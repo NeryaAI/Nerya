@@ -147,6 +147,7 @@ def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     cmd = str((arguments or {}).get("command") or "")
     if not cmd:
         return RiskLevel.READ
+    cmd = cmd.strip()
     heads = _command_heads(cmd)
     if any(head in _DELETE_HEADS for head in heads):
         return RiskLevel.DANGEROUS
@@ -168,6 +169,8 @@ def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
             return RiskLevel.EXEC
     parts = cmd.strip().split()
     head = Path(parts[0]).name.lower() if parts else ""
+    if head in _DELETE_HEADS:
+        return RiskLevel.DANGEROUS
     if head in _READ_HEADS and ">" not in cmd and ">>" not in cmd:
         if head != "git":
             return RiskLevel.READ

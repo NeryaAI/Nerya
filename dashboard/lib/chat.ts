@@ -385,7 +385,6 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
     }
   }
 
-  const callIndex = new Map<string, number>();
   const approvalIndex = new Map<string, number>();
   const subagentIndex = new Map<string, number>();
   const teamIndex = new Map<string, number>();
@@ -636,10 +635,9 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         },
         kind: "tool_use",
       };
-      callIndex.set(callId, out.length);
       out.push(env);
       if (ev.action === "team_run") {
-        appendTeamStep(ev, "start");
+        ensureTeamTrace(ev);
       }
       continue;
     }
@@ -666,9 +664,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         const block = ensureTeamTrace(ev);
         block.status = ev.ok === false || ev.error ? "failed" : "completed";
         block.result = (ev as Record<string, unknown>).result;
-        appendTeamStep(ev, "end");
       }
-      callIndex.delete(callId);
       continue;
     }
 

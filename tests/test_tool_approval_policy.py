@@ -56,6 +56,7 @@ def test_shell_research_commands_are_read_risk():
 
 def test_shell_delete_and_sensitive_config_writes_are_dangerous():
     assert classify_shell_risk({"command": "rm notes.txt"}) is RiskLevel.DANGEROUS
+    assert classify_shell_risk({"command": "  rm notes.txt"}) is RiskLevel.DANGEROUS
     assert classify_shell_risk({"command": "echo live > nerya.yml"}) is RiskLevel.DANGEROUS
     assert (
         classify_shell_risk({"command": "find . -name '*.tmp' -delete"})

@@ -556,7 +556,8 @@ function traceTone(status: string): "neutral" | "ok" | "warn" | "err" | "brand" 
   const s = status.toLowerCase();
   if (s === "completed" || s === "done" || s === "ok") return "ok";
   if (s === "failed" || s === "error") return "err";
-  if (s === "skipped" || s === "blocked") return "warn";
+  if (s === "skipped" || s === "blocked" || s === "completed_with_failures")
+    return "warn";
   return "brand";
 }
 
