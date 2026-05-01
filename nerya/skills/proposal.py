@@ -1,7 +1,7 @@
 """Skill proposal scaffolding used by evolution.
 
 2026-04-26: ``skill.yml`` was retired. The full typed manifest lives in
-``SKILL.md`` frontmatter (Hermes / Claude Code parity). This scaffolder
+``SKILL.md`` frontmatter (skill-runtime compatibility). This scaffolder
 emits exactly one ``SKILL.md`` with the manifest baked into the
 frontmatter, plus a placeholder body, ``actions.py`` shim, ``references/``
 dir, and ``tests/`` dir.

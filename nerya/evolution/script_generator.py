@@ -1,6 +1,6 @@
 """Scaffold a new script proposal.
 
-Audit 5.3 / Phase 3 — the previous skeleton referenced a ``Client`` class
+Audit 5.3 / the previous skeleton referenced a ``Client`` class
 and ``Client.local()`` constructor that no longer exist on the Python SDK
 (``nerya_sdk``). Generated scripts therefore failed at import time and
 turned the agent-facing ``generate_script_proposal`` action into a

@@ -1,4 +1,4 @@
-"""Scheduled-session delivery fan-out (Hermes parity, Phase C).
+"""Scheduled-session delivery fan-out (compatibility, ).
 
 After a scheduled agent session finishes, its result is routed to any
 ``delivery_targets`` declared on the :class:`ScheduleEntry`. Two target

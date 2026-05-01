@@ -23,7 +23,7 @@ def script_run_id() -> str: return new_id("srn")
 def turn_id() -> str: return new_id("trn")
 def turn_step_id() -> str: return new_id("stp")
 
-# Trading control-plane (Plan 2026-04-29).
+# Trading control-plane (04-29).
 def reservation_id() -> str: return new_id("rsv")
 def executor_id() -> str: return new_id("exc")
 def position_id() -> str: return new_id("pos")

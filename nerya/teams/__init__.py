@@ -1,7 +1,5 @@
 """Agent Team — durable multi-agent coordination layer.
-
-See ``docs/agent-team-clawteam-design.md`` for the full design. The
-package brings ClawTeam-style team coordination into Nerya without
+package brings team-orchestration team coordination into Nerya without
 spawning external processes; instead the existing
 ``SubAgentDispatcher`` runs every member, while this package owns the
 durable team state (run/tasks/messages/blackboard) and the orchestration

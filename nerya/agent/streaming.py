@@ -4,9 +4,9 @@ The kernel emits structured events as a turn progresses; subscribers
 (Dashboard SSE, Gateway WebSocket, CLI TUI) receive them in order
 without polling the journal. Without this layer every UI either had
 to tail the JSONL files or wait for the turn to complete, which made
-long Hermes-style coding loops feel laggy.
+long runtime coding loops feel laggy.
 
-Plan 03 P0 §3 wired the basic in-memory bus. Plan 12 (Context,
+wired the basic in-memory bus. (Context,
 Streaming, And State Architecture) raises the bar with a *resume
 contract*:
 
@@ -42,10 +42,7 @@ publishes:
   tool_result)
 - ``turn.complete`` — turn finished
 
-Plan refs:
-``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/03-agent-loop-context-session.md``
 P0 §3,
-``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/12-context-streaming-state.md``
 "Streaming Contract".
 """
 
@@ -77,7 +74,7 @@ class StreamingEventBus:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _last_events: list[dict[str, Any]] = field(default_factory=list)
     _seq: int = 0
-    _max_replay: int = 500
+    _max_replay: int = 2000
 
     def subscribe(self, callback: _EventCb) -> Callable[[], None]:
         """Register ``callback``. Returns an unsubscribe function."""
@@ -150,11 +147,10 @@ class StreamingEventBus:
     def recent(self, *, after_seq: int | None = None) -> list[dict[str, Any]]:
         """Return events newer than ``after_seq`` (or the whole ring).
 
-        Plan 05 P0 §1 / Plan 12 streaming contract: a polling client
+        / streaming contract: a polling client
         sends the highest ``seq`` it already saw and gets back only
         the strictly newer events. ``after_seq=None`` (the default)
-        returns the entire ring, preserving the original Plan 03
-        behaviour.
+        returns the entire ring, preserving the original behaviour.
         """
 
         with self._lock:

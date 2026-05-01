@@ -1,8 +1,8 @@
 """Memory native tools — read/write the long-term memory store.
 
-Hermes parity: the agent reaches its persistent recall directly through
+compatibility: the agent reaches its persistent recall directly through
 native tools rather than the legacy skill bridge. Mirrors the lifecycle
-described in ``hermes-agent/agent/memory_provider.py``:
+described in ``agent-runtime/agent/memory_provider.py``:
 
 * **system_prompt_block** — :func:`build_system_prompt_block` reads
   the current global memory + (optional) strategy learnings and renders
@@ -319,7 +319,7 @@ def journal_search_handler(call: ToolCall, *, paths: WorkspacePaths) -> ToolResu
 
 
 # ---------------------------------------------------------------------------
-# System-prompt block (Hermes parity)
+# System-prompt block (compatibility)
 # ---------------------------------------------------------------------------
 
 
@@ -333,7 +333,7 @@ def build_system_prompt_block(
 
     Returns an empty string when there is nothing useful to share, so
     the kernel can drop the block cleanly. The fence + system note
-    wording mirrors :func:`hermes_agent.agent.memory_manager.build_memory_context_block`,
+    wording mirrors :func:`agent_runtime.agent.memory_manager.build_memory_context_block`,
     so the model treats the body as informational, not as user input.
     """
 

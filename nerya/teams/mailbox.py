@@ -96,6 +96,9 @@ class Mailbox:
             from_agent=from_agent,
             to=to,
             recipients=len(out),
+            recipient_names=[m.to for m in out],
+            content=content,
+            artifact_refs=list(artifact_refs or []),
         )
         return out
 

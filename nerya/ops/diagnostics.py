@@ -1,9 +1,9 @@
-"""Plan 28 §13 — operator-grade diagnostics surface.
+"""operator-grade diagnostics surface.
 
 The legacy ``nerya doctor`` printed a flat blob (Python version,
 package versions, env vars, workspace root) which is fine for "did
-the install work" but is *not* an operator-grade diagnosis. Hermes
-``hermes status`` / ``hermes doctor`` cover provider auth states,
+the install work" but is *not* an operator-grade diagnosis. the runtime
+``runtime status`` / ``runtime doctor`` cover provider auth states,
 gateway platform readiness, dashboard proxy connectivity, DB
 schema/version, process registry, plugin/skill availability,
 sandbox mode, token/auth mode warnings, profile isolation, and
@@ -451,7 +451,7 @@ def _check_workspace(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_profile_isolation(client: Any) -> Iterable[Diagnosis]:
-    """Plan 28 §2 — profile isolation under ``$NERYA_HOME``."""
+    """profile isolation under ``$NERYA_HOME``."""
 
     try:
         from ..core.paths import _resolve_home, list_profiles
@@ -492,7 +492,7 @@ def _check_profile_isolation(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_db_schema(client: Any) -> Iterable[Diagnosis]:
-    """Plan 27 §1 — DB schema version + ledger consistency."""
+    """DB schema version + ledger consistency."""
 
     try:
         import sqlite3
@@ -548,7 +548,7 @@ def _check_db_schema(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_skills_lock(client: Any) -> Iterable[Diagnosis]:
-    """Plan 30 — skills lockfile + signature freshness."""
+    """skills lockfile + signature freshness."""
 
     try:
         from ..skills import lockfile as lock_mod
@@ -612,7 +612,7 @@ def _check_skills_lock(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_provider_auth(client: Any) -> Iterable[Diagnosis]:
-    """Plan 26 §9 — provider auth records (OpenAI, Anthropic, ...)."""
+    """provider auth records (OpenAI, Anthropic, ...)."""
 
     try:
         from ..security.provider_auth import ProviderAuthStore
@@ -678,7 +678,7 @@ def _check_provider_auth(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_auth_mode(client: Any) -> Iterable[Diagnosis]:
-    """Plan 28 §4 — API auth mode warnings."""
+    """API auth mode warnings."""
 
     try:
         mode = str(client.config.get("api.auth.mode") or "local").lower()
@@ -738,7 +738,7 @@ def _check_auth_mode(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_token_scopes(client: Any) -> Iterable[Diagnosis]:
-    """Plan 11 — token grant audit.
+    """token grant audit.
 
     The route authorization matrix only helps if tokens are issued with
     least-privilege scopes. This check looks at every configured token
@@ -839,7 +839,7 @@ def _check_token_scopes(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_skills_availability(client: Any) -> Iterable[Diagnosis]:
-    """Plan 31 §2 — action availability probes."""
+    """action availability probes."""
 
     try:
         from ..skills.availability import build_availability_table
@@ -897,7 +897,7 @@ def _check_skills_availability(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_model_registry(client: Any) -> Iterable[Diagnosis]:
-    """Plan 25 §5 — LLM model metadata coverage."""
+    """LLM model metadata coverage."""
 
     try:
         from ..llm import model_registry as mr
@@ -959,7 +959,7 @@ def _check_model_registry(client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_service_status(_client: Any) -> Iterable[Diagnosis]:
-    """Plan 28 §13 — stale service detection."""
+    """stale service detection."""
 
     try:
         from ..install import service as svc
@@ -1003,7 +1003,7 @@ def _check_service_status(_client: Any) -> Iterable[Diagnosis]:
 
 
 def _check_operator_preset(client: Any) -> Iterable[Diagnosis]:
-    """Plan 01 §3 — active operator preset advisory."""
+    """active operator preset advisory."""
 
     try:
         preset_id = str(client.config.get("agent.operator.preset") or "")

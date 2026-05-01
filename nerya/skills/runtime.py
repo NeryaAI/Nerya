@@ -97,7 +97,7 @@ class SkillRuntime:
                 if src in payload and dst not in payload:
                     payload[dst] = payload[src]
 
-        # Phase 6 — validate the payload against the declared input_schema
+        # validate the payload against the declared input_schema
         # at dispatch time so schema mismatches never reach the trading
         # kernel. Missing/empty schema is a no-op for backward compat.
         try:
@@ -132,13 +132,13 @@ class SkillRuntime:
         call_id = skill_call_id()
         journal_path = self.config.paths.journal("skills")
         from ..core import jsonl
-        # Phase 6 — attribute every skill call with the manifest version,
+        # attribute every skill call with the manifest version,
         # caller identity class, and declared tags so downstream audit /
         # observability can answer "who called what version of which
         # skill" without re-deriving it later.
         caller_kind = _caller_kind(caller)
         if spec.journal:
-            # Plan 02 P0 §5 — explain *why* this skill was loaded so the
+            # explain *why* this skill was loaded so the
             # transcript / dashboard can answer "which skill ran and from
             # where". ``loaded_via`` is one of:
             #   - ``builtin``: shipped with the runtime
@@ -213,7 +213,7 @@ class SkillRuntime:
             caller=caller,
         )
 
-        # Plan 16 P1 §1 — Hermes-style tool-result overflow.
+        # runtime tool-result overflow.
         # When a skill returns a payload that would balloon the planner's
         # context, persist the original to ``state/tool_results/`` and
         # replace the in-memory result with a reference card. Skills can

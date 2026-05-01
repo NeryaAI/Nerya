@@ -2,8 +2,7 @@
 
 This is the single chokepoint between the agent loop and tool handlers
 in the new architecture. The legacy ``nerya.harness.tool_runner`` is
-kept for legacy ``SKILL.md actions`` but the workspace-native loop
-(Phase 8) calls ``NativeToolExecutor.execute(call)`` exclusively.
+kept for legacy ``SKILL.md actions`` but the workspace-native loop calls ``NativeToolExecutor.execute(call)`` exclusively.
 
 Lifecycle for one call:
 
@@ -21,9 +20,7 @@ Lifecycle for one call:
    *attaches* them to the result.
 8. **Post-hook** — optional callbacks for evidence / streaming.
 
-References:
-* docs/agent-harness-comparison-and-refactor-todo.md Phase 5
-* docs/agent-intelligence-gap-and-cursor-refactor-plan.md §3.3
+Implementation notes:
 """
 
 from __future__ import annotations
@@ -64,7 +61,7 @@ PostHook = Callable[[ToolCall, ToolResult], None]
 redact secrets / append breadcrumbs. Setting
 ``result.context_modifiers`` or ``result.metadata['block_continuation']
 = True`` lets the loop know it must surface the hook output to the
-operator before continuing the next round (mirrors Claude Code's
+operator before continuing the next round (mirrors coding-agent's
 ``executePostToolHooks`` blocking error path).
 """
 

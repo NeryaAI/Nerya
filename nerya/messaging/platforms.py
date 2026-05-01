@@ -1,4 +1,4 @@
-"""Hermes-aligned gateway platform catalog for Nerya.
+"""Gateway platform catalog for Nerya.
 
 The catalog is the contract shared by the runtime, dashboard, and the
 capability-development skill.  Platform-specific adapters can be native
@@ -16,11 +16,11 @@ from typing import Any
 class GatewayPlatformSpec:
     """Description of a gateway platform.
 
-    ``support_level`` is the Plan 23 §4 capability claim — it tells the
-    dashboard / docs whether this entry is a real adapter or just a
-    catalog placeholder. Allowed values mirror the plan's recommendation:
+    ``support_level`` is the capability claim — it tells the
+    dashboard whether this entry is a real adapter or just a
+    catalog placeholder. Allowed values describe the runtime support model:
 
-    - ``catalog_only``    — listed for parity with Hermes, no adapter wired.
+    - ``catalog_only``    — listed as a placeholder, no adapter wired.
     - ``send_only``       — Nerya can send via this platform; inbound is
       proxied through ``/gateway/inbound`` only.
     - ``inbound_webhook`` — Nerya accepts webhook inbound + sends.
@@ -28,13 +28,13 @@ class GatewayPlatformSpec:
     - ``tested``          — full_duplex with regression coverage.
 
     ``support_level`` is filled in by callers; ``status`` keeps the legacy
-    Hermes-style label for compatibility (``native`` / ``webhook`` /
+    legacy label for compatibility (``native`` / ``webhook`` /
     ``scaffold``) — UIs that render the new field can ignore the old one.
     """
 
     id: str
     title: str
-    hermes_id: str
+    alias_id: str
     status: str
     inbound: str
     outbound: str
@@ -50,7 +50,7 @@ class GatewayPlatformSpec:
         return asdict(self)
 
 
-_HERMES_PLATFORMS: tuple[GatewayPlatformSpec, ...] = (
+_GATEWAY_PLATFORMS: tuple[GatewayPlatformSpec, ...] = (
     GatewayPlatformSpec("local", "Local / Dashboard", "local", "native", "http", "dashboard", "events", "dashboard", notes="Dashboard chat + local API.", support_level="full_duplex"),
     GatewayPlatformSpec("telegram", "Telegram", "telegram", "native", "polling", "bot_api", "sendChatAction", "setMyCommands", attachments=True, voice=True, config_refs=("bot_token_ref", "chat_id"), support_level="tested"),
     GatewayPlatformSpec("discord", "Discord", "discord", "webhook", "generic_inbound", "webhook", "status_webhook", "slash_commands_scaffold", attachments=True, config_refs=("webhook_url_ref", "webhook_url"), support_level="send_only"),
@@ -73,17 +73,17 @@ _HERMES_PLATFORMS: tuple[GatewayPlatformSpec, ...] = (
     GatewayPlatformSpec("qqbot", "QQ Bot", "qqbot", "scaffold", "generic_inbound", "qqbot_api", "status_webhook", "commands_scaffold", attachments=True, support_level="catalog_only"),
 )
 
-PLATFORM_IDS: tuple[str, ...] = tuple(p.id for p in _HERMES_PLATFORMS)
+PLATFORM_IDS: tuple[str, ...] = tuple(p.id for p in _GATEWAY_PLATFORMS)
 
 
 def list_platforms() -> list[dict[str, Any]]:
-    return [p.asdict() for p in _HERMES_PLATFORMS]
+    return [p.asdict() for p in _GATEWAY_PLATFORMS]
 
 
 def get_platform(platform_id: str) -> GatewayPlatformSpec | None:
     key = str(platform_id or "").strip().lower()
-    for spec in _HERMES_PLATFORMS:
-        if key in {spec.id, spec.hermes_id}:
+    for spec in _GATEWAY_PLATFORMS:
+        if key in {spec.id, spec.alias_id}:
             return spec
     return None
 

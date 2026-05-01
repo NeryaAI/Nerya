@@ -1,13 +1,12 @@
 """Research-layer data contracts.
 
-Implements ``BacktestConfig`` from the VibeTrading optimization plan
-(§4.1).  The dataclass is intentionally validation-heavy: every operator-
+Defines ``BacktestConfig`` for the research runtime. The dataclass is
+intentionally validation-heavy: every operator-
 or agent-authored backtest config goes through ``BacktestConfig.parse``
 before any fixture loader, signal engine or runner ever sees it.
 
-Inspired by ``../Vibe-Trading/agent/backtest/runner.py:42`` (BacktestConfigSchema)
-but reimplemented inside Nerya so the runtime keeps the single source of
-truth.  No imports from ``../Vibe-Trading``.
+The contract is implemented inside Nerya so the runtime keeps the single
+source of truth.
 """
 from __future__ import annotations
 
@@ -43,9 +42,9 @@ _KNOWN_ENGINES = {"auto", "crypto", "polymarket", "paper_intent"}
 class BacktestConfig:
     """Backtest configuration record.
 
-    All fields documented in the VibeTrading plan §4.1.  Fields are
+    Fields are
     primitive types so the payload is trivially JSON serialisable —
-    important because validation reports must be reproducible (§2.8).
+    important because validation reports must be reproducible.
     """
 
     strategy_id: str

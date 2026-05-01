@@ -1,6 +1,6 @@
 """Reconciliation — local projection vs. exchange truth.
 
-Plan 2026-04-29 §5.2 / §11 (P4) — three passes:
+04-29 §5.2 / §11 (P4) — three passes:
 
 1. ``reconcile_strategy`` (legacy): per-strategy fills journal vs.
    :class:`VirtualLedger`. Kept stable so the existing CLI/cron path
@@ -14,7 +14,7 @@ Plan 2026-04-29 §5.2 / §11 (P4) — three passes:
 The new pipeline writes a row into ``reconciliation_reports`` for
 every run, severity-tagged. ``info`` and ``warning`` are non-blocking;
 ``action_required`` and ``trading_halted`` are surfaced to the risk
-gate and dashboard for operator action. Plan §5.2 mandates "report,
+gate and dashboard for operator action. mandates "report,
 do not auto-heal" — drift never silently mutates the real position.
 """
 
@@ -184,7 +184,7 @@ def _bps_diff(a: float, b: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Plan 2026-04-29 P4 — control-plane reconciliation pipeline.
+# control-plane reconciliation pipeline.
 # ---------------------------------------------------------------------------
 
 
@@ -205,7 +205,7 @@ ReconcileSeverity = Literal[
 
 @dataclass
 class ReconciliationReport:
-    """Plan §11 — severity-tagged record of a single reconciliation pass."""
+    """severity-tagged record of a single reconciliation pass."""
 
     report_id: str
     ts: float
@@ -454,7 +454,7 @@ def reconcile_account(
 ) -> ReconciliationReport:
     """Compare local PositionBook + OrderTracker against the venue.
 
-    Plan §5.2 — **never auto-heal**. Issues are written to the report
+    **never auto-heal**. Issues are written to the report
     so an operator can decide whether to attach/import an unexpected
     external position, accept an external close, or escalate.
     """

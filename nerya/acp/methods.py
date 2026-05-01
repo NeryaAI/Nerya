@@ -1,6 +1,6 @@
-"""Plan 25 §4 — registry-driven ACP method/action declaration.
+"""registry-driven ACP method/action declaration.
 
-Hermes' editor-agent surface composes its method table from the live
+The runtime' editor-agent surface composes its method table from the live
 tool/registry layer rather than a hand-coded ``dict`` in a single
 file. Nerya's ACP server used to do exactly that — every supported
 method was a literal in :func:`AcpServer._methods`. That made
@@ -16,7 +16,7 @@ JSON-schema-shaped params/result hints, tags, and a category bucket
 
 The server populates the registry during construction by calling
 :func:`register_default_methods`, which mirrors the legacy hand-coded
-table verbatim and also wires the new Plan 25 §4 capabilities:
+table verbatim and also wires the new capabilities:
 
 * ``session.create`` / ``session.list`` / ``session.interrupt`` /
   ``session.resume`` / ``session.branch`` — talk-track lifecycle

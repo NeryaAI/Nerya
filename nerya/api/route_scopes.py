@@ -1,9 +1,5 @@
 """Route → minimum-scope authorization matrix for the local API.
 
-Gap-audit reference:
-``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/11-auth-api-tool-permissions.md``
-"API Authorization Matrix".
-
 Until now every authenticated request implicitly received ``scope='api:all'``,
 which meant a service token issued for "read-only inspection" could in fact
 mutate workspace config, pull secrets, or call ``/trading/submit``. That is
@@ -131,7 +127,7 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/agent/session/delete", "write:config", ""),
     RouteRule("GET", "/agent/stream/events", "read:sessions", ""),
     RouteRule("POST", "/agent/interrupt", "write:chat", ""),
-    # Phase 14 — workspace-native tool registry view.
+    # workspace-native tool registry view.
     RouteRule("GET", "/agent/tools", "read:runtime", ""),
 
     # skills

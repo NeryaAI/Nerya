@@ -1,6 +1,6 @@
 """Position book — event-sourced live + paper position projection.
 
-Plan 2026-04-29 §3.2 / §5 — the position book is the *projection* of
+the position book is the *projection* of
 the durable fill ledger; nothing else in Nerya is allowed to compute
 "what is my position right now" from scratch. Risk gate, executors,
 dashboard — they all read here.

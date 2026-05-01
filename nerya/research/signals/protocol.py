@@ -1,6 +1,6 @@
 """SignalFrame model + signal engine duck-type protocol.
 
-Plan §4.2: ``SignalFrame`` describes a single time-stamped target
+``SignalFrame`` describes a single time-stamped target
 weight for a single symbol.  Engine output is normalised through
 :func:`coerce_signal_frame` so subsequent stages can rely on clean data.
 """

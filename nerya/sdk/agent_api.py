@@ -1,6 +1,4 @@
-"""AgentAPI — in-process façade exposing the workspace-native agent.
-
-Phase 15 of the refactor wires the Gateway / SDK against the new
+"""AgentAPI — in-process façade exposing the workspace-native agent. of the refactor wires the Gateway / SDK against the new
 :class:`nerya.agent.kernel.AgentKernel`. Callers can:
 
 * run a single turn end-to-end (``run_turn``)

@@ -1,13 +1,11 @@
 """Static + smoke-test validator for strategy packages.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §5.5.
-
 Scope
 -----
 The validator runs *before* a :class:`StrategyPackage` is promoted into
 ``workspace/strategies/<id>/``. It must catch every failure mode that
 the agent's free-form code generator can introduce *without* actually
-executing the strategy in production. The runner (Phase 3) re-runs
+executing the strategy in production. The runner re-runs
 its own smoke checks at tick-time, but those are belt-and-braces;
 this is the gate that decides whether the package is allowed to
 exist on disk at all.

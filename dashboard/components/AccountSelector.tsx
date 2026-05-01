@@ -6,7 +6,7 @@ import { clientApi, type AccountSummary } from "../lib/clientApi";
 import { useCurrentAccountId } from "../lib/currentAccount";
 
 /**
- * Top-bar account selector (Plan 2026-04-29 §11 P9).
+ * Top-bar account selector (04-29 §11 P9).
  *
  * Replaces the static Paper/Live indicator with a real chooser that
  * spans every account configured in ``accounts.yml``. The chosen id

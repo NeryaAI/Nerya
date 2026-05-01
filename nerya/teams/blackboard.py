@@ -59,6 +59,17 @@ class Blackboard:
             created_at=now_iso(),
         )
         jsonl.append(self.store.blackboard_path(self.run_id), entry.asdict(), stamp=False)
+        self.store.append_event(
+            self.run_id,
+            kind="blackboard.appended",
+            entry_id=entry.id,
+            entry_kind=entry.kind,
+            author=entry.author,
+            summary=entry.summary,
+            confidence=entry.confidence,
+            task_id=entry.task_id,
+            source_refs=list(entry.source_refs),
+        )
         return entry
 
     def list(self) -> list[BlackboardEntry]:

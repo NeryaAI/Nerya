@@ -1,13 +1,12 @@
 """Symbol-aware dataset router.
 
-Implements the symbol-detection logic from the VibeTrading optimization
-plan §5 Task 2.  The router accepts a list of symbols and returns the
+Implements the symbol-detection logic used by research backtests. The
+router accepts a list of symbols and returns the
 correct loader (fixture for tests, ccxt/polymarket/onchain for
 production once those adapters land).
 
-We mirror the regex routing from
-``../Vibe-Trading/agent/backtest/runner.py:121`` but reimplement it
-inside Nerya — we never import the Vibe runtime.
+The regex routing lives inside Nerya so the runtime never imports an
+external research tree.
 """
 from __future__ import annotations
 

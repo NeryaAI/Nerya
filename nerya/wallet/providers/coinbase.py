@@ -76,7 +76,7 @@ _CAPABILITIES = WalletCapabilities(
     chains=("base", "base-sepolia", "ethereum", "ethereum-sepolia"),
     notes=(
         "Use wallet.coinbase with cdp-sdk for real swaps, or the Node "
-        "skill for full quote+swap parity. agentkit-only installs are "
+        "skill for full quote+swap coverage. agentkit-only installs are "
         "feature-incomplete on the swap path."
     ),
 )

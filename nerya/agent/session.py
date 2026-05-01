@@ -1,4 +1,4 @@
-"""Rich session persistence + invoked-skill state preservation (Phase 3).
+"""Rich session persistence + invoked-skill state preservation.
 
 A *session* collects a set of related turns (same user/strategy context)
 so they can be listed, resumed, inspected, and replayed without

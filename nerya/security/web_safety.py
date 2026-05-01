@@ -1,4 +1,4 @@
-"""Plan 18 §5 — backend browser / web-safety stack.
+"""backend browser / web-safety stack.
 
 This module is the safety layer that *every* outbound URL in Nerya
 should pass through before we fetch it (news, social, browser tools,
@@ -79,8 +79,8 @@ DEFAULT_SCHEMES = ("http", "https")
 
 
 # Common substrings that look like an embedded secret in a URL query.
-# Hermes's `web_tools.py` blocks the same family of substrings before
-# fetching; we keep parity.
+# The runtime's `web_tools.py` blocks the same family of substrings before
+# fetching; we keep the same safeguard.
 _SECRET_QUERY_KEYS = (
     "access_token", "id_token", "refresh_token", "api_key",
     "apikey", "secret", "password", "client_secret",
@@ -195,7 +195,7 @@ def _is_private_host(host: str) -> tuple[bool, str]:
 def _has_credential_keyword(url: str) -> Optional[str]:
     """Return the offending key if a URL carries a credential keyword.
 
-    Hermes blocks anything that looks like ``?api_key=...``.  We do the
+    the runtime blocks anything that looks like ``?api_key=...``.  We do the
     same — we never want a model-emitted URL to drop a token into the
     network.
     """

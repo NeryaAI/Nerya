@@ -1,6 +1,6 @@
-"""Resource native tools — Phase 12.
+"""Resource native tools — existing.
 
-Two read-only tools mirror what Claude Code's MCP layer exposes for
+Two read-only tools mirror what coding-agent's MCP layer exposes for
 ``resources/list`` and ``resources/read``:
 
 * ``resource_list`` — enumerate everything in the workspace

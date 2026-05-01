@@ -1,4 +1,4 @@
-"""Provider capability matrix (Phase 13).
+"""Provider capability matrix.
 
 We refuse to claim "provider X is supported" unless we can *declare*
 what exactly we support on that provider. This module is the single
@@ -6,7 +6,7 @@ source of truth for:
 
 * which capabilities each LLM provider exposes through Nerya, and
 * at what support tier: ``supported`` (production ready),
-  ``experimental`` (behind a flag / limited parity), ``metadata-only``
+  ``experimental`` (behind a flag / limited support), ``metadata-only``
   (we list the provider but the feature isn't wired up yet),
   ``unsupported``.
 
@@ -216,7 +216,7 @@ MATRIX: dict[str, ProviderCapabilities] = {
             },
         )
         for name in ("deepseek", "openrouter", "moonshot", "xai",
-                     "mistral", "together", "groq", "cerebras", "compat")
+                     "mistral", "together", "groq", "cerebras", "stepfun", "compat")
     },
     # "mock" always exists — it is deterministic and offline. We mark it
     # as metadata-only on everything that implies a real provider; callers

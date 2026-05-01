@@ -148,7 +148,7 @@ export function TopHeader() {
         </div>
 
         <div className="ml-auto flex items-center gap-3">
-          {/* Plan 2026-04-29 §11 P9 — replaced the global Paper/Live
+          {/* 04-29 §11 P9 — replaced the global Paper/Live
               toggle with a real account chooser. The chosen id is the
               "operator focus" used by the Home page KPIs and any
               other multi-account surface. */}

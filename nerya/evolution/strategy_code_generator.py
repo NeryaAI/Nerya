@@ -1,7 +1,5 @@
 """Generate strategy package proposals.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §5.4 / §11 Phase 4.
-
 The agent calls this module to *propose* a new strategy package; the
 generator never mutates ``workspace/strategies/`` directly. It builds:
 
@@ -24,7 +22,7 @@ practice we want every generated package to:
   (so the runner doesn't have to keep schema migrations forever);
 * pass :func:`nerya.strategies.validator.validate_proposal_files`
   (so promotion can be a one-click action for operators);
-* read like the templates in plan §9 so reviewers don't have to
+* read like the templates in runtime spec so reviewers don't have to
   context-switch between three writing styles.
 
 This generator centralises those defaults. The agent can override

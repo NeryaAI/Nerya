@@ -1,6 +1,6 @@
 """Registry holds loaded manifests + (optional) action handlers.
 
-Aligned with the Anthropic Skill spec (Claude Code / Hermes): a skill
+Aligned with the Anthropic Skill spec (agent skill runtime): a skill
 is a markdown playbook with minimal YAML frontmatter, plus standalone
 scripts the agent invokes via ``run_shell``. The registry only loads
 the manifest; it does **not** auto-import any Python from the skill
@@ -69,7 +69,7 @@ class SkillRegistry:
 
     # --- loading ---
     @classmethod
-    def load_builtin(cls, workspace_paths=None) -> "SkillRegistry":
+    def load_builtin(cls, workspace_paths=None, *, config=None) -> "SkillRegistry":
         """Load every shipped + user-installed skill into a fresh registry.
 
         Order of discovery:
@@ -89,6 +89,15 @@ class SkillRegistry:
         are invoked through ``run_shell``. ``actions == {}`` for every
         such skill; only procedural single-file skills register a
         ``run`` handler.
+
+        A skill whose frontmatter declares ``requires_integration:
+        <name>`` is skipped entirely unless
+        ``config.integration_enabled(<name>)`` is true. This keeps
+        optional third-party surfaces (``anet``, future additions)
+        invisible to the agent when the operator has not opted in.
+        When ``config`` is ``None`` the guard defaults to "no
+        integration enabled" — safe for any caller that boots the
+        registry before config has been loaded.
         """
 
         reg = cls()
@@ -99,6 +108,17 @@ class SkillRegistry:
             doc = yaml_io.load(workspace_paths.skills_enabled, default={}) or {}
             if doc.get("enabled"):
                 enabled = set(doc["enabled"])
+
+        def _integration_ok(manifest: SkillManifest) -> bool:
+            req = (getattr(manifest, "requires_integration", "") or "").strip()
+            if not req:
+                return True
+            if config is None:
+                return False
+            try:
+                return bool(config.integration_enabled(req))
+            except Exception:
+                return False
 
         # 1. Shipped Anthropic-spec builtins.
         if builtin_root.exists():
@@ -114,6 +134,8 @@ class SkillRegistry:
                     continue
                 manifest.source = "builtin"
                 if enabled is not None and manifest.id not in enabled:
+                    continue
+                if not _integration_ok(manifest):
                     continue
                 reg.register(SkillEntry(
                     manifest=manifest, module=None, actions={},
@@ -139,10 +161,11 @@ class SkillRegistry:
                     if manifest is not None:
                         manifest.source = "workspace_installed"
                         if enabled is None or manifest.id in enabled:
-                            reg.register(SkillEntry(
-                                manifest=manifest, module=None, actions={},
-                            ))
-                            continue
+                            if _integration_ok(manifest):
+                                reg.register(SkillEntry(
+                                    manifest=manifest, module=None, actions={},
+                                ))
+                                continue
                     _register_procedural(reg, md, enabled=enabled, source="workspace_installed")
 
         # 3 + 4. Additional user roots (workspace/skills/ + ~/.nerya/skills/).
@@ -176,10 +199,11 @@ class SkillRegistry:
                         "workspace" if extra_root == workspace_paths.skills else "user_home"
                     )
                     if enabled is None or manifest.id in enabled:
-                        reg.register(SkillEntry(
-                            manifest=manifest, module=None, actions={},
-                        ))
-                        continue
+                        if _integration_ok(manifest):
+                            reg.register(SkillEntry(
+                                manifest=manifest, module=None, actions={},
+                            ))
+                            continue
                 _register_procedural(
                     reg,
                     md,

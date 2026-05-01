@@ -19,7 +19,7 @@ const STATUS_TONE: Record<
 };
 
 /**
- * Setup readiness card — Phase 25 first-run checklist.
+ * Setup readiness card — first-run checklist.
  *
  * Mounted on the Home page (when not all checks pass) and also stands
  * alone as the body of ``/settings/setup``. Each check has a status

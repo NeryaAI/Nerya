@@ -327,7 +327,7 @@ function EventBlock({ event, index }: { event: GatewayEvent; index: number }) {
 }
 
 // ---------------------------------------------------------------------
-// Phase 14 — provider-native block rendering
+// provider-native block rendering
 // ---------------------------------------------------------------------
 //
 // The new ``WorkspaceNativeAgentLoop`` emits a chronological stream of
@@ -669,6 +669,10 @@ function NativeTeamTraceBlock({
   const roles = stringArray(block.roles);
   const members = recordOf(block.members);
   const task = String(block.task || "");
+  const runId = String(block.run_id || block.team_key || "");
+  const templateId = String(block.template_id || "");
+  const phase = String(block.phase || "");
+  const goal = String(block.goal || "");
   const steps = arrayOfRecords(block.steps);
   const memberNames = Array.from(
     new Set([...roles, ...Object.keys(members)]),
@@ -702,7 +706,15 @@ function NativeTeamTraceBlock({
       }
     >
       <div className="space-y-3">
+        <div className="flex items-center gap-1 flex-wrap">
+          {runId ? <Tag>{runId}</Tag> : null}
+          {templateId ? <Tag tone="brand">{templateId}</Tag> : null}
+          {phase ? <Tag tone="brand">{`phase: ${phase}`}</Tag> : null}
+        </div>
         {task ? <div className="text-xs text-ink-200">{task}</div> : null}
+        {goal && goal !== task ? (
+          <div className="text-[11px] text-ink-300 leading-relaxed">{goal}</div>
+        ) : null}
         {memberNames.length ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
             {memberNames.map((name) => {
@@ -751,10 +763,49 @@ function NativeTeamTraceBlock({
                         {String(step.status)}
                       </Tag>
                     ) : null}
+                    {step.phase ? <Tag>{`phase ${String(step.phase)}`}</Tag> : null}
+                    {step.task_id ? <Tag>{String(step.task_id)}</Tag> : null}
+                    {step.artifact ? <Tag tone="brand">{String(step.artifact)}</Tag> : null}
                   </div>
+                  {step.subject ? (
+                    <div className="mt-1 text-[11px] text-ink-300 break-words">
+                      {String(step.subject)}
+                    </div>
+                  ) : null}
+                  {step.summary ? (
+                    <div className="mt-1 text-[11px] text-ink-200 break-words">
+                      {String(step.summary)}
+                    </div>
+                  ) : null}
+                  {step.content ? (
+                    <div className="mt-1 text-[11px] text-ink-200 break-words">
+                      <span className="text-ink-500">
+                        {String(step.from_agent || "agent")}
+                        {step.to ? ` -> ${String(step.to)}` : ""}
+                        :{" "}
+                      </span>
+                      {String(step.content)}
+                    </div>
+                  ) : null}
                   {step.error ? (
                     <div className="mt-1 text-[11px] text-[#ef5564] break-words">
                       {String(step.error)}
+                    </div>
+                  ) : null}
+                  {step.outcomes ? (
+                    <div className="mt-2">
+                      <JsonBlock value={step.outcomes} />
+                    </div>
+                  ) : null}
+                  {step.raw ? (
+                    <div className="mt-2">
+                      <Collapsible
+                        title="raw event"
+                        tone="neutral"
+                        defaultOpen={false}
+                      >
+                        <JsonBlock value={step.raw} />
+                      </Collapsible>
                     </div>
                   ) : null}
                 </div>
@@ -780,6 +831,9 @@ function NativeSubagentTraceBlock({
   const status = String(block.status || (live ? "running" : "completed"));
   const steps = arrayOfRecords(block.steps);
   const payloadKeys = stringArray(block.payload_keys);
+  const teamRunId = String(block.team_run_id || "");
+  const teamTaskId = String(block.team_task_id || "");
+  const teamTaskSubject = String(block.team_task_subject || "");
   const title = (
     <span className="flex items-center gap-2 min-w-0">
       <span className="text-ink-400">Sub Agent</span>
@@ -807,6 +861,19 @@ function NativeSubagentTraceBlock({
       }
     >
       <div className="space-y-3">
+        {teamRunId || teamTaskId || teamTaskSubject ? (
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1 flex-wrap">
+              {teamRunId ? <Tag>{teamRunId}</Tag> : null}
+              {teamTaskId ? <Tag tone="brand">{teamTaskId}</Tag> : null}
+            </div>
+            {teamTaskSubject ? (
+              <div className="text-[11px] text-ink-300 leading-relaxed">
+                {teamTaskSubject}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {payloadKeys.length ? (
           <div className="flex items-center gap-1 flex-wrap">
             {payloadKeys.map((key) => (
@@ -855,6 +922,11 @@ function NativeSubagentTraceBlock({
                     <div className="mt-1.5 text-[11px] text-[#ef5564] break-words">
                       {String(step.error)}
                     </div>
+                  ) : null}
+                  {step.reasoning ? (
+                    <pre className="mt-2 whitespace-pre-wrap text-[11px] font-mono text-ink-200 bg-ink-900/70 border border-ink-700/70 rounded-md p-2 overflow-auto max-h-64">
+                      {String(step.reasoning)}
+                    </pre>
                   ) : null}
                 </div>
               );
@@ -1132,7 +1204,7 @@ export function TurnBlocks({
         </div>
       ) : null}
 
-      {/* Phase 14 — when the workspace-native loop produced block
+      {/* when the workspace-native loop produced block
         * envelopes, render them up top in their original chronological
         * order. The legacy ``actions`` / ``tool_trace`` views below act
         * as a familiar summary, but the native track is the operator's
@@ -1147,7 +1219,7 @@ export function TurnBlocks({
         />
       ) : null}
 
-      {/* Apr-27 2026 — Claude Code TUI parity render order. Upstream
+      {/* Apr-27 2026 — chat transcript render order. Upstream
         * streams content blocks chronologically: thinking → tool_use →
         * text. We mirror that here: high-level decision trail first
         * (events), then the granular tool calls in the order they

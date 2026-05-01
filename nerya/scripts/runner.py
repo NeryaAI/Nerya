@@ -56,7 +56,6 @@ def _build_script_context(
     (usually the ``script`` skill action, which lives in the skills
     layer) provides. Scripts MUST NOT import the skill kernel directly
     — that would violate the ``scripts``→``skills`` boundary rule in
-    ``docs/runtime-ownership.md``.
 
     Returns ``None`` if no invoker is wired; the script then runs
     without a ``ctx`` argument (legacy behaviour).

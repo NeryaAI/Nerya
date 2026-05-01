@@ -59,7 +59,7 @@ SKELETON_MANIFEST = {
 def _render_skill_md(manifest: dict[str, Any], *, body: str = "") -> str:
     """Render a SKILL.md file with the manifest baked into YAML frontmatter.
 
-    Hermes / Claude Code parity: ``SKILL.md`` (with frontmatter) is the
+    skill-runtime compatibility: ``SKILL.md`` (with frontmatter) is the
     *only* manifest format. Evolution scaffolds previously emitted a
     sidecar ``skill.yml`` plus a stub ``SKILL.md``; that drift has been
     removed.

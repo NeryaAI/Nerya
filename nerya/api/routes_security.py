@@ -67,7 +67,7 @@ def routes():
         return {"ok": True, "name": name}
 
     def _resolve_policy(client) -> WebPolicy:
-        # Plan 18 §5 — read web policy from workspace if present so the
+        # read web policy from workspace if present so the
         # dashboard can pin allow/deny lists without restarting the
         # server.  We fall back to defaults silently because most
         # workspaces won't ship a custom policy file.

@@ -1,4 +1,4 @@
-"""Flexible result envelopes (Phase 12).
+"""Flexible result envelopes.
 
 Historically every Nerya API returned a plain JSON dict with whatever
 fields the caller happened to need. That makes it hard to return:

@@ -2,7 +2,7 @@
 
 Each template wires Nerya's default subagents into a structured team with
 quorum/required-artifact gates. The market/research templates are adapted
-from the public Vibe-Trading swarm presets and TradingAgents analyst /
+from the public research runtime swarm presets and multi-analyst research analyst /
 researcher / risk-manager chain, while keeping Nerya as the runtime of
 record.
 """

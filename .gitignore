@@ -20,6 +20,9 @@ build/
 %SystemDrive%/
 /state/
 /tmp/
+/docs/
+/notes.md
+/task_plan.md
 nerya.egg-info/
 
 # Local Nerya workspace — never commit trading state or secrets.

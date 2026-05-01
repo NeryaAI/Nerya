@@ -1,11 +1,11 @@
-"""Durable order tracker (Plan 2026-04-29 §6).
+"""Durable order tracker (04-29 §6).
 
-Hummingbot's ``ClientOrderTracker`` is the model: every order has a
+the connector framework's ``ClientOrderTracker`` is the model: every order has a
 client-side id we generate before we hit the exchange, every
 state/fill/cancel transition is recorded, and the tracker persists
 enough state in SQLite to recover after a runtime crash.
 
-Plan §6 lays out four primary states a tracker must be able to
+lays out four primary states a tracker must be able to
 recognise without help from a fragile ``OrderAck`` round-trip:
 
 * ``active`` — submitted and not yet terminal.
@@ -61,14 +61,14 @@ TERMINAL_STATES: tuple[OrderState, ...] = (
 # treated as fully retired.
 DEFAULT_CACHED_RETENTION_S = 24 * 3600
 # How many consecutive ``fetch_order`` not-founds count as a "lost"
-# order. Hummingbot's default is 4 — same here.
+# order. the connector framework's default is 4 — same here.
 LOST_ORDER_NOT_FOUND_THRESHOLD = 4
 
 
 def make_client_order_id(
     *, strategy_id: str, executor_id: str, leg: str = "0", seq: int = 0
 ) -> str:
-    """Plan §6.3 — stable, traceable client order id.
+    """stable, traceable client order id.
 
     ``nerya:{strategy_id}:{executor_id}:{leg}:{seq}`` is a 64-char
     upper bound which fits Binance's 36-char clientOrderId limit *only*

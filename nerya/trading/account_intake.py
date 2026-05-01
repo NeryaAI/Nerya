@@ -1,4 +1,4 @@
-"""Sandboxed account-intake flow (Plan 2026-04-29 §11 P10).
+"""Sandboxed account-intake flow (04-29 §11 P10).
 
 The account intake module solves the "let the agent walk an operator
 through adding an exchange / wallet without ever seeing the operator's

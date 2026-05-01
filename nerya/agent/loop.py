@@ -6,8 +6,6 @@ until the model emits ``stop_reason=end_turn`` (or a configurable
 ``max_iterations`` budget is exhausted).
 
 Design summary (per
-``docs/agent-intelligence-gap-and-cursor-refactor-plan.md`` §3 and
-``docs/agent-harness-comparison-and-refactor-todo.md`` Phase 8):
 
 * The loop owns a *transcript* (list of provider-shaped messages).
 * Each step calls :meth:`LLMGateway.call_messages` with the current
@@ -129,15 +127,15 @@ class LoopConfig:
     multi-minute turn whose tool history (reads/writes/etc.) is
     already on disk. Set to ``1`` to disable the loop-level retry.
 
-    Apr-30 2026 — bumped 8 → 10 to match Claude Code's
-    ``invokeWithRetries`` shape (claude-code/agent.ts: ``maxRetries: 10``)
+    Apr-30 2026 — bumped 8 → 10 to match coding-agent's
+    ``invokeWithRetries`` shape (coding-agent/agent.ts: ``maxRetries: 10``)
     so a sustained provider 5xx storm does not silently drop a turn."""
 
     llm_retry_base_delay: float = 3.0
     """Base seconds for exponential backoff between iteration-level
     LLM retries. Effective wait is ``base * 2^(attempt-1)`` capped at
     ``llm_retry_max_delay`` and then *full-jittered* (uniform(0, x)) —
-    matching Claude Code's exponential-backoff-with-full-jitter strategy
+    matching coding-agent's exponential-backoff-with-full-jitter strategy
     so a herd of concurrent agents doesn't synchronise their retries.
     With 10 attempts this gives a worst-case timeline of roughly
     3 + 6 + 12 + 24 + 48 + 60 + 60 + 60 + 60 = 333s (~5.5min), with
@@ -152,7 +150,7 @@ class LoopConfig:
 
     llm_retry_full_jitter: bool = True
     """If true, each retry sleeps ``uniform(0, computed_delay)`` instead
-    of the bare exponential delay. Apr-30 2026 — Claude-Code parity:
+    of the bare exponential delay. Apr-30 2026 — runtime retry behavior:
     full jitter prevents thundering-herd retries when many agents share
     a provider account. Disable only for deterministic test runs."""
 
@@ -396,7 +394,7 @@ class WorkspaceNativeAgentLoop:
             # whole tool_use/tool_result pairs to keep the message
             # count in budget; micro keeps every pair but truncates
             # bulky bodies (read/grep/glob/shell). Together they
-            # mirror Claude Code's two-tier compaction.
+            # mirror coding-agent's two-tier compaction.
             if self.config.enable_microcompact:
                 transcript, _mc_report = microcompact(
                     transcript,
@@ -467,7 +465,7 @@ class WorkspaceNativeAgentLoop:
                         llm_base * (2 ** (llm_attempt - 1)),
                     )
                     if bool(self.config.llm_retry_full_jitter):
-                        # Apr-30 2026 — full jitter (Claude Code parity):
+                        # Apr-30 2026 — full jitter (coding-agent retry behavior):
                         # uniform(0, raw_delay). Avoids synchronised
                         # retries across concurrent agents sharing a
                         # provider account.
@@ -601,7 +599,7 @@ class WorkspaceNativeAgentLoop:
             if not tool_uses:
                 break
 
-            # Phase 13 — partial / interrupted tool_use repair. When the
+            # partial / interrupted tool_use repair. When the
             # provider stopped because of ``max_tokens`` (or any
             # non-tool finish reason) we cannot trust that the
             # ``input`` JSON is complete; the model was cut off mid-
@@ -665,7 +663,7 @@ class WorkspaceNativeAgentLoop:
             total_tool_calls += len(calls)
             error_count += batch.error_count
 
-            # Phase 14 — per-batch summary so dashboards / TUI can show
+            # per-batch summary so dashboards / TUI can show
             # one-liners ("3× read_file, 1× edit_file (+1 err)") without
             # walking the transcript. Emitted via the same event sink the
             # block envelopes use; missing sink is a no-op.
@@ -774,7 +772,7 @@ class WorkspaceNativeAgentLoop:
         }
         if result.is_error:
             block["is_error"] = True
-            # Phase 13 — append a recovery hint as an extra text part so
+            # append a recovery hint as an extra text part so
             # the model sees *what to try next* in the same observation
             # block, not just the raw failure text. Per-class policy
             # already lives in :mod:`nerya.agent.error_recovery`; we
@@ -838,7 +836,7 @@ class WorkspaceNativeAgentLoop:
             report.kept, report.dropped, report.pairs_dropped,
             report.skills_preserved,
         )
-        # Phase 9 — give the kernel a chance to re-attach file-state
+        # give the kernel a chance to re-attach file-state
         # / plan / async-task summaries that lived in the dropped
         # tool_use/tool_result pairs. The callback is responsible for
         # idempotency; we just hand it the compacted transcript and

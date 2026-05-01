@@ -403,7 +403,7 @@ export function AssistantBubble({
   onSaveEdit?: () => void;
   onCancelEdit?: () => void;
 }) {
-  // Apr-27 2026 — Claude Code TUI render parity. Upstream renders an
+  // Apr-27 2026 — chat transcript render order. Upstream renders an
   // assistant turn chronologically: thinking → tool_use blocks (with
   // their results) → final assistant text. The "summary" never sits
   // on top of the tool trace; it lands at the bottom because that's
@@ -553,11 +553,11 @@ export function AssistantBubble({
             </div>
           ) : null}
 
-          {/* Final reply text last — Claude Code TUI parity: the
+          {/* Final reply text last — chat transcript order: the
             * assistant's prose summary always lands AFTER tool_use
             * blocks, never above them. The text is rendered through
             * the shared Markdown component (Apr-27 user feedback —
-            * Hermes already does GFM, our previous plain-text
+            * the runtime already does GFM, our previous plain-text
             * ``whitespace-pre-wrap`` made tables/lists/code blocks
             * unreadable). */}
           {!msg.error && reasoning ? (

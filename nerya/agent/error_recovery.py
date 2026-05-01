@@ -1,8 +1,6 @@
 """Error taxonomy + recovery hints for the workspace-native agent loop.
 
-Plan refs:
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §4.7
-- Mirrors Claude Code's principle that *every* error the model sees
+- Mirrors coding-agent's principle that *every* error the model sees
   must be (a) classified and (b) accompanied by an actionable next
   step. Without this, models loop on the same error forever; with it,
   they self-recover ~80% of the time.
@@ -304,7 +302,7 @@ def classify_for_recovery(
 
 
 # ---------------------------------------------------------------------------
-# Retry policy (Phase 13)
+# Retry policy
 # ---------------------------------------------------------------------------
 
 

@@ -1,6 +1,6 @@
 """Self-evolution native tools.
 
-Hermes parity: the agent can ask for a reflection cycle directly,
+compatibility: the agent can ask for a reflection cycle directly,
 without the legacy ``runtime.call("evolve", "tick", ...)`` bridge. Two
 tools are exposed:
 

@@ -221,9 +221,9 @@ def find_missed_opportunities(paths: WorkspacePaths,
 
 def _session_attribution(paths: WorkspacePaths, sid: str,
                          *, max_sessions: int = 25) -> list[dict[str, Any]]:
-    """For each of the most recent sessions, run the Phase 8 attribution
+    """For each of the most recent sessions, run the attribution
     pipeline and surface the top root cause plus subagent summary. This
-    gives Phase 9 proposals explicit evidence to cite instead of vague
+    gives proposals explicit evidence to cite instead of vague
     "something seems off" language."""
     seen: list[str] = []
     for row in store.read_ledger(paths, sid, "triggers"):
@@ -277,7 +277,7 @@ def run_reflection(paths: WorkspacePaths,
             "overtrading": find_overtrading(paths, sid),
             "missed_opportunity": find_missed_opportunities(paths, sid),
         }
-        # Phase 9 v2 — feed reflection with Phase 8 attribution evidence.
+        # v2 — feed reflection with attribution evidence.
         try:
             findings["attribution"] = _session_attribution(paths, sid)
         except Exception:

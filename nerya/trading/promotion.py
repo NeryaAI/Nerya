@@ -1,6 +1,6 @@
 """Strategy promotion gate.
 
-Plan 2026-04-29 §11 P5 — Agent-generated strategies do not get to skip
+04-29 §11 P5 — Agent-generated strategies do not get to skip
 straight from ``draft`` to ``live``. Every forward step on the lifecycle
 graph requires concrete evidence:
 

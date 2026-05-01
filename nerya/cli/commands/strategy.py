@@ -1,7 +1,5 @@
 """``nerya strategy ...`` subcommands.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §8.
-
 These commands wrap :class:`nerya.sdk.strategy_api.StrategyAPI` so the
 operator can drive every package-lifecycle step from the terminal:
 

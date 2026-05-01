@@ -1,9 +1,9 @@
-"""Plan 25 §2 — externalised workspace prompt bundles.
+"""externalised workspace prompt bundles.
 
 The previous design encoded every default workspace prompt
 (``agents/system.md``, ``agents/main.agent.md`` and every
 ``subagents/*.agent.md``) as a Python literal inside
-:mod:`nerya.workspace.manager`.  Hermes-style prompt provenance is hard
+:mod:`nerya.workspace.manager`.  runtime prompt provenance is hard
 to do that way: operators editing a prompt cannot diff against the
 "factory" version, migrations cannot detect operator edits, and ``nerya
 init`` cannot pick a different profile (``trading_paper`` vs

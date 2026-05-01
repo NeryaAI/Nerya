@@ -25,7 +25,7 @@ def cmd_init(args) -> int:
 
 
 def cmd_profile_list(args) -> int:
-    """List profiles under ``$NERYA_HOME`` (Plan 28 P1 §2)."""
+    """List profiles under ``$NERYA_HOME``."""
     from ...core.paths import _resolve_home, list_profiles
     home = _resolve_home()
     rows: list[dict] = []
@@ -70,7 +70,7 @@ def cmd_profile_init(args) -> int:
 def cmd_run(args) -> int:
     """Boot the local Nerya service.
 
-    Default behaviour is "everything" (Hermes parity / Apr-26 2026
+    Default behaviour is "everything" (compatibility / Apr-26 2026
     operator directive — "启动服务的时候需要同时把前端和配置好的 gateway
     都一起启动"):
 
@@ -194,7 +194,7 @@ def cmd_dashboard(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    """Plan 28 §13 — operator-grade diagnostic surface.
+    """operator-grade diagnostic surface.
 
     Walks the global :class:`~nerya.ops.diagnostics.DiagnosticRegistry`
     and aggregates results into a structured report. ``--json`` emits
@@ -231,7 +231,7 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_status(args) -> int:
-    """Plan 28 §13 — concise one-line-per-issue operator status.
+    """concise one-line-per-issue operator status.
 
     Same registry as ``nerya doctor`` but renders only the non-OK
     rows. Useful for shell prompts, status bars, and CI early-out.
@@ -274,7 +274,7 @@ def cmd_preflight(args) -> int:
 def cmd_certify(args) -> int:
     """Run the certification gate for ``A``/``B``/``C``.
 
-    This is the Phase 7 gate: preflight plus artifact-based evidence
+    This is the gate: preflight plus artifact-based evidence
     (paper cycle, pinned version, rollback target, kill switch,
     experimental capability review).
     """
@@ -313,7 +313,7 @@ def register(sub) -> None:
         _add_ws(p)
         p.add_argument("--host", default="127.0.0.1")
         p.add_argument("--port", type=int, default=8787)
-        # Hermes parity (Plan 21 P1 + Apr-26 2026 operator directive):
+        # compatibility:
         # ``nerya run`` is the "boot everything" command — service +
         # dashboard + configured gateways (Telegram long-poll auto-
         # attached by local_server.serve). Headless deployments opt
@@ -355,7 +355,7 @@ def register(sub) -> None:
                    help="comma-separated check ids to skip")
     p.set_defaults(func=cmd_doctor)
 
-    # Plan 28 §13 — concise operator status (subset of doctor output).
+    # concise operator status (subset of doctor output).
     p = sub.add_parser("status")
     _add_ws(p)
     p.add_argument("--json", action="store_true",
@@ -384,7 +384,7 @@ def register(sub) -> None:
     p = svc.add_parser("status"); _add_ws(p)
     p.set_defaults(func=cmd_service_status)
 
-    # Plan 28 P1 §2 — Hermes-style profile selector.
+    # runtime profile selector.
     prof = sub.add_parser("profile").add_subparsers(dest="profcmd", required=True)
     p = prof.add_parser("list"); _add_ws(p)
     p.set_defaults(func=cmd_profile_list)

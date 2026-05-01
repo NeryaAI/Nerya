@@ -14,7 +14,7 @@ import { clientApi } from "../../lib/clientApi";
 import type { TriggerRoute, TriggerSchedule } from "../../lib/clientApi";
 
 /**
- * Workflows surface — Phase 25.
+ * Workflows surface — .
  *
  * Operator-facing view of scheduled and event-driven automations. Talks
  * to the existing backend trigger routes (``/triggers/routes``,

@@ -14,7 +14,7 @@ The companion :class:`ReferenceStore` writes any dropped segment to
 ``[ref: <id>]`` placeholder in the prompt and the operator / LLM can pull
 the full text later via ``load_reference``.
 
-Ported concept-for-concept from Hermes' ``context_compressor.py`` +
+Ported concept-for-concept from The runtime' ``context_compressor.py`` +
 ``context_references.py`` but kept dependency-free.
 """
 
@@ -212,7 +212,7 @@ def budget_for_model(
     fallback_budget: int = 8_192,
     headroom_ratio: float = 0.85,
 ) -> int:
-    """Plan 25 §5 — derive a compression budget from the model registry
+    """derive a compression budget from the model registry
     instead of the legacy hardcoded ``8_192`` fallback.
 
     The budget is::

@@ -1,6 +1,6 @@
 """Rate-limit state parsed from provider response headers.
 
-Ported from Hermes' `agent/rate_limit_tracker.py` — simplified to the
+Ported from The runtime' `agent/rate_limit_tracker.py` — simplified to the
 fields Nerya actually needs (per-minute + per-hour requests/tokens).
 
 Recognised header conventions:

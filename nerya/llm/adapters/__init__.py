@@ -54,6 +54,7 @@ def builtin_providers(transport: Transport | None = None) -> dict[str, ProviderC
         "together":           compat,
         "groq":               compat,
         "cerebras":           compat,
+        "stepfun":            compat,
         "compat":             compat,
     }
 

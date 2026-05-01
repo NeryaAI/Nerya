@@ -1,7 +1,7 @@
 """Transcript-aware compaction with tool_use / tool_result invariants.
 
 Audit finding 4.7 called out that Nerya had TTL-based markdown memory
-compaction but not the Claude Code-style *transcript-aware* compaction
+compaction but not the coding-agent-style *transcript-aware* compaction
 that respects tool-use/tool-result pairs. This module closes that gap.
 
 Design goals (kept small and dependency-free on purpose):
@@ -25,7 +25,7 @@ Design goals (kept small and dependency-free on purpose):
 - We always evict in pairs (tool_use + tool_result together).
 - When we evict a chunk, we leave a single summary message in its
   place so downstream readers know something was compacted (similar
-  to Claude Code's session compact breadcrumbs).
+  to coding-agent's session compact breadcrumbs).
 
 This module is pure-python and does not touch disk by itself; the
 agent kernel / session store decides when to run it and where to

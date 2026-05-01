@@ -65,17 +65,10 @@ def _get_run(client, payload):
         "run": run.asdict(),
         "members": [m.asdict() for m in store.read_members(run_id)],
         "tasks": [t.asdict() for t in store.list_tasks(run_id)],
-        "blackboard": [
-            {
-                "id": e["id"], "kind": e["kind"], "author": e["author"],
-                "summary": e.get("summary"), "task_id": e.get("task_id"),
-                "confidence": e.get("confidence"),
-                "created_at": e.get("created_at"),
-            }
-            for e in (
-                __read_blackboard(store, run_id)
-            )
-        ],
+        "events": store.list_events(run_id),
+        "messages": __read_messages(store, run_id),
+        "blackboard": __read_blackboard(store, run_id),
+        "artifacts": __read_artifacts(store, run_id),
         "final_report": final_report,
         "final_context": final_context,
     }
@@ -112,6 +105,43 @@ def _start_run(client, payload):
 def __read_blackboard(store: TeamStore, run_id: str):
     from ..core import jsonl
     return jsonl.read_all(store.blackboard_path(run_id))
+
+
+def __read_messages(store: TeamStore, run_id: str) -> list[dict[str, Any]]:
+    import json as _json
+
+    root = store.run_dir(run_id) / "inboxes"
+    if not root.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("msg-*.json")) + sorted(root.rglob("*.consumed")):
+        try:
+            row = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(row, dict):
+            row.setdefault("mailbox_path", str(path))
+            out.append(row)
+    out.sort(key=lambda x: str(x.get("created_at") or ""))
+    return out
+
+
+def __read_artifacts(store: TeamStore, run_id: str) -> list[dict[str, Any]]:
+    import json as _json
+
+    root = store.artifacts_dir(run_id)
+    if not root.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            row = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(row, dict):
+            row.setdefault("artifact_path", str(path))
+            out.append(row)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +199,7 @@ def routes():
         ("POST", "/teams/runs", _list_runs),
         ("POST", "/teams/run", _start_run),
         ("POST", "/teams/get", _get_run),
-        # Phase 11+: persistent agent role registry (workspace +
+        # +: persistent agent role registry (workspace +
         # defaults). The dashboard renders this under
         # /agent/roles; the model can also call role_* tools to
         # introspect or update roles between turns.

@@ -1,6 +1,6 @@
 """Bulk-migrate built-in skill ``actions.py`` modules into ``scripts/handlers.py``.
 
-This is a **one-time development helper** that implements Phase 3 of the
+This is a **one-time development helper** that implements of the
 ``2026-04-25-skill-md-only-migration-plan.md`` migration:
 
 For every skill under ``nerya/skills/builtin/<name>_skill/`` whose
@@ -129,7 +129,7 @@ def _make_shim(skill_id: str, public_names: list[str]) -> str:
         all_block = "__all__: list[str] = []\n"
     body = (
         f'"""Compatibility shim for {skill_id}.\n\n'
-        "Phase 3 of the SKILL.md-only migration moves executable logic\n"
+        "The SKILL.md-only migration moves executable logic\n"
         "into ``scripts/handlers.py``. This module re-exports the public\n"
         "callables so existing imports (``nerya.skills.builtin."
         f"{skill_id}.actions``) continue to resolve while the canonical\n"
@@ -199,7 +199,7 @@ def _make_shim(skill_id: str, public_names: list[str]) -> str:
 def _make_scripts_init(skill_id: str, public_names: list[str]) -> str:
     body = (
         f'"""``{skill_id}`` script package.\n\n'
-        "Phase 3 of the SKILL.md-only migration: executable logic\n"
+        "The SKILL.md-only migration: executable logic\n"
         "lives in ``handlers.py`` (and may be split into per-action\n"
         "modules over time).\n"
         '"""\n\n'

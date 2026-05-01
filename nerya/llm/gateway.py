@@ -79,7 +79,7 @@ class LLMCall:
     usd: float
     raw: str
     parsed: Any
-    # Reasoning surfaces (Plan 32). Empty when the tier is configured for
+    # Reasoning surfaces. Empty when the tier is configured for
     # a non-reasoning model OR ``reasoning_effort`` is unset on the tier.
     reasoning_text: str = ""
     reasoning_tokens: int = 0
@@ -159,7 +159,7 @@ class LLMGateway:
                     f"before using high-tier task '{task}'"
                 )
 
-        # Capability check (Phase 2): when the caller wants a schema-shaped
+        # Capability check: when the caller wants a schema-shaped
         # response we must not silently dispatch to a provider whose
         # ``schema_json_mode`` is declared ``unsupported``. Same goes for
         # ``reasoning_thinking`` on reasoning-flagged tasks. This closes the
@@ -262,7 +262,7 @@ class LLMGateway:
 
     # ---------------------------------------------------------- matrix
     def capabilities(self) -> dict[str, Any]:
-        """Return the live per-tier capability matrix (Phase 13).
+        """Return the live per-tier capability matrix.
 
         Each configured tier is resolved to its provider and the
         corresponding capability record. Callers use this to know
@@ -275,7 +275,7 @@ class LLMGateway:
         configured tiers — the operator dashboard reads this to warn
         before a business-critical capability silently degrades.
 
-        Plan 25 §5 — additionally enriches each tier with model-level
+        additionally enriches each tier with model-level
         metadata (context window, output limit, costs, modalities,
         knowledge cutoff, prompt caching) sourced from
         :mod:`nerya.llm.model_registry`.
@@ -357,7 +357,7 @@ class LLMGateway:
                          session=session).parsed
 
     # ============================================================
-    # Phase 7 — provider-native ``messages + tools`` interface
+    # provider-native ``messages + tools`` interface
     # ============================================================
     #
     # ``call_messages`` is the entry point used by the
@@ -592,7 +592,7 @@ class LLMGateway:
 
         if provider in {
             "deepseek", "openrouter", "moonshot", "xai", "mistral",
-            "together", "groq", "cerebras", "compat",
+            "together", "groq", "cerebras", "stepfun", "compat",
         }:
             api_key = self._resolve_provider_key(cfg)
             if not api_key:

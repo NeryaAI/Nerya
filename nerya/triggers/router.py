@@ -51,7 +51,7 @@ class TriggerRouter:
     # ------------------------------------------------------------ policy
     def _resolve_payload_cap(self, event: TriggerEvent,
                              route: TriggerRoute | None) -> int:
-        """Resolve the payload cap for ``event`` (Plan 23 P2 §3).
+        """Resolve the payload cap for ``event``.
 
         Precedence: route-level cap > per-actor override > per-channel
         override > per-source override > per-kind override >
@@ -110,7 +110,7 @@ class TriggerRouter:
     def explain(self, event: TriggerEvent) -> dict[str, Any]:
         """Return a trace of *why* ``event`` would route where it does.
 
-        This is the Phase 5 explain surface: it never emits the event, it
+        This is the explain surface: it never emits the event, it
         never touches the dedupe / cooldown stores, it just evaluates
         every route in declaration order and surfaces:
 

@@ -1,10 +1,7 @@
 """nerya.tools — Native tool harness (workspace-native agent layer).
 
-This package implements the *Cursor-style / Claude-Code-style* tool harness
+This package implements the *IDE-style / coding-agent* tool harness
 described in:
-
-* ``Nerya/docs/agent-intelligence-gap-and-cursor-refactor-plan.md``
-* ``Nerya/docs/agent-harness-comparison-and-refactor-todo.md``
 
 Goal: a provider-native ``messages + tools -> tool_use -> tool_result``
 loop. ``nerya.tools`` is the home for:

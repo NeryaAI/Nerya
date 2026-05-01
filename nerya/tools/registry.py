@@ -18,11 +18,9 @@ Holds three classes of tools:
 
 The registry is intentionally simple: a name -> descriptor map plus a
 small set of filter / list helpers. It does *not* execute tools — that
-is :class:`NativeToolExecutor` (Phase 5).
+is :class:`NativeToolExecutor`.
 
-References:
-* docs/agent-intelligence-gap-and-cursor-refactor-plan.md §3.2
-* docs/agent-harness-comparison-and-refactor-todo.md Phase 1
+Implementation notes are kept with the registry and executor contracts.
 """
 
 from __future__ import annotations

@@ -621,7 +621,7 @@ export default function PortfolioPage() {
         {summary && (
           <Card
             title="Advanced payloads"
-            description="For debugging parity with the runtime API."
+            description="For debugging consistency with the runtime API."
           >
             <details>
               <summary className="cursor-pointer text-xs text-ink-400 hover:text-ink-200">

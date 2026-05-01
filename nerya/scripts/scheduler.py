@@ -41,7 +41,6 @@ def _validate_cadence(
 
     We deliberately don't import the full cron parser from
     ``nerya.triggers.schedule`` — the ``scripts`` package must not
-    depend on ``triggers`` (see docs/runtime-ownership.md). The trigger
     plane re-validates every row when the scheduler loop loads them.
     """
     if (every_seconds is None) == (cron is None):

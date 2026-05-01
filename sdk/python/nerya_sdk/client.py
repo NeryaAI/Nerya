@@ -120,7 +120,7 @@ class NeryaClient:
             return self._outer._client().messages.send(**kw)
 
     class _AgentFacade:
-        """Phase 15 — workspace-native agent surface for the SDK.
+        """workspace-native agent surface for the SDK.
 
         Mirrors :class:`nerya.sdk.agent_api.AgentAPI`. ``run_turn`` returns
         the same dashboard-shaped dict the HTTP API serves at

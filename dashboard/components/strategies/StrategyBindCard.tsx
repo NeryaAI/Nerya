@@ -18,7 +18,7 @@ interface Props {
 }
 
 /**
- * Strategy bind card (Plan 2026-04-29 §11 P9).
+ * Strategy bind card (04-29 §11 P9).
  *
  * Pulls the live account roster from /accounts/list and the wallet
  * bindings from /wallet/configured so the operator can re-bind a

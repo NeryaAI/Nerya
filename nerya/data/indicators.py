@@ -1,7 +1,7 @@
-"""Native indicator engine (Phase 14).
+"""Native indicator engine.
 
 Historically this module only exposed ``sma``, ``pct_change``, and a
-one-off breakout detector. Phase 14 promotes it into the canonical
+one-off breakout detector. promotes it into the canonical
 indicator surface used by analysis, review, optimization, and the
 strategy skill — so indicator outputs are first-class inputs into
 every downstream decision.
@@ -74,7 +74,7 @@ def require_talib() -> None:
 
 
 def capability() -> dict[str, Any]:
-    """Report the live indicator backend status (Phase 14)."""
+    """Report the live indicator backend status."""
     return {
         "talib_installed": has_talib(),
         "backend": "talib" if has_talib() else "pure_python",

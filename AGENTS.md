@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Ground-truth orientation for AI agents (Claude, Codex, Cursor, …) and
+Ground-truth orientation for AI agents and
 human contributors working inside the **Nerya** repository.
 
 Read this file *first*. It answers the "where does X live, and how do
@@ -81,7 +81,6 @@ Nerya/
 │   ├── triggers/          # cron + trigger router, schedules.yml parser
 │   └── wallet/            # WalletProvider abstraction + self_custody / okx_os / bitget / binance_agentic / coinbase
 ├── dashboard/             # Next.js 14 control panel (app router + Tailwind)
-├── docs/                  # architecture / risk / strategy / security / sdk docs
 ├── scripts/               # CLI helpers (install / doctor / e2e)
 ├── tests/                 # pytest suite — 500+ tests
 ├── workspace_template/    # reference layout (the actual layout is built at runtime by `workspace/layout.py::required_dirs`)
@@ -232,7 +231,6 @@ paper runs and tests. Do **not** try to "replace with real data".
 Look at, in this order:
 
 1. This file.
-2. `docs/nerya-architecture.md` for how the pieces fit together.
-3. `docs/skill-first-trading.md` for the skill + risk-gate contract.
-4. The nearest test in `tests/test_<area>.py` — tests are the
+2. The nearest implementation file in `nerya/` or `dashboard/`.
+3. The nearest test in `tests/test_<area>.py` — tests are the
   executable spec for everything in the runtime.

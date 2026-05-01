@@ -1,8 +1,6 @@
 """Context budget + microcompact + autocompact for long coding sessions.
 
-Plan refs:
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §4.4
-- Mirrors Claude Code's three-layer compaction stack:
+- Mirrors coding-agent's three-layer compaction stack:
   1. ``tool_result_budget``  — bound any single observation;
   2. ``microcompact``        — collapse contiguous low-value tool calls;
   3. ``autocompact``         — when the running window crosses a

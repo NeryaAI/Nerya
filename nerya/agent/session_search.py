@@ -1,8 +1,7 @@
-"""Session search over persisted turn/skill journals (Plan 03 P0 §5
-+ Plan 06 P0 §2).
+"""Session search over persisted turn/skill journals.
 
-Hermes ships an FTS5 index over its session table so operators can
-``hermes session search "redis token loop"`` and recover what happened
+the runtime ships an FTS5 index over its session table so operators can
+``runtime session search "redis token loop"`` and recover what happened
 last week. Nerya stored the equivalent telemetry in journal files and
 session JSONs but did not expose any search surface, which made
 post-mortems painful for long-running operators.
@@ -11,7 +10,7 @@ This module ships *both* lanes:
 
 - A pure-python streaming scan (:func:`search`/:func:`recent_events`)
   that works on tiny SQLite-less environments and matches the original
-  Plan 03 P0 §5 contract.
+  contract.
 - An optional FTS5 mirror (:mod:`nerya.agent.session_search_fts`) that
   the same :func:`search` consults first when SQLite ships FTS5. The
   mirror is rebuilt incrementally from the JSONL journals so the
@@ -24,10 +23,7 @@ Public surface:
 - :func:`search` — full text search over turn-step journal entries.
 - :func:`recent_events` — most-recent N events for a session/strategy.
 
-Plan refs:
-``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/03-agent-loop-context-session.md``
 P0 §5,
-``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/06-memory-reflection-evolution.md``
 P0 §2.
 """
 

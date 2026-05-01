@@ -1,4 +1,4 @@
-"""Plan 30 — supply-chain trust polish: signed skill lockfiles.
+"""supply-chain trust polish: signed skill lockfiles.
 
 The :mod:`nerya.skills.lockfile` module records ``sha256`` for every
 promoted skill.  The next step on the supply-chain hardening road is
@@ -7,7 +7,7 @@ to *attest* those hashes with a signature so that:
 * a tampered ``skills.lock.yml`` (e.g. someone editing a hash by
   hand) can be detected even before we re-walk the skill tree;
 * a workspace can require a known signing key before loading skills
-  (matches Hermes' "trusted publisher" gate);
+  (matches The runtime' "trusted publisher" gate);
 * the dashboard / CLI can show "lock verified by `<key fingerprint>`"
   next to each skill.
 

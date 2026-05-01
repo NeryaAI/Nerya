@@ -1,7 +1,6 @@
 """Native skill index/view tools — playbook-style skill discovery.
 
 In the new architecture (per
-``docs/agent-intelligence-gap-and-cursor-refactor-plan.md``) skills
 are no longer schema containers — they are *playbooks*:
 
 * ``SKILL.md`` is markdown. Its frontmatter carries an
@@ -12,8 +11,8 @@ are no longer schema containers — they are *playbooks*:
   playbook references.
 
 The model sees a *one-line index* up front and pulls the full
-playbook only when ``skill_view`` is called. That mirrors how Cursor
-Skills and Claude Code Skills work, and keeps the system prompt
+playbook only when ``skill_view`` is called. That mirrors how IDE
+Skills and agent skills work, and keeps the system prompt
 short.
 
 Tools provided here:

@@ -1,20 +1,17 @@
 """Loader for project-local agent rules (AGENTS.md / .cursor/rules / CLAUDE.md).
 
-Plan refs:
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §3.2
 
 Why
 ---
-Cursor / Claude Code / Codex / Aider all converge on the same idea:
+IDE integrations and coding agents all converge on the same idea:
 a project ships a small set of plain-text "agent rules" that the
 runtime injects into the system prompt every turn. Examples:
 
-* ``AGENTS.md`` (Anthropic / Claude Code) — top-level conventions
-* ``.cursor/rules/*.md`` — Cursor-style rule snippets, optionally
+* ``AGENTS.md`` (Anthropic / coding-agent) — top-level conventions
+* ``.cursor/rules/*.md`` — IDE-style rule snippets, optionally
   scoped to glob patterns
-* ``CLAUDE.md`` — Claude Code legacy filename
+* ``CLAUDE.md`` — coding-agent legacy filename
 * ``.claude/skills/*/SKILL.md`` — auto-loaded skill instructions
-* ``docs/AGENTS.md`` — secondary location
 
 This module discovers and merges all of those into one ordered list
 of :class:`ProjectRule` records. The kernel injects them into the
@@ -27,7 +24,7 @@ Rule files can declare a YAML frontmatter with optional ``apply_to``
 globs. When the current task touches a file matching one of the
 globs, the rule is *prioritised* (rendered first, with a higher
 salience). Otherwise it is rendered after the global rules. The
-frontmatter is identical to Cursor's rule format so existing rule
+frontmatter is identical to IDE's rule format so existing rule
 files just work.
 """
 
@@ -95,7 +92,6 @@ _DEFAULT_DIRS = (
     ".cursor/rules",
     ".claude/rules",
     ".agents/rules",
-    "docs/agents",
 )
 
 

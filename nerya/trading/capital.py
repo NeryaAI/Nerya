@@ -1,6 +1,6 @@
 """Capital management — sizing, budget checking, reservations.
 
-Plan 2026-04-29 §4 — multi-strategy concurrency must not double-spend
+multi-strategy concurrency must not double-spend
 the same balance. The two pieces in here cooperate to make that
 guarantee:
 
@@ -8,7 +8,7 @@ guarantee:
   :class:`SizingPolicy` into an :class:`OrderCandidate`. It cross
   references the latest :class:`AccountSnapshot` and any *outstanding*
   capital reservations on the same account, then either ``allow``s,
-  ``resize``s, or ``reject``s the request. Hummingbot's
+  ``resize``s, or ``reject``s the request. the connector framework's
   ``BudgetChecker`` is the conceptual ancestor; the Nerya version
   drops collateral graphs and deals only in USD-equivalent notional
   for the first pass.

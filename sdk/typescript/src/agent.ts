@@ -1,4 +1,4 @@
-// Phase 15 — TypeScript SDK shapes for the workspace-native agent.
+// TypeScript SDK shapes for the workspace-native agent.
 //
 // Mirrors `nerya.api.routes_agent.run_turn` and `nerya.api.routes_agent
 // .tool_registry`. Kept intentionally permissive — providers / kernel

@@ -162,7 +162,7 @@ def promote_installed(paths: WorkspacePaths, skill_id: str) -> Path:
 
     This is what the proposal-promotion step calls once an operator
     approves a ``skill_install_request``. After promotion we also
-    record an entry in ``skills/skills.lock.yml`` (Plan 30 P1 §4) so
+    record an entry in ``skills/skills.lock.yml`` so
     the kernel can detect tree drift on the next boot.
     """
     from ..core import yaml_io
@@ -183,7 +183,7 @@ def promote_installed(paths: WorkspacePaths, skill_id: str) -> Path:
         doc["enabled"] = enabled
         yaml_io.dump(paths.skills_enabled, doc)
 
-    # Plan 30 P1 §4 — refresh the lock entry. Source/version come from
+    # refresh the lock entry. Source/version come from
     # the staged report; sha256 is recomputed from the promoted tree so
     # boot-time integrity checks compare apples to apples (the staged
     # hash excludes ``install_report.json`` which only exists post-stage).

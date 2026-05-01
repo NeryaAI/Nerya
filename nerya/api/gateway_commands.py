@@ -1,10 +1,10 @@
 """Platform-neutral gateway command registry.
 
-Hermes-aligned: the same `/help`, `/menu`, `/status`, `/new`, `/trace`
+gateway: the same `/help`, `/menu`, `/status`, `/new`, `/trace`
 commands must work across Telegram, dashboard, generic webhook, and any
 future adapter without copy/pasting Python `if/elif` chains in every
 gateway route. Skills can extend the registry with additional commands
-(planned — see ``Plan 23 #3``); for now we ship the Hermes baseline.
+(planned — see ````); for now we ship the gateway baseline.
 
 The registry is intentionally small and side-effect free at import time:
 - ``BUILTIN_COMMANDS`` lists the canonical specs.
@@ -470,7 +470,7 @@ def _handle_session(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
 
 
 def _handle_skills(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
-    """Plan 02 P0 §3 — ``/skills`` lists every loaded skill + agent action.
+    """``/skills`` lists every loaded skill + agent action.
 
     Resolves the live registry through ``ctx.client.skills`` so the
     list reflects post-install state without requiring a restart.
@@ -494,7 +494,7 @@ def _handle_skills(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
 
 
 def _handle_accounts(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
-    """Plan 2026-04-29 §11 P10 — ``/accounts`` renders the configured accounts roster.
+    """04-29 §11 P10 — ``/accounts`` renders the configured accounts roster.
 
     The output is intentionally compact (one line per account) so it
     survives Telegram's 4096-character limit even on workspaces with
@@ -592,7 +592,7 @@ def _handle_accounts(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
 
 
 def _handle_wallets(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
-    """Plan 2026-04-29 §11 P10 — ``/wallets`` lists on-chain wallet providers.
+    """04-29 §11 P10 — ``/wallets`` lists on-chain wallet providers.
 
     Mirrors ``/accounts`` for the on-chain side: shows every wallet
     provider declared in :mod:`nerya.wallet.registry` plus its install
@@ -730,7 +730,7 @@ def _handle_intake(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
 
 
 def _handle_skill_subcommand(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
-    """Plan 02 P0 §3 — ``/skill view <id>`` renders manifest + actions."""
+    """``/skill view <id>`` renders manifest + actions."""
 
     parts = (ctx.raw_text or "").strip().split()
     sub = parts[1] if len(parts) >= 2 else ""
@@ -884,7 +884,7 @@ class GatewayCommandRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Default registry (Hermes baseline)
+# Default registry (gateway baseline)
 # ---------------------------------------------------------------------------
 
 BUILTIN_COMMANDS: tuple[tuple[CommandSpec, CommandHandler], ...] = (
@@ -914,7 +914,7 @@ DEFAULT_REGISTRY: GatewayCommandRegistry = _build_default_registry()
 
 
 def menu_commands(*, platform: Optional[str] = None) -> list[dict[str, str]]:
-    """Public entry point for adapters that need the Hermes-aligned menu."""
+    """Public entry point for adapters that need the gateway menu."""
 
     return DEFAULT_REGISTRY.menu(platform=platform)
 

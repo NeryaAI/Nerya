@@ -1,7 +1,5 @@
 """HTTP routes for the strategy runtime control plane.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §8.
-
 Returns a list of ``(method, path, handler)`` tuples in the same shape
 as the rest of :mod:`nerya.api.routes_*`. Mounted by the runtime
 HTTP server alongside ``routes_triggers``, ``routes_strategy_history``,
@@ -24,7 +22,7 @@ Routes
 | POST   | /strategies/runtime/kill_switch      | Set / clear / inspect the per-strategy kill switch.     |
 | GET    | /strategies/runtime/runs             | List recent strategy runs.                              |
 | GET    | /strategies/runtime/status           | Aggregate manifest + schedule + kill switch + last run. |
-| GET    | /strategies/runtime/workspace        | Aggregate workspace endpoint (Phase 8 frontend prep).   |
+| GET    | /strategies/runtime/workspace        | Aggregate workspace endpoint.   |
 
 Why a "runtime" sub-namespace
 -----------------------------
@@ -32,8 +30,7 @@ The legacy strategy routes (``/strategies/<id>``) return the older
 ``trading.strategies.Strategy`` rows. We don't want to break the
 operator's existing dashboard while we migrate to the new
 StrategyPackage model — namespacing the new endpoints under
-``/strategies/runtime/`` lets both surfaces coexist until Phase 8
-finishes the dashboard refactor.
+``/strategies/runtime/`` lets both surfaces coexist until finishes the dashboard refactor.
 """
 
 from __future__ import annotations
@@ -234,10 +231,10 @@ def routes():
     def workspace(client, query):
         """Aggregate everything the dashboard's StrategyWorkspace needs.
 
-        Plan §8 — instead of the frontend making 6 separate calls to
+        instead of the frontend making 6 separate calls to
         rebuild a strategy view, we ship one endpoint that joins the
         manifest, schedules, kill switch, last 50 runs, and the
-        legacy strategy-history ledgers. Phase 8 of the dashboard
+        legacy strategy-history ledgers. of the dashboard
         refactor consumes this verbatim.
         """
 

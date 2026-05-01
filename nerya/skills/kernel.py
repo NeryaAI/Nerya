@@ -18,7 +18,7 @@ class SkillKernel:
 
     @classmethod
     def boot(cls, config: Config) -> "SkillKernel":
-        registry = SkillRegistry.load_builtin(config.paths)
+        registry = SkillRegistry.load_builtin(config.paths, config=config)
         runtime = SkillRuntime(config, registry)
         return cls(config=config, registry=registry, runtime=runtime)
 
@@ -61,7 +61,7 @@ class SkillKernel:
         return out
 
     # ------------------------------------------------------------------
-    # Hermes-parity helpers (Plan 02 P0 §2 / §3)
+    # compatibility helpers
     # ------------------------------------------------------------------
 
     def view(self, skill_id: str) -> dict[str, Any] | None:
@@ -182,7 +182,7 @@ class SkillKernel:
         live process picks up new manifests without a restart.
         """
 
-        new = SkillRegistry.load_builtin(self.config.paths)
+        new = SkillRegistry.load_builtin(self.config.paths, config=self.config)
         self.registry = new
         self.runtime.registry = new
         return len(new.list())

@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 MODE="${1:-full}"
 
 # ------------------------------------------------------------ truth gates
-# These scan repo artifacts for outward-facing honesty rules (Phase 6).
+# These scan repo artifacts for outward-facing honesty rules.
 TRUTH_GATES=(
   tests/test_release_truth_gate.py
   tests/test_runtime_truth_gate.py
@@ -27,18 +27,18 @@ TRUTH_GATES=(
   tests/test_no_placeholder_runtime_paths.py
 )
 
-# --------------------------------------------- per-phase regression suites
+# --------------------------------------------- regression suites
 # Locked to the audit's Section 8 list so a drift in this file also means
 # a drift in the documented release-gate surface.
 PHASE_REGRESSION=(
-  # Phase 1 — external SDK surface
+  # external SDK surface
   tests/test_sdk_smoke.py
-  # Phase 2 — script runtime truth
+  # script runtime truth
   tests/test_script_context.py
   tests/test_script_sandbox.py
-  # Phase 3 — self-evolution closure
+  # self-evolution closure
   tests/test_evolution_scaffold_phase3.py
-  # Phase 4 — provider / wallet capability honesty
+  # provider / wallet capability honesty
   tests/test_wallet_capabilities_phase4.py
   tests/test_provider_capability_matrix.py
   # Core agent loop & subagents
@@ -50,13 +50,11 @@ PHASE_REGRESSION=(
   tests/test_trigger_sdk.py
   tests/test_trigger_route_crud.py
   tests/test_trigger_schedule_lifecycle.py
-  # Hermes parity — scheduled agent sessions (2026-04-24 plan)
+  # scheduled agent session compatibility
   tests/test_schedule_schema_extension.py
   tests/test_scheduled_session_runner.py
   tests/test_scheduled_session_delivery.py
   tests/test_schedule_nl_parse.py
-  tests/test_hermes_parity_cron_session.py
-  tests/test_hermes_parity_e2e.py
   # Operator-facing prompt-driven end-to-end (skill scaffold -> route ->
   # NL schedule -> live agent turn -> self-managed schedule lifecycle)
   tests/test_agent_prompt_driven_e2e.py
@@ -76,8 +74,8 @@ if [[ "$MODE" == "--quick" || "$MODE" == "quick" ]]; then
   echo "== Nerya truth gate (quick: truth-gates only) =="
 else
   TARGETS=("${TRUTH_GATES[@]}" "${PHASE_REGRESSION[@]}")
-  echo "== Nerya truth gate (full: truth-gates + phase regression) =="
+  echo "== Nerya truth gate (full: truth gates + regression suites) =="
 fi
 
 echo "target count: ${#TARGETS[@]}"
-python -m pytest "${TARGETS[@]}" -q
+"${PYTHON:-python}" -m pytest "${TARGETS[@]}" -q

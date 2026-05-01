@@ -47,7 +47,7 @@ class LLMAPI:
                           caller=caller)
 
     def capabilities(self) -> dict[str, Any]:
-        """Return the live provider capability matrix (Phase 13).
+        """Return the live provider capability matrix.
 
         Mirrors :meth:`nerya.llm.gateway.LLMGateway.capabilities`; exposed
         here so SDK callers (dashboards, CLI, tests) can see per-tier
@@ -60,7 +60,7 @@ class LLMAPI:
         return gateway.capabilities()
 
     def reasoning_settings(self) -> dict[str, Any]:
-        """Return per-tier reasoning configuration (Plan 32).
+        """Return per-tier reasoning configuration.
 
         Output shape::
 

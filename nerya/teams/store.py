@@ -111,7 +111,17 @@ class TeamStore:
     def create_task(self, task: TeamTask) -> None:
         path = self.task_path(task.run_id, task.id)
         _write_json_atomic(path, task.asdict())
-        self.append_event(task.run_id, kind="task.created", task_id=task.id, owner=task.owner)
+        self.append_event(
+            task.run_id,
+            kind="task.created",
+            task_id=task.id,
+            owner=task.owner,
+            subagent=task.subagent_name,
+            subject=task.subject,
+            description=task.description,
+            depends_on=list(task.depends_on),
+            required=task.required,
+        )
 
     # ------------------------------------------------------------ reads
     def read_run(self, run_id: str) -> Optional[TeamRun]:
@@ -158,6 +168,14 @@ class TeamStore:
     def update_run(self, run: TeamRun) -> None:
         run.updated_at = now_iso()
         _write_json_atomic(self.run_dir(run.id) / "run.json", run.asdict())
+        self.append_event(
+            run.id,
+            kind="run.updated",
+            status=run.status,
+            phase=run.phase,
+            error=run.error,
+            metrics=run.metrics,
+        )
 
     def update_task(self, task: TeamTask) -> None:
         _write_json_atomic(self.task_path(task.run_id, task.id), task.asdict())
@@ -165,15 +183,34 @@ class TeamStore:
             task.run_id,
             kind="task.updated",
             task_id=task.id,
+            owner=task.owner,
+            subagent=task.subagent_name,
+            subject=task.subject,
             status=task.status,
             error=task.error,
             artifact=task.result_artifact,
+            summary=task.result_summary,
+            started_at=task.started_at,
+            completed_at=task.completed_at,
         )
 
     # ------------------------------------------------------------ events
     def append_event(self, run_id: str, *, kind: str, **fields: Any) -> dict[str, Any]:
         rec = {"kind": kind, "ts": now_iso(), **fields}
-        return jsonl.append(self.events_path(run_id), rec, stamp=False)
+        written = jsonl.append(self.events_path(run_id), rec, stamp=False)
+        try:
+            from ..agent.streaming import get_default_bus
+
+            get_default_bus().publish(
+                "team.event",
+                team_run_id=run_id,
+                team_event_kind=kind,
+                team_event=written,
+                **fields,
+            )
+        except Exception:
+            pass
+        return written
 
     def list_events(self, run_id: str) -> list[dict[str, Any]]:
         return jsonl.read_all(self.events_path(run_id))
@@ -190,6 +227,18 @@ class TeamStore:
             "payload": payload,
         }
         _write_json_atomic(d / f"{artifact_id}.json", body)
+        self.append_event(
+            run_id,
+            kind="artifact.written",
+            artifact_id=artifact_id,
+            artifact_kind=kind,
+            task_id=payload.get("task_id"),
+            owner=payload.get("owner"),
+            subagent=payload.get("subagent"),
+            summary=payload.get("summary"),
+            signal=payload.get("signal"),
+            confidence=payload.get("confidence"),
+        )
         return artifact_id
 
     def read_artifact(self, run_id: str, artifact_id: str) -> Optional[dict[str, Any]]:
@@ -201,6 +250,13 @@ class TeamStore:
         d.mkdir(parents=True, exist_ok=True)
         path = d / f"{_slug(name)}.json"
         _write_json_atomic(path, payload)
+        self.append_event(
+            run_id,
+            kind="synthesis.written",
+            name=name,
+            path=str(path),
+            format="json",
+        )
         return path
 
     def write_synthesis_text(self, run_id: str, name: str, text: str) -> Path:
@@ -216,6 +272,14 @@ class TeamStore:
             safe = _slug(name)
         path = d / safe
         path.write_text(text, encoding="utf-8")
+        self.append_event(
+            run_id,
+            kind="synthesis.written",
+            name=name,
+            path=str(path),
+            format="text",
+            bytes=len(text.encode("utf-8")),
+        )
         return path
 
     # ------------------------------------------------------------ delete

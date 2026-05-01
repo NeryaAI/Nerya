@@ -1,7 +1,7 @@
 """Tool-result persistence for oversized observations.
 
-Hermes' ``run_agent.py`` persists oversized tool outputs to disk and
-substitutes a reference into the agent's context (see Hermes
+The runtime' ``run_agent.py`` persists oversized tool outputs to disk and
+substitutes a reference into the agent's context (see the runtime
 ``run_agent.py``: ``_persist_tool_result`` / ``tool_result_store``).
 Without that, every long ``ls`` / ``read_file`` / ``terminal`` reply
 would balloon the prompt window.
@@ -11,8 +11,6 @@ synchronous: callers ask for a "ref" (a stable filename in
 ``state/tool_results/``), write the full payload, and substitute the
 ref into the planner observation. Read-back (``load``) is best-effort
 and returns ``None`` when the file rotated out.
-
-Plan ref: ``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/01-harness-and-tools.md`` P0 §4.
 """
 
 from __future__ import annotations

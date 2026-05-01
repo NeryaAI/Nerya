@@ -9,7 +9,6 @@ lives in :mod:`nerya.cli.commands.<topic>`; this file only:
 * dispatches ``args.func(args)``.
 
 If you're looking for the list of ``nerya`` subcommands, read
-``docs/runbook.md``. If you're looking for the implementation of one,
 grep for ``cmd_<name>`` in ``nerya/cli/commands/``.
 
 Subcommand topic map:
@@ -30,6 +29,7 @@ import argparse
 import sys
 
 from .commands import core, evolution, runtime, skills, strategy, wallet
+from .commands import anet as anet_cmd
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolution.register(sub)
     runtime.register(sub)
     wallet.register(sub)
+    anet_cmd.register(sub)
 
     return parser
 

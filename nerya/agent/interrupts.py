@@ -1,8 +1,6 @@
 """Cooperative interrupts (cancel / pause / resume) for long agent turns.
 
-Plan refs:
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §4.6
-- Mirrors Claude Code's "interrupts must always succeed" guarantee:
+- Mirrors coding-agent's "interrupts must always succeed" guarantee:
   ESC at any point flushes the current step, stops the model stream,
   drains the journal, and yields control back to the operator.
 

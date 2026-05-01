@@ -1,10 +1,9 @@
-"""Eval / regression harness for the workspace-native agent loop.
 
-Phase 15 of ``docs/agent-harness-comparison-and-refactor-todo.md``.
+"""Eval / regression harness for the workspace-native agent loop.
 
 This package ships the *infrastructure* for tool-level evals (the
 machinery used to run scenarios), not the scenarios themselves. The
-plan calls out 10 reference scenarios but operators are expected to
+built-in templates are seed scenarios; operators are expected to
 maintain their own catalog under ``evals/`` in the workspace.
 
 Public surface:
@@ -19,8 +18,7 @@ Public surface:
   expected tool calls, and a verdict callable.
 * :class:`EvalRunner` — wires the loop, runs scenarios, and aggregates
   ``EvalRunResult`` instances (pass/fail/error per scenario).
-* :data:`SCENARIO_TEMPLATES` — the 10 reference scenarios from the
-  Phase 15 plan, expressed as data so the catalog is auditable
+* :data:`SCENARIO_TEMPLATES` — built-in scenario templates expressed as data so the catalog is auditable
   without shipping a pytest tree.
 
 The module is import-safe even when the agent loop is not in use; we

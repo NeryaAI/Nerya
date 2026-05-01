@@ -27,6 +27,7 @@ const KNOWN_LLM_PROVIDERS = [
   "together",
   "groq",
   "cerebras",
+  "stepfun",
   "ollama",
   "compat",
   "bedrock",
@@ -44,6 +45,7 @@ const DEFAULT_PROVIDER_BASE_URLS: Record<string, string> = {
   together: "https://api.together.xyz/v1",
   groq: "https://api.groq.com/openai/v1",
   cerebras: "https://api.cerebras.ai/v1",
+  stepfun: "https://api.stepfun.com/v1",
   ollama: "http://127.0.0.1:11434",
 };
 

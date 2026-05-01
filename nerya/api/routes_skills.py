@@ -155,7 +155,7 @@ def _create(client, payload):
 
 
 def _lock_status(client, _payload):
-    """Plan 30 — supply-chain trust polish: lock + signature snapshot."""
+    """supply-chain trust polish: lock + signature snapshot."""
     paths = client.config.paths
     fp = fingerprint_lock(paths)
     drift = verify_lock(paths)

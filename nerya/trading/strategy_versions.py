@@ -1,4 +1,4 @@
-"""Strategy versioning, promotion, and rollback (Phase 7).
+"""Strategy versioning, promotion, and rollback.
 
 A Nerya strategy is not just a folder on disk: it evolves. We need an
 auditable record of *every* change that affects live trading surface —

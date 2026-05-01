@@ -48,7 +48,7 @@ class TriggerAPI:
             for r in load_routes(self.config.paths, include_inactive=True)
         ]
 
-    # ---------------------------------------------- route CRUD (Phase 10)
+    # ---------------------------------------------- route CRUD
     def add_route(self, **payload: Any) -> dict[str, Any]:
         return self._skills_kernel().runtime.call(
             "trigger", "add_route", payload=payload,
@@ -118,7 +118,7 @@ class TriggerAPI:
         defaults to ``True`` at the scheduler level but can be set
         explicitly here.
 
-        Hermes-parity extensions (all optional):
+        compatibility extensions (all optional):
 
         * ``session_kind`` = ``"trigger"`` (default, emits a TriggerEvent)
           or ``"agent"`` (spawns an ephemeral agent session per tick).
@@ -162,7 +162,7 @@ class TriggerAPI:
     def add_schedule_from_text(self, *, text: str,
                                defaults: dict[str, Any] | None = None,
                                ) -> dict[str, Any]:
-        """Natural-language → schedule (Hermes parity, Phase D).
+        """Natural-language schedule creation.
 
         Delegates to the ``trigger.add_schedule_from_text`` skill action,
         which asks the *light* LLM tier to translate ``text`` into a
@@ -204,7 +204,7 @@ class TriggerAPI:
         for key in (
             "kind", "every_seconds", "cron", "starts_at", "ends_at",
             "enabled", "target", "strategy_id", "payload",
-            # Hermes-parity extension:
+            # compatibility extension:
             "session_kind", "attached_skills", "delivery_targets",
             "session_ttl_seconds",
         ):
@@ -314,7 +314,7 @@ class TriggerAPI:
         }
         return {k: v for k, v in out.items() if v is not None}
 
-    # -------------------------------------------------------- Phase 5
+    # -------------------------------------------------------- explain
     def explain(self, *, source: str, kind: str,
                 payload: dict[str, Any] | None = None,
                 target: str = "main", strategy_id: str | None = None,

@@ -1,8 +1,7 @@
 """Native ``run_shell`` tool with risk classification + sandbox enforcement.
 
-References:
-* docs/agent-harness-comparison-and-refactor-todo.md Phase 5 (BashTool risk).
-* Claude Code's ``BashTool/bashPermissions.ts`` — we approximate the
+Implementation notes:
+* coding-agent's ``BashTool/bashPermissions.ts`` — we approximate the
   *intent* (per-call risk classification, prefix rules, destructive
   patterns) without taking a runtime dep on a JS shell parser.
 
@@ -139,7 +138,7 @@ def _looks_like_config_write(cmd: str, heads: list[str]) -> bool:
 def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     """Map ``run_shell`` arguments -> :class:`RiskLevel`.
 
-    Matches Claude Code's *spirit* (allow read commands without prompt,
+    Matches coding-agent's *spirit* (allow read commands without prompt,
     ask on writes/network, hard-block destructive without explicit
     approval) without forking ``mvdan/sh``.
     """

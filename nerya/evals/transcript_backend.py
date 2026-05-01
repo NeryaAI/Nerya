@@ -1,6 +1,4 @@
-"""Transcript-level mock provider for the eval harness.
-
-Phase 15 §"transcript-level mock provider" — the offline
+"""Transcript-level mock provider for the eval harness. §"transcript-level mock provider" — the offline
 :class:`~nerya.llm.messages.MockMessagesBackend` only knows how to
 replay a single ``[[call_tool: …]]`` marker. For evals we need a
 backend that walks a *scripted* multi-turn transcript so a scenario

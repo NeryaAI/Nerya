@@ -1,4 +1,4 @@
-"""Plan 21 P0 §2 — HTTP surface for inline approval prompts.
+"""HTTP surface for inline approval prompts.
 
 Today the dashboard had to construct approval renderings ad-hoc and
 the gateway had no way to ask Nerya "give me the inline keyboard

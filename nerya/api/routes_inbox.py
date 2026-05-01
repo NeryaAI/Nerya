@@ -1,7 +1,5 @@
 """Action Inbox routes.
 
-Plan ref: ``docs/frontend-agent-workspace-redesign-plan.md`` Phase 26.
-
 The inbox unifies five sources the operator currently has to triage
 across three tabs:
 

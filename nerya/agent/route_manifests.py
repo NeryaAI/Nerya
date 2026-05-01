@@ -1,6 +1,6 @@
-"""Plan 23 P1 §1 — versioned planner route manifests.
+"""versioned planner route manifests.
 
-Hermes ships a set of named, versioned planner profiles (``coding-v1``,
+the runtime ships a set of named, versioned planner profiles (``coding-v1``,
 ``operator-v1`` …) so operators can pin a known-good preset rather than
 hand-edit `nerya.yml`. Nerya now exposes the same shape:
 
@@ -244,7 +244,7 @@ _TRADING_V1 = RouteManifest(
                     "create subagent", "spawn", "orchestrate",
                     "postmortem", "backtest", "macd", "rsi",
                     "strategy", "committee",
-                    # Plan 32 — escalate when the operator explicitly asks
+                    # escalate when the operator explicitly asks
                     # for an agent team / multi-subagent research pass; on
                     # the medium tier the LLM tends to merely *list* team
                     # templates instead of actually launching one.
@@ -290,7 +290,7 @@ _GENERAL_OPERATOR_V1 = RouteManifest(
     id="general-operator-v1",
     name="General operator",
     description=(
-        "Hermes-style preset for non-trading workspaces. Drops the "
+        "runtime preset for non-trading workspaces. Drops the "
         "trading-only lanes and instead routes user chat through "
         "memory / subagent / trace / message skills. Useful when "
         "Nerya is hosting an operator agent without trading "

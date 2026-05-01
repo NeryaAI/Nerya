@@ -1,6 +1,5 @@
 """Strategy SDK wrapper.
 
-After the strategy-runtime refactor (`Nerya/docs/plans/2026-04-28-...md`),
 this SDK speaks two dialects:
 
 * **Legacy review/history** — :meth:`history`, :meth:`explain_trade`,
@@ -561,7 +560,7 @@ def _entry_to_dict(entry: Any) -> dict[str, Any]:
 
 @dataclass
 class StrategyTuningAPI:
-    """Per-strategy self-evolution surface (Phase 7).
+    """Per-strategy self-evolution surface.
 
     Mirrors the trading-side runtime: ``generate`` enables the loop on
     an existing package, ``schedule``/``pause``/``resume`` flip the

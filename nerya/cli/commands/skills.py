@@ -71,7 +71,7 @@ def cmd_skill_installed(args) -> int:
 
 
 def cmd_skill_disable(args) -> int:
-    """Plan 02 P0 §2 — drop a skill id from ``skills/enabled.yml``."""
+    """drop a skill id from ``skills/enabled.yml``."""
 
     client = _client(args.workspace, getattr(args, "profile", None))
     path = client.config.paths.skills_enabled
@@ -86,7 +86,7 @@ def cmd_skill_disable(args) -> int:
 
 
 def cmd_skill_view(args) -> int:
-    """Plan 02 P0 §2 — Hermes-style ``skill view <id>`` showing actions/permissions."""
+    """runtime ``skill view <id>`` showing actions/permissions."""
 
     client = _client(args.workspace, getattr(args, "profile", None))
     info = client.skills.view(args.skill_id) if hasattr(client, "skills") else None
@@ -102,7 +102,7 @@ def cmd_skill_view(args) -> int:
 
 
 def cmd_skill_doctor(args) -> int:
-    """Plan 02 P0 §2 — surface manifest/handler/enabled mismatches."""
+    """surface manifest/handler/enabled mismatches."""
 
     client = _client(args.workspace, getattr(args, "profile", None))
     from ...skills.kernel import SkillKernel
@@ -112,7 +112,7 @@ def cmd_skill_doctor(args) -> int:
 
 
 def cmd_skill_sync(args) -> int:
-    """Plan 02 P0 §2 — re-read skill manifests after an install/promote."""
+    """re-read skill manifests after an install/promote."""
 
     client = _client(args.workspace, getattr(args, "profile", None))
     from ...skills.kernel import SkillKernel

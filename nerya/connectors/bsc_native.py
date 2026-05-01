@@ -1,6 +1,6 @@
 """BSC (Binance Smart Chain) native connector with PancakeSwap v2 routing.
 
-This connector is hummingbot-style:
+This connector is connector-oriented:
 
 * Reads: native + ERC-20 balances, allowances, gas, block, token metadata, and
   PancakeSwap v2 router quotes (``getAmountsOut``) — all via JSON-RPC.

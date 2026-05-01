@@ -17,13 +17,13 @@ from ..evolution.validation_plan import run_validation_plan
 def routes():
     def reflect(client, payload):
         """POST /evolution/reflect — run a reflection tick and return the
-        ranked proposal seeds with evidence attached (Phase 9/10)."""
+        ranked proposal seeds with evidence attached."""
         return evolve(client.config)
 
     def rank(client, payload):
         """POST /evolution/rank — rank open proposals using attribution.
 
-        Phase 9 — consume the Phase 8 evidence surfaces (reflection
+        consume the evidence surfaces (reflection
         findings and paper/live divergence) to score every open
         proposal on severity, freshness, and scope. Optionally writes
         a snapshot to ``workspace/evolution/ranking.json`` for UIs.

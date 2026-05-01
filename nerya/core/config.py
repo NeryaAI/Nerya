@@ -84,7 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "temperature": 0.2,
                 "timeout_s": 240,
                 "daily_budget_usd": 50,
-                # Reasoning controls (Plan 32).
+                # Reasoning controls.
                 # ``reasoning_effort``: minimal | low | medium | high — opt-in;
                 # only honoured when the configured model is reasoning-
                 # capable (gpt-5*/o1*/o3*/o4*, claude-opus-4*/sonnet-4*/3-7,
@@ -145,7 +145,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "max_retries": 1,
             "result_overflow_threshold_bytes": 65_536,
         },
-        # Plan 01 §3 — operator-mode preset.  Picks the coarse policy
+        # operator-mode preset.  Picks the coarse policy
         # for the LLM-visible action catalog: ``read_only`` /
         # ``dev`` (default) / ``deploy`` / ``live_trading``.  Workspaces
         # can override and add per-action allow/deny globs.
@@ -168,8 +168,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "source": "agent",
         },
         "planner": {
-            # Optional versioned route manifest selector (Plan 23 P1 §1 —
-            # Hermes parity audit). When set, the manifest's routes/
+            # Optional versioned route manifest selector (# compatibility audit). When set, the manifest's routes/
             # fallback win over the freeform ``routes`` table below.
             # Built-in manifests today: ``trading-v1``,
             # ``general-operator-v1``, ``minimal-v1``. Workspaces can
@@ -224,7 +223,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "tier": "light",
                 },
                 # Multi-expert strategy design — runs the
-                # ``strategy_design_team`` clawteam-style team before the
+                # ``strategy_design_team`` team-orchestration team before the
                 # main LLM. ``strategy.design`` / ``strategy.improve`` are
                 # the explicit kinds; the broader ``strategy.*`` route
                 # below still picks up everything else.
@@ -345,7 +344,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                             "create subagent", "spawn", "orchestrate",
                             "postmortem", "backtest", "macd", "rsi",
                             "strategy", "committee",
-                            # Plan 32 — escalate when the operator wants a
+                            # escalate when the operator wants a
                             # multi-subagent research pass; medium tier
                             # was merely listing team templates instead
                             # of actually launching them.
@@ -387,7 +386,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     # Trigger router caps and policies. Operators can override per-route limits
     # in workspace nerya.yml under ``triggers.router.policies`` (keyed by
-    # source/channel/actor/event-kind). Plan 23 P2 §3 — Hermes parity audit.
+    # source/channel/actor/event-kind). compatibility audit.
     "triggers": {
         "router": {
             # Hard payload cap when no route declares ``max_payload_bytes``.
@@ -449,7 +448,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 7878,
     },
-    # VibeTrading deep optimization plan §5 Task 7 — promotion gate
+    # research promotion workflow §5 Task 7 — promotion gate
     # consumes validation reports + shadow runs (where present) to
     # decide whether ``paper -> canary -> live`` promotions can land.
     # Defaults are intentionally safe: validation is required to
@@ -469,7 +468,64 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "cost_stress_multiplier": 2.0,
         },
     },
-    # Plan 25 §3 — manifest-driven MCP tool surface. The legacy
+    # Optional third-party integrations. Every block below is OFF by
+    # default; turning one on is the *only* way its code path gets
+    # imported, its routes get mounted, or its skill becomes visible to
+    # the agent. Nothing in :mod:`nerya.integrations` is loaded at
+    # ``local_server`` start unless ``integrations.<name>.enabled: true``.
+    #
+    # ``NERYA_DISABLE_INTEGRATIONS=1`` short-circuits every block back
+    # to the default (disabled) regardless of what the workspace yaml
+    # says.
+    "integrations": {
+        # AgentNetwork P2P (anet-p2p-starter-kit). Registers selected
+        # read-only Nerya endpoints with a local ``anet daemon`` so
+        # other peers on the network can discover and call them. The
+        # optional ``anet`` pip extra must be installed, and the
+        # daemon binary itself (Linux / macOS / WSL2 only) comes from
+        # ``curl -fsSL https://agentnetwork.org.cn/install.sh | sh``.
+        "anet": {
+            "enabled": False,
+            "daemon_url": "http://127.0.0.1:13921",
+            # ``secret:anet/api_token`` once the operator has stored
+            # the bearer token issued by ``anet daemon`` / self-register.
+            "token_ref": "",
+            # Leave empty to derive from the machine hostname.
+            "service_name": "",
+            "description": "Nerya strategy production line",
+            "tags": ["trading", "strategy-review", "nerya"],
+            # Endpoints exposed to the P2P network. Empty list means
+            # "use the built-in read-only whitelist"
+            # (:mod:`nerya.integrations.anet.whitelist`). Operators can
+            # add extra paths here, but the whitelist still filters out
+            # anything that touches signer / wallet / approvals.
+            "expose_paths": [],
+            "modes": ["rr", "server-stream"],
+            "cost_model": {
+                "free": True,
+                "per_call": None,
+                "per_kb": None,
+                "deposit": None,
+            },
+            # Seconds between background re-registrations. ``anet``
+            # does not persist registrations across daemon restarts
+            # (v1.1 limitation), so the loop re-registers every minute.
+            "heartbeat_seconds": 60,
+            # Outbound surface: lets Nerya's agent discover and call
+            # services on the ANET network. Kept separate from the
+            # inbound (register) surface so an operator can publish a
+            # read-only service without granting the agent the ability
+            # to spend shells calling other peers.
+            "outbound": {
+                "skill_enabled": False,
+                # Any priced call above this many micro-credits goes
+                # through the Approval Gate before funds leave the
+                # wallet. Zero = require approval for every priced call.
+                "require_approval_above_credits": 0,
+            },
+        },
+    },
+    # manifest-driven MCP tool surface. The legacy
     # ``NeryaTools`` registry stays on by default; the dynamic layer
     # generates a tool per manifest action that passes the policy
     # below. Set ``mcp.dynamic_tools.enabled: false`` to revert to the
@@ -526,6 +582,20 @@ class Config:
             return True
         return bool(self.get("runtime.kill_switch", False))
 
+    def integration_enabled(self, name: str) -> bool:
+        """True iff ``integrations.<name>.enabled`` is set AND the
+        ``NERYA_DISABLE_INTEGRATIONS`` kill-switch is not active.
+
+        Every optional third-party integration (anet, future additions)
+        must be gated by this helper so a single env flag can disable
+        all of them during CI, audits, or incident response.
+        """
+        if os.environ.get("NERYA_DISABLE_INTEGRATIONS", "").lower() in (
+            "1", "true", "yes", "on",
+        ):
+            return False
+        return bool(self.get(f"integrations.{name}.enabled", False))
+
 
 def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
@@ -544,7 +614,7 @@ def load_config(
 ) -> Config:
     """Load the merged config for ``workspace`` (or the active profile).
 
-    Plan 28 P1 §2 — Hermes parity audit added an explicit ``profile``
+    compatibility audit added an explicit ``profile``
     selector so callers can dispatch ``nerya --profile dev`` style
     commands without mutating the global env.
     """

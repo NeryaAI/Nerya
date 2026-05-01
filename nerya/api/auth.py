@@ -1,6 +1,4 @@
 """Minimal request-auth layer for the local API server.
-
-Gap-audit reference: docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/
 11-auth-api-tool-permissions.md.
 
 The earlier local server exposed every route with ``Access-Control-Allow-Origin: *``

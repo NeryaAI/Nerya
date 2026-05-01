@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 # log a one-time warning so the operator is aware, but we accept them.
 KNOWN_SOURCES: frozenset[str] = frozenset({
     "script", "schedule", "price", "user_command", "webhook",
-    "scheduled_session",   # Hermes-parity cron/session path
+    "scheduled_session",   # compatibility cron/session path
 })
 
 # Back-compat alias for call sites that inspected the old name.

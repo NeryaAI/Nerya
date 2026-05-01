@@ -1,6 +1,6 @@
 """Protection rule persistence + soft runtime evaluation.
 
-Plan 2026-04-29 §7 — every open position should have an auditable
+every open position should have an auditable
 :class:`ProtectionRule`. The store here owns the lifecycle of those
 rules in SQLite. The :func:`evaluate` helper is the soft-runtime
 trigger evaluator used by :class:`PositionProtectionExecutor`; it is

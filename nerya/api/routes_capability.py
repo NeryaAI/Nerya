@@ -1,6 +1,6 @@
 """Runtime capability matrix endpoint.
 
-Plan 23 §12 ("hardcoded product copy shapes operator behavior") and the
+("hardcoded product copy shapes operator behavior") and the
 P1 "runtime capability/support matrix" item both call out that UI / docs
 / gateway help should render *current* capabilities rather than baked-in
 strings. This module provides one place a dashboard, docs page, gateway
@@ -29,7 +29,7 @@ from .gateway_commands import DEFAULT_REGISTRY
 
 
 def _skill_listing(client) -> list[dict[str, Any]]:
-    """Claude Code / Hermes style listing of installed skills.
+    """agent-skill style listing of installed skills.
 
     Returns ``[{name, description, when_to_use?}, ...]``. The dashboard
     renders this as a discovery list; tool-level capability lives on
@@ -109,7 +109,7 @@ def _runtime_section(client) -> dict[str, Any]:
 def _planner_section(client) -> dict[str, Any]:
     cfg = client.config
     paths = getattr(cfg, "paths", None)
-    # Plan 23 P1 §1 — when a manifest is pinned the resolver wins; otherwise
+    # when a manifest is pinned the resolver wins; otherwise
     # fall back to the freeform ``agent.planner.routes`` table so legacy
     # workspaces keep showing the same routes.
     try:
@@ -156,7 +156,7 @@ def _recipes_section(client) -> dict[str, Any]:
 
 
 def _dashboard_extensions(client) -> list[dict[str, Any]]:
-    """Plan 23 P1 §5 — surface manifest-declared dashboard panels.
+    """surface manifest-declared dashboard panels.
 
     Skills can declare ``dashboard:`` entries in ``skill.yml``. Today
     we just expose the descriptors so the dashboard can render them
@@ -188,7 +188,7 @@ def _dashboard_extensions(client) -> list[dict[str, Any]]:
 
 
 def _operator_presets_section(client) -> dict[str, Any]:
-    """Plan 01 §3 — surface the operator preset catalog and the
+    """surface the operator preset catalog and the
     currently active preset id so the dashboard / capability-drift
     tests can show ``read_only`` / ``dev`` / ``deploy`` / ``live_trading``
     side-by-side."""
@@ -217,7 +217,7 @@ def _operator_presets_section(client) -> dict[str, Any]:
 
 
 def _mcp_dynamic_section(client) -> dict[str, Any]:
-    """Plan 25 §3 — manifest-driven MCP tool surface summary.
+    """manifest-driven MCP tool surface summary.
 
     Builds the same registry the MCP server registers at boot time and
     returns its serialised view. Both ``tools`` (kept) and ``dropped``
@@ -241,7 +241,7 @@ def _mcp_dynamic_section(client) -> dict[str, Any]:
 
 
 def _model_registry_section(client) -> dict[str, Any]:
-    """Plan 25 §5 — surface per-model metadata (context window, costs,
+    """surface per-model metadata (context window, costs,
     modalities, knowledge cutoff) so the dashboard can render the
     *exact* model behind each tier rather than only the provider name.
     """
@@ -260,7 +260,7 @@ def _model_registry_section(client) -> dict[str, Any]:
 
 
 def _route_scopes_section() -> dict[str, Any]:
-    """Plan 11 — surface the route → minimum-scope matrix so dashboards
+    """surface the route → minimum-scope matrix so dashboards
     and capability-drift tests can render and verify it."""
 
     return {
@@ -298,7 +298,7 @@ def _dashboard_extensions_endpoint(client, _payload):
 def _recipes_endpoint(client, _payload):
     """Return the recipes whose capability requirements are met today.
 
-    Plan 23 P2 §4 — moves the dashboard chat empty-state suggestions
+    moves the dashboard chat empty-state suggestions
     out of TypeScript and into a manifest-driven endpoint so installed
     skills are the source of truth.
     """
@@ -308,20 +308,20 @@ def _recipes_endpoint(client, _payload):
 
 
 def _operator_presets_endpoint(client, _payload):
-    """Plan 01 §3 — standalone endpoint for the dashboard preset
+    """standalone endpoint for the dashboard preset
     selector."""
 
     return {"ok": True, "operator_presets": _operator_presets_section(client)}
 
 
 def _model_registry_endpoint(client, _payload):
-    """Plan 25 §5 — standalone endpoint for the model-metadata UI."""
+    """standalone endpoint for the model-metadata UI."""
 
     return {"ok": True, "model_registry": _model_registry_section(client)}
 
 
 def _mcp_dynamic_endpoint(client, _payload):
-    """Plan 25 §3 — standalone endpoint that mirrors what the MCP server
+    """standalone endpoint that mirrors what the MCP server
     would expose given the current configuration."""
 
     return {"ok": True, "mcp_dynamic": _mcp_dynamic_section(client)}

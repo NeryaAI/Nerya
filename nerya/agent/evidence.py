@@ -1,8 +1,6 @@
 """EvidenceBundle — structured per-turn ledger of agent activity.
 
-Plan refs:
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §4.5
-- Mirrors the Hermes "evidence ledger" pattern + Claude Code's per-turn
+- Mirrors the the runtime "evidence ledger" pattern + coding-agent's per-turn
   activity log used to render the dashboard timeline and to seed
   retrospective compaction.
 

@@ -72,7 +72,7 @@ def evolve(config: Config) -> dict[str, Any]:
         import json as _json
         extra["ranked_seeds.json"] = _json.dumps(ranked, indent=2, default=str)
     extra["provider_capabilities.json"] = _capability_snapshot()
-    # Phase 5 — feed proposal with strategy version + indicator state so
+    # feed proposal with strategy version + indicator state so
     # reviewers see exactly which snapshot and which indicator backend
     # was active when the seeds were ranked.
     extra["strategy_versions.json"] = _strategy_version_snapshot(
@@ -91,8 +91,8 @@ def evolve(config: Config) -> dict[str, Any]:
 def rank_proposal_seeds(reflection: dict[str, Any]) -> list[dict[str, Any]]:
     """Rank proposal seeds surfaced by reflection by evidence strength.
 
-    Uses Phase 8 attribution (top-cause weight + pnl magnitude +
-    subagent volume) and Phase 13 provider quality (penalise strategies
+    Uses attribution (top-cause weight + pnl magnitude +
+    subagent volume) and provider quality (penalise strategies
     that depend on providers with unsupported capabilities) to order
     seeds deterministically.
     """

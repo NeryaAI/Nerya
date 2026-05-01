@@ -1,4 +1,4 @@
-"""Executor orchestrator (Plan 2026-04-29 §3.2).
+"""Executor orchestrator (04-29 §3.2).
 
 Owns persistence and lifecycle of every :class:`Executor` instance.
 

@@ -1,11 +1,10 @@
 # Release truth gate.
 #
 # This workflow is the CI surface of the production-readiness audit
-# (`docs/plans/2026-04-23-nerya-production-readiness-audit.md`).
 #
 # It runs two jobs on every PR and on every push to `main`:
 #
-# * `truth-gate` — the Phase 6 honest production gate plus the
+# * `truth-gate` — the honest production gate plus the
 #   truth-style regression suites that scan repo artifacts for outward
 #   surface drift (ports, routes, paths, cosmetic stubs, capability
 #   honesty).
@@ -32,7 +31,7 @@ on:
 
 jobs:
   truth-gate:
-    name: truth gates (Phase 6 + release/runtime + no-placeholder)
+    name: truth gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +46,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
-      - name: Run Phase 6 + truth gates (quick)
+      - name: Run + truth gates (quick)
         run: bash scripts/run_truth_gate.sh --quick
 
   regression:

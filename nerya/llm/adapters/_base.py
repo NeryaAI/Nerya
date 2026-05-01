@@ -38,7 +38,7 @@ class ProviderResult:
     provider: str = ""
     latency_ms: int = 0
     finish_reason: str = ""
-    # Reasoning output (Plan 32 — reasoning_effort + reasoning summary).
+    # Reasoning output (reasoning_effort + reasoning summary).
     # ``reasoning_text`` is a human-readable summary of the model's chain-of-
     # thought (only what the provider chose to expose; e.g. OpenAI reasoning
     # summaries, Anthropic thinking blocks, Gemini thought markers). It is
@@ -289,6 +289,20 @@ _PRICE_PATTERNS: list[tuple[re.Pattern[str], tuple[float, float]]] = [
     (re.compile(r"moonshot-v1-8k",                           re.I), (0.0012,  0.0012)),
     (re.compile(r"moonshot-v1-32k",                          re.I), (0.0024,  0.0024)),
     (re.compile(r"moonshot-v1-128k",                         re.I), (0.0060,  0.0060)),
+    # Stepfun (阶跃星辰) — converted from CNY/1k to USD/1k (~7.0)
+    (re.compile(r"step-1-flash",                             re.I), (0.00014, 0.00057)),
+    (re.compile(r"step-1-8k",                                re.I), (0.00057, 0.00285)),
+    (re.compile(r"step-1-32k",                               re.I), (0.00214, 0.00857)),
+    (re.compile(r"step-1-128k",                              re.I), (0.00571, 0.01714)),
+    (re.compile(r"step-1-256k",                              re.I), (0.01857, 0.05571)),
+    (re.compile(r"step-2-mini",                              re.I), (0.00014, 0.00057)),
+    (re.compile(r"step-2-16k(?:-exp)?",                      re.I), (0.00543, 0.02143)),
+    (re.compile(r"step-1v-8k",                               re.I), (0.00714, 0.02857)),
+    (re.compile(r"step-1v-32k",                              re.I), (0.02143, 0.07143)),
+    (re.compile(r"step-1\.5v-mini",                          re.I), (0.00114, 0.00457)),
+    (re.compile(r"step-1o-vision-32k|step-1o-turbo-vision",  re.I), (0.00714, 0.02857)),
+    (re.compile(r"step-r1-v-mini|step-r-mini",               re.I), (0.00057, 0.00857)),
+    (re.compile(r"^step-",                                   re.I), (0.00057, 0.00285)),
     # Ollama / local / anything else: free
     (re.compile(r"ollama|llama|phi|qwen|mistral-7b|local",   re.I), (0.0, 0.0)),
 ]

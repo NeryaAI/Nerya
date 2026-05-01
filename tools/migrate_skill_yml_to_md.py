@@ -1,6 +1,6 @@
 """Merge every ``skill.yml`` into its sibling ``SKILL.md`` frontmatter.
 
-Hermes / Claude Code parity: a typed skill is one ``SKILL.md`` with
+skill-runtime compatibility: a typed skill is one ``SKILL.md`` with
 YAML frontmatter that contains the full action manifest plus a markdown
 body for the playbook. This migration walks ``nerya/skills/builtin/``,
 merges each ``skill.yml`` content into the matching ``SKILL.md``

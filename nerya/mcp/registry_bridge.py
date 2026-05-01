@@ -1,4 +1,4 @@
-"""Phase 11 — bridge a native :class:`ToolRegistry` to the MCP server.
+"""bridge a native :class:`ToolRegistry` to the MCP server.
 
 The legacy MCP wiring projects ``ActionSpec`` (declarative action
 metadata on each ``SkillManifest``) into MCP tool descriptors. That

@@ -101,8 +101,7 @@ export const api = {
   secretsList: () =>
     request<{ secrets: unknown[] }>("/security/secrets/list", { method: "POST", body: {} }),
 
-  // Agent — Phase 14/15
-  // The response shape is the dashboard-shaped TurnPayload (see
+  // Agent — // The response shape is the dashboard-shaped TurnPayload (see
   // ``dashboard/lib/chat.ts``); we pass `unknown` here so callers
   // explicitly opt into the typed cast where they consume it.
   agentRun: (trigger: { source: string; kind: string; payload?: unknown; target?: string; strategy_id?: string }) =>

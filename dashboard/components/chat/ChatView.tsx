@@ -747,7 +747,7 @@ export function ChatView() {
     async function pollOnce(): Promise<void> {
       if (handle.stop) return;
       try {
-        const resp = await clientApi.streamEvents(cursor, { limit: 100 });
+        const resp = await clientApi.streamEvents(cursor, { limit: 500 });
         const fresh: LiveEvent[] = Array.isArray(resp?.events)
           ? (resp.events as LiveEvent[])
           : [];

@@ -12,7 +12,7 @@ author: Nerya
 
 This skill turns raw data into a disciplined market view. It is adapted
 for Nerya's skill-first runtime from the analyst-team pattern used by
-TradingAgents and the research-desk presets used by Vibe-Trading.
+multi-analyst research and the research-desk presets used by research runtime.
 
 ## Analyst Stack
 

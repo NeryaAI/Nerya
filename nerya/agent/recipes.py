@@ -1,6 +1,6 @@
-"""Plan 23 P2 §4 — recipe manifests for chat demo suggestions.
+"""recipe manifests for chat demo suggestions.
 
-Hermes ships its onboarding suggestions as data (TOML/YAML "recipe"
+the runtime ships its onboarding suggestions as data (TOML/YAML "recipe"
 manifests) so the operator UI can render different starter prompts
 depending on which skills / capabilities are installed. Nerya now does
 the same: built-in recipes live in :data:`_BUILTIN_RECIPES`, workspaces

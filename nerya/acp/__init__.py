@@ -1,12 +1,12 @@
 """Minimal Agent Client Protocol (ACP) adapter for Nerya.
 
 This is a small, dependency-free implementation of the parts of ACP that
-actually matter for a trading agent: letting an IDE (Cursor / Claude Code /
-VS Code / Zed) see the runtime's current capabilities, pending approvals,
+actually matter for a trading agent: letting an IDE or coding agent
+see the runtime's current capabilities, pending approvals,
 and recent turns, and reply with approve/reject / free-text responses.
 
 It speaks JSON-RPC 2.0 over stdio — the same framing ACP uses. The
-surface it exposes is intentionally minimal relative to Hermes-style
+surface it exposes is intentionally minimal relative to runtime
 editor-native agents (no file diffs, no terminal commands, no streamed
 tool activity chunks), but it is dynamic where it counts:
 

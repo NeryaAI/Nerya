@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Plan 11 P2 — the dashboard proxy must forward authentication
+// the dashboard proxy must forward authentication
 // material to the Nerya backend so per-actor route scoping
 // (`nerya.api.auth`) works end-to-end. We:
 //
@@ -12,7 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 //  * strip hop-by-hop / dangerous headers (`host`, `connection`, ...),
 //  * support all common HTTP verbs, not just GET/POST.
 //
-// Hermes' dashboard performs the same forwarding via its Next.js proxy;
+// The runtime' dashboard performs the same forwarding via its Next.js proxy;
 // without this, the Nerya dashboard would silently lose auth context.
 
 const BASE = process.env.NERYA_API || "http://127.0.0.1:8787";

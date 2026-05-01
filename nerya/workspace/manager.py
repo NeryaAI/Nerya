@@ -64,7 +64,7 @@ class WorkspaceManager:
                    "# Market regimes\n")
         _seed_text(paths.memory / "skill_learnings.md",
                    "# Skill learnings\n")
-        # Plan 25 §2 — workspace prompts now ship as a real prompt
+        # workspace prompts now ship as a real prompt
         # bundle under ``nerya/workspace/_prompt_bundles/<id>``.  The
         # bundle loader records provenance (sha256, source path, bundle
         # version) into ``agents/_provenance.yml`` so future migrations
@@ -106,19 +106,19 @@ _DEFAULT_ENABLED_SKILLS = [
     # default so the planner prompt's recall/remember guidance has a
     # live action endpoint from the first turn of a fresh workspace.
     "memory",
-    # Optional generalist packs (Phase-adjacent, always-on by default so
+    # Optional generalist packs (always-on by default so
     # backtests and replays can lean on them without extra bootstrap).
     "creative", "devops", "data_science",
-    # General operator harness — Plan 01 P0 §1. Lets the agent inspect
+    # General operator harness — Lets the agent inspect
     # the workspace, search code, write text, and run terminal commands
     # without bespoke routing. Mutating actions still go through the
     # standard approval gate.
     "operator",
-    # Agent team orchestrator — clawteam design. Lets the main agent
+    # Agent team orchestrator — team-orchestration design. Lets the main agent
     # spawn a durable multi-expert team run (market analysis,
     # strategy design, etc.) without resorting to ad-hoc subagents.
     "team",
-    # Strategy validation — VibeTrading deep optimization plan §5 Task 6.
+    # Strategy validation — research promotion workflow.
     # Wires nerya.research (schemas, dataset router, signal engine
     # contract, backtest runner, validation report) behind a skill
     # surface so the agent can run deterministic backtests, fetch

@@ -1,4 +1,4 @@
-"""Trading control-plane schemas (Plan 2026-04-29 §3.2/§4/§7).
+"""Trading control-plane schemas (04-29 §3.2/§4/§7).
 
 This module is the canonical home for the *intent-side* dataclasses that
 sit between an Agent / strategy SDK call and the rest of the trading

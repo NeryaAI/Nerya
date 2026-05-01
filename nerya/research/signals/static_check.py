@@ -1,6 +1,6 @@
 """Static checks for agent-authored signal engines.
 
-Plan §5 Task 3 step 5 forbids signal engines from importing dangerous
+Task 3 step 5 forbids signal engines from importing dangerous
 modules (``os``, ``subprocess``, ``socket``, ``ccxt``, exchange clients
 etc.) and from sub-classing/calling things that perform IO.
 
@@ -8,9 +8,8 @@ The check is intentionally simple: parse the source to AST, enumerate
 top-level import targets, reject any in the deny list.  This catches
 the obvious cases without trying to be a full sandbox.
 
-Inspired by ``../Vibe-Trading/agent/src/shadow_account/codegen.py:78``
-(static checks on generated signal engines) but reimplemented inside
-Nerya — no Vibe-Trading import.
+The checks live inside Nerya and do not import an external research
+tree.
 """
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 Production path uses ``connector.get_order_book``. When no connector is
 provided we return a degraded envelope (empty book) rather than
 fabricating bid/ask/spread from the mark price — silent synthetic
-spreads violated the Phase 11 truth gate. Mock behaviour remains
+spreads violated the truth gate. Mock behaviour remains
 available but requires explicit authorisation via ``allow_mock`` or
 ``NERYA_ALLOW_MOCK_DATA`` / ``runtime.mock_mode``.
 """

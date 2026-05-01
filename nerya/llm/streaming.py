@@ -1,8 +1,5 @@
 """Provider-agnostic streaming primitives for LLM adapters.
 
-Plan refs:
-- ``docs/plans/2026-04-27-nerya-end-to-end-streaming-plan.md`` Phase 1 + 2.
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §3.4
   ("text/thinking/tool_use blocks form the streaming wire format").
 
 Why

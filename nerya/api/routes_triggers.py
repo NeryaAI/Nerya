@@ -110,7 +110,7 @@ def routes():
         )
 
     def explain(client, payload):
-        """Phase 5 — operator-facing static explain.
+        """operator-facing static explain.
 
         Given an event shape, return the route the router *would* take
         without firing the event or touching dedupe/cooldown state.
@@ -125,7 +125,7 @@ def routes():
         )
 
     def replay(client, payload):
-        """Phase 5 — operator-facing replay of a historical event by id."""
+        """operator-facing replay of a historical event by id."""
         eid = payload.get("event_id") or (payload.get("event") or {}).get("event_id")
         if not eid:
             return {"error": "event_id required"}
@@ -136,7 +136,7 @@ def routes():
         return out
 
     def stats(client, _query):
-        """Phase 5 — aggregate per-route terminal-status counters."""
+        """aggregate per-route terminal-status counters."""
         from nerya.triggers import aggregate_from_journal, summary
         journal = client.config.paths.journal("triggers")
         agg = aggregate_from_journal(journal)

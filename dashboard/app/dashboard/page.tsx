@@ -65,7 +65,7 @@ export default function DashboardOverview() {
   const [recentTrades, setRecentTrades] = useState<RecentTrade[]>([]);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [venues, setVenues] = useState<{ name: string; label: string }[]>([]);
-  // Plan 2026-04-29 §11 P9 — pull the multi-account roster so the
+  // 04-29 §11 P9 — pull the multi-account roster so the
   // focused-account hero can show NAV / cash / positions / mode in
   // the account's native currency.
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
@@ -224,7 +224,7 @@ export default function DashboardOverview() {
   const mode = workspace ? (workspace.live_trading_enabled ? "LIVE" : "PAPER") : "—";
   const killed = !!workspace?.kill_switch;
 
-  // Plan 2026-04-29 §11 P9 — resolve the operator-focused account so
+  // 04-29 §11 P9 — resolve the operator-focused account so
   // the hero strip can render NAV / cash / positions in the account's
   // native currency (USDT for paper, CNY for an A-share row, USDC for
   // an on-chain wallet, etc).
@@ -297,16 +297,16 @@ export default function DashboardOverview() {
       {error && <ErrorBanner error={error} />}
 
       <PageBody>
-        {/* Operator overview hero — Phase 25 (frontend redesign).
+        {/* Operator overview hero — (frontend redesign).
             Sources health + attention items from /operator/overview. */}
         <OperatorOverviewHero />
 
-        {/* Setup readiness — Phase 25 first-run checklist. The card
+        {/* Setup readiness — first-run checklist. The card
             self-hides once ``status === ok``, so it only takes space
             when something actually needs configuring. */}
         <SetupReadinessCard collapsed />
 
-        {/* Focused-account strip (Plan 2026-04-29 §11 P9). Mirrors
+        {/* Focused-account strip (04-29 §11 P9). Mirrors
             the AccountSelector in the top header — pick a different
             account up there and this card refreshes in place. */}
         {focusedAccount ? (

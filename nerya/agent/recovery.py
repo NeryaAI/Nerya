@@ -1,4 +1,4 @@
-"""Journal-aware turn recovery (Phase 4).
+"""Journal-aware turn recovery.
 
 The :class:`AgentKernel` journals every phase of a turn into
 ``journals/turn_steps.jsonl``. That journal is the authoritative record

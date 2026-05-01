@@ -1,4 +1,4 @@
-"""External MCP session adapter — Phase 12.
+"""External MCP session adapter — existing.
 
 This module turns a remote MCP server's tool surface into native
 :class:`ToolDescriptor` objects on the same :class:`ToolRegistry`
@@ -7,7 +7,7 @@ external MCP tool exactly the same way it sees ``read_file`` —
 identical schema validation, permission engine, hooks, error
 taxonomy, transcript invariants.
 
-Design points (mirrors Claude Code's
+Design points (mirrors coding-agent's
 ``services/mcp/client.ts::reconnectAndCall`` pattern):
 
 * The adapter holds a *single* live connection to one MCP server.
@@ -352,7 +352,7 @@ def register_external_mcp_resources(
 
     The MCP spec lets servers publish read-only documents the agent
     can list / read alongside the tool surface (logs, configuration
-    snippets, dataset cards). Phase 12 of the harness refactor calls
+    snippets, dataset cards). of the harness refactor calls
     this out: those resources should land in the workspace's
     :class:`ResourceIndex` so the agent's ``resource_list`` /
     ``resource_read`` tools see them next to local resources.
@@ -538,8 +538,7 @@ def attach_mcp_adapters(
     The kernel calls this once at startup with the configured adapters
     so every external MCP tool surface lands on the native registry,
     *and* the executor sees the standard provenance / redaction
-    pipeline as a post-tool hook (Phase 12 invariant: MCP results go
-    through the same redaction pass before reaching the transcript).
+    pipeline as a post-tool hook.
 
     ``transforms`` defaults to ``[default_output_transform]`` so every
     MCP envelope at least carries provenance metadata. Pass extra

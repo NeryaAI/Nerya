@@ -1,7 +1,5 @@
 """Per-strategy state, run records, kill switch, and version registry.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §10.
-
 This module owns the *outside-the-context* persistence for a strategy
 package. The in-strategy ``ctx.state`` (a small KV store) lives in
 :class:`nerya.strategies.context.StrategyState`; this module provides

@@ -342,7 +342,7 @@ export type TradingHistoryResult = {
 };
 
 // ---------------------------------------------------------------------------
-// Control-plane types (Plan 2026-04-29 §11 P7).
+// Control-plane types (04-29 §11 P7).
 // ---------------------------------------------------------------------------
 
 export type AccountSnapshotData = {
@@ -456,7 +456,7 @@ export type KillSwitchView = {
 };
 
 // ---------------------------------------------------------------------------
-// Account control plane (Plan 2026-04-29 §11 P8).
+// Account control plane (04-29 §11 P8).
 // ---------------------------------------------------------------------------
 
 export type AccountProfileView = {
@@ -975,7 +975,7 @@ export const clientApi = {
   tradingCancelOrder: (strategy_id: string, order_id: string) =>
     post<Record<string, unknown>>("/trading/cancel", { strategy_id, order_id }),
 
-  // ---- Control plane (Plan 2026-04-29 §11 P7) ----
+  // ---- Control plane (04-29 §11 P7) ----
   portfolioHealth: (account_id?: string) =>
     post<ControlPlanePortfolioHealth>("/portfolio/health", { account_id }),
   controlOrdersList: (filter?: {
@@ -1066,7 +1066,7 @@ export const clientApi = {
       body
     ),
 
-  // ---- Account roster CRUD (Plan 2026-04-29 §11 P8) ----
+  // ---- Account roster CRUD (04-29 §11 P8) ----
   accountsList: () =>
     get<{ accounts: AccountSummary[]; ts: number }>("/accounts/list"),
   accountsGet: (account_id: string) =>
@@ -1091,7 +1091,7 @@ export const clientApi = {
     limits?: Record<string, number>;
     credentials?: Record<string, string>;
     operator?: string;
-    // Plan 2026-04-29 §11 P9 — when ``apply: false`` the upsert is
+    // 04-29 §11 P9 — when ``apply: false`` the upsert is
     // staged as an account_roster_patch proposal that needs operator
     // approval. Default ``true`` keeps the legacy direct write path
     // for backwards compat.
@@ -1183,7 +1183,7 @@ export const clientApi = {
     }>("/accounts/reset_paper", body),
   walletConfigured: () =>
     get<{ bindings: WalletBinding[]; count: number }>("/wallet/configured"),
-  // Plan 2026-04-29 §11 P10 — manage HTTP auth headers on data-source
+  // 04-29 §11 P10 — manage HTTP auth headers on data-source
   // accounts. ``accountsHeadersList`` returns a masked metadata view
   // safe to render in the dashboard; ``accountsHeadersPatch`` merges
   // / removes headers and refuses any plaintext value that looks like
@@ -1230,7 +1230,7 @@ export const clientApi = {
       error?: string;
       detail?: string;
     }>("/wallet/portfolio", body),
-  // Plan 2026-04-29 §11 P9 — recent risk-gate decisions with fix
+  // 04-29 §11 P9 — recent risk-gate decisions with fix
   // hints. Used by the strategy detail page to render a "why this
   // got rejected" panel that links to the right account / settings.
   riskEvaluations: (body: {
@@ -1662,7 +1662,7 @@ export const clientApi = {
 
   // Agent / session operator plane
   // ---------------------------------------------------------------
-  // Strategy runtime control plane (Phase 8)
+  // Strategy runtime control plane
   //
   // These wrap ``/strategies/runtime/*`` exposed by
   // ``nerya.api.routes_strategies_runtime``. The legacy
@@ -1802,7 +1802,7 @@ export const clientApi = {
     ),
 
   // ---------------------------------------------------------------------
-  // Operator BFF (Phase 25-27 of frontend redesign plan)
+  // Operator BFF (27 of dashboard BFF surface)
   //
   // These endpoints aggregate raw runtime data into product-shaped
   // envelopes the dashboard can render directly. Every response wears
@@ -2118,7 +2118,7 @@ export type TriggerSchedule = {
   description?: string;
   last_tick_at?: string | null;
   next_due_at?: string | null;
-  // Hermes-parity cron/session extension
+  // compatibility cron/session extension
   session_kind?: "trigger" | "agent";
   attached_skills?: string[];
   delivery_targets?: TriggerDeliveryTarget[];

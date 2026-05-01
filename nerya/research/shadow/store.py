@@ -1,4 +1,4 @@
-"""Filesystem store for shadow runs — VibeTrading plan §5 Task 8."""
+"""Filesystem store for shadow runs — research runtime spec §5 Task 8."""
 from __future__ import annotations
 
 import json

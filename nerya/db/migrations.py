@@ -1,6 +1,6 @@
 """Versioned migrations with a ``schema_version`` ledger.
 
-Plan 27 P1 §1 — Hermes records the applied migration set in a
+the runtime records the applied migration set in a
 ``schema_migrations`` table so non-idempotent statements (ALTER, RENAME,
 DATA fix-ups) can land safely. Until now Nerya only ran a flat list of
 ``CREATE TABLE IF NOT EXISTS`` statements, which works for new tables
@@ -133,7 +133,7 @@ def _v1(con: sqlite3.Connection) -> None:
 
 
 def _v2_idempotent_indexes(con: sqlite3.Connection) -> None:
-    """Backfill indexes Hermes uses for hot-path lookups."""
+    """Backfill indexes the runtime uses for hot-path lookups."""
     con.execute(
         "CREATE INDEX IF NOT EXISTS idx_cooldown_until ON cooldown(until)"
     )
@@ -198,7 +198,7 @@ _V3_TRADING_CONTROL_PLANE = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_capital_reservations_state ON capital_reservations(account_id, state)",
     "CREATE INDEX IF NOT EXISTS idx_capital_reservations_intent ON capital_reservations(intent_id)",
-    # Durable order ledger. Hummingbot-style active/cached/lost split
+    # Durable order ledger. connector-oriented active/cached/lost split
     # via ``state`` + ``terminal_at`` (terminal orders stay around for a
     # configurable retention window so out-of-order fills/updates can
     # still be matched).
@@ -415,7 +415,7 @@ _V3_TRADING_CONTROL_PLANE = (
 
 
 def _v3_trading_control_plane(con: sqlite3.Connection) -> None:
-    """Trading control-plane (Plan 2026-04-29 §10).
+    """Trading control-plane (04-29 §10).
 
     Introduces the durable tables that back account snapshots, capital
     reservations, the order tracker, executor runs, the position book,
@@ -428,7 +428,7 @@ def _v3_trading_control_plane(con: sqlite3.Connection) -> None:
 
 
 _V4_STRATEGY_PROMOTION = (
-    # Plan §11 P5 — promotion gate audit trail. Every requested move
+    # promotion gate audit trail. Every requested move
     # along the lifecycle graph (draft -> static_review -> backtested
     # -> paper -> shadow -> canary -> live) writes a row here, even
     # if the gate ultimately rejects it. ``state`` tracks the lifecycle
@@ -454,7 +454,7 @@ _V4_STRATEGY_PROMOTION = (
     "CREATE INDEX IF NOT EXISTS idx_strategy_promotions_strategy ON strategy_promotions(strategy_id)",
     "CREATE INDEX IF NOT EXISTS idx_strategy_promotions_state ON strategy_promotions(state)",
     "CREATE INDEX IF NOT EXISTS idx_strategy_promotions_ts ON strategy_promotions(ts_requested DESC)",
-    # Plan §11 P5 — strategy evidence catalogue. Backtest reports, paper
+    # strategy evidence catalogue. Backtest reports, paper
     # window stats, static-review verdicts, protection-rule attestations,
     # subagent reviews — everything the promotion gate inspects ends
     # up as a row here so the dashboard can render an at-a-glance
@@ -479,7 +479,7 @@ _V4_STRATEGY_PROMOTION = (
 
 
 def _v4_strategy_promotion(con: sqlite3.Connection) -> None:
-    """Strategy promotion gate (Plan 2026-04-29 §11 P5).
+    """Strategy promotion gate (04-29 §11 P5).
 
     Adds the durable tables that back the promotion ramp:
 

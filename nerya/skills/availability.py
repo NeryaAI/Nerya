@@ -1,6 +1,6 @@
-"""Plan 31 P1 — action availability probes.
+"""action availability probes.
 
-Hermes filters tools the LLM can see by running cheap availability
+the runtime filters tools the LLM can see by running cheap availability
 probes at planner-build time:
 
 * ``requires_env`` — environment variables that must be set,

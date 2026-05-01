@@ -1,6 +1,6 @@
 """Account snapshots — periodic NAV/balance projection per account.
 
-Plan 2026-04-29 §3.2 calls this out as the missing layer between the
+04-29 §3.2 calls this out as the missing layer between the
 connector layer (which has live balances on tap) and the rest of the
 control plane (RiskGate, BudgetChecker, dashboard, reconciliation). A
 :class:`AccountSnapshot` is the persisted "what does this account look
@@ -48,7 +48,7 @@ SnapshotSource = Literal["paper", "live", "shadow", "mock"]
 SnapshotHealth = Literal["ok", "degraded", "stale", "auth_error", "rate_limited"]
 
 
-# How long we treat a snapshot as fresh by default. Plan §3.2 says
+# How long we treat a snapshot as fresh by default. says
 # RiskGate should reject new opens against stale snapshots; the actual
 # threshold per account is read from
 # ``trading.snapshot.max_age_seconds`` in nerya.yml.
@@ -57,7 +57,7 @@ DEFAULT_MAX_AGE_S = 60
 
 @dataclass
 class AccountSnapshot:
-    """Plan 2026-04-29 §3.2 — concrete account state at a point in time."""
+    """concrete account state at a point in time."""
 
     snapshot_id: str
     account_id: str
@@ -348,7 +348,7 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
 def _wallet_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
     """Pull a snapshot from an installed on-chain wallet provider.
 
-    Plan 2026-04-29 §11 P10 — once an operator (or the agent) installs
+    04-29 §11 P10 — once an operator (or the agent) installs
     a wallet provider via ``/wallet/install`` and binds it to an
     account by setting ``wallet_id`` plus ``provider_config.balances``
     (a list of ``{chain, address, token, symbol?, decimals?}`` rows),

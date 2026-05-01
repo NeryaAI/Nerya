@@ -35,7 +35,7 @@ export type GatewayEvent = {
   detail?: Record<string, unknown>;
 };
 
-/** Phase 14 — provider-native block envelope from
+/** provider-native block envelope from
  * :class:`WorkspaceNativeAgentLoop`. Each envelope wraps one of:
  *   - ``text``           — model's natural-language reply chunk
  *   - ``thinking``       — extended-reasoning trace (only when the
@@ -105,7 +105,7 @@ export type TurnPayload = {
   events?: GatewayEvent[];
   turn_id?: string;
   stopped_reason?: string | null;
-  /** Phase 14 — block envelopes emitted by the workspace-native agent
+  /** block envelopes emitted by the workspace-native agent
    * loop. Empty under the legacy JSON-decision harness; populated when
    * the backend feature flag ``agent.harness.native_loop`` is on.
    * The dashboard prefers ``blocks`` over ``actions``/``tool_trace``
@@ -424,7 +424,12 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
     const key = teamKey(ev);
     const existing = teamIndex.get(key);
     if (existing !== undefined) {
-      return (out[existing].block ?? out[existing]) as NativeBlock;
+      const block = (out[existing].block ?? out[existing]) as NativeBlock;
+      block.status = ev.status || block.status;
+      block.phase = ev.phase || block.phase;
+      block.goal = ev.goal || block.goal;
+      block.template_id = ev.template || ev.template_id || block.template_id;
+      return block;
     }
     const payload = asRecord(ev.payload);
     const roles = roleNames(ev.roles ?? payload.roles);
@@ -432,7 +437,18 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       kind: "team_trace",
       call_id: String(ev.call_id || ev.tool_call_id || ""),
       team_key: key,
-      task: String(ev.task || ev.team_task || payload.task || ""),
+      run_id: ev.team_run_id || ev.run_id,
+      template_id: ev.template || ev.template_id,
+      phase: ev.phase,
+      goal: ev.goal,
+      task: String(
+        ev.task ||
+          ev.team_task ||
+          payload.task ||
+          ev.goal ||
+          ev.team_run_id ||
+          "",
+      ),
       status: "running",
       roles,
       max_parallel: ev.max_parallel ?? payload.max_parallel,
@@ -448,34 +464,64 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
   function appendTeamStep(ev: LiveEvent, stepKind: string) {
     const block = ensureTeamTrace(ev);
     const steps = Array.isArray(block.steps) ? [...block.steps] : [];
-    const subagent = String(ev.subagent || ev.role || "");
+    const eventKind = String(ev.team_event_kind || stepKind);
+    const subagent = String(
+      ev.subagent || ev.subagent_name || ev.role || ev.owner || ev.from_agent || "",
+    );
     steps.push({
-      kind: stepKind,
+      kind: eventKind,
+      lifecycle: stepKind,
       subagent,
+      owner: ev.owner,
+      task_id: ev.task_id || ev.team_task_id,
+      subject: ev.subject || ev.team_task_subject,
+      phase: ev.phase,
       status: ev.status || (ev.ok === false ? "error" : "ok"),
       ok: ev.ok,
       error: ev.error,
+      summary: ev.summary,
+      content: ev.content,
+      from_agent: ev.from_agent,
+      to: ev.to,
+      artifact: ev.artifact || ev.artifact_id,
+      artifact_refs: ev.artifact_refs,
+      entry_kind: ev.entry_kind,
+      outcomes: ev.outcomes,
       tokens: ev.tokens,
       usd: ev.usd,
       wall_ms: ev.wall_ms,
       ts: ev.ts,
+      raw: ev.team_event || ev,
     });
     block.steps = steps;
+    if (ev.status) block.status = ev.status;
+    if (ev.phase) block.phase = ev.phase;
+    if (eventKind === "run.completed") block.status = "completed";
+    if (eventKind === "run.failed") block.status = "failed";
     if (subagent) {
       const members = asRecord(block.members);
+      const memberStatus = ev.status
+        ? String(ev.status)
+        : eventKind === "task.updated" && ev.status
+        ? String(ev.status)
+        : stepKind === "member.start"
+        ? "running"
+        : stepKind === "member.skip"
+        ? "skipped"
+        : ev.ok === false
+        ? "failed"
+        : "completed";
       members[subagent] = {
         ...(asRecord(members[subagent])),
         name: subagent,
-        status:
-          stepKind === "member.start"
-            ? "running"
-            : stepKind === "member.skip"
-            ? "skipped"
-            : ev.ok === false
-            ? "failed"
-            : "completed",
+        owner: ev.owner,
+        task_id: ev.task_id || ev.team_task_id,
+        subject: ev.subject || ev.team_task_subject,
+        status: memberStatus,
         ok: ev.ok,
         error: ev.error,
+        summary: ev.summary,
+        artifact: ev.artifact || ev.artifact_id,
         tokens: ev.tokens,
         usd: ev.usd,
         wall_ms: ev.wall_ms,
@@ -486,20 +532,32 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
 
   function ensureSubagentTrace(ev: LiveEvent): NativeBlock {
     const name = String(ev.subagent || ev.name || "subagent");
-    const existing = subagentIndex.get(name);
+    const key = [
+      String(ev.team_run_id || ""),
+      String(ev.team_task_id || ""),
+      name,
+    ]
+      .filter(Boolean)
+      .join(":") || name;
+    const existing = subagentIndex.get(key);
     if (existing !== undefined) {
       return (out[existing].block ?? out[existing]) as NativeBlock;
     }
     const block: NativeBlock = {
       kind: "subagent_trace",
       subagent: name,
+      team_run_id: ev.team_run_id,
+      team_template: ev.team_template,
+      team_task_id: ev.team_task_id,
+      team_task_owner: ev.team_task_owner,
+      team_task_subject: ev.team_task_subject,
       tier: ev.tier,
       status: "running",
       payload_keys: ev.payload_keys,
       steps: [],
       index: out.length,
     };
-    subagentIndex.set(name, out.length);
+    subagentIndex.set(key, out.length);
     out.push({ block, kind: "subagent_trace" });
     return block;
   }
@@ -521,6 +579,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       provider: ev.provider,
       model: ev.model,
       parsed_keys: ev.parsed_keys,
+      reasoning: ev.reasoning,
       reasoning_tokens: ev.reasoning_tokens,
       reasoning_effort: ev.reasoning_effort,
       ts: ev.ts,
@@ -738,6 +797,12 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
     if (ev.kind === "team.start") {
       flushText();
       appendTeamStep(ev, "start");
+      continue;
+    }
+
+    if (ev.kind === "team.event") {
+      flushText();
+      appendTeamStep(ev, String(ev.team_event_kind || "event"));
       continue;
     }
 

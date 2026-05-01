@@ -1,6 +1,6 @@
 """TeamOrchestrator — runs a :class:`TeamTemplate` to completion.
 
-Orchestrator responsibilities (Phase 2 of the agent-team plan):
+Orchestrator responsibilities:
 
 * Materialise a :class:`TeamRun` and persist its template/members/tasks.
 * Seed the blackboard with the goal + trigger context.
@@ -127,12 +127,6 @@ class TeamOrchestrator:
             self.store.update_run(run)
             self.store.append_event(run.id, kind="phase.enter", phase="synthesis")
             conflict_matrix = self.aggregator.build_conflict_matrix(run.id)
-            final_context = self.aggregator.build_final_context(
-                run=run, tasks=tasks, gates=outcomes,
-            )
-            report = self.aggregator.build_final_report(
-                run=run, final_context=final_context,
-            )
             run.final_context_ref = "synthesis/final_context.json"
             run.final_report_ref = "synthesis/final_report.md"
             run.status = "completed"
@@ -146,6 +140,12 @@ class TeamOrchestrator:
                 "gates_total": len(outcomes),
             }
             self.store.update_run(run)
+            final_context = self.aggregator.build_final_context(
+                run=run, tasks=tasks, gates=outcomes,
+            )
+            report = self.aggregator.build_final_report(
+                run=run, final_context=final_context,
+            )
             self.store.append_event(run.id, kind="run.completed",
                                     metrics=run.metrics)
         except Exception as exc:
@@ -255,11 +255,12 @@ class TeamOrchestrator:
                     self.store.update_task(t)
                     payload = self._task_payload(
                         run=run, template=template, task=t,
-                        blackboard=bb,
+                        blackboard=bb, mailbox=mailbox,
                     )
                     futures[pool.submit(
                         self._run_task,
                         task=t, payload=payload,
+                        trigger_event_id=run.trigger_event_id,
                         strategy_id=strategy_id, session_id=session_id,
                     )] = tid
                 for fut in futures:
@@ -278,8 +279,10 @@ class TeamOrchestrator:
         template: TeamTemplate,
         task: TeamTask,
         blackboard: Blackboard,
+        mailbox: Mailbox,
     ) -> dict[str, Any]:
         preview = blackboard.preview_for_agent(task.owner, max_entries=10)
+        inbox = [m.asdict() for m in mailbox.peek(task.owner, limit=10)]
         return {
             "team_run_id": run.id,
             "team_template": template.id,
@@ -290,6 +293,7 @@ class TeamOrchestrator:
             "task_description": task.description,
             "expected_output_kinds": task.payload.get("output_kinds") or [],
             "blackboard_preview": preview,
+            "inbox_messages": inbox,
             "instruction": (
                 "Respond with structured JSON. Include `summary` (string), "
                 "an optional `signal` (one of: bullish|bearish|neutral|none), "
@@ -305,6 +309,7 @@ class TeamOrchestrator:
         *,
         task: TeamTask,
         payload: dict[str, Any],
+        trigger_event_id: Optional[str],
         strategy_id: Optional[str],
         session_id: Optional[str],
     ) -> SubAgentResult:
@@ -312,7 +317,7 @@ class TeamOrchestrator:
         return self.dispatcher._run_one(
             task.subagent_name,
             payload=payload,
-            trigger_event_id=None,
+            trigger_event_id=trigger_event_id,
             strategy_id=strategy_id,
             session_id=session_id,
         )

@@ -25,16 +25,13 @@ runtime, never as a raw tool call against an exchange API.
 4. **Nerya-native runtime** — the agent loop (`nerya/agent/kernel.py`),
   LLM gateway (`nerya/llm/gateway.py`), subagents (`nerya/subagents/`),
    triggers (`nerya/triggers/`) and skill runtime (`nerya/skills/runtime.py`)
-   are all implemented in-repo. Sibling projects (Hermes among them) are
-   used only as **reference material** for behaviors and maturity targets;
-   Nerya never imports or attaches to any of them at runtime. See
-   `docs/reference-capability-map.md`.
+   are all implemented in-repo. Nerya never imports or attaches to an
+   external agent runtime at execution time.
 
 ## Layout
 
-See `docs/nerya-architecture.md` for the full layout, and the other
-`docs/*.md` files for deep-dives on triggers, SDKs, LLM Gateway, Risk Gate,
-strategy history, security and evolution.
+The main source layout is documented in `AGENTS.md`; runtime behavior is
+covered by the code and tests checked into this repository.
 
 ## One-liner install
 
@@ -155,7 +152,7 @@ synchronised by Nerya itself during API startup whenever a Telegram channel with
 poller only calls `/gateway/telegram/poll` so user messages reach the local
 agent without manual curl commands. The menu is generated from the same gateway
 command registry used by `/help` and `/menu`, keeping the Bot API menu aligned
-with Hermes-style gateway command behavior. Use `-NoTelegramPoller` when you
+with the gateway command behavior. Use `-NoTelegramPoller` when you
 only want API + dashboard.
 
 If you want real e2e LLM calls after boot, make sure the machine or user
@@ -195,10 +192,9 @@ Live trading is **disabled by default**. Paper trading is the only mode
 reachable from Agent skills until the operator edits `accounts/accounts.yml`,
 enables `live_trading_enabled: true` and provisions signed approvals.
 
-## Gateway platform alignment
+## Gateway Platform
 
-Nerya tracks the same gateway platform ids as Hermes and exposes a universal
-platform contract:
+Nerya exposes a universal platform contract:
 
 - `GET /gateway/platforms` returns the platform matrix and support status.
 - `POST /gateway/inbound` accepts normalized inbound messages from any platform.
@@ -206,8 +202,8 @@ platform contract:
 - Agent turn responses include `events`, a user-visible decision trail (`plan`, `think`, `act`, `observe`, `close`).
 - Telegram keeps `typing` active until the turn finishes; other platforms can use native status adapters or `status_webhook_url`.
 
-For platform adapter development, use the built-in `capability_developer` skill.
-Its reference lives at `nerya/skills/builtin/capability_developer_skill/references/gateway-platform-development.md`; the operator-facing overview is in `docs/gateway-platforms.md`.
+For platform adapter development, use the built-in `capability_developer` skill
+and the gateway APIs above.
 
 ## Safety summary
 
@@ -218,40 +214,6 @@ they go through `connectors/`, `security/signer.py`, `messaging/pipeline.py`.
 Trading SDK + Risk Gate.
 - `evolution` can mutate prompts, scripts, skills, routes, strategy configs —
 never `limits.yml`, `live_trading_enabled`, signer policy or secret policy.
-
-## Reference material (shape only, not source)
-
-Nerya draws on Hermes and other sibling projects for **capability shape
-and boundary ideas** — never as a runtime dependency. "Reference" means
-we re-implemented the same boundary natively, not that we reach feature
-parity with the reference project. Concepts Nerya has a native
-implementation of, with the shape borrowed from Hermes:
-
-- agent loop / turn model (`nerya/agent/kernel.py`) — subset of Hermes's
-orchestrator; no compactor parity.
-- skill runtime with per-skill manifests and sandbox (`nerya/skills/runtime.py`,
-`nerya/skills/builtin/`*).
-- subagent registry + dispatcher (`nerya/subagents/`*) — tiered dispatch,
-no ad-hoc spawning parity.
-- cron / schedule primitives with operator lifecycle
-(`nerya/triggers/cron.py`, `nerya/triggers/router.py`).
-- LLM gateway + model catalog + OpenRouter-style provider routing
-(`nerya/llm/gateway.py`, `nerya/llm/model_router.py`,
-`nerya/llm/provider_routing.py`) — covers the routing preferences set
-(`sort`, `only`, `ignore`, `order`, `require_parameters`,
-`data_collection`); does not cover every edge of Hermes's router.
-- strategy history journaling + trade review
-(`nerya/strategy_history/*`) — session ledger rather than full
-conversational memory compaction.
-- self-reflection and evolution pipeline (`nerya/agent/reflection.py`,
-`nerya/evolution/*`).
-
-Nerya does **not** attach to an external agent runtime at execution
-time, and no Hermes bridge package exists. External agents plug into
-Nerya through `nerya/mcp/` (Model Context Protocol) and `nerya/acp/`
-(Agent Communication Protocol). See `docs/reference-capability-map.md`
-for the full, per-capability reference-to-native mapping (including
-explicit "implemented" / "partial" / "shape only" labels).
 
 ## What Nerya implements natively
 
@@ -318,4 +280,3 @@ Hyperliquid. Real DEX swaps for BSC (PancakeSwap v2) and Solana (Jupiter).
 - Dev mode captures HTTP / tool / error traces; accessible via
 `nerya dev status|tail|clear` and the local HTTP API.
 - One-line installer with service registration on Linux / macOS / Windows.
-

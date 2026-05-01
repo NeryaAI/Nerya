@@ -1,6 +1,4 @@
-"""Unified trace builder.
-
-Phase 10 exit criterion: *an operator can trace any trigger from ingress
+"""Unified trace builder. exit criterion: *an operator can trace any trigger from ingress
 to final outcome*.
 
 We don't keep a separate trace log. Instead we reconstruct an end-to-end
@@ -183,7 +181,7 @@ def build_trace(
 
 
 # ==================================================================
-# Phase 10 v2 — operator explain / degradation surfaces
+# v2 — operator explain / degradation surfaces
 # ==================================================================
 
 def explain_trace(paths: WorkspacePaths, *,
@@ -200,7 +198,7 @@ def explain_trace(paths: WorkspacePaths, *,
     * ``degradations`` — truth-gate / degraded-envelope / capability
       error rows extracted from the trace;
     * ``attribution`` — when ``session_id`` and ``strategy_id`` resolve,
-      the Phase 8 root-cause summary;
+      the root-cause summary;
     * ``active_strategy_version`` — the strategy version active at
       query time (so post-mortems can anchor "which version ran this").
     """

@@ -9,7 +9,7 @@ import type { Components } from "react-markdown";
  * Shared markdown renderer for the chat surface.
  *
  * The Apr-27 user feedback called for proper markdown rendering in the
- * chat bubble (and the gateways) — Hermes already does this, and the
+ * chat bubble (and the gateways) — the runtime already does this, and the
  * agent's prose summaries routinely contain headings, code blocks,
  * tables, and bullet lists that look terrible as ``whitespace-pre-wrap``
  * plain text.

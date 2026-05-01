@@ -2,7 +2,7 @@
 
 Loaded lazily so the rest of Nerya keeps working without the ``mcp`` package.
 
-Plan 25 §3 — alongside the legacy hand-coded :class:`NeryaTools` registry,
+alongside the legacy hand-coded :class:`NeryaTools` registry,
 the server can register a dynamically-generated tool surface built from
 the live skill manifest registry (``DynamicMCPRegistry``). Both surfaces
 coexist by default; operators can disable one or the other via the
@@ -58,7 +58,7 @@ def create_server(
 ):
     """Build a FastMCP instance with every Nerya tool registered.
 
-    Plan 25 §3 — registers two layers:
+    registers two layers:
 
     * **legacy** static :class:`NeryaTools` registry (back-compat, kept
       so existing MCP clients keep working);

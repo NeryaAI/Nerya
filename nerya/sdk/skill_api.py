@@ -28,12 +28,12 @@ class SkillAPI:
         return self.skills.list()
 
     def view(self, skill_id: str) -> dict[str, Any] | None:
-        """Plan 02 P0 §2 — detailed manifest view for ``nerya skill view``."""
+        """detailed manifest view for ``nerya skill view``."""
 
         return self.skills.view(skill_id)
 
     def doctor(self) -> dict[str, Any]:
-        """Plan 02 P0 §2 — self-diagnostic for ``nerya skill doctor``."""
+        """self-diagnostic for ``nerya skill doctor``."""
 
         return self.skills.doctor()
 

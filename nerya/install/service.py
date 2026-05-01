@@ -7,7 +7,7 @@ service:
     * macOS    → launchd agent at ``~/Library/LaunchAgents/com.nerya.agent.plist``
     * Windows  → NSSM service ``nerya-agent`` (requires ``nssm`` on PATH)
 
-The design mirrors Hermes' one-command service experience: after
+The design mirrors The runtime' one-command service experience: after
 ``nerya service install``, the API is available on the configured port
 across restarts with a single command.
 

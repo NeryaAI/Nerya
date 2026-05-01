@@ -1,7 +1,5 @@
 """Strategy performance snapshots.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §7.4.
-
 The self-evolution loop needs a deterministic, schema-stable view of
 *how the strategy is actually doing* — derived from the same ledgers
 the dashboard already reads — so the tuning subagent can ground its

@@ -1,6 +1,6 @@
 """Skill manifest loader (Anthropic Skill spec).
 
-The on-disk shape mirrors the Claude Code / Hermes ``SKILL.md`` exactly:
+The on-disk shape mirrors the agent skill runtime ``SKILL.md`` exactly:
 
 * The frontmatter is a tiny YAML block with **only** the fields the
   spec defines: ``name``, ``description``, ``version``, ``license``,
@@ -27,7 +27,7 @@ from ..core.errors import SkillManifestError
 
 
 # Action-name prefixes that imply a pure-read operation. Mirrors how
-# Claude Code labels Read/Glob/Grep/etc. as read-only based on their
+# coding-agent labels Read/Glob/Grep/etc. as read-only based on their
 # semantic role. Still used by the dynamic MCP bridge and by some
 # operator-side preset utilities.
 _READ_PREFIXES: tuple[str, ...] = (
@@ -116,13 +116,17 @@ class ActionSpec:
 class SkillManifest:
     """A loaded skill — frontmatter + (optional) procedural actions.
 
-    Aligned with the Anthropic Agent Skill spec (Claude Code / Hermes).
+    Aligned with the Anthropic Agent Skill spec (agent skill runtime).
     The YAML frontmatter only carries:
 
     * ``name`` (required) — agent-visible skill name.
     * ``description`` (required) — one-paragraph trigger blurb.
     * ``version`` — semver (defaults to ``0.1.0``).
     * ``license`` / ``author`` — provenance.
+    * ``requires_integration`` — optional. Name of an entry under
+      ``integrations.<name>`` whose ``enabled`` flag must be true for
+      the skill to be registered. Nerya-specific extension; strict
+      Anthropic-spec loaders can ignore it without harm.
 
     Anything else in the frontmatter is ignored. Actions, when
     present, come from procedural single-file SKILL.md loading and
@@ -142,6 +146,7 @@ class SkillManifest:
     instructions: str = ""
     instructions_meta: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    requires_integration: str = ""
 
     def is_proposal_only(self) -> bool:
         """True when the manifest is a proposal-only scaffold."""
@@ -152,7 +157,7 @@ class SkillManifest:
 
     @classmethod
     def from_skill_md(cls, md_path: Path) -> "SkillManifest":
-        """Load a SKILL.md as Claude Code does — frontmatter + body, period.
+        """Load a SKILL.md as coding-agent does — frontmatter + body, period.
 
         The loader is deliberately minimal: it parses the YAML
         frontmatter, captures the markdown body, and stops. It does
@@ -211,6 +216,7 @@ class SkillManifest:
 
         description = str(doc.get("description") or "").strip()
         version = str(doc.get("version") or "0.1.0").strip()
+        requires_integration = str(doc.get("requires_integration") or "").strip()
 
         skill_permissions: list[str] = []
         seen: set[str] = set()
@@ -234,6 +240,7 @@ class SkillManifest:
             instructions=body,
             instructions_meta={},
             metadata={},
+            requires_integration=requires_integration,
         )
 
 

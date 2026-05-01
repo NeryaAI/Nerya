@@ -1,7 +1,5 @@
 """Self-evolution loop for one strategy package.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §7.
-
 The trading tick (:class:`StrategyRunner`) and the tuning loop
 intentionally live in two different runtimes:
 
@@ -34,7 +32,7 @@ Inputs
 ``strategy_tuner`` subagent through :class:`SubAgentDispatcher`,
 and validates the resulting proposal payload.
 
-The tuning subagent's expected output schema (plan §7.2)::
+The tuning subagent's expected output schema::
 
     {
       "summary": "...",

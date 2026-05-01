@@ -1,6 +1,6 @@
 """Jittered exponential backoff for provider retries.
 
-Ported from Hermes' `agent/retry_utils.py` — jitter decorrelates
+Ported from The runtime' `agent/retry_utils.py` — jitter decorrelates
 concurrent retries so multiple sessions hitting the same provider don't
 all retry at the same instant.
 """

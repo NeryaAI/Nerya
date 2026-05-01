@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Currently-focused account (Plan 2026-04-29 §11 P9).
+ * Currently-focused account (04-29 §11 P9).
  *
  * Persists the operator's "active account" choice so the top-level
  * chrome (TopHeader account selector), the Home page KPIs, and any
@@ -75,7 +75,7 @@ export function setCurrentAccountId(id: string | null): void {
 /* -------------------------------------------------------------- currency utils */
 
 /**
- * Per-account currency formatter (Plan 2026-04-29 §11 P9).
+ * Per-account currency formatter (04-29 §11 P9).
  *
  * Each :class:`AccountProfile` carries a ``base_currency`` (USDT by
  * default, but the YAML accepts any ISO-4217-ish ticker — CNY for

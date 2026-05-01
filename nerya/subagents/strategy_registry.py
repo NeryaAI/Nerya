@@ -1,7 +1,5 @@
 """Strategy-scoped subagent registry.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §6.
-
 The global :func:`nerya.subagents.registry.load_registry` returns
 operator-defined ``*.agent.md`` prompts under ``workspace/subagents/``.
 That is the wrong scope for agent-generated strategies: each
@@ -22,7 +20,7 @@ This module owns the resolution policy:
 
 ``allowed_skills`` and ``tier`` are still resolved by name through
 the same defaults the global registry uses; per-strategy overrides
-will be added in Phase 7 alongside the tuning config.
+will be added in alongside the tuning config.
 """
 
 from __future__ import annotations

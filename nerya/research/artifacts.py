@@ -1,6 +1,6 @@
 """Artifact path helpers.
 
-VibeTrading optimization plan §3.3 mandates this directory layout:
+research runtime spec §3.3 mandates this directory layout:
 
 ```
 workspace/strategies/<strategy_id>/candidates/<candidate_id>/
@@ -21,7 +21,7 @@ workspace/strategies/<strategy_id>/shadow/runs/<run_id>/
 
 Every helper here resolves paths *only* under the workspace strategies
 tree.  Path traversal inputs (``../``, absolute paths) are rejected so
-research code can never write outside the candidate directory (plan §1).
+research code can never write outside the candidate directory.
 """
 from __future__ import annotations
 

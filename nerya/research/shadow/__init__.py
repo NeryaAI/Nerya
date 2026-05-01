@@ -1,4 +1,4 @@
-"""Shadow runtime — VibeTrading deep optimization plan §5 Task 8.
+"""Shadow runtime — research promotion workflow §5 Task 8.
 
 The shadow runtime replays a strategy candidate's signals against
 fixture (or paper-snapshot) market data, **without** writing to the
@@ -6,7 +6,7 @@ paper or live ledgers. It produces a structured ``ShadowReport`` that
 the promotion gate consumes to decide whether ``canary -> live`` is
 allowed.
 
-Design rules (plan §2):
+Design rules:
 
 * Shadow code never touches connectors. It reads market data via the
   research dataset router, just like the backtester.

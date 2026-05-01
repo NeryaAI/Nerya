@@ -3,7 +3,7 @@
 The user-facing Python SDK is `nerya_sdk` in the `sdk/python/` workspace.
 That client talks to this internal SDK either in-process or over file/HTTP.
 
-Plan 2026-04-29 §11 P6 — re-export the typed trade-plan schemas so SDK
+04-29 §11 P6 — re-export the typed trade-plan schemas so SDK
 callers (agent runtimes, scripts, tools) can build :class:`TradePlan` /
 :class:`SizingPolicy` / :class:`ProtectionRule` without reaching into
 ``nerya.trading.order_intents`` directly.

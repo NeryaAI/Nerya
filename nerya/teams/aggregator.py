@@ -122,6 +122,14 @@ class TeamAggregator:
         lines.append(f"- Distribution: {final_context.get('signal_distribution')}")
         lines.append(f"- Actionable: **{final_context.get('actionable')}**")
         lines.append("")
+        report_markdown = self._extract_report_markdown(run.id)
+        if report_markdown:
+            lines.append("## Final Report")
+            lines.append("")
+            lines.append(report_markdown.strip())
+            lines.append("")
+            lines.append("## Execution Trace")
+            lines.append("")
         lines.append("## Tasks")
         for t in final_context.get("tasks_summary") or []:
             err = f" (error: {t.get('error')})" if t.get("error") else ""
@@ -144,6 +152,30 @@ class TeamAggregator:
         text = "\n".join(lines).rstrip() + "\n"
         self.store.write_synthesis_text(run.id, "final_report.md", text)
         return text
+
+    def _extract_report_markdown(self, run_id: str) -> str:
+        """Return the full editor report when a report task produced one."""
+
+        for task in self.store.list_tasks(run_id):
+            if not task.result_artifact:
+                continue
+            if task.id != "t-report" and "report" not in task.id.lower():
+                continue
+            artifact = self.store.read_artifact(run_id, task.result_artifact) or {}
+            payload = artifact.get("payload") if isinstance(artifact, dict) else {}
+            if not isinstance(payload, dict):
+                continue
+            raw = payload.get("raw_output")
+            if isinstance(raw, dict):
+                report = raw.get("report_markdown") or raw.get("markdown")
+                if isinstance(report, str) and report.strip():
+                    return report
+            output = payload.get("output")
+            if isinstance(output, dict):
+                report = output.get("report_markdown") or output.get("markdown")
+                if isinstance(report, str) and report.strip():
+                    return report
+        return ""
 
 
 __all__ = ["TeamAggregator"]

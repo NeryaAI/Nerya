@@ -1,10 +1,9 @@
-"""Plan 26 §9 / Plan 30 P1 — OAuth provider auth scaffolding.
+"""OAuth provider auth scaffolding.
 
-This module is the stub of a Hermes-style provider-auth manager. Hermes
-treats provider credentials as *first-class records* with refresh /
-revocation / health metadata; Nerya historically went straight to vault
-refs or env vars.  This module introduces the missing layer without
-forcing every caller to switch overnight.
+This module treats provider credentials as first-class records with
+refresh, revocation, and health metadata. Nerya historically went
+straight to vault refs or env vars; this layer adds explicit auth state
+without forcing every caller to switch overnight.
 
 Concepts
 --------
@@ -31,9 +30,9 @@ Concepts
     tokens via injected callbacks.
 
 This file is intentionally small: it provides the scaffolding,
-persistence, and structured ``needs_reauth`` semantics referenced by
-Plan 26 §9 and Plan 30 §9.  Live OAuth providers (Google, OKX, MCP
-servers) plug into this via :class:`ProviderConfig` registrations.
+persistence, and structured ``needs_reauth`` semantics. Live OAuth
+providers (Google, OKX, MCP servers) plug into this via
+:class:`ProviderConfig` registrations.
 """
 
 from __future__ import annotations
@@ -68,10 +67,10 @@ class ProviderNotConfigured(ProviderAuthError):
 class NeedsReauth(ProviderAuthError):
     """Structured ``needs_reauth`` error.
 
-    Hermes uses this to short-circuit retry loops and surface a
-    re-authentication prompt to the operator.  Nerya callers should
-    catch :class:`NeedsReauth` and emit an approval/event rather than
-    retrying the request.
+    Callers use this to short-circuit retry loops and surface a
+    re-authentication prompt to the operator. Nerya callers should catch
+    :class:`NeedsReauth` and emit an approval/event rather than retrying
+    the request.
     """
 
     def __init__(self, provider: str, reason: str = "no_credentials") -> None:

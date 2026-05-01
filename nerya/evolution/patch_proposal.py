@@ -69,12 +69,11 @@ ALLOWED_KINDS = {
     "skill_scaffold",           # runnable skill scaffolded in-place
     "gateway_platform_proposal", # messaging gateway adapter / platform support
     "core_feature_proposal",     # non-protected runtime/core feature plan
-    "strategy_package_proposal", # agent-generated strategy package (Phase 4
-                                 # of the strategy-runtime refactor); brings
+    "strategy_package_proposal", # agent-generated strategy package; brings
                                  # files under after/strategies/<id>/* that
                                  # promotion.py copies into the workspace.
     "strategy_tuning_proposal",  # patch produced by the per-strategy tuning
-                                 # loop (Phase 7); same shape but scoped to
+                                 # loop; same shape but scoped to
                                  # the tuning subagent's recommendations.
     "evolution_asset_proposal",  # candidate Gene/Capsule changes that still
                                  # require operator review before promotion.

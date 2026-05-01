@@ -1,4 +1,4 @@
-"""Connector base class — rich, hummingbot-style interface.
+"""Connector base class — rich, connector-oriented interface.
 
 Connectors expose read (public market data) and write (signed trading)
 methods. Writes are only ever called by the ExecutionEngine when the

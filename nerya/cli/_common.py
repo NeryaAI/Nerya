@@ -25,7 +25,7 @@ def _client(workspace: str | None,
             profile: str | None = None) -> InternalClient:
     """Return a configured :class:`InternalClient` for ``workspace``.
 
-    Plan 28 P1 §2 — accept an optional ``profile`` selector so commands
+    accept an optional ``profile`` selector so commands
     can dispatch to ``$NERYA_HOME/<profile>`` without mutating env vars.
     """
     return InternalClient.boot(workspace, profile=profile)

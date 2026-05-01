@@ -1,6 +1,6 @@
 """Deterministic single-symbol backtest runner.
 
-Implements VibeTrading optimization plan §5 Task 5.
+Implements the deterministic research backtest path.
 
 Workflow:
 
@@ -12,7 +12,7 @@ Workflow:
 6. Emit ``trades.csv``, ``equity_curve.csv``, ``metrics.json``,
    ``report.md`` and a structured ``ValidationReport`` JSON.
 
-The runner does not depend on Vibe-Trading code.
+The runner is self-contained and only depends on Nerya contracts.
 """
 from __future__ import annotations
 

@@ -1,7 +1,5 @@
 """Native tools for the agent-generated strategy runtime.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §11 Phase 4.
-
 These tools let the agent author and operate strategy packages from
 inside the loop:
 

@@ -1,4 +1,4 @@
-"""Account roster proposals (Plan 2026-04-29 §11 P9).
+"""Account roster proposals (04-29 §11 P9).
 
 The generic :mod:`nerya.evolution.patch_proposal` machinery refuses to
 target ``accounts/accounts.yml`` outright — that file is in

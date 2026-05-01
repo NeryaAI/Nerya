@@ -1,6 +1,6 @@
 """Safe loader for candidate-authored signal engine modules.
 
-Plan §5 Task 3 step 4 forbids loading signal engines from anywhere
+Task 3 step 4 forbids loading signal engines from anywhere
 outside ``workspace/strategies/<strategy_id>/candidates/<candidate_id>/``.
 We enforce this by resolving paths relative to the workspace root and
 rejecting anything that escapes.

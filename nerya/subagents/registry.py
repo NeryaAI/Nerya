@@ -58,13 +58,13 @@ DEFAULT_SUBAGENT_SKILLS = {
     # built-in market_data / onchain / news_social skills don't cover the
     # ask. ``websearch`` (Apr-27 2026) is added to every research lane
     # so the subagent can pull live evidence from DuckDuckGo before
-    # writing a fetcher script — this is the Claude-Code-style
+    # writing a fetcher script — this is the coding-agent
     # "research → write code → run code → cross-check → summarise" loop
     # the operator asked for. The dispatcher's
     # ``SUBAGENT_SKILL_DENYLIST`` still keeps trading_write / wallet /
     # script_runtime out of these lanes.
     #
-    # Plan 2026-04-28 §6 — what used to be a blanket ``trading`` allow
+    # what used to be a blanket ``trading`` allow
     # is split into ``trading_read`` (read-only / planning lanes:
     # ``execution_planner``, ``portfolio_manager``, ``verification_lane``,
     # …) and ``trading_write`` (only the main agent / runner). The
@@ -137,7 +137,7 @@ DEFAULT_SUBAGENT_SKILLS = {
         "market_data", "news_social", "websearch", "onchain", "portfolio",
         "trading_read", "trace", "operator", "script", "llm",
     ],
-    # Plan 2026-04-28 §7 — strategy_tuner is the per-strategy
+    # strategy_tuner is the per-strategy
     # self-evolution lane. It can read every read-only signal but never
     # ships orders or applies its own proposals. Final promotion still
     # routes through the operator's approval flow.
@@ -146,12 +146,12 @@ DEFAULT_SUBAGENT_SKILLS = {
         "market_data", "trading_read", "operator", "script",
         "websearch", "trace", "llm",
     ],
-    # Plan 04 P0 §3 — first-class coding lane. ``operator`` exposes
+    # first-class coding lane. ``operator`` exposes
     # file/dir/search/write/patch/terminal + the background process
     # registry; ``script`` provides sandboxed code execution; ``trace``
     # lets the lane self-report what it did. No trading skills are
     # listed so the dispatcher denylist + workspace chroot keeps the
-    # lane safe. Plan 04 P1 §2 — review/critic lane that can read but
+    # lane safe. review/critic lane that can read but
     # not mutate the repo (no operator.write_file / patch_file / terminal —
     # the runtime enforces this through ``allowed_skills``).
     "coding_agent": ["operator", "script", "websearch", "trace", "llm"],

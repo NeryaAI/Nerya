@@ -6,10 +6,10 @@ the provider-native ``messages + tools`` loop until the model emits
 
 Reference implementations:
 
-* ``ClaudeCode/anthropic-ai-claude-code-2.1.88-expanded/src/query.ts`` —
+* ``coding-agent/anthropic-ai-coding-agent-2.1.88-expanded/src/query.ts`` —
   ``query()`` + ``queryLoop()`` ``while(true)`` body.
-* ``ClaudeCode/.../src/Tool.ts`` — tool descriptor / dispatch contract.
-* ``hermes-agent/agent/skill_utils.py`` — Hermes' equivalent skill /
+* ``coding-agent/.../src/Tool.ts`` — tool descriptor / dispatch contract.
+* ``agent-runtime/agent/skill_utils.py`` — The runtime' equivalent skill /
   tool prompt assembly.
 * :mod:`nerya.agent.loop` — our own ``WorkspaceNativeAgentLoop``.
 
@@ -238,7 +238,7 @@ class AgentKernel:
 
         Lazily attached so unit tests that build a kernel without a
         real workspace don't pay the I/O cost. Mirrors
-        :class:`hermes_agent.MemoryManager` in spirit: the kernel keeps
+        :class:`agent_runtime.MemoryManager` in spirit: the kernel keeps
         a single instance for the whole session, the native
         ``memory_recall`` / ``memory_remember`` tools read/write through
         it, and end-of-turn hooks (see :meth:`_after_turn_memory`) call
@@ -719,7 +719,7 @@ class AgentKernel:
                         )
                     except Exception:
                         _LOG.debug("evolution tool hook failed", exc_info=True)
-                    # Phase 14 — surface approval requests as their
+                    # surface approval requests as their
                     # own event so the dashboard can render an
                     # "approval pending" pill instead of just a
                     # ``tool.complete`` carrying ``error_kind=
@@ -931,7 +931,7 @@ class AgentKernel:
         except Exception:
             _LOG.debug("verifier nudge failed", exc_info=True)
 
-        # Phase 14 — autonomous artifact index. We collect what
+        # autonomous artifact index. We collect what
         # actually changed on disk / what commands ran / what errors
         # came back so dashboards + CI gates have a structured record
         # independent of the model's narrative final_text. Failure
@@ -1878,7 +1878,7 @@ class AgentKernel:
     ) -> dict[str, Any]:
         """End-of-session lifecycle hook.
 
-        Mirrors Claude Code's ``onCleanup`` and Hermes'
+        Mirrors coding-agent's ``onCleanup`` and The runtime'
         ``MemoryManager.session_end`` step:
 
         * fires the registry-level ``after_session`` hook so operator
@@ -2001,9 +2001,9 @@ class AgentKernel:
     ) -> str:
         """Render the workspace-native system prompt.
 
-        Mirrors Claude Code's tiny ``main.md`` — a one-paragraph
+        Mirrors coding-agent's tiny ``main.md`` — a one-paragraph
         charter, the workspace root, a skill listing, and a memory
-        recap block (Hermes parity, see
+        recap block (compatibility, see
         :func:`nerya.tools.native.memory.build_system_prompt_block`).
         Tool docs come from the provider tool list rendered by the
         loop, not the system prompt — that's how Anthropic / OpenAI /

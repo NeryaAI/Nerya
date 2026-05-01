@@ -66,7 +66,7 @@ class CronScheduler:
     :meth:`TriggerRuntime.emit` so the regular router / dedupe / cooldown
     fabric applies unchanged.
 
-    For ``session_kind='agent'`` (Hermes parity) the scheduler spawns an
+    For ``session_kind='agent'`` (compatibility) the scheduler spawns an
     ephemeral agent session via :class:`ScheduledSessionRunner` instead;
     it never touches the trigger router so the scheduled session has its
     own journal, its own per-tick session id, and its own delivery

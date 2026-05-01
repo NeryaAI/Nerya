@@ -16,12 +16,10 @@ Inputs:
 Outputs:
 * :class:`PermissionDecision` — ``ALLOW`` | ``ASK`` | ``DENY``.
 
-Decisions are written to the transcript by the executor (Phase 5);
+Decisions are written to the transcript by the executor;
 the engine itself is pure-data and easily unit-testable.
 
-References:
-* docs/agent-harness-comparison-and-refactor-todo.md Phase 4
-* docs/agent-intelligence-gap-and-cursor-refactor-plan.md §3.4 (Plan/
+Implementation notes:
   approval boundary)
 """
 

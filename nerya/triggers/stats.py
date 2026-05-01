@@ -1,4 +1,4 @@
-"""Per-route statistics for the trigger plane (Phase 5).
+"""Per-route statistics for the trigger plane.
 
 The router already journals every terminal event. This module reads the
 trigger journal and aggregates per-route counters — useful for the

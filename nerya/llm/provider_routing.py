@@ -1,4 +1,4 @@
-"""Provider routing preferences (Hermes/OpenRouter parity).
+"""Provider routing preferences (provider-routing compatibility).
 
 The operator config lives in ``workspace/llm/provider_routing.json``.
 OpenRouter and any OpenAI-compatible router that understands the

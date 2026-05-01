@@ -1,4 +1,4 @@
-"""Position protection executor (Plan 2026-04-29 §7).
+"""Position protection executor (04-29 §7).
 
 Watches a position against its :class:`ProtectionRule`. Default mode
 is *soft runtime* — the executor evaluates the rule against the
@@ -6,8 +6,7 @@ current mark price every tick and, when a trigger fires, spawns a
 flatten ``MarketOrderExecutor`` to close the position.
 
 The executor is small on purpose. Hard-exchange and hybrid modes
-hook in here via :meth:`prepare`/:meth:`step` extensions later (Plan
-P3 specifies the contract). For now we always run the soft path,
+hook in here via :meth:`prepare`/:meth:`step` extensions later. For now we always run the soft path,
 which is the only mode guaranteed to work on every CCXT venue.
 """
 

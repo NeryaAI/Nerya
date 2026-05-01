@@ -1,7 +1,5 @@
 """Add a tuning block to an existing strategy package.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §7.5.
-
 The :mod:`nerya.evolution.strategy_code_generator` module already
 emits a tuning block when ``create_tuning=True`` is set at *creation*
 time. Operators routinely promote a strategy without a tuning block

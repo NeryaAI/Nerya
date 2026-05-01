@@ -1,11 +1,11 @@
-"""Proposal ranking from attribution evidence (Phase 9).
+"""Proposal ranking from attribution evidence.
 
 Purpose
 -------
-Phase 9's governing requirement is that every agent-authored change is
+'s governing requirement is that every agent-authored change is
 proposal-only and evidence-backed. We had proposal *creation* covered
 in :mod:`nerya.evolution.patch_proposal`, but nothing consumed the
-richer Phase 8 surfaces (attribution bundles, reflection findings,
+richer surfaces (attribution bundles, reflection findings,
 paper/live divergence) to rank or prioritize proposals for an
 operator.
 

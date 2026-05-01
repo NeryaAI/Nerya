@@ -1,6 +1,4 @@
-"""ResourceIndex — Phase 12.
-
-Reference: ``ClaudeCode/.../src/services/mcp/client.ts:2171`` —
+"""ResourceIndex — existing.
 MCP servers can publish three orthogonal asset classes:
 
 * **Tools**       — invokable RPCs (already covered by

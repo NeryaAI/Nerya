@@ -1,8 +1,8 @@
-"""SQLite/FTS5-backed mirror of the session journals (Plan 06 P0 §2).
+"""SQLite/FTS5-backed mirror of the session journals.
 
 The pure-Python ``session_search`` scan is fine for a few thousand
-journal rows but Hermes ships an FTS5 index so operators can grep
-years of conversation in milliseconds. Plan 06 P0 §2 explicitly calls
+journal rows but the runtime ships an FTS5 index so operators can grep
+years of conversation in milliseconds. explicitly calls
 for "session search backed by SQLite/FTS or equivalent". This module
 provides the equivalent without forcing it on small workspaces:
 
@@ -23,10 +23,6 @@ provides the equivalent without forcing it on small workspaces:
   behavioural difference is that bracketed regex queries (``/foo/``)
   fall through to the substring scan because FTS5 does not support
   regex. Plain text and prefix queries (``foo*``) use FTS5.
-
-Plan ref:
-``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/06-memory-reflection-evolution.md``
-P0 §2.
 """
 
 from __future__ import annotations

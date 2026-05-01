@@ -1,7 +1,7 @@
 """Native workspace-primitive tools for the workspace-native agent loop.
 
 These are the *first-class coding tools* that every coding-capable
-agent (Cursor, Claude Code, Aider, Codex CLI) ships with. They are
+agent (IDE, coding-agent, coding agent, coding CLI) ships with. They are
 deliberately decoupled from the legacy ``operator_skill`` so the agent
 can use them without going through the legacy planner / skill selector
 allowlist.
@@ -18,9 +18,9 @@ Modules:
   ``exit_plan_mode``.
 * :mod:`skill`         — ``skill_index`` / ``skill_view`` /
   ``script_inspect`` / ``script_run``.
-* :mod:`skill_tool`    — ``Skill`` (Claude Code-style playbook loader).
+* :mod:`skill_tool`    — ``Skill`` (coding-agent-style playbook loader).
 * :mod:`memory`        — ``memory_recall`` / ``memory_remember`` /
-  ``journal_search`` (Hermes parity for long-term recall).
+  ``journal_search`` (compatibility for long-term recall).
 * :mod:`agents`        — ``subagent_list`` / ``subagent_run`` (parent
   kernel summons child runtimes).
 * :mod:`evolve`        — ``evolve_reflect`` / ``evolve_proposals``
@@ -42,10 +42,8 @@ Modules:
   and compression).
 * :mod:`bootstrap`     — ``register_native_tools(registry, deps)``.
 
-References:
-* docs/agent-intelligence-gap-and-cursor-refactor-plan.md §3.2 (always-on
+Implementation notes:
   coding primitives).
-* docs/agent-harness-comparison-and-refactor-todo.md Phase 5-7.
 """
 
 from .bootstrap import (

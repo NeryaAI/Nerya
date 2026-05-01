@@ -1,4 +1,4 @@
-"""Phase 13 helper — annotate every builtin SKILL.md with the new
+"""Helper — annotate every builtin SKILL.md with the new
 ``metadata.nerya.style`` field and append a short Playbook section to
 the body when it is missing.
 
@@ -17,10 +17,7 @@ Usage
 The script is idempotent — running it twice produces no second-pass
 edits.
 
-Plan refs
 ---------
-* docs/agent-harness-comparison-and-refactor-todo.md Phase 13
-* docs/agent-intelligence-gap-and-cursor-refactor-plan.md §3.6
 """
 
 from __future__ import annotations
@@ -89,7 +86,7 @@ def _ensure_playbook_section(body: str, *, skill_id: str, manifest: dict) -> tup
     if PLAYBOOK_FOOTER_HEADING in body:
         return body, False
     if skill_id in PLAYBOOK_ONLY_SKILLS:
-        # Operator already authored its own playbook in Phase 12.
+        # Operator already authored its own playbook in existing.
         return body, False
 
     description = (manifest.get("description") or "").strip()

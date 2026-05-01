@@ -1,6 +1,6 @@
 """Anthropic prompt caching — system + 3-message rolling window.
 
-Ported from Hermes' `agent/prompt_caching.py`. Applied automatically by
+Ported from The runtime' `agent/prompt_caching.py`. Applied automatically by
 :class:`nerya.llm.providers.AnthropicAdapter` when the tier config sets
 ``prompt_cache: true``.
 

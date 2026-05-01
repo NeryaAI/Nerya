@@ -1,6 +1,6 @@
 """Strategy session directory helpers.
 
-Phase 4 — this is the canonical place to open, close, and write artifacts
+this is the canonical place to open, close, and write artifacts
 to a **session**. A session is a persisted record of a single *unit of
 work*: a main-agent turn, a subagent analysis, a strategy review, or an
 evolution run.

@@ -2,7 +2,7 @@
 
 The original :class:`Account` shape (``id``, ``mode``, ``initial_balance_usd``,
 ``status``, ``venue``/``kind``/``raw``) is kept verbatim so existing call
-sites continue to work. Plan 2026-04-29 §3.2 introduces a richer
+sites continue to work. 04-29 §3.2 introduces a richer
 :class:`AccountProfile` view layered on top — operators get
 mode/permission/limits/credentials in one place, while existing code
 keeps using the slim :class:`Account` dataclass.
@@ -27,7 +27,7 @@ from ..core.paths import WorkspacePaths
 
 
 # ---------------------------------------------------------------------------
-# AccountMode and AccountStatus literals (Plan 2026-04-29 §3.2)
+# AccountMode and AccountStatus literals (04-29 §3.2)
 # ---------------------------------------------------------------------------
 
 AccountMode = Literal["paper", "shadow", "canary", "live"]
@@ -140,7 +140,7 @@ class AccountProfile:
     permissions: AccountPermissions = field(default_factory=AccountPermissions)
     limits: AccountLimits = field(default_factory=AccountLimits)
     credentials: dict[str, str] = field(default_factory=dict)
-    # Plan 2026-04-29 §11 P8 — every account can pin a specific wallet
+    # 04-29 §11 P8 — every account can pin a specific wallet
     # provider id (declared under ``wallet.providers.<id>`` in
     # ``nerya.yml``). Empty falls back to the legacy single
     # ``wallet.provider`` selection so existing fixtures stay green.
@@ -304,7 +304,7 @@ def load_accounts(paths: WorkspacePaths) -> dict[str, Account]:
 
 
 def load_account_profiles(paths: WorkspacePaths) -> dict[str, AccountProfile]:
-    """Plan 2026-04-29 §3.2 — rich profile view of the account roster."""
+    """rich profile view of the account roster."""
     doc = yaml_io.load(paths.accounts_file, default={"accounts": []}) or {}
     out: dict[str, AccountProfile] = {}
     for row in doc.get("accounts", []):
@@ -376,7 +376,7 @@ def get_account_profile(paths: WorkspacePaths, account_id: str) -> AccountProfil
 def _atomic_write_accounts_doc(paths: WorkspacePaths, doc: dict[str, Any]) -> None:
     """Persist the accounts roster back to ``accounts/accounts.yml``.
 
-    Plan 2026-04-29 §11 P8 — every mutation goes through this helper so
+    04-29 §11 P8 — every mutation goes through this helper so
     we (a) deduplicate writes, (b) keep a single source of truth, and
     (c) make sure the directory exists for fresh workspaces.
     """
@@ -571,7 +571,7 @@ def reset_paper_account(
 ) -> AccountProfile:
     """Wipe all paper-mode trading state for ``account_id``.
 
-    Plan 2026-04-29 §11 P9 — operators iterate fast on paper. This
+    04-29 §11 P9 — operators iterate fast on paper. This
     helper resets the paper sandbox without touching live or canary
     accounts:
 

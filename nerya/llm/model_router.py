@@ -56,7 +56,7 @@ class CallResult:
     degraded: bool = False
     fallback_used: bool = False
     error: str = ""
-    # Reasoning surfaces (Plan 32). ``reasoning_text`` is the model's
+    # Reasoning surfaces. ``reasoning_text`` is the model's
     # exposed chain-of-thought summary (NEVER fed back into prompts);
     # ``reasoning_tokens`` and ``reasoning_effort`` are journaled for
     # the operator dashboard / cost-attribution.
@@ -134,7 +134,7 @@ class ModelRouter:
         # Per-tier timeout override (seconds). Heavy reasoning tiers can
         # legitimately take > 60 s; expose the knob on the tier config.
         timeout_override = cfg.get("timeout_s") or cfg.get("timeout")
-        # Reasoning controls (Plan 32). Strings are normalised to
+        # Reasoning controls. Strings are normalised to
         # "minimal" | "low" | "medium" | "high"; empty disables reasoning.
         reasoning_effort = str(cfg.get("reasoning_effort") or "").strip().lower()
         reasoning_summary = str(cfg.get("reasoning_summary") or "").strip().lower()

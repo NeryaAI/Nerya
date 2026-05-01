@@ -1,6 +1,5 @@
 """Evidence artifacts backing the production certification gates.
 
-`docs/release-checklists.md` mandates an evidence package for every
 live promotion:
 
 * `explain`      — a recent agent/trigger explain bundle,

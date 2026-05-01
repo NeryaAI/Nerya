@@ -1,7 +1,5 @@
 """Operator-facing API envelope helpers.
 
-Plan ref: ``docs/frontend-agent-workspace-redesign-plan.md`` §2.16.
-
 Every response from the operator-facing BFF (``routes_operator``,
 ``routes_inbox``, ``routes_agent_tasks``) follows the same envelope so
 the dashboard can render statuses, primary actions, and source links

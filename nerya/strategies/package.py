@@ -1,7 +1,5 @@
 """Strategy package loader + typed manifest models.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §5.1.
-
 A *strategy package* is what the agent generates and the operator
 promotes into ``workspace/strategies/<strategy_id>/``. The runtime
 never reads loose ``main.py`` files; it always loads the package
@@ -369,7 +367,7 @@ class StrategyAgentProfile:
 
 
 # ---------------------------------------------------------------------------
-# Tuning block (Phase 7)
+# Tuning block
 # ---------------------------------------------------------------------------
 
 
@@ -400,7 +398,7 @@ class StrategyTuningGuardrails:
 class StrategyTuningConfig:
     """Per-strategy tuning configuration.
 
-    Lives at ``strategy.yml::tuning`` (see plan §7.1). Drives an
+    Lives at ``strategy.yml::tuning`` (see runtime spec). Drives an
     independent self-evolution cron — separate from the trading
     schedule — that generates ``PatchProposal`` objects with code /
     config / prompt updates.

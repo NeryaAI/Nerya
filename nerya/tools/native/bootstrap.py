@@ -192,12 +192,12 @@ class NativeToolDeps:
     shell_max_output_bytes: int = 64_000
     background_processes: dict[str, dict] = field(default_factory=dict)
     task_store: Optional["Any"] = None
-    """Async subagent task store (Phase 11). Held on deps so every
+    """Async subagent task store. Held on deps so every
     ``subagent_run_async`` / ``task_*`` call shares the same on-disk
     registry. Built lazily from ``paths`` when missing."""
 
     resource_index: Optional["Any"] = None
-    """Workspace :class:`ResourceIndex` (Phase 12). Holds MCP-published
+    """Workspace :class:`ResourceIndex`. Holds MCP-published
     resources alongside any local read-only documents. ``resource_list``
     / ``resource_read`` tools dispatch through it."""
 
@@ -987,7 +987,7 @@ def _wrap_llm_compress(deps: NativeToolDeps):
 
 
 # ----- strategy runtime ----------------------------------------------------
-# Phase 4 of the strategy-runtime refactor exposes the full lifecycle
+# of the strategy-runtime refactor exposes the full lifecycle
 # of agent-generated strategy packages (generate / validate / promote /
 # run / kill switch / history) as native tools so the agent can author
 # and operate them without leaving the loop.
@@ -2002,7 +2002,7 @@ def register_native_tools(
             ),
         ])
         # ----- strategy runtime -----
-        # Phase 4 of the strategy-runtime refactor: agent authors a
+        # of the strategy-runtime refactor: agent authors a
         # strategy package via generate_proposal, validates it,
         # operators promote it, and the agent (or a cron-driven
         # bridge) calls run_tick. The agent owns the full lifecycle
@@ -2125,7 +2125,7 @@ def register_native_tools(
                 auto_approve=True,
             ),
             # ----- self-evolution tuning loop -----
-            # Phase 7 — tuning is the per-strategy self-evolution
+            # tuning is the per-strategy self-evolution
             # surface. ``tuning_generate`` adds a tuning block to an
             # existing package; ``tuning_run`` executes one cycle and
             # writes a strategy_tuning_proposal; ``tuning_status``/

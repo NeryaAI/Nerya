@@ -1,4 +1,4 @@
-"""Account control-plane HTTP endpoints (Plan 2026-04-29 §11 P8).
+"""Account control-plane HTTP endpoints (04-29 §11 P8).
 
 The trading control plane already exposed a per-portfolio aggregate via
 ``/portfolio/health``. This module fills in the operator-grade CRUD
@@ -216,7 +216,7 @@ def routes():
         return {"ok": True, "account": _account_summary(client, profile)}
 
     def upsert_account(client, payload):
-        # Plan 2026-04-29 §11 P9 — accounts.upsert can stage a
+        # 04-29 §11 P9 — accounts.upsert can stage a
         # proposal instead of writing immediately. ``apply: true``
         # (default) preserves the prior direct-write behaviour;
         # ``apply: false`` returns an :class:`AccountProposal` the
@@ -472,7 +472,7 @@ def routes():
     def list_headers(client, payload):
         """Show masked auth headers for an account.
 
-        Plan 2026-04-29 §11 P8 — data-source providers (and any REST
+        04-29 §11 P8 — data-source providers (and any REST
         connector) can hold extra HTTP auth headers under
         ``provider_config.headers``. Operators viewing the dashboard or
         agents inspecting an account must never see plaintext secrets,

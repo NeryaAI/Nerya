@@ -1,6 +1,6 @@
 """SubAgentDispatcher — resolves `subagent:<name>` targets and runs them.
 
-Phase 3 — native subagent runtime.
+native subagent runtime.
 
 * Every subagent run produces a :class:`SubAgentResult` envelope with
   ``ok``, ``error_kind`` and ``error`` fields so the caller has a uniform
@@ -32,7 +32,6 @@ from .strategy_registry import StrategySubAgentRegistry
 # surfaces and must only be called from the main agent, where Risk/Approval
 # gates and budgeting are already centralised.
 #
-# Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §6 —
 # split ``trading`` into ``trading_read`` (allowed) and ``trading_write``
 # (blocked). The dispatcher denies ``trading`` outright and separately
 # denies ``trading_write``; subagents must use the read-only variant.
@@ -46,9 +45,7 @@ SUBAGENT_SKILL_DENYLIST: frozenset[str] = frozenset({
 
 @dataclass
 class SubAgentResult:
-    """Uniform envelope returned by every subagent run.
-
-    Phase 3 extends this with per-run ``metrics`` and ``steps`` so the
+    """Uniform envelope returned by every subagent run. extends this with per-run ``metrics`` and ``steps`` so the
     parent kernel can attribute contribution and reconstruct what
     happened inside a child runtime without having to reach into the
     LLM journal.

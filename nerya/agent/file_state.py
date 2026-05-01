@@ -1,13 +1,10 @@
-"""FileStateCache — Claude-Code-style fresh-read tracking for file edits.
+"""FileStateCache — coding-agent fresh-read tracking for file edits.
 
-Plan refs:
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §4.1.1
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §3.1 (the
   "fresh read before edit" invariant that the file_first lane enforces).
 
 Why
 ---
-Every coding agent (Claude Code, Cursor, Codex, Aider, Hermes) has the
+Every coding agent (coding-agent, IDE, coding agent, coding agent, the runtime) has the
 same pathology: the model edits a file based on stale context (its own
 memory of what the file looked like a few turns ago), the on-disk copy
 has since been changed by the user / a sibling tool / git, and the

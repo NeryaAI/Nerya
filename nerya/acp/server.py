@@ -1,6 +1,6 @@
 """Stdio JSON-RPC 2.0 server exposing Nerya's approval + turn surface.
 
-Plan 25 §4 — the method table is now registry-driven (see
+the method table is now registry-driven (see
 :mod:`nerya.acp.methods`) instead of a hand-coded dict. The wire
 shape is unchanged: line-delimited JSON-RPC 2.0, so existing IDE
 clients keep working. New layers are stacked on top of the legacy
@@ -128,7 +128,7 @@ class AcpServer:
         dst.parent.mkdir(parents=True, exist_ok=True)
         with dst.open("a", encoding="utf-8") as f:
             f.write(json.dumps(moved) + "\n")
-        # Plan 25 §4 — fan-out as an event so subscribers see the change.
+        # fan-out as an event so subscribers see the change.
         self.publish_event({
             "kind": f"approval.{state}",
             "approval_id": approval_id,
@@ -155,7 +155,7 @@ def register_default_methods(server: AcpServer) -> None:
         category="meta",
         description=(
             "Negotiate protocol version + return live capability matrix. "
-            "Plan 25 §4 — capabilities now include the registered method "
+            "capabilities now include the registered method "
             "categories and session/tool/event surfaces."
         ),
         params_schema={"type": "object", "properties": {}},
@@ -171,7 +171,7 @@ def register_default_methods(server: AcpServer) -> None:
         "meta.methods",
         lambda p: _m_meta_methods(server, p),
         category="meta",
-        description="Return every registered ACP method (Plan 25 §4 introspection).",
+        description="Return every registered ACP method.",
         result_schema={"type": "object", "properties": {"methods": {"type": "array"}}},
     )
     methods.add(
@@ -262,7 +262,7 @@ def register_default_methods(server: AcpServer) -> None:
         },
     )
 
-    # ----- session lifecycle (Plan 25 §4) -------------------------------
+    # ----- session lifecycle -------------------------------
     methods.add(
         "session.create",
         lambda p: _m_session_create(server, p),
@@ -301,7 +301,7 @@ def register_default_methods(server: AcpServer) -> None:
                     "parent metadata so the IDE can render thread trees.",
     )
 
-    # ----- tool surface (Plan 25 §4) ------------------------------------
+    # ----- tool surface ------------------------------------
     methods.add(
         "tool.list",
         lambda p: _m_tool_list(server, p),
@@ -335,7 +335,7 @@ def register_default_methods(server: AcpServer) -> None:
                     "``agent.approve`` with stable categorisation).",
     )
 
-    # ----- event bus (Plan 25 §4) ---------------------------------------
+    # ----- event bus ---------------------------------------
     methods.add(
         "event.subscribe",
         lambda p: _m_event_subscribe(server, p),
@@ -379,7 +379,7 @@ def _m_initialize(server: AcpServer, params: dict[str, Any]) -> dict[str, Any]:
         "recent_turns": True,
         "skills": skills_enabled,
         "triggers_explain": True,
-        # Plan 25 §4 — declare the new surfaces explicitly so clients
+        # declare the new surfaces explicitly so clients
         # know which methods they can rely on without calling
         # ``meta.methods`` first.
         "sessions": True,

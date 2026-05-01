@@ -102,7 +102,7 @@ export class NeryaClient {
   };
 
   readonly agent = {
-    /** Phase 15 — run a single agent turn through the workspace-native
+    /** run a single agent turn through the workspace-native
      *  loop. Equivalent of `POST /agent/run_turn`. Returns the same
      *  block-aware shape the dashboard consumes, including
      *  `blocks` (provider-native envelopes) and `tool_trace`

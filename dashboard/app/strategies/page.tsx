@@ -69,7 +69,7 @@ export default function StrategiesPage() {
     setLoading(true);
     setError(null);
     try {
-      // Plan 2026-04-29 §11 P9 — strategy create / rebind reads the
+      // 04-29 §11 P9 — strategy create / rebind reads the
       // account roster from /accounts/list (the new control-plane
       // surface; quarantine/read_only/disabled are filtered out for
       // binding) and the configured wallet providers from

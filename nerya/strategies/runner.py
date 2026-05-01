@@ -1,7 +1,5 @@
 """StrategyRunner — single-tick executor for agent-generated strategies.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §5.3.
-
 The runner is the only place that:
 
 * loads a :class:`~nerya.strategies.package.StrategyPackage` by id
@@ -94,7 +92,7 @@ def _wall_clock_timeout(seconds: float) -> Iterator[None]:
     thread and wait on a timeout. The strategy *won't* be hard-
     killed; if it ignores cooperative cancellation we let it run
     in the background and surface a timeout to the caller. This
-    matches Hermes' approach and is the same trade-off that the
+    matches The runtime' approach and is the same trade-off that the
     rest of the agent loop makes.
 
     The "context manager" shape is preserved so callers read

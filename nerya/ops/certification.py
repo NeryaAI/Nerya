@@ -1,4 +1,4 @@
-"""Phase 7 — production certification gates.
+"""production certification gates.
 
 The production alignment plan defines three gates:
 

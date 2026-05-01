@@ -1,7 +1,7 @@
-"""Derived features from raw candles / orderbook / funding (Phase 14).
+"""Derived features from raw candles / orderbook / funding.
 
 ``compute_features`` historically returned only a handful of scalars
-(close, sma_20, ret_1, vol_last, breakout). Phase 14 extends it to a
+(close, sma_20, ret_1, vol_last, breakout). extends it to a
 full collaborative feature set — every indicator in
 :mod:`nerya.data.indicators` is represented as a last-bar scalar so
 downstream analysis / review / optimization agents can consume a

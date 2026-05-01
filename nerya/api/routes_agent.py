@@ -436,7 +436,7 @@ def routes():
     def get_trace(client, payload):
         """POST /agent/trace — rebuild the end-to-end trace for a correlator.
 
-        Phase 10: operators can hand in any of ``trigger_id``/``turn_id``/
+        operators can hand in any of ``trigger_id``/``turn_id``/
         ``session_id`` (optionally scoped to ``strategy_id``) and get
         back a time-ordered list of every runtime event that touched
         the request. Zero state: re-built from the journals each time.
@@ -454,7 +454,7 @@ def routes():
         """POST /agent/explain — operator-oriented explain surface.
 
         Returns the same trace plus stage counts, detected degradation
-        rows, Phase 8 attribution, and the active strategy version —
+        rows attribution, and the active strategy version —
         everything an operator needs to answer "what happened and why".
         """
         return explain_trace(
@@ -466,9 +466,7 @@ def routes():
         )
 
     def open_turns(client, _params):
-        """GET /agent/open_turns — resumable / halted turn inventory.
-
-        Phase 4/6 operator surface: renders every turn the journal
+        """GET /agent/open_turns — resumable / halted turn inventory. operator surface: renders every turn the journal
         knows about that never emitted a ``close`` step, so the on-call
         can decide which ones to resume and which to abandon.
         """
@@ -650,7 +648,7 @@ def routes():
         return {"ok": True, "session": state.asdict()}
 
     def session_search(client, payload):
-        """POST /agent/session/search — Plan 03 P0 §5 full-journal search.
+        """POST /agent/session/search — full-journal search.
 
         Body: ``{query, session_id?, strategy_id?, limit?, journals?}``.
         Returns matching events newest-first with payload + preview.
@@ -782,7 +780,7 @@ def routes():
             with this session.
         ``after_seq`` (optional)
             Return only events with ``seq > after_seq``. Implements
-            the Plan 12 reconnect contract: a client persists the
+            the reconnect contract: a client persists the
             largest seq it has rendered and replays from there on
             reconnect, so it never duplicates or drops events.
         ``limit`` (optional)
@@ -826,7 +824,7 @@ def routes():
         }
 
     def interrupt(client, payload):
-        """POST /agent/interrupt — Plan 05 P0 §1 stop control.
+        """POST /agent/interrupt — stop control.
 
         Best-effort cooperative cancellation of the current turn(s)
         for ``session_id``. The kernel's :class:`CancelToken` is

@@ -1,6 +1,6 @@
 """Structured hook lifecycle for agent turns.
 
-Phase 3 — first-class, best-effort hooks that fire at each turn boundary:
+first-class, best-effort hooks that fire at each turn boundary:
 
 * ``before_turn`` — trigger received, about to plan.
 * ``after_plan`` — planner chose tier / subagents / skills.

@@ -4,8 +4,6 @@ Audit 2026-04-24 honesty fix
 ----------------------------
 Older drafts of this module contained a placeholder ``Signer`` that
 returned ``{"signed": True, "tx_hash_preview": "0x..."}``. Nothing in
-the runtime ever imported it. Several doc pages (``docs/security.md``,
-``docs/nerya-architecture.md``, ``docs/reference-capability-map.md``,
 ``README.md``) still reference this file as "the signer", so we keep
 the module name stable but make its contents match runtime truth:
 

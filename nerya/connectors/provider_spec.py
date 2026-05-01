@@ -147,7 +147,7 @@ class ExchangeProviderSpec:
     # Optional: fine-grained instrument coverage for derivatives venues —
     # e.g. ("spot",), ("perp", "futures"), ("options",), or mixed.
     instrument_types: tuple[str, ...] = ()
-    # Per-provider credential schema (Plan 2026-04-29 — sandboxed
+    # Per-provider credential schema (sandboxed
     # account intake). Empty tuple means "no credentials needed", which
     # is the right answer for ``mock``/``mock_chain`` and for
     # data-source-only paper accounts.
@@ -586,9 +586,9 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     # ``ccxt`` provider already uses, but exposed as dedicated venues so
     # the dashboard / agent picker can render their docs URLs and
     # credential schemas (passphrases, sub-account hints, …) instead of
-    # forcing the operator through ``ccxt:<id>``. Hummingbot ships
+    # forcing the operator through ``ccxt:<id>``. the connector framework ships
     # native connectors for each of these — see
-    # ``hummingbot/hummingbot/connector/exchange/<venue>``.
+    # ``connector framework/connector framework/connector/exchange/<venue>``.
     # ------------------------------------------------------------------
 
     def _ccxt_spec(
@@ -856,7 +856,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     ))
 
     # ------------------------------------------------------------------
-    # Broker / data-source-only providers borrowed from QuantDinger:
+    # Broker / data-source-only providers borrowed from broker/data-source tooling:
     # IBKR, MT5, Alpaca, Tushare, Polygon.io, CoinGecko, Glassnode.
     # These are registered with ``supports.place_order=False`` when only
     # data is wired, so the upsert flow bumps them to a paper account

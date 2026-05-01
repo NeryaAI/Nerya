@@ -1,4 +1,4 @@
-"""Control-plane operator endpoints (Plan 2026-04-29 §11 P7).
+"""Control-plane operator endpoints (04-29 §11 P7).
 
 Exposes the new account-aware control plane to the dashboard and any
 HTTP-driven operator tooling. Every handler is read-only or
@@ -126,8 +126,7 @@ def _orders_list(client, payload):
     elif state == "cached":
         rows = tracker.cached_orders(account_id=account_id)
     else:
-        # "Recent" = active + cached (recently terminal). Plan §11 P7
-        # asks for active/cached/lost grouping in one view; merging
+        # "Recent" = active + cached (recently terminal). # asks for active/cached/lost grouping in one view; merging
         # active and cached is the closest single-call surface.
         active = tracker.active_orders(account_id=account_id)
         cached = tracker.cached_orders(account_id=account_id)
@@ -392,7 +391,7 @@ def _kill_switch_set(client, payload):
 def _risk_evaluations(client, payload):
     """Return recent rejected / escalated risk evaluations.
 
-    Plan 2026-04-29 §11 P9 — surfaces ``RiskGate`` rejections in the
+    04-29 §11 P9 — surfaces ``RiskGate`` rejections in the
     dashboard so operators see *why* an intent was blocked and which
     button to click. ``fix_hints`` is decoded from ``snapshot_json``
     (where ``RiskGate._persist`` stows it under ``_fix_hints``); if the

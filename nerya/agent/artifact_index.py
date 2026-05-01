@@ -1,7 +1,5 @@
-"""Artifact index — Phase 14.
-
-Reference: ``ClaudeCode/.../src/services/result-summary/*`` — at the
-end of every coding turn Claude Code emits an autonomous summary
+"""Artifact index — .
+end of every coding turn coding-agent emits an autonomous summary
 listing the files that were modified, the commands that were run,
 the errors encountered, and any unverified risks (e.g. "I changed
 ``config.yml`` but never re-ran the test that depends on it"). This
@@ -363,9 +361,7 @@ def summarize_batch(
     *,
     results: Iterable[Any],
 ) -> dict[str, Any]:
-    """Compact per-batch summary used for streaming events / dashboard.
-
-    Phase 14 calls out a "tool batch summary": the dashboard wants a
+    """Compact per-batch summary used for streaming events / dashboard. calls out a "tool batch summary": the dashboard wants a
     one-line status label for each batch the orchestrator just
     finished (e.g. ``"3 reads, 1 edit (1 retry)"``) without having to
     walk the transcript for it. The kernel publishes this on
@@ -419,7 +415,7 @@ def summarize_batch(
 def render_final_report(index: ArtifactIndex) -> dict[str, Any]:
     """Render an :class:`ArtifactIndex` into the *final report* shape.
 
-    Phase 14: the agent's final answer should be informed by the
+    the agent's final answer should be informed by the
     artifact index, not by what the model thinks it did. Dashboards /
     final-message renderers read this dict to surface a structured
     summary block under the natural-language final text. We keep the

@@ -39,6 +39,7 @@ DEFAULT_BASE_URLS: dict[str, str] = {
     "together":   "https://api.together.xyz/v1",
     "groq":       "https://api.groq.com/openai/v1",
     "cerebras":   "https://api.cerebras.ai/v1",
+    "stepfun":    "https://api.stepfun.com/v1",
     "compat":     "",
 }
 

@@ -1,4 +1,4 @@
-"""Unified trace/observability surface for the Nerya runtime — Phase 10."""
+"""Unified trace/observability surface for the Nerya runtime — ."""
 
 from .trace import Trace, TraceEvent, build_trace
 

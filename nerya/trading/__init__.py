@@ -1,7 +1,7 @@
 """Trading kernel — intents, plans, risk gate, approval gate, executors,
 capital, position book, paper execution, ledger.
 
-Plan 2026-04-29 introduces a richer control plane on top of the
+04-29 introduces a richer control plane on top of the
 existing safety scaffolding (kill switch + live flag + RiskGate +
 ApprovalGate + ExecutionEngine). New code should import from the
 explicit submodules; the names re-exported here are the stable ones

@@ -1,4 +1,4 @@
-"""Account-intake HTTP endpoints (Plan 2026-04-29 §11 P10).
+"""Account-intake HTTP endpoints (04-29 §11 P10).
 
 Backs the sandboxed Agent-driven account creation flow. The agent /
 operator opens an intake describing what credentials a venue needs;

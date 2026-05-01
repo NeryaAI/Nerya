@@ -1,15 +1,15 @@
-"""Verification-agent nudge — Phase 10.
+"""Verification-agent nudge — .
 
-Claude Code reference:
+Agent runtime reference:
 
-* ``ClaudeCode/.../src/tools/TodoWriteTool/TodoWriteTool.ts:72`` — when
+* ``coding-agent/.../src/tools/TodoWriteTool/TodoWriteTool.ts:72`` — when
   the model marks several todos completed without running a verification
   step (tests, type-check, dry-run), the harness *nudges* a verifier
   agent so the user doesn't accept "all done" on faith.
 
-Hermes parity:
+compatibility:
 
-* Hermes' ``after_turn`` reflection hook fires the same shape — count
+* The runtime' ``after_turn`` reflection hook fires the same shape — count
   completed todos this turn, compare to validation evidence, attach a
   follow-up suggestion to the next observation.
 
@@ -27,7 +27,7 @@ existing memory-recall block, so the model sees:
 
 What counts as "validation"
 ---------------------------
-Configurable, but the defaults match Claude Code's heuristic:
+Configurable, but the defaults match coding-agent's heuristic:
 
 * a ``run_shell`` call whose command matches one of ``test_patterns``
   (``pytest``/``go test``/``cargo test``/``npm test``/``make test``/…),

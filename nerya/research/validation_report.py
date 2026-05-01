@@ -1,7 +1,7 @@
-"""ValidationReport contract (VibeTrading plan §4.4).
+"""ValidationReport contract (research runtime spec §4.4).
 
 A validation report is the single artifact that promotion gates and the
-dashboard consume.  It must be reproducible (plan §2.8): every report
+dashboard consume.  It must be reproducible: every report
 records the code/config hash, data source, symbol set, date range, fees,
 slippage, initial capital, engine and generated artifact paths.
 """

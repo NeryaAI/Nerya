@@ -83,7 +83,7 @@ class WorkspacePaths:
     def skills_pending(self) -> Path: return self.skills / "pending"
     @property
     def skills_rejected(self) -> Path: return self.skills / "rejected"
-    # Plan 30 P1 §4 — Hermes-style skills hub (trust + hash + lock).
+    # runtime skills hub (trust + hash + lock).
     @property
     def skills_lock(self) -> Path: return self.skills / "skills.lock.yml"
     @property
@@ -155,7 +155,7 @@ class WorkspacePaths:
     # security
     @property
     def security(self) -> Path: return self.root / "security"
-    # Plan 26 §9 — provider auth records (tokens live in vault, only
+    # provider auth records (tokens live in vault, only
     # pointers + metadata sit on disk here).
     @property
     def provider_auth(self) -> Path: return self.security / "provider_auth.json"
@@ -210,7 +210,7 @@ def _resolve_home() -> Path:
     * ``NERYA_HOME`` env var if set
     * ``~/.nerya`` otherwise
 
-    See Plan 28 P1 §2 — Hermes-style multi-profile isolation. Each profile
+    See runtime multi-profile isolation. Each profile
     becomes a workspace directory under this home (``<home>/<profile>``)
     so ``nerya --profile dev`` and ``nerya --profile live`` get fully
     independent journals, db, and outboxes without colliding.
@@ -238,7 +238,7 @@ def resolve_workspace(
        (contains ``nerya.yml`` or ``state/``).
     6. ``$NERYA_HOME/default``.
 
-    Plan 28 P1 §2: keep legacy callers happy by treating
+    keep legacy callers happy by treating
     ``NERYA_WORKSPACE`` as the deepest fallback when no profile is given.
     """
     if path is not None:

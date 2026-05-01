@@ -1,8 +1,5 @@
 """Block-shaped transcript schema for the workspace-native agent loop.
 
-Plan refs:
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §3.4
-- ``docs/plans/2026-04-27-nerya-end-to-end-streaming-plan.md`` Phase 1
   (streaming chunk shape) — these blocks are what each chunk
   *materialises* into when it lands in the journal/dashboard.
 

@@ -5,7 +5,7 @@ messages. It deliberately contains no secrets and no transport code; routes can
 use the same summaries for dashboard, Telegram, Discord, or future gateways.
 
 Command + menu rendering is delegated to :mod:`nerya.api.gateway_commands`
-(plan 23 #3 — single Hermes-aligned registry shared by every adapter).
+(single gateway registry shared by every adapter).
 ``DEFAULT_COMMANDS`` and ``command_help_text`` are kept as thin shims for
 backwards compatibility with code that imported them directly.
 """

@@ -1,6 +1,6 @@
-"""Plan 25 §3 — manifest-driven MCP tool generation.
+"""manifest-driven MCP tool generation.
 
-Hermes' MCP bridge composes its tool surface from the live tool registry
+The runtime' MCP bridge composes its tool surface from the live tool registry
 plus plugin contributions, so every newly enabled skill / toolset shows
 up in the MCP server without code edits. Nerya's legacy ``NeryaTools``
 class hand-codes 17 wrapper methods that mirror specific

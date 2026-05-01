@@ -1,6 +1,6 @@
-"""Procedural ``SKILL.md`` skills (Plan 02 P0 §4).
+"""Procedural ``SKILL.md`` skills.
 
-Hermes' user skill ecosystem accepts plain markdown skills with a YAML
+The runtime' user skill ecosystem accepts plain markdown skills with a YAML
 frontmatter (``---``) describing ``id``, ``description``, ``tags``,
 ``allowed_tools``, and so on. The body is the operator-facing playbook
 the agent should follow. There is no Python action module — the skill
@@ -8,7 +8,7 @@ is *procedural*, i.e. a recipe.
 
 Nerya has historically only supported typed action skills
 (``skill.yml`` + ``actions.py``). Without a procedural loader, every
-agentskills.io / OpenClaw / Hermes skill on disk is invisible to the
+agentskills.io / OpenClaw / the runtime skill on disk is invisible to the
 runtime, so operators cannot drag-and-drop a SKILL.md into
 ``workspace/skills/`` and use it from chat.
 
@@ -18,10 +18,6 @@ markdown body so the planner / chat surface can splice the playbook
 into context. Mutation actions are intentionally *not* generated —
 procedural skills declare what the agent should consider, the agent
 still routes side effects through the existing typed skills.
-
-Plan ref:
-``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/02-skill-loading-and-execution.md``
-P0 §4.
 """
 
 from __future__ import annotations

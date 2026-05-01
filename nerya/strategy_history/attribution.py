@@ -1,11 +1,11 @@
-"""Phase 8 — trading-native attribution.
+"""trading-native attribution.
 
 Given a session's ledger rows, produce a structured *attribution bundle*
 that ranks candidate root causes. This output is intentionally
 rule-based and independent of any LLM so:
 
 - backtests and replays are deterministic
-- the proposal pipeline (Phase 9) can consume the output as data
+- the proposal pipeline can consume the output as data
 - an operator can always verify ``why`` without reading model prose
 
 Categories
@@ -230,14 +230,14 @@ def attribute_session(paths: WorkspacePaths, strategy_id: str,
 
 
 # ==================================================================
-# Phase 8 v2 — richer attribution surfaces
+# v2 — richer attribution surfaces
 # ==================================================================
 
 def subagent_contribution(paths: WorkspacePaths, strategy_id: str,
                           session_id: str) -> dict[str, Any]:
     """Summarise subagent behaviour over a single session.
 
-    Reads the per-subagent journal the Phase 3 runtime writes and
+    Reads the per-subagent journal the runtime writes and
     aggregates signals/skill_calls/rejections/uncertainty so the
     review & optimization surfaces can rank who actually contributed
     to an outcome instead of assuming every subagent was equally

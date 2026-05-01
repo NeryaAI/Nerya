@@ -1,6 +1,4 @@
-"""Read scheduled trigger sources from workspace/triggers/schedules.yml.
-
-Phase 5 extends the schedule schema beyond ``every_seconds``:
+"""Read scheduled trigger sources from workspace/triggers/schedules.yml. extends the schedule schema beyond ``every_seconds``:
 
 * ``cron``: a POSIX-style 5-field cron expression (minute hour dom month dow).
 * ``starts_at`` / ``ends_at``: ISO timestamps gating when the schedule is
@@ -11,7 +9,7 @@ Phase 5 extends the schedule schema beyond ``every_seconds``:
 be supplied. The old ``every_seconds``-only shape remains the default so
 existing workspaces keep working untouched.
 
-Hermes-parity extension (2026-04-24)
+compatibility extension (2026-04-24)
 ------------------------------------
 Four optional fields on ``ScheduleEntry`` let a schedule behave as a
 "scheduled agent session" rather than a plain trigger emitter:
@@ -57,7 +55,7 @@ class ScheduleEntry:
     target: str = "main"
     strategy_id: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
-    # ---- Hermes-parity cron/session extension (all optional) -----------
+    # ---- compatibility cron/session extension (all optional) -----------
     session_kind: str = "trigger"
     attached_skills: list[str] = field(default_factory=list)
     delivery_targets: list[dict[str, Any]] = field(default_factory=list)
@@ -163,7 +161,7 @@ def load_schedules(paths: WorkspacePaths) -> list[ScheduleEntry]:
             "starts_at": row.get("starts_at"),
             "ends_at": row.get("ends_at"),
             "enabled": bool(row.get("enabled", True)),
-            # Hermes-parity extension (backwards compatible defaults).
+            # compatibility extension (backwards compatible defaults).
             "session_kind": str(row.get("session_kind") or "trigger"),
             "attached_skills": list(row.get("attached_skills") or []),
             "delivery_targets": list(row.get("delivery_targets") or []),

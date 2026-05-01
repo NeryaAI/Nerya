@@ -1,4 +1,4 @@
-"""Plan 26 §9 — HTTP surface for the provider auth manager.
+"""HTTP surface for the provider auth manager.
 
 Exposes the OAuth/provider auth scaffolding so dashboards and CLI
 tools can:

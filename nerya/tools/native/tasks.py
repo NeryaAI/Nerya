@@ -1,6 +1,6 @@
-"""Async / background subagent tools — Phase 11.
+"""Async / background subagent tools — .
 
-Mirrors Claude Code's ``AgentTool`` background mode: the parent
+Mirrors coding-agent's ``AgentTool`` background mode: the parent
 spawns a subagent, gets a ``task_id`` back immediately, and uses
 companion tools to inspect / pull / stop the work later.
 
@@ -386,7 +386,7 @@ def task_update_handler(
     Used by the parent agent (or, more usefully, a worker subagent
     threading its progress back to the parent) to surface partial
     findings without polluting the parent's context with a full
-    output read. Mirrors Claude Code's ``AgentTool`` progress
+    output read. Mirrors coding-agent's ``AgentTool`` progress
     notification path.
     """
 

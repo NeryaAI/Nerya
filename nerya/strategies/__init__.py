@@ -1,7 +1,6 @@
 """nerya.strategies — Agent-generated strategy runtime.
 
-Implements the Phase 1-7 plan in
-``Nerya/docs/plans/2026-04-28-agent-generated-strategy-runtime-refactor.md``.
+Implements the 7 plan in
 
 A strategy is an *agent-generated package* under
 ``workspace/strategies/<strategy_id>/`` containing:

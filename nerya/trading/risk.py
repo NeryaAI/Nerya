@@ -1,6 +1,6 @@
 """Risk Gate — pure function of (intent, strategy, account, market snapshot, ledger).
 
-Plan 2026-04-29 §3.2 / P1 — every decision now carries a stable
+04-29 §3.2 / P1 — every decision now carries a stable
 ``risk_evaluation_id`` (matching the new ``risk_evaluations`` table)
 so reservations, executors, and journal entries can pin themselves to
 exactly which decision allowed them.
@@ -39,13 +39,13 @@ class RiskDecision:
     account_snapshot: dict[str, Any] = field(default_factory=dict)
     reservation_blocked_usd: float = 0.0
     ts: str = ""
-    # Plan §11 P5 — promotion-state-aware flags consumed by submit.py.
+    # promotion-state-aware flags consumed by submit.py.
     # ``shadow_only=True`` means the gate accepted the intent but the
     # submit pipeline must skip the executor (intent is journalled
     # against a real-money account snapshot, never sent to the venue).
     shadow_only: bool = False
     promotion_state: str = ""
-    # Plan §11 P9 — operator-facing remediation hints. Each entry maps
+    # operator-facing remediation hints. Each entry maps
     # one of the strings in ``reasons`` to a human-readable fix and a
     # deep-link target the dashboard can render as a button.
     fix_hints: list[dict[str, Any]] = field(default_factory=list)
@@ -64,7 +64,7 @@ class RiskDecision:
         return asdict(self)
 
 
-# Plan §11 P9 — fix-hint catalogue. Maps a reason *prefix* to a
+# fix-hint catalogue. Maps a reason *prefix* to a
 # remediation suggestion. The dashboard picks the first matching
 # prefix per reason so ordering matters: most specific first.
 _FIX_HINT_CATALOGUE: list[tuple[str, dict[str, Any]]] = [
@@ -431,7 +431,7 @@ class RiskGate:
             reasons.append(f"strategy_status_{strategy.status}")
             decision = "reject"
 
-        # 3b. Plan §11 P5 — promotion-state guards.
+        # 3b. promotion-state guards.
         #     - ``shadow``  must run against a real-money account but
         #       must NOT place orders. We mark the decision so the
         #       submit pipeline can short-circuit without losing the
@@ -475,7 +475,7 @@ class RiskGate:
             reasons.append(f"max_single_order_exceeded:{notional:.2f}>{cap:.2f}")
             decision = "reject"
 
-        # 6b. Plan §11 P5 — canary forces a stricter cap regardless of
+        # 6b. canary forces a stricter cap regardless of
         # what the strategy's own ``limits.yml`` says, so a too-loose
         # YAML cannot bypass the canary safety net.
         if strategy.status == "canary":
@@ -505,7 +505,7 @@ class RiskGate:
             reasons.append("insufficient_paper_cash")
             decision = "reject"
 
-        # 8b. Account snapshot freshness + reservation overlay (Plan §3.2).
+        # 8b. Account snapshot freshness + reservation overlay.
         # We *don't* hard-reject in legacy mode if the snapshot is missing
         # (paper/legacy callers haven't built a snapshot loop yet) — but
         # if a snapshot exists and is stale, that's a hard reject because
@@ -542,7 +542,7 @@ class RiskGate:
                     )
                     decision = "reject"
 
-        # 8c. Reconciliation halt (Plan §11 P4). If the most recent
+        # 8c. Reconciliation halt. If the most recent
         # reconciliation pass for this account left a ``trading_halted``
         # severity unresolved (within the lookback window), every new
         # open is rejected until an operator runs a clean pass.
@@ -596,7 +596,7 @@ class RiskGate:
                 )
                 decision = "escalate"
 
-        # 12b. Plan §11 P5 — canary state forces approval on every
+        # 12b. canary state forces approval on every
         # opening side regardless of notional, and rejects opens that
         # don't carry a protection rule. ``intent.meta['protection_present']``
         # is set by ``submit_trade_plan`` when a TradePlan declares one;
@@ -618,7 +618,7 @@ class RiskGate:
         if not reasons:
             reasons = ["ok"]
 
-        # 12c. Plan §11 P5 — shadow strategies pass risk but never
+        # 12c. shadow strategies pass risk but never
         # actually place orders. Tag the decision so the submit
         # pipeline can short-circuit cleanly. Risk is still evaluated
         # against the real-money snapshot above so a broken paper

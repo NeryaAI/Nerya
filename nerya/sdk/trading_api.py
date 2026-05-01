@@ -1,6 +1,6 @@
 """Trading SDK surface.
 
-Plan 2026-04-29 §11 P6 — Agents and strategies should express trading
+04-29 §11 P6 — Agents and strategies should express trading
 intent in *typed plans*, not bespoke order dicts. This module is the
 canonical SDK contract: every helper here translates the caller's
 intent into a :class:`TradePlan` (or related schema) and forwards it
@@ -106,7 +106,7 @@ class TradingAPI:
         )
 
     # ------------------------------------------------------------------
-    # New control-plane methods (Plan §11 P6)
+    # New control-plane methods
     # ------------------------------------------------------------------
 
     def signal(
@@ -385,7 +385,7 @@ class TradingAPI:
     ) -> dict[str, Any]:
         """Run RiskGate against a plan/intent without committing.
 
-        Plan §11 P6 acceptance #4 — SDK and direct ``submit_trade_intent``
+        acceptance #4 — SDK and direct ``submit_trade_intent``
         produce the same RiskGate verdict for equivalent payloads. This
         method exposes that verdict to the caller for "what-if" UX
         without persisting the intent or sending an order.

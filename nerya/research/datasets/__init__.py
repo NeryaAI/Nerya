@@ -5,9 +5,8 @@ data for backtests/shadow runs.  At test time the only loader exposed
 is :class:`FixtureMarketDataset` which reads CSV files under
 ``tests/fixtures/candles/``.
 
-Inspired by ``../Vibe-Trading/agent/backtest/runner.py:121`` (market
-detection) but reimplemented in Nerya so the runtime keeps a single
-source of truth.  No imports from ``../Vibe-Trading``.
+The market detection contract is implemented in Nerya so the runtime
+keeps a single source of truth.
 """
 from __future__ import annotations
 

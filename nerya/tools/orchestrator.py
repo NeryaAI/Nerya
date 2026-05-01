@@ -1,7 +1,7 @@
 """ToolOrchestrator — batch-aware fan-out / fan-in over the executor.
 
 A turn often produces multiple ``tool_use`` blocks at once (Claude
-Code, Cursor, and the Anthropic SDK all encourage this). The
+Code, IDE, and the Anthropic SDK all encourage this). The
 orchestrator implements the same fan-out semantics:
 
 * **Read-only concurrent** — descriptors flagged
@@ -11,7 +11,7 @@ orchestrator implements the same fan-out semantics:
   deterministically.
 * **Mixed batch**           — the orchestrator splits the batch:
   read-only group first (parallel), then mutating group (serial),
-  which mirrors Claude Code's two-phase behaviour.
+  which mirrors coding-agent's two-phase behaviour.
 * **Context modifier replay** — modifiers are applied *after* the
   whole batch resolves, in tool-call order. This keeps the post-state
   consistent regardless of the parallel scheduling decisions made by

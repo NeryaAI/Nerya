@@ -1,4 +1,4 @@
-"""Phase 5 — scenario replay for historical sessions.
+"""scenario replay for historical sessions.
 
 Session replay (``nerya.workspace.replay``) answers:
 

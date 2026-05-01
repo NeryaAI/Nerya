@@ -3,9 +3,7 @@
 Previews are *read-only* text summaries of `memory/*.md` and
 `strategies/<id>/learnings.md`. Writes are append-only and are meant to be
 called from the reflection / self-improvement path (or by operator via CLI)
-— never by an untrusted script.
-
-Phase 4 unifies the memory semantics:
+— never by an untrusted script. unifies the memory semantics:
 
 * ``Memory.append_*`` stays the canonical write path (whitelist-enforced).
 * ``Memory.compact_file`` implements TTL-based compaction so persisted

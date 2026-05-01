@@ -5,8 +5,7 @@ fresh :class:`EvalScenario` so callers (CI scripts, dashboards, MCP
 probes) can mutate the user prompt or expected tool calls without
 mutating shared state.
 
-The 10 scenarios mirror Phase 15 of
-``docs/agent-harness-comparison-and-refactor-todo.md``:
+The 10 scenarios mirror of
 
 1. ``read_grep_edit_shell_final``    — happy-path coding task.
 2. ``tool_input_schema_correction``  — tool error -> retry.
@@ -608,7 +607,7 @@ def scenario_template(scenario_id: str) -> EvalScenario:
 
     Raises :class:`KeyError` if ``scenario_id`` isn't registered.
     Operators are expected to layer their own builders on top — this
-    catalog only seeds the canonical Phase 15 reference cases.
+    catalog only seeds the canonical reference cases.
     """
 
     builder = SCENARIO_TEMPLATES[scenario_id]

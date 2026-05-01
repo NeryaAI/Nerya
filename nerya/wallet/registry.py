@@ -409,7 +409,7 @@ def list_configured_providers(
 ) -> list[dict[str, Any]]:
     """Return every wallet binding declared in ``nerya.yml``.
 
-    Plan 2026-04-29 §11 P8 — Nerya now lets operators run *multiple*
+    04-29 §11 P8 — Nerya now lets operators run *multiple*
     wallet providers in parallel by declaring them under
     ``wallet.providers.<wallet_id>`` (each entry carries a provider id
     and a per-id config). The legacy ``wallet.provider`` key still works

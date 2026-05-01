@@ -1,4 +1,4 @@
-"""Scheduled agent session runner (Hermes parity, Phase B).
+"""Scheduled agent session runner (compatibility, ).
 
 When a :class:`ScheduleEntry` declares ``session_kind == "agent"`` it is
 not just a trigger emitter — it asks the cron loop to spawn a fresh,

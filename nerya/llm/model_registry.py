@@ -1,8 +1,8 @@
-"""Plan 25 §5 — model-level metadata registry.
+"""model-level metadata registry.
 
 The :class:`ProviderCapabilities` matrix in :mod:`nerya.llm.capability_matrix`
 answers "does provider X support tool calling?".  This module answers the
-*next* question Hermes already answers: "does *this exact model* support
+*next* question the runtime already answers: "does *this exact model* support
 tool calling, what's its context window, what does it cost, what's the
 knowledge cutoff, can it accept attachments, can it cache prompts?".
 
@@ -359,6 +359,139 @@ BUILTIN_MODELS: dict[tuple[str, str], ModelMetadata] = {
         knowledge_cutoff="2024-08", release_date="2025-02-17",
         status="preview",
     ),
+    # ---- Stepfun (阶跃星辰) ------------------------------------------
+    ("stepfun", "step-2-16k"): _m(
+        id="step-2-16k", provider="stepfun", family="stepfun",
+        display_name="Step-2 16K",
+        context_window=16_384, max_output_tokens=8_192,
+        cost_input_per_m=5.43, cost_output_per_m=21.43,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text",), output_modalities=("text",),
+        knowledge_cutoff="2024-07", release_date="2024-07-23",
+        status="stable",
+    ),
+    ("stepfun", "step-2-mini"): _m(
+        id="step-2-mini", provider="stepfun", family="stepfun",
+        display_name="Step-2 mini",
+        context_window=8_192, max_output_tokens=8_192,
+        cost_input_per_m=0.14, cost_output_per_m=0.57,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text",), output_modalities=("text",),
+        knowledge_cutoff="2024-07", release_date="2024-11-22",
+        status="stable",
+    ),
+    ("stepfun", "step-1-flash"): _m(
+        id="step-1-flash", provider="stepfun", family="stepfun",
+        display_name="Step-1 flash",
+        context_window=8_192, max_output_tokens=8_192,
+        cost_input_per_m=0.14, cost_output_per_m=0.57,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text",), output_modalities=("text",),
+        knowledge_cutoff="2024-05", release_date="2024-09-15",
+        status="stable",
+    ),
+    ("stepfun", "step-1-8k"): _m(
+        id="step-1-8k", provider="stepfun", family="stepfun",
+        display_name="Step-1 8K",
+        context_window=8_192, max_output_tokens=8_192,
+        cost_input_per_m=0.57, cost_output_per_m=2.86,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text",), output_modalities=("text",),
+        knowledge_cutoff="2024-05", release_date="2024-06-01",
+        status="stable",
+    ),
+    ("stepfun", "step-1-32k"): _m(
+        id="step-1-32k", provider="stepfun", family="stepfun",
+        display_name="Step-1 32K",
+        context_window=32_768, max_output_tokens=8_192,
+        cost_input_per_m=2.14, cost_output_per_m=8.57,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text",), output_modalities=("text",),
+        knowledge_cutoff="2024-05", release_date="2024-06-01",
+        status="stable",
+    ),
+    ("stepfun", "step-1-128k"): _m(
+        id="step-1-128k", provider="stepfun", family="stepfun",
+        display_name="Step-1 128K",
+        context_window=131_072, max_output_tokens=8_192,
+        cost_input_per_m=5.71, cost_output_per_m=17.14,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text",), output_modalities=("text",),
+        knowledge_cutoff="2024-05", release_date="2024-06-01",
+        status="stable",
+    ),
+    ("stepfun", "step-1-256k"): _m(
+        id="step-1-256k", provider="stepfun", family="stepfun",
+        display_name="Step-1 256K",
+        context_window=262_144, max_output_tokens=8_192,
+        cost_input_per_m=18.57, cost_output_per_m=55.71,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text",), output_modalities=("text",),
+        knowledge_cutoff="2024-05", release_date="2024-06-01",
+        status="stable",
+    ),
+    ("stepfun", "step-1v-8k"): _m(
+        id="step-1v-8k", provider="stepfun", family="stepfun",
+        display_name="Step-1V 8K",
+        context_window=8_192, max_output_tokens=8_192,
+        cost_input_per_m=7.14, cost_output_per_m=28.57,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text", "image"), output_modalities=("text",),
+        knowledge_cutoff="2024-05", release_date="2024-07-12",
+        status="stable",
+    ),
+    ("stepfun", "step-1v-32k"): _m(
+        id="step-1v-32k", provider="stepfun", family="stepfun",
+        display_name="Step-1V 32K",
+        context_window=32_768, max_output_tokens=8_192,
+        cost_input_per_m=21.43, cost_output_per_m=71.43,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text", "image"), output_modalities=("text",),
+        knowledge_cutoff="2024-05", release_date="2024-07-12",
+        status="stable",
+    ),
+    ("stepfun", "step-1.5v-mini"): _m(
+        id="step-1.5v-mini", provider="stepfun", family="stepfun",
+        display_name="Step-1.5V mini",
+        context_window=32_768, max_output_tokens=8_192,
+        cost_input_per_m=1.14, cost_output_per_m=4.57,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text", "image"), output_modalities=("text",),
+        knowledge_cutoff="2024-08", release_date="2024-12-26",
+        status="stable",
+    ),
+    ("stepfun", "step-1o-vision-32k"): _m(
+        id="step-1o-vision-32k", provider="stepfun", family="stepfun",
+        display_name="Step-1o Vision 32K",
+        context_window=32_768, max_output_tokens=8_192,
+        cost_input_per_m=7.14, cost_output_per_m=28.57,
+        supports_tool_calling=True, supports_structured_output=True,
+        supports_streaming=True,
+        input_modalities=("text", "image"), output_modalities=("text",),
+        knowledge_cutoff="2024-08", release_date="2025-01-15",
+        status="stable",
+    ),
+    ("stepfun", "step-r1-v-mini"): _m(
+        id="step-r1-v-mini", provider="stepfun", family="stepfun",
+        display_name="Step-R1 V mini",
+        context_window=65_536, max_output_tokens=8_192,
+        cost_input_per_m=0.57, cost_output_per_m=8.57,
+        supports_tool_calling=False, supports_streaming=True,
+        supports_reasoning=True,
+        input_modalities=("text", "image"), output_modalities=("text",),
+        knowledge_cutoff="2024-10", release_date="2025-02-20",
+        status="preview",
+    ),
     # ---- Mock -------------------------------------------------------
     # Deterministic offline tier; we still emit metadata so the
     # capability matrix has something to render.
@@ -403,6 +536,12 @@ BUILTIN_ALIASES: dict[str, list[tuple[re.Pattern[str], str]]] = {
         (re.compile(r"^gemini-2\.0-flash(?:-\w+)?$", re.I), "gemini-2.0-flash"),
         (re.compile(r"^gemini-1\.5-pro(?:-\w+)?$", re.I), "gemini-1.5-pro"),
         (re.compile(r"^gemini-1\.5-flash(?:-\w+)?$", re.I), "gemini-1.5-flash"),
+    ],
+    "stepfun": [
+        (re.compile(r"^step-2-16k(?:-exp)?$", re.I), "step-2-16k"),
+        (re.compile(r"^step-1v-8k$", re.I), "step-1v-8k"),
+        (re.compile(r"^step-1v-32k$", re.I), "step-1v-32k"),
+        (re.compile(r"^step-1o-turbo-vision$", re.I), "step-1o-vision-32k"),
     ],
 }
 

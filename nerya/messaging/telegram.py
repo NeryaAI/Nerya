@@ -67,7 +67,7 @@ def send(outbox_messages: Path, message: dict[str, Any], *,
         body["parse_mode"] = parse_mode
     if "disable_web_page_preview" in cfg:
         body["disable_web_page_preview"] = bool(cfg["disable_web_page_preview"])
-    # Plan 21 P0 §2 — inline approval keyboards. Callers can attach a
+    # inline approval keyboards. Callers can attach a
     # ``reply_markup`` directly on the message envelope; the messaging
     # pipeline will set it via ``approval_prompts.ApprovalPrompt``.
     reply_markup = message.get("reply_markup")
@@ -160,7 +160,7 @@ def answer_callback_query(*, channel_cfg: dict[str, Any] | None = None,
                           show_alert: bool = False,
                           resolve_secret: Callable[[str], str | None] | None = None,
                           transport: MessagingTransport | None = None) -> dict[str, Any]:
-    """Plan 21 P0 §2 — acknowledge an inline-keyboard button press.
+    """acknowledge an inline-keyboard button press.
 
     Telegram requires every callback query to be answered within ~15s
     or the spinner stays on the user's screen. We expose a small helper

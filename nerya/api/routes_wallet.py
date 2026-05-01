@@ -66,7 +66,7 @@ def routes():
         }
 
     def list_configured(client, _payload):
-        """Plan 2026-04-29 §11 P8 — every wallet binding declared in
+        """04-29 §11 P8 — every wallet binding declared in
         ``wallet.providers.<id>`` plus the legacy single
         ``wallet.provider`` selection. Used by the dashboard's
         Add-account form so operators can pick a wallet binding by id.
@@ -335,7 +335,7 @@ def routes():
     def portfolio(client, payload):
         """Aggregate balances across every configured wallet account.
 
-        Plan 2026-04-29 §11 P10 — once a wallet provider is installed
+        04-29 §11 P10 — once a wallet provider is installed
         and an account binds to it via ``wallet_id`` plus
         ``provider_config.balances``, the snapshot loop knows how to
         pull the live data. This route reuses that path so the

@@ -1,7 +1,5 @@
 """StrategyContext facade — the only object generated strategy code sees.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §5.2.
-
 Why a facade
 ------------
 Generated strategy ``main.py`` files are agent-authored. Even after
@@ -847,7 +845,7 @@ class StrategyTrading:
         return envelope
 
     # ------------------------------------------------------------------
-    # Plan §11 P6 — typed control-plane helpers. These mirror the
+    # typed control-plane helpers. These mirror the
     # methods on :class:`nerya.sdk.trading_api.TradingAPI` and route
     # through the same :func:`submit_trade_plan` pipeline so strategy
     # code, agent code, and CLI code all share one risk gate path.
@@ -1391,7 +1389,7 @@ def build_strategy_context(
     news_fetchers:
         Optional mapping ``source_id -> NewsFetcher`` registered onto
         :class:`StrategyNews`. Operators ship these via the workspace
-        config; the runner (Phase 3) will look them up by
+        config; the runner will look them up by
         ``manifest.news_sources`` and call this helper.
     clock:
         Optional :class:`StrategyClock`. Defaults to wall-clock.

@@ -127,7 +127,7 @@ export function AddAccountForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // Plan 2026-04-29 §11 P9 — operators can stage the change as a
+  // 04-29 §11 P9 — operators can stage the change as a
   // proposal that another approver clicks through. Defaults to
   // "Save now" for the legacy direct-write behaviour.
   const [submitMode, setSubmitMode] = useState<"apply" | "propose">("apply");

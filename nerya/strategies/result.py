@@ -1,7 +1,5 @@
 """Strategy run result envelope.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §5.2.
-
 Generated strategy code returns a :class:`StrategyResult`; the
 :class:`~nerya.strategies.runner.StrategyRunner` consumes it, journals
 the outcome, and decides whether to escalate, retry, or hand off to

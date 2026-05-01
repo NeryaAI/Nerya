@@ -1,5 +1,5 @@
 /**
- * Strategy runtime types — Phase 8 of the agent-generated strategy
+ * Strategy runtime types — of the agent-generated strategy
  * runtime refactor.
  *
  * These mirror the backend's

@@ -33,7 +33,6 @@ from .registry import SubAgentSpec
 
 
 # Canonical capability-tag ids. Kept in sync with the skill manifest
-# documentation; see ``docs/plans/2026-04-23-nerya-production-readiness-audit.md``.
 CAP_MARKET = "context.market"
 CAP_NEWS = "context.news"
 CAP_ONCHAIN = "context.onchain"

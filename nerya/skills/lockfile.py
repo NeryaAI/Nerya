@@ -1,6 +1,6 @@
-"""Plan 30 P1 §4 — Hermes-style skills hub: trust + hash + lock.
+"""runtime skills hub: trust + hash + lock.
 
-Hermes's skills hub keeps a ``skills.lock`` next to ``skills/installed/``
+The runtime's skills hub keeps a ``skills.lock`` next to ``skills/installed/``
 that records, for every promoted skill, the exact ``sha256`` of its tree
 plus the publisher / source / version it was approved with. The kernel
 verifies the lock at boot and flags drift before anything is loaded —

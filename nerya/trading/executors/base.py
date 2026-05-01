@@ -1,4 +1,4 @@
-"""Executor base class (Plan 2026-04-29 §3.2).
+"""Executor base class (04-29 §3.2).
 
 The state machine is shared by every executor kind:
 
@@ -165,7 +165,7 @@ class Executor(ABC):
             market=market,
             state="created",
             config_json=config.asdict(),
-            plan_json=dict(plan or {}),
+            plan_json=dict,
             intent_id=intent_id,
             plan_id=plan_id,
             position_id=position_id,

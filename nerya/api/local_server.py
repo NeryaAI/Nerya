@@ -38,7 +38,7 @@ def _register(method: str, path: str, handler):
 def _collect_routes() -> None:
     if _ROUTES:
         return
-    for mod in (routes_health, routes_workspace, routes_agent,
+    base_modules = (routes_health, routes_workspace, routes_agent,
                 routes_skills, routes_triggers, routes_trading,
                 routes_llm, routes_memory, routes_strategy_history, routes_scripts,
                 routes_messages, routes_evolution, routes_security,
@@ -49,8 +49,24 @@ def _collect_routes() -> None:
                 routes_strategies_runtime, routes_strategy,
                 routes_operator, routes_inbox, routes_agent_tasks,
                 routes_control_plane, routes_accounts,
-                routes_account_intake):
+                routes_account_intake)
+    for mod in base_modules:
         for method, path, handler in mod.routes():
+            _register(method, path, handler)
+    # Optional integrations: imported only when the operator has
+    # explicitly enabled them in workspace yaml. Each block stays out
+    # of the import graph when disabled so the runtime has no
+    # footprint (no extra modules, no background loops, no outbound
+    # network). ``NERYA_DISABLE_INTEGRATIONS`` short-circuits every
+    # block back to disabled regardless of yaml.
+    try:
+        from ..core.config import load_config as _load_cfg
+        _cfg = _load_cfg()
+    except Exception:
+        _cfg = None
+    if _cfg is not None and _cfg.integration_enabled("anet"):
+        from . import routes_anet  # local import keeps it lazy
+        for method, path, handler in routes_anet.routes():
             _register(method, path, handler)
 
 

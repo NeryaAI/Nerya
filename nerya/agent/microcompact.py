@@ -1,12 +1,10 @@
-"""Microcompact — per-tool-result token cap (Phase 9).
-
-Reference: ``ClaudeCode/.../src/services/compact/microCompact.ts:40``.
+"""Microcompact — per-tool-result token cap.
 
 Where macro-compaction (``transcript_compact``) drops whole
 tool_use/tool_result pairs to keep the *message count* in budget,
 microcompact does the opposite: it keeps every pair but **truncates
 the body** of the bulkiest read/grep/glob/shell/web tool results so
-the per-message token bill goes down. Mirrors what Claude Code
+the per-message token bill goes down. Mirrors what coding-agent
 calls "low-value, high-volume" tool results.
 
 The function is called immediately *before* every model round so

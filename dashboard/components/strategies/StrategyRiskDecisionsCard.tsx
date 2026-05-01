@@ -19,7 +19,7 @@ function fmtTs(ts: number): string {
 }
 
 /**
- * Strategy risk-decision panel (Plan 2026-04-29 §11 P9).
+ * Strategy risk-decision panel (04-29 §11 P9).
  *
  * Reads ``/risk/evaluations`` and renders the most recent
  * rejected/escalated decisions for this strategy with operator

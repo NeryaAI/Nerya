@@ -4,7 +4,7 @@ These tools manipulate *session-level* state (todo list, plan mode flag,
 pending plan body). The state lives in :class:`TaskState`, owned by the
 agent kernel and passed to the executor via ``NativeToolDeps``.
 
-Per the refactor plan:
+Task tools:
 
 * ``todo_write``      — set the *whole* todo list. Mirrors Claude
   Code's TodoWriteTool. ``content`` + ``activeForm`` per item.
@@ -338,7 +338,7 @@ def plan_status_handler(call: ToolCall, *, task_state: TaskState) -> ToolResult:
 
     The model uses this between turns to decide whether the operator has
     accepted the plan body it submitted via ``exit_plan_mode``. Mirrors
-    Claude Code's behaviour where ExitPlanMode returns ``permission_pending``
+    coding-agent's behaviour where ExitPlanMode returns ``permission_pending``
     until the user resolves it; we accomplish the same loop with two tools.
     """
 

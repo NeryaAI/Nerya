@@ -20,9 +20,7 @@ def routes():
         )
 
     def capabilities(client, _payload):
-        """GET /llm/capabilities — live provider support matrix.
-
-        Phase 10/13 operator surface: dashboards use this to render a
+        """GET /llm/capabilities — live provider support matrix. operator surface: dashboards use this to render a
         per-provider capability grid and detect ``unsupported``/
         ``metadata-only`` cells so operators never silently rely on a
         claim that isn't evidence-backed.

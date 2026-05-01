@@ -1,11 +1,11 @@
-"""Session restore — Phase 10.
+"""Session restore — .
 
-Reference points:
+Implementation notes:
 
-* ``ClaudeCode/.../src/utils/sessionRestore.ts:73`` — walks the
+* ``coding-agent/.../src/utils/sessionRestore.ts:73`` — walks the
   transcript looking for the most recent ``TodoWrite`` ``tool_use``
   and replays its arguments into app state.
-* ``ClaudeCode/.../src/utils/sessionRestore.ts:138`` — the same
+* ``coding-agent/.../src/utils/sessionRestore.ts:138`` — the same
   pass restores plan-mode flag + recently-read file pins.
 
 Why we need this in Nerya

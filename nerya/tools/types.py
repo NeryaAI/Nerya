@@ -18,9 +18,7 @@ Why not reuse ``nerya/agent/transcript_blocks.py``?
    actually pass around. The two reconcile at the loop boundary in
    :mod:`nerya.agent.loop`.
 
-References (Cursor refactor docs):
-* ``docs/agent-intelligence-gap-and-cursor-refactor-plan.md`` §3.2
-* ``docs/agent-harness-comparison-and-refactor-todo.md`` Phase 1-2
+Implementation notes:
 """
 
 from __future__ import annotations
@@ -80,9 +78,9 @@ ToolHandler = Callable[..., Union["ToolResult", Awaitable["ToolResult"]]]
 class ToolDescriptor:
     """First-class metadata for a tool registered in :class:`ToolRegistry`.
 
-    Mirrors Claude Code's ``buildTool`` shape but kept Pythonic. Every
-    field is required for permission / orchestration / UI rendering, so
-    we surface them explicitly rather than hiding them behind kwargs.
+    Provider-native tool descriptor kept Pythonic. Every field is
+    required for permission / orchestration / UI rendering, so we surface
+    them explicitly rather than hiding them behind kwargs.
     """
 
     name: str

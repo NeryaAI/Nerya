@@ -1,6 +1,6 @@
 """SubAgentRuntime — a subagent runs as a real child runtime.
 
-Phase 3 — the subagent is no longer a single "build prompt → one LLM call →
+the subagent is no longer a single "build prompt → one LLM call →
 return dict" black box. Each subagent:
 
 * Owns its own iterative observe → think → act loop.
@@ -37,7 +37,6 @@ from .registry import SubAgentSpec
 # they are listed in ``spec.allowed_skills``. Mirrors the parent dispatcher
 # denylist so we reject attempts at the child-runtime layer too.
 #
-# Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §6 —
 # trading is split into ``trading_read`` (allowed for analyst lanes) and
 # ``trading_write`` (blocked everywhere except the main agent). We deny
 # both the legacy umbrella and the write surface here.
@@ -133,7 +132,7 @@ class SubAgentRuntime:
 
     # ---------------------------------------------------------------- config
     def _max_iterations(self) -> int:
-        # Apr-27 2026 (third bump) — Claude Code's ``forkSubagent``
+        # Apr-27 2026 (third bump) — coding-agent's ``forkSubagent``
         # (src/tools/AgentTool/forkSubagent.ts:65) ships ``maxTurns: 200``
         # and the runtime never auto-terminates a subagent below that ceiling.
         # When we asked Nerya to run a "deep research on $TICKER" team plan
@@ -213,7 +212,7 @@ class SubAgentRuntime:
         # Apr-27 2026 — emit subagent lifecycle events on the same
         # process-wide streaming bus the parent kernel uses, so the
         # dashboard / gateway / TUI can display the subagent's *own*
-        # think → act → observe loop live (Claude-Code-TUI parity).
+        # think → act → observe loop live (chat transcript order).
         # Without this the subagent appeared as one opaque
         # "subagent X ran" badge regardless of how many internal
         # iterations it ran. We never let a streaming-bus failure
@@ -223,6 +222,13 @@ class SubAgentRuntime:
             _bus = get_default_bus()
         except Exception:
             _bus = None  # type: ignore[assignment]
+        team_event_fields = {
+            "team_run_id": payload.get("team_run_id"),
+            "team_template": payload.get("team_template"),
+            "team_task_id": payload.get("task_id"),
+            "team_task_owner": payload.get("task_owner"),
+            "team_task_subject": payload.get("task_subject"),
+        }
 
         def _publish(kind: str, **fields: Any) -> None:
             if _bus is None:
@@ -235,6 +241,7 @@ class SubAgentRuntime:
                     strategy_id=strategy_id,
                     session_id=session_id,
                     trigger_event_id=trigger_event_id,
+                    **{k: v for k, v in team_event_fields.items() if v is not None},
                     **fields,
                 )
             except Exception:

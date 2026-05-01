@@ -1,6 +1,6 @@
-"""Plan 21 P0 §2 — inline approval prompts for messaging platforms.
+"""inline approval prompts for messaging platforms.
 
-Hermes ships approve / reject buttons that are tied to an approval id
+the runtime ships approve / reject buttons that are tied to an approval id
 and the actor that initiated the action. Nerya now produces the same
 shape from the existing ``ApprovalRecord`` / pending-approval JSONL
 rows: a platform-agnostic :class:`ApprovalPrompt` plus per-platform
@@ -290,7 +290,7 @@ def resolve_callback(
 ) -> CallbackResolution:
     """Apply an inbound platform callback (button press).
 
-    Plan 21 P0 §2 — Hermes parity: only the actor that owns the
+    compatibility: only the actor that owns the
     approval id may resolve it. Operators can plug a custom
     ``actor_owns`` predicate to enforce that. When ``actor_owns`` is
     ``None`` we accept the callback as-is so the existing single-tenant

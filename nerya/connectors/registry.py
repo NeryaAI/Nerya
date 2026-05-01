@@ -105,7 +105,7 @@ def _resolve_cex_creds(
        map written by :func:`nerya.trading.accounts.upsert_account`.
        Each value must be a ``vault://`` reference.
     2. Legacy flat ``api_key_ref``/``api_secret_ref``/``api_passphrase_ref``
-       keys for hand-edited YAML files predating Plan 2026-04-29.
+       keys for hand-edited YAML files predating 04-29.
 
     Anything that doesn't resolve falls through as an empty string so
     public-data calls keep working without credentials.

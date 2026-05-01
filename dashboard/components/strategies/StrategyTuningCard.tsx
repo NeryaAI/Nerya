@@ -17,7 +17,7 @@ interface Props {
 }
 
 /**
- * Tuning surface — Phase 7/8 of the agent-generated strategy runtime
+ * Tuning surface — of the agent-generated strategy runtime
  * refactor.
  *
  * Shows the strategy tuner's current prompt, schedule, and the most

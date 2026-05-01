@@ -1,6 +1,6 @@
 """Sub-agent native tools — wrap :mod:`nerya.subagents` for the kernel.
 
-Hermes parity: the parent kernel exposes a small handful of native tools
+compatibility: the parent kernel exposes a small handful of native tools
 that let the model spawn a child runtime instead of reaching into
 ``runtime.call("subagents", "spawn", ...)`` through the legacy bridge.
 

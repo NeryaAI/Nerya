@@ -1,7 +1,5 @@
 """Operator-facing BFF routes.
-
-Plan ref: ``docs/frontend-agent-workspace-redesign-plan.md`` §2.14, §2.15,
-Phase 25.
+.
 
 This module ships three endpoints the dashboard's new top-level shell
 consumes directly:

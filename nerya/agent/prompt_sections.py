@@ -1,8 +1,6 @@
 """Layered prompt assembly for the workspace-native agent loop.
 
-Plan refs:
-- ``docs/coding-agent-and-file-tools-improvement-plan.md`` §3.1
-- Mirrors Claude Code's "system message is a stack of named sections"
+- Mirrors coding-agent's "system message is a stack of named sections"
   pattern. The kernel composes the prompt from explicit, ordered
   sections so individual layers (project rules, skill catalog, tool
   catalog, context budget header) can be re-rendered/truncated

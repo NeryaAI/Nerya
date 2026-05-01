@@ -1,7 +1,5 @@
 """Compile strategy schedules into the existing trigger-schedule schema.
 
-Plan ref: ``2026-04-28-agent-generated-strategy-runtime-refactor.md`` §5.6.
-
 The runtime intentionally does **not** ship a second scheduler. Every
 strategy that wants to trade on a cron is rendered down to a row in
 ``workspace/triggers/schedules.yml`` so the operator's existing
@@ -15,8 +13,7 @@ The bridge installs *up to* two rows per strategy:
 
 * ``strategy_<id>_tick``       — fires the trading tick. ``strategy_id``
   is set so existing journal queries by strategy keep working.
-* ``strategy_<id>_tuning``     — fires the self-evolution tuning loop
-  (Phase 7). Only installed when ``manifest.tuning.enabled`` is true.
+* ``strategy_<id>_tuning``     — fires the self-evolution tuning loop. Only installed when ``manifest.tuning.enabled`` is true.
 
 The two schedules are independent: pausing the trading tick does not
 pause tuning, and vice versa. That separation matters because we
@@ -40,8 +37,8 @@ The trigger router uses ``target=skill:strategy.run_tick`` for
 trading ticks and ``target=skill:strategy.run_tuning`` for tuning
 ticks. The actual handlers live in :mod:`nerya.api.routes_strategies_runtime`
 and :mod:`nerya.cli.commands.strategy`; both ultimately call
-:meth:`StrategyRunner.run_tick` (Phase 3) or, for tuning, the
-:class:`StrategyEvolutionRunner` from Phase 7.
+:meth:`StrategyRunner.run_tick` or, for tuning, the
+:class:`StrategyEvolutionRunner` from .
 """
 
 from __future__ import annotations

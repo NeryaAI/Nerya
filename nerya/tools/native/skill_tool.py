@@ -1,6 +1,6 @@
 """``Skill`` native tool — load a SKILL.md playbook into the conversation.
 
-Mirrors :file:`ClaudeCode/anthropic-ai-claude-code-2.1.88-expanded/src/tools/SkillTool/SkillTool.ts`
+Mirrors :file:`coding-agent/anthropic-ai-coding-agent-2.1.88-expanded/src/tools/SkillTool/SkillTool.ts`
 (``executeRemoteSkill`` + the inline branch). One single tool that the
 model invokes with ``{"skill": "<name>"}``; the handler:
 
@@ -11,7 +11,7 @@ model invokes with ``{"skill": "<name>"}``; the handler:
 4. prepends a ``Base directory for this skill: <abs path>`` header so
    the model can reference scripts/assets next to the skill,
 5. substitutes ``${CLAUDE_SKILL_DIR}`` placeholders with the same path
-   (Hermes / Claude Code convention),
+   (agent skill runtime convention),
 6. returns the resulting text as the tool result — the workspace-native
    loop puts it in a ``tool_result`` block, which the model reads on
    the next turn exactly as if the playbook had been quoted in a user
@@ -26,7 +26,7 @@ Why a separate tool when ``skill_view`` already exists?
 -------------------------------------------------------
 ``skill_view`` returns the *raw* SKILL.md (frontmatter included) and
 takes ``skill_id`` as its arg name — that's useful for operator
-debugging and dashboards, but it's not the shape Claude Code's model
+debugging and dashboards, but it's not the shape coding-agent's model
 expects. ``Skill`` takes the ``skill`` field name (matches the
 provider-side Anthropic prompt convention), strips the frontmatter,
 and prepends the base-dir header. Keeping the two tools separate lets
@@ -106,7 +106,7 @@ SKILL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
 def _strip_frontmatter(text: str) -> str:
     """Drop a leading YAML frontmatter block, if present.
 
-    Mirrors :file:`ClaudeCode/.../utils/frontmatterParser.ts` for the
+    Mirrors :file:`coding-agent/.../utils/frontmatterParser.ts` for the
     common case. The listing already shows the description /
     when_to_use; including the YAML in the body is just noise.
     """
@@ -117,7 +117,7 @@ def _strip_frontmatter(text: str) -> str:
 def _normalise_dir(path: Path) -> str:
     """Render ``path`` with forward slashes so cross-OS skills work.
 
-    Claude Code does the same conversion on Windows (see
+    coding-agent does the same conversion on Windows (see
     ``executeRemoteSkill`` line ~1075). Skills frequently contain
     relative refs like ``./scripts/foo.py`` and the model is far more
     comfortable with POSIX-style paths.
@@ -136,7 +136,7 @@ def _normalise_name(raw: Any) -> str:
 def _substitute_args(body: str, args: str) -> str:
     """Replace ``$ARGUMENTS`` markers with the caller-supplied string.
 
-    Claude Code's ``processPromptSlashCommand`` performs the same
+    coding-agent's ``processPromptSlashCommand`` performs the same
     interpolation. When ``args`` is empty the marker is dropped so a
     skill written for an arg-less invocation reads cleanly.
     """

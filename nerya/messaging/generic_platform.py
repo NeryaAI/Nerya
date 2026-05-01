@@ -1,4 +1,4 @@
-"""Webhook-backed sender for Hermes-aligned gateway platforms."""
+"""Webhook-backed sender for gateway platforms."""
 
 from __future__ import annotations
 

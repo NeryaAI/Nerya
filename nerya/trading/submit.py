@@ -251,7 +251,7 @@ def submit_trade_intent(
                     "risk_decision": risk.asdict(),
                 }
 
-    # Plan §11 P5 — shadow strategies stop here. The intent is fully
+    # shadow strategies stop here. The intent is fully
     # journaled and the risk decision is persisted, but no order is
     # ever sent (paper or live). This gives operators a side-by-side
     # stream against paper without touching the real-money venue.
@@ -382,7 +382,7 @@ def submit_trade_plan(
 ) -> dict[str, Any]:
     """Run a :class:`TradePlan` through the new control-plane.
 
-    Plan 2026-04-29 §3 / §4 / §6 — the full pipeline:
+    04-29 §3 / §4 / §6 — the full pipeline:
 
     1. Translate the plan into a legacy :class:`TradeIntent` for the
        existing :class:`RiskGate`. This preserves every existing
@@ -465,7 +465,7 @@ def submit_trade_plan(
                     "risk_decision": risk.asdict(),
                 }
 
-    # Plan §11 P5 — shadow strategies stop before capital reservation
+    # shadow strategies stop before capital reservation
     # and executor creation. The intent is journalled and the risk
     # decision (built against a real-money snapshot) is persisted so
     # the dashboard can compare shadow intents against the eventual
@@ -596,7 +596,7 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
     a notional estimate so the dedupe + cap checks still bite.
 
     We also stamp ``protection_present`` into ``intent.meta`` so the
-    canary risk hook (Plan §11 P5) can reject opens that ship without
+    canary risk hook can reject opens that ship without
     a protection rule.
     """
     side = plan.buy_or_sell if plan.action in (

@@ -1,7 +1,5 @@
 """Agent task routes.
 
-Plan ref: ``docs/frontend-agent-workspace-redesign-plan.md`` Phase 27.
-
 In the operator-facing model a *task* is the long-lived unit the user
 cares about ("plan a strategy", "rebalance portfolio", "answer this
 question"). It maps 1:1 onto an :class:`agent.session.SessionState`,

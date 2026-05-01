@@ -1,6 +1,6 @@
 """Cooperative cancellation tokens for ``AgentKernel.run_turn`` / ``ToolRunner``.
 
-Hermes' agent loop has interrupt + redirect semantics so an operator can
+The runtime' agent loop has interrupt + redirect semantics so an operator can
 abort a long inspection/build job without waiting for the planner to
 realise it should stop. The Nerya harness lacked any cancellation
 contract, so a long-running tool blocked the whole turn.
@@ -12,8 +12,6 @@ it through ``call(...)`` and check it before each retry.
 
 The token is intentionally process-local — for distributed cancellation
 we would back it with a journal flag (see TODO at the bottom).
-
-Plan ref: ``docs/plans/2026-04-25-nerya-hermes-capability-gap-audit/01-harness-and-tools.md`` P0 §5.
 """
 
 from __future__ import annotations
@@ -94,8 +92,7 @@ def maybe(token: Optional[CancelToken]) -> CancelToken:
 
 # Process-wide registry of live tokens keyed by session/turn id, so the
 # dashboard's POST /agent/interrupt can flip the right token without
-# holding a Python reference. Plan 05 P0 §1.
-_REGISTRY_LOCK = threading.Lock()
+# holding a Python reference. _REGISTRY_LOCK = threading.Lock()
 _REGISTRY: dict[str, CancelToken] = {}
 
 

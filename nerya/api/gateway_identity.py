@@ -1,6 +1,6 @@
 """Gateway identity + event-id helpers.
 
-Plan 23 §10 calls out that ``telegram_{chat_id}`` session ids and
+calls out that ``telegram_{chat_id}`` session ids and
 ``tg_reply_{chat_id}_{time}`` outbox ids are constructed inline, so we
 cannot dedupe properly across threads / users / workspaces and cannot
 build a clean platform-id mirror. This module centralises that contract

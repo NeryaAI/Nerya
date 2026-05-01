@@ -1,4 +1,4 @@
-"""Plan 01 §3 — operator-mode presets.
+"""operator-mode presets.
 
 A *preset* is a coarse-grained policy the operator picks at workspace
 config time (``agent.operator.preset``).  It tells the harness which

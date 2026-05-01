@@ -1,6 +1,6 @@
 """Strategy lifecycle graph.
 
-Plan 2026-04-29 §3.1 / §11 P5 — strategies are first-class runtime
+04-29 §3.1 / §11 P5 — strategies are first-class runtime
 entities with an explicit promotion graph. The previous shape only
 had ``draft / paper / canary / live / paused / archived``; the
 control-plane refactor adds a richer ramp:
@@ -9,7 +9,7 @@ States
 ------
 - ``draft``         — agent-authored package, not yet validated.
 - ``static_review`` — passed schema + static analyzer (no direct
-  connector / vault / network imports). Plan §6 requires this gate.
+  connector / vault / network imports). requires this gate.
 - ``backtested``    — has at least one accepted backtest evidence
   artifact attached. Required before any account-bound mode.
 - ``paper``         — paper-only execution against a virtual ledger.
@@ -139,7 +139,7 @@ def is_account_bindable(status: str) -> bool:
 
     A ``draft`` / ``static_review`` / ``backtested`` strategy must not
     receive an account binding to a real-money account profile —
-    Plan §11 P5 verification #1.
+    verification #1.
     """
     return status in ACCOUNT_BINDABLE_STATES
 

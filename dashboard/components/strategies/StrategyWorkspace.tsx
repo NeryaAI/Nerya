@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * StrategyWorkspace — Phase 8 of the agent-generated strategy runtime
+ * StrategyWorkspace — of the agent-generated strategy runtime
  * refactor.
  *
  * Renders the operator surface for one strategy package. Talks to the

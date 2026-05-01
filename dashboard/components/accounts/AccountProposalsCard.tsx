@@ -29,7 +29,7 @@ function formatValue(value: unknown): string {
 }
 
 /**
- * Pending account proposal review card (Plan 2026-04-29 §11 P9).
+ * Pending account proposal review card (04-29 §11 P9).
  *
  * Shows account_roster_patch proposals staged via /accounts/upsert
  * with ``apply: false``. The operator can approve (writes the YAML
