@@ -1,0 +1,307 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url("https://rsms.me/inter/inter.css");
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+:root {
+  color-scheme: dark;
+  --grid: rgba(139, 92, 246, 0.06);
+  --bg-deep: #04040d;
+  --bg: #0a0b1a;
+  --card: rgba(19, 20, 38, 0.72);
+  --card-hi: rgba(30, 30, 48, 0.86);
+  --line: rgba(139, 92, 246, 0.14);
+  --line-hi: rgba(139, 92, 246, 0.32);
+  --ok: #10d993;
+  --warn: #f5a524;
+  --err: #ef4560;
+  --violet: #8b5cf6;
+  --violet-2: #b48bff;
+  --fluid: #22d3ee;
+  --fluid-soft: rgba(34, 211, 238, 0.16);
+}
+
+@supports (font-variation-settings: normal) {
+  html { font-family: "InterVariable", "Inter", system-ui, sans-serif; }
+}
+
+html, body {
+  background-color: var(--bg-deep);
+  color: #e6e5f1;
+  font-feature-settings: "cv03", "cv04", "cv09", "ss01";
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background-image:
+    radial-gradient(1100px 600px at 8% -10%, rgba(139, 92, 246, 0.18), transparent 60%),
+    radial-gradient(900px 520px at 110% 0%, rgba(34, 211, 238, 0.08), transparent 55%),
+    radial-gradient(720px 520px at 60% 120%, rgba(180, 139, 255, 0.10), transparent 55%),
+    linear-gradient(180deg, #04040d 0%, #0a0b1a 100%);
+  min-height: 100vh;
+}
+
+/* Aurora — slow-drifting fluid mesh that lives in a fixed layer behind
+   the app. ::before / ::after give us two independently animated blobs
+   so the motion never looks tiled. */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: -10%;
+  z-index: -1;
+  pointer-events: none;
+  filter: blur(96px);
+  opacity: 0.7;
+  will-change: transform;
+}
+body::before {
+  background:
+    radial-gradient(40% 36% at 18% 22%, rgba(139, 92, 246, 0.55), transparent 70%),
+    radial-gradient(30% 30% at 78% 10%, rgba(34, 211, 238, 0.34), transparent 70%);
+  animation: aurora-shift 18s ease-in-out infinite;
+}
+body::after {
+  background:
+    radial-gradient(34% 32% at 82% 88%, rgba(180, 139, 255, 0.42), transparent 70%),
+    radial-gradient(28% 30% at 12% 86%, rgba(16, 217, 147, 0.18), transparent 70%);
+  animation: aurora-shift 26s ease-in-out infinite reverse;
+}
+@media (prefers-reduced-motion: reduce) {
+  body::before, body::after { animation: none; }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-brand-500/15 bg-[rgba(19,20,38,0.72)] backdrop-blur-glass
+           shadow-glass;
+  }
+  .card-hover {
+    @apply hover:border-brand-500/30 transition-colors;
+  }
+  /* Liquid-glass surface — premium feature panels and the chat
+     transcript card. Uses a soft inner highlight + heavy backdrop
+     blur to feel translucent. */
+  .glass {
+    @apply rounded-2xl border border-white/5 bg-white/[0.03] backdrop-blur-glass shadow-glass
+           supports-[backdrop-filter]:bg-white/[0.025];
+  }
+  .glass-hi {
+    @apply rounded-2xl border border-white/10 bg-white/[0.05] backdrop-blur-glass shadow-glass;
+  }
+  /* Subtle "thinking" gradient ring used on the agent avatar / running
+     turn indicators. */
+  .ring-ai {
+    background-image:
+      conic-gradient(from 180deg at 50% 50%,
+        rgba(139, 92, 246, 0) 0deg,
+        rgba(139, 92, 246, 0.7) 120deg,
+        rgba(34, 211, 238, 0.7) 240deg,
+        rgba(139, 92, 246, 0) 360deg);
+  }
+  .card-head {
+    @apply flex items-center justify-between px-5 py-3.5 border-b border-brand-500/10;
+  }
+  .card-title {
+    @apply text-[13px] font-medium text-ink-100 tracking-wide;
+  }
+  .card-subtle {
+    @apply text-[11px] text-ink-400;
+  }
+  .stat-label {
+    @apply text-[10px] uppercase tracking-[0.18em] text-ink-400 font-medium;
+  }
+  .stat-value {
+    @apply text-[26px] leading-tight font-semibold text-white tabular-nums;
+  }
+  .stat-delta-up { @apply text-accent-400 text-xs font-medium; }
+  .stat-delta-down { @apply text-[#ef4560] text-xs font-medium; }
+
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full border border-ink-700 bg-ink-800/70 px-2 py-0.5 text-[11px] text-ink-200;
+  }
+  .pill-ok { @apply border-accent-400/40 bg-accent-400/10 text-accent-400; }
+  .pill-warn { @apply border-[#f5a524]/40 bg-[#f5a524]/10 text-[#f5a524]; }
+  .pill-err { @apply border-[#ef4560]/40 bg-[#ef4560]/10 text-[#ef4560]; }
+  .pill-brand { @apply border-brand-500/40 bg-brand-500/15 text-brand-200; }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-md bg-ink-800/70 border border-brand-500/20 px-2 py-0.5 text-[11px] text-ink-200 font-mono;
+  }
+  .divider { @apply border-t border-brand-500/10; }
+
+  .table {
+    @apply w-full text-sm text-ink-200;
+  }
+  .table th {
+    @apply text-left font-normal text-[10px] uppercase tracking-[0.14em] text-ink-400 border-b border-brand-500/10 py-2.5 px-3;
+  }
+  .table td {
+    @apply border-b border-brand-500/10 py-3 px-3 align-top;
+  }
+  .table tr:hover td { @apply bg-brand-500/5; }
+
+  .embedded-scroll {
+    @apply overflow-auto overscroll-contain;
+    scrollbar-gutter: stable;
+  }
+  .embedded-list-scroll {
+    @apply max-h-80 overflow-auto overscroll-contain pr-1;
+    scrollbar-gutter: stable;
+  }
+  .embedded-list-scroll-sm {
+    @apply max-h-48 overflow-auto overscroll-contain pr-1;
+    scrollbar-gutter: stable;
+  }
+  .embedded-list-scroll-lg {
+    @apply max-h-[420px] overflow-auto overscroll-contain pr-1;
+    scrollbar-gutter: stable;
+  }
+  .embedded-table-scroll {
+    @apply max-h-[420px] overflow-auto overscroll-contain rounded-lg border border-brand-500/10;
+    scrollbar-gutter: stable;
+  }
+  .embedded-table-scroll > table {
+    min-width: 100%;
+  }
+  .embedded-table-scroll thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: rgba(10, 11, 26, 0.96);
+    backdrop-filter: blur(12px);
+  }
+
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors;
+  }
+  .btn-ghost {
+    @apply btn text-ink-200 border border-brand-500/20 hover:bg-brand-500/10 hover:border-brand-500/40 hover:text-white;
+  }
+  .btn-primary {
+    @apply btn bg-brand-500 text-white hover:bg-brand-400 shadow-glow;
+  }
+
+  .input-dark {
+    @apply w-full bg-ink-900 border border-brand-500/20 rounded-md px-3 py-1.5 text-xs
+           text-ink-100 placeholder:text-ink-500 focus:outline-none focus:border-brand-500/60;
+  }
+  textarea.input-dark { @apply font-mono; }
+
+  .mode-toggle-wrap {
+    @apply inline-flex rounded-full border border-brand-500/20 bg-ink-900/60 p-0.5;
+  }
+  .mode-toggle-btn {
+    @apply px-3.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] rounded-full transition-colors;
+  }
+  .mode-toggle-active {
+    @apply bg-brand-500 text-white shadow-glow;
+  }
+  .mode-toggle-idle {
+    @apply text-ink-300 hover:text-white;
+  }
+
+  .icon-btn {
+    @apply inline-flex items-center justify-center w-9 h-9 rounded-lg border border-brand-500/15 bg-ink-900/50
+           text-ink-300 hover:border-brand-500/40 hover:text-white transition-colors relative;
+  }
+
+  .sidebar-item {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all;
+  }
+  .sidebar-item-idle {
+    @apply text-ink-300 hover:bg-brand-500/10 hover:text-white;
+  }
+  .sidebar-item-active {
+    @apply bg-gradient-to-r from-brand-500/30 via-brand-500/15 to-transparent text-white
+           shadow-[inset_2px_0_0_#b48bff,0_0_24px_-6px_rgba(139,92,246,0.45)];
+  }
+
+  /* Gradient text — used for hero titles and brand wordmarks. */
+  .text-gradient-brand {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(
+      120deg,
+      #ffffff 0%,
+      #c9a8ff 38%,
+      #67e8f9 72%,
+      #ffffff 100%
+    );
+  }
+  .text-gradient-ai {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(
+      90deg,
+      #b48bff 0%,
+      #22d3ee 100%
+    );
+  }
+
+  /* AI-native message bubbles — used by the chat transcript. */
+  .bubble-user {
+    @apply rounded-2xl rounded-br-md border border-brand-500/30
+           bg-gradient-to-br from-brand-500/30 to-brand-700/10
+           px-4 py-3 text-sm text-white shadow-glow;
+  }
+  .bubble-ai {
+    @apply rounded-2xl rounded-bl-md border border-white/10
+           bg-white/[0.04] backdrop-blur-glass
+           px-4 py-3 text-sm text-ink-100 shadow-glass;
+    border-left: 2px solid rgba(34, 211, 238, 0.55);
+  }
+  .typing-dot {
+    @apply inline-block w-1.5 h-1.5 rounded-full bg-fluid-400;
+    animation: ai-pulse 1.4s ease-in-out infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: 0.18s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.36s; }
+
+  /* Skeleton shimmer — replaces "Loading runtime status…" plain text
+     placeholders with a moving gradient. */
+  .skeleton {
+    @apply rounded-md;
+    background: linear-gradient(
+      90deg,
+      rgba(139, 92, 246, 0.06) 0%,
+      rgba(139, 92, 246, 0.16) 50%,
+      rgba(139, 92, 246, 0.06) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 2.4s linear infinite;
+  }
+}
+
+.grid-bg {
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-position: -1px -1px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track { background: #0a0b1a; }
+::-webkit-scrollbar-thumb {
+  background: #2a2a3e;
+  border-radius: 4px;
+  border: 2px solid #0a0b1a;
+}
+::-webkit-scrollbar-thumb:hover { background: #454560; }
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(16, 217, 147, 0.55); }
+  70% { box-shadow: 0 0 0 10px rgba(16, 217, 147, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 217, 147, 0); }
+}
+.pulse-ring { animation: pulse-ring 2s infinite; }
+
+@keyframes pulse-violet {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.55); }
+  50% { box-shadow: 0 0 0 10px rgba(139, 92, 246, 0); }
+}
+.pulse-violet { animation: pulse-violet 2.5s infinite; }

@@ -1,0 +1,815 @@
+// Chat thread model + localStorage persistence.
+//
+// Threads are stored entirely client-side — the backend `/agent/run_turn`
+// endpoint is stateless (every call builds its own context from the workspace
+// journals), so we just keep the rendered transcript locally for now.
+
+export type Role = "user" | "assistant";
+
+export type ToolTraceEntry = {
+  skill_id?: string;
+  action?: string;
+  caller?: string;
+  ok?: boolean;
+  error?: string | null;
+  error_kind?: string | null;
+  elapsed_ms?: number | null;
+  attempts?: number;
+  result?: unknown;
+  payload?: Record<string, unknown>;
+  budget_snapshot?: Record<string, unknown>;
+};
+
+export type ActionRecord = {
+  action: string;
+  result?: unknown;
+  error?: string;
+  error_kind?: string;
+};
+
+export type GatewayEvent = {
+  phase?: string;
+  status?: string;
+  text?: string;
+  wall_ms?: number | null;
+  detail?: Record<string, unknown>;
+};
+
+/** Phase 14 — provider-native block envelope from
+ * :class:`WorkspaceNativeAgentLoop`. Each envelope wraps one of:
+ *   - ``text``           — model's natural-language reply chunk
+ *   - ``thinking``       — extended-reasoning trace (only when the
+ *                          provider exposes it)
+ *   - ``tool_use``       — model decided to call a tool
+ *   - ``tool_result``    — orchestrator response for a previous
+ *                          ``tool_use``
+ *
+ * The shape is intentionally permissive — different providers carry
+ * slightly different fields and we do not want the dashboard to break
+ * when the kernel adds richer metadata.
+ */
+export type NativeBlockKind =
+  | "text"
+  | "thinking"
+  | "tool_use"
+  | "tool_result"
+  | string;
+
+export type NativeBlock = {
+  kind?: NativeBlockKind;
+  index?: number;
+  iteration?: number;
+  ts?: string;
+  // text / thinking
+  text?: string;
+  // tool_use
+  call_id?: string;
+  action?: string;
+  skill_id?: string;
+  payload?: Record<string, unknown>;
+  // tool_result
+  ok?: boolean;
+  error?: string | null;
+  error_kind?: string | null;
+  elapsed_ms?: number | null;
+  result?: unknown;
+  // catch-all
+  [key: string]: unknown;
+};
+
+export type NativeBlockEnvelope = {
+  block?: NativeBlock;
+  // Some providers/serialisers flatten the payload into the envelope
+  // root; treat those as the block itself.
+  kind?: NativeBlockKind;
+  ts?: string;
+  index?: number;
+  iteration?: number;
+  [key: string]: unknown;
+};
+
+export type TurnPayload = {
+  trigger_event_id?: string | null;
+  plan?: { kind?: string; tier?: string };
+  decision?: Record<string, unknown> & {
+    reasoning?: string;
+    action?: string;
+    actions?: ActionRecord[];
+  };
+  actions?: ActionRecord[];
+  subagents?: Record<string, unknown>;
+  tool_trace?: ToolTraceEntry[];
+  budget?: Record<string, unknown>;
+  reply_text?: string;
+  final_text?: string;
+  events?: GatewayEvent[];
+  turn_id?: string;
+  stopped_reason?: string | null;
+  /** Phase 14 — block envelopes emitted by the workspace-native agent
+   * loop. Empty under the legacy JSON-decision harness; populated when
+   * the backend feature flag ``agent.harness.native_loop`` is on.
+   * The dashboard prefers ``blocks`` over ``actions``/``tool_trace``
+   * when this array is non-empty. */
+  blocks?: NativeBlockEnvelope[];
+  /** Identifies which agent harness produced this turn. Useful for
+   * debug overlays (legacy vs native). */
+  harness?: "legacy" | "native" | string;
+};
+
+export type UserMessage = {
+  id: string;
+  role: "user";
+  ts: number;
+  text: string;
+  backend_message_id?: string;
+};
+
+/** One frame of the live agent run, sourced from
+ * ``GET /agent/stream/events?after_seq=N`` (see
+ * ``nerya/agent/streaming.py``).
+ *
+ * The bus emits dozens of event ``kind``s — we surface the ones that
+ * matter for human observability in chat (start/progress/complete tool
+ * calls, journalled turn steps, approval requests). Everything else is
+ * ignored at render-time but still pushed to ``live_events`` so the
+ * advanced "raw events" panel can show the full trace.
+ */
+export type LiveEvent = {
+  kind: string;
+  seq: number;
+  event_id?: string;
+  ts?: number;
+  // Frequently populated payload fields. Treat all as optional so the
+  // schema can grow without breaking renders.
+  skill_id?: string;
+  action?: string;
+  caller?: string;
+  ok?: boolean;
+  error?: string | null;
+  error_kind?: string | null;
+  elapsed_ms?: number | null;
+  message?: string;
+  text?: string;
+  step?: string;
+  status?: string;
+  detail?: Record<string, unknown>;
+  payload?: Record<string, unknown>;
+  reasoning_effort?: string;
+  reasoning_tokens?: number;
+  provider?: string;
+  model?: string;
+  approval_id?: string;
+  session_id?: string;
+  strategy_id?: string;
+  // Catch-all so renderers can dig deeper without TS blocking us.
+  [key: string]: unknown;
+};
+
+export type AssistantMessage = {
+  id: string;
+  role: "assistant";
+  ts: number;
+  backend_message_id?: string;
+  loading?: boolean;
+  error?: string;
+  turn?: TurnPayload;
+  started_ms?: number;
+  elapsed_ms?: number;
+  /** In-flight + post-turn streaming events from
+   * ``/agent/stream/events``. Captured while ``loading`` is ``true`` so
+   * the UI can render a live activity timeline; retained after the
+   * turn returns so users can audit what happened step-by-step.
+   */
+  live_events?: LiveEvent[];
+  /** Highest seq we've already ingested for ``live_events``. Used as
+   * the ``after_seq`` cursor for the next poll, so we never duplicate
+   * frames and never miss frames that arrived between polls.
+   */
+  live_cursor?: number;
+};
+
+export type ChatMessage = UserMessage | AssistantMessage;
+
+export type ReasoningEffort =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
+
+export type PermissionMode = "default" | "yolo";
+
+export type ChatRunSettings = {
+  reasoning_effort: ReasoningEffort;
+  permission_mode: PermissionMode;
+  model_tier: string;
+  model_provider: string;
+  model_id: string;
+};
+
+export type ChatModelOption = {
+  key: string;
+  label: string;
+  tier?: string;
+  provider: string;
+  model: string;
+  source: "tier" | "catalog";
+};
+
+export type ChatThread = {
+  id: string;
+  title: string;
+  created_ts: number;
+  updated_ts: number;
+  messages: ChatMessage[];
+  /** When true, this thread mirrors a backend session that was started
+   * outside the dashboard (curl, gateway, scripted run). The transcript
+   * is reconstructed from the agent journal on hydrate. New messages
+   * sent into this thread will reuse ``id`` as the ``session_id`` so
+   * the conversation continues against the same on-disk session.
+   */
+  imported?: boolean;
+  /** Last time we re-pulled this thread's transcript from the backend.
+   * Used to decide whether a refresh on focus is worth doing. */
+  imported_at?: number;
+};
+
+const STORAGE_KEY = "nerya.chat.threads.v1";
+const ACTIVE_KEY = "nerya.chat.active";
+const SETTINGS_KEY = "nerya.chat.runSettings.v1";
+
+export const DEFAULT_CHAT_RUN_SETTINGS: ChatRunSettings = {
+  reasoning_effort: "off",
+  permission_mode: "default",
+  model_tier: "",
+  model_provider: "",
+  model_id: "",
+};
+
+export function uuid(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function isBrowser() {
+  return typeof window !== "undefined" && typeof localStorage !== "undefined";
+}
+
+export function loadThreads(): ChatThread[] {
+  if (!isBrowser()) return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed as ChatThread[];
+  } catch {
+    return [];
+  }
+}
+
+export function saveThreads(threads: ChatThread[]) {
+  if (!isBrowser()) return;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(threads));
+  } catch {
+    // ignore quota errors — the UI will keep working with in-memory state.
+  }
+}
+
+export function loadActiveId(): string | null {
+  if (!isBrowser()) return null;
+  return localStorage.getItem(ACTIVE_KEY);
+}
+
+export function saveActiveId(id: string | null) {
+  if (!isBrowser()) return;
+  if (id === null) localStorage.removeItem(ACTIVE_KEY);
+  else localStorage.setItem(ACTIVE_KEY, id);
+}
+
+export function loadRunSettings(): ChatRunSettings {
+  if (!isBrowser()) return DEFAULT_CHAT_RUN_SETTINGS;
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return DEFAULT_CHAT_RUN_SETTINGS;
+    const parsed = JSON.parse(raw) as Partial<ChatRunSettings>;
+    const effort = parsed.reasoning_effort;
+    const mode = parsed.permission_mode;
+    return {
+      reasoning_effort:
+        effort && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(effort)
+          ? effort
+          : DEFAULT_CHAT_RUN_SETTINGS.reasoning_effort,
+      permission_mode: mode === "yolo" ? "yolo" : "default",
+      model_tier:
+        typeof parsed.model_tier === "string" ? parsed.model_tier.trim() : "",
+      model_provider:
+        typeof parsed.model_provider === "string"
+          ? parsed.model_provider.trim().toLowerCase()
+          : "",
+      model_id:
+        typeof parsed.model_id === "string" ? parsed.model_id.trim() : "",
+    };
+  } catch {
+    return DEFAULT_CHAT_RUN_SETTINGS;
+  }
+}
+
+export function saveRunSettings(settings: ChatRunSettings) {
+  if (!isBrowser()) return;
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // ignore quota errors; the in-memory setting still applies.
+  }
+}
+
+export function deriveTitle(text: string): string {
+  const clean = text.trim().replace(/\s+/g, " ");
+  if (clean.length <= 60) return clean;
+  return clean.slice(0, 57) + "...";
+}
+
+export function newThread(seedText?: string): ChatThread {
+  const now = Date.now();
+  return {
+    id: uuid(),
+    title: seedText ? deriveTitle(seedText) : "New chat",
+    created_ts: now,
+    updated_ts: now,
+    messages: [],
+  };
+}
+
+export function upsertThread(
+  threads: ChatThread[],
+  next: ChatThread
+): ChatThread[] {
+  const i = threads.findIndex((t) => t.id === next.id);
+  if (i < 0) return [next, ...threads];
+  const copy = threads.slice();
+  copy[i] = next;
+  return copy;
+}
+
+/**
+ * Convert the bus-event stream from ``/agent/stream/events`` into the
+ * Anthropic-style block envelope shape used by the dashboard's
+ * ``NativeBlocksTrack`` renderer. The kernel maps native blocks ↔ bus
+ * events 1:1 on the way out (see ``nerya/agent/kernel.py`` ``_event_sink``):
+ *
+ *   text  block  → ``message.delta``      (accumulated)
+ *   thinking      → ``turn.step`` step.kind=thinking
+ *   tool_use      → ``tool.start``
+ *   tool_result   → ``tool.complete``
+ *
+ * Reversing the mapping lets us render live progress through the same
+ * block UI used for the final ``turn.blocks`` payload — one transcript
+ * lens for both streaming and committed turns.
+ */
+export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
+  const out: NativeBlockEnvelope[] = [];
+  let textAccum = "";
+  let textIdx: number | null = null;
+
+  function flushText() {
+    if (textIdx !== null) {
+      // The accumulated text block is already pushed; nothing else to
+      // do — text is live-updated in place via ``out[textIdx]``.
+      textIdx = null;
+      textAccum = "";
+    }
+  }
+
+  const callIndex = new Map<string, number>();
+  const approvalIndex = new Map<string, number>();
+  const subagentIndex = new Map<string, number>();
+  const teamIndex = new Map<string, number>();
+
+  function asRecord(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  }
+
+  function roleNames(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    const names: string[] = [];
+    for (const row of value) {
+      if (typeof row === "string" && row.trim()) {
+        names.push(row.trim());
+      } else if (row && typeof row === "object") {
+        const name = String((row as Record<string, unknown>).name || "").trim();
+        if (name) names.push(name);
+      }
+    }
+    return names;
+  }
+
+  function teamKey(ev: LiveEvent): string {
+    const key = String(
+      ev.call_id ||
+        ev.team_run_id ||
+        ev.run_id ||
+        ev.event_id ||
+        "team",
+    );
+    return key || "team";
+  }
+
+  function ensureTeamTrace(ev: LiveEvent): NativeBlock {
+    const key = teamKey(ev);
+    const existing = teamIndex.get(key);
+    if (existing !== undefined) {
+      return (out[existing].block ?? out[existing]) as NativeBlock;
+    }
+    const payload = asRecord(ev.payload);
+    const roles = roleNames(ev.roles ?? payload.roles);
+    const block: NativeBlock = {
+      kind: "team_trace",
+      call_id: String(ev.call_id || ev.tool_call_id || ""),
+      team_key: key,
+      task: String(ev.task || ev.team_task || payload.task || ""),
+      status: "running",
+      roles,
+      max_parallel: ev.max_parallel ?? payload.max_parallel,
+      steps: [],
+      members: {},
+      index: out.length,
+    };
+    teamIndex.set(key, out.length);
+    out.push({ block, kind: "team_trace" });
+    return block;
+  }
+
+  function appendTeamStep(ev: LiveEvent, stepKind: string) {
+    const block = ensureTeamTrace(ev);
+    const steps = Array.isArray(block.steps) ? [...block.steps] : [];
+    const subagent = String(ev.subagent || ev.role || "");
+    steps.push({
+      kind: stepKind,
+      subagent,
+      status: ev.status || (ev.ok === false ? "error" : "ok"),
+      ok: ev.ok,
+      error: ev.error,
+      tokens: ev.tokens,
+      usd: ev.usd,
+      wall_ms: ev.wall_ms,
+      ts: ev.ts,
+    });
+    block.steps = steps;
+    if (subagent) {
+      const members = asRecord(block.members);
+      members[subagent] = {
+        ...(asRecord(members[subagent])),
+        name: subagent,
+        status:
+          stepKind === "member.start"
+            ? "running"
+            : stepKind === "member.skip"
+            ? "skipped"
+            : ev.ok === false
+            ? "failed"
+            : "completed",
+        ok: ev.ok,
+        error: ev.error,
+        tokens: ev.tokens,
+        usd: ev.usd,
+        wall_ms: ev.wall_ms,
+      };
+      block.members = members;
+    }
+  }
+
+  function ensureSubagentTrace(ev: LiveEvent): NativeBlock {
+    const name = String(ev.subagent || ev.name || "subagent");
+    const existing = subagentIndex.get(name);
+    if (existing !== undefined) {
+      return (out[existing].block ?? out[existing]) as NativeBlock;
+    }
+    const block: NativeBlock = {
+      kind: "subagent_trace",
+      subagent: name,
+      tier: ev.tier,
+      status: "running",
+      payload_keys: ev.payload_keys,
+      steps: [],
+      index: out.length,
+    };
+    subagentIndex.set(name, out.length);
+    out.push({ block, kind: "subagent_trace" });
+    return block;
+  }
+
+  function appendSubagentStep(ev: LiveEvent, lifecycle: string) {
+    const block = ensureSubagentTrace(ev);
+    const steps = Array.isArray(block.steps) ? [...block.steps] : [];
+    steps.push({
+      lifecycle,
+      step_kind: ev.step_kind,
+      iteration: ev.iteration,
+      status: ev.status || (ev.error ? "error" : "ok"),
+      skill: ev.skill,
+      action: ev.action,
+      error: ev.error,
+      wall_ms: ev.wall_ms,
+      tokens: ev.tokens,
+      usd: ev.usd,
+      provider: ev.provider,
+      model: ev.model,
+      parsed_keys: ev.parsed_keys,
+      reasoning_tokens: ev.reasoning_tokens,
+      reasoning_effort: ev.reasoning_effort,
+      ts: ev.ts,
+    });
+    block.steps = steps;
+    block.tier = block.tier || ev.tier;
+    if (lifecycle === "end") {
+      block.status = ev.error ? "failed" : "completed";
+      block.iterations = ev.iterations;
+      block.skill_calls = ev.skill_calls;
+      block.rejected = ev.rejected;
+      block.tokens = ev.tokens;
+      block.usd = ev.usd;
+      block.wall_ms = ev.wall_ms;
+    } else if (ev.error || ev.status === "error") {
+      block.status = "error";
+    } else {
+      block.status = "running";
+    }
+  }
+
+  function rebuildApprovalIndex() {
+    approvalIndex.clear();
+    out.forEach((env, idx) => {
+      if ((env.block?.kind ?? env.kind) !== "approval_request") return;
+      const id = String(env.block?.approval_id ?? env.block?.id ?? "");
+      if (id) approvalIndex.set(id, idx);
+    });
+  }
+  function insertIndexAfterCall(callId: string): number | null {
+    if (!callId) return null;
+    for (let idx = out.length - 1; idx >= 0; idx -= 1) {
+      const block = out[idx]?.block;
+      if (
+        (block?.kind ?? out[idx]?.kind) === "tool_result" &&
+        String(block?.call_id ?? "") === callId
+      ) {
+        return idx + 1;
+      }
+    }
+    return null;
+  }
+
+  for (const ev of events) {
+    if (ev.kind === "message.delta") {
+      const piece =
+        typeof ev.text === "string"
+          ? ev.text
+          : typeof ev.message === "string"
+          ? ev.message
+          : "";
+      if (!piece) continue;
+      if (textIdx === null) {
+        textAccum = piece;
+        const env: NativeBlockEnvelope = {
+          block: { kind: "text", text: textAccum, index: out.length },
+          kind: "text",
+        };
+        textIdx = out.length;
+        out.push(env);
+      } else {
+        textAccum += piece;
+        const env = out[textIdx];
+        if (env.block) {
+          env.block = { ...env.block, text: textAccum };
+        }
+      }
+      continue;
+    }
+
+    if (ev.kind === "turn.step") {
+      const step = (ev.step ?? {}) as Record<string, unknown>;
+      const kind =
+        typeof step === "object" && typeof step.step_kind === "string"
+          ? step.step_kind
+          : typeof step === "object" && typeof step.kind === "string"
+          ? (step.kind as string)
+          : typeof ev.step === "string"
+          ? ev.step
+          : "step";
+      if (kind === "thinking" || kind === "think") {
+        flushText();
+        const detail =
+          typeof step === "object" &&
+          step.detail &&
+          typeof step.detail === "object"
+            ? (step.detail as Record<string, unknown>)
+            : null;
+        const text =
+          (detail && typeof detail.text === "string" && detail.text) ||
+          (detail && typeof detail.reasoning === "string" && detail.reasoning) ||
+          "";
+        out.push({
+          block: { kind: "thinking", text: String(text), index: out.length },
+          kind: "thinking",
+        });
+      }
+      continue;
+    }
+
+    if (ev.kind === "tool.start") {
+      flushText();
+      const callId = String(ev.call_id ?? ev.tool_call_id ?? "");
+      const env: NativeBlockEnvelope = {
+        block: {
+          kind: "tool_use",
+          call_id: callId,
+          skill_id: ev.skill_id ?? "native",
+          action: ev.action ?? "",
+          payload: (ev.payload as Record<string, unknown>) ?? {},
+          index: out.length,
+        },
+        kind: "tool_use",
+      };
+      callIndex.set(callId, out.length);
+      out.push(env);
+      if (ev.action === "team_run") {
+        appendTeamStep(ev, "start");
+      }
+      continue;
+    }
+
+    if (ev.kind === "tool.complete") {
+      flushText();
+      const callId = String(ev.call_id ?? ev.tool_call_id ?? "");
+      out.push({
+        block: {
+          kind: "tool_result",
+          call_id: callId,
+          skill_id: ev.skill_id ?? "native",
+          action: ev.action ?? "",
+          ok: ev.ok ?? true,
+          error: ev.error ?? null,
+          error_kind: ev.error_kind ?? null,
+          elapsed_ms: ev.elapsed_ms ?? null,
+          result: (ev as Record<string, unknown>).result,
+          index: out.length,
+        },
+        kind: "tool_result",
+      });
+      if (ev.action === "team_run") {
+        const block = ensureTeamTrace(ev);
+        block.status = ev.ok === false || ev.error ? "failed" : "completed";
+        block.result = (ev as Record<string, unknown>).result;
+        appendTeamStep(ev, "end");
+      }
+      callIndex.delete(callId);
+      continue;
+    }
+
+    if (ev.kind === "approval.request") {
+      flushText();
+      const approvalId = String(ev.approval_id ?? ev.id ?? "");
+      if (!approvalId) continue;
+      const callId = String(ev.call_id ?? ev.tool_call_id ?? "");
+      const env: NativeBlockEnvelope = {
+        block: {
+          kind: "approval_request",
+          approval_id: approvalId,
+          call_id: callId,
+          prompt: ev.prompt,
+          record: ev.record,
+          reason: ev.reason,
+          index: out.length,
+        },
+        kind: "approval_request",
+      };
+      const existingIdx = approvalIndex.get(approvalId);
+      if (existingIdx !== undefined && out[existingIdx]?.block) {
+        env.block = {
+          ...out[existingIdx].block,
+          ...env.block,
+          index: out[existingIdx].block?.index ?? existingIdx,
+        };
+        const targetIdx = insertIndexAfterCall(callId);
+        if (targetIdx !== null && targetIdx !== existingIdx + 1) {
+          out.splice(existingIdx, 1);
+          const adjustedTarget = targetIdx > existingIdx ? targetIdx - 1 : targetIdx;
+          out.splice(Math.min(adjustedTarget, out.length), 0, env);
+        } else {
+          out[existingIdx] = env;
+        }
+        rebuildApprovalIndex();
+      } else {
+        const insertAt = insertIndexAfterCall(callId) ?? out.length;
+        out.splice(insertAt, 0, env);
+        rebuildApprovalIndex();
+      }
+      continue;
+    }
+
+    if (ev.kind === "approval.resolved") {
+      flushText();
+      const approvalId = String(ev.approval_id ?? ev.id ?? "");
+      if (!approvalId) continue;
+      const idx = approvalIndex.get(approvalId);
+      if (idx !== undefined && out[idx]?.block) {
+        out[idx].block = {
+          ...out[idx].block,
+          state: ev.state,
+          resolved_state: ev.state,
+        };
+      } else {
+        out.push({
+          block: {
+            kind: "approval_request",
+            approval_id: approvalId,
+            state: ev.state,
+            resolved_state: ev.state,
+            index: out.length,
+          },
+          kind: "approval_request",
+        });
+      }
+      continue;
+    }
+
+    if (ev.kind === "team.start") {
+      flushText();
+      appendTeamStep(ev, "start");
+      continue;
+    }
+
+    if (ev.kind === "team.member.start") {
+      flushText();
+      appendTeamStep(ev, "member.start");
+      continue;
+    }
+
+    if (ev.kind === "team.member.end") {
+      flushText();
+      appendTeamStep(ev, "member.end");
+      continue;
+    }
+
+    if (ev.kind === "team.member.skip") {
+      flushText();
+      appendTeamStep(ev, "member.skip");
+      continue;
+    }
+
+    if (ev.kind === "team.end") {
+      flushText();
+      const block = ensureTeamTrace(ev);
+      block.status = ev.ok === false || ev.error ? "failed" : "completed";
+      block.roles_succeeded = ev.roles_succeeded;
+      block.roles_failed = ev.roles_failed;
+      block.tokens_total = ev.tokens_total;
+      block.usd_total = ev.usd_total;
+      appendTeamStep(ev, "end");
+      continue;
+    }
+
+    if (ev.kind === "subagent.start") {
+      flushText();
+      appendSubagentStep(ev, "start");
+      continue;
+    }
+
+    if (ev.kind === "subagent.step") {
+      flushText();
+      appendSubagentStep(ev, "step");
+      continue;
+    }
+
+    if (ev.kind === "subagent.end") {
+      flushText();
+      appendSubagentStep(ev, "end");
+      continue;
+    }
+  }
+  return out;
+}
+
+export function topLevelDecisionText(turn: TurnPayload | undefined): string {
+  if (!turn) return "";
+  if (typeof turn.reply_text === "string" && turn.reply_text.trim()) {
+    return turn.reply_text.trim();
+  }
+  const d = turn.decision;
+  if (!d) return "";
+  const reasoning = typeof d.reasoning === "string" ? d.reasoning : "";
+  if (reasoning) return reasoning;
+  // Fall back to the first action's text / first message / raw decision.
+  const actions = (turn.actions || []) as ActionRecord[];
+  for (const a of actions) {
+    const r = (a as { result?: { text?: string } }).result;
+    if (r && typeof r.text === "string") return r.text;
+  }
+  return "";
+}

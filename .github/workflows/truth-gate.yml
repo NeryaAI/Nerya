@@ -1,0 +1,70 @@
+# Release truth gate.
+#
+# This workflow is the CI surface of the production-readiness audit
+# (`docs/plans/2026-04-23-nerya-production-readiness-audit.md`).
+#
+# It runs two jobs on every PR and on every push to `main`:
+#
+# * `truth-gate` — the Phase 6 honest production gate plus the
+#   truth-style regression suites that scan repo artifacts for outward
+#   surface drift (ports, routes, paths, cosmetic stubs, capability
+#   honesty).
+# * `regression` — the phase-by-phase regression surfaces the audit
+#   requires: agent loop, subagents, trigger/schedule control plane,
+#   trading SDK + risk gate, attribution/replay, indicator path.
+#
+# Both jobs delegate to the same script (`scripts/run_truth_gate.sh`)
+# so operators can reproduce CI locally with:
+#
+#   bash scripts/run_truth_gate.sh          # full gate
+#   bash scripts/run_truth_gate.sh --quick  # truth-gates only
+#
+# Any green CI run on this workflow proves that, as of that commit, the
+# outward-facing surfaces still match the runtime they describe.
+
+name: truth-gate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  truth-gate:
+    name: truth gates (Phase 6 + release/runtime + no-placeholder)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install runtime + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Run Phase 6 + truth gates (quick)
+        run: bash scripts/run_truth_gate.sh --quick
+
+  regression:
+    name: phase-by-phase regression (audit section 8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install runtime + dev + trading extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev,trading]'
+
+      - name: Run full truth gate (truth gates + phase regression)
+        run: bash scripts/run_truth_gate.sh

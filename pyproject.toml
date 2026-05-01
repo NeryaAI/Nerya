@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nerya"
+version = "0.1.0"
+description = "Skill-first, trading-native, self-evolving autonomous agent runtime"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Nerya" }]
+license = { text = "Apache-2.0" }
+dependencies = [
+    "pyyaml>=6.0",
+    "pydantic>=2.5",
+    "cryptography>=41.0",
+    "httpx>=0.27",
+    "typer>=0.12",
+    "rich>=13.7",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jsonschema>=4.21",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+trading = [
+    "eth-account>=0.13",
+    "eth-abi>=5.0",
+    "msgpack>=1.0",
+    "pynacl>=1.5",
+    "base58>=2.1",
+]
+
+[project.scripts]
+nerya = "nerya.cli.app:main"
+
+[tool.setuptools.packages.find]
+where = [".", "sdk/python"]
+include = ["nerya*", "nerya_sdk*"]
+exclude = ["tests*", "dashboard*", "workspace_template*", "sdk.typescript*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Default to the curated smoke suite (~50 cases) so local
+# `pytest` runs are fast. Run the full 1900+ test regression
+# pass via `pytest -m ""` (empty filter selects everything).
+addopts = "-m smoke"
+markers = [
+    "smoke: curated end-to-end smoke suite (default)",
+    "profile: per-profile gate (unit_mock | strict_runtime | live_opt_in)",
+]

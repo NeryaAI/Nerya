@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="200" height="200">
+  <title>Nerya Phase Loop</title>
+  <defs>
+    <linearGradient id="g6" x1="0" y1="50" x2="100" y2="50" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#b48bff"/>
+      <stop offset="50%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke-linecap="round">
+    <path d="M28 50 C28 32 42 32 50 50 C58 68 72 68 72 50 C72 32 58 32 50 50 C42 68 28 68 28 50 Z"
+          stroke="url(#g6)" stroke-width="3"/>
+    <path d="M28 50 C28 32 42 32 50 50 C58 68 72 68 72 50"
+          stroke="#ffffff" stroke-width="3" opacity="0.18"/>
+  </g>
+  <g>
+    <circle cx="50" cy="50" r="4" fill="#ffffff"/>
+    <circle cx="50" cy="50" r="7" fill="none" stroke="#22d3ee" stroke-width="1" opacity="0.6"/>
+    <circle cx="50" cy="50" r="11" fill="none" stroke="#22d3ee" stroke-width="0.8" opacity="0.3"/>
+  </g>
+  <g fill="#b48bff">
+    <circle cx="28" cy="50" r="2"/>
+    <circle cx="72" cy="50" r="2"/>
+  </g>
+  <g fill="#22d3ee" opacity="0.85">
+    <circle cx="38" cy="36" r="1.2"/>
+    <circle cx="62" cy="64" r="1.2"/>
+  </g>
+</svg>

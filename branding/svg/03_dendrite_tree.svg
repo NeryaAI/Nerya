@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="200" height="200">
+  <title>Nerya Dendrite Tree</title>
+  <defs>
+    <linearGradient id="g3" x1="50" y1="20" x2="50" y2="80" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#g3)" stroke-width="2" stroke-linecap="round">
+    <path d="M50 50 L50 30"/>
+    <path d="M50 30 Q44 24 38 22"/>
+    <path d="M50 30 Q56 24 62 22"/>
+    <path d="M38 22 Q34 18 30 18"/>
+    <path d="M62 22 Q66 18 70 18"/>
+    <path d="M50 50 L34 60"/>
+    <path d="M34 60 Q26 64 22 70"/>
+    <path d="M34 60 Q30 70 28 76"/>
+    <path d="M50 50 L66 60"/>
+    <path d="M66 60 Q74 64 78 70"/>
+    <path d="M66 60 Q70 70 72 76"/>
+    <path d="M50 50 L50 70"/>
+    <path d="M50 70 Q46 76 44 82"/>
+    <path d="M50 70 Q54 76 56 82"/>
+  </g>
+  <g fill="#b48bff">
+    <circle cx="50" cy="50" r="5"/>
+    <circle cx="30" cy="18" r="1.6"/>
+    <circle cx="70" cy="18" r="1.6"/>
+    <circle cx="22" cy="70" r="1.6"/>
+    <circle cx="78" cy="70" r="1.6"/>
+    <circle cx="28" cy="76" r="1.4"/>
+    <circle cx="72" cy="76" r="1.4"/>
+    <circle cx="44" cy="82" r="1.4"/>
+    <circle cx="56" cy="82" r="1.4"/>
+  </g>
+  <circle cx="50" cy="50" r="2" fill="#ffffff" opacity="0.9"/>
+</svg>

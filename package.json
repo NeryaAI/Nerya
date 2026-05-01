@@ -1,0 +1,14 @@
+{
+  "name": "nerya-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nerya monorepo — Python runtime + TypeScript SDK + Next.js dashboard",
+  "workspaces": [
+    "sdk/typescript",
+    "dashboard"
+  ],
+  "scripts": {
+    "build:sdk": "pnpm --filter @nerya/sdk build",
+    "dev:dashboard": "pnpm --filter @nerya/dashboard dev"
+  }
+}

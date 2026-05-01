@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="200" height="200">
+  <title>Nerya N Brain Fold</title>
+  <defs>
+    <linearGradient id="g4" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#b48bff"/>
+      <stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
+    <clipPath id="g4clip">
+      <path d="M22 80 L22 20 L34 20 L66 64 L66 20 L78 20 L78 80 L66 80 L34 36 L34 80 Z"/>
+    </clipPath>
+  </defs>
+  <path d="M22 80 L22 20 L34 20 L66 64 L66 20 L78 20 L78 80 L66 80 L34 36 L34 80 Z" fill="url(#g4)"/>
+  <g clip-path="url(#g4clip)" fill="none" stroke="#22d3ee" stroke-width="0.8" opacity="0.65" stroke-linecap="round">
+    <path d="M14 30 Q22 26 30 30 T46 30 T62 30 T78 30 T94 30"/>
+    <path d="M14 42 Q22 38 30 42 T46 42 T62 42 T78 42 T94 42"/>
+    <path d="M14 54 Q22 50 30 54 T46 54 T62 54 T78 54 T94 54"/>
+    <path d="M14 66 Q22 62 30 66 T46 66 T62 66 T78 66 T94 66"/>
+    <path d="M14 78 Q22 74 30 78 T46 78 T62 78 T78 78 T94 78"/>
+  </g>
+  <circle cx="82" cy="22" r="3" fill="#22d3ee"/>
+  <circle cx="82" cy="22" r="6" fill="none" stroke="#22d3ee" stroke-width="0.8" opacity="0.6"/>
+</svg>

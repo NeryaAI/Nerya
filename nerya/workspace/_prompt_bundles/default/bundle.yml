@@ -1,0 +1,34 @@
+version: 1
+id: default
+description: >
+  Default Nerya workspace prompt bundle. Ships with `nerya init` and seeds
+  the `agents/` and `subagents/` directories of a fresh workspace. Each
+  prompt is its own ``.md`` file under this directory so operators can
+  diff/upgrade them without editing Python source.
+profile: trading_paper
+agents:
+  system: system.md
+  policies: policies.md
+  main: main.agent.md
+subagents:
+  market_analyst: subagents/market_analyst.agent.md
+  technical_analyst: subagents/technical_analyst.agent.md
+  fundamentals_analyst: subagents/fundamentals_analyst.agent.md
+  sentiment_analyst: subagents/sentiment_analyst.agent.md
+  macro_strategist: subagents/macro_strategist.agent.md
+  quant_researcher: subagents/quant_researcher.agent.md
+  bull_researcher: subagents/bull_researcher.agent.md
+  bear_researcher: subagents/bear_researcher.agent.md
+  research_manager: subagents/research_manager.agent.md
+  research_editor: subagents/research_editor.agent.md
+  risk_critic: subagents/risk_critic.agent.md
+  execution_planner: subagents/execution_planner.agent.md
+  onchain_watcher: subagents/onchain_watcher.agent.md
+  news_interpreter: subagents/news_interpreter.agent.md
+  portfolio_manager: subagents/portfolio_manager.agent.md
+  portfolio_auditor: subagents/portfolio_auditor.agent.md
+  strategy_reviewer: subagents/strategy_reviewer.agent.md
+  message_writer: subagents/message_writer.agent.md
+  plan_lane: subagents/plan_lane.agent.md
+  explore_lane: subagents/explore_lane.agent.md
+  verification_lane: subagents/verification_lane.agent.md

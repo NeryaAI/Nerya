@@ -1,0 +1,333 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { Card, Empty, Pill } from "../Page";
+import { clientApi } from "../../lib/clientApi";
+import { formatTsShort } from "../../lib/format";
+
+const PROMOTION_TARGETS = [
+  "static_review",
+  "backtested",
+  "paper",
+  "shadow",
+  "canary",
+  "live",
+] as const;
+
+const EVIDENCE_KINDS = [
+  "static_review",
+  "backtest",
+  "paper_window",
+  "shadow_window",
+  "canary_window",
+  "protection_check",
+  "operator_signoff",
+] as const;
+
+type PromotionRecord = Record<string, unknown> & {
+  promotion_id?: string;
+  strategy_id?: string;
+  target?: string;
+  state?: string;
+  reason?: string;
+  ts?: number | string;
+  operator?: string;
+  notes?: string;
+};
+
+function stateTone(state?: string): "ok" | "warn" | "danger" | "neutral" | "brand" {
+  switch ((state || "").toLowerCase()) {
+    case "approved":
+    case "applied":
+      return "ok";
+    case "needs_evidence":
+    case "escalate":
+      return "warn";
+    case "rejected":
+      return "danger";
+    case "pending":
+      return "brand";
+    default:
+      return "neutral";
+  }
+}
+
+function fmtTs(ts: unknown): string {
+  if (ts == null) return "—";
+  if (typeof ts === "string") return formatTsShort(ts);
+  const seconds = Number(ts);
+  if (!Number.isFinite(seconds)) return String(ts);
+  const ms = seconds > 1e12 ? seconds : seconds * 1000;
+  return formatTsShort(new Date(ms).toISOString());
+}
+
+interface Props {
+  strategyId: string;
+  status?: string;
+  onError: (msg: string | null) => void;
+  onNotice: (msg: string | null) => void;
+  onRefresh: () => Promise<void> | void;
+}
+
+export function StrategyPromotionCard({
+  strategyId,
+  status,
+  onError,
+  onNotice,
+  onRefresh,
+}: Props) {
+  const [promotions, setPromotions] = useState<PromotionRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [target, setTarget] = useState<(typeof PROMOTION_TARGETS)[number]>("paper");
+  const [notes, setNotes] = useState("");
+  const [evidenceKind, setEvidenceKind] =
+    useState<(typeof EVIDENCE_KINDS)[number]>("static_review");
+  const [evidencePassed, setEvidencePassed] = useState(true);
+
+  async function loadPromotions() {
+    setLoading(true);
+    try {
+      const res = await clientApi.controlPromotionsList(strategyId, 25);
+      setPromotions((res.promotions || []) as PromotionRecord[]);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadPromotions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyId]);
+
+  const latest = promotions[0];
+
+  const allowedTargets = useMemo(() => {
+    if (!status) return PROMOTION_TARGETS;
+    const idx = PROMOTION_TARGETS.indexOf(
+      status as (typeof PROMOTION_TARGETS)[number],
+    );
+    if (idx < 0) return PROMOTION_TARGETS;
+    return PROMOTION_TARGETS.slice(idx);
+  }, [status]);
+
+  async function requestPromotion() {
+    setBusy("request");
+    onError(null);
+    try {
+      const res = await clientApi.controlPromotionRequest({
+        strategy_id: strategyId,
+        target,
+        operator: "dashboard",
+        notes: notes || undefined,
+      });
+      const promotion = res.promotion as PromotionRecord;
+      onNotice(
+        `Promotion → ${promotion.target}: ${promotion.state ?? "pending"}`,
+      );
+      await loadPromotions();
+      await onRefresh();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function applyPromotion(record: PromotionRecord) {
+    if (!record.promotion_id) return;
+    if (
+      !confirm(
+        `Apply promotion ${record.promotion_id} → ${record.target}? This changes the strategy lifecycle state.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(record.promotion_id);
+    onError(null);
+    try {
+      await clientApi.controlPromotionApply(String(record.promotion_id));
+      onNotice(`Promotion applied → ${record.target}`);
+      await loadPromotions();
+      await onRefresh();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function recordEvidence() {
+    setBusy("evidence");
+    onError(null);
+    try {
+      await clientApi.controlEvidenceRecord({
+        strategy_id: strategyId,
+        kind: evidenceKind,
+        passed: evidencePassed,
+        operator: "dashboard",
+        payload: {
+          note: notes || undefined,
+        },
+      });
+      onNotice(
+        `Recorded evidence ${evidenceKind} (${evidencePassed ? "passed" : "failed"})`,
+      );
+      await loadPromotions();
+      await onRefresh();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Card
+      title="Promotion lifecycle"
+      description="Track and request strategy promotions through draft → static_review → backtested → paper → shadow → canary → live."
+      actions={
+        <button
+          onClick={loadPromotions}
+          disabled={loading}
+          className="btn-ghost text-xs"
+        >
+          {loading ? "Refreshing…" : "Refresh"}
+        </button>
+      }
+    >
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="space-y-3">
+          <div className="space-y-1.5 text-xs">
+            <div className="text-ink-400">Current state</div>
+            <div className="flex items-center gap-2">
+              <Pill tone="brand">{status || "—"}</Pill>
+              {latest ? (
+                <span className="text-ink-400">
+                  · last decision{" "}
+                  <Pill tone={stateTone(latest.state)}>{latest.state}</Pill>{" "}
+                  for <span className="font-mono">{latest.target}</span>
+                </span>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="rounded-md border border-brand-500/10 p-3 space-y-2">
+            <div className="text-xs uppercase tracking-wider text-ink-400">
+              Request promotion
+            </div>
+            <div className="flex gap-2 items-center text-xs">
+              <span className="text-ink-400">target</span>
+              <select
+                value={target}
+                onChange={(e) =>
+                  setTarget(
+                    e.target.value as (typeof PROMOTION_TARGETS)[number],
+                  )
+                }
+                className="bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-ink-200"
+              >
+                {allowedTargets.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={requestPromotion}
+                disabled={busy === "request"}
+                className="btn-ghost text-xs"
+              >
+                {busy === "request" ? "…" : "Request"}
+              </button>
+            </div>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              placeholder="Notes (optional, becomes part of the promotion record)"
+              className="w-full bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-xs text-ink-200"
+            />
+          </div>
+
+          <div className="rounded-md border border-brand-500/10 p-3 space-y-2">
+            <div className="text-xs uppercase tracking-wider text-ink-400">
+              Record evidence
+            </div>
+            <div className="flex gap-2 items-center text-xs flex-wrap">
+              <span className="text-ink-400">kind</span>
+              <select
+                value={evidenceKind}
+                onChange={(e) =>
+                  setEvidenceKind(
+                    e.target.value as (typeof EVIDENCE_KINDS)[number],
+                  )
+                }
+                className="bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-ink-200"
+              >
+                {EVIDENCE_KINDS.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                  </option>
+                ))}
+              </select>
+              <label className="flex items-center gap-1.5 text-ink-300">
+                <input
+                  type="checkbox"
+                  checked={evidencePassed}
+                  onChange={(e) => setEvidencePassed(e.target.checked)}
+                />
+                passed
+              </label>
+              <button
+                onClick={recordEvidence}
+                disabled={busy === "evidence"}
+                className="btn-ghost text-xs"
+              >
+                {busy === "evidence" ? "…" : "Record"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs uppercase tracking-wider text-ink-400 mb-2">
+            Recent promotions
+          </div>
+          {promotions.length === 0 ? (
+            <Empty
+              label={loading ? "Loading…" : "No promotion records yet."}
+            />
+          ) : (
+            <div className="embedded-list-scroll space-y-1.5">
+              {promotions.map((rec) => (
+                <div
+                  key={String(rec.promotion_id ?? Math.random())}
+                  className="flex items-center gap-2 text-xs border border-brand-500/10 rounded px-2 py-1.5 bg-ink-900/40"
+                >
+                  <Pill tone={stateTone(rec.state)}>{rec.state || "?"}</Pill>
+                  <span className="font-mono">{rec.target}</span>
+                  <span className="text-ink-500 truncate">{rec.reason || ""}</span>
+                  <span className="ml-auto text-ink-500 font-mono shrink-0">
+                    {fmtTs(rec.ts)}
+                  </span>
+                  {rec.state === "approved" ? (
+                    <button
+                      onClick={() => applyPromotion(rec)}
+                      disabled={busy === rec.promotion_id}
+                      className="btn-ghost text-[11px] py-0.5 text-accent-300"
+                    >
+                      {busy === rec.promotion_id ? "…" : "apply"}
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}

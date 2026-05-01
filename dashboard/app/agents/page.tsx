@@ -1,0 +1,755 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import {
+  Card,
+  Empty,
+  ErrorBanner,
+  PageBody,
+  PageHeader,
+  Pill,
+} from "../../components/Page";
+import { SectionTabs } from "../../components/SectionTabs";
+import {
+  AgentsIcon,
+  CheckIcon,
+  PlusIcon,
+  SearchIcon,
+  SkillsIcon,
+  TrashIcon,
+  WrenchIcon,
+  XIcon,
+} from "../../components/icons";
+import { clientApi, type SkillSummary } from "../../lib/clientApi";
+
+type AgentSummary = {
+  name: string;
+  tier: string;
+  allowed_skills: string[];
+  source: "workspace" | "default";
+  prompt_path?: string;
+  description?: string;
+};
+
+type AgentDetail = {
+  name: string;
+  tier: string;
+  allowed_skills: string[];
+  prompt: string;
+  prompt_path?: string;
+  source: "workspace" | "default";
+  persistent: boolean;
+};
+
+const DEFAULT_PROMPT_TEMPLATE = `# <role-name>
+
+You are the <role-name> subagent. Describe the role's mission in one paragraph.
+
+## Output schema
+
+\`\`\`json
+{
+  "recommendation": "buy|sell|hold|reduce|avoid",
+  "confidence": 0.0,
+  "thesis": "..."
+}
+\`\`\`
+
+## Constraints
+
+- Read-only. Never call trading.* tools.
+- Always cite the data source for any claim.
+- If unsure, return recommendation="hold" with confidence < 0.4.
+`;
+
+export default function AgentsPage() {
+  const [items, setItems] = useState<AgentSummary[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [detail, setDetail] = useState<AgentDetail | null>(null);
+  const [draft, setDraft] = useState<{
+    name: string;
+    tier: "light" | "medium" | "high";
+    allowed_skills: string[];
+    prompt: string;
+  }>({
+    name: "",
+    tier: "medium",
+    allowed_skills: [],
+    prompt: DEFAULT_PROMPT_TEMPLATE,
+  });
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [agentQuery, setAgentQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  async function refreshList(focus?: string | null) {
+    setLoading(true);
+    try {
+      const res = await clientApi.agentsList();
+      const list = (res.roles || []).slice();
+      list.sort((a, b) => {
+        if (a.source !== b.source) return a.source === "workspace" ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      setItems(list);
+      const next = focus && list.some((r) => r.name === focus)
+        ? focus
+        : list[0]?.name || null;
+      setSelected(next);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    refreshList();
+    clientApi
+      .skills()
+      .then((res) => {
+        const rows = (res.skills || []).slice();
+        rows.sort((a, b) => a.id.localeCompare(b.id));
+        setSkills(rows);
+      })
+      .catch(() => setSkills([]));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!selected) {
+      setDetail(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setBusy(true);
+    clientApi
+      .agentsGet(selected)
+      .then((res) => {
+        if (cancelled) return;
+        if (!res.ok || !res.role) {
+          setDetail(null);
+          setError(res.error || "role not found");
+        } else {
+          setDetail(res.role);
+          setError(null);
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
+  const counts = useMemo(() => {
+    const ws = items.filter((i) => i.source === "workspace").length;
+    return { workspace: ws, defaults: items.length - ws, total: items.length };
+  }, [items]);
+
+  const filteredItems = useMemo(() => {
+    const needle = agentQuery.trim().toLowerCase();
+    if (!needle) return items;
+    return items.filter((agent) =>
+      [
+        agent.name,
+        agent.tier,
+        agent.source,
+        agent.description,
+        ...(agent.allowed_skills || []),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [agentQuery, items]);
+
+  const skillOptions = useMemo(
+    () =>
+      skills.map((skill) => ({
+        id: skill.id,
+        label: skill.title || skill.id,
+        style: skill.style || skill.status || "",
+      })),
+    [skills],
+  );
+
+  async function persistDetailEdit(next: AgentDetail) {
+    setBusy(true);
+    try {
+      const res = await clientApi.agentsSave({
+        name: next.name,
+        prompt: next.prompt,
+        tier: (next.tier as "light" | "medium" | "high") || undefined,
+        allowed_skills: next.allowed_skills,
+      });
+      if (!res.ok || !res.role) throw new Error(res.error || "save failed");
+      setDetail(res.role);
+      setInfo(`Saved ${next.name}`);
+      await refreshList(next.name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteAgent(name: string) {
+    if (!confirm(`Delete persona "${name}" from the workspace? Default fallback (if any) will be used instead.`)) return;
+    setBusy(true);
+    try {
+      const res = await clientApi.agentsDelete(name);
+      if (!res.ok) throw new Error(res.error || "delete failed");
+      setInfo(`Deleted ${name}`);
+      await refreshList();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createAgent() {
+    if (!/^[A-Za-z0-9_]+$/.test(draft.name)) {
+      setError("Name must match [A-Za-z0-9_]+");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await clientApi.agentsSave({
+        name: draft.name,
+        prompt: draft.prompt,
+        tier: draft.tier,
+        allowed_skills: draft.allowed_skills
+          .map((s) => s.trim())
+          .filter(Boolean),
+      });
+      if (!res.ok || !res.role) throw new Error(res.error || "save failed");
+      setInfo(`Created ${draft.name}`);
+      setCreating(false);
+      setDraft({
+        name: "",
+        tier: "medium",
+        allowed_skills: [],
+        prompt: DEFAULT_PROMPT_TEMPLATE,
+      });
+      await refreshList(res.role.name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <PageBody>
+      <PageHeader
+        eyebrow="Agents library"
+        title="Agents"
+        description="Curated subagent / persona library. Strategies and team_run calls reuse these prompts; create new ones once and they become available everywhere."
+        actions={
+          <>
+            <button
+              type="button"
+              className="btn btn-ghost cursor-pointer"
+              onClick={() => refreshList(selected)}
+              disabled={loading}
+            >
+              <WrenchIcon size={14} />
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary cursor-pointer"
+              onClick={() => setCreating(true)}
+              disabled={busy}
+            >
+              <PlusIcon size={14} />
+              New agent
+            </button>
+          </>
+        }
+      />
+      <SectionTabs section="runtime" />
+
+      {error ? <ErrorBanner error={error} /> : null}
+      {info ? (
+        <div className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">
+          {info}
+        </div>
+      ) : null}
+
+      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5">
+        <Card
+          title={`Personas (${counts.total})`}
+          description={`${counts.workspace} workspace · ${counts.defaults} default`}
+        >
+          <div className="relative mb-3">
+            <SearchIcon size={15} className="absolute left-2.5 top-2.5 text-ink-500" />
+            <input
+              className="input-dark pl-8"
+              value={agentQuery}
+              onChange={(e) => setAgentQuery(e.target.value)}
+              placeholder="Search agents or skills"
+            />
+          </div>
+          {items.length === 0 ? (
+            <Empty title="No agents yet" subtitle="Click + New agent to create one." />
+          ) : filteredItems.length === 0 ? (
+            <Empty title="No matching agents" subtitle="Try another search." />
+          ) : (
+            <ul className="embedded-scroll max-h-[calc(100vh-260px)] min-h-[260px] space-y-1 pr-1">
+              {filteredItems.map((agent) => (
+                <li key={`${agent.source}_${agent.name}`}>
+                  <button
+                    type="button"
+                    className={`group w-full text-left rounded-lg border px-3 py-2.5 text-[12px] cursor-pointer transition-colors duration-200 ${
+                      selected === agent.name
+                        ? "border-brand-400/60 bg-brand-500/10"
+                        : "border-white/5 bg-ink-950/30 hover:border-brand-500/25 hover:bg-white/5"
+                    }`}
+                    onClick={() => setSelected(agent.name)}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-brand-500/15 bg-brand-500/10 text-brand-200">
+                        <AgentsIcon size={15} />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center justify-between gap-2">
+                          <span className="truncate font-mono text-[12px] text-ink-100">
+                            {agent.name}
+                          </span>
+                          <Pill tone={agent.source === "workspace" ? "ok" : "neutral"}>
+                            {agent.source}
+                          </Pill>
+                        </span>
+                        <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-ink-500">
+                          <span className="rounded-md border border-brand-500/10 bg-ink-900/70 px-1.5 py-0.5 text-ink-300">
+                            {agent.tier}
+                          </span>
+                          <span>{agent.allowed_skills.length} skills</span>
+                          {agent.allowed_skills.slice(0, 2).map((skill) => (
+                            <span
+                              key={skill}
+                              className="max-w-[96px] truncate rounded-md border border-white/5 bg-white/[0.03] px-1.5 py-0.5 font-mono"
+                            >
+                              {skill}
+                            </span>
+                          ))}
+                        </span>
+                      </span>
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+
+        <Card
+          title={detail?.name || "Pick an agent"}
+          description={
+            detail
+              ? `${detail.source} · tier ${detail.tier} · ${detail.allowed_skills.length} preloaded skill(s)`
+              : "Select a persona on the left to inspect or edit it."
+          }
+          actions={
+            detail && detail.source === "workspace" ? (
+              <button
+                type="button"
+                className="btn btn-ghost cursor-pointer text-rose-300"
+                onClick={() => deleteAgent(detail.name)}
+                disabled={busy}
+              >
+                <TrashIcon size={14} />
+                Delete
+              </button>
+            ) : null
+          }
+        >
+          {detail ? (
+            <AgentEditor
+              key={detail.name}
+              detail={detail}
+              busy={busy}
+              skillOptions={skillOptions}
+              onSave={persistDetailEdit}
+            />
+          ) : (
+            <Empty title="No selection" subtitle="Pick an agent from the list." />
+          )}
+        </Card>
+      </div>
+
+      {creating ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setCreating(false);
+          }}
+        >
+          <div className="embedded-scroll w-[760px] max-w-[92vw] max-h-[88vh] rounded-2xl border border-white/10 bg-bg-card shadow-glow">
+            <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-6 py-4">
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-brand-500/20 bg-brand-500/10 text-brand-200">
+                  <AgentsIcon size={18} />
+                </span>
+                <div>
+                  <h3 className="text-lg font-semibold text-ink-100">Create persona</h3>
+                  <p className="mt-1 text-[12px] text-ink-400">
+                    Persisted under <code className="text-fluid-300">workspace/subagents/&lt;name&gt;.agent.md</code>.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="icon-btn h-8 w-8"
+                onClick={() => setCreating(false)}
+                aria-label="Close"
+              >
+                <XIcon size={15} />
+              </button>
+            </div>
+
+            <div className="space-y-4 px-6 py-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <label className="text-[12px] text-ink-300">
+                  Name
+                  <input
+                    type="text"
+                    className="input-dark mt-1 w-full"
+                    placeholder="risk_critic"
+                    value={draft.name}
+                    onChange={(e) =>
+                      setDraft({ ...draft, name: e.target.value })
+                    }
+                    autoFocus
+                  />
+                </label>
+                <label className="text-[12px] text-ink-300">
+                  LLM tier
+                  <select
+                    className="input-dark mt-1 w-full"
+                    value={draft.tier}
+                    onChange={(e) =>
+                      setDraft({ ...draft, tier: e.target.value as typeof draft.tier })
+                    }
+                  >
+                    <option value="light">light</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="block text-[12px] text-ink-300">
+                <div className="mb-1">Preloaded skills</div>
+                <SkillSelector
+                  selected={draft.allowed_skills}
+                  options={skillOptions}
+                  onChange={(allowed_skills) =>
+                    setDraft({ ...draft, allowed_skills })
+                  }
+                />
+              </div>
+
+              <label className="block text-[12px] text-ink-300">
+                Prompt body (Markdown)
+                <textarea
+                  className="input-dark mt-1 min-h-[320px] w-full font-mono text-[12px]"
+                  rows={14}
+                  value={draft.prompt}
+                  onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
+                />
+              </label>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="btn btn-ghost cursor-pointer"
+                  onClick={() => setCreating(false)}
+                  disabled={busy}
+                >
+                  <XIcon size={14} />
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary cursor-pointer"
+                  onClick={createAgent}
+                  disabled={busy || !draft.name.trim()}
+                >
+                  <CheckIcon size={14} />
+                  {busy ? "Saving…" : "Create"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </PageBody>
+  );
+}
+
+function AgentEditor({
+  detail,
+  busy,
+  skillOptions,
+  onSave,
+}: {
+  detail: AgentDetail;
+  busy: boolean;
+  skillOptions: Array<{ id: string; label: string; style: string }>;
+  onSave: (next: AgentDetail) => void | Promise<void>;
+}) {
+  const [tier, setTier] = useState(detail.tier || "medium");
+  const [allowed, setAllowed] = useState<string[]>(detail.allowed_skills || []);
+  const [prompt, setPrompt] = useState(detail.prompt || "");
+
+  useEffect(() => {
+    setTier(detail.tier || "medium");
+    setAllowed(detail.allowed_skills || []);
+    setPrompt(detail.prompt || "");
+  }, [detail.name, detail.tier, detail.prompt]);
+
+  const dirty =
+    tier !== detail.tier ||
+    allowed.join(",") !== (detail.allowed_skills || []).join(",") ||
+    prompt !== detail.prompt;
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 xl:grid-cols-[220px_1fr] gap-3">
+        <label className="text-[12px] text-ink-300">
+          LLM tier
+          <select
+            className="input-dark mt-1 w-full"
+            value={tier}
+            onChange={(e) => setTier(e.target.value)}
+          >
+            <option value="light">light</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <div className="text-[12px] text-ink-300">
+          <div className="mb-1">Preloaded skills</div>
+          <SkillSelector
+            selected={allowed}
+            options={skillOptions}
+            onChange={setAllowed}
+          />
+        </div>
+      </div>
+
+      <label className="text-[12px] text-ink-300 block">
+        Prompt body
+        <textarea
+          className="input-dark mt-1 w-full font-mono text-[12px]"
+          rows={20}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+        />
+      </label>
+
+      {detail.prompt_path ? (
+        <p className="text-[11px] text-ink-500 font-mono">
+          {detail.prompt_path}
+        </p>
+      ) : null}
+
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          className="btn btn-primary cursor-pointer"
+          disabled={busy || !dirty}
+          onClick={() =>
+            onSave({
+              ...detail,
+              tier,
+              allowed_skills: allowed,
+              prompt,
+              source: "workspace",
+              persistent: true,
+            })
+          }
+        >
+          <CheckIcon size={14} />
+          {busy ? "Saving…" : detail.source === "workspace" ? "Save" : "Save as workspace override"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SkillSelector({
+  selected,
+  options,
+  onChange,
+}: {
+  selected: string[];
+  options: Array<{ id: string; label: string; style: string }>;
+  onChange: (next: string[]) => void;
+}) {
+  const selectedSet = new Set(selected);
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const selectedOptions = options.filter((skill) => selectedSet.has(skill.id));
+  const selectedMissing = selected.filter((id) => !options.some((skill) => skill.id === id));
+  const visible = options
+    .filter((skill) => {
+      const needle = query.trim().toLowerCase();
+      if (!needle) return true;
+      return (
+        skill.id.toLowerCase().includes(needle) ||
+        skill.label.toLowerCase().includes(needle)
+      );
+    })
+    .slice(0, 80);
+
+  function toggle(id: string) {
+    if (selectedSet.has(id)) {
+      onChange(selected.filter((x) => x !== id));
+    } else {
+      onChange([...selected, id]);
+    }
+  }
+
+  if (options.length === 0) {
+    return (
+      <div className="mt-1 rounded-lg border border-brand-500/10 bg-ink-900/40 p-3 text-[11px] text-ink-400">
+        No skills loaded yet.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1 rounded-lg border border-brand-500/10 bg-ink-900/40 p-2">
+      <div className="flex min-h-8 items-center gap-2">
+        <div className="min-w-0 flex-1">
+          {selected.length ? (
+            <div className="flex flex-wrap gap-1.5">
+              {selectedOptions.slice(0, 6).map((skill) => (
+                <button
+                  key={skill.id}
+                  type="button"
+                  onClick={() => toggle(skill.id)}
+                  className="inline-flex max-w-[160px] items-center gap-1 rounded-md border border-brand-400/30 bg-brand-500/10 px-2 py-0.5 font-mono text-[10px] text-brand-100"
+                >
+                  <span className="truncate">{skill.id}</span>
+                  <XIcon size={11} className="shrink-0 text-brand-200" />
+                </button>
+              ))}
+              {selectedMissing.slice(0, 4).map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => toggle(id)}
+                  className="inline-flex max-w-[160px] items-center gap-1 rounded-md border border-[#f5a524]/30 bg-[#f5a524]/10 px-2 py-0.5 font-mono text-[10px] text-[#f5a524]"
+                >
+                  <span className="truncate">{id}</span>
+                  <XIcon size={11} className="shrink-0" />
+                </button>
+              ))}
+              {selected.length > 6 ? (
+                <span className="rounded-md border border-white/5 bg-white/[0.03] px-2 py-0.5 text-[10px] text-ink-400">
+                  +{selected.length - 6}
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <span className="text-[11px] text-ink-500">No skills selected</span>
+          )}
+        </div>
+        {selected.length ? (
+          <button
+            type="button"
+            onClick={() => onChange([])}
+            className="rounded-md border border-white/5 px-2 py-1 text-[10px] text-ink-400 hover:border-brand-500/30 hover:text-white"
+          >
+            Clear
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          className="inline-flex items-center gap-1 rounded-md border border-brand-500/20 px-2 py-1 text-[11px] text-brand-200 hover:bg-brand-500/10"
+        >
+          <PlusIcon size={12} />
+          Add
+        </button>
+      </div>
+
+      {open ? (
+        <div className="mt-2 border-t border-brand-500/10 pt-2">
+          <div className="relative mb-2">
+            <SearchIcon size={14} className="absolute left-2.5 top-2.5 text-ink-500" />
+            <input
+              className="input-dark pl-8"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search skills"
+            />
+          </div>
+          <div className="embedded-list-scroll-sm space-y-1">
+            {visible.map((skill) => {
+              const checked = selectedSet.has(skill.id);
+              return (
+                <button
+                  key={skill.id}
+                  type="button"
+                  onClick={() => toggle(skill.id)}
+                  className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-[11px] transition-colors ${
+                    checked
+                      ? "border-brand-400/50 bg-brand-500/15 text-white"
+                      : "border-white/5 bg-ink-950/40 text-ink-300 hover:bg-white/5"
+                  }`}
+                >
+                  <span
+                    className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${
+                      checked ? "border-brand-300 bg-brand-500" : "border-ink-600"
+                    }`}
+                  >
+                    {checked ? <CheckIcon size={12} /> : null}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5">
+                      <SkillsIcon size={12} className="shrink-0 text-brand-200" />
+                      <span className="block truncate font-mono text-[11px]">{skill.id}</span>
+                    </span>
+                    {skill.label !== skill.id || skill.style ? (
+                      <span className="block truncate text-[10px] text-ink-500">
+                        {[skill.label !== skill.id ? skill.label : "", skill.style]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                    ) : null}
+                  </span>
+                </button>
+              );
+            })}
+            {!visible.length ? (
+              <div className="rounded-lg border border-white/5 bg-ink-950/30 px-3 py-6 text-center text-[11px] text-ink-500">
+                No skills match this search.
+              </div>
+            ) : null}
+          </div>
+          <div className="mt-2 text-[10px] text-ink-500">
+            {selected.length} selected · {visible.length} shown
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}

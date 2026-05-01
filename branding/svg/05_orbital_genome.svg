@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="200" height="200">
+  <title>Nerya Orbital Genome</title>
+  <defs>
+    <linearGradient id="g5a" x1="0" y1="0" x2="0" y2="100" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#b48bff"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="g5b" x1="0" y1="100" x2="0" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#b48bff"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke-linecap="round" stroke-width="2.4">
+    <path d="M30 20 C50 32 50 48 30 60 C50 72 50 88 30 100" stroke="url(#g5a)" transform="translate(0,-10)"/>
+    <path d="M70 20 C50 32 50 48 70 60 C50 72 50 88 70 100" stroke="url(#g5b)" transform="translate(0,-10)"/>
+  </g>
+  <g stroke="#8b5cf6" stroke-width="1.4" stroke-linecap="round" opacity="0.85">
+    <line x1="34" y1="22" x2="66" y2="22"/>
+    <line x1="38" y1="34" x2="62" y2="34"/>
+    <line x1="38" y1="50" x2="62" y2="50"/>
+    <line x1="38" y1="66" x2="62" y2="66"/>
+    <line x1="34" y1="78" x2="66" y2="78"/>
+  </g>
+  <g fill="#22d3ee">
+    <circle cx="34" cy="22" r="1.6"/>
+    <circle cx="66" cy="22" r="1.6"/>
+    <circle cx="34" cy="78" r="1.6"/>
+    <circle cx="66" cy="78" r="1.6"/>
+  </g>
+  <g fill="#b48bff">
+    <circle cx="38" cy="50" r="2"/>
+    <circle cx="62" cy="50" r="2"/>
+  </g>
+</svg>

@@ -1,0 +1,225 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { clientApi } from "../lib/clientApi";
+import type {
+  AttentionItem,
+  EnvelopeSeverity,
+  OperatorOverviewData,
+  OperatorOverviewEnvelope,
+} from "../lib/operatorTypes";
+import { Card, Pill } from "./Page";
+
+const SEVERITY_TONE: Record<EnvelopeSeverity, "ok" | "warn" | "danger" | "brand"> = {
+  info: "ok",
+  warn: "warn",
+  danger: "danger",
+};
+
+const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "brand"> = {
+  ok: "ok",
+  warn: "warn",
+  error: "danger",
+  blocked: "danger",
+};
+
+export function OperatorOverviewHero() {
+  const [env, setEnv] = useState<OperatorOverviewEnvelope | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const next = await clientApi.operatorOverview();
+        if (cancelled) return;
+        setEnv(next);
+        setError(null);
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    const t = setInterval(load, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, []);
+
+  if (loading && !env) {
+    return (
+      <Card title="Workspace at a glance" description="Loading runtime status…" />
+    );
+  }
+  if (error || !env) {
+    return (
+      <Card
+        title="Workspace at a glance"
+        description="Operator overview unavailable"
+      >
+        <div className="text-[12px] text-rose-300 font-mono break-all">
+          {error || "no data"}
+        </div>
+      </Card>
+    );
+  }
+
+  const data: OperatorOverviewData = env.data;
+  const tone = STATUS_TONE[env.status] ?? "brand";
+
+  return (
+    <Card
+      title="Workspace at a glance"
+      description={env.summary}
+      actions={
+        <div className="flex items-center gap-2">
+          <Pill tone={tone}>{env.status.toUpperCase()}</Pill>
+          {env.primary_action ? (
+            env.primary_action.href ? (
+              <Link
+                href={env.primary_action.href}
+                className="text-[11px] px-2 py-0.5 rounded-md text-brand-200 border border-brand-500/25 hover:bg-brand-500/10"
+              >
+                {env.primary_action.label} →
+              </Link>
+            ) : (
+              <span className="text-[11px] text-ink-400">
+                {env.primary_action.label}
+              </span>
+            )
+          ) : null}
+        </div>
+      }
+    >
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <HealthChip
+          label="Live trading"
+          on={data.health.live_trading}
+          tone={data.health.live_trading ? "warn" : "brand"}
+        />
+        <HealthChip
+          label="Kill switch"
+          on={data.health.kill_switch}
+          tone={data.health.kill_switch ? "danger" : "ok"}
+        />
+        <HealthChip
+          label="LLM ready"
+          on={data.health.llm_ready}
+          tone={data.health.llm_ready ? "ok" : "danger"}
+          subtitle={`${data.llm.ready_tiers}/${data.llm.total_tiers} tiers`}
+        />
+        <HealthChip
+          label="Strategies"
+          on={data.health.strategies}
+          tone={data.health.strategies ? "ok" : "warn"}
+          subtitle={`${data.counts.strategy_packages} package(s)`}
+        />
+      </div>
+
+      <AttentionList items={data.attention} />
+    </Card>
+  );
+}
+
+function HealthChip({
+  label,
+  on,
+  tone,
+  subtitle,
+}: {
+  label: string;
+  on: boolean;
+  tone: "ok" | "warn" | "danger" | "brand";
+  subtitle?: string;
+}) {
+  const accent =
+    tone === "ok"
+      ? { bar: "bg-accent-500", text: "text-accent-400", glow: "shadow-[0_0_12px_rgba(16,217,147,0.45)]" }
+      : tone === "warn"
+      ? { bar: "bg-[#f5a524]", text: "text-[#f5a524]", glow: "shadow-[0_0_12px_rgba(245,165,36,0.45)]" }
+      : tone === "danger"
+      ? { bar: "bg-[#ef4560]", text: "text-[#ef4560]", glow: "shadow-[0_0_12px_rgba(239,69,96,0.45)]" }
+      : { bar: "bg-brand-400", text: "text-brand-300", glow: "shadow-[0_0_12px_rgba(180,139,255,0.45)]" };
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-white/5 bg-white/[0.03] backdrop-blur-glass px-3 py-3 hover:border-white/10 transition-colors min-w-0">
+      <span className={`absolute left-0 top-0 bottom-0 w-[2px] ${accent.bar} ${on ? accent.glow : "opacity-30"}`} />
+      <div className="pl-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-ink-400">
+            Status
+          </span>
+          <span className={`text-[10px] font-mono uppercase tracking-[0.18em] shrink-0 ${on ? accent.text : "text-ink-500"}`}>
+            {on ? "ON" : "OFF"}
+          </span>
+        </div>
+        <div className="mt-1 text-[13px] font-medium leading-snug text-white">
+          {label}
+        </div>
+        {subtitle ? (
+          <div className="text-[10.5px] text-ink-400 mt-0.5 font-mono truncate">
+            {subtitle}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function AttentionList({ items }: { items: AttentionItem[] }) {
+  if (!items.length) {
+    return (
+      <div className="text-[12px] text-ink-500 px-1 py-2">
+        Nothing requires your attention right now.
+      </div>
+    );
+  }
+  return (
+    <ul className="embedded-list-scroll space-y-2">
+      {items.slice(0, 6).map((item) => (
+        <li
+          key={item.id}
+          className="flex items-start gap-3 px-2 py-2 rounded-lg hover:bg-brand-500/5"
+        >
+          <span
+            className={`mt-1 w-2 h-2 rounded-full ${dotColor(item.severity)}`}
+          />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <Pill tone={SEVERITY_TONE[item.severity]}>
+                {item.type.replace("_", " ")}
+              </Pill>
+              <span className="text-[12.5px] text-ink-100 truncate">
+                {item.title}
+              </span>
+            </div>
+            {item.summary ? (
+              <div className="text-[11px] text-ink-500 mt-0.5 truncate">
+                {item.summary}
+              </div>
+            ) : null}
+          </div>
+          {item.href ? (
+            <Link
+              href={item.href}
+              className="text-[11px] px-2 py-0.5 rounded-md text-brand-200 border border-brand-500/25 hover:bg-brand-500/10 shrink-0"
+            >
+              Open →
+            </Link>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function dotColor(severity: EnvelopeSeverity) {
+  if (severity === "danger") return "bg-rose-500";
+  if (severity === "warn") return "bg-amber-400";
+  return "bg-brand-400";
+}

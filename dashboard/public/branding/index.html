@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nerya · Logo studio — Evolutionary Brain</title>
+<style>
+  :root {
+    --paper: #f3ecdb;
+    --paper-2: #e9dfc4;
+    --ink: #1a1330;
+    --ink-2: #4a3f6a;
+    --violet: #8b5cf6;
+    --fluid: #22d3ee;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    color: var(--ink);
+    background-color: var(--paper);
+    background-image:
+      radial-gradient(1200px 700px at 12% 0%, rgba(139, 92, 246, 0.16), transparent 60%),
+      radial-gradient(900px 500px at 110% 8%, rgba(34, 211, 238, 0.12), transparent 55%),
+      radial-gradient(800px 600px at 50% 110%, rgba(244, 114, 182, 0.12), transparent 55%),
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'><filter id='n'><feTurbulence baseFrequency='0.92' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 0.08, 0 0 0 0 0.06, 0 0 0 0 0.18, 0 0 0 0.18 0'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
+    min-height: 100vh;
+    padding: 64px 48px 96px;
+  }
+  header {
+    max-width: 1200px;
+    margin: 0 auto 56px;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+    color: var(--violet);
+    font-weight: 600;
+  }
+  .eyebrow .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--violet);
+    box-shadow: 0 0 12px rgba(139, 92, 246, 0.6);
+  }
+  h1 {
+    font-size: 56px;
+    line-height: 1.04;
+    letter-spacing: -0.02em;
+    margin: 14px 0 16px;
+    font-weight: 600;
+    background-image: linear-gradient(120deg, #1a1330 0%, #4c1d95 35%, #0e7490 75%, #1a1330 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .lede {
+    max-width: 720px;
+    color: var(--ink-2);
+    font-size: 16px;
+    line-height: 1.6;
+  }
+  .meta {
+    display: flex;
+    gap: 24px;
+    margin-top: 22px;
+    font-size: 12px;
+    color: var(--ink-2);
+    flex-wrap: wrap;
+  }
+  .meta span strong { color: var(--ink); font-weight: 600; }
+
+  .grid {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 24px;
+  }
+  .card {
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.6), rgba(255,255,255,0.35));
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(26, 19, 48, 0.08);
+    border-radius: 18px;
+    padding: 22px 22px 18px;
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.7) inset,
+      0 18px 32px -22px rgba(76, 29, 149, 0.35);
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
+  }
+  .card:hover {
+    transform: translateY(-2px);
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.7) inset,
+      0 22px 38px -22px rgba(76, 29, 149, 0.5);
+  }
+  .stage {
+    position: relative;
+    height: 220px;
+    border-radius: 12px;
+    margin-bottom: 18px;
+    overflow: hidden;
+    background:
+      radial-gradient(60% 80% at 50% 30%, rgba(139, 92, 246, 0.18), transparent 70%),
+      linear-gradient(135deg, #fbf6e8, #f0e6cd);
+    border: 1px solid rgba(26, 19, 48, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .stage svg {
+    width: 140px;
+    height: 140px;
+    filter: drop-shadow(0 4px 14px rgba(76, 29, 149, 0.18));
+  }
+  .stage::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence baseFrequency='1.2' numOctaves='1' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 0.1, 0 0 0 0 0.05, 0 0 0 0 0.2, 0 0 0 0.06 0'/></filter><rect width='120' height='120' filter='url(%23n)'/></svg>");
+    pointer-events: none;
+    opacity: 0.5;
+  }
+  .id {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    color: var(--violet);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .name {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 4px;
+    letter-spacing: -0.005em;
+  }
+  .desc {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 14px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--ink-2);
+  }
+  .row .swatches { display: flex; gap: 6px; }
+  .swatch { width: 14px; height: 14px; border-radius: 4px; border: 1px solid rgba(26,19,48,0.08); }
+  footer {
+    max-width: 1200px;
+    margin: 80px auto 0;
+    padding-top: 28px;
+    border-top: 1px dashed rgba(26, 19, 48, 0.18);
+    color: var(--ink-2);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="eyebrow"><span class="dot"></span> Nerya · Brand exploration · v0.1</div>
+    <h1>Evolutionary Brain</h1>
+    <p class="lede">Six logo directions for Nerya, the self-evolving trading runtime. Each variant carries the
+      same conceptual nucleus — a biological neural network that grows, connects, and iterates — expressed
+      with a different visual grammar: synapses, spirals, dendrites, ridges, double helix, and a phase loop.
+      Display surface uses a high-saturation paper-texture backdrop with a violet ↔ cyan aurora bleed,
+      mirroring the dashboard's runtime aesthetic.</p>
+    <div class="meta">
+      <span><strong>Concept</strong> · 进化 · 联结 · 迭代环 · 生物神经网络</span>
+      <span><strong>Palette</strong> · violet #8b5cf6 → cyan #22d3ee</span>
+      <span><strong>Format</strong> · SVG, viewBox 0 0 100 100</span>
+    </div>
+  </header>
+
+  <section class="grid">
+    <article class="card">
+      <div class="stage"><object data="svg/01_synapse_n.svg" type="image/svg+xml" aria-label="Synapse N"></object></div>
+      <div class="id">01 · Synapse N</div>
+      <div class="name">N as a neural circuit</div>
+      <div class="desc">The N letterform redrawn as three excitable axons with synaptic relay points. The
+        diagonal carries a downstream cascade of small fluid dots — packets of information traveling
+        from one neuron to the next.</div>
+      <div class="row"><span>weight 2.6 · stroke + nodes</span><span class="swatches"><span class="swatch" style="background:#b48bff"></span><span class="swatch" style="background:#8b5cf6"></span><span class="swatch" style="background:#22d3ee"></span></span></div>
+    </article>
+
+    <article class="card">
+      <div class="stage"><object data="svg/02_iteration_spiral.svg" type="image/svg+xml" aria-label="Iteration Spiral"></object></div>
+      <div class="id">02 · Iteration Spiral</div>
+      <div class="name">The evolution loop</div>
+      <div class="desc">A 270° gradient arc closes back on itself with an open mouth — the hand-off of one
+        generation to the next. Concentric dotted rings represent feedback iterations. The five satellite
+        nodes echo the five pillars of the runtime: skill · plan · act · memory · evolve.</div>
+      <div class="row"><span>arc + concentric · 5 satellites</span><span class="swatches"><span class="swatch" style="background:#22d3ee"></span><span class="swatch" style="background:#8b5cf6"></span><span class="swatch" style="background:#b48bff"></span></span></div>
+    </article>
+
+    <article class="card">
+      <div class="stage"><object data="svg/03_dendrite_tree.svg" type="image/svg+xml" aria-label="Dendrite Tree"></object></div>
+      <div class="id">03 · Dendrite Tree</div>
+      <div class="name">A cell body, branching outward</div>
+      <div class="desc">Most literal of the six — a single neuron with axon, dendrites, and synaptic
+        terminals. The center cell glows with a luminous nucleus. Reads as both biology and decision tree,
+        which is how the agent actually thinks.</div>
+      <div class="row"><span>organic · 9 terminals</span><span class="swatches"><span class="swatch" style="background:#22d3ee"></span><span class="swatch" style="background:#8b5cf6"></span><span class="swatch" style="background:#b48bff"></span></span></div>
+    </article>
+
+    <article class="card">
+      <div class="stage"><object data="svg/04_n_brain_fold.svg" type="image/svg+xml" aria-label="N + Brain fold"></object></div>
+      <div class="id">04 · N + Brain Fold</div>
+      <div class="name">Letterform with cortical ridges</div>
+      <div class="desc">Solid violet N filled with horizontal cortical fold lines — the visual signature of
+        a brain in cross-section. A single fluid orb hovers at the upper-right tracking position, calling
+        out the "agent online" status pattern from the dashboard.</div>
+      <div class="row"><span>solid + ridges · clip-path</span><span class="swatches"><span class="swatch" style="background:#b48bff"></span><span class="swatch" style="background:#6d28d9"></span><span class="swatch" style="background:#22d3ee"></span></span></div>
+    </article>
+
+    <article class="card">
+      <div class="stage"><object data="svg/05_orbital_genome.svg" type="image/svg+xml" aria-label="Orbital Genome"></object></div>
+      <div class="id">05 · Orbital Genome</div>
+      <div class="name">DNA double helix</div>
+      <div class="desc">Two intertwined gradient strands cross at five base-pair rungs — encoding,
+        replication, mutation. Speaks to evolution at the genome level, which fits a system that
+        rewrites its own strategies and skills on every cycle.</div>
+      <div class="row"><span>double helix · 5 base pairs</span><span class="swatches"><span class="swatch" style="background:#b48bff"></span><span class="swatch" style="background:#8b5cf6"></span><span class="swatch" style="background:#22d3ee"></span></span></div>
+    </article>
+
+    <article class="card">
+      <div class="stage"><object data="svg/06_phase_loop.svg" type="image/svg+xml" aria-label="Phase Loop"></object></div>
+      <div class="id">06 · Phase Loop</div>
+      <div class="name">Infinity with a pulse</div>
+      <div class="desc">A horizontal infinity / Möbius ribbon sweeps left-to-right with the cyan-violet
+        gradient, then crosses through a glowing white pulse node at center. This is the
+        "always-running, always-learning" loop signature, and the cleanest of the six at favicon size.</div>
+      <div class="row"><span>infinity · pulse node</span><span class="swatches"><span class="swatch" style="background:#b48bff"></span><span class="swatch" style="background:#8b5cf6"></span><span class="swatch" style="background:#22d3ee"></span></span></div>
+    </article>
+  </section>
+
+  <footer>
+    Nerya — Evolutionary Brain · brand exploration v0.1 · violet × cyan · paper-texture backdrop ·
+    six SVG variants live under <code>Nerya/branding/svg/</code> · selection drives <code>NeryaMark</code> in
+    the dashboard.
+  </footer>
+</body>
+</html>
