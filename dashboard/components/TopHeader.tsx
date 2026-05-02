@@ -14,6 +14,7 @@ import {
   SettingsIcon,
   StarIcon,
 } from "./icons";
+import { NeryaLogo } from "./NeryaLogo";
 
 type Workspace = {
   live_trading_enabled?: boolean;
@@ -205,8 +206,8 @@ export function TopHeader() {
           <Link href="/settings" className="icon-btn" title={tHeader("settings")}>
             <SettingsIcon size={16} />
           </Link>
-          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 via-brand-500 to-brand-700 ring-1 ring-brand-500/40 flex items-center justify-center shadow-glow text-white font-bold text-sm">
-            N
+          <div className="w-9 h-9 rounded-full overflow-hidden ring-1 ring-brand-500/40 shadow-glow bg-black/30 flex items-center justify-center">
+            <NeryaLogo size={36} />
           </div>
         </div>
       </div>

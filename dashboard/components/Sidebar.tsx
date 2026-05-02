@@ -15,9 +15,9 @@ import {
   MoonIcon,
   NAV_ICONS,
   NAV_ICON_BY_NAME,
-  NeryaMark,
 } from "./icons";
 import { LanguageSwitcher } from "./LanguageSwitcher";
+import { NeryaLogo } from "./NeryaLogo";
 import { SwitchIndicator } from "./SwitchControl";
 
 const COLLAPSE_KEY = "nerya.sidebar.collapsed";
@@ -202,8 +202,8 @@ export function Sidebar() {
       style={{ background: "var(--panel-bg, rgba(4,4,13,0.6))", borderColor: "var(--line)", color: "var(--text-muted)" }}
     >
       <div className="px-4 py-5 border-b flex items-center gap-3" style={{ borderColor: "var(--line)" }}>
-        <div className="relative w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500/40 via-brand-600/30 to-fluid-500/20 ring-1 ring-brand-500/40 flex items-center justify-center shadow-glow">
-          <NeryaMark size={22} />
+        <div className="relative w-10 h-10 rounded-xl overflow-hidden ring-1 ring-brand-500/40 flex items-center justify-center shadow-glow bg-black/30">
+          <NeryaLogo size={40} />
           <span className="absolute -inset-px rounded-xl ring-1 ring-white/10 pointer-events-none" />
         </div>
         {!collapsed ? (
@@ -231,8 +231,8 @@ export function Sidebar() {
           <div className="flex items-center gap-3">
             <div className="relative shrink-0">
               <div className="absolute inset-0 rounded-full ring-ai animate-spin-slow opacity-70" style={{ animation: "aurora-shift 8s linear infinite" }} />
-              <div className="relative w-10 h-10 rounded-full bg-gradient-to-br from-brand-400 via-brand-500 to-brand-700 flex items-center justify-center text-white font-bold text-sm shadow-glow">
-                N
+              <div className="relative w-10 h-10 rounded-full overflow-hidden shadow-glow ring-1 ring-brand-500/40 bg-black/30 flex items-center justify-center">
+                <NeryaLogo size={40} />
               </div>
               <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-accent-500 ring-2 ring-[#04040d]" />
             </div>
@@ -267,8 +267,8 @@ export function Sidebar() {
             className="flex justify-center mt-4"
           >
           <div className="relative">
-            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 via-brand-500 to-brand-700 flex items-center justify-center text-white font-bold text-sm shadow-glow">
-              N
+            <div className="w-9 h-9 rounded-full overflow-hidden shadow-glow ring-1 ring-brand-500/40 bg-black/30 flex items-center justify-center">
+              <NeryaLogo size={36} />
             </div>
             <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-accent-500 ring-2 ring-[#0a0b1a]" />
           </div>

@@ -441,3 +441,9 @@ html.light body::after {
   50% { box-shadow: 0 0 0 10px rgba(139, 92, 246, 0); }
 }
 .pulse-violet { animation: pulse-violet 2.5s infinite; }
+
+/* 打字机光标闪烁 */
+@keyframes typewriter-blink {
+  from, to { opacity: 1; }
+  50% { opacity: 0; }
+}
