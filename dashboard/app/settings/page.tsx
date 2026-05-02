@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useTranslations } from "next-intl";
 import { Card, ErrorBanner, PageBody, PageHeader, Pill } from "../../components/Page";
 import { SwitchControl } from "../../components/SwitchControl";
-import { CheckIcon, SearchIcon, SettingsIcon, SparkIcon, WrenchIcon } from "../../components/icons";
+import { CheckIcon, RefreshIcon, SearchIcon, SettingsIcon, SparkIcon } from "../../components/icons";
 import { DEFAULT_SETTINGS, useUiSettings } from "../../lib/settings";
 import {
   clientApi,
@@ -164,11 +165,18 @@ function modelId(row: Record<string, unknown>): string {
   return String(row.id || row.model || row.name || row.model_id || "").trim();
 }
 
-function tierLabel(tier: string): string {
-  if (tier === "light") return "Low / light";
-  if (tier === "medium") return "Medium";
-  if (tier === "high") return "High";
-  if (tier === INTENT_TIER) return "Intent recognition";
+function tierLabel(tier: string, t?: (k: string) => string): string {
+  if (t) {
+    if (tier === "light") return t("tierLight");
+    if (tier === "medium") return t("tierMedium");
+    if (tier === "high") return t("tierHigh");
+    if (tier === INTENT_TIER) return t("tierIntent");
+  } else {
+    if (tier === "light") return "Low / light";
+    if (tier === "medium") return "Medium";
+    if (tier === "high") return "High";
+    if (tier === INTENT_TIER) return "Intent recognition";
+  }
   return tier;
 }
 
@@ -196,6 +204,13 @@ function fingerprintConfig(
 
 export default function SettingsPage() {
   const [uiSettings, patchUi] = useUiSettings();
+  const t = useTranslations("settings");
+  const tProvider = useTranslations("settings.providerCard");
+  const tModel = useTranslations("settings.modelCard");
+  const tMemory = useTranslations("settings.memoryCard");
+  const tDisplay = useTranslations("settings.displayCard");
+  const tChart = useTranslations("settings.chartCard");
+  const tCommon = useTranslations("common");
   const [venues, setVenues] = useState<{ name: string; label: string }[]>([]);
   const [providers, setProviders] = useState<ProviderOption[]>([]);
   const [providerProfiles, setProviderProfiles] = useState<LlmProviderProfile[]>([]);
@@ -314,8 +329,8 @@ export default function SettingsPage() {
   }, [modelCatalog, providerDraft, providerProfiles, providers, tierRows]);
 
   const defaultTierOptions = useMemo(
-    () => STANDARD_TIERS.map((tier) => ({ value: tier, label: tierLabel(tier) })),
-    [],
+    () => STANDARD_TIERS.map((tier) => ({ value: tier, label: tierLabel(tier, tModel) })),
+    [tModel],
   );
 
   const providerProfileMap = useMemo(() => {
@@ -578,9 +593,8 @@ export default function SettingsPage() {
   return (
     <PageBody>
       <PageHeader
-        eyebrow="Runtime settings"
-        title="Settings"
-        description="Runtime model routing, provider onboarding, memory indexing, and browser-local dashboard preferences."
+        title={t("title")}
+        description={t("description")}
         actions={
           <button
             type="button"
@@ -588,8 +602,8 @@ export default function SettingsPage() {
             onClick={() => void loadModelConfig()}
             disabled={loading}
           >
-            <WrenchIcon size={14} />
-            {loading ? "Loading..." : "Refresh"}
+            <RefreshIcon size={14} />
+            {loading ? tCommon("loading") : tCommon("refresh")}
           </button>
         }
       />
@@ -604,16 +618,17 @@ export default function SettingsPage() {
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_360px] gap-5">
         <div className="space-y-5">
           <Card
-            title="Provider and model inventory"
-            description="Select a provider, store its key as a vault ref, fetch /models, then import the exact model ids Nerya can assign."
+            featured
+            title={tProvider("title")}
+            description={tProvider("description")}
             actions={
               discoveredModels.length ? (
-                <Pill tone="brand">{selectedModelIds.size}/{discoveredModels.length} selected</Pill>
+                <Pill tone="brand">{tProvider("selectedCount", { selected: selectedModelIds.size, total: discoveredModels.length })}</Pill>
               ) : null
             }
           >
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-[180px_1fr]">
-              <Field label="Provider" hint="dropdown">
+              <Field label={tProvider("providerLabel")} hint={tProvider("providerHint")}>
                 <select
                   className="input-dark font-mono"
                   value={providerDraft}
@@ -626,7 +641,7 @@ export default function SettingsPage() {
                   ))}
                 </select>
               </Field>
-              <Field label="Base URL" hint="provider endpoint">
+              <Field label={tProvider("baseUrlLabel")} hint={tProvider("baseUrlHint")}>
                 <input
                   className="input-dark font-mono"
                   value={providerBaseUrlDraft}
@@ -634,13 +649,13 @@ export default function SettingsPage() {
                   placeholder="https://api.openai.com/v1"
                 />
               </Field>
-              <Field label="API key / vault ref" hint="plaintext becomes vault://">
+              <Field label={tProvider("apiKeyLabel")} hint={tProvider("apiKeyHint")}>
                 <input
                   className="input-dark font-mono"
                   value={providerKeyDraft}
                   onChange={(e) => setProviderKeyDraft(e.target.value)}
                   type={providerKeyDraft.startsWith("vault://") ? "text" : "password"}
-                  placeholder="paste API key or vault://llm_openai"
+                  placeholder={tProvider("apiKeyPlaceholder")}
                 />
               </Field>
               <div className="flex items-end gap-2">
@@ -651,7 +666,7 @@ export default function SettingsPage() {
                   disabled={discovering || !providerDraft.trim()}
                 >
                   <SearchIcon size={14} />
-                  {discovering ? "Fetching..." : "Fetch /models"}
+                  {discovering ? tProvider("fetching") : tProvider("fetchModels")}
                 </button>
                 <button
                   type="button"
@@ -659,7 +674,7 @@ export default function SettingsPage() {
                   onClick={() => setSelectedModelIds(new Set(discoveredModels.map(modelId)))}
                   disabled={!discoveredModels.length}
                 >
-                  Select all
+                  {tProvider("selectAll")}
                 </button>
                 <button
                   type="button"
@@ -667,16 +682,16 @@ export default function SettingsPage() {
                   onClick={() => setSelectedModelIds(new Set())}
                   disabled={!discoveredModels.length}
                 >
-                  Clear
+                  {tProvider("clear")}
                 </button>
                 <button
                   type="button"
-                  className="btn btn-ghost ml-auto"
+                  className="btn btn-primary ml-auto"
                   onClick={importSelectedModels}
                   disabled={importing || selectedModelIds.size === 0}
                 >
                   <CheckIcon size={14} />
-                  {importing ? "Importing..." : "Import selected"}
+                  {importing ? tProvider("importing") : tProvider("importSelected")}
                 </button>
               </div>
             </div>
@@ -709,50 +724,51 @@ export default function SettingsPage() {
           </Card>
 
           <Card
+            featured
             title={
               <span className="inline-flex items-center gap-2">
                 <SparkIcon size={16} className="text-fluid-300" />
-                Model assignments
+                {tModel("title")}
               </span>
             }
-            description="Choose imported provider+model pairs for high, medium, light, and intent/classification work. Tiers inherit provider keys from the provider profile."
+            description={tModel("description")}
             actions={
               <div className="flex items-center gap-2">
-                {dirty ? <Pill tone="warn">unsaved</Pill> : null}
-                <Pill tone="brand">{catalogModelCount} catalog models</Pill>
+                {dirty ? <Pill tone="warn">{tModel("unsaved")}</Pill> : null}
+                <Pill tone="brand">{tModel("catalogModels", { count: catalogModelCount })}</Pill>
               </div>
             }
           >
             <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
               <Metric
-                label="Default"
+                label={tModel("defaultLabel")}
                 value={<span className="font-mono">{defaultTier}</span>}
-                detail="agent turns"
+                detail={tModel("agentTurns")}
                 icon={<SparkIcon size={16} />}
               />
               <Metric
-                label="Intent"
+                label={tModel("intentLabel")}
                 value={<span className="font-mono">{intentTier}</span>}
-                detail="classification"
+                detail={tModel("classification")}
                 icon={<SearchIcon size={16} />}
               />
               <Metric
-                label="Configured"
+                label={tModel("configuredLabel")}
                 value={`${configuredTierCount}/${tierRows.length}`}
-                detail="provider + model"
+                detail={tModel("providerModel")}
                 icon={<CheckIcon size={16} />}
               />
               <Metric
-                label="Providers"
+                label={tModel("providersLabel")}
                 value={`${readyProviderCount}/${providers.length || providerOptions.length}`}
-                detail="credential-ready"
+                detail={tModel("credentialReady")}
                 icon={<SettingsIcon size={16} />}
               />
             </div>
 
             <div className="mb-4 flex flex-wrap items-end gap-3 rounded-xl border border-brand-500/10 bg-ink-900/40 p-3">
               <label className="text-[12px] text-ink-300">
-                Default tier
+                {tModel("defaultTier")}
                 <Select
                   value={defaultTier}
                   onChange={setDefaultTier}
@@ -765,8 +781,8 @@ export default function SettingsPage() {
                 onClick={refreshModels}
                 disabled={refreshing}
               >
-                <WrenchIcon size={14} />
-                {refreshing ? "Refreshing..." : "Refresh catalog"}
+                <RefreshIcon size={14} />
+                {refreshing ? tCommon("refreshing") : tModel("refreshCatalog")}
               </button>
               <button
                 type="button"
@@ -775,7 +791,7 @@ export default function SettingsPage() {
                 disabled={saving || tierRows.length === 0}
               >
                 <CheckIcon size={14} />
-                {saving ? "Saving..." : "Save assignments"}
+                {saving ? tCommon("saving") : tModel("saveAssignments")}
               </button>
             </div>
 
@@ -787,6 +803,12 @@ export default function SettingsPage() {
                 const modelOptions = row.model && !models.includes(row.model)
                   ? [row.model, ...models]
                   : models;
+                const laneKey = row.tier === INTENT_TIER
+                  ? "laneIntent"
+                  : row.tier === "light" ? "laneLight"
+                  : row.tier === "medium" ? "laneMedium"
+                  : row.tier === "high" ? "laneHigh"
+                  : null;
                 return (
                   <div
                     key={row.tier}
@@ -794,29 +816,27 @@ export default function SettingsPage() {
                   >
                     <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
                       <div>
-                        <div className="font-mono text-[13px] text-ink-100">{tierLabel(row.tier)}</div>
+                        <div className="font-mono text-[13px] text-ink-100">{tierLabel(row.tier, tModel)}</div>
                         <div className="mt-0.5 text-[11px] text-ink-500">
-                          {row.tier === INTENT_TIER
-                            ? "classification / intent routing"
-                            : `${row.tier} model lane`}
+                          {laneKey ? tModel(laneKey) : `${row.tier} model lane`}
                         </div>
                       </div>
                       <div className="flex flex-wrap justify-end gap-1.5">
                         <Pill tone={provider?.ready || profile?.has_key_ref || profile?.provider_key_ref ? "ok" : "warn"}>
-                          {provider?.ready || profile?.has_key_ref || profile?.provider_key_ref ? "ready" : "key ref missing"}
+                          {provider?.ready || profile?.has_key_ref || profile?.provider_key_ref ? tModel("ready") : tModel("keyRefMissing")}
                         </Pill>
-                        {row.tier === defaultTier ? <Pill tone="brand">default</Pill> : null}
-                        {row.tier === intentTier ? <Pill tone="brand">intent</Pill> : null}
+                        {row.tier === defaultTier ? <Pill tone="brand">{tModel("default")}</Pill> : null}
+                        {row.tier === intentTier ? <Pill tone="brand">{tModel("intent")}</Pill> : null}
                       </div>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <Field label="Provider" hint={profile?.base_url || provider?.base_url || "select first"}>
+                      <Field label={tProvider("providerLabel")} hint={profile?.base_url || provider?.base_url || tModel("selectProvider")}>
                         <select
                           className="input-dark"
                           value={row.provider}
                           onChange={(e) => patchTier(index, { provider: e.target.value })}
                         >
-                          <option value="">select provider</option>
+                          <option value="">{tModel("selectProvider")}</option>
                           {providerOptions.map((p) => (
                             <option key={p} value={p}>
                               {p}
@@ -824,7 +844,7 @@ export default function SettingsPage() {
                           ))}
                         </select>
                       </Field>
-                      <Field label="Model" hint={models.length ? `${models.length} imported` : "import models first"}>
+                      <Field label={tProvider("modelLabel")} hint={models.length ? tModel("importedCount", { count: models.length }) : tModel("importModelsFirst")}>
                         <select
                           className="input-dark font-mono"
                           value={row.model}
@@ -834,7 +854,7 @@ export default function SettingsPage() {
                           }}
                           disabled={!row.provider}
                         >
-                          <option value="">select model</option>
+                          <option value="">{tModel("selectModel")}</option>
                           {modelOptions.map((m) => (
                             <option key={m} value={m}>
                               {m}
@@ -851,21 +871,21 @@ export default function SettingsPage() {
         </div>
 
         <div className="space-y-5">
-          <Card title="Memory vector index" description="Optional memsearch index over markdown memory. Disabled by default; install and indexing only run after enabling it here.">
+          <Card title={tMemory("title")} description={tMemory("description")}>
             <Row
-              label="Enable memsearch"
-              desc={memoryStatus?.dependency_available ? "dependency available" : "dependency not installed"}
+              label={tMemory("enableLabel")}
+              desc={memoryStatus?.dependency_available ? tMemory("dependencyAvailable") : tMemory("dependencyMissing")}
             >
               <SwitchControl
                 checked={Boolean(memoryStatus?.enabled)}
                 disabled={memoryBusy === "toggle"}
-                label="Enable memsearch"
+                label={tMemory("enableLabel")}
                 onCheckedChange={(v) => {
                   void runMemoryAction("toggle", () => clientApi.memoryVectorConfig({ enabled: v }));
                 }}
               />
             </Row>
-            <Row label="Backend" desc={memoryStatus?.paths?.join(", ") || "memory, strategies"}>
+            <Row label={tMemory("backendLabel")} desc={memoryStatus?.paths?.join(", ") || "memory, strategies"}>
               <span className="font-mono text-xs text-ink-200">
                 {memoryStatus?.backend || "memsearch"}
               </span>
@@ -1009,7 +1029,7 @@ export default function SettingsPage() {
                   })
                 }
               >
-                Install deps
+                {tMemory("installDeps")}
               </button>
               <button
                 type="button"
@@ -1023,7 +1043,7 @@ export default function SettingsPage() {
                   })
                 }
               >
-                Rebuild index
+                {tMemory("rebuildIndex")}
               </button>
               {memoryStatus?.watcher_running ? (
                 <button
@@ -1032,7 +1052,7 @@ export default function SettingsPage() {
                   disabled={memoryBusy === "stop"}
                   onClick={() => void runMemoryAction("stop", () => clientApi.memoryVectorStop())}
                 >
-                  Stop watcher
+                  {tMemory("stopWatcher")}
                 </button>
               ) : (
                 <button
@@ -1041,7 +1061,7 @@ export default function SettingsPage() {
                   disabled={!memoryStatus?.enabled || !memoryStatus?.dependency_available || memoryBusy === "start"}
                   onClick={() => void runMemoryAction("start", () => clientApi.memoryVectorStart())}
                 >
-                  Start watcher
+                  {tMemory("startWatcher")}
                 </button>
               )}
             </div>
@@ -1050,7 +1070,7 @@ export default function SettingsPage() {
                 className="input-dark text-xs"
                 value={memoryQuery}
                 onChange={(e) => setMemoryQuery(e.target.value)}
-                placeholder="search memory"
+                placeholder={tMemory("searchPlaceholder")}
                 disabled={!memoryStatus?.enabled || !memoryStatus?.dependency_available}
               />
               <button
@@ -1060,7 +1080,7 @@ export default function SettingsPage() {
                 onClick={() => void searchMemory()}
               >
                 <SearchIcon size={14} />
-                Search
+                {tCommon("search")}
               </button>
             </div>
             {memoryResults.length ? (
@@ -1079,8 +1099,8 @@ export default function SettingsPage() {
             ) : null}
           </Card>
 
-          <Card title="Dashboard display" description="Browser-local preferences used by existing dashboard views.">
-            <Row label="Timezone" desc="Used by timestamp formatting across the dashboard.">
+          <Card title={tDisplay("title")} description={tDisplay("description")}>
+            <Row label={tDisplay("timezone")} desc={tDisplay("timezoneDesc")}>
               <Select
                 value={uiSettings.timezone}
                 onChange={(v) => patchUi({ timezone: v as typeof uiSettings.timezone })}
@@ -1094,12 +1114,12 @@ export default function SettingsPage() {
                 ]}
               />
             </Row>
-            <Row label="Refresh cadence" desc="Used by polling views and operator cards.">
+            <Row label={tDisplay("refreshCadence")} desc={tDisplay("refreshCadenceDesc")}>
               <Select
                 value={String(uiSettings.refreshSeconds || 0)}
                 onChange={(v) => patchUi({ refreshSeconds: Number(v) })}
                 options={[
-                  { value: "0", label: "Off" },
+                  { value: "0", label: tDisplay("refreshOff") },
                   { value: "5", label: "5 sec" },
                   { value: "10", label: "10 sec" },
                   { value: "30", label: "30 sec" },
@@ -1107,17 +1127,17 @@ export default function SettingsPage() {
                 ]}
               />
             </Row>
-            <Row label="Compact mode" desc="Reduce spacing on dense operator surfaces.">
+            <Row label={tDisplay("compactMode")} desc={tDisplay("compactModeDesc")}>
               <SwitchControl
                 checked={uiSettings.compact}
-                label="Compact mode"
+                label={tDisplay("compactMode")}
                 onCheckedChange={(v) => patchUi({ compact: v })}
               />
             </Row>
           </Card>
 
-          <Card title="Market chart defaults" description="Used by the dashboard K-line and market panels.">
-            <Row label="Venue" desc="Connector used for candles.">
+          <Card title={tChart("title")} description={tChart("description")}>
+            <Row label={tChart("venue")} desc={tChart("venueDesc")}>
               {venues.length ? (
                 <Select
                   value={uiSettings.kline.venue}
@@ -1125,10 +1145,10 @@ export default function SettingsPage() {
                   options={venues.map((v) => ({ value: v.name, label: v.label }))}
                 />
               ) : (
-                <span className="text-[11px] text-ink-400">No venues registered</span>
+                <span className="text-[11px] text-ink-400">{tModel("noVenues")}</span>
               )}
             </Row>
-            <Row label="Symbol" desc="Default market symbol.">
+            <Row label={tChart("symbol")} desc={tChart("symbolDesc")}>
               <input
                 value={uiSettings.kline.symbol}
                 onChange={(e) => patchUi({ kline: { ...uiSettings.kline, symbol: e.target.value.toUpperCase() } })}
@@ -1136,7 +1156,7 @@ export default function SettingsPage() {
                 placeholder="BTCUSDT"
               />
             </Row>
-            <Row label="Timeframe" desc="Default candle interval.">
+            <Row label={tChart("timeframe")} desc={tChart("timeframeDesc")}>
               <Select
                 value={uiSettings.kline.interval}
                 onChange={(v) => patchUi({ kline: { ...uiSettings.kline, interval: v as typeof uiSettings.kline.interval } })}
@@ -1150,7 +1170,7 @@ export default function SettingsPage() {
                 ]}
               />
             </Row>
-            <Row label="Candles" desc="Recent candles to fetch.">
+            <Row label={tChart("candles")} desc={tChart("candlesDesc")}>
               <Select
                 value={String(uiSettings.kline.count)}
                 onChange={(v) => patchUi({ kline: { ...uiSettings.kline, count: Number(v) } })}
@@ -1162,17 +1182,17 @@ export default function SettingsPage() {
                 ]}
               />
             </Row>
-            <Row label="Show volume" desc="Display volume bars by default.">
+            <Row label={tChart("showVolume")} desc={tChart("showVolumeDesc")}>
               <SwitchControl
                 checked={uiSettings.showVolume}
-                label="Show volume"
+                label={tChart("showVolume")}
                 onCheckedChange={(v) => patchUi({ showVolume: v })}
               />
             </Row>
-            <Row label="Reset UI settings" desc="Restore browser-local dashboard preferences.">
+            <Row label={tChart("resetSettings")} desc={tChart("resetSettingsDesc")}>
               <button className="btn btn-ghost" onClick={() => patchUi(DEFAULT_SETTINGS)}>
                 <SettingsIcon size={14} />
-                Reset
+                {tCommon("reset")}
               </button>
             </Row>
           </Card>

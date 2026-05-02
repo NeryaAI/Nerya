@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { useTranslations } from "next-intl";
 import { Card, Empty, ErrorBanner, Json, PageBody, PageHeader, Pill } from "../../components/Page";
 import { SwitchIndicator } from "../../components/SwitchControl";
 import {
@@ -26,13 +27,7 @@ import type {
 
 type Tab = "timeline" | "assets" | "proposals" | "config" | "debug";
 
-const TABS: Array<{ id: Tab; label: string }> = [
-  { id: "timeline", label: "History" },
-  { id: "assets", label: "Assets" },
-  { id: "proposals", label: "Proposals" },
-  { id: "config", label: "Config" },
-  { id: "debug", label: "Debug" },
-];
+const TAB_IDS: Tab[] = ["timeline", "assets", "proposals", "config", "debug"];
 
 function toneForStatus(status?: string): "neutral" | "ok" | "warn" | "danger" | "brand" {
   const s = String(status || "").toLowerCase();
@@ -51,6 +46,7 @@ function stageTone(stage?: string): "neutral" | "ok" | "warn" | "danger" | "bran
 }
 
 export default function SelfEvolutionPage() {
+  const t = useTranslations("selfEvolution");
   const [tab, setTab] = useState<Tab>("timeline");
   const [envelope, setEnvelope] = useState<EvolutionTimelineEnvelope | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -113,7 +109,7 @@ export default function SelfEvolutionPage() {
     setError(null);
     try {
       const out = await clientApi.evolutionReflect();
-      setNotice(`Reflection completed: ${String(out.count ?? out.proposals ?? "done")}.`);
+      setNotice(t("reflectionCompleted", { result: String(out.count ?? out.proposals ?? t("done")) }));
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -125,7 +121,7 @@ export default function SelfEvolutionPage() {
   async function runTuningDryRun() {
     const sid = strategy.trim();
     if (!sid) {
-      setError("Enter a strategy_id before running a tuning dry-run.");
+      setError(t("enterStrategyFirst"));
       return;
     }
     setBusy("tuning");
@@ -137,7 +133,7 @@ export default function SelfEvolutionPage() {
         operator: "dashboard",
         note: "self-evolution dashboard dry-run",
       });
-      setNotice(`Tuning dry-run for ${sid}: ${out.ok ? "completed" : "blocked"}.`);
+      setNotice(t("tuningResult", { sid, status: out.ok ? t("completed") : t("blockedWord") }));
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -152,7 +148,7 @@ export default function SelfEvolutionPage() {
     try {
       const out = await clientApi.evolutionAssetPromote(candidateId);
       if (!out.ok) throw new Error(JSON.stringify(out));
-      setNotice(`Promoted candidate ${candidateId}.`);
+      setNotice(t("promoted", { id: candidateId }));
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -167,7 +163,7 @@ export default function SelfEvolutionPage() {
     try {
       const out = await clientApi.evolutionAssetReject(candidateId, "rejected from dashboard");
       if (!out.ok) throw new Error(JSON.stringify(out));
-      setNotice(`Rejected candidate ${candidateId}.`);
+      setNotice(t("rejected", { id: candidateId }));
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -184,7 +180,7 @@ export default function SelfEvolutionPage() {
         proposal_id: proposalId,
         dry_run: true,
       });
-      setNotice(`Validation dry-run for ${proposalId}: ${out.ok ? "safe" : "blocked"}.`);
+      setNotice(t("validationDryRunResult", { id: proposalId, status: out.ok ? t("safeWord") : t("blockedWord") }));
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -196,17 +192,17 @@ export default function SelfEvolutionPage() {
   return (
     <div>
       <PageHeader
-        eyebrow="Learning control plane"
-        title="Self Evolution"
-        description="Audit prompts, inputs, generated docs, proposals, validation gates, outcomes, and reusable learning assets."
+        eyebrow={t("eyebrow")}
+        title={t("title")}
+        description={t("description")}
         actions={
           <>
             <button className="btn btn-ghost" onClick={() => void load(false)} disabled={Boolean(busy)}>
-              Refresh
+              {t("refresh")}
             </button>
             <button className="btn btn-primary" onClick={() => void load(true)} disabled={Boolean(busy)}>
               <EvolutionIcon size={14} />
-              {busy === "collect" ? "Collecting..." : "Collect signals"}
+              {busy === "collect" ? t("collecting") : t("collectSignals")}
             </button>
           </>
         }
@@ -234,18 +230,21 @@ export default function SelfEvolutionPage() {
         <LearningChain timeline={timeline} />
 
         <div className="overflow-x-auto border-b border-white/5">
-          {TABS.map((item) => (
-            <button
-              key={item.id}
-              className={[
-                "px-3 py-2 text-[12px]",
-                tab === item.id ? "border-b border-brand-300 text-white" : "text-ink-400",
-              ].join(" ")}
-              onClick={() => setTab(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
+          {TAB_IDS.map((id) => {
+            const labelKey = id === "timeline" ? "tabHistory" : id === "assets" ? "tabAssets" : id === "proposals" ? "tabProposals" : id === "config" ? "tabConfig" : "tabDebug";
+            return (
+              <button
+                key={id}
+                className={[
+                  "px-3 py-2 text-[12px]",
+                  tab === id ? "border-b border-brand-300 text-white" : "text-ink-400",
+                ].join(" ")}
+                onClick={() => setTab(id)}
+              >
+                {t(labelKey)}
+              </button>
+            );
+          })}
         </div>
 
         {tab === "timeline" ? (
@@ -312,39 +311,40 @@ function Filters({
   onReflect: () => Promise<void>;
   onTuning: () => Promise<void>;
 }) {
+  const t = useTranslations("selfEvolution");
   return (
     <Card>
       <div className="grid gap-3 lg:grid-cols-[minmax(180px,260px)_1fr_auto] lg:items-end">
         <label className="text-[12px] text-ink-300">
-          Strategy
+          {t("strategy")}
           <input
             value={strategy}
             onChange={(e) => onStrategy(e.target.value)}
             className="input-dark mt-1 font-mono"
-            placeholder="optional strategy_id"
+            placeholder={t("strategyPlaceholder")}
           />
         </label>
         <label className="text-[12px] text-ink-300">
-          Search history, evidence, proposals, assets
+          {t("searchLabel")}
           <input
             value={query}
             onChange={(e) => onQuery(e.target.value)}
             className="input-dark mt-1"
-            placeholder="slippage, noop, validation, proposal id"
+            placeholder={t("searchPlaceholder")}
           />
         </label>
         <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
           <button className="btn btn-ghost" onClick={onFilter} disabled={Boolean(busy)}>
             <SearchIcon size={14} />
-            Filter
+            {t("filter")}
           </button>
           <button className="btn btn-ghost" onClick={() => void onReflect()} disabled={Boolean(busy)}>
             <SparkIcon size={14} />
-            {busy === "reflect" ? "Reflecting..." : "Run reflection"}
+            {busy === "reflect" ? t("reflecting") : t("runReflection")}
           </button>
           <button className="btn btn-ghost" onClick={() => void onTuning()} disabled={Boolean(busy)}>
             <WrenchIcon size={14} />
-            {busy === "tuning" ? "Running..." : "Tuning dry-run"}
+            {busy === "tuning" ? t("running") : t("tuningDryRun")}
           </button>
         </div>
       </div>
@@ -353,14 +353,15 @@ function Filters({
 }
 
 function SummaryStrip({ summary }: { summary?: EvolutionTimelineEnvelope["summary"] }) {
+  const t = useTranslations("selfEvolution");
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-      <Stat label="Signals" value={summary?.signals ?? 0} />
-      <Stat label="Open proposals" value={summary?.open_proposals ?? 0} tone={summary?.open_proposals ? "warn" : "neutral"} />
-      <Stat label="Validation plans" value={summary?.validation_plans ?? 0} />
-      <Stat label="Reusable assets" value={summary?.assets ?? 0} tone="ok" />
-      <Stat label="Blocked" value={(summary?.blocked_candidates ?? 0) + (summary?.blocked_validation_plans ?? 0)} tone="danger" />
-      <Stat label="Last activity" value={summary?.last_activity_ts ? formatTime(summary.last_activity_ts) : "none"} compact />
+      <Stat label={t("signals")} value={summary?.signals ?? 0} />
+      <Stat label={t("openProposals")} value={summary?.open_proposals ?? 0} tone={summary?.open_proposals ? "warn" : "neutral"} />
+      <Stat label={t("validationPlans")} value={summary?.validation_plans ?? 0} />
+      <Stat label={t("reusableAssets")} value={summary?.assets ?? 0} tone="ok" />
+      <Stat label={t("blocked")} value={(summary?.blocked_candidates ?? 0) + (summary?.blocked_validation_plans ?? 0)} tone="danger" />
+      <Stat label={t("lastActivity")} value={summary?.last_activity_ts ? formatTime(summary.last_activity_ts) : t("none")} compact />
     </div>
   );
 }
@@ -392,12 +393,13 @@ function Stat({
 }
 
 function LearningChain({ timeline }: { timeline: EvolutionTimelineItem[] }) {
+  const t = useTranslations("selfEvolution");
   const stages = [
-    { id: "signal", label: "Signals", hint: "why it triggered" },
-    { id: "reflection", label: "Reflection", hint: "pattern detected" },
-    { id: "proposal", label: "Proposal", hint: "what may change" },
-    { id: "validation", label: "Validation", hint: "gates and evidence" },
-    { id: "asset", label: "Asset", hint: "reusable learning" },
+    { id: "signal", label: t("stageSignals"), hint: t("stageSignalsHint") },
+    { id: "reflection", label: t("stageReflection"), hint: t("stageReflectionHint") },
+    { id: "proposal", label: t("stageProposal"), hint: t("stageProposalHint") },
+    { id: "validation", label: t("stageValidation"), hint: t("stageValidationHint") },
+    { id: "asset", label: t("stageAsset"), hint: t("stageAssetHint") },
   ];
   return (
     <div className="grid gap-2 md:grid-cols-5">
@@ -435,26 +437,27 @@ function EmptyHistory({
   onTuning: () => Promise<void>;
   onOpenProposals: () => void;
 }) {
+  const t = useTranslations("selfEvolution");
   return (
-    <Card title="No evolution history yet">
+    <Card title={t("noHistoryTitle")}>
       <div className="grid gap-4 lg:grid-cols-[1fr_360px] lg:items-center">
         <Empty
-          title="No signal, proposal, or asset matched the current filter."
-          subtitle="Start by collecting signals, then run a reflection pass to convert repeated patterns into proposal-first changes."
+          title={t("noMatchTitle")}
+          subtitle={t("noMatchSubtitle")}
         />
         <div className="flex flex-wrap justify-center gap-2 lg:justify-end">
           <button className="btn btn-primary" onClick={onCollect} disabled={Boolean(busy)}>
             <EvolutionIcon size={14} />
-            Collect signals
+            {t("collectSignals")}
           </button>
           <button className="btn btn-ghost" onClick={() => void onReflect()} disabled={Boolean(busy)}>
-            Run reflection
+            {t("runReflection")}
           </button>
           <button className="btn btn-ghost" onClick={() => void onTuning()} disabled={Boolean(busy) || !hasStrategy}>
-            Tuning dry-run
+            {t("tuningDryRun")}
           </button>
           <button className="btn btn-ghost" onClick={onOpenProposals}>
-            Open proposals
+            {t("openProposalsBtn")}
           </button>
         </div>
       </div>
@@ -473,11 +476,12 @@ function TimelineConsole({
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
+  const t = useTranslations("selfEvolution");
   return (
     <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(460px,560px)]">
       <Card
-        title={`Evolution history (${items.length})`}
-        description="Newest first. Select a row to inspect why it happened, what evidence exists, and what the next governed step is."
+        title={t("historyTitle", { count: items.length })}
+        description={t("historyDesc")}
       >
         <div className="embedded-list-scroll-lg divide-y divide-brand-500/10">
           {items.map((item) => (
@@ -504,6 +508,7 @@ function TimelineRow({
   selected: boolean;
   onSelect: () => void;
 }) {
+  const t = useTranslations("selfEvolution");
   return (
     <button
       className={[
@@ -514,12 +519,12 @@ function TimelineRow({
     >
       <div className="flex flex-wrap items-center gap-2">
         <Pill tone={stageTone(item.stage)}>{item.stage}</Pill>
-        <Pill tone={toneForStatus(item.status)}>{item.status || "unknown"}</Pill>
+        <Pill tone={toneForStatus(item.status)}>{item.status || t("unknown")}</Pill>
         {item.strategy_id ? <Pill tone="neutral">{item.strategy_id}</Pill> : null}
         <span className="ml-auto font-mono text-[11px] text-ink-500">{formatTime(item.ts)}</span>
       </div>
       <div className="mt-2 font-medium text-ink-100">{item.title}</div>
-      <div className="mt-1 line-clamp-2 text-ink-400">{item.summary || item.why || "No summary."}</div>
+      <div className="mt-1 line-clamp-2 text-ink-400">{item.summary || item.why || t("noSummary")}</div>
       <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px] text-ink-500">
         {item.proposal_id ? <span>proposal:{shortId(item.proposal_id)}</span> : null}
         {item.validation_plan_id ? <span>validation:{shortId(item.validation_plan_id)}</span> : null}
@@ -530,10 +535,11 @@ function TimelineRow({
 }
 
 function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
+  const t = useTranslations("selfEvolution");
   if (!item) {
     return (
-      <Card title="Timeline detail">
-        <Empty title="No item selected" subtitle="Select a history row to inspect its evidence chain." />
+      <Card title={t("timelineDetail")}>
+        <Empty title={t("noItemSelected")} subtitle={t("selectRow")} />
       </Card>
     );
   }
@@ -541,8 +547,8 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
   const sections = process?.sections ?? [];
   return (
     <Card
-      title="Timeline detail"
-      actions={<Pill tone={toneForStatus(item.status)}>{item.status || "unknown"}</Pill>}
+      title={t("timelineDetail")}
+      actions={<Pill tone={toneForStatus(item.status)}>{item.status || t("unknown")}</Pill>}
     >
       <div className="space-y-4 text-sm">
         <div>
@@ -551,22 +557,22 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
             <span className="font-mono text-[11px] text-ink-500">{item.record_id}</span>
           </div>
           <h3 className="mt-3 text-lg font-semibold text-ink-50">{item.title}</h3>
-          <p className="mt-2 text-ink-300">{item.summary || "No summary."}</p>
+          <p className="mt-2 text-ink-300">{item.summary || t("noSummary")}</p>
         </div>
 
         <ProcessStatus process={process} />
-        <DetailRow label="Why triggered">{item.why || "No trigger explanation recorded."}</DetailRow>
-        <DetailRow label="Evidence">
-          <TokenList values={item.evidence_refs ?? []} empty="No evidence refs recorded." />
+        <DetailRow label={t("whyTriggered")}>{item.why || t("noTriggerExplanation")}</DetailRow>
+        <DetailRow label={t("evidence")}>
+          <TokenList values={item.evidence_refs ?? []} empty={t("noEvidence")} />
         </DetailRow>
-        <DetailRow label="Generated proposal">
+        <DetailRow label={t("generatedProposal")}>
           {item.proposal_id ? (
             <span className="font-mono text-ink-100">{item.proposal_id}</span>
           ) : (
-            <span className="text-ink-500">No linked proposal.</span>
+            <span className="text-ink-500">{t("noLinkedProposal")}</span>
           )}
         </DetailRow>
-        <DetailRow label="Validation result">
+        <DetailRow label={t("validationResult")}>
           {item.validation_plan_id || item.validation_status ? (
             <div className="space-y-1">
               {item.validation_plan_id ? <div className="font-mono text-ink-100">{item.validation_plan_id}</div> : null}
@@ -574,19 +580,19 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
               <TokenList values={item.blocked_reasons ?? []} tone="danger" empty="" />
             </div>
           ) : (
-            <span className="text-ink-500">No validation plan linked.</span>
+            <span className="text-ink-500">{t("noValidationPlan")}</span>
           )}
         </DetailRow>
-        <DetailRow label="Asset or outcome">
+        <DetailRow label={t("assetOrOutcome")}>
           <div className="space-y-2">
             {item.outcome ? <Pill tone={toneForStatus(item.outcome)}>{item.outcome}</Pill> : null}
-            <TokenList values={item.asset_ids ?? []} empty={item.outcome ? "" : "No asset linked."} />
+            <TokenList values={item.asset_ids ?? []} empty={item.outcome ? "" : t("noAssetLinked")} />
             {typeof item.outcome_score === "number" ? (
-              <div className="font-mono text-[12px] text-ink-400">score {item.outcome_score}</div>
+              <div className="font-mono text-[12px] text-ink-400">{t("score", { score: item.outcome_score })}</div>
             ) : null}
           </div>
         </DetailRow>
-        <DetailRow label="Next step">{item.next_step || "Review linked evidence."}</DetailRow>
+        <DetailRow label={t("nextStep")}>{item.next_step || t("reviewEvidence")}</DetailRow>
 
         {sections.length ? (
           <ProcessTrace sections={sections} />
@@ -597,7 +603,7 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
         )}
 
         <details className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
-          <summary className="cursor-pointer text-[12px] text-ink-300">Raw record</summary>
+          <summary className="cursor-pointer text-[12px] text-ink-300">{t("rawRecord")}</summary>
           <div className="mt-3">
             <Json value={item.raw ?? item} />
           </div>
@@ -735,14 +741,15 @@ function AssetsPanel({
   onPromote: (id: string) => Promise<void>;
   onReject: (id: string) => Promise<void>;
 }) {
+  const t = useTranslations("selfEvolution");
   return (
     <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1fr_420px]">
       <Card
-        title={`Genes and capsules (${assets.length})`}
-        description="Reusable learning units selected by future memory recall and self-evolution runs."
+        title={t("genesAndCapsules", { count: assets.length })}
+        description={t("genesDesc")}
       >
         {!assets.length ? (
-          <Empty title="No assets match" subtitle="Promoted capsules and custom genes will appear here." />
+          <Empty title={t("noAssetsMatch")} subtitle={t("noAssetsSubtitle")} />
         ) : (
           <div className="embedded-list-scroll-lg divide-y divide-brand-500/10">
             {assets.map((asset) => (
@@ -760,9 +767,9 @@ function AssetsPanel({
           </div>
         )}
       </Card>
-      <Card title={`Candidates (${candidates.length})`} description="Promotion records an event and never mutates protected runtime scopes.">
+      <Card title={t("candidates", { count: candidates.length })} description={t("candidatesDesc")}>
         {!candidates.length ? (
-          <Empty title="No candidates pending" subtitle="Asset candidates will appear after reflection, proposal outcomes, or memory gates." />
+          <Empty title={t("noCandidates")} subtitle={t("noCandidatesSub")} />
         ) : (
           <div className="space-y-3">
             {candidates.map((candidate) => (
@@ -776,14 +783,14 @@ function AssetsPanel({
                     <div className="mt-2 text-ink-300">{candidate.summary}</div>
                   </div>
                   <Pill tone={candidate.safe_to_promote ? "ok" : "danger"}>
-                    {candidate.safe_to_promote ? "safe" : "blocked"}
+                    {candidate.safe_to_promote ? t("safe") : t("blockedStatus")}
                   </Pill>
                 </div>
                 <TokenList values={candidate.blocked_reasons} tone="danger" empty="" />
                 <div className="mt-3 flex justify-end gap-2">
                   <button className="btn btn-ghost" disabled={busy === candidate.id} onClick={() => void onReject(candidate.id)}>
                     <XIcon size={14} />
-                    Reject
+                    {t("reject")}
                   </button>
                   <button
                     className="btn btn-primary"
@@ -791,7 +798,7 @@ function AssetsPanel({
                     onClick={() => void onPromote(candidate.id)}
                   >
                     <CheckIcon size={14} />
-                    Promote
+                    {t("promote")}
                   </button>
                 </div>
               </div>
@@ -812,15 +819,16 @@ function ProposalsPanel({
   busy: string;
   onValidate: (id: string) => Promise<void>;
 }) {
+  const t = useTranslations("selfEvolution");
   if (!proposals.length) {
     return (
-      <Card title="Open proposals">
-        <Empty title="No open proposals" subtitle="Reflection and tuning produce proposal-first changes here before any apply step." />
+      <Card title={t("openProposalsEmpty")}>
+        <Empty title={t("openProposalsEmpty")} subtitle={t("openProposalsEmptySub")} />
       </Card>
     );
   }
   return (
-    <Card title={`Open proposals (${proposals.length})`} description="Review state, validation plan, evidence refs, and target before using the governed apply flow.">
+    <Card title={t("openProposalsTitle", { count: proposals.length })} description={t("openProposalsDesc")}>
       <div className="embedded-list-scroll-lg divide-y divide-brand-500/10">
         {proposals.map((proposal) => {
           const id = String(proposal.id || "");
@@ -829,15 +837,15 @@ function ProposalsPanel({
             <div key={id} className="py-3 text-sm">
               <div className="flex flex-wrap items-center gap-2">
                 <Pill tone={toneForStatus(String(proposal.state || ""))}>
-                  {String(proposal.state || "unknown")}
+                  {String(proposal.state || t("unknown"))}
                 </Pill>
                 <span className="font-mono text-ink-100">{id}</span>
                 <span className="text-[11px] text-ink-500">{String(proposal.kind || "")}</span>
               </div>
               <div className="mt-1 text-ink-300">{String(proposal.summary || "")}</div>
               <div className="mt-2 grid gap-2 md:grid-cols-2">
-                <DetailMini label="Validation" value={String(proposal.validation_plan_id || "missing")} />
-                <DetailMini label="Target" value={String(proposal.target || "workspace proposal")} />
+                <DetailMini label={t("validation")} value={String(proposal.validation_plan_id || t("missing"))} />
+                <DetailMini label={t("target")} value={String(proposal.target || t("workspaceProposal"))} />
               </div>
               <div className="mt-2">
                 <TokenList values={evidence} empty="" />
@@ -845,7 +853,7 @@ function ProposalsPanel({
               <div className="mt-3 flex justify-end">
                 <button className="btn btn-ghost" disabled={busy === id} onClick={() => void onValidate(id)}>
                   <ShieldCheckIcon size={14} />
-                  Validate
+                  {t("validate")}
                 </button>
               </div>
             </div>
@@ -866,44 +874,45 @@ function DetailMini({ label, value }: { label: string; value: string }) {
 }
 
 function ConfigPanel({ config }: { config: EvolutionConfigSnapshot }) {
+  const t = useTranslations("selfEvolution");
   return (
     <div className="grid grid-cols-1 gap-5 xl:grid-cols-[1fr_420px]">
-      <Card title="Evolution gates" description="Current runtime guardrails. The dashboard displays policy state; mutating runtime config still belongs in Settings or proposals.">
+      <Card title={t("evolutionGates")} description={t("evolutionGatesDesc")}>
         <div className="grid gap-3 md:grid-cols-2">
           <ConfigSwitch
-            label="Lifecycle hooks"
+            label={t("lifecycleHooks")}
             value={config.hooks.enabled}
-            detail={`Sources: ${config.hooks.sources.join(", ")}`}
+            detail={t("sources", { list: config.hooks.sources.join(", ") })}
           />
           <ConfigSwitch
-            label="Memory quality gate"
+            label={t("memoryQualityGate")}
             value={config.memory_quality_gate.enabled}
-            detail={`Minimum score ${config.memory_quality_gate.minimum_score}`}
+            detail={t("minimumScore", { score: config.memory_quality_gate.minimum_score })}
           />
           <ConfigSwitch
-            label="Evidence required"
+            label={t("evidenceRequired")}
             value={config.memory_quality_gate.requires_evidence_refs}
-            detail="Low-value memories stay as events, not persistent learnings."
+            detail={t("evidenceRequiredDesc")}
           />
           <ConfigSwitch
-            label="Secret guard"
+            label={t("secretGuard")}
             value={config.memory_quality_gate.blocks_possible_secrets}
-            detail="Potential secrets are blocked from learning assets."
+            detail={t("secretGuardDesc")}
           />
           <ConfigSwitch
-            label="Validation dry-run only"
+            label={t("validationDryRunOnly")}
             value={config.validation.dry_run_only}
-            detail="Dashboard validation inspects plans and allowlists only."
+            detail={t("validationDryRunDesc")}
           />
           <ConfigSwitch
-            label="Shell execution"
+            label={t("shellExecution")}
             value={config.validation.execution_enabled}
             invert
-            detail="Actual validation command execution remains disabled here."
+            detail={t("shellExecutionDesc")}
           />
         </div>
         <div className="mt-4 rounded-lg border border-brand-500/10 bg-ink-950/30 p-3 text-sm">
-          <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">Allowed validation step types</div>
+          <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("allowedSteps")}</div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {config.validation.allowed_step_types.map((step) => (
               <Pill key={step} tone="neutral">{step}</Pill>
@@ -911,23 +920,23 @@ function ConfigPanel({ config }: { config: EvolutionConfigSnapshot }) {
           </div>
         </div>
       </Card>
-      <Card title="Per-strategy tuning" description="Self-evolution tuning is configured in each strategy package.">
+      <Card title={t("perStrategyTuning")} description={t("perStrategyDesc")}>
         <div className="mb-3 grid grid-cols-2 gap-3">
-          <Stat label="Strategies" value={config.strategy_tuning.total_strategies} />
-          <Stat label="Enabled" value={config.strategy_tuning.enabled_strategies} tone="ok" />
+          <Stat label={t("strategies")} value={config.strategy_tuning.total_strategies} />
+          <Stat label={t("enabled")} value={config.strategy_tuning.enabled_strategies} tone="ok" />
         </div>
         {!config.strategy_tuning.strategies.length ? (
-          <Empty title="No strategy tuning config found" />
+          <Empty title={t("noTuningConfig")} />
         ) : (
           <div className="embedded-list-scroll divide-y divide-brand-500/10">
             {config.strategy_tuning.strategies.map((row) => (
               <div key={row.strategy_id} className="py-3 text-sm">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Pill tone={row.enabled ? "ok" : "neutral"}>{row.enabled ? "enabled" : "disabled"}</Pill>
+                  <Pill tone={row.enabled ? "ok" : "neutral"}>{row.enabled ? t("enabledStatus") : t("disabledStatus")}</Pill>
                   <span className="font-mono text-ink-100">{row.strategy_id}</span>
                 </div>
                 <div className="mt-1 text-[12px] text-ink-500">
-                  {listConfigText(row.objectives) || "Objectives not configured"}
+                  {listConfigText(row.objectives) || t("objectivesNotConfigured")}
                 </div>
               </div>
             ))}
@@ -968,8 +977,9 @@ function ConfigSwitch({
 }
 
 function DebugPanel({ envelope }: { envelope: EvolutionTimelineEnvelope }) {
+  const t = useTranslations("selfEvolution");
   return (
-    <Card title="Raw evolution envelope" description="Debug-only payload behind the operator view.">
+    <Card title={t("rawEnvelope")} description={t("rawEnvelopeDesc")}>
       <Json value={envelope} />
     </Card>
   );

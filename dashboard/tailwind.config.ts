@@ -8,21 +8,19 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Dark violet/slate "ink" surface palette. Slightly warmer / more
-        // violet than neutral grey so the violet accents feel native.
-        // 950 added so OLED-true-black surfaces have a name.
+        // Ink 调色板 — 通过 CSS 变量驱动，深色/亮色模式切换时自动更新
         ink: {
-          50: "#f6f5fb",
-          100: "#e7e5f2",
-          200: "#c9c7db",
-          300: "#9c98ba",
-          400: "#6b6a85",
-          500: "#454560",
-          600: "#2a2a3e",
-          700: "#1e1e30",
-          800: "#131426",
-          900: "#0a0b1a",
-          950: "#04040d",
+          50:  "var(--ink-50,  #f6f5fb)",
+          100: "var(--ink-100, #e7e5f2)",
+          200: "var(--ink-200, #c9c7db)",
+          300: "var(--ink-300, #9c98ba)",
+          400: "var(--ink-400, #6b6a85)",
+          500: "var(--ink-500, #454560)",
+          600: "var(--ink-600, #2a2a3e)",
+          700: "var(--ink-700, #1e1e30)",
+          800: "var(--ink-800, #131426)",
+          900: "var(--ink-900, #0a0b1a)",
+          950: "var(--ink-950, #04040d)",
         },
         // Violet / electric purple — the NERYA primary accent.
         brand: {

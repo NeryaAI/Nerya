@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useTranslations } from "next-intl";
 
 type SectionKey = "trading" | "strategy" | "runtime";
 
 type TabItem = {
-  label: string;
+  labelKey: string;
   href: string;
   match?: string[];
 };
@@ -14,32 +15,32 @@ type TabItem = {
 const SECTIONS: Record<
   SectionKey,
   {
-    label: string;
+    labelKey: string;
     tabs: TabItem[];
   }
 > = {
   trading: {
-    label: "Trading",
+    labelKey: "trading",
     tabs: [
-      { label: "Portfolio", href: "/portfolio" },
-      { label: "Accounts", href: "/accounts", match: ["/accounts"] },
-      { label: "Orders", href: "/orders" },
-      { label: "Incidents", href: "/incidents" },
+      { labelKey: "portfolio", href: "/portfolio" },
+      { labelKey: "accounts", href: "/accounts", match: ["/accounts"] },
+      { labelKey: "orders", href: "/orders" },
+      { labelKey: "incidents", href: "/incidents" },
     ],
   },
   strategy: {
-    label: "Strategy Lab",
+    labelKey: "strategyLab",
     tabs: [
-      { label: "Strategies", href: "/strategies", match: ["/strategies"] },
-      { label: "Workflows", href: "/workflows" },
+      { labelKey: "strategies", href: "/strategies", match: ["/strategies"] },
+      { labelKey: "workflows", href: "/workflows" },
     ],
   },
   runtime: {
-    label: "Runtime Library",
+    labelKey: "runtimeLibrary",
     tabs: [
-      { label: "Agents", href: "/agents" },
-      { label: "Skills", href: "/skills" },
-      { label: "Tasks", href: "/tasks" },
+      { labelKey: "agents", href: "/agents" },
+      { labelKey: "skills", href: "/skills" },
+      { labelKey: "tasks", href: "/tasks" },
     ],
   },
 };
@@ -54,12 +55,13 @@ function isActive(pathname: string, tab: TabItem): boolean {
 }
 
 export function SectionTabs({ section }: { section: SectionKey }) {
+  const t = useTranslations("sectionTabs");
   const pathname = usePathname() || "";
   const config = SECTIONS[section];
 
   return (
     <nav
-      aria-label={`${config.label} tabs`}
+      aria-label={t("tabsAriaLabel", { section: t(config.labelKey) })}
       className="mb-5 -mt-3 overflow-x-auto pb-1"
     >
       <div className="inline-flex min-w-full items-center gap-1 border-b border-white/5">
@@ -77,7 +79,7 @@ export function SectionTabs({ section }: { section: SectionKey }) {
                   : "text-ink-400 hover:text-ink-100",
               ].join(" ")}
             >
-              {tab.label}
+              {t(tab.labelKey)}
               {active ? (
                 <span className="absolute inset-x-2 -bottom-px h-px bg-brand-300 shadow-[0_0_10px_rgba(180,139,255,0.75)]" />
               ) : null}

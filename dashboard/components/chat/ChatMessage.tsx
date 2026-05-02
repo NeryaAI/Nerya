@@ -1,6 +1,7 @@
 "use client";
 
 import { type ReactNode, useState } from "react";
+import { useTranslations } from "next-intl";
 import type { AssistantMessage, UserMessage } from "../../lib/chat";
 import { liveEventsToBlocks, topLevelDecisionText } from "../../lib/chat";
 import type { ApprovalCard } from "../../lib/clientApi";
@@ -189,6 +190,7 @@ function StreamingDots() {
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
+  const t = useTranslations("chat");
   if (!text) return null;
   return (
     <button
@@ -202,8 +204,8 @@ function CopyButton({ text }: { text: string }) {
         }
       }}
       className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-ink-400 hover:text-white hover:border-white/20 transition-colors"
-      title="Copy message"
-      aria-label={copied ? "Copied" : "Copy message"}
+      title={t("copyMessage")}
+      aria-label={copied ? t("copied") : t("copyMessage")}
     >
       {copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
     </button>
@@ -254,16 +256,17 @@ function MessageActions({
   onEdit?: () => void;
   onDelete?: () => void;
 }) {
+  const t = useTranslations("chat");
   return (
     <div className="mt-1 flex items-center gap-1.5 text-[10px]">
       <CopyButton text={text} />
       {onEdit ? (
-        <IconButton label="Edit message" onClick={onEdit}>
+        <IconButton label={t("editMessage")} onClick={onEdit}>
           <EditIcon size={14} />
         </IconButton>
       ) : null}
       {onDelete ? (
-        <IconButton label="Delete message" onClick={onDelete} tone="danger">
+        <IconButton label={t("deleteMessage")} onClick={onDelete} tone="danger">
           <TrashIcon size={14} />
         </IconButton>
       ) : null}
@@ -284,6 +287,7 @@ function InlineEditor({
   onCancel: () => void;
   align?: "left" | "right";
 }) {
+  const t = useTranslations("chat");
   const canSave = value.trim().length > 0;
   return (
     <form
@@ -314,11 +318,11 @@ function InlineEditor({
           align === "right" ? "justify-end" : "justify-start"
         }`}
       >
-        <IconButton label="Cancel edit" onClick={onCancel}>
+        <IconButton label={t("cancelEdit")} onClick={onCancel}>
           <XIcon size={14} />
         </IconButton>
         <IconButton
-          label="Save edit"
+          label={t("saveEdit")}
           type="submit"
           tone="primary"
           disabled={!canSave}

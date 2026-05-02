@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
 import {
   clientApi,
@@ -37,6 +38,7 @@ function formatValue(value: unknown): string {
  * the proposal without touching accounts.yml at all.
  */
 export function AccountProposalsCard({ onApplied }: Props) {
+  const t = useTranslations("accountProposals");
   const [proposals, setProposals] = useState<AccountProposalView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -65,10 +67,12 @@ export function AccountProposalsCard({ onApplied }: Props) {
   async function approve(p: AccountProposalView) {
     if (
       !window.confirm(
-        `Approve proposal ${p.id}?\n\n` +
-          `${p.operation} account ${p.target_id}\n` +
-          `${Object.keys(p.diff || {}).length} field(s) change(s).\n\n` +
-          "This writes accounts.yml.",
+        t("approveConfirm", {
+          id: p.id,
+          operation: p.operation,
+          target: p.target_id,
+          count: Object.keys(p.diff || {}).length,
+        }),
       )
     )
       return;
@@ -90,7 +94,7 @@ export function AccountProposalsCard({ onApplied }: Props) {
   }
 
   async function reject(p: AccountProposalView) {
-    const note = window.prompt(`Reject proposal ${p.id}? Reason:`, "");
+    const note = window.prompt(t("rejectPrompt", { id: p.id }), "");
     if (note == null) return;
     setBusy(`${p.id}:reject`);
     setError(null);
@@ -115,15 +119,15 @@ export function AccountProposalsCard({ onApplied }: Props) {
 
   return (
     <Card
-      title={`Pending account proposals (${proposals.length})`}
-      description="Each row was staged via /accounts/upsert with apply=false. Approving applies the change atomically through the vault-only upsert helper."
+      title={t("title", { count: proposals.length })}
+      description={t("description")}
       actions={
         <button
           onClick={() => void load()}
           disabled={loading}
           className="btn-ghost text-xs"
         >
-          {loading ? "…" : "Refresh"}
+          {loading ? "…" : t("refresh")}
         </button>
       }
     >
@@ -133,7 +137,7 @@ export function AccountProposalsCard({ onApplied }: Props) {
         </div>
       )}
       {proposals.length === 0 ? (
-        <Empty label="No pending proposals." />
+        <Empty label={t("noPending")} />
       ) : (
         <div className="embedded-list-scroll-lg grid gap-2">
           {proposals.map((p) => {
@@ -152,16 +156,16 @@ export function AccountProposalsCard({ onApplied }: Props) {
                   </span>
                   <span className="text-ink-400">{p.summary}</span>
                   <span className="ml-auto text-ink-500">
-                    {formatTs(p.ts)} · by {p.operator}
+                    {t("tsBy", { ts: formatTs(p.ts), operator: p.operator })}
                   </span>
                 </div>
                 <div className="mt-1.5 flex items-center gap-2 text-ink-400">
-                  <span>{fieldCount} field change(s)</span>
+                  <span>{t("fieldChanges", { count: fieldCount })}</span>
                   <button
                     onClick={() => setExpanded(isOpen ? null : p.id)}
                     className="btn-ghost text-[11px] py-0 px-1"
                   >
-                    {isOpen ? "hide diff" : "show diff"}
+                    {isOpen ? t("hideDiff") : t("showDiff")}
                   </button>
                   <span className="ml-auto flex gap-1.5">
                     <button
@@ -169,14 +173,14 @@ export function AccountProposalsCard({ onApplied }: Props) {
                       disabled={busy === `${p.id}:reject`}
                       className="btn-ghost text-[11px] py-0.5 text-[#ef4560]"
                     >
-                      {busy === `${p.id}:reject` ? "…" : "Reject"}
+                      {busy === `${p.id}:reject` ? "…" : t("reject")}
                     </button>
                     <button
                       onClick={() => void approve(p)}
                       disabled={busy === `${p.id}:apply`}
                       className="btn-ghost text-[11px] py-0.5 text-accent-300"
                     >
-                      {busy === `${p.id}:apply` ? "Applying…" : "Approve & apply"}
+                      {busy === `${p.id}:apply` ? t("applying") : t("approveApply")}
                     </button>
                   </span>
                 </div>
@@ -185,9 +189,9 @@ export function AccountProposalsCard({ onApplied }: Props) {
                     <table className="table w-full font-mono text-[11px]">
                       <thead>
                         <tr className="text-ink-400">
-                          <th>Field</th>
-                          <th>Before</th>
-                          <th>After</th>
+                          <th>{t("colField")}</th>
+                          <th>{t("colBefore")}</th>
+                          <th>{t("colAfter")}</th>
                         </tr>
                       </thead>
                       <tbody>

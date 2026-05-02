@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { callApi, clientApi, type ApprovalCard } from "../../lib/clientApi";
 import {
   ChatMessage,
@@ -98,6 +99,7 @@ function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
 
 export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const router = useRouter();
+  const t = useTranslations("chat");
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -652,7 +654,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     if (!thread) return;
     const message = thread.messages.find((m) => m.id === messageId);
     if (!message) return;
-    if (!window.confirm("Delete this message?")) return;
+    if (!window.confirm(t("confirmDeleteMessage"))) return;
     if (editingMessageId === messageId) {
       setEditingMessageId(null);
       setEditDraft("");

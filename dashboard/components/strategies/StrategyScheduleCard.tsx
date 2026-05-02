@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
 import type {
@@ -34,12 +35,13 @@ export function StrategyScheduleCard({
   onError,
   onNotice,
 }: Props) {
+  const t = useTranslations("strategySchedule");
   async function reschedule() {
     onSetBusy("schedule:reschedule");
     onError(null);
     try {
       await clientApi.strategyRuntimeSchedule(strategyId);
-      onNotice("Schedules re-installed from manifest.");
+      onNotice(t("reinstalled"));
       await onRefresh();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -53,7 +55,7 @@ export function StrategyScheduleCard({
     onError(null);
     try {
       await clientApi.strategyRuntimePause(strategyId);
-      onNotice("Trading + tuning paused.");
+      onNotice(t("paused"));
       await onRefresh();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -67,7 +69,7 @@ export function StrategyScheduleCard({
     onError(null);
     try {
       await clientApi.strategyRuntimeResume(strategyId);
-      onNotice("Trading + tuning resumed.");
+      onNotice(t("resumed"));
       await onRefresh();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -78,8 +80,8 @@ export function StrategyScheduleCard({
 
   return (
     <Card
-      title="Schedules"
-      description="Trading tick + tuning cron rows installed in triggers/schedules.yml"
+      title={t("title")}
+      description={t("description")}
       actions={
         <div className="flex items-center gap-2">
           <button
@@ -87,32 +89,32 @@ export function StrategyScheduleCard({
             disabled={busy !== null}
             className="btn-ghost text-xs"
           >
-            {busy === "schedule:reschedule" ? "Saving…" : "Re-install"}
+            {busy === "schedule:reschedule" ? t("saving") : t("reinstall")}
           </button>
           <button
             onClick={() => void pause()}
             disabled={busy !== null}
             className="text-xs rounded px-3 py-1.5 border border-[#f5a524]/40 text-[#f5a524] hover:bg-[#f5a524]/10"
           >
-            {busy === "schedule:pause" ? "Pausing…" : "Pause"}
+            {busy === "schedule:pause" ? t("pausing") : t("pause")}
           </button>
           <button
             onClick={() => void resume()}
             disabled={busy !== null}
             className="text-xs rounded px-3 py-1.5 border border-accent-500/40 text-accent-300 hover:bg-accent-500/10"
           >
-            {busy === "schedule:resume" ? "Resuming…" : "Resume"}
+            {busy === "schedule:resume" ? t("resuming") : t("resume")}
           </button>
         </div>
       }
     >
       {status ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <ScheduleRow label="Trading tick" entry={status.trading} />
-          <ScheduleRow label="Tuning cron" entry={status.tuning} />
+          <ScheduleRow label={t("tradingTick")} entry={status.trading} />
+          <ScheduleRow label={t("tuningCron")} entry={status.tuning} />
         </div>
       ) : (
-        <Empty label="Schedules not yet installed for this strategy." />
+        <Empty label={t("notInstalled")} />
       )}
     </Card>
   );
@@ -125,6 +127,7 @@ function ScheduleRow({
   label: string;
   entry: StrategyScheduleEntry | null;
 }) {
+  const t = useTranslations("strategySchedule");
   if (!entry) {
     return (
       <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3">
@@ -132,7 +135,7 @@ function ScheduleRow({
           {label}
         </div>
         <div className="mt-1.5 text-xs text-ink-500 italic">
-          not installed
+          {t("rowNotInstalled")}
         </div>
       </div>
     );
@@ -144,7 +147,7 @@ function ScheduleRow({
           {label}
         </div>
         <Pill tone={entry.enabled ? "ok" : "warn"}>
-          {entry.enabled ? "enabled" : "paused"}
+          {entry.enabled ? t("enabled") : t("paused2")}
         </Pill>
       </div>
       <div className="mt-1 font-mono text-[12px] text-ink-200 truncate">
@@ -154,11 +157,11 @@ function ScheduleRow({
         {entry.cron
           ? `cron: ${entry.cron}`
           : entry.every_seconds
-            ? `every ${entry.every_seconds}s`
+            ? t("everySeconds", { n: entry.every_seconds })
             : "—"}
       </div>
       <div className="mt-0.5 text-[11px] text-ink-500 truncate">
-        target → <span className="font-mono">{entry.target}</span>
+        {t("targetArrow")} <span className="font-mono">{entry.target}</span>
       </div>
     </div>
   );

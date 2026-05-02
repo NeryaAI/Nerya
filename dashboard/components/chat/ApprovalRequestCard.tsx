@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import type { ApprovalCard } from "../../lib/clientApi";
 import {
   CheckIcon,
@@ -96,6 +97,8 @@ export function ApprovalRequestCard({
   onAction?: (callbackData: string) => void;
   busy?: boolean;
 }) {
+  const t = useTranslations("approvals");
+  const tCommon = useTranslations("common");
   const approvalId = approvalIdFromEvent(event);
   if (!approvalId) return null;
   const prompt =
@@ -106,7 +109,7 @@ export function ApprovalRequestCard({
   const resolved = state === "approved" || state === "rejected";
   const text =
     prompt?.text ||
-    String(event.reason || "This tool call needs operator permission.");
+    String(event.reason || t("needsPermission"));
   const items = permissionItems(event, card);
   const isBatch =
     items.length > 1 ||
@@ -124,10 +127,10 @@ export function ApprovalRequestCard({
       <div className="flex items-center justify-between gap-2">
         <div className="text-[10px] uppercase tracking-[0.18em]">
           {state === "approved"
-            ? "Permission approved"
+            ? t("approved")
             : state === "rejected"
-            ? "Permission rejected"
-            : "Permission request"}
+            ? t("rejected")
+            : t("request")}
         </div>
         <span className="font-mono text-[10px] text-ink-400">
           {approvalId.slice(0, 18)}
@@ -137,8 +140,8 @@ export function ApprovalRequestCard({
         <div className="space-y-2">
           <div className="text-xs leading-relaxed text-ink-100">
             {isBatch
-              ? `${items.length} tool calls require approval. One approve continues all of them.`
-              : "This tool call needs operator permission."}
+              ? t("batchApproval", { count: items.length })
+              : t("needsPermission")}
           </div>
           <div className="space-y-1.5">
             {items.map((item, idx) => {
@@ -203,7 +206,7 @@ export function ApprovalRequestCard({
                 className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors disabled:opacity-50 disabled:cursor-wait ${cls}`}
               >
                 <Icon size={14} />
-                <span>{busy ? "Working..." : button.label}</span>
+                <span>{busy ? tCommon("working") : button.label}</span>
               </button>
             );
           })}
@@ -215,7 +218,7 @@ export function ApprovalRequestCard({
                 className="inline-flex items-center gap-1.5 rounded-md border border-accent-400/50 bg-accent-400/10 px-2.5 py-1 text-xs text-accent-400 hover:bg-accent-400/20 transition-colors disabled:opacity-50 disabled:cursor-wait"
               >
                 <ShieldCheckIcon size={14} />
-                <span>{busy ? "Working..." : "Approve"}</span>
+                <span>{busy ? tCommon("working") : tCommon("approve")}</span>
               </button>
               <button
                 onClick={() => onAction?.(`reject:${approvalId}`)}
@@ -223,7 +226,7 @@ export function ApprovalRequestCard({
                 className="inline-flex items-center gap-1.5 rounded-md border border-[#ef5564]/50 bg-[#ef5564]/10 px-2.5 py-1 text-xs text-[#ffb3bd] hover:bg-[#ef5564]/20 transition-colors disabled:opacity-50 disabled:cursor-wait"
               >
                 <ShieldXIcon size={14} />
-                <span>{busy ? "Working..." : "Reject"}</span>
+                <span>{busy ? tCommon("working") : tCommon("reject")}</span>
               </button>
             </>
           ) : null}

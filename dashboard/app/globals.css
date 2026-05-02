@@ -5,8 +5,23 @@
 @import url("https://rsms.me/inter/inter.css");
 @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");
 
+/* ── 暗色模式（默认）──────────────────────────────────────────── */
 :root {
   color-scheme: dark;
+
+  /* Ink 调色板 — 暗色默认值，亮色在 html.light 中覆盖 */
+  --ink-50:  #f6f5fb;
+  --ink-100: #e7e5f2;
+  --ink-200: #c9c7db;
+  --ink-300: #9c98ba;
+  --ink-400: #6b6a85;
+  --ink-500: #454560;
+  --ink-600: #2a2a3e;
+  --ink-700: #1e1e30;
+  --ink-800: #131426;
+  --ink-900: #0a0b1a;
+  --ink-950: #04040d;
+
   --grid: rgba(139, 92, 246, 0.06);
   --bg-deep: #04040d;
   --bg: #0a0b1a;
@@ -21,6 +36,55 @@
   --violet-2: #b48bff;
   --fluid: #22d3ee;
   --fluid-soft: rgba(34, 211, 238, 0.16);
+  --text-base: #e6e5f1;
+  --text-muted: #9c98ba;
+  --scrollbar-track: #0a0b1a;
+  --scrollbar-thumb: #2a2a3e;
+  --scrollbar-thumb-hover: #454560;
+  --table-sticky-bg: rgba(10, 11, 26, 0.96);
+  --header-bg: rgba(4, 4, 13, 0.65);
+  --panel-bg:  rgba(4, 4, 13, 0.55);
+}
+
+/* ── 亮色模式（html.light 时覆盖）──────────────────────────────── */
+html.light {
+  color-scheme: light;
+
+  /* Ink 调色板 — 亮色（与暗色近似翻转，保留紫调） */
+  --ink-50:  #0f0e1a;
+  --ink-100: #1a1830;
+  --ink-200: #2d2b50;
+  --ink-300: #4e4b72;
+  --ink-400: #6b6885;
+  --ink-500: #9895b8;
+  --ink-600: #c8c4e8;
+  --ink-700: #ddd9f5;
+  --ink-800: #eae7ff;
+  --ink-900: #f2f0ff;
+  --ink-950: #f8f7ff;
+
+  --grid: rgba(139, 92, 246, 0.05);
+  --bg-deep: #ebe8ff;
+  --bg: #f3f0ff;
+  --card: #ffffff;
+  --card-hi: #f0ecff;
+  --line: rgba(109, 40, 217, 0.18);
+  --line-hi: rgba(109, 40, 217, 0.36);
+  --ok: #059669;
+  --warn: #d97706;
+  --err: #dc2626;
+  --violet: #7c3aed;
+  --violet-2: #8b5cf6;
+  --fluid: #0891b2;
+  --fluid-soft: rgba(8, 145, 178, 0.12);
+  --text-base: #1a1830;
+  --text-muted: #6b6a85;
+  --scrollbar-track: #f0effe;
+  --scrollbar-thumb: #c9c7db;
+  --scrollbar-thumb-hover: #9c98ba;
+  --table-sticky-bg: rgba(248, 247, 255, 0.97);
+  --header-bg: rgba(243, 240, 255, 0.94);
+  --panel-bg:  rgba(230, 224, 255, 0.95);
 }
 
 @supports (font-variation-settings: normal) {
@@ -29,18 +93,19 @@
 
 html, body {
   background-color: var(--bg-deep);
-  color: #e6e5f1;
+  color: var(--text-base);
   font-feature-settings: "cv03", "cv04", "cv09", "ss01";
   text-rendering: optimizeLegibility;
 }
 
 body {
-  background-image:
-    radial-gradient(1100px 600px at 8% -10%, rgba(139, 92, 246, 0.18), transparent 60%),
-    radial-gradient(900px 520px at 110% 0%, rgba(34, 211, 238, 0.08), transparent 55%),
-    radial-gradient(720px 520px at 60% 120%, rgba(180, 139, 255, 0.10), transparent 55%),
-    linear-gradient(180deg, #04040d 0%, #0a0b1a 100%);
+  background-color: var(--bg-deep);
   min-height: 100vh;
+}
+
+html.light body {
+  background-image: none;
+  background-color: var(--bg-deep);
 }
 
 /* Aurora — slow-drifting fluid mesh that lives in a fixed layer behind
@@ -54,29 +119,43 @@ body::after {
   z-index: -1;
   pointer-events: none;
   filter: blur(96px);
-  opacity: 0.7;
   will-change: transform;
 }
 body::before {
   background:
-    radial-gradient(40% 36% at 18% 22%, rgba(139, 92, 246, 0.55), transparent 70%),
-    radial-gradient(30% 30% at 78% 10%, rgba(34, 211, 238, 0.34), transparent 70%);
+    radial-gradient(40% 36% at 18% 22%, rgba(109, 40, 217, 0.35), transparent 70%),
+    radial-gradient(30% 30% at 78% 10%, rgba(139, 92, 246, 0.18), transparent 70%);
+  opacity: 0.6;
   animation: aurora-shift 18s ease-in-out infinite;
 }
 body::after {
   background:
-    radial-gradient(34% 32% at 82% 88%, rgba(180, 139, 255, 0.42), transparent 70%),
-    radial-gradient(28% 30% at 12% 86%, rgba(16, 217, 147, 0.18), transparent 70%);
+    radial-gradient(34% 32% at 82% 88%, rgba(88, 28, 135, 0.28), transparent 70%),
+    radial-gradient(28% 30% at 12% 86%, rgba(139, 92, 246, 0.15), transparent 70%);
+  opacity: 0.5;
   animation: aurora-shift 26s ease-in-out infinite reverse;
 }
+
+/* 亮色模式关闭 Aurora — 明亮背景下光晕无意义 */
+html.light body::before,
+html.light body::after {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   body::before, body::after { animation: none; }
 }
 
 @layer components {
   .card {
-    @apply rounded-xl border border-brand-500/15 bg-[rgba(19,20,38,0.72)] backdrop-blur-glass
-           shadow-glass;
+    @apply rounded-xl border border-brand-500/15 backdrop-blur-glass shadow-glass;
+    background: var(--card);
+  }
+  html.light .card {
+    box-shadow:
+      0 1px 3px rgba(109, 40, 217, 0.10),
+      0 4px 16px rgba(109, 40, 217, 0.08),
+      inset 0 1px 0 rgba(255, 255, 255, 0.8);
   }
   .card-hover {
     @apply hover:border-brand-500/30 transition-colors;
@@ -85,11 +164,21 @@ body::after {
      transcript card. Uses a soft inner highlight + heavy backdrop
      blur to feel translucent. */
   .glass {
-    @apply rounded-2xl border border-white/5 bg-white/[0.03] backdrop-blur-glass shadow-glass
-           supports-[backdrop-filter]:bg-white/[0.025];
+    @apply rounded-2xl border border-white/5 backdrop-blur-glass shadow-glass;
+    background: rgba(255, 255, 255, 0.03);
   }
   .glass-hi {
-    @apply rounded-2xl border border-white/10 bg-white/[0.05] backdrop-blur-glass shadow-glass;
+    @apply rounded-2xl border border-white/10 backdrop-blur-glass shadow-glass;
+    background: rgba(255, 255, 255, 0.05);
+  }
+  html.light .glass {
+    background: rgba(255, 255, 255, 0.7);
+    border-color: rgba(139, 92, 246, 0.1);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 8px 24px rgba(139,92,246,0.06);
+  }
+  html.light .glass-hi {
+    background: rgba(255, 255, 255, 0.85);
+    border-color: rgba(139, 92, 246, 0.15);
   }
   /* Subtle "thinking" gradient ring used on the agent avatar / running
      turn indicators. */
@@ -102,25 +191,35 @@ body::after {
         rgba(139, 92, 246, 0) 360deg);
   }
   .card-head {
-    @apply flex items-center justify-between px-5 py-3.5 border-b border-brand-500/10;
+    @apply flex items-center justify-between px-5 py-4 border-b border-brand-500/15;
   }
   .card-title {
-    @apply text-[13px] font-medium text-ink-100 tracking-wide;
+    @apply text-[15px] font-semibold tracking-tight;
+    color: #ffffff;
+  }
+  html.light .card-title {
+    color: var(--text-base);
   }
   .card-subtle {
-    @apply text-[11px] text-ink-400;
+    @apply text-[12px] leading-relaxed;
+    color: var(--text-muted);
   }
   .stat-label {
-    @apply text-[10px] uppercase tracking-[0.18em] text-ink-400 font-medium;
+    @apply text-[10px] uppercase tracking-[0.18em] font-medium;
+    color: var(--text-muted);
   }
   .stat-value {
-    @apply text-[26px] leading-tight font-semibold text-white tabular-nums;
+    @apply text-[26px] leading-tight font-semibold tabular-nums;
+    color: var(--text-base);
   }
   .stat-delta-up { @apply text-accent-400 text-xs font-medium; }
   .stat-delta-down { @apply text-[#ef4560] text-xs font-medium; }
 
   .pill {
-    @apply inline-flex items-center gap-1 rounded-full border border-ink-700 bg-ink-800/70 px-2 py-0.5 text-[11px] text-ink-200;
+    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px];
+    border-color: var(--line-hi);
+    background: var(--card);
+    color: var(--text-muted);
   }
   .pill-ok { @apply border-accent-400/40 bg-accent-400/10 text-accent-400; }
   .pill-warn { @apply border-[#f5a524]/40 bg-[#f5a524]/10 text-[#f5a524]; }
@@ -170,7 +269,7 @@ body::after {
     position: sticky;
     top: 0;
     z-index: 1;
-    background: rgba(10, 11, 26, 0.96);
+    background: var(--table-sticky-bg);
     backdrop-filter: blur(12px);
   }
 
@@ -178,7 +277,11 @@ body::after {
     @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors;
   }
   .btn-ghost {
-    @apply btn text-ink-200 border border-brand-500/20 hover:bg-brand-500/10 hover:border-brand-500/40 hover:text-white;
+    @apply btn border border-brand-500/20 hover:bg-brand-500/10 hover:border-brand-500/40 transition-colors;
+    color: var(--text-muted);
+  }
+  html.light .btn-ghost:hover {
+    color: var(--text-base);
   }
   .btn-primary {
     @apply btn bg-brand-500 text-white hover:bg-brand-400 shadow-glow;
@@ -204,15 +307,27 @@ body::after {
   }
 
   .icon-btn {
-    @apply inline-flex items-center justify-center w-9 h-9 rounded-lg border border-brand-500/15 bg-ink-900/50
-           text-ink-300 hover:border-brand-500/40 hover:text-white transition-colors relative;
+    @apply inline-flex items-center justify-center w-9 h-9 rounded-lg border border-brand-500/15
+           hover:border-brand-500/40 transition-colors relative;
+    background: var(--card);
+    color: var(--text-muted);
+  }
+  html.light .icon-btn:hover {
+    color: var(--text-base);
   }
 
   .sidebar-item {
     @apply flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all;
   }
   .sidebar-item-idle {
-    @apply text-ink-300 hover:bg-brand-500/10 hover:text-white;
+    @apply text-ink-300 hover:bg-brand-500/10;
+  }
+  html.light .sidebar-item-idle {
+    color: var(--text-muted);
+  }
+  html.light .sidebar-item-idle:hover {
+    color: var(--text-base);
+    background: rgba(139, 92, 246, 0.08);
   }
   .sidebar-item-active {
     @apply bg-gradient-to-r from-brand-500/30 via-brand-500/15 to-transparent text-white
@@ -230,6 +345,15 @@ body::after {
       #ffffff 100%
     );
   }
+  html.light .text-gradient-brand {
+    background-image: linear-gradient(
+      120deg,
+      #1a1830 0%,
+      #7c3aed 38%,
+      #0891b2 72%,
+      #1a1830 100%
+    );
+  }
   .text-gradient-ai {
     @apply bg-clip-text text-transparent;
     background-image: linear-gradient(
@@ -243,13 +367,25 @@ body::after {
   .bubble-user {
     @apply rounded-2xl rounded-br-md border border-brand-500/30
            bg-gradient-to-br from-brand-500/30 to-brand-700/10
-           px-4 py-3 text-sm text-white shadow-glow;
+           px-4 py-3 text-sm shadow-glow;
+    color: var(--text-base);
+  }
+  html.light .bubble-user {
+    background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(109,40,217,0.08));
+    color: #1a1830;
   }
   .bubble-ai {
     @apply rounded-2xl rounded-bl-md border border-white/10
            bg-white/[0.04] backdrop-blur-glass
-           px-4 py-3 text-sm text-ink-100 shadow-glass;
+           px-4 py-3 text-sm shadow-glass;
     border-left: 2px solid rgba(34, 211, 238, 0.55);
+    color: var(--text-base);
+  }
+  html.light .bubble-ai {
+    background: rgba(255,255,255,0.75);
+    border-color: rgba(139,92,246,0.1);
+    border-left: 2px solid rgba(8, 145, 178, 0.6);
+    color: #1a1830;
   }
   .typing-dot {
     @apply inline-block w-1.5 h-1.5 rounded-full bg-fluid-400;
@@ -285,13 +421,13 @@ body::after {
   width: 10px;
   height: 10px;
 }
-::-webkit-scrollbar-track { background: #0a0b1a; }
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
 ::-webkit-scrollbar-thumb {
-  background: #2a2a3e;
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
-  border: 2px solid #0a0b1a;
+  border: 2px solid var(--scrollbar-track);
 }
-::-webkit-scrollbar-thumb:hover { background: #454560; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
 @keyframes pulse-ring {
   0% { box-shadow: 0 0 0 0 rgba(16, 217, 147, 0.55); }

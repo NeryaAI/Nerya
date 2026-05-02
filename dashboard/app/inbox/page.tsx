@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Card,
@@ -20,15 +21,6 @@ import type {
   OperatorAction,
 } from "../../lib/operatorTypes";
 
-const ALL_TYPES: { id: InboxItemType | "all"; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "approval", label: "Approvals" },
-  { id: "proposal", label: "Proposals" },
-  { id: "failed_task", label: "Failed tasks" },
-  { id: "notification", label: "Notifications" },
-  { id: "provider_error", label: "Provider errors" },
-];
-
 const SEVERITY_TONE: Record<EnvelopeSeverity, "ok" | "warn" | "danger" | "brand"> = {
   info: "ok",
   warn: "warn",
@@ -36,6 +28,8 @@ const SEVERITY_TONE: Record<EnvelopeSeverity, "ok" | "warn" | "danger" | "brand"
 };
 
 export default function InboxPage() {
+  const t = useTranslations("inbox");
+  const tCommon = useTranslations("common");
   const [env, setEnv] = useState<InboxItemsEnvelope | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -43,6 +37,15 @@ export default function InboxPage() {
   const [filterType, setFilterType] = useState<InboxItemType | "all">("all");
   const [onlyAction, setOnlyAction] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const ALL_TYPES: { id: InboxItemType | "all"; label: string }[] = [
+    { id: "all", label: t("typeAll") },
+    { id: "approval", label: t("typeApproval") },
+    { id: "proposal", label: t("typeProposal") },
+    { id: "failed_task", label: t("typeFailedTask") },
+    { id: "notification", label: t("typeNotification") },
+    { id: "provider_error", label: t("typeProviderError") },
+  ];
 
   const load = useCallback(async () => {
     try {
@@ -95,7 +98,7 @@ export default function InboxPage() {
           : "dismiss";
       const result = await clientApi.inboxResolve({ id: item.id, decision });
       if (!result.ok) {
-        setError(result.summary || "resolve failed");
+        setError(result.summary || t("resolveFailed"));
       }
       await load();
     } catch (e) {
@@ -110,11 +113,11 @@ export default function InboxPage() {
       {error ? <ErrorBanner error={error} /> : null}
       <PageBody>
         <PageHeader
-          eyebrow="Operator"
-          title="Action Inbox"
+          eyebrow={t("eyebrow")}
+          title={t("title")}
           description={
             env?.summary ||
-            "Approvals, proposals, failed tasks, notifications, and provider errors in one place."
+            t("description")
           }
           actions={
             <div className="flex items-center gap-2">
@@ -125,13 +128,13 @@ export default function InboxPage() {
                 onClick={load}
                 className="text-[11px] px-2 py-0.5 rounded-md text-brand-200 border border-brand-500/25 hover:bg-brand-500/10"
               >
-                Refresh
+                {tCommon("refresh")}
               </button>
             </div>
           }
         />
 
-        <Card title="Filter" padded>
+        <Card title={t("filter")} padded>
           <div className="flex flex-wrap items-center gap-2">
             {ALL_TYPES.map((opt) => (
               <button
@@ -152,21 +155,21 @@ export default function InboxPage() {
                 checked={onlyAction}
                 onChange={(e) => setOnlyAction(e.target.checked)}
               />
-              Only items needing action
+              {t("onlyItemsNeedingAction")}
             </label>
           </div>
         </Card>
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
           <Card
-            title={`Items (${items.length})`}
-            description={`${env?.data.needs_action ?? 0} need action`}
+            title={t("itemsCount", { count: items.length })}
+            description={t("needAction", { count: env?.data.needs_action ?? 0 })}
             padded={false}
           >
             {loading && items.length === 0 ? (
-              <div className="p-4 text-[12px] text-ink-500">Loading…</div>
+              <div className="p-4 text-[12px] text-ink-500">{tCommon("loading")}</div>
             ) : items.length === 0 ? (
-              <Empty label="Inbox is empty" />
+              <Empty label={t("inboxEmpty")} />
             ) : (
               <ul className="embedded-list-scroll-lg">
                 {items.map((item) => (
@@ -188,7 +191,7 @@ export default function InboxPage() {
                         {item.title}
                       </span>
                       {item.requires_action ? (
-                        <Pill tone="warn">action</Pill>
+                        <Pill tone="warn">{t("action")}</Pill>
                       ) : null}
                     </div>
                     {item.summary ? (
@@ -214,7 +217,7 @@ export default function InboxPage() {
                 }
               >
                 <div className="text-[12px] text-ink-200 whitespace-pre-wrap mb-3">
-                  {selected.summary || "(no summary)"}
+                  {selected.summary || t("noSummary")}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -256,14 +259,14 @@ export default function InboxPage() {
                 </div>
 
                 <div className="text-[10px] text-ink-500 uppercase tracking-widest mb-1">
-                  Raw payload
+                  {t("rawPayload")}
                 </div>
                 <Json value={selected.data} />
               </Card>
             ) : (
-              <Card title="Select an item">
+              <Card title={t("selectItem")}>
                 <div className="text-[12px] text-ink-500">
-                  Pick an inbox item on the left to see details and act on it.
+                  {t("selectItemHint")}
                 </div>
               </Card>
             )}

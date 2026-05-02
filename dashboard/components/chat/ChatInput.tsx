@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useEffect, useRef } from "react";
 import type { ChatModelOption, ChatRunSettings, ReasoningEffort } from "../../lib/chat";
 import { SendIcon, SparkIcon, StopIcon, WrenchIcon } from "../icons";
@@ -35,6 +36,8 @@ export function ChatInput({
   modelOptions?: ChatModelOption[];
 }) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  const t = useTranslations("chat");
+  const tCommon = useTranslations("common");
   const selectedModelKey =
     modelOptions.find(
       (option) =>
@@ -60,7 +63,7 @@ export function ChatInput({
   }
 
   return (
-    <div className="border-t border-white/5 bg-[rgba(4,4,13,0.55)] backdrop-blur-glass">
+    <div className="border-t backdrop-blur-glass" style={{ background: "var(--panel-bg)", borderColor: "var(--line)" }}>
       <div className="max-w-4xl mx-auto px-4 py-3">
         <div className="flex items-end gap-2 rounded-2xl border border-white/8 bg-white/[0.04] backdrop-blur-glass focus-within:border-brand-500/50 focus-within:shadow-[0_0_0_4px_rgba(139,92,246,0.08)] transition-all px-3 py-2">
           <textarea
@@ -69,18 +72,15 @@ export function ChatInput({
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
             rows={1}
-            placeholder={
-              placeholder ??
-              "Ask Nerya to open a position, write a script, schedule a cron job, or run a postmortem... (Shift+Enter for newline)"
-            }
+            placeholder={placeholder ?? t("inputPlaceholder")}
             className="flex-1 bg-transparent resize-none text-sm text-ink-100 placeholder:text-ink-500 focus:outline-none py-1.5 min-h-[28px] max-h-[240px]"
           />
           {sending && onCancel ? (
             <button
               onClick={onCancel}
               className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-ink-300 hover:text-white hover:border-white/20 transition-colors cursor-pointer"
-              title="Cancel in-flight turn (client-side only; the backend may still finish)"
-              aria-label="Cancel in-flight turn"
+              title={t("cancelTurn")}
+              aria-label={t("cancelTurn")}
             >
               <StopIcon size={15} />
             </button>
@@ -89,13 +89,13 @@ export function ChatInput({
             onClick={onSend}
             disabled={sending || !value.trim()}
             className="inline-flex h-8 w-8 items-center justify-center bg-gradient-to-r from-brand-500 to-brand-700 hover:from-brand-400 hover:to-brand-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm rounded-md transition-all shadow-glow cursor-pointer"
-            title={sending ? "Running" : "Send"}
-            aria-label={sending ? "Running" : "Send message"}
+            title={sending ? t("running") : t("send")}
+            aria-label={sending ? t("running") : t("send")}
           >
             {sending ? (
               <span className="inline-flex items-center gap-1.5">
                 <span className="typing-dot" />
-                <span className="sr-only">Running</span>
+                <span className="sr-only">{t("running")}</span>
               </span>
             ) : (
               <SendIcon size={15} />
@@ -103,15 +103,12 @@ export function ChatInput({
           </button>
         </div>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-ink-500 px-1">
-          <span>
-            Enter to send · Shift+Enter for newline · turns run live against the
-            backend
-          </span>
+          <span>{t("enterToSend")}</span>
           <div className="flex items-center gap-2">
             <label className="flex items-center gap-1.5">
               <span className="inline-flex items-center gap-1 text-ink-300">
                 <SparkIcon size={13} />
-                <span>Think</span>
+                <span>{t("think")}</span>
               </span>
               <select
                 value={settings.reasoning_effort}
@@ -134,7 +131,7 @@ export function ChatInput({
             <label className="flex items-center gap-1.5">
               <span className="inline-flex items-center gap-1 text-ink-300">
                 <WrenchIcon size={13} />
-                <span>Model</span>
+                <span>{t("model")}</span>
               </span>
               <select
                 value={selectedModelKey}
@@ -162,9 +159,9 @@ export function ChatInput({
                 disabled={sending}
                 className="max-w-[220px] rounded-md border border-white/10 bg-ink-900/80 px-2 py-1 text-[10px] text-ink-200 focus:outline-none focus:border-brand-500/50 disabled:opacity-60"
               >
-                <option value="__default">Runtime default</option>
+                <option value="__default">{t("runtimeDefault")}</option>
                 {selectedModelKey === "__custom" ? (
-                  <option value="__custom">Custom override</option>
+                  <option value="__custom">{t("customOverride")}</option>
                 ) : null}
                 {modelOptions.map((option) => (
                   <option key={option.key} value={option.key}>
@@ -186,7 +183,7 @@ export function ChatInput({
                 }
                 className="h-3 w-3 accent-brand-500"
               />
-              <span>YOLO</span>
+              <span>{t("yolo")}</span>
             </label>
           </div>
         </div>

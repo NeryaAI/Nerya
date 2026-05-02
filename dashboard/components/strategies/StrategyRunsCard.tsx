@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 
 import { Card, Empty, Json, Pill } from "../Page";
 import type { StrategyRunRecord } from "../../lib/strategyTypes";
@@ -25,20 +26,21 @@ const TONES: Record<
  * trail. Reads from the workspace envelope (no extra fetch).
  */
 export function StrategyRunsCard({ runs, total }: Props) {
+  const t = useTranslations("strategyRuns");
   const [openId, setOpenId] = useState<string | null>(null);
 
   if (!runs.length) {
     return (
-      <Card title="Recent runs" description="StrategyRunner journal">
-        <Empty label="No runs yet — manual `Run tick` will produce the first entry." />
+      <Card title={t("title")} description={t("description")}>
+        <Empty label={t("noRuns")} />
       </Card>
     );
   }
 
   return (
     <Card
-      title={`Recent runs (${runs.length}/${total})`}
-      description="Each row is one StrategyRunner.run() invocation."
+      title={t("titleWithCount", { shown: runs.length, total })}
+      description={t("rowDescription")}
     >
       <ul className="embedded-list-scroll-lg divide-y divide-brand-500/10 text-xs">
         {runs.map((run) => (
@@ -72,7 +74,7 @@ export function StrategyRunsCard({ runs, total }: Props) {
                 {run.audit && run.audit.length > 0 && (
                   <details>
                     <summary className="text-[11px] text-ink-400 cursor-pointer">
-                      audit · {run.audit.length} entries
+                      {t("auditEntries", { n: run.audit.length })}
                     </summary>
                     <Json value={run.audit} />
                   </details>
@@ -80,7 +82,7 @@ export function StrategyRunsCard({ runs, total }: Props) {
                 {run.error && (
                   <div className="rounded border border-[#ef4560]/40 bg-[#ef4560]/10 px-2 py-1 text-[11px] text-[#ef4560]">
                     {run.error.kind ? `${run.error.kind}: ` : ""}
-                    {run.error.message ?? "error"}
+                    {run.error.message ?? t("error")}
                   </div>
                 )}
               </div>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import {
   Card,
   Empty,
@@ -57,6 +58,7 @@ function statusPill(
 }
 
 export default function AccountsPage() {
+  const t = useTranslations("accounts");
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -91,7 +93,7 @@ export default function AccountsPage() {
     try {
       const reason =
         next !== "active"
-          ? window.prompt(`Reason for setting ${account_id} to ${next}?`, "manual")
+          ? window.prompt(t("reasonPrompt", { id: account_id, status: next }), t("manual"))
           : undefined;
       if (next !== "active" && reason == null) {
         setBusy(null);
@@ -123,10 +125,7 @@ export default function AccountsPage() {
     if (acc.profile.mode !== "paper") return;
     const currentBalance = Number(acc.profile.initial_balance_usd) || 0;
     const raw = window.prompt(
-      `Reset paper sandbox for ${aid}?\n\n` +
-        "This wipes orders / fills / positions / reservations / snapshots / executor runs " +
-        "for the account, and resets the virtual ledger. Strategy bindings stay.\n\n" +
-        "Initial balance (USD) — leave blank to keep current:",
+      t("resetPrompt", { id: aid }),
       String(currentBalance || ""),
     );
     if (raw == null) return;
@@ -135,7 +134,7 @@ export default function AccountsPage() {
     if (trimmed !== "") {
       const parsed = Number(trimmed);
       if (!Number.isFinite(parsed) || parsed < 0) {
-        setError(`Invalid initial balance: ${trimmed}`);
+        setError(t("invalidBalance", { value: trimmed }));
         return;
       }
       initial = parsed;
@@ -149,11 +148,12 @@ export default function AccountsPage() {
       });
       if (!res.ok && res.error === "account_busy" && res.state) {
         const proceed = window.confirm(
-          `Account ${aid} still has ` +
-            `${res.state.active_orders} order(s) / ` +
-            `${res.state.open_positions} position(s) / ` +
-            `${res.state.active_executors} executor(s).\n\n` +
-            "Force reset anyway?",
+          t("accountBusy", {
+            id: aid,
+            orders: res.state.active_orders,
+            positions: res.state.open_positions,
+            executors: res.state.active_executors,
+          }),
         );
         if (!proceed) {
           setBusy(null);
@@ -206,28 +206,28 @@ export default function AccountsPage() {
   return (
     <div>
       <PageHeader
-        title="Accounts"
-        description="Configure trading accounts (CEX, DEX, perps, on-chain) with mode/permissions/limits/credentials. Multi-exchange + multi-paper + on-chain wallets all live here."
+        title={t("title")}
+        description={t("description")}
         actions={
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowWizard((s) => !s)}
               className="btn-ghost text-xs"
             >
-              {showWizard ? "Close wizard" : "+ Add exchange"}
+              {showWizard ? t("closeWizard") : t("addExchange")}
             </button>
             <button
               onClick={() => setShowAdd((s) => !s)}
               className="btn-ghost text-xs"
             >
-              {showAdd ? "Close form" : "+ Add account"}
+              {showAdd ? t("closeForm") : t("addAccount")}
             </button>
             <button
               onClick={load}
               disabled={loading}
               className="btn-ghost text-xs"
             >
-              {loading ? "…" : "Refresh"}
+              {loading ? "…" : t("refresh")}
             </button>
           </div>
         }
@@ -237,24 +237,26 @@ export default function AccountsPage() {
         {error && <ErrorBanner error={error} />}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Kpi label="Accounts" value={`${totals.total}`} tone="brand" />
+          <Kpi label={t("accountsKpi")} value={`${totals.total}`} tone="brand" />
           <Kpi
-            label="Live"
+            label={t("live")}
             value={`${totals.live}`}
             tone={totals.live > 0 ? "warn" : "neutral"}
-            delta={`${totals.quarantined} quarantined`}
+            delta={t("quarantined", { count: totals.quarantined })}
           />
           <Kpi
-            label="Open positions"
+            label={t("openPositions")}
             value={`${totals.positions}`}
-            delta={`${totals.protections} protection rule(s)`}
+            delta={t("protectionRules", { count: totals.protections })}
           />
           <Kpi
-            label="Reserved (USD-eq)"
+            label={t("reservedUsd")}
             value={money(totals.reserved, "USDT")}
-            delta={`${totals.currencies.size} currency${
-              totals.currencies.size === 1 ? "" : "s"
-            }`}
+            delta={
+              totals.currencies.size === 1
+                ? t("currencyCount", { count: totals.currencies.size })
+                : t("currencyCountPlural", { count: totals.currencies.size })
+            }
           />
         </div>
 
@@ -290,15 +292,15 @@ export default function AccountsPage() {
         <AccountProposalsCard onApplied={() => void load()} />
 
         <Card
-          title="All accounts"
-          description="One row per AccountProfile. Click the id to open the driver page."
+          title={t("allAccounts")}
+          description={t("allAccountsDesc")}
         >
           {accounts.length === 0 ? (
             <Empty
               label={
                 loading
-                  ? "Loading…"
-                  : "No accounts configured yet. Click + Add account."
+                  ? t("loading")
+                  : t("noAccounts")
               }
             />
           ) : (
@@ -306,16 +308,16 @@ export default function AccountsPage() {
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
-                    <th>Id</th>
-                    <th>Mode</th>
-                    <th>Status</th>
-                    <th>Venue</th>
-                    <th>Wallet</th>
-                    <th>Currency</th>
-                    <th>Total</th>
-                    <th>Reserved</th>
-                    <th>Positions</th>
-                    <th>Executors</th>
+                    <th>{t("colId")}</th>
+                    <th>{t("colMode")}</th>
+                    <th>{t("colStatus")}</th>
+                    <th>{t("colVenue")}</th>
+                    <th>{t("colWallet")}</th>
+                    <th>{t("colCurrency")}</th>
+                    <th>{t("colTotal")}</th>
+                    <th>{t("colReserved")}</th>
+                    <th>{t("colPositions")}</th>
+                    <th>{t("colExecutors")}</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -363,14 +365,14 @@ export default function AccountsPage() {
                                 disabled={busy === `${p.id}:quarantined`}
                                 className="btn-ghost text-[11px] py-0.5 text-[#ef4560]"
                               >
-                                quarantine
+                                {t("quarantineBtn")}
                               </button>
                               <button
                                 onClick={() => quarantine(p.id, "read_only")}
                                 disabled={busy === `${p.id}:read_only`}
                                 className="btn-ghost text-[11px] py-0.5 text-[#f5a524]"
                               >
-                                read-only
+                                {t("readOnlyBtn")}
                               </button>
                             </>
                           ) : (
@@ -379,7 +381,7 @@ export default function AccountsPage() {
                               disabled={busy === `${p.id}:active`}
                               className="btn-ghost text-[11px] py-0.5 text-accent-300"
                             >
-                              re-activate
+                              {t("reactivate")}
                             </button>
                           )}
                           {p.mode === "paper" ? (
@@ -387,9 +389,9 @@ export default function AccountsPage() {
                               onClick={() => void resetPaper(acc)}
                               disabled={busy === `${p.id}:reset`}
                               className="btn-ghost text-[11px] py-0.5 text-brand-200"
-                              title="Wipe paper trading state and reset balance"
+                              title={t("resetPaperTitle")}
                             >
-                              {busy === `${p.id}:reset` ? "…" : "reset paper"}
+                              {busy === `${p.id}:reset` ? "…" : t("resetPaper")}
                             </button>
                           ) : null}
                         </td>

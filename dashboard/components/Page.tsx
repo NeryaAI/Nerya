@@ -1,4 +1,7 @@
+"use client";
+
 import { ReactNode } from "react";
+import { useTranslations } from "next-intl";
 import { Sparkline } from "./Sparkline";
 
 export function PageHeader({ title, description, actions, eyebrow }: {
@@ -8,7 +11,7 @@ export function PageHeader({ title, description, actions, eyebrow }: {
   eyebrow?: string;
 }) {
   return (
-    <header className="flex items-start justify-between gap-4 pb-6 mb-6 border-b border-white/5">
+    <header className="flex items-start justify-between gap-4 pb-6 mb-8 border-b border-brand-500/15">
       <div className="min-w-0">
         {eyebrow ? (
           <div className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.22em] text-brand-300 mb-2">
@@ -16,11 +19,11 @@ export function PageHeader({ title, description, actions, eyebrow }: {
             {eyebrow}
           </div>
         ) : null}
-        <h2 className="text-[26px] leading-[1.15] font-semibold tracking-tight text-gradient-brand">
+        <h2 className="text-[28px] leading-[1.15] font-semibold tracking-tight text-gradient-brand">
           {title}
         </h2>
         {description ? (
-          <p className="text-ink-300 text-sm mt-2 max-w-2xl leading-relaxed">
+          <p className="text-ink-400 text-[13px] mt-2 max-w-2xl leading-relaxed">
             {description}
           </p>
         ) : null}
@@ -33,7 +36,7 @@ export function PageHeader({ title, description, actions, eyebrow }: {
 }
 
 export function PageBody({ children }: { children: ReactNode }) {
-  return <div className="space-y-5">{children}</div>;
+  return <div className="space-y-8">{children}</div>;
 }
 
 export function Card({
@@ -42,20 +45,27 @@ export function Card({
   children,
   actions,
   padded = true,
+  featured = false,
 }: {
   title?: ReactNode;
   description?: ReactNode;
   children?: ReactNode;
   actions?: ReactNode;
   padded?: boolean;
+  featured?: boolean;
 }) {
   return (
-    <section className="card card-hover min-w-0">
+    <section className={[
+      "card card-hover min-w-0",
+      featured
+        ? "border-brand-500/30 shadow-[0_0_0_1px_rgba(139,92,246,0.15),0_4px_32px_-8px_rgba(139,92,246,0.25)] relative before:absolute before:inset-x-0 before:top-0 before:h-[2px] before:rounded-t-xl before:bg-gradient-to-r before:from-brand-500/60 before:via-brand-400/80 before:to-fluid-400/40"
+        : "",
+    ].join(" ")}>
       {(title || actions) && (
         <div className="card-head">
           <div className="min-w-0">
             {title && <h3 className="card-title break-words">{title}</h3>}
-            {description && <p className="card-subtle mt-0.5 break-words">{description}</p>}
+            {description && <p className="card-subtle mt-1 break-words">{description}</p>}
           </div>
           {actions ? <div className="shrink-0">{actions}</div> : null}
         </div>
@@ -137,7 +147,8 @@ export function Empty({
   title?: string;
   subtitle?: string;
 }) {
-  const heading = title || label || "No data";
+  const t = useTranslations("pageCommon");
+  const heading = title || label || t("noData");
   return (
     <div className="text-ink-400 text-sm italic py-8 text-center">
       <div>{heading}</div>

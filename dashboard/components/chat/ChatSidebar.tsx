@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import type { ChatThread } from "../../lib/chat";
 import { PlusIcon, TrashIcon } from "../icons";
 
@@ -28,29 +29,31 @@ export function ChatSidebar({
   onNew: () => void;
   onDelete: (id: string) => void;
 }) {
+  const t = useTranslations("chat");
+  const tCommon = useTranslations("common");
   return (
-    <aside className="w-64 shrink-0 border-r border-white/5 bg-[rgba(4,4,13,0.55)] backdrop-blur-glass flex flex-col">
-      <div className="p-3 border-b border-white/5">
+    <aside className="w-64 shrink-0 border-r backdrop-blur-glass flex flex-col" style={{ background: "var(--panel-bg)", borderColor: "var(--line)" }}>
+      <div className="p-3 border-b" style={{ borderColor: "var(--line)" }}>
         <button
           onClick={onNew}
           className="w-full text-left rounded-lg border border-brand-500/30 bg-gradient-to-r from-brand-500/15 to-fluid-500/10 hover:from-brand-500/25 hover:to-fluid-500/15 text-white text-sm px-3 py-2 transition-colors flex items-center gap-2"
-          title="New chat"
+          title={t("newChat")}
         >
           <PlusIcon size={15} className="text-brand-200" />
-          <span>New chat</span>
+          <span>{t("newChat")}</span>
         </button>
       </div>
       <div className="embedded-scroll flex-1">
         {threads.length === 0 ? (
           <div className="p-4 text-xs text-ink-500 italic">
-            Your conversations will appear here.
+            {t("emptyHistory")}
           </div>
         ) : (
           <ul className="p-2 space-y-1">
-            {threads.map((t) => {
-              const active = t.id === activeId;
+            {threads.map((th) => {
+              const active = th.id === activeId;
               return (
-                <li key={t.id}>
+                <li key={th.id}>
                   <div
                     className={`group flex items-start gap-1 rounded-lg px-2 py-2 text-sm transition-colors cursor-pointer ${
                       active
@@ -59,22 +62,22 @@ export function ChatSidebar({
                     }`}
                   >
                     <button
-                      onClick={() => onPick(t.id)}
+                      onClick={() => onPick(th.id)}
                       className="flex-1 text-left min-w-0"
                     >
-                      <div className="truncate text-[13px]">{t.title}</div>
+                      <div className="truncate text-[13px]">{th.title}</div>
                       <div className="text-[10px] text-ink-500 font-mono mt-0.5">
-                        {t.messages.length} msg · {timeAgo(t.updated_ts)}
+                        {t("messages", { count: th.messages.length })} · {timeAgo(th.updated_ts)}
                       </div>
                     </button>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (confirm("Delete this conversation?")) onDelete(t.id);
+                        if (confirm(t("deleteConfirm"))) onDelete(th.id);
                       }}
                       className="opacity-0 group-hover:opacity-100 text-ink-500 hover:text-[#ef5564] text-xs px-1.5 transition-opacity"
-                      title="Delete"
-                      aria-label="Delete conversation"
+                      title={tCommon("delete")}
+                      aria-label={tCommon("delete")}
                     >
                       <TrashIcon size={14} />
                     </button>
@@ -85,9 +88,8 @@ export function ChatSidebar({
           </ul>
         )}
       </div>
-      <div className="p-3 border-t border-white/5 text-[10px] text-ink-500 leading-relaxed">
-        Conversations are mirrored into the Nerya workspace so dashboard,
-        curl, and gateway sessions can be resumed from the same history.
+      <div className="p-3 border-t text-[10px] text-ink-500 leading-relaxed" style={{ borderColor: "var(--line)" }}>
+        {t("historyFooter")}
       </div>
     </aside>
   );

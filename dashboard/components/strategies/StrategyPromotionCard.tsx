@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
 import { formatTsShort } from "../../lib/format";
@@ -76,6 +77,7 @@ export function StrategyPromotionCard({
   onNotice,
   onRefresh,
 }: Props) {
+  const t = useTranslations("strategyPromotion");
   const [promotions, setPromotions] = useState<PromotionRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -125,7 +127,7 @@ export function StrategyPromotionCard({
       });
       const promotion = res.promotion as PromotionRecord;
       onNotice(
-        `Promotion → ${promotion.target}: ${promotion.state ?? "pending"}`,
+        t("promotionResult", { target: String(promotion.target), state: promotion.state ?? "pending" }),
       );
       await loadPromotions();
       await onRefresh();
@@ -140,7 +142,7 @@ export function StrategyPromotionCard({
     if (!record.promotion_id) return;
     if (
       !confirm(
-        `Apply promotion ${record.promotion_id} → ${record.target}? This changes the strategy lifecycle state.`,
+        t("applyConfirm", { id: String(record.promotion_id), target: String(record.target) }),
       )
     ) {
       return;
@@ -149,7 +151,7 @@ export function StrategyPromotionCard({
     onError(null);
     try {
       await clientApi.controlPromotionApply(String(record.promotion_id));
-      onNotice(`Promotion applied → ${record.target}`);
+      onNotice(t("applied", { target: String(record.target) }));
       await loadPromotions();
       await onRefresh();
     } catch (e) {
@@ -173,7 +175,7 @@ export function StrategyPromotionCard({
         },
       });
       onNotice(
-        `Recorded evidence ${evidenceKind} (${evidencePassed ? "passed" : "failed"})`,
+        t("evidenceRecorded", { kind: evidenceKind, result: evidencePassed ? t("passed") : t("failed") }),
       );
       await loadPromotions();
       await onRefresh();
@@ -186,29 +188,29 @@ export function StrategyPromotionCard({
 
   return (
     <Card
-      title="Promotion lifecycle"
-      description="Track and request strategy promotions through draft → static_review → backtested → paper → shadow → canary → live."
+      title={t("title")}
+      description={t("description")}
       actions={
         <button
           onClick={loadPromotions}
           disabled={loading}
           className="btn-ghost text-xs"
         >
-          {loading ? "Refreshing…" : "Refresh"}
+          {loading ? t("refreshing") : t("refresh")}
         </button>
       }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="space-y-3">
           <div className="space-y-1.5 text-xs">
-            <div className="text-ink-400">Current state</div>
+            <div className="text-ink-400">{t("currentState")}</div>
             <div className="flex items-center gap-2">
               <Pill tone="brand">{status || "—"}</Pill>
               {latest ? (
                 <span className="text-ink-400">
-                  · last decision{" "}
+                  {t("lastDecisionPrefix")}{" "}
                   <Pill tone={stateTone(latest.state)}>{latest.state}</Pill>{" "}
-                  for <span className="font-mono">{latest.target}</span>
+                  {t("for")} <span className="font-mono">{latest.target}</span>
                 </span>
               ) : null}
             </div>
@@ -216,10 +218,10 @@ export function StrategyPromotionCard({
 
           <div className="rounded-md border border-brand-500/10 p-3 space-y-2">
             <div className="text-xs uppercase tracking-wider text-ink-400">
-              Request promotion
+              {t("requestPromotion")}
             </div>
             <div className="flex gap-2 items-center text-xs">
-              <span className="text-ink-400">target</span>
+              <span className="text-ink-400">{t("target")}</span>
               <select
                 value={target}
                 onChange={(e) =>
@@ -240,24 +242,24 @@ export function StrategyPromotionCard({
                 disabled={busy === "request"}
                 className="btn-ghost text-xs"
               >
-                {busy === "request" ? "…" : "Request"}
+                {busy === "request" ? "…" : t("request")}
               </button>
             </div>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               rows={2}
-              placeholder="Notes (optional, becomes part of the promotion record)"
+              placeholder={t("notesPlaceholder")}
               className="w-full bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-xs text-ink-200"
             />
           </div>
 
           <div className="rounded-md border border-brand-500/10 p-3 space-y-2">
             <div className="text-xs uppercase tracking-wider text-ink-400">
-              Record evidence
+              {t("recordEvidence")}
             </div>
             <div className="flex gap-2 items-center text-xs flex-wrap">
-              <span className="text-ink-400">kind</span>
+              <span className="text-ink-400">{t("kind")}</span>
               <select
                 value={evidenceKind}
                 onChange={(e) =>
@@ -279,14 +281,14 @@ export function StrategyPromotionCard({
                   checked={evidencePassed}
                   onChange={(e) => setEvidencePassed(e.target.checked)}
                 />
-                passed
+                {t("passed")}
               </label>
               <button
                 onClick={recordEvidence}
                 disabled={busy === "evidence"}
                 className="btn-ghost text-xs"
               >
-                {busy === "evidence" ? "…" : "Record"}
+                {busy === "evidence" ? "…" : t("record")}
               </button>
             </div>
           </div>
@@ -294,11 +296,11 @@ export function StrategyPromotionCard({
 
         <div>
           <div className="text-xs uppercase tracking-wider text-ink-400 mb-2">
-            Recent promotions
+            {t("recentPromotions")}
           </div>
           {promotions.length === 0 ? (
             <Empty
-              label={loading ? "Loading…" : "No promotion records yet."}
+              label={loading ? t("loading") : t("noRecords")}
             />
           ) : (
             <div className="embedded-list-scroll space-y-1.5">
@@ -319,7 +321,7 @@ export function StrategyPromotionCard({
                       disabled={busy === rec.promotion_id}
                       className="btn-ghost text-[11px] py-0.5 text-accent-300"
                     >
-                      {busy === rec.promotion_id ? "…" : "apply"}
+                      {busy === rec.promotion_id ? "…" : t("apply")}
                     </button>
                   ) : null}
                 </div>

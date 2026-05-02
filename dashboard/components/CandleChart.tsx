@@ -9,6 +9,7 @@
  */
 
 import { useMemo } from "react";
+import { useTranslations } from "next-intl";
 import type { Candle } from "../lib/api";
 
 type Mode = "candlestick" | "line" | "area";
@@ -38,6 +39,7 @@ export function CandleChart({
   loading = false,
   error,
 }: Props) {
+  const t = useTranslations("candleChart");
   const padding = { top: 8, right: 56, bottom: 20, left: 6 };
   const volumeH = showVolume ? Math.max(28, Math.round(height * 0.18)) : 0;
   const chartH = height - padding.top - padding.bottom - volumeH;
@@ -219,7 +221,7 @@ export function CandleChart({
           aria-hidden
         >
           <div className="text-[10px] text-ink-500 uppercase tracking-wider">
-            Last
+            {t("last")}
           </div>
           <div
             className="text-sm font-mono"
@@ -234,10 +236,10 @@ export function CandleChart({
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-[11px] text-ink-500">
             {error
-              ? `Failed to load candles: ${error}`
+              ? t("failedToLoad", { error })
               : loading
-                ? "Loading candles…"
-                : "No candle data yet."}
+                ? t("loading")
+                : t("noData")}
           </div>
         </div>
       ) : null}

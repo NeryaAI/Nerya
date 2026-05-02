@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import { Card, Empty } from "../Page";
 import { clientApi } from "../../lib/clientApi";
 import type {
@@ -12,18 +13,6 @@ import type {
 
 const MODE_OPTIONS = ["paper", "shadow", "canary", "live"] as const;
 const KIND_OPTIONS = ["cex", "dex", "perp", "futures", "chain"] as const;
-const PERMISSION_PRESETS = [
-  {
-    id: "read_only",
-    label: "Read only",
-    permissions: { read_balances: true, place_order: false, cancel_order: false },
-  },
-  {
-    id: "trade",
-    label: "Trade + cancel",
-    permissions: { read_balances: true, place_order: true, cancel_order: true },
-  },
-] as const;
 
 interface CredentialSlot {
   field: string;
@@ -76,6 +65,19 @@ export function AddAccountForm({
   onProposed,
   onCancel,
 }: Props) {
+  const t = useTranslations("addAccountForm");
+  const PERMISSION_PRESETS = [
+    {
+      id: "read_only",
+      label: t("permissionReadOnly"),
+      permissions: { read_balances: true, place_order: false, cancel_order: false },
+    },
+    {
+      id: "trade",
+      label: t("permissionTradeCancel"),
+      permissions: { read_balances: true, place_order: true, cancel_order: true },
+    },
+  ] as const;
   const [id, setId] = useState(initial?.id || "");
   const [venue, setVenue] = useState(initial?.venue || "");
   const [venueOptions, setVenueOptions] = useState<Array<{ id: string; label: string; kind?: string }>>([]);
@@ -183,7 +185,7 @@ export function AddAccountForm({
         if (!mounted) return;
         if (!res.ok) {
           setSchemaLabel("");
-          setSchemaError(res.detail || res.error || "credential schema unavailable");
+          setSchemaError(res.detail || res.error || t("errSchemaUnavailable"));
           return;
         }
         const fields = res.credential_fields || [];
@@ -271,14 +273,18 @@ export function AddAccountForm({
           throw new Error("missing_proposal_response");
         }
         setNotice(
-          `Staged proposal ${res.proposal.id} for ${res.proposal.target_id} (${res.proposal.operation}). Awaiting approval.`,
+          t("stagedProposalNotice", {
+            id: res.proposal.id,
+            target: res.proposal.target_id,
+            operation: res.proposal.operation,
+          }),
         );
         onProposed?.(res.proposal.id);
       } else {
         if (!res.account) {
           throw new Error("missing_account_response");
         }
-        setNotice(`Saved ${res.account.profile.id}`);
+        setNotice(t("savedNotice", { id: res.account.profile.id }));
         onSaved?.(res.account);
       }
     } catch (e) {
@@ -290,8 +296,8 @@ export function AddAccountForm({
 
   return (
     <Card
-      title={editing ? `Edit ${initial?.id}` : "Add account"}
-      description="Paste exchange keys directly here or use existing vault:// refs. The API stores plaintext in SecretVault first and persists only vault refs to accounts.yml."
+      title={editing ? t("editTitle", { id: initial?.id ?? "" }) : t("addTitle")}
+      description={t("description")}
       actions={
         <div className="flex gap-2 items-center">
           <select
@@ -301,14 +307,14 @@ export function AddAccountForm({
             }
             disabled={busy}
             className="bg-ink-900 border border-brand-500/20 rounded px-1.5 py-1 text-[11px] text-ink-200"
-            title="Apply now writes accounts.yml directly. Propose stages a reviewable account_roster_patch."
+            title={t("submitModeTitle")}
           >
-            <option value="apply">Apply now</option>
-            <option value="propose">Propose for review</option>
+            <option value="apply">{t("applyNow")}</option>
+            <option value="propose">{t("proposeForReview")}</option>
           </select>
           {onCancel ? (
             <button onClick={onCancel} className="btn-ghost text-xs">
-              Cancel
+              {t("cancel")}
             </button>
           ) : null}
           <button
@@ -318,20 +324,20 @@ export function AddAccountForm({
           >
             {busy
               ? submitMode === "propose"
-                ? "Staging…"
-                : "Saving…"
+                ? t("staging")
+                : t("saving")
               : submitMode === "propose"
-              ? "Stage proposal"
+              ? t("stageProposal")
               : editing
-              ? "Save"
-              : "Create"}
+              ? t("save")
+              : t("create")}
           </button>
         </div>
       }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-sm">
         <div className="space-y-3">
-          <Field label="Account id">
+          <Field label={t("fieldAccountId")}>
             <input
               value={id}
               onChange={(e) => setId(e.target.value)}
@@ -340,13 +346,13 @@ export function AddAccountForm({
               className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
             />
           </Field>
-          <Field label="Venue">
+          <Field label={t("fieldVenue")}>
             <select
               value={venue}
               onChange={(e) => setVenue(e.target.value)}
               className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100"
             >
-              <option value="">Select exchange / venue</option>
+              <option value="">{t("selectVenue")}</option>
               {venueOptions.map((option) => (
                 <option key={option.id} value={option.id}>
                   {option.label} ({option.id})
@@ -355,7 +361,7 @@ export function AddAccountForm({
             </select>
           </Field>
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Kind">
+            <Field label={t("fieldKind")}>
               <select
                 value={kind}
                 onChange={(e) => setKind(e.target.value)}
@@ -368,7 +374,7 @@ export function AddAccountForm({
                 ))}
               </select>
             </Field>
-            <Field label="Mode">
+            <Field label={t("fieldMode")}>
               <select
                 value={mode}
                 onChange={(e) =>
@@ -385,7 +391,7 @@ export function AddAccountForm({
             </Field>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Base currency">
+            <Field label={t("fieldBaseCurrency")}>
               <input
                 list="account-currency-suggestions"
                 value={baseCurrency}
@@ -394,7 +400,7 @@ export function AddAccountForm({
                 }
                 className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
                 placeholder="USDT / USDC / CNY / JPY / HKD …"
-                title="Quote currency the dashboard uses to format balances. CEX accounts usually use USDT/USDC; A-share/CN brokers use CNY; on-chain wallets pin to whichever stablecoin the venue settles in."
+                title={t("baseCurrencyTitle")}
               />
               <datalist id="account-currency-suggestions">
                 <option value="USDT" />
@@ -409,17 +415,17 @@ export function AddAccountForm({
                 <option value="BTC" />
               </datalist>
             </Field>
-            <Field label="Subaccount">
+            <Field label={t("fieldSubaccount")}>
               <input
                 value={subaccount}
                 onChange={(e) => setSubaccount(e.target.value)}
-                placeholder="(optional)"
+                placeholder={t("optional")}
                 className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
               />
             </Field>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <Field label="Initial balance USD">
+            <Field label={t("fieldInitialBalance")}>
               <input
                 type="number"
                 value={initialBalance}
@@ -427,7 +433,7 @@ export function AddAccountForm({
                 className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
               />
             </Field>
-            <Field label="Live trading">
+            <Field label={t("fieldLiveTrading")}>
               <label className="flex items-center gap-2 mt-1.5 text-xs text-ink-300">
                 <input
                   type="checkbox"
@@ -440,23 +446,23 @@ export function AddAccountForm({
               </label>
               {requiresCredentials && !liveTradingEnabled ? (
                 <div className="text-[11px] text-[#f5a524] mt-0.5">
-                  canary/live needs this set + vault credentials
+                  {t("canaryLiveNeeds")}
                 </div>
               ) : null}
             </Field>
           </div>
 
-          <Field label="Wallet binding (wallet_id)">
+          <Field label={t("fieldWalletBinding")}>
             <select
               value={walletId}
               onChange={(e) => setWalletId(e.target.value)}
               className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
             >
-              <option value="">(none / use default)</option>
+              <option value="">{t("noneUseDefault")}</option>
               {bindings.map((b) => (
                 <option key={b.wallet_id} value={b.wallet_id}>
                   {b.wallet_id} · {b.provider}
-                  {b.source === "legacy" ? " (default)" : ""}
+                  {b.source === "legacy" ? ` (${t("defaultTag")})` : ""}
                 </option>
               ))}
             </select>
@@ -466,7 +472,7 @@ export function AddAccountForm({
         <div className="space-y-3">
           <div>
             <div className="mb-1 flex items-center justify-between gap-2">
-              <div className="text-ink-400 text-xs">Permissions</div>
+              <div className="text-ink-400 text-xs">{t("permissions")}</div>
               <select
                 className="bg-ink-900 border border-brand-500/20 rounded px-1.5 py-1 text-[11px] text-ink-200"
                 onChange={(e) => {
@@ -505,14 +511,13 @@ export function AddAccountForm({
                 </label>
               ))}
               <div className="text-ink-500 text-[11px] mt-1">
-                ⚠ <span className="font-mono">withdraw</span> is hard-pinned to
-                false by Nerya core — it's never opt-in via this form.
+                ⚠ <span className="font-mono">withdraw</span> {t("withdrawPinned")}
               </div>
             </div>
           </div>
 
           <div>
-            <div className="text-ink-400 text-xs mb-1">Limits</div>
+            <div className="text-ink-400 text-xs mb-1">{t("limits")}</div>
             <div className="space-y-1 text-xs font-mono">
               {Object.keys(limits).map((k) => (
                 <label
@@ -539,7 +544,7 @@ export function AddAccountForm({
           <div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-ink-400">
-                Connection fields
+                {t("connectionFields")}
                 {schemaLabel ? (
                   <span className="ml-1 text-ink-500">({schemaLabel})</span>
                 ) : null}
@@ -548,25 +553,25 @@ export function AddAccountForm({
                 onClick={addCredentialSlot}
                 className="btn-ghost text-[11px] py-0.5"
               >
-                + add slot
+                {t("addSlot")}
               </button>
             </div>
             {schemaLoading ? (
               <div className="text-[11px] text-ink-500 mt-1">
-                Loading provider credential fields...
+                {t("loadingProviderFields")}
               </div>
             ) : null}
             {schemaError ? (
               <div className="text-[11px] text-[#f5a524] mt-1">
-                {schemaError}. You can still add manual credential slots.
+                {schemaError}. {t("canAddManualSlots")}
               </div>
             ) : null}
             {credentialSlots.length === 0 ? (
               <Empty
                 label={
                   requiresCredentials
-                    ? "live/canary requires at least one API key or vault:// credential"
-                    : "paper/shadow accounts can leave this empty"
+                    ? t("liveRequiresCred")
+                    : t("paperCanEmpty")
                 }
               />
             ) : (
@@ -601,7 +606,7 @@ export function AddAccountForm({
                       list={slot.sensitive !== false ? "account-vault-ref-suggestions" : undefined}
                       placeholder={
                         slot.placeholder ||
-                        (slot.sensitive === false ? "public config value" : "paste API key or vault://ref")
+                        (slot.sensitive === false ? t("publicConfigValue") : t("pastApiOrVault"))
                       }
                       className="flex-1 bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
                     />
@@ -609,7 +614,7 @@ export function AddAccountForm({
                       onClick={() => removeCredentialSlot(idx)}
                       disabled={slot.required}
                       className="btn-ghost text-[11px] py-0.5"
-                      title={slot.required ? "Required by provider schema" : "Remove field"}
+                      title={slot.required ? t("requiredBySchema") : t("removeField")}
                     >
                       ×
                     </button>
@@ -627,8 +632,7 @@ export function AddAccountForm({
             )}
             {vaultRefs.length === 0 ? (
               <div className="text-[11px] text-ink-500 mt-1">
-                No existing vault refs yet. Pasted plaintext will be converted
-                automatically on submit.
+                {t("noVaultRefs")}
               </div>
             ) : null}
           </div>

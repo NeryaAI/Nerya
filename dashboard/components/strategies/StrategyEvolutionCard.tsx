@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
 import type { PendingTuningProposal } from "../../lib/strategyTypes";
@@ -28,11 +29,12 @@ export function StrategyEvolutionCard({
   dropped,
   onRefresh,
 }: Props) {
+  const t = useTranslations("strategyEvolution");
   async function apply(proposalId: string) {
     if (!proposalId) return;
     if (
       !window.confirm(
-        `Promote proposal ${proposalId} for ${strategyId}? This rewrites the strategy package.`,
+        t("promoteConfirm", { id: proposalId, strategyId }),
       )
     )
       return;
@@ -56,11 +58,11 @@ export function StrategyEvolutionCard({
 
   return (
     <Card
-      title="Pending tuning proposals"
-      description="Strategy-tuner output awaiting operator approval."
+      title={t("title")}
+      description={t("description")}
     >
       {proposals.length === 0 ? (
-        <Empty label="No pending tuning proposals." />
+        <Empty label={t("noProposals")} />
       ) : (
         <ul className="embedded-list-scroll divide-y divide-brand-500/10 text-xs">
           {proposals.map((p) => (
@@ -68,7 +70,7 @@ export function StrategyEvolutionCard({
               <div className="min-w-0">
                 <div className="font-mono text-ink-200 truncate">{p.id}</div>
                 <div className="text-[11px] text-ink-400 mt-0.5">
-                  {p.summary || "no summary"}
+                  {p.summary || t("noSummary")}
                 </div>
                 <div className="mt-1 flex items-center gap-2">
                   <Pill tone="brand">{p.state}</Pill>
@@ -82,13 +84,13 @@ export function StrategyEvolutionCard({
                   onClick={() => void apply(p.id)}
                   className="text-[11px] px-2 py-1 rounded border border-accent-500/40 text-accent-300 hover:bg-accent-500/10"
                 >
-                  Promote
+                  {t("promote")}
                 </button>
                 <button
                   onClick={() => void rollback(p.id)}
                   className="text-[11px] px-2 py-1 rounded border border-[#ef4560]/40 text-[#ef4560] hover:bg-[#ef4560]/10"
                 >
-                  Rollback
+                  {t("rollback")}
                 </button>
               </div>
             </li>
@@ -99,7 +101,7 @@ export function StrategyEvolutionCard({
       {dropped.length > 0 && (
         <div className="mt-4">
           <div className="text-[11px] uppercase tracking-wider text-ink-500 mb-1">
-            Dropped by guardrail
+            {t("droppedByGuardrail")}
           </div>
           <ul className="embedded-list-scroll-sm text-[11px] space-y-1">
             {dropped.map((d, idx) => (

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import { clientApi } from "../../lib/clientApi";
 import type {
   Incident,
@@ -58,6 +59,8 @@ const WINDOW_OPTIONS = [
 ];
 
 export default function IncidentsPage() {
+  const t = useTranslations("incidents");
+  const tCommon = useTranslations("common");
   const [windowS, setWindowS] = useState<number>(3600);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [reports, setReports] = useState<ReconciliationReport[]>([]);
@@ -96,8 +99,8 @@ export default function IncidentsPage() {
     if (
       !confirm(
         next
-          ? "Engage the global kill switch? Strategies will refuse to trade until it is released."
-          : "Release the global kill switch?",
+          ? t("killSwitchEngageConfirm")
+          : t("killSwitchReleaseConfirm"),
       )
     ) {
       return;
@@ -140,8 +143,8 @@ export default function IncidentsPage() {
   return (
     <div>
       <PageHeader
-        title="Incident Center"
-        description="Reconcile drift, lost orders, stale snapshots, auth failures and other operator-grade signals from the live trading control plane."
+        title={t("title")}
+        description={t("description")}
         actions={
           <div className="flex items-center gap-2">
             {killSwitch ? (
@@ -149,13 +152,13 @@ export default function IncidentsPage() {
                 onClick={toggleKillSwitch}
                 disabled={busy === "kill"}
                 className={`btn-ghost text-xs ${killSwitch.kill_switch ? "text-accent-300" : "text-[#ef4560]"}`}
-                title="Toggle the global kill switch"
+                title={t("killSwitchToggleTitle")}
               >
                 {busy === "kill"
                   ? "…"
                   : killSwitch.kill_switch
-                    ? "release kill"
-                    : "engage kill"}
+                    ? t("releaseKill")
+                    : t("engageKill")}
               </button>
             ) : null}
             <button
@@ -163,7 +166,7 @@ export default function IncidentsPage() {
               disabled={loading}
               className="btn-ghost text-xs"
             >
-              {loading ? "Refreshing…" : "Refresh"}
+              {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
           </div>
         }
@@ -193,36 +196,35 @@ export default function IncidentsPage() {
               </span>
             </div>
             <div className="mt-1 text-xs">
-              {Number(worst.summary?.issue_count ?? 0)} drift issue(s) need
-              operator attention before live trading resumes.
+              {t("driftIssuesNeedAttention", { count: Number(worst.summary?.issue_count ?? 0) })}
             </div>
           </div>
         ) : null}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi
-            label="Incidents"
+            label={t("kpiIncidents")}
             value={`${incidents.length}`}
             tone={incidents.length > 0 ? "warn" : "neutral"}
           />
           <Kpi
-            label="Recon reports"
+            label={t("kpiReconReports")}
             value={`${reports.length}`}
-            delta={`${totalIssues} drift issue(s)`}
+            delta={t("driftIssuesDelta", { count: totalIssues })}
           />
           <Kpi
-            label="Lost orders"
+            label={t("kpiLostOrders")}
             value={`${incidentsByKind["lost_order"] || 0}`}
             tone={(incidentsByKind["lost_order"] || 0) > 0 ? "danger" : "ok"}
           />
           <Kpi
-            label="Kill switch"
-            value={killSwitch?.kill_switch ? "ENGAGED" : "released"}
+            label={t("kpiKillSwitch")}
+            value={killSwitch?.kill_switch ? t("killSwitchEngaged") : t("killSwitchReleased")}
             tone={killSwitch?.kill_switch ? "danger" : "ok"}
           />
         </div>
 
-        <Card title="Time window">
+        <Card title={t("timeWindowTitle")}>
           <div className="flex flex-wrap gap-2 items-center text-xs">
             {WINDOW_OPTIONS.map((opt) => (
               <button
@@ -234,29 +236,29 @@ export default function IncidentsPage() {
                     : "border-brand-500/20 text-ink-300 hover:bg-brand-500/10"
                 }`}
               >
-                last {opt.label}
+                {t("lastWindow", { label: opt.label })}
               </button>
             ))}
           </div>
         </Card>
 
         <Card
-          title={`Incidents (${incidents.length})`}
-          description="Aggregates lost orders, stale snapshots, reconciliation drift, and other risk signals."
+          title={t("incidentsTitle", { count: incidents.length })}
+          description={t("incidentsDescription")}
         >
           {incidents.length === 0 ? (
-            <Empty label="No incidents in this window." />
+            <Empty label={t("noIncidentsInWindow")} />
           ) : (
             <div className="embedded-table-scroll">
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
-                    <th>Severity</th>
-                    <th>Kind</th>
-                    <th>Account</th>
-                    <th>Strategy</th>
-                    <th>Subject</th>
-                    <th>When</th>
+                    <th>{t("colSeverity")}</th>
+                    <th>{t("colKind")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colStrategy")}</th>
+                    <th>{t("colSubject")}</th>
+                    <th>{t("colWhen")}</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -295,7 +297,7 @@ export default function IncidentsPage() {
                           onClick={() => setSelected(incident)}
                           className="btn-ghost text-[11px] py-0.5"
                         >
-                          inspect
+                          {t("inspect")}
                         </button>
                       </td>
                     </tr>
@@ -307,22 +309,22 @@ export default function IncidentsPage() {
         </Card>
 
         <Card
-          title={`Reconciliation reports (${reports.length})`}
-          description="Severity-tagged reports from local + account passes."
+          title={t("reconciliationReportsTitle", { count: reports.length })}
+          description={t("reconciliationReportsDescription")}
         >
           {reports.length === 0 ? (
-            <Empty label="No reconciliation reports yet." />
+            <Empty label={t("noReconciliationReports")} />
           ) : (
             <div className="embedded-table-scroll">
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
-                    <th>Severity</th>
-                    <th>Scope</th>
-                    <th>Account</th>
-                    <th>Strategy</th>
-                    <th>Issues</th>
-                    <th>When</th>
+                    <th>{t("colSeverity")}</th>
+                    <th>{t("colScope")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colStrategy")}</th>
+                    <th>{t("colIssues")}</th>
+                    <th>{t("colWhen")}</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -355,7 +357,7 @@ export default function IncidentsPage() {
                           }
                           className="btn-ghost text-[11px] py-0.5"
                         >
-                          inspect
+                          {t("inspect")}
                         </button>
                       </td>
                     </tr>
@@ -368,13 +370,13 @@ export default function IncidentsPage() {
 
         {selected ? (
           <Card
-            title={`Incident · ${selected.kind}`}
+            title={t("incidentDetailTitle", { kind: selected.kind })}
             actions={
               <button
                 onClick={() => setSelected(null)}
                 className="btn-ghost text-xs"
               >
-                Close
+                {tCommon("close")}
               </button>
             }
           >

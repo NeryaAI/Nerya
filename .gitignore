@@ -40,3 +40,4 @@ workspace/inbox/
 workspace/outbox/
 workspace/approvals/
 workspace/artifacts/
+.idea/

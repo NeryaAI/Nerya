@@ -25,6 +25,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 
 import { Card, Empty, ErrorBanner, Kpi, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
@@ -51,6 +52,7 @@ export function StrategyWorkspace({
   strategyId,
   onRefreshed,
 }: StrategyWorkspaceProps) {
+  const t = useTranslations("strategyWorkspace");
   const [envelope, setEnvelope] = useState<StrategyWorkspaceEnvelope | null>(
     null,
   );
@@ -106,7 +108,7 @@ export function StrategyWorkspace({
   );
 
   if (!strategyId) {
-    return <Empty label="Pick a strategy from the list to manage it." />;
+    return <Empty label={t("pickStrategy")} />;
   }
 
   return (
@@ -119,14 +121,14 @@ export function StrategyWorkspace({
       )}
 
       {!envelope && loading ? (
-        <Empty label={`Loading ${strategyId}…`} />
+        <Empty label={t("loading", { id: strategyId })} />
       ) : !envelope || !envelope.ok ? (
-        <Card title={`Strategy ${strategyId}`}>
+        <Card title={t("strategyTitle", { id: strategyId })}>
           <Empty
             label={
               envelope?.error
-                ? `Backend error: ${envelope.error}`
-                : "Strategy package is not yet promoted."
+                ? t("backendError", { error: envelope.error })
+                : t("notPromoted")
             }
           />
         </Card>
@@ -186,15 +188,15 @@ export function StrategyWorkspace({
       <div className="flex items-center justify-between text-[11px] text-ink-500">
         <span>
           {loading
-            ? `Refreshing ${strategyId}…`
-            : `Last refresh ${new Date().toLocaleTimeString()}`}
+            ? t("refreshing", { id: strategyId })
+            : t("lastRefresh", { time: new Date().toLocaleTimeString() })}
         </span>
         <button
           onClick={() => void refresh()}
           disabled={loading}
           className="btn-ghost text-xs"
         >
-          {loading ? "…" : "Refresh"}
+          {loading ? "…" : t("refresh")}
         </button>
       </div>
     </div>

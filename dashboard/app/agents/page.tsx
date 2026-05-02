@@ -1,5 +1,6 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useEffect, useMemo, useState } from "react";
 import {
   Card,
@@ -62,7 +63,31 @@ You are the <role-name> subagent. Describe the role's mission in one paragraph.
 - If unsure, return recommendation="hold" with confidence < 0.4.
 `;
 
+type Translator = (key: string) => string;
+
+function translateSource(t: Translator, source: string): string {
+  const map: Record<string, string> = {
+    default: "sourceDefault",
+    workspace: "sourceWorkspace",
+  };
+  const key = map[source];
+  return key ? t(key) : source;
+}
+
+function translateTier(t: Translator, tier: string): string {
+  const map: Record<string, string> = {
+    high: "tierHigh",
+    medium: "tierMedium",
+    light: "tierLight",
+    intent: "tierIntent",
+  };
+  const key = map[tier];
+  return key ? t(key) : tier;
+}
+
 export default function AgentsPage() {
+  const t = useTranslations("agentsPage");
+  const tCommon = useTranslations("common");
   const [items, setItems] = useState<AgentSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<AgentDetail | null>(null);
@@ -134,7 +159,7 @@ export default function AgentsPage() {
         if (cancelled) return;
         if (!res.ok || !res.role) {
           setDetail(null);
-          setError(res.error || "role not found");
+          setError(res.error || t("roleNotFound"));
         } else {
           setDetail(res.role);
           setError(null);
@@ -194,9 +219,9 @@ export default function AgentsPage() {
         tier: (next.tier as "light" | "medium" | "high") || undefined,
         allowed_skills: next.allowed_skills,
       });
-      if (!res.ok || !res.role) throw new Error(res.error || "save failed");
+      if (!res.ok || !res.role) throw new Error(res.error || t("saveFailed"));
       setDetail(res.role);
-      setInfo(`Saved ${next.name}`);
+      setInfo(t("savedInfo", { name: next.name }));
       await refreshList(next.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -206,12 +231,12 @@ export default function AgentsPage() {
   }
 
   async function deleteAgent(name: string) {
-    if (!confirm(`Delete persona "${name}" from the workspace? Default fallback (if any) will be used instead.`)) return;
+    if (!confirm(t("deleteConfirm", { name }))) return;
     setBusy(true);
     try {
       const res = await clientApi.agentsDelete(name);
-      if (!res.ok) throw new Error(res.error || "delete failed");
-      setInfo(`Deleted ${name}`);
+      if (!res.ok) throw new Error(res.error || t("deleteFailed"));
+      setInfo(t("deletedInfo", { name }));
       await refreshList();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -222,7 +247,7 @@ export default function AgentsPage() {
 
   async function createAgent() {
     if (!/^[A-Za-z0-9_]+$/.test(draft.name)) {
-      setError("Name must match [A-Za-z0-9_]+");
+      setError(t("nameValidation"));
       return;
     }
     setBusy(true);
@@ -235,8 +260,8 @@ export default function AgentsPage() {
           .map((s) => s.trim())
           .filter(Boolean),
       });
-      if (!res.ok || !res.role) throw new Error(res.error || "save failed");
-      setInfo(`Created ${draft.name}`);
+      if (!res.ok || !res.role) throw new Error(res.error || t("saveFailed"));
+      setInfo(t("createdInfo", { name: draft.name }));
       setCreating(false);
       setDraft({
         name: "",
@@ -255,9 +280,9 @@ export default function AgentsPage() {
   return (
     <PageBody>
       <PageHeader
-        eyebrow="Agents library"
-        title="Agents"
-        description="Curated subagent / persona library. Strategies and team_run calls reuse these prompts; create new ones once and they become available everywhere."
+        eyebrow={t("eyebrow")}
+        title={t("title")}
+        description={t("description")}
         actions={
           <>
             <button
@@ -267,7 +292,7 @@ export default function AgentsPage() {
               disabled={loading}
             >
               <WrenchIcon size={14} />
-              {loading ? "Refreshing…" : "Refresh"}
+              {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
             <button
               type="button"
@@ -276,7 +301,7 @@ export default function AgentsPage() {
               disabled={busy}
             >
               <PlusIcon size={14} />
-              New agent
+              {t("newAgent")}
             </button>
           </>
         }
@@ -292,8 +317,8 @@ export default function AgentsPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5">
         <Card
-          title={`Personas (${counts.total})`}
-          description={`${counts.workspace} workspace · ${counts.defaults} default`}
+          title={t("personasCount", { count: counts.total })}
+          description={t("personasCountsDesc", { workspace: counts.workspace, defaults: counts.defaults })}
         >
           <div className="relative mb-3">
             <SearchIcon size={15} className="absolute left-2.5 top-2.5 text-ink-500" />
@@ -301,13 +326,13 @@ export default function AgentsPage() {
               className="input-dark pl-8"
               value={agentQuery}
               onChange={(e) => setAgentQuery(e.target.value)}
-              placeholder="Search agents or skills"
+              placeholder={t("searchPlaceholder")}
             />
           </div>
           {items.length === 0 ? (
-            <Empty title="No agents yet" subtitle="Click + New agent to create one." />
+            <Empty title={t("noAgentsYet")} subtitle={t("noAgentsYetHint")} />
           ) : filteredItems.length === 0 ? (
-            <Empty title="No matching agents" subtitle="Try another search." />
+            <Empty title={t("noMatchingAgents")} subtitle={t("noMatchingAgentsHint")} />
           ) : (
             <ul className="embedded-scroll max-h-[calc(100vh-260px)] min-h-[260px] space-y-1 pr-1">
               {filteredItems.map((agent) => (
@@ -331,14 +356,14 @@ export default function AgentsPage() {
                             {agent.name}
                           </span>
                           <Pill tone={agent.source === "workspace" ? "ok" : "neutral"}>
-                            {agent.source}
+                            {translateSource(t, agent.source)}
                           </Pill>
                         </span>
                         <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-ink-500">
                           <span className="rounded-md border border-brand-500/10 bg-ink-900/70 px-1.5 py-0.5 text-ink-300">
-                            {agent.tier}
+                            {translateTier(t, agent.tier)}
                           </span>
-                          <span>{agent.allowed_skills.length} skills</span>
+                          <span>{t("skillsCount", { count: agent.allowed_skills.length })}</span>
                           {agent.allowed_skills.slice(0, 2).map((skill) => (
                             <span
                               key={skill}
@@ -358,11 +383,15 @@ export default function AgentsPage() {
         </Card>
 
         <Card
-          title={detail?.name || "Pick an agent"}
+          title={detail?.name || t("pickAgent")}
           description={
             detail
-              ? `${detail.source} · tier ${detail.tier} · ${detail.allowed_skills.length} preloaded skill(s)`
-              : "Select a persona on the left to inspect or edit it."
+              ? t("detailDescription", {
+                  source: translateSource(t, detail.source),
+                  tier: translateTier(t, detail.tier),
+                  count: detail.allowed_skills.length,
+                })
+              : t("pickAgentHint")
           }
           actions={
             detail && detail.source === "workspace" ? (
@@ -373,7 +402,7 @@ export default function AgentsPage() {
                 disabled={busy}
               >
                 <TrashIcon size={14} />
-                Delete
+                {tCommon("delete")}
               </button>
             ) : null
           }
@@ -387,7 +416,7 @@ export default function AgentsPage() {
               onSave={persistDetailEdit}
             />
           ) : (
-            <Empty title="No selection" subtitle="Pick an agent from the list." />
+            <Empty title={t("noSelection")} subtitle={t("noSelectionHint")} />
           )}
         </Card>
       </div>
@@ -406,9 +435,11 @@ export default function AgentsPage() {
                   <AgentsIcon size={18} />
                 </span>
                 <div>
-                  <h3 className="text-lg font-semibold text-ink-100">Create persona</h3>
+                  <h3 className="text-lg font-semibold text-ink-100">{t("createPersona")}</h3>
                   <p className="mt-1 text-[12px] text-ink-400">
-                    Persisted under <code className="text-fluid-300">workspace/subagents/&lt;name&gt;.agent.md</code>.
+                    {t.rich("createPersonaPath", {
+                      code: (chunks) => <code className="text-fluid-300">{chunks}</code>,
+                    })}
                   </p>
                 </div>
               </div>
@@ -416,7 +447,7 @@ export default function AgentsPage() {
                 type="button"
                 className="icon-btn h-8 w-8"
                 onClick={() => setCreating(false)}
-                aria-label="Close"
+                aria-label={tCommon("close")}
               >
                 <XIcon size={15} />
               </button>
@@ -425,7 +456,7 @@ export default function AgentsPage() {
             <div className="space-y-4 px-6 py-5">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <label className="text-[12px] text-ink-300">
-                  Name
+                  {t("nameLabel")}
                   <input
                     type="text"
                     className="input-dark mt-1 w-full"
@@ -438,7 +469,7 @@ export default function AgentsPage() {
                   />
                 </label>
                 <label className="text-[12px] text-ink-300">
-                  LLM tier
+                  {t("llmTier")}
                   <select
                     className="input-dark mt-1 w-full"
                     value={draft.tier}
@@ -454,7 +485,7 @@ export default function AgentsPage() {
               </div>
 
               <div className="block text-[12px] text-ink-300">
-                <div className="mb-1">Preloaded skills</div>
+                <div className="mb-1">{t("preloadedSkills")}</div>
                 <SkillSelector
                   selected={draft.allowed_skills}
                   options={skillOptions}
@@ -465,7 +496,7 @@ export default function AgentsPage() {
               </div>
 
               <label className="block text-[12px] text-ink-300">
-                Prompt body (Markdown)
+                {t("promptBody")}
                 <textarea
                   className="input-dark mt-1 min-h-[320px] w-full font-mono text-[12px]"
                   rows={14}
@@ -482,7 +513,7 @@ export default function AgentsPage() {
                   disabled={busy}
                 >
                   <XIcon size={14} />
-                  Cancel
+                  {tCommon("cancel")}
                 </button>
                 <button
                   type="button"
@@ -491,7 +522,7 @@ export default function AgentsPage() {
                   disabled={busy || !draft.name.trim()}
                 >
                   <CheckIcon size={14} />
-                  {busy ? "Saving…" : "Create"}
+                  {busy ? tCommon("saving") : t("create")}
                 </button>
               </div>
             </div>
@@ -513,6 +544,8 @@ function AgentEditor({
   skillOptions: Array<{ id: string; label: string; style: string }>;
   onSave: (next: AgentDetail) => void | Promise<void>;
 }) {
+  const t = useTranslations("agentsPage");
+  const tCommon = useTranslations("common");
   const [tier, setTier] = useState(detail.tier || "medium");
   const [allowed, setAllowed] = useState<string[]>(detail.allowed_skills || []);
   const [prompt, setPrompt] = useState(detail.prompt || "");
@@ -532,7 +565,7 @@ function AgentEditor({
     <div className="space-y-3">
       <div className="grid grid-cols-1 xl:grid-cols-[220px_1fr] gap-3">
         <label className="text-[12px] text-ink-300">
-          LLM tier
+          {t("llmTier")}
           <select
             className="input-dark mt-1 w-full"
             value={tier}
@@ -544,7 +577,7 @@ function AgentEditor({
           </select>
         </label>
         <div className="text-[12px] text-ink-300">
-          <div className="mb-1">Preloaded skills</div>
+          <div className="mb-1">{t("preloadedSkills")}</div>
           <SkillSelector
             selected={allowed}
             options={skillOptions}
@@ -554,7 +587,7 @@ function AgentEditor({
       </div>
 
       <label className="text-[12px] text-ink-300 block">
-        Prompt body
+        {t("promptBodyShort")}
         <textarea
           className="input-dark mt-1 w-full font-mono text-[12px]"
           rows={20}
@@ -586,7 +619,7 @@ function AgentEditor({
           }
         >
           <CheckIcon size={14} />
-          {busy ? "Saving…" : detail.source === "workspace" ? "Save" : "Save as workspace override"}
+          {busy ? tCommon("saving") : detail.source === "workspace" ? tCommon("save") : t("saveAsOverride")}
         </button>
       </div>
     </div>
@@ -602,6 +635,7 @@ function SkillSelector({
   options: Array<{ id: string; label: string; style: string }>;
   onChange: (next: string[]) => void;
 }) {
+  const t = useTranslations("agentsPage");
   const selectedSet = new Set(selected);
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -629,7 +663,7 @@ function SkillSelector({
   if (options.length === 0) {
     return (
       <div className="mt-1 rounded-lg border border-brand-500/10 bg-ink-900/40 p-3 text-[11px] text-ink-400">
-        No skills loaded yet.
+        {t("noSkillsLoaded")}
       </div>
     );
   }
@@ -669,7 +703,7 @@ function SkillSelector({
               ) : null}
             </div>
           ) : (
-            <span className="text-[11px] text-ink-500">No skills selected</span>
+            <span className="text-[11px] text-ink-500">{t("noSkillsSelected")}</span>
           )}
         </div>
         {selected.length ? (
@@ -678,7 +712,7 @@ function SkillSelector({
             onClick={() => onChange([])}
             className="rounded-md border border-white/5 px-2 py-1 text-[10px] text-ink-400 hover:border-brand-500/30 hover:text-white"
           >
-            Clear
+            {t("clear")}
           </button>
         ) : null}
         <button
@@ -687,7 +721,7 @@ function SkillSelector({
           className="inline-flex items-center gap-1 rounded-md border border-brand-500/20 px-2 py-1 text-[11px] text-brand-200 hover:bg-brand-500/10"
         >
           <PlusIcon size={12} />
-          Add
+          {t("add")}
         </button>
       </div>
 
@@ -699,7 +733,7 @@ function SkillSelector({
               className="input-dark pl-8"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search skills"
+              placeholder={t("searchSkillsPlaceholder")}
             />
           </div>
           <div className="embedded-list-scroll-sm space-y-1">
@@ -741,12 +775,12 @@ function SkillSelector({
             })}
             {!visible.length ? (
               <div className="rounded-lg border border-white/5 bg-ink-950/30 px-3 py-6 text-center text-[11px] text-ink-500">
-                No skills match this search.
+                {t("noSkillsMatch")}
               </div>
             ) : null}
           </div>
           <div className="mt-2 text-[10px] text-ink-500">
-            {selected.length} selected · {visible.length} shown
+            {t("selectedShown", { selected: selected.length, shown: visible.length })}
           </div>
         </div>
       ) : null}

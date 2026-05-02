@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import { clientApi } from "../../lib/clientApi";
 import type {
   EquityPoint,
@@ -107,6 +108,8 @@ function modePill(mode: string): "ok" | "warn" | "danger" | "brand" | "neutral" 
 }
 
 export default function PortfolioPage() {
+  const t = useTranslations("portfolio");
+  const tCommon = useTranslations("common");
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [positions, setPositions] = useState<PortfolioPosition[]>([]);
   const [pnl, setPnl] = useState<PnlSummary | null>(null);
@@ -232,33 +235,33 @@ export default function PortfolioPage() {
   return (
     <div>
       <PageHeader
-        title="Portfolio"
-        description="Account-aware command surface: NAV, exposure, snapshot health, reservations, executors, protections, and reconciliation."
+        title={t("title")}
+        description={t("description")}
         actions={
           <div className="flex items-center gap-2">
             {killSwitch ? (
               <Pill tone={killSwitch.kill_switch ? "danger" : "ok"}>
                 {killSwitch.kill_switch
-                  ? "kill-switch ON"
+                  ? t("killSwitchOn")
                   : killSwitch.live_trading_enabled
-                    ? "live trading"
-                    : "paper only"}
+                    ? t("liveTrading")
+                    : t("paperOnly")}
               </Pill>
             ) : null}
             <button
               onClick={() => runReconcile()}
               disabled={!!reconcileBusy}
               className="btn-ghost text-xs"
-              title="Run reconciliation across all accounts"
+              title={t("reconcileAllTitle")}
             >
-              {reconcileBusy === "*" ? "Reconciling…" : "Reconcile all"}
+              {reconcileBusy === "*" ? t("reconciling") : t("reconcileAll")}
             </button>
             <button
               onClick={load}
               disabled={loading}
               className="btn-ghost text-xs"
             >
-              {loading ? "Refreshing…" : "Refresh"}
+              {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
           </div>
         }
@@ -290,39 +293,39 @@ export default function PortfolioPage() {
               </span>
             </div>
             <div className="mt-1 text-xs">
-              {Number(worstReport.summary?.issue_count ?? 0)} drift issue(s).
-              Operator action required before continuing live trading.
+              {t("driftIssues", { count: Number(worstReport.summary?.issue_count ?? 0) })}
             </div>
           </div>
         ) : null}
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <Kpi
-            label="Equity"
+            label={t("equity")}
             value={money(summary?.totals?.equity_usd ?? pnl?.equity_usd)}
             tone="brand"
             spark={equityValues}
           />
-          <Kpi label="Cash" value={money(summary?.totals?.cash_usd)} />
+          <Kpi label={t("cash")} value={money(summary?.totals?.cash_usd)} />
           <Kpi
-            label="Realized PnL"
+            label={t("realizedPnl")}
             value={money(pnl?.realized_usd)}
             tone={Number(pnl?.realized_usd || 0) >= 0 ? "ok" : "danger"}
           />
           <Kpi
-            label="Active executors"
+            label={t("activeExecutors")}
             value={`${totals?.active_executors ?? 0}`}
-            delta={`${totals?.active_protections ?? 0} protection rule(s)`}
+            delta={t("protectionRules", { count: totals?.active_protections ?? 0 })}
             tone={(totals?.active_executors ?? 0) > 0 ? "warn" : "neutral"}
           />
         </div>
 
         {hasHealth ? (
           <Card
-            title="Account health"
-            description={`Snapshots, reservations, open positions, protections, and active executors per account. Live: ${
-              totals?.live_accounts ?? 0
-            } / ${totals?.accounts ?? 0}.`}
+            title={t("accountHealth")}
+            description={t("accountHealthDesc", {
+              live: totals?.live_accounts ?? 0,
+              total: totals?.accounts ?? 0,
+            })}
           >
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {(health?.accounts || []).map((entry) => (
@@ -340,19 +343,18 @@ export default function PortfolioPage() {
           !loading &&
           !error && (
             <Card
-              title="No accounts configured"
-              description="Strategies need an account before they can trade."
+              title={t("noAccountsTitle")}
+              description={t("noAccountsDesc")}
             >
               <div className="text-sm text-ink-300">
-                Use{" "}
+                {t("noAccountsUse")}{" "}
                 <a
                   className="text-brand-300 hover:text-brand-200"
                   href="/settings"
                 >
-                  Settings
+                  {t("settingsLink")}
                 </a>{" "}
-                to configure wallet/provider readiness, then add account
-                definitions through the runtime workspace config.
+                {t("noAccountsHint")}
               </div>
             </Card>
           )
@@ -360,12 +362,12 @@ export default function PortfolioPage() {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
           <Card
-            title="Accounts"
-            description={`${totalTrades} recorded trade${totalTrades === 1 ? "" : "s"} across all accounts.`}
+            title={t("accounts")}
+            description={t("accountsDesc", { count: totalTrades })}
           >
             {accounts.length === 0 ? (
               <Empty
-                label={loading ? "Loading accounts…" : "No accounts found."}
+                label={loading ? t("loadingAccounts") : t("noAccountsFound")}
               />
             ) : (
               <div className="space-y-3">
@@ -381,7 +383,7 @@ export default function PortfolioPage() {
                       <Pill
                         tone={account.live_trading_enabled ? "warn" : "brand"}
                       >
-                        {account.live_trading_enabled ? "live" : "paper"}
+                        {account.live_trading_enabled ? t("live") : t("paper")}
                       </Pill>
                       <span className="ml-auto text-xs text-ink-400">
                         {account.mode}
@@ -389,25 +391,25 @@ export default function PortfolioPage() {
                     </div>
                     <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
                       <div>
-                        <div className="text-ink-500">cash</div>
+                        <div className="text-ink-500">{t("cashLower")}</div>
                         <div className="text-ink-100">
                           {money(account.cash_usd)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-ink-500">equity</div>
+                        <div className="text-ink-500">{t("equityLower")}</div>
                         <div className="text-brand-200">
                           {money(account.equity_usd)}
                         </div>
                       </div>
                       <div>
-                        <div className="text-ink-500">positions</div>
+                        <div className="text-ink-500">{t("positionsLower")}</div>
                         <div className="text-ink-100">
                           {Object.keys(account.positions || {}).length}
                         </div>
                       </div>
                       <div>
-                        <div className="text-ink-500">trades</div>
+                        <div className="text-ink-500">{t("tradesLower")}</div>
                         <div className="text-ink-100">{account.trade_count}</div>
                       </div>
                     </div>
@@ -418,11 +420,11 @@ export default function PortfolioPage() {
           </Card>
 
           <Card
-            title="Equity curve"
-            description="Cumulative realized PnL plus current account equity."
+            title={t("equityCurve")}
+            description={t("equityCurveDesc")}
           >
             {curve.length === 0 ? (
-              <Empty label="No equity points yet." />
+              <Empty label={t("noEquityPoints")} />
             ) : (
               <div>
                 <Sparkline
@@ -452,11 +454,11 @@ export default function PortfolioPage() {
           </Card>
 
           <Card
-            title="Reconciliation"
-            description="Severity tagged drift detection across local ledger vs exchange truth."
+            title={t("reconciliation")}
+            description={t("reconciliationDesc")}
           >
             {reports.length === 0 ? (
-              <Empty label="No reconciliation reports yet." />
+              <Empty label={t("noReconciliation")} />
             ) : (
               <div className="embedded-list-scroll space-y-2">
                 {reports.slice(0, 8).map((report) => (
@@ -475,7 +477,7 @@ export default function PortfolioPage() {
                         </span>
                       </div>
                       <div className="text-[11px] text-ink-400 mt-0.5">
-                        {Number(report.summary?.issue_count ?? 0)} issue(s)
+                        {t("issueCount", { count: Number(report.summary?.issue_count ?? 0) })}
                       </div>
                     </div>
                     <span className="text-[10px] text-ink-500 font-mono shrink-0">
@@ -490,20 +492,20 @@ export default function PortfolioPage() {
 
         {walletPortfolio.length > 0 ? (
           <Card
-            title={`Wallet portfolio (${walletPortfolio.length})`}
-            description="Aggregated balances across every account bound to an on-chain wallet provider. Stablecoins (USDT/USDC/...) sum into NAV at par; other assets show as raw on-chain amounts."
+            title={t("walletPortfolio", { count: walletPortfolio.length })}
+            description={t("walletPortfolioDesc")}
           >
             <div className="embedded-table-scroll">
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
-                    <th>Account</th>
-                    <th>Wallet</th>
-                    <th>Mode</th>
-                    <th>Health</th>
-                    <th>Stable NAV</th>
-                    <th>Assets</th>
-                    <th>Snapshot</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colWallet")}</th>
+                    <th>{t("colMode")}</th>
+                    <th>{t("colHealth")}</th>
+                    <th>{t("colStableNav")}</th>
+                    <th>{t("colAssets")}</th>
+                    <th>{t("colSnapshot")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -561,23 +563,23 @@ export default function PortfolioPage() {
         ) : null}
 
         <Card
-          title={`Open positions (${allPositions.length})`}
-          description="Flattened account positions with human-readable fields first."
+          title={t("openPositions", { count: allPositions.length })}
+          description={t("openPositionsDesc")}
         >
           {allPositions.length === 0 ? (
-            <Empty label="No open positions." />
+            <Empty label={t("noOpenPositions")} />
           ) : (
             <div className="embedded-table-scroll">
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
-                    <th>Account</th>
-                    <th>Market</th>
-                    <th>Side</th>
-                    <th>Size</th>
-                    <th>Avg Entry</th>
-                    <th>Unrealized</th>
-                    <th>Realized</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colMarket")}</th>
+                    <th>{t("colSide")}</th>
+                    <th>{t("colSize")}</th>
+                    <th>{t("colAvgEntry")}</th>
+                    <th>{t("colUnrealized")}</th>
+                    <th>{t("colRealized")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -620,12 +622,12 @@ export default function PortfolioPage() {
 
         {summary && (
           <Card
-            title="Advanced payloads"
-            description="For debugging consistency with the runtime API."
+            title={t("advancedPayloads")}
+            description={t("advancedPayloadsDesc")}
           >
             <details>
               <summary className="cursor-pointer text-xs text-ink-400 hover:text-ink-200">
-                portfolio summary
+                {t("portfolioSummary")}
               </summary>
               <div className="mt-2">
                 <Json value={summary} />
@@ -633,7 +635,7 @@ export default function PortfolioPage() {
             </details>
             <details className="mt-2">
               <summary className="cursor-pointer text-xs text-ink-400 hover:text-ink-200">
-                pnl payload
+                {t("pnlPayload")}
               </summary>
               <div className="mt-2">
                 <Json value={pnl} />
@@ -642,7 +644,7 @@ export default function PortfolioPage() {
             {health ? (
               <details className="mt-2">
                 <summary className="cursor-pointer text-xs text-ink-400 hover:text-ink-200">
-                  control plane health payload
+                  {t("controlPlaneHealth")}
                 </summary>
                 <div className="mt-2">
                   <Json value={health} />
@@ -680,6 +682,7 @@ function AccountHealthCard({
   onReconcile: () => void;
   busy: boolean;
 }) {
+  const t = useTranslations("portfolio");
   const snapshot = entry.snapshot;
   const reservedShare =
     snapshot && snapshot.total_usd
@@ -701,43 +704,43 @@ function AccountHealthCard({
         <span className="ml-auto">
           {snapshot ? (
             <Pill tone={snapshotHealthTone(snapshot.health)}>
-              snapshot {snapshot.health}
+              {t("snapshotWithHealth", { health: snapshot.health })}
             </Pill>
           ) : (
-            <Pill tone="warn">no snapshot</Pill>
+            <Pill tone="warn">{t("noSnapshot")}</Pill>
           )}
         </span>
       </div>
 
       <div className="grid grid-cols-3 gap-2 text-xs">
         <div>
-          <div className="text-ink-500">total</div>
+          <div className="text-ink-500">{t("totalLower")}</div>
           <div className="text-ink-100">{money(snapshot?.total_usd)}</div>
         </div>
         <div>
-          <div className="text-ink-500">free</div>
+          <div className="text-ink-500">{t("freeLower")}</div>
           <div className="text-ink-100">
             {money(snapshot?.free_usd ?? snapshot?.available_usd)}
           </div>
         </div>
         <div>
-          <div className="text-ink-500">positions</div>
+          <div className="text-ink-500">{t("positionsLower")}</div>
           <div className="text-brand-200">
             {money(snapshot?.positions_value_usd)}
           </div>
         </div>
         <div>
-          <div className="text-ink-500">reserved</div>
+          <div className="text-ink-500">{t("reservedLower")}</div>
           <div className={entry.reserved_usd > 0 ? "text-[#f5a524]" : "text-ink-100"}>
             {money(entry.reserved_usd)}
           </div>
         </div>
         <div>
-          <div className="text-ink-500">open positions</div>
+          <div className="text-ink-500">{t("openPositionsLower")}</div>
           <div className="text-ink-100">{entry.open_position_count}</div>
         </div>
         <div>
-          <div className="text-ink-500">protections</div>
+          <div className="text-ink-500">{t("protectionsLower")}</div>
           <div className="text-ink-100">{entry.protection_count}</div>
         </div>
       </div>
@@ -745,7 +748,7 @@ function AccountHealthCard({
       {snapshot && Number(snapshot.total_usd) > 0 ? (
         <div>
           <div className="flex justify-between text-[10px] text-ink-500">
-            <span>reservation utilization</span>
+            <span>{t("reservationUtilization")}</span>
             <span>{Math.round(reservedShare * 100)}%</span>
           </div>
           <div className="h-1.5 mt-0.5 rounded-full bg-ink-700/60 overflow-hidden">
@@ -765,27 +768,26 @@ function AccountHealthCard({
 
       <div className="flex items-center gap-2 text-[11px] text-ink-400">
         <span>
-          {entry.active_executors.length} active executor
-          {entry.active_executors.length === 1 ? "" : "s"}
+          {t("activeExecutorCount", { count: entry.active_executors.length })}
         </span>
         <span className="ml-auto flex gap-1.5 flex-wrap">
           {entry.live_trading_enabled ? (
-            <Pill tone="warn">live ok</Pill>
+            <Pill tone="warn">{t("liveOk")}</Pill>
           ) : (
-            <Pill tone="brand">live disabled</Pill>
+            <Pill tone="brand">{t("liveDisabled")}</Pill>
           )}
           <button
             onClick={onReconcile}
             disabled={busy}
             className="btn-ghost text-[11px] py-0.5"
           >
-            {busy ? "Running…" : "Reconcile"}
+            {busy ? t("running") : t("reconcile")}
           </button>
           <Link
             href={`/accounts/${encodeURIComponent(entry.account_id)}`}
             className="btn-ghost text-[11px] py-0.5"
           >
-            Inspect
+            {t("inspect")}
           </Link>
         </span>
       </div>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
 import { clientApi, type RiskEvaluationRow } from "../../lib/clientApi";
 
@@ -28,6 +29,7 @@ function fmtTs(ts: number): string {
  * from "why was I rejected?" to "click here to fix it".
  */
 export function StrategyRiskDecisionsCard({ strategyId }: Props) {
+  const t = useTranslations("strategyRisk");
   const [rows, setRows] = useState<RiskEvaluationRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,15 +61,15 @@ export function StrategyRiskDecisionsCard({ strategyId }: Props) {
 
   return (
     <Card
-      title="Risk-gate rejections"
-      description="Recent rejected / escalated decisions in the last 24h. Each hint deep-links to the page that fixes it."
+      title={t("title")}
+      description={t("description")}
       actions={
         <button
           onClick={() => void load()}
           disabled={loading}
           className="btn-ghost text-xs"
         >
-          {loading ? "…" : "Refresh"}
+          {loading ? "…" : t("refresh")}
         </button>
       }
     >
@@ -77,7 +79,7 @@ export function StrategyRiskDecisionsCard({ strategyId }: Props) {
         </div>
       )}
       {!loading && rows.length === 0 ? (
-        <Empty label="No rejections in the last 24h. Risk gate is happy." />
+        <Empty label={t("noRejections")} />
       ) : null}
       <div className="embedded-list-scroll-lg grid gap-3">
         {rows.map((row) => (
@@ -90,7 +92,7 @@ export function StrategyRiskDecisionsCard({ strategyId }: Props) {
                 {row.decision}
               </Pill>
               <span className="font-mono text-ink-300">
-                acct {row.account_id}
+                {t("acct")} {row.account_id}
               </span>
               <span className="font-mono text-ink-400">
                 ${(row.notional_usd ?? 0).toFixed(2)}
@@ -120,7 +122,7 @@ export function StrategyRiskDecisionsCard({ strategyId }: Props) {
                       </div>
                       <div className="text-ink-300 mt-0.5">{hint.detail}</div>
                       <div className="mt-0.5 font-mono text-[10px] text-ink-500">
-                        reason: {hint.reason}
+                        {t("reason")} {hint.reason}
                       </div>
                     </div>
                     {hint.href ? (
@@ -128,7 +130,7 @@ export function StrategyRiskDecisionsCard({ strategyId }: Props) {
                         href={hint.href}
                         className="btn-primary text-[11px] py-1 px-2 whitespace-nowrap shrink-0"
                       >
-                        Fix →
+                        {t("fix")}
                       </Link>
                     ) : null}
                   </div>
