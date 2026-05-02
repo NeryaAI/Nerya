@@ -411,9 +411,9 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
 
   function teamKey(ev: LiveEvent): string {
     const key = String(
-      ev.call_id ||
-        ev.team_run_id ||
+      ev.team_run_id ||
         ev.run_id ||
+        ev.call_id ||
         ev.event_id ||
         "team",
     );
@@ -438,12 +438,13 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       call_id: String(ev.call_id || ev.tool_call_id || ""),
       team_key: key,
       run_id: ev.team_run_id || ev.run_id,
-      template_id: ev.template || ev.template_id,
+      template_id: ev.team_template || ev.template || ev.template_id,
       phase: ev.phase,
       goal: ev.goal,
       task: String(
         ev.task ||
           ev.team_task ||
+          ev.team_task_subject ||
           payload.task ||
           ev.goal ||
           ev.team_run_id ||
@@ -452,6 +453,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       status: "running",
       roles,
       max_parallel: ev.max_parallel ?? payload.max_parallel,
+      collaboration_model: ev.collaboration_model,
       steps: [],
       members: {},
       index: out.length,
@@ -490,6 +492,14 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       tokens: ev.tokens,
       usd: ev.usd,
       wall_ms: ev.wall_ms,
+      payload: ev.payload,
+      input_payload: ev.input_payload,
+      assignment_prompt: ev.assignment_prompt,
+      output: ev.output,
+      metrics: ev.metrics,
+      results: ev.results,
+      failures: ev.failures,
+      aggregated: ev.aggregated,
       ts: ev.ts,
       raw: ev.team_event || ev,
     });
@@ -517,6 +527,9 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         owner: ev.owner,
         task_id: ev.task_id || ev.team_task_id,
         subject: ev.subject || ev.team_task_subject,
+        team_task_id: ev.team_task_id || ev.task_id,
+        team_task_owner: ev.team_task_owner || ev.owner,
+        team_task_subject: ev.team_task_subject || ev.subject,
         status: memberStatus,
         ok: ev.ok,
         error: ev.error,
@@ -525,8 +538,115 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         tokens: ev.tokens,
         usd: ev.usd,
         wall_ms: ev.wall_ms,
+        payload: ev.payload,
+        input_payload: ev.input_payload,
+        assignment_prompt: ev.assignment_prompt,
+        output: ev.output,
+        metrics: ev.metrics,
       };
       block.members = members;
+    }
+  }
+
+  function mergeSubagentIntoTeam(ev: LiveEvent, lifecycle: string) {
+    if (!ev.team_run_id) return;
+    const block = ensureTeamTrace(ev);
+    const name = String(
+      ev.subagent ||
+        ev.name ||
+        ev.team_task_owner ||
+        ev.team_task_id ||
+        "subagent",
+    );
+    const members = asRecord(block.members);
+    const previous = asRecord(members[name]);
+    const memberSteps = Array.isArray(previous.steps)
+      ? [...(previous.steps as unknown[])]
+      : [];
+    const step = {
+      lifecycle,
+      step_kind: ev.step_kind,
+      iteration: ev.iteration,
+      status: ev.status || (ev.error ? "error" : "ok"),
+      skill: ev.skill,
+      action: ev.action,
+      error: ev.error,
+      wall_ms: ev.wall_ms,
+      tokens: ev.tokens,
+      usd: ev.usd,
+      provider: ev.provider,
+      model: ev.model,
+      parsed_keys: ev.parsed_keys,
+      reasoning: ev.reasoning,
+      reasoning_tokens: ev.reasoning_tokens,
+      reasoning_effort: ev.reasoning_effort,
+      prompt: ev.prompt,
+      prompt_chars: ev.prompt_chars,
+      payload: ev.payload,
+      output: ev.output,
+      metrics: ev.metrics,
+      ts: ev.ts,
+    };
+    memberSteps.push(step);
+    const nextStatus =
+      lifecycle === "start"
+        ? "running"
+        : lifecycle === "end"
+        ? ev.error
+          ? "failed"
+          : "completed"
+        : ev.error || ev.status === "error"
+        ? "error"
+        : String(previous.status || "running");
+    members[name] = {
+      ...previous,
+      name,
+      status: nextStatus,
+      tier: previous.tier || ev.tier,
+      team_task_id: ev.team_task_id,
+      team_task_owner: ev.team_task_owner,
+      team_task_subject: ev.team_task_subject,
+      payload_keys: ev.payload_keys || previous.payload_keys,
+      payload: ev.payload || previous.payload,
+      input_payload: ev.input_payload || previous.input_payload,
+      assignment_prompt: ev.assignment_prompt || previous.assignment_prompt,
+      role_prompt: ev.role_prompt || previous.role_prompt,
+      prompt_path: ev.prompt_path || previous.prompt_path,
+      allowed_skills: ev.allowed_skills || previous.allowed_skills,
+      native_tools: ev.native_tools || previous.native_tools,
+      last_prompt: ev.prompt || previous.last_prompt,
+      prompt_chars: ev.prompt_chars || previous.prompt_chars,
+      output: ev.output || previous.output,
+      metrics: ev.metrics || previous.metrics,
+      tokens: ev.tokens ?? previous.tokens,
+      usd: ev.usd ?? previous.usd,
+      wall_ms: ev.wall_ms ?? previous.wall_ms,
+      steps: memberSteps,
+    };
+    block.members = members;
+
+    const steps = Array.isArray(block.steps) ? [...block.steps] : [];
+    steps.push({
+      kind: `subagent.${String(ev.step_kind || lifecycle)}`,
+      lifecycle,
+      subagent: name,
+      task_id: ev.team_task_id,
+      subject: ev.team_task_subject,
+      status: step.status,
+      skill: ev.skill,
+      action: ev.action,
+      prompt_chars: ev.prompt_chars,
+      summary: lifecycle === "end" ? "member completed" : undefined,
+      error: ev.error,
+      tokens: ev.tokens,
+      usd: ev.usd,
+      wall_ms: ev.wall_ms,
+      ts: ev.ts,
+      raw: ev,
+    });
+    block.steps = steps;
+    if (String(block.status || "") !== "completed") {
+      block.status = nextStatus === "failed" || nextStatus === "error" ? "error" : "running";
     }
   }
 
@@ -548,12 +668,18 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       subagent: name,
       team_run_id: ev.team_run_id,
       team_template: ev.team_template,
+      team_call_id: ev.team_call_id,
       team_task_id: ev.team_task_id,
       team_task_owner: ev.team_task_owner,
       team_task_subject: ev.team_task_subject,
       tier: ev.tier,
       status: "running",
       payload_keys: ev.payload_keys,
+      payload: ev.payload,
+      role_prompt: ev.role_prompt,
+      prompt_path: ev.prompt_path,
+      allowed_skills: ev.allowed_skills,
+      native_tools: ev.native_tools,
       steps: [],
       index: out.length,
     };
@@ -582,6 +708,11 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       reasoning: ev.reasoning,
       reasoning_tokens: ev.reasoning_tokens,
       reasoning_effort: ev.reasoning_effort,
+      prompt: ev.prompt,
+      prompt_chars: ev.prompt_chars,
+      payload: ev.payload,
+      output: ev.output,
+      metrics: ev.metrics,
       ts: ev.ts,
     });
     block.steps = steps;
@@ -594,11 +725,17 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       block.tokens = ev.tokens;
       block.usd = ev.usd;
       block.wall_ms = ev.wall_ms;
+      block.output = ev.output;
+      block.metrics = ev.metrics;
     } else if (ev.error || ev.status === "error") {
       block.status = "error";
     } else {
       block.status = "running";
     }
+    if (ev.prompt) block.last_prompt = ev.prompt;
+    if (ev.payload) block.payload = ev.payload;
+    if (ev.role_prompt) block.role_prompt = ev.role_prompt;
+    mergeSubagentIntoTeam(ev, lifecycle);
   }
 
   function rebuildApprovalIndex() {

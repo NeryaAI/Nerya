@@ -53,7 +53,8 @@ are 2–4 roles.
 
 ## Running a team
 
-Use the native `team_run` tool:
+Use the native `team_run` tool. `roles` must be a real JSON array, not
+a quoted/stringified JSON array:
 
 ```json
 {

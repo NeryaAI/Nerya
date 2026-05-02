@@ -3,6 +3,21 @@
 The markdown files under ``memory/`` and strategy ``learnings.md`` files stay
 the source of truth. memsearch is a derived, rebuildable index that is disabled
 by default and only installed / started after an explicit operator action.
+
+Embedding configuration
+-----------------------
+memsearch internally supports multiple embedding backends (openai, google,
+voyage, ollama, local) but its OpenAI client only picks up a custom base URL
+via the ``OPENAI_BASE_URL`` environment variable. To let operators point at
+any OpenAI-compatible endpoint (Gitee AI, SiliconFlow, DeepSeek, proxies)
+without shelling into the process, we:
+
+* store provider / model / base_url / api_key_ref under
+  ``memory.vector_search.embedding`` in ``config.yaml``;
+* resolve ``api_key_ref`` (``vault://<name>``) through the same SecretVault
+  the LLM plane uses, so users can reuse an existing LLM provider key;
+* set the relevant env vars in the current process (for ``reindex`` /
+  ``search``) or the watcher subprocess before instantiating ``MemSearch``.
 """
 
 from __future__ import annotations
@@ -11,6 +26,7 @@ import asyncio
 import importlib.util
 import importlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,10 +38,33 @@ from ..core.config import Config
 
 _WATCHER_PROCESS: subprocess.Popen | None = None
 
+_ENV_VARS_BY_PROVIDER: dict[str, tuple[str, str | None]] = {
+    # provider -> (api_key_env_name, base_url_env_name or None)
+    "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    "google": ("GOOGLE_API_KEY", None),
+    "voyage": ("VOYAGE_API_KEY", None),
+    "ollama": ("OLLAMA_API_KEY", "OLLAMA_BASE_URL"),
+    "local": ("", None),
+}
+
 
 def _cfg(config: Config) -> dict[str, Any]:
     raw = config.get("memory.vector_search", {}) or {}
     return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _embedding_cfg(config: Config) -> dict[str, Any]:
+    raw = _cfg(config).get("embedding") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return dict(raw)
+
+
+def _milvus_cfg(config: Config) -> dict[str, Any]:
+    raw = _cfg(config).get("milvus") or {}
+    if not isinstance(raw, dict):
+        return {}
+    return dict(raw)
 
 
 def _relative_path(root: Path, raw: str) -> Path:
@@ -53,9 +92,41 @@ def dependency_available() -> bool:
     return importlib.util.find_spec("memsearch") is not None
 
 
+def _resolve_vault_key(config: Config, ref: str) -> str:
+    """Resolve a ``vault://<name>`` ref through the workspace SecretVault.
+
+    Returns empty string when the ref is missing / unresolvable. Never
+    raises — callers fall back to plaintext / env lookup.
+    """
+    if not ref:
+        return ""
+    try:
+        from ..security.secrets import SecretVault  # local import, optional
+    except Exception:
+        return ""
+    if not ref.startswith("vault://"):
+        return ""
+    name = ref.split("vault://", 1)[-1].strip()
+    if not name:
+        return ""
+    vault_path = config.paths.vault_enc
+    if not vault_path.exists():
+        return ""
+    try:
+        vault = SecretVault.open(vault_path)
+        # No scope restriction: the vault is operator-managed and we want
+        # to support reusing existing ``llm`` entries here.
+        return vault.resolve(name)
+    except Exception:
+        return ""
+
+
 def status(config: Config) -> dict[str, Any]:
     cfg = _cfg(config)
     process_running = bool(_WATCHER_PROCESS and _WATCHER_PROCESS.poll() is None)
+    emb = _embedding_cfg(config)
+    milvus = _milvus_cfg(config)
+    api_key_ref = str(emb.get("api_key_ref") or "").strip()
     return {
         "ok": True,
         "enabled": bool(cfg.get("enabled", False)),
@@ -65,7 +136,57 @@ def status(config: Config) -> dict[str, Any]:
         "watch_enabled": bool(cfg.get("watch_enabled", False)),
         "watcher_running": process_running,
         "paths": [str(p) for p in source_paths(config)],
+        "embedding": {
+            "provider": str(emb.get("provider") or "openai"),
+            "model": str(emb.get("model") or "text-embedding-3-small"),
+            "base_url": str(emb.get("base_url") or ""),
+            "api_key_ref": api_key_ref,
+            "has_key": bool(_resolve_vault_key(config, api_key_ref)),
+        },
+        "milvus": {
+            "uri": str(milvus.get("uri") or "~/.memsearch/milvus.db"),
+            "collection": str(milvus.get("collection") or "memsearch_chunks"),
+            "has_token": bool(str(milvus.get("token") or "").strip()),
+        },
     }
+
+
+def _apply_embedding_patch(
+    vector: dict[str, Any], patch: dict[str, Any] | None
+) -> None:
+    if not isinstance(patch, dict):
+        return
+    current = vector.get("embedding")
+    if not isinstance(current, dict):
+        current = {}
+    if "provider" in patch and patch["provider"] is not None:
+        current["provider"] = str(patch["provider"]).strip().lower() or "openai"
+    if "model" in patch and patch["model"] is not None:
+        current["model"] = str(patch["model"]).strip()
+    if "base_url" in patch and patch["base_url"] is not None:
+        current["base_url"] = str(patch["base_url"]).strip()
+    if "api_key_ref" in patch and patch["api_key_ref"] is not None:
+        current["api_key_ref"] = str(patch["api_key_ref"]).strip()
+    vector["embedding"] = current
+
+
+def _apply_milvus_patch(
+    vector: dict[str, Any], patch: dict[str, Any] | None
+) -> None:
+    if not isinstance(patch, dict):
+        return
+    current = vector.get("milvus")
+    if not isinstance(current, dict):
+        current = {}
+    if "uri" in patch and patch["uri"] is not None:
+        current["uri"] = str(patch["uri"]).strip() or "~/.memsearch/milvus.db"
+    if "token" in patch and patch["token"] is not None:
+        current["token"] = str(patch["token"]).strip()
+    if "collection" in patch and patch["collection"] is not None:
+        current["collection"] = (
+            str(patch["collection"]).strip() or "memsearch_chunks"
+        )
+    vector["milvus"] = current
 
 
 def configure(
@@ -75,6 +196,8 @@ def configure(
     watch_enabled: bool | None = None,
     paths: list[str] | None = None,
     install_package: str | None = None,
+    embedding: dict[str, Any] | None = None,
+    milvus: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     existing = yaml_io.load(config.paths.config, default={}) or {}
     if not isinstance(existing, dict):
@@ -91,6 +214,23 @@ def configure(
     vector.setdefault("backend", "memsearch")
     vector.setdefault("install_package", "memsearch")
     vector.setdefault("paths", ["memory", "strategies"])
+    vector.setdefault(
+        "embedding",
+        {
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "base_url": "",
+            "api_key_ref": "",
+        },
+    )
+    vector.setdefault(
+        "milvus",
+        {
+            "uri": "~/.memsearch/milvus.db",
+            "token": "",
+            "collection": "memsearch_chunks",
+        },
+    )
     if enabled is not None:
         vector["enabled"] = bool(enabled)
     if watch_enabled is not None:
@@ -100,6 +240,8 @@ def configure(
         vector["paths"] = cleaned or ["memory", "strategies"]
     if install_package:
         vector["install_package"] = install_package
+    _apply_embedding_patch(vector, embedding)
+    _apply_milvus_patch(vector, milvus)
 
     yaml_io.dump(config.paths.config, existing)
     config.data.setdefault("memory", {})
@@ -155,20 +297,78 @@ def _require_ready(config: Config) -> tuple[bool, dict[str, Any] | None]:
     return True, None
 
 
-async def _index_async(paths: list[Path], *, force: bool = False) -> Any:
+def _resolved_env(config: Config) -> dict[str, str]:
+    """Env vars to inject so memsearch's embedding backend can authenticate.
+
+    Returns a copy of ``os.environ`` plus any provider-specific keys / URLs
+    derived from config. Empty values are left unset to avoid clobbering
+    something the operator set in their shell.
+    """
+    emb = _embedding_cfg(config)
+    provider = str(emb.get("provider") or "openai").strip().lower()
+    base_url = str(emb.get("base_url") or "").strip()
+    api_key_ref = str(emb.get("api_key_ref") or "").strip()
+    resolved_key = _resolve_vault_key(config, api_key_ref)
+
+    env = dict(os.environ)
+    key_env, url_env = _ENV_VARS_BY_PROVIDER.get(provider, ("", None))
+    if key_env and resolved_key:
+        env[key_env] = resolved_key
+    if url_env and base_url:
+        env[url_env] = base_url
+    return env
+
+
+def _memsearch_kwargs(config: Config, *, paths: list[Path]) -> dict[str, Any]:
+    emb = _embedding_cfg(config)
+    milvus = _milvus_cfg(config)
+    kwargs: dict[str, Any] = {
+        "paths": [str(p) for p in paths if p.exists()],
+        "embedding_provider": str(emb.get("provider") or "openai").strip().lower()
+        or "openai",
+    }
+    model = str(emb.get("model") or "").strip()
+    if model:
+        kwargs["embedding_model"] = model
+    milvus_uri = str(milvus.get("uri") or "").strip()
+    if milvus_uri:
+        kwargs["milvus_uri"] = milvus_uri
+    milvus_token = str(milvus.get("token") or "").strip()
+    if milvus_token:
+        kwargs["milvus_token"] = milvus_token
+    collection = str(milvus.get("collection") or "").strip()
+    if collection:
+        kwargs["collection"] = collection
+    return kwargs
+
+
+def _build_memsearch(config: Config, *, paths: list[Path]):
+    """Instantiate a MemSearch with the configured embedding backend.
+
+    Sets env vars in the *current* process so the async OpenAI / Ollama
+    clients instantiated inside memsearch pick up the operator-configured
+    base URL / API key. For watcher subprocesses we pass ``env=`` instead
+    — see :func:`start_watcher`.
+    """
+    # Apply env vars in-process for reindex / search codepaths.
+    os.environ.update(_resolved_env(config))
     from memsearch import MemSearch  # type: ignore
 
-    mem = MemSearch(paths=[str(p) for p in paths if p.exists()])
+    return MemSearch(**_memsearch_kwargs(config, paths=paths))
+
+
+async def _index_async(config: Config, paths: list[Path], *, force: bool = False) -> Any:
+    mem = _build_memsearch(config, paths=paths)
     try:
         return await mem.index(force=force)
     except TypeError:
         return await mem.index()
 
 
-async def _search_async(paths: list[Path], query: str, *, top_k: int) -> Any:
-    from memsearch import MemSearch  # type: ignore
-
-    mem = MemSearch(paths=[str(p) for p in paths if p.exists()])
+async def _search_async(
+    config: Config, paths: list[Path], query: str, *, top_k: int
+) -> Any:
+    mem = _build_memsearch(config, paths=paths)
     return await mem.search(query, top_k=top_k)
 
 
@@ -177,7 +377,7 @@ def reindex(config: Config, *, force: bool = False) -> dict[str, Any]:
     if not ready:
         return error or {"ok": False}
     paths = source_paths(config)
-    result = asyncio.run(_index_async(paths, force=force))
+    result = asyncio.run(_index_async(config, paths, force=force))
     return {
         "ok": True,
         "indexed": True,
@@ -194,7 +394,9 @@ def search(config: Config, *, query: str, top_k: int = 5) -> dict[str, Any]:
     clean = str(query or "").strip()
     if not clean:
         return {"ok": False, "error": "query_required"}
-    rows = asyncio.run(_search_async(source_paths(config), clean, top_k=max(1, top_k)))
+    rows = asyncio.run(
+        _search_async(config, source_paths(config), clean, top_k=max(1, top_k))
+    )
     return {"ok": True, "query": clean, "results": rows, "count": len(rows or [])}
 
 
@@ -210,11 +412,14 @@ def start_watcher(config: Config) -> dict[str, Any]:
         return {"ok": False, "error": "no_existing_source_paths"}
     log_path = config.paths.dev_log("memsearch_watch")
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    kwargs = _memsearch_kwargs(config, paths=source_paths(config))
+    # Re-serialise to drop the Path objects we stripped in _memsearch_kwargs
+    # — ``paths`` above is already stringified.
     code = (
         "import asyncio, json\n"
         "from memsearch import MemSearch\n"
-        f"paths = {json.dumps(paths)}\n"
-        "asyncio.run(MemSearch(paths=paths).watch())\n"
+        f"kwargs = {json.dumps(kwargs)}\n"
+        "asyncio.run(MemSearch(**kwargs).watch())\n"
     )
     log = log_path.open("ab")
     _WATCHER_PROCESS = subprocess.Popen(
@@ -222,6 +427,7 @@ def start_watcher(config: Config) -> dict[str, Any]:
         cwd=str(config.paths.root),
         stdout=log,
         stderr=subprocess.STDOUT,
+        env=_resolved_env(config),
     )
     configure(config, watch_enabled=True)
     return {

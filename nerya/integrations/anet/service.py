@@ -31,6 +31,59 @@ from typing import Any
 from ..anet import whitelist as _wl
 
 
+class _HttpxSvcClient:
+    """Minimal drop-in replacement for ``anet.svc.SvcClient``.
+
+    PyPI's ``anet`` package is currently a 0.0.1 placeholder; the
+    real SDK ships with the ``anet`` CLI but is not pip-installable
+    as of v1.1.11. This shim speaks the three REST endpoints the
+    register loop actually needs:
+
+    * ``POST /api/svc/register``   — publish a service.
+    * ``POST /api/svc/unregister`` — retract a service by name.
+    * ``GET  /api/svc/list``       — used by callers for debugging.
+
+    When the official pip package catches up, the top-level import
+    flips back to ``from anet.svc import SvcClient`` and this shim
+    is bypassed without any call-site changes.
+    """
+
+    def __init__(self, base_url: str, token: str):
+        import httpx
+        self._client = httpx.Client(
+            base_url=base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+            timeout=15.0,
+        )
+
+    def register(self, **kwargs) -> dict:
+        # Drop keys with None values so the daemon doesn't complain
+        # about unexpected nulls in the cost_model.
+        payload = {k: v for k, v in kwargs.items() if v is not None}
+        r = self._client.post("/api/svc/register", json=payload)
+        if r.status_code >= 400:
+            raise RuntimeError(f"register HTTP {r.status_code}: {r.text[:300]}")
+        try:
+            return r.json()
+        except Exception:
+            return {}
+
+    def unregister(self, name: str) -> dict:
+        r = self._client.post("/api/svc/unregister", json={"name": name})
+        if r.status_code >= 400:
+            raise RuntimeError(f"unregister HTTP {r.status_code}: {r.text[:300]}")
+        try:
+            return r.json()
+        except Exception:
+            return {}
+
+    def close(self) -> None:
+        try:
+            self._client.close()
+        except Exception:
+            pass
+
+
 def _short_host_hash() -> str:
     """4-byte deterministic suffix so two laptops don't collide on service name."""
     import hashlib
@@ -130,7 +183,7 @@ def main(config=None, *, argv: list[str] | None = None) -> int:
         return 0
 
     block = (config.data.get("integrations") or {}).get("anet") or {}
-    daemon_url = str(block.get("daemon_url") or "http://127.0.0.1:13921")
+    daemon_url = str(block.get("daemon_url") or "http://127.0.0.1:3998")
     token = _resolve_token(config, str(block.get("token_ref") or ""))
     if not token:
         print("[anet] ERROR: no ANET api token resolved. "
@@ -141,17 +194,6 @@ def main(config=None, *, argv: list[str] | None = None) -> int:
     if token:
         os.environ.setdefault("ANET_TOKEN", token)
     os.environ.setdefault("ANET_BASE_URL", daemon_url)
-
-    try:
-        from anet.svc import SvcClient, SvcAPIError, AuthMissingError  # type: ignore
-    except Exception as exc:
-        print(
-            "[anet] ERROR: 'anet' package missing. "
-            "Install with: pip install 'nerya[anet]'"
-            f"\n  (import failure: {exc})",
-            file=sys.stderr, flush=True,
-        )
-        return 2
 
     api_block = config.data.get("api") or {}
     api_host = str(api_block.get("host") or "127.0.0.1")
@@ -165,8 +207,20 @@ def main(config=None, *, argv: list[str] | None = None) -> int:
         return 3
 
     try:
+        from anet.svc import SvcClient, SvcAPIError, AuthMissingError  # type: ignore
         svc = SvcClient(base_url=daemon_url)
-    except AuthMissingError as exc:
+        use_sdk = True  # noqa: F841 — retained for future branching
+    except (ImportError, ModuleNotFoundError, AttributeError) as exc:
+        # PyPI's ``anet`` 0.0.1 is a placeholder; the real SDK ships
+        # with the ``anet`` daemon and isn't on pip yet. Fall back to
+        # a tiny httpx-based client that speaks the same two endpoints
+        # we actually need.
+        print(f"[anet] anet.svc SDK unavailable ({exc}); "
+              "using built-in httpx fallback client",
+              file=sys.stderr, flush=True)
+        svc = _HttpxSvcClient(base_url=daemon_url, token=token)
+        SvcAPIError = RuntimeError  # noqa: N806
+    except Exception as exc:
         print(f"[anet] {exc}", file=sys.stderr, flush=True)
         return 1
 

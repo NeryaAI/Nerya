@@ -35,7 +35,7 @@ def _register(method: str, path: str, handler):
     _ROUTES.append((method.upper(), path, handler))
 
 
-def _collect_routes() -> None:
+def _collect_routes(config: Config | None = None) -> None:
     if _ROUTES:
         return
     base_modules = (routes_health, routes_workspace, routes_agent,
@@ -59,12 +59,14 @@ def _collect_routes() -> None:
     # footprint (no extra modules, no background loops, no outbound
     # network). ``NERYA_DISABLE_INTEGRATIONS`` short-circuits every
     # block back to disabled regardless of yaml.
-    try:
-        from ..core.config import load_config as _load_cfg
-        _cfg = _load_cfg()
-    except Exception:
-        _cfg = None
-    if _cfg is not None and _cfg.integration_enabled("anet"):
+    #
+    # The config passed by :func:`build_server` is the caller's
+    # resolved workspace config — never fall back to a freshly loaded
+    # default workspace, or ``nerya serve --workspace X`` would ignore
+    # X's integration toggles. ``None`` means "disabled" — the safer
+    # default for any unit-test caller that invokes ``_collect_routes``
+    # without a config.
+    if config is not None and config.integration_enabled("anet"):
         from . import routes_anet  # local import keeps it lazy
         for method, path, handler in routes_anet.routes():
             _register(method, path, handler)
@@ -78,7 +80,7 @@ def _match(method: str, path: str):
 
 
 def build_server(config: Config, host: str = "127.0.0.1", port: int = 8787) -> ThreadingHTTPServer:
-    _collect_routes()
+    _collect_routes(config)
     client = InternalClient.boot(config.paths.root)
     routes_gateway.launch_configured_gateways_on_start(client)
 

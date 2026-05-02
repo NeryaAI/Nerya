@@ -69,7 +69,7 @@ def get_client(block: dict[str, Any]):
         }
         print(err)
         raise SystemExit(3)
-    base_url = str(block.get("daemon_url") or "http://127.0.0.1:13921")
+    base_url = str(block.get("daemon_url") or "http://127.0.0.1:3998")
     # SvcClient reads ANET_TOKEN / ANET_BASE_URL from env; service.py
     # already populates them when running in-process. Set them here too
     # so ad-hoc ``python -m ... scripts.discover`` works.

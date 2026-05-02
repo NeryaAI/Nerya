@@ -50,54 +50,58 @@ Hold:        every other case
 
 from __future__ import annotations
 
+from nerya.skills.builtin.backtest.scripts.indicators import rsi
+
 
 def run(ctx) -> dict:
     market = "binance:BTCUSDT"
-    candles = ctx.market_data.candles(market, tf="1m", limit=120)
+    candles = ctx.market.candles(market, timeframe="1m", limit=120)
     if len(candles) < 60:
         return {"decision": "HOLD", "reason": "warming up"}
 
-    rsi = ctx.market_data.indicators.rsi(candles, period=14)[-1]
-    vwap30 = ctx.market_data.indicators.vwap(candles[-30:])
+    rsi_value = rsi(candles, 14)[-1]
+    vwap30 = (sum(float(c["close"]) for c in candles[-30:]) / 30)
     last_close = candles[-1]["close"]
 
-    pos = ctx.portfolio.position(market)
-    have_pos = pos is not None and abs(pos.qty) > 1e-8
+    pos = ctx.state.get(f"position:{market}")
+    have_pos = bool(pos)
 
-    if not have_pos and rsi < 25 and last_close > vwap30:
-        intent = ctx.trading.submit_intent({
-            "market": market,
-            "side": "buy",
-            "qty": 0.001,
-            "type": "market",
-            "dedup_key": f"scalp:{ctx.now().isoformat(timespec='minutes')}",
-        })
+    if not have_pos and rsi_value is not None and rsi_value < 25 and last_close > vwap30:
+        intent = ctx.trading.submit_intent(
+            market=market,
+            side="buy",
+            size=100,
+            size_unit="usd",
+            order_type="market",
+            reasoning=f"scalp:{ctx.clock.now_iso()[:16]}",
+        )
         return {
             "decision": "ENTRY",
-            "reason": f"rsi={rsi:.1f} < 25 and px>{vwap30:.0f}",
-            "intent_id": intent.get("id"),
-            "metrics": {"rsi": rsi, "vwap30": vwap30, "px": last_close},
+            "reason": f"rsi={rsi_value:.1f} < 25 and px>{vwap30:.0f}",
+            "intent_id": intent.get("intent_id"),
+            "metrics": {"rsi": rsi_value, "vwap30": vwap30, "px": last_close},
         }
 
     if have_pos:
-        unreal = (last_close - pos.avg_price) / pos.avg_price * 100
-        if rsi > 70 or unreal >= 0.4:
-            intent = ctx.trading.submit_intent({
-                "market": market,
-                "side": "sell",
-                "qty": pos.qty,
-                "type": "market",
-                "dedup_key": f"scalp:{ctx.now().isoformat(timespec='minutes')}:exit",
-            })
+        unreal = (last_close - pos["avg_price"]) / pos["avg_price"] * 100
+        if (rsi_value is not None and rsi_value > 70) or unreal >= 0.4:
+            intent = ctx.trading.submit_intent(
+                market=market,
+                side="sell",
+                size=0,
+                size_unit="usd",
+                order_type="market",
+                reasoning=f"scalp:{ctx.clock.now_iso()[:16]}:exit",
+            )
             return {
                 "decision": "EXIT",
-                "reason": f"rsi={rsi:.1f} or pnl%={unreal:.2f}",
-                "intent_id": intent.get("id"),
-                "metrics": {"rsi": rsi, "unreal_pct": unreal},
+                "reason": f"rsi={rsi_value:.1f} or pnl%={unreal:.2f}",
+                "intent_id": intent.get("intent_id"),
+                "metrics": {"rsi": rsi_value, "unreal_pct": unreal},
             }
 
     return {"decision": "HOLD",
-            "reason": "no edge", "metrics": {"rsi": rsi}}
+            "reason": "no edge", "metrics": {"rsi": rsi_value}}
 ```
 
 ## Backtest harness (required)
@@ -109,9 +113,9 @@ from main import run
 def test_replay_paper(make_ctx):
     ctx = make_ctx(window_days=14, tf="1m")
     stats = ctx.backtest_replay(run, fee_bps=2.0, slippage_bps=1.0)
-    assert stats["wins"] + stats["losses"] >= 5, "too few trades"
-    assert stats["max_drawdown_pct"] <= ctx.limits.max_drawdown_pct
-    assert stats["sharpe"] >= 0.0, "no edge"
+    assert stats["win_trades"] + stats["loss_trades"] >= 5, "too few trades"
+    assert stats["max_drawdown_pct"] <= 5.0
+    assert stats["sharpe_ratio"] >= 0.0, "no edge"
 ```
 
 ## limits.yml

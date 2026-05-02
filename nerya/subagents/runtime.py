@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.config import Config
+from ..core.redaction import redact_display_dict, redact_text
 from ..core.time import now_iso
 from ..llm.gateway import LLMGateway
 from ..security.prompt_injection import wrap_untrusted
@@ -225,10 +226,16 @@ class SubAgentRuntime:
         team_event_fields = {
             "team_run_id": payload.get("team_run_id"),
             "team_template": payload.get("team_template"),
+            "team_call_id": payload.get("team_call_id"),
             "team_task_id": payload.get("task_id"),
             "team_task_owner": payload.get("task_owner"),
             "team_task_subject": payload.get("task_subject"),
         }
+        try:
+            safe_payload = redact_display_dict(payload)
+        except Exception:
+            safe_payload = payload
+        audit_payload = safe_payload if isinstance(safe_payload, dict) else payload
 
         def _publish(kind: str, **fields: Any) -> None:
             if _bus is None:
@@ -247,8 +254,6 @@ class SubAgentRuntime:
             except Exception:
                 pass
 
-        _publish("subagent.start", payload_keys=sorted(payload.keys()))
-
         base_context = build_context(
             self.config, self.skills, spec,
             payload=payload, strategy_id=strategy_id,
@@ -260,6 +265,32 @@ class SubAgentRuntime:
         last_raw: str = ""
         total_tokens = 0
         total_usd = 0.0
+        audit_prompts: list[dict[str, Any]] = []
+        audit_start = {
+            "subagent": spec.name,
+            "tier": spec.tier,
+            "prompt_path": str(spec.prompt_path) if spec.prompt_path else "",
+            "role_prompt": redact_text(spec.prompt or ""),
+            "payload": safe_payload,
+            "payload_keys": sorted(payload.keys()),
+            "allowed_skills": list(spec.allowed_skills or []),
+            "callable_skills": callable_skills,
+            "native_tools": callable_native_tools,
+            "context_chars": len(base_context or ""),
+            "redacted": True,
+        }
+
+        _publish(
+            "subagent.start",
+            payload_keys=audit_start["payload_keys"],
+            payload=audit_start["payload"],
+            role_prompt=audit_start["role_prompt"],
+            prompt_path=audit_start["prompt_path"],
+            allowed_skills=audit_start["allowed_skills"],
+            callable_skills=audit_start["callable_skills"],
+            native_tools=audit_start["native_tools"],
+            context_chars=audit_start["context_chars"],
+        )
 
         accumulated_obs: list[dict[str, Any]] = []
         for i in range(max_iter):
@@ -267,6 +298,27 @@ class SubAgentRuntime:
                 spec, payload, base_context, accumulated_obs,
                 allowed=preloaded,
                 native_tools=callable_native_tools,
+            )
+            audit_prompt = self._render_prompt(
+                spec, audit_payload, base_context, accumulated_obs,
+                allowed=preloaded,
+                native_tools=callable_native_tools,
+            )
+            safe_prompt = redact_text(audit_prompt)
+            audit_prompts.append({
+                "iteration": i,
+                "prompt": safe_prompt,
+                "prompt_chars": len(audit_prompt),
+                "redacted": True,
+            })
+            _publish(
+                "subagent.step",
+                step_kind="prompt",
+                iteration=i,
+                status="sent",
+                prompt=safe_prompt,
+                prompt_chars=len(audit_prompt),
+                payload=safe_payload,
             )
             t0 = time.monotonic()
             try:
@@ -435,6 +487,14 @@ class SubAgentRuntime:
             tokens=total_tokens,
             usd=total_usd,
             wall_ms=int((time.monotonic() - t_start) * 1000),
+            output=redact_display_dict(last_parsed or {"raw": last_raw}),
+            metrics=redact_display_dict({
+                "signals_used": signals_used,
+                "skill_calls": skill_calls,
+                "rejected_actions": rejected_actions,
+                "uncertainty": uncertainty,
+                "evidence": evidence,
+            }),
         )
 
         return {
@@ -452,6 +512,11 @@ class SubAgentRuntime:
                 "iterations": sum(1 for s in steps if s.kind == "think"),
             },
             "steps": [s.asdict() for s in steps],
+            "audit": {
+                **audit_start,
+                "prompt_records": audit_prompts,
+                "redacted": True,
+            },
         }
 
     # ---------------------------------------------------------------- prompt

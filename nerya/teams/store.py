@@ -190,6 +190,9 @@ class TeamStore:
             error=task.error,
             artifact=task.result_artifact,
             summary=task.result_summary,
+            payload=task.payload,
+            input_payload=(task.payload or {}).get("input_payload"),
+            assignment_prompt=(task.payload or {}).get("assignment_prompt"),
             started_at=task.started_at,
             completed_at=task.completed_at,
         )

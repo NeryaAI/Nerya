@@ -82,6 +82,78 @@ from ..evolution.hooks import EvolutionHookBus
 _LOG = logging.getLogger(__name__)
 
 
+# Per-turn meta cap. Chat transcripts can stack up thousands of turns;
+# each assistant row stores its full ``blocks`` / ``tool_trace`` so the
+# dashboard can rehydrate the tool_use timeline after a reload. The cap
+# keeps a single pathological tool_result (say, a 5 MB JSON dump) from
+# blowing up the SQLite row. 256 KB comfortably holds a normal
+# multi-tool turn but clips anything exotic — the UI still renders the
+# truncation because the envelope is dropped intact, just flagged.
+_ASSISTANT_TURN_META_CAP = 256 * 1024
+
+
+def _compact_turn_payload(
+    *,
+    turn_id: str,
+    blocks: list[dict[str, Any]],
+    actions: list[dict[str, Any]],
+    tool_trace: list[dict[str, Any]],
+    iterations: int | None,
+    tool_calls_count: int | None,
+    stop_reason: str | None,
+    aborted: bool | None,
+    abort_reason: str | None,
+    error_count: int | None,
+    final_text: str,
+) -> dict[str, Any]:
+    """Shape the turn payload persisted on the assistant message row.
+
+    Mirrors :class:`AgentTurnResult` fields the dashboard consumes when
+    rendering ``TurnBlocks`` so an imported session reconstructs with
+    the same block stream the live turn produced. If the serialised
+    payload exceeds :data:`_ASSISTANT_TURN_META_CAP`, progressively drop
+    the heaviest lists (``blocks`` first, then ``tool_trace``) so at
+    least the summary fields survive.
+    """
+
+    def _serialised_size(obj: Any) -> int:
+        try:
+            return len(
+                json.dumps(obj, ensure_ascii=False, default=str)
+            )
+        except Exception:
+            return _ASSISTANT_TURN_META_CAP + 1
+
+    payload: dict[str, Any] = {
+        "turn_id": turn_id,
+        "harness": "native",
+        "reply_text": final_text,
+        "final_text": final_text,
+        "blocks": blocks or [],
+        "actions": actions or [],
+        "tool_trace": tool_trace or [],
+        "budget": {
+            "iterations": iterations,
+            "tool_calls": tool_calls_count,
+            "errors": error_count,
+            "aborted": aborted,
+            "abort_reason": abort_reason,
+        },
+        "stopped_reason": stop_reason,
+    }
+    if _serialised_size(payload) <= _ASSISTANT_TURN_META_CAP:
+        return payload
+    # Shed the heaviest fields in order. The summary (actions + budget)
+    # is what the dashboard falls back on today, so preserve it.
+    payload["blocks_truncated"] = True
+    payload["blocks"] = []
+    if _serialised_size(payload) <= _ASSISTANT_TURN_META_CAP:
+        return payload
+    payload["tool_trace_truncated"] = True
+    payload["tool_trace"] = []
+    return payload
+
+
 _STRATEGY_TRIGGER_SOURCES = {
     "scheduled_session",
     "schedule",
@@ -630,6 +702,13 @@ class AgentKernel:
         )
         bus = get_default_bus()
         tool_payloads: dict[str, dict[str, Any]] = {}
+        # Captured during ``permission_pending`` tool results so we can
+        # splice an ``approval_request`` block into ``outcome.blocks``
+        # after the loop returns. Without this, the approval card lives
+        # only on the in-memory event bus and disappears the moment the
+        # dashboard switches from the live stream to ``msg.turn.blocks``
+        # (page reload, session re-open, follow-up turn).
+        captured_approvals: list[tuple[str, dict[str, Any]]] = []
 
         def _event_sink(env: BlockEnvelope) -> None:
             """Translate native block envelopes onto the streaming bus.
@@ -751,6 +830,19 @@ class AgentKernel:
                             reason=block.get("error"),
                             **common,
                         )
+                        captured_approvals.append((
+                            call_id,
+                            {
+                                "kind": "approval_request",
+                                "approval_id": str(approval_payload.get("approval_id") or ""),
+                                "call_id": call_id,
+                                "skill_id": str(block.get("skill_id") or "native"),
+                                "action": str(block.get("action") or ""),
+                                "prompt": approval_payload.get("prompt"),
+                                "record": approval_payload.get("record"),
+                                "reason": block.get("error"),
+                            },
+                        ))
                 elif kind == "system":
                     sub_kind = str(block.get("kind_detail") or block.get("event_kind") or "")
                     if sub_kind in {"compact.start", "compact.complete"}:
@@ -847,6 +939,15 @@ class AgentKernel:
             cancel_token=cancel_token,
         )
 
+        # Persist any permission_pending approvals as native blocks so
+        # the dashboard's ``msg.turn.blocks`` view (post-turn, after
+        # reload, in re-imported sessions) keeps showing the approval
+        # card. Without this the card is only present in the in-memory
+        # event bus and vanishes the moment the chat re-renders from
+        # ``turn.blocks``.
+        if captured_approvals:
+            self._splice_approval_blocks(outcome, captured_approvals, turn_id)
+
         actions, tool_trace = self._project_blocks(outcome)
 
         if outcome.final_text:
@@ -906,6 +1007,14 @@ class AgentKernel:
                 user_text=user_text,
                 final_text=outcome.final_text or "",
                 blocks=block_dicts,
+                actions=actions,
+                tool_trace=tool_trace,
+                iterations=outcome.iterations,
+                tool_calls_count=outcome.tool_calls,
+                stop_reason=outcome.stop_reason,
+                aborted=outcome.aborted,
+                abort_reason=outcome.abort_reason or None,
+                error_count=outcome.error_count,
             )
             self._maybe_auto_title_session(
                 session_id=session_id,
@@ -1147,6 +1256,14 @@ class AgentKernel:
         user_text: str,
         final_text: str,
         blocks: list[dict[str, Any]],
+        actions: list[dict[str, Any]] | None = None,
+        tool_trace: list[dict[str, Any]] | None = None,
+        iterations: int | None = None,
+        tool_calls_count: int | None = None,
+        stop_reason: str | None = None,
+        aborted: bool | None = None,
+        abort_reason: str | None = None,
+        error_count: int | None = None,
     ) -> None:
         try:
             from ..db.repositories import AgentSessionRepository
@@ -1160,12 +1277,37 @@ class AgentKernel:
                 meta={"last_turn_id": turn_id},
             )
             if final_text.strip():
+                # May-01 2026 — persist the full turn payload so the
+                # dashboard can rehydrate imported sessions with the
+                # original tool_use / tool_result stream. Without this
+                # the transcript route only returns ``content`` and the
+                # chat view degrades to the ``actions applied`` summary
+                # after a refresh or visibilitychange-triggered
+                # reimport. Cap each nested list at a conservative
+                # budget so a pathological tool_result payload can't
+                # blow up the meta_json cell.
+                assistant_meta = {
+                    "turn": _compact_turn_payload(
+                        turn_id=turn_id,
+                        blocks=blocks,
+                        actions=actions or [],
+                        tool_trace=tool_trace or [],
+                        iterations=iterations,
+                        tool_calls_count=tool_calls_count,
+                        stop_reason=stop_reason,
+                        aborted=aborted,
+                        abort_reason=abort_reason,
+                        error_count=error_count,
+                        final_text=final_text,
+                    ),
+                }
                 repo.record_message(
                     message_id=f"{turn_id}:assistant",
                     session_id=session_id,
                     turn_id=turn_id,
                     role="assistant",
                     content=final_text[:16_000],
+                    meta=assistant_meta,
                 )
             for i, env in enumerate(blocks or []):
                 block = env.get("block") if isinstance(env.get("block"), dict) else env
@@ -1507,6 +1649,64 @@ class AgentKernel:
             "record": record,
             "prompt": prompt,
         }
+
+    @staticmethod
+    def _splice_approval_blocks(
+        outcome: LoopOutcome,
+        captured: list[tuple[str, dict[str, Any]]],
+        turn_id: str,
+    ) -> None:
+        """Insert ``approval_request`` block envelopes into the outcome.
+
+        Each captured entry pairs a ``call_id`` with the block payload
+        the dashboard's ``ApprovalRequestCard`` expects. We splice the
+        envelope right after the matching ``tool_result`` so the chat
+        renders the card adjacent to the call that triggered it; if the
+        tool_result can't be located we append at the end as a fallback.
+        """
+
+        if not captured or not outcome.blocks:
+            return
+
+        # Avoid duplicating an envelope when the loop is re-entered for
+        # the same turn (defensive — current loop builds outcome.blocks
+        # fresh each run).
+        existing_ids = {
+            str((env.block or {}).get("approval_id") or "")
+            for env in outcome.blocks
+            if (env.block or {}).get("kind") == "approval_request"
+        }
+
+        message_id = outcome.blocks[-1].message_id if outcome.blocks else turn_id
+        next_seq = max((env.seq for env in outcome.blocks), default=0) + 1
+
+        for call_id, block in captured:
+            approval_id = str(block.get("approval_id") or "")
+            if approval_id and approval_id in existing_ids:
+                continue
+            envelope = BlockEnvelope(
+                seq=next_seq,
+                turn_id=turn_id,
+                message_id=message_id,
+                role="tool",
+                block=dict(block),
+            )
+            next_seq += 1
+            insert_at: int | None = None
+            for idx in range(len(outcome.blocks) - 1, -1, -1):
+                candidate = outcome.blocks[idx].block or {}
+                if (
+                    candidate.get("kind") == "tool_result"
+                    and str(candidate.get("call_id") or "") == call_id
+                ):
+                    insert_at = idx + 1
+                    break
+            if insert_at is None:
+                outcome.blocks.append(envelope)
+            else:
+                outcome.blocks.insert(insert_at, envelope)
+            if approval_id:
+                existing_ids.add(approval_id)
 
     # ----------------------------------------------------------- helpers
 
@@ -2100,8 +2300,11 @@ class AgentKernel:
             "3. Use memory_recall before re-deriving things you've"
             " already learned; use memory_remember sparingly for durable"
             " lessons.\n"
-            "4. Spawn subagents (subagent_run) only for genuinely"
-            " parallel sub-tasks; live-trading writes stay on the parent.\n"
+            "4. If the user asks for Agent Team, team, committee,"
+            " multi-role, or deep-research collaboration, call role_list"
+            " then team_run so the UI shows one coordinated team. Use"
+            " subagent_run only for a single bounded child task;"
+            " live-trading writes stay on the parent.\n"
             "5. Trading discipline: portfolio_summary / strategy_history"
             " before forming an opinion; risk_check before"
             " trade_intent_submit; kill_switch_set is DANGEROUS and"

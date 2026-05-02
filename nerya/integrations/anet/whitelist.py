@@ -33,6 +33,9 @@ SAFE_PATHS: tuple[tuple[str, str, str], ...] = (
     ("GET", "/anet/health", "Liveness probe for the anet gateway."),
     ("GET", "/anet/meta",   "Machine-readable capability card used by anet svc register."),
     ("GET", "/anet/status", "Integration status snapshot (debug / operator-side)."),
+    # Protocol-standard aliases: the anet gateway default-fetches
+    # ``/meta`` during ``anet svc meta``. Same handler as /anet/meta.
+    ("GET", "/meta", "Protocol-standard capability card (alias of /anet/meta)."),
     # Read-only market data. Useful as a free tier that attracts callers
     # and seeds a reputation signal without giving anything away.
     ("GET", "/market/ticker", "Spot/perp ticker snapshot via Nerya's connector matrix."),

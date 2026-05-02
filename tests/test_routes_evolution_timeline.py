@@ -52,10 +52,15 @@ def test_evolution_timeline_stitches_history_and_config(tmp_path):
         paths,
         kind="learning_update",
         summary="remember repair pattern",
+        rationale="# Rationale\n\nGenerated from repeated tool failures.\n",
         evidence_refs=["turn:t1"],
         source_event_id=event["id"],
         validation_plan_id=plan_id,
         metadata={"strategy_id": "alpha"},
+        extra_files={
+            "reflection.json": '{"summary":"reflection payload"}',
+            "ranked_seeds.json": '{"seeds":[{"id":"seed-1"}]}',
+        },
     )
     evolution_assets.create_candidate(
         paths,
@@ -82,3 +87,16 @@ def test_evolution_timeline_stitches_history_and_config(tmp_path):
     assert any(item.get("proposal_id") == proposal.id for item in out["timeline"])
     assert any(item.get("validation_plan_id") == plan_id for item in out["timeline"])
     assert any(item["type"] == "asset_candidate" for item in out["timeline"])
+
+    proposal_item = next(item for item in out["timeline"] if item.get("proposal_id") == proposal.id)
+    process = proposal_item["process"]
+    assert process["has_generated_docs"] is True
+    assert process["has_validation"] is True
+    titles = [
+        artifact["title"]
+        for section in process["sections"]
+        for artifact in section["artifacts"]
+    ]
+    assert "rationale.md" in titles
+    assert "reflection.json" in titles
+    assert "Validation plan" in titles

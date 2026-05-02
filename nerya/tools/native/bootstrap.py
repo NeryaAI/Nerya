@@ -1567,7 +1567,10 @@ def register_native_tools(
                         "return its envelope. The child runs its own "
                         "observe → think → act loop with a bounded "
                         "skill allowlist; live-trading skills are "
-                        "denied at the dispatcher boundary."
+                        "denied at the dispatcher boundary. Do not use "
+                        "this for user-requested Agent Team / committee "
+                        "work; use team_run so the dashboard can show one "
+                        "coordinated team with member lanes."
                     ),
                     input_schema=SUBAGENT_RUN_SCHEMA,
                     handler=_wrap_subagent_run(deps),
@@ -1588,7 +1591,9 @@ def register_native_tools(
                         "(per-role output + cross-role aggregate). Use "
                         "this when the user asks for a team/committee/"
                         "deep-research, or when a low-frequency strategy "
-                        "wants multi-perspective decisions."
+                        "wants multi-perspective decisions. The roles "
+                        "argument must be an actual JSON array of role "
+                        "objects, not a quoted JSON string."
                     ),
                     input_schema=TEAM_RUN_SCHEMA,
                     handler=_wrap_team_run(deps),

@@ -64,6 +64,7 @@ from ..core.config import Config
 from ..core.errors import NeryaError
 from ..core.ids import new_id
 from ..core.paths import WorkspacePaths
+from ..core.redaction import redact_display_dict
 from ..core.time import now_iso
 from ..evolution.patch_proposal import Proposal, create_proposal
 from ..evolution.event_store import record_event
@@ -98,6 +99,7 @@ class TuningRunResult:
     subagent_output: dict[str, Any] = field(default_factory=dict)
     proposal_id: Optional[str] = None
     review_path: Optional[str] = None
+    audit_path: Optional[str] = None
     source_event_id: Optional[str] = None
     validation_plan_id: Optional[str] = None
     dropped_changes: list[dict[str, Any]] = field(default_factory=list)
@@ -209,6 +211,14 @@ class StrategyEvolutionRunner:
                 snapshot=snapshot.asdict(),
             )
         if not envelope.get("ok"):
+            audit_path = self._write_tuning_audit(
+                pkg=pkg,
+                run_id=run_id,
+                envelope=envelope,
+                operator=operator,
+                note=note,
+                dry_run=dry_run,
+            )
             res = TuningRunResult(
                 run_id=run_id,
                 strategy_id=strategy_id,
@@ -219,6 +229,7 @@ class StrategyEvolutionRunner:
                 reason="tuning subagent failed",
                 snapshot=snapshot.asdict(),
                 subagent_output=dict(envelope or {}),
+                audit_path=str(audit_path) if audit_path else None,
                 error={
                     "kind": "subagent",
                     "error_kind": envelope.get("error_kind"),
@@ -231,6 +242,14 @@ class StrategyEvolutionRunner:
         output = envelope.get("output") or {}
         if not isinstance(output, dict):
             output = {}
+        audit_path = self._write_tuning_audit(
+            pkg=pkg,
+            run_id=run_id,
+            envelope=envelope,
+            operator=operator,
+            note=note,
+            dry_run=dry_run,
+        )
 
         accepted, dropped, warnings = _filter_changes(output, cfg)
         validation_plan = build_validation_plan(
@@ -310,6 +329,10 @@ class StrategyEvolutionRunner:
                 output=output,
                 accepted=accepted,
                 review_text=review_text,
+                audit_text=(
+                    audit_path.read_text(encoding="utf-8")
+                    if audit_path and audit_path.exists() else "{}"
+                ),
                 source_event_id=str(event.get("id") or ""),
                 validation_plan_id=validation_plan_id,
             )
@@ -338,6 +361,7 @@ class StrategyEvolutionRunner:
             subagent_output=output,
             proposal_id=(proposal.id if proposal else None),
             review_path=str(review_path),
+            audit_path=str(audit_path) if audit_path else None,
             source_event_id=str(event.get("id") or ""),
             validation_plan_id=validation_plan_id,
             dropped_changes=list(dropped),
@@ -388,6 +412,50 @@ class StrategyEvolutionRunner:
             trigger_event_id=trigger_event_id,
         )
 
+    def _write_tuning_audit(
+        self,
+        *,
+        pkg: StrategyPackage,
+        run_id: str,
+        envelope: dict[str, Any],
+        operator: Optional[str],
+        note: str,
+        dry_run: bool,
+    ) -> Optional[Any]:
+        try:
+            audit = dict(envelope.get("audit") or {})
+            data = {
+                "run_id": run_id,
+                "strategy_id": pkg.strategy_id,
+                "created_at": now_iso(),
+                "operator": operator,
+                "note": note,
+                "dry_run": dry_run,
+                "package_hash": pkg.content_hash,
+                "subagent": envelope.get("subagent") or audit.get("subagent"),
+                "tier": envelope.get("tier") or audit.get("tier"),
+                "ok": bool(envelope.get("ok")),
+                "tokens": int(envelope.get("tokens") or 0),
+                "usd": float(envelope.get("usd") or 0.0),
+                "wall_ms": int(envelope.get("wall_ms") or 0),
+                "prompt_path": audit.get("prompt_path"),
+                "role_prompt": audit.get("role_prompt") or "",
+                "payload": audit.get("payload") or {},
+                "prompt_records": audit.get("prompt_records") or [],
+                "metrics": redact_display_dict(envelope.get("metrics") or {}),
+                "steps": redact_display_dict(envelope.get("steps") or []),
+                "subagent_output": redact_display_dict(envelope.get("output") or {}),
+                "error": envelope.get("error"),
+                "error_kind": envelope.get("error_kind"),
+                "redacted": True,
+            }
+            audit_path = pkg.root / "reviews" / f"tuning_{run_id}_audit.json"
+            atomic_write_text(audit_path, _json_dumps(data))
+            return audit_path
+        except Exception:
+            _LOG.exception("tuning audit write failed for run %s", run_id)
+            return None
+
     def _create_tuning_proposal(
         self,
         *,
@@ -397,6 +465,7 @@ class StrategyEvolutionRunner:
         output: dict[str, Any],
         accepted: list[dict[str, Any]],
         review_text: str,
+        audit_text: str,
         source_event_id: str,
         validation_plan_id: str,
     ) -> Optional[Proposal]:
@@ -415,6 +484,7 @@ class StrategyEvolutionRunner:
                     }
                 ),
                 "tuning_review.md": review_text,
+                "tuning_audit.json": audit_text,
             }
             return create_proposal(
                 self.paths,
@@ -463,6 +533,10 @@ class StrategyEvolutionRunner:
                     "status": result.status,
                     "reason": result.reason,
                     "proposal_id": result.proposal_id,
+                    "review_path": result.review_path,
+                    "audit_path": result.audit_path,
+                    "source_event_id": result.source_event_id,
+                    "validation_plan_id": result.validation_plan_id,
                     "duration_ms": result.duration_ms,
                     "dry_run": dry_run,
                     "operator": operator,

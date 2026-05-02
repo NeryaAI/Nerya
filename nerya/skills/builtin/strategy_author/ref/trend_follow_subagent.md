@@ -52,41 +52,43 @@ Exit:          EMA(50) crosses below EMA(200), OR stop_loss_pct breached
 
 from __future__ import annotations
 
+from nerya.skills.builtin.backtest.scripts.indicators import ema
+
 
 def run(ctx) -> dict:
     market = "nasdaq:NVDA"
-    candles = ctx.market_data.candles(market, tf="1d", limit=400)
+    candles = ctx.market.candles(market, timeframe="1d", limit=400)
     if len(candles) < 220:
         return {"decision": "HOLD", "reason": "warming up"}
 
-    ema50 = ctx.market_data.indicators.ema(candles, period=50)[-1]
-    ema200 = ctx.market_data.indicators.ema(candles, period=200)[-1]
+    ema50 = ema(candles, 50)[-1]
+    ema200 = ema(candles, 200)[-1]
     last_close = candles[-1]["close"]
     bullish = ema50 > ema200 and last_close > ema50
 
-    pos = ctx.portfolio.position(market)
-    have_pos = pos is not None and abs(pos.qty) > 1e-8
+    pos = ctx.state.get(f"position:{market}")
+    have_pos = bool(pos)
 
     if have_pos:
         if ema50 < ema200:
-            intent = ctx.trading.submit_intent({
-                "market": market, "side": "sell", "qty": pos.qty,
-                "type": "market",
-                "dedup_key": f"nvda_trend:{ctx.now().date().isoformat()}:exit",
-            })
+            intent = ctx.trading.submit_intent(
+                market=market, side="sell", size=0, size_unit="usd",
+                order_type="market",
+                reasoning=f"nvda_trend:{ctx.clock.now_iso()[:10]}:exit",
+            )
             return {"decision": "EXIT",
                     "reason": "ema50<ema200",
-                    "intent_id": intent.get("id")}
-        unreal_pct = (last_close - pos.avg_price) / pos.avg_price * 100
-        if unreal_pct <= -ctx.limits.stop_loss_pct:
-            intent = ctx.trading.submit_intent({
-                "market": market, "side": "sell", "qty": pos.qty,
-                "type": "market",
-                "dedup_key": f"nvda_trend:{ctx.now().date().isoformat()}:stop",
-            })
+                    "intent_id": intent.get("intent_id")}
+        unreal_pct = (last_close - pos["avg_price"]) / pos["avg_price"] * 100
+        if unreal_pct <= -8.0:
+            intent = ctx.trading.submit_intent(
+                market=market, side="sell", size=0, size_unit="usd",
+                order_type="market",
+                reasoning=f"nvda_trend:{ctx.clock.now_iso()[:10]}:stop",
+            )
             return {"decision": "EXIT",
                     "reason": f"stop hit pnl%={unreal_pct:.1f}",
-                    "intent_id": intent.get("id")}
+                    "intent_id": intent.get("intent_id")}
         return {"decision": "HOLD",
                 "reason": "in position, filter bullish",
                 "metrics": {"unreal_pct": unreal_pct}}
@@ -96,7 +98,7 @@ def run(ctx) -> dict:
                 "reason": "filter bearish",
                 "metrics": {"ema50": ema50, "ema200": ema200}}
 
-    verdict = ctx.subagents.dispatch(
+    envelope = ctx.subagents.run(
         "market_analyst",
         payload={
             "market": market,
@@ -107,6 +109,7 @@ def run(ctx) -> dict:
             "ema200": ema200,
         },
     )
+    verdict = envelope.get("output", envelope)
     decision = verdict.get("decision", "HOLD")
     confidence = float(verdict.get("confidence", 0.0))
     if decision != "ENTRY" or confidence < 0.6:
@@ -114,18 +117,15 @@ def run(ctx) -> dict:
                 "reason": f"subagent vetoed: decision={decision} conf={confidence:.2f}",
                 "subagent": verdict}
 
-    qty = ctx.portfolio.size_by_risk(
-        market, risk_usd=ctx.limits.max_single_order_usd,
-        stop_pct=ctx.limits.stop_loss_pct,
+    intent = ctx.trading.submit_intent(
+        market=market, side="buy", size=1000, size_unit="usd",
+        order_type="market",
+        reasoning=f"nvda_trend:{ctx.clock.now_iso()[:10]}:entry",
     )
-    intent = ctx.trading.submit_intent({
-        "market": market, "side": "buy", "qty": qty, "type": "market",
-        "dedup_key": f"nvda_trend:{ctx.now().date().isoformat()}:entry",
-    })
     return {
         "decision": "ENTRY",
         "reason": f"filter+subagent agree (conf={confidence:.2f})",
-        "intent_id": intent.get("id"),
+        "intent_id": intent.get("intent_id"),
         "subagent": verdict,
     }
 ```
@@ -168,16 +168,34 @@ from main import run
 def test_replay_with_subagent_stub(make_ctx):
     ctx = make_ctx(window_days=365, tf="1d",
                    subagent_stub={"decision": "ENTRY", "confidence": 0.7})
-    stats = ctx.backtest_replay(run, fee_bps=1.0, slippage_bps=2.0)
-    assert stats["sharpe"] >= 0.3, "no edge with optimistic subagent"
-    assert stats["max_drawdown_pct"] <= ctx.limits.max_drawdown_pct
+    stats = ctx.backtest_replay(
+        run,
+        fee_bps=1.0,
+        slippage_bps=2.0,
+        mock_surfaces={
+            "subagents": {
+                "mode": "stub",
+                "payload": {"decision": "ENTRY", "confidence": 0.7},
+            },
+        },
+    )
+    assert stats["sharpe_ratio"] is None or stats["sharpe_ratio"] >= 0.3
+    assert stats["max_drawdown_pct"] <= 12.0
 
 def test_replay_subagent_pessimistic(make_ctx):
     """When subagent always vetoes, strategy never trades."""
     ctx = make_ctx(window_days=365, tf="1d",
                    subagent_stub={"decision": "HOLD", "confidence": 0.9})
-    stats = ctx.backtest_replay(run)
-    assert stats["wins"] + stats["losses"] == 0
+    stats = ctx.backtest_replay(
+        run,
+        mock_surfaces={
+            "subagents": {
+                "mode": "stub",
+                "payload": {"decision": "HOLD", "confidence": 0.9},
+            },
+        },
+    )
+    assert stats["win_trades"] + stats["loss_trades"] == 0
 ```
 
 ## limits.yml

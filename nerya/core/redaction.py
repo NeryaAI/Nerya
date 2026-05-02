@@ -76,3 +76,58 @@ def redact_dict(data: Any) -> Any:
     if isinstance(data, str):
         return redact_text(data)
     return data
+
+
+_DISPLAY_SECRET_KEYS = {
+    "api_key", "apikey", "secret", "secret_key", "secretkey",
+    "private_key", "privatekey", "token_secret", "refresh_token",
+    "access_token", "bot_token", "telegram_token", "discord_token",
+    "passphrase", "password", "pass", "x-api-key", "x_api_key",
+    "authorization", "auth_header",
+}
+
+
+def redact_display_dict(data: Any) -> Any:
+    """Redact for operator-facing event/detail panes.
+
+    This keeps observability fields such as ``task_id`` and ``tokens``
+    readable. The stricter :func:`redact_dict` intentionally treats
+    short substrings such as ``sk`` and ``token`` as secret hints, which
+    is too aggressive for UI traces where those words are common
+    telemetry names.
+    """
+
+    if isinstance(data, dict):
+        out = {}
+        for k, v in data.items():
+            raw_key = str(k)
+            key_lc = raw_key.lower()
+            key_norm = key_lc.replace("-", "_")
+            is_secret_key = (
+                key_lc in _DISPLAY_SECRET_KEYS
+                or key_norm in _DISPLAY_SECRET_KEYS
+                or key_norm.endswith("_api_key")
+                or key_norm.endswith("_secret")
+                or key_norm.endswith("_private_key")
+                or key_norm.endswith("_password")
+                or key_norm.endswith("_passphrase")
+                or key_norm.endswith("_access_token")
+                or key_norm.endswith("_refresh_token")
+            )
+            if is_secret_key:
+                if isinstance(v, str):
+                    out[k] = {
+                        "__redacted__": True,
+                        "preview": preview(v),
+                        "sha12": fingerprint(v),
+                    }
+                else:
+                    out[k] = {"__redacted__": True}
+            else:
+                out[k] = redact_display_dict(v)
+        return out
+    if isinstance(data, list):
+        return [redact_display_dict(x) for x in data]
+    if isinstance(data, str):
+        return redact_text(data)
+    return data

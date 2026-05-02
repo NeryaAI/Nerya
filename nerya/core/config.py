@@ -118,6 +118,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "install_package": "memsearch",
             "watch_enabled": False,
             "paths": ["memory", "strategies"],
+            "embedding": {
+                "provider": "openai",
+                "model": "text-embedding-3-small",
+                "base_url": "",
+                "api_key_ref": "",
+            },
+            "milvus": {
+                "uri": "~/.memsearch/milvus.db",
+                "token": "",
+                "collection": "memsearch_chunks",
+            },
         },
     },
     "workspace_preferences": {
@@ -486,7 +497,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # ``curl -fsSL https://agentnetwork.org.cn/install.sh | sh``.
         "anet": {
             "enabled": False,
-            "daemon_url": "http://127.0.0.1:13921",
+            "daemon_url": "http://127.0.0.1:3998",
             # ``secret:anet/api_token`` once the operator has stored
             # the bearer token issued by ``anet daemon`` / self-register.
             "token_ref": "",

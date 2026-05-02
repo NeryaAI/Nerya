@@ -123,10 +123,23 @@ class ToolRegistry:
     # ------------------------------------------------------------ lookup
 
     def get(self, name: str) -> ToolDescriptor:
-        """Return the descriptor or raise :class:`ToolNotFoundError`."""
+        """Return the descriptor or raise :class:`ToolNotFoundError`.
+
+        Exact-match first. On miss, falls back to a case-insensitive
+        scan so a model emitting ``"skill"`` instead of ``"Skill"`` (or
+        ``"read_File"`` etc.) still routes to the right tool instead
+        of taking the ``unknown tool`` branch. Enabled-status is still
+        enforced on the matched entry.
+        """
 
         with self._lock:
             entry = self._entries.get(name)
+            if entry is None:
+                lowered = name.lower() if isinstance(name, str) else name
+                for key, candidate in self._entries.items():
+                    if key.lower() == lowered:
+                        entry = candidate
+                        break
         if entry is None or not entry.enabled:
             raise ToolNotFoundError(name)
         return entry.descriptor

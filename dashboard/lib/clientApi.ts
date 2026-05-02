@@ -124,6 +124,41 @@ export async function callApi<T = unknown>(
   return body as T;
 }
 
+export interface BacktestRunSummary {
+  ts: string;
+  days?: number;
+  total_return_pct?: number;
+  max_dd_pct?: number;
+  sharpe_ratio?: number | null;
+  verdict?: string;
+  start_utc?: string;
+  end_utc?: string;
+}
+
+export interface BacktestChartEnvelope {
+  ok: boolean;
+  strategy_id: string;
+  ts: string;
+  chart: BacktestChartData;
+}
+
+export interface BacktestChartData {
+  schema_version: string;
+  meta: Record<string, unknown>;
+  panels: BacktestPanel[];
+  summary_cards: Array<Record<string, unknown>>;
+  tables: Array<{ id: string; columns: string[]; rows: unknown[][] }>;
+}
+
+export interface BacktestPanel {
+  id: string;
+  type: string;
+  title: string;
+  series: Array<{ kind: string; name?: string; data: Array<Record<string, unknown>> }>;
+  annotations?: Array<Record<string, unknown>>;
+  guides?: Array<Record<string, unknown>>;
+}
+
 export type SecretRef = {
   name: string;
   kind: string;
@@ -613,6 +648,20 @@ export type LlmProviderProfile = {
   has_key_ref?: boolean;
 };
 
+export type MemoryVectorEmbedding = {
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key_ref: string;
+  has_key: boolean;
+};
+
+export type MemoryVectorMilvus = {
+  uri: string;
+  collection: string;
+  has_token: boolean;
+};
+
 export type MemoryVectorStatus = {
   ok: boolean;
   enabled: boolean;
@@ -622,6 +671,8 @@ export type MemoryVectorStatus = {
   watch_enabled: boolean;
   watcher_running: boolean;
   paths: string[];
+  embedding?: MemoryVectorEmbedding;
+  milvus?: MemoryVectorMilvus;
   error?: string;
   detail?: string;
 };
@@ -824,6 +875,21 @@ export const clientApi = {
       content,
       reason: reason || "dashboard_write_file",
     }),
+  strategyBacktests: (strategyId: string) =>
+    post<{ ok: boolean; strategy_id: string; backtests: BacktestRunSummary[] }>(
+      "/strategy/backtests",
+      { strategy_id: strategyId },
+    ),
+  strategyBacktestChart: (strategyId: string, ts: string) =>
+    post<BacktestChartEnvelope>("/strategy/backtests/chart", {
+      strategy_id: strategyId,
+      ts,
+    }),
+  strategyBacktestFile: (strategyId: string, ts: string, name: string) =>
+    post<{ ok: boolean; strategy_id: string; ts: string; name: string; content: string }>(
+      "/strategy/backtests/file",
+      { strategy_id: strategyId, ts, name },
+    ),
 
   subagentList: () =>
     post<{ subagents: SubagentRecord[] }>("/skills/call", {
@@ -1556,6 +1622,17 @@ export const clientApi = {
     watch_enabled?: boolean;
     paths?: string[];
     install_package?: string;
+    embedding?: Partial<{
+      provider: string;
+      model: string;
+      base_url: string;
+      api_key_ref: string;
+    }>;
+    milvus?: Partial<{
+      uri: string;
+      token: string;
+      collection: string;
+    }>;
   }) => post<MemoryVectorStatus>("/memory/vector/config", body),
   memoryVectorInstall: () =>
     post<MemoryVectorStatus & {
@@ -1988,6 +2065,7 @@ export const clientApi = {
         turn_id?: string;
         ts?: string;
         meta?: Record<string, unknown>;
+        turn?: Record<string, unknown> | null;
       }>;
       count: number;
       error?: string;

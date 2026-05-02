@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { callApi, clientApi, type ApprovalCard } from "../../lib/clientApi";
 import {
   ChatMessage,
@@ -11,11 +12,9 @@ import {
   LiveEvent,
   TurnPayload,
   deriveTitle,
-  loadActiveId,
   loadRunSettings,
   loadThreads,
   newThread,
-  saveActiveId,
   saveRunSettings,
   saveThreads,
   upsertThread,
@@ -97,17 +96,17 @@ function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
   );
 }
 
-export function ChatView() {
+export function ChatView({ sessionId }: { sessionId?: string } = {}) {
+  const router = useRouter();
   const [threads, setThreads] = useState<ChatThread[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [hydrated, setHydrated] = useState(false);
+  const [missingSession, setMissingSession] = useState(false);
   const [settings, setSettings] = useState<ChatRunSettings>(
     DEFAULT_CHAT_RUN_SETTINGS,
   );
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
-  const [modelProviders, setModelProviders] = useState<string[]>([]);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [pendingApprovals, setPendingApprovals] = useState<Map<string, ApprovalCard>>(
@@ -142,15 +141,9 @@ export function ChatView() {
 
   useEffect(() => {
     const loaded = loadThreads();
-    const savedActive = loadActiveId();
     const savedSettings = loadRunSettings();
     setSettings(savedSettings);
     setThreads(loaded);
-    setActiveId(
-      savedActive && loaded.some((t) => t.id === savedActive)
-        ? savedActive
-        : loaded[0]?.id ?? null
-    );
     setHydrated(true);
     void hydrateModelOptions();
     // Fold in conversations that were started outside the dashboard
@@ -186,14 +179,12 @@ export function ChatView() {
       ]);
       const options: ChatModelOption[] = [];
       const seen = new Set<string>();
-      const providerSet = new Set<string>();
 
       if (tiersResp.status === "fulfilled") {
         for (const tier of tiersResp.value?.tiers ?? []) {
           const provider = String(tier.provider || "").trim().toLowerCase();
           const model = String(tier.model || "").trim();
           if (!provider || !model) continue;
-          providerSet.add(provider);
           const key = `tier:${tier.tier}:${provider}:${model}`;
           seen.add(`${provider}:${model}:${tier.tier || ""}`);
           options.push({
@@ -212,7 +203,6 @@ export function ChatView() {
         for (const [providerRaw, rows] of Object.entries(providers)) {
           const provider = providerRaw.trim().toLowerCase();
           if (!provider) continue;
-          providerSet.add(provider);
           for (const row of rows.slice(0, 120)) {
             const model = String(
               row.id || row.model || row.name || row.model_id || "",
@@ -233,7 +223,6 @@ export function ChatView() {
       }
 
       setModelOptions(options.slice(0, 240));
-      setModelProviders(Array.from(providerSet).sort());
     } catch {
       // The chat still works with the runtime default model.
     }
@@ -283,16 +272,16 @@ export function ChatView() {
   }
 
   function appendApprovalResolutionEvent(id: string, state: string) {
-    if (!id || !activeId) return;
+    if (!id || !sessionId) return;
     const resolved: LiveEvent = {
       kind: "approval.resolved",
       seq: Date.now(),
       ts: Date.now() / 1000,
       approval_id: id,
       state,
-      session_id: activeId,
+      session_id: sessionId,
     };
-    updateThread(activeId, (t) => ({
+    updateThread(sessionId, (t) => ({
       ...t,
       messages: t.messages.map((m) => {
         if (m.role !== "assistant") return m;
@@ -409,11 +398,36 @@ export function ChatView() {
           backend_message_id: m.message_id,
         });
       } else {
+        // May-01 2026 — assistant rows now carry the full turn payload
+        // (blocks / tool_trace / actions / budget) persisted by the
+        // kernel. Prefer it over the bare ``{reply_text, turn_id}``
+        // fallback so rehydrated sessions keep the tool_use timeline
+        // the user saw during the live turn. Older rows that predate
+        // the write still fall back to the minimal shape.
+        const persistedTurn =
+          m.turn && typeof m.turn === "object"
+            ? (m.turn as TurnPayload)
+            : null;
+        const turn: TurnPayload = persistedTurn
+          ? {
+              ...persistedTurn,
+              reply_text:
+                typeof persistedTurn.reply_text === "string" &&
+                persistedTurn.reply_text
+                  ? persistedTurn.reply_text
+                  : m.content,
+              turn_id:
+                typeof persistedTurn.turn_id === "string" &&
+                persistedTurn.turn_id
+                  ? persistedTurn.turn_id
+                  : m.turn_id,
+            }
+          : { reply_text: m.content, turn_id: m.turn_id };
         msgs.push({
           id: uuid(),
           role: "assistant",
           ts,
-          turn: { reply_text: m.content, turn_id: m.turn_id },
+          turn,
           elapsed_ms: 0,
           backend_message_id: m.message_id,
         });
@@ -480,18 +494,64 @@ export function ChatView() {
 
   useEffect(() => {
     if (!hydrated) return;
-    saveActiveId(activeId);
-  }, [activeId, hydrated]);
-
-  useEffect(() => {
-    if (!hydrated) return;
     saveRunSettings(settings);
   }, [settings, hydrated]);
 
   const active = useMemo(
-    () => threads.find((t) => t.id === activeId) || null,
-    [threads, activeId]
+    () => (sessionId ? threads.find((t) => t.id === sessionId) || null : null),
+    [threads, sessionId],
   );
+
+  // When the URL points at a session we haven't seen locally, pull its
+  // transcript from the backend. This is what makes deep links / refresh
+  // / curl-started sessions work without a prior visit.
+  useEffect(() => {
+    if (!hydrated || !sessionId) {
+      setMissingSession(false);
+      return;
+    }
+    if (threads.some((t) => t.id === sessionId)) {
+      setMissingSession(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const built = await buildImportedThread(sessionId, {});
+        if (cancelled) return;
+        if (built) {
+          setThreads((prev) => upsertThread(prev, built));
+          setMissingSession(false);
+        } else {
+          setMissingSession(true);
+        }
+      } catch {
+        if (!cancelled) setMissingSession(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, sessionId, threads]);
+
+  // Pick up a first message that was staged on `/chat` before the route
+  // switched to `/chat/[id]`. Running it here keeps the turn alive across
+  // the unmount/remount caused by navigation.
+  useEffect(() => {
+    if (!hydrated || !sessionId) return;
+    let pending: { threadId: string; text: string } | null = null;
+    try {
+      const raw = sessionStorage.getItem("nerya.chat.pendingFirstMessage");
+      if (raw) pending = JSON.parse(raw);
+    } catch {
+      pending = null;
+    }
+    if (!pending || pending.threadId !== sessionId) return;
+    sessionStorage.removeItem("nerya.chat.pendingFirstMessage");
+    void runAgentTurn(pending.text, { visibleUser: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, sessionId]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -504,7 +564,6 @@ export function ChatView() {
   function createThread(seedText?: string): ChatThread {
     const t = newThread(seedText);
     setThreads((prev) => upsertThread(prev, t));
-    setActiveId(t.id);
     return t;
   }
 
@@ -517,10 +576,12 @@ export function ChatView() {
   function deleteThread(id: string) {
     setThreads((prev) => {
       const next = prev.filter((t) => t.id !== id);
-      if (activeId === id) {
+      if (sessionId === id) {
         setEditingMessageId(null);
         setEditDraft("");
-        setActiveId(next[0]?.id ?? null);
+        const fallback = next[0]?.id;
+        if (fallback) router.replace(`/chat/${fallback}`);
+        else router.replace("/chat");
       }
       return next;
     });
@@ -683,6 +744,26 @@ export function ChatView() {
       thread = createThread(clean);
     }
     const threadId = thread.id;
+
+    // When we entered at `/chat` with no sessionId, we've just minted a
+    // thread id — move the browser to `/chat/[id]` via the sibling page.
+    // We stash the pending message in sessionStorage so the remounted
+    // ChatView continues the turn, because Next App Router unmounts this
+    // component on route change.
+    if (!sessionId && visibleUser) {
+      try {
+        sessionStorage.setItem(
+          "nerya.chat.pendingFirstMessage",
+          JSON.stringify({ threadId, text: clean }),
+        );
+      } catch {
+        // sessionStorage may be disabled; fall back to in-place send.
+      }
+      // Persist the freshly-created thread now so the next mount sees it.
+      saveThreads(upsertThread(threads, thread));
+      router.replace(`/chat/${threadId}`);
+      return;
+    }
 
     const userMsgId = uuid();
     const assistantId = uuid();
@@ -922,14 +1003,31 @@ export function ChatView() {
     <div className="h-[calc(100vh-0px)] flex">
       <ChatSidebar
         threads={threads}
-        activeId={activeId}
-        onPick={setActiveId}
-        onNew={() => createThread()}
+        activeId={sessionId ?? null}
+        onPick={(id) => router.push(`/chat/${id}`)}
+        onNew={() => router.push("/chat")}
         onDelete={deleteThread}
       />
       <div className="flex-1 flex flex-col min-w-0">
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
-          {!active || active.messages.length === 0 ? (
+          {sessionId && missingSession ? (
+            <div className="max-w-xl mx-auto px-6 py-16 text-center">
+              <h2 className="text-lg text-white font-semibold mb-2">
+                Session not found
+              </h2>
+              <p className="text-sm text-ink-400 mb-6">
+                The conversation <span className="font-mono">{sessionId}</span>{" "}
+                isn't available locally and the backend has no transcript for
+                it.
+              </p>
+              <button
+                onClick={() => router.push("/chat")}
+                className="glass hover:bg-white/[0.05] hover:border-brand-500/30 px-4 py-2 text-sm text-white transition-colors"
+              >
+                Start a new chat
+              </button>
+            </div>
+          ) : !active || active.messages.length === 0 ? (
             <EmptyState onPrompt={(p) => setInput(p)} />
           ) : (
             <div className="max-w-4xl mx-auto px-4 py-6 space-y-5">
@@ -975,7 +1073,6 @@ export function ChatView() {
           settings={settings}
           onSettingsChange={setSettings}
           modelOptions={modelOptions}
-          modelProviders={modelProviders}
         />
       </div>
     </div>

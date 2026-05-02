@@ -80,8 +80,13 @@ def _health(client, _params) -> dict[str, Any]:
 
 
 def routes():
+    # ``/meta`` and ``/health`` are the protocol-standard paths the
+    # anet gateway probes during ``svc register`` and ``svc meta``;
+    # the ``/anet/...`` aliases exist so Nerya operators can curl the
+    # integration-specific flavour without touching the gateway probe.
     return [
         ("GET", "/anet/health", _health),
         ("GET", "/anet/meta", _meta),
         ("GET", "/anet/status", _status),
+        ("GET", "/meta", _meta),
     ]

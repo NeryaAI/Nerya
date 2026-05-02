@@ -572,6 +572,54 @@ function payloadRoles(payload: unknown): string[] {
   return stringArray(p.roles);
 }
 
+function TextPanel({
+  label,
+  text,
+  maxH = "max-h-72",
+}: {
+  label: string;
+  text: unknown;
+  maxH?: string;
+}) {
+  const body = typeof text === "string" ? text : "";
+  if (!body.trim()) return null;
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[10px] uppercase tracking-wider text-ink-400">
+          {label}
+        </div>
+        <CopyButton text={body} />
+      </div>
+      <pre
+        className={`whitespace-pre-wrap text-[11px] font-mono text-ink-200 bg-ink-900/70 border border-ink-700/70 rounded-md p-2 overflow-auto ${maxH}`}
+      >
+        {body}
+      </pre>
+    </div>
+  );
+}
+
+function JsonPanel({ label, value }: { label: string; value: unknown }) {
+  if (value === undefined || value === null || value === "") return null;
+  if (Array.isArray(value) && value.length === 0) return null;
+  if (
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(recordOf(value)).length === 0
+  ) {
+    return null;
+  }
+  return (
+    <div className="space-y-1">
+      <div className="text-[10px] uppercase tracking-wider text-ink-400">
+        {label}
+      </div>
+      <JsonBlock value={value} />
+    </div>
+  );
+}
+
 function NativeAgentToolIntro({ block }: { block: NativeBlock }) {
   const action = String(block.action || "");
   const payload = recordOf(block.payload);
@@ -715,28 +763,158 @@ function NativeTeamTraceBlock({
         {goal && goal !== task ? (
           <div className="text-[11px] text-ink-300 leading-relaxed">{goal}</div>
         ) : null}
+        {block.collaboration_model ? (
+          <div className="rounded-md border border-brand-500/20 bg-brand-500/[0.04] px-2.5 py-2 text-[11px] text-ink-300 leading-relaxed">
+            {String(block.collaboration_model)}
+          </div>
+        ) : null}
+        <JsonPanel label="team aggregate" value={block.aggregated} />
+        <JsonPanel label="team results" value={block.results} />
+        <JsonPanel label="team failures" value={block.failures} />
         {memberNames.length ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
             {memberNames.map((name) => {
               const member = recordOf(members[name]);
               const state = String(member.status || "planned");
+              const memberSteps = arrayOfRecords(member.steps);
+              const promptStep = [...memberSteps]
+                .reverse()
+                .find((s) => typeof s.prompt === "string" && String(s.prompt).trim());
               return (
-                <div
+                <Collapsible
                   key={name}
-                  className="rounded-md border border-ink-700/60 bg-ink-900/45 px-2.5 py-2"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs text-ink-100 truncate">
-                      {name}
+                  title={
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span className="text-ink-400">member</span>
+                      <span className="font-mono text-ink-100 truncate">
+                        {name}
+                      </span>
                     </span>
-                    <Tag tone={traceTone(state)}>{state}</Tag>
-                  </div>
-                  {member.error ? (
-                    <div className="mt-1 text-[11px] text-[#ef5564] break-words">
-                      {String(member.error)}
+                  }
+                  tone={traceTone(state)}
+                  defaultOpen={
+                    defaultOpen ||
+                    live ||
+                    memberNames.length <= 4 ||
+                    state === "running"
+                  }
+                  badge={<Tag tone={traceTone(state)}>{state}</Tag>}
+                  right={
+                    <span className="flex items-center gap-1">
+                      {compactNumber(member.tokens)}
+                      {compactNumber(member.usd, "usd")}
+                      {compactNumber(member.wall_ms, "ms")}
+                    </span>
+                  }
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-1 flex-wrap">
+                      {member.team_task_id ? (
+                        <Tag tone="brand">{String(member.team_task_id)}</Tag>
+                      ) : null}
+                      {member.tier ? <Tag>{String(member.tier)}</Tag> : null}
+                      {Array.isArray(member.payload_keys)
+                        ? member.payload_keys.map((key) => (
+                            <Tag key={String(key)}>{String(key)}</Tag>
+                          ))
+                        : null}
                     </div>
-                  ) : null}
-                </div>
+                    {member.team_task_subject ? (
+                      <div className="text-[11px] text-ink-300 leading-relaxed">
+                        {String(member.team_task_subject)}
+                      </div>
+                    ) : null}
+                    {member.error ? (
+                      <div className="text-[11px] text-[#ef5564] break-words">
+                        {String(member.error)}
+                      </div>
+                    ) : null}
+                    <TextPanel
+                      label="assignment prompt"
+                      text={member.assignment_prompt}
+                    />
+                    <TextPanel
+                      label="role prompt"
+                      text={member.role_prompt}
+                      maxH="max-h-56"
+                    />
+                    <TextPanel
+                      label="runtime prompt sent to subagent"
+                      text={member.last_prompt || promptStep?.prompt}
+                      maxH="max-h-96"
+                    />
+                    <JsonPanel
+                      label="input payload"
+                      value={member.payload || member.input_payload}
+                    />
+                    <JsonPanel label="output" value={member.output} />
+                    <JsonPanel label="metrics" value={member.metrics} />
+                    {memberSteps.length ? (
+                      <Collapsible
+                        title="member step stream"
+                        tone="neutral"
+                        defaultOpen={
+                          defaultOpen ||
+                          live ||
+                          memberNames.length <= 4 ||
+                          state === "running"
+                        }
+                        badge={<Tag>{memberSteps.length}</Tag>}
+                      >
+                        <div className="space-y-1.5">
+                          {memberSteps.map((step, j) => {
+                            const label = String(
+                              step.step_kind || step.lifecycle || "step",
+                            );
+                            return (
+                              <div
+                                key={j}
+                                className="rounded-md border border-ink-700/50 bg-ink-900/35 px-2.5 py-2"
+                              >
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-xs text-ink-100">
+                                    {label}
+                                  </span>
+                                  {typeof step.iteration === "number" ? (
+                                    <Tag>{`iter ${step.iteration}`}</Tag>
+                                  ) : null}
+                                  {step.status ? (
+                                    <Tag tone={traceTone(String(step.status))}>
+                                      {String(step.status)}
+                                    </Tag>
+                                  ) : null}
+                                  {step.skill ? <Tag>{String(step.skill)}</Tag> : null}
+                                  {step.action ? <Tag>{String(step.action)}</Tag> : null}
+                                  {step.prompt_chars ? (
+                                    <Tag>{`${String(step.prompt_chars)} chars`}</Tag>
+                                  ) : null}
+                                  {compactNumber(step.wall_ms, "ms")}
+                                </div>
+                                {step.error ? (
+                                  <div className="mt-1 text-[11px] text-[#ef5564] break-words">
+                                    {String(step.error)}
+                                  </div>
+                                ) : null}
+                                <TextPanel
+                                  label="prompt"
+                                  text={step.prompt}
+                                  maxH="max-h-72"
+                                />
+                                <TextPanel
+                                  label="reasoning"
+                                  text={step.reasoning}
+                                  maxH="max-h-56"
+                                />
+                                <JsonPanel label="payload" value={step.payload} />
+                                <JsonPanel label="output" value={step.output} />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </Collapsible>
+                    ) : null}
+                  </div>
+                </Collapsible>
               );
             })}
           </div>
@@ -766,6 +944,9 @@ function NativeTeamTraceBlock({
                     {step.phase ? <Tag>{`phase ${String(step.phase)}`}</Tag> : null}
                     {step.task_id ? <Tag>{String(step.task_id)}</Tag> : null}
                     {step.artifact ? <Tag tone="brand">{String(step.artifact)}</Tag> : null}
+                    {step.prompt_chars ? (
+                      <Tag>{`${String(step.prompt_chars)} chars`}</Tag>
+                    ) : null}
                   </div>
                   {step.subject ? (
                     <div className="mt-1 text-[11px] text-ink-300 break-words">
@@ -797,6 +978,9 @@ function NativeTeamTraceBlock({
                       <JsonBlock value={step.outcomes} />
                     </div>
                   ) : null}
+                  <JsonPanel label="payload" value={step.payload || step.input_payload} />
+                  <JsonPanel label="output" value={step.output} />
+                  <JsonPanel label="metrics" value={step.metrics} />
                   {step.raw ? (
                     <div className="mt-2">
                       <Collapsible
@@ -881,6 +1065,15 @@ function NativeSubagentTraceBlock({
             ))}
           </div>
         ) : null}
+        <TextPanel label="role prompt" text={block.role_prompt} maxH="max-h-56" />
+        <TextPanel
+          label="runtime prompt sent to subagent"
+          text={block.last_prompt}
+          maxH="max-h-96"
+        />
+        <JsonPanel label="input payload" value={block.payload} />
+        <JsonPanel label="output" value={block.output} />
+        <JsonPanel label="metrics" value={block.metrics} />
         {steps.length ? (
           <div className="space-y-1.5">
             {steps.map((step, i) => {
@@ -909,6 +1102,9 @@ function NativeSubagentTraceBlock({
                     ) : null}
                     {step.provider ? <Tag>{String(step.provider)}</Tag> : null}
                     {step.model ? <Tag>{String(step.model)}</Tag> : null}
+                    {step.prompt_chars ? (
+                      <Tag>{`${String(step.prompt_chars)} chars`}</Tag>
+                    ) : null}
                     {compactNumber(step.wall_ms, "ms")}
                   </div>
                   {parsedKeys.length ? (
@@ -928,6 +1124,9 @@ function NativeSubagentTraceBlock({
                       {String(step.reasoning)}
                     </pre>
                   ) : null}
+                  <TextPanel label="prompt" text={step.prompt} maxH="max-h-72" />
+                  <JsonPanel label="payload" value={step.payload} />
+                  <JsonPanel label="output" value={step.output} />
                 </div>
               );
             })}
@@ -1026,6 +1225,14 @@ export function NativeBlocksTrack({
       pendingIdx = envelopes.length - 1;
     }
   }
+  const teamRunIds = new Set<string>();
+  envelopes.forEach((env) => {
+    const block = unwrapBlock(env);
+    const kind = (block.kind || env.kind || "").toString();
+    if (kind !== "team_trace") return;
+    const id = String(block.run_id || block.team_key || "");
+    if (id) teamRunIds.add(id);
+  });
   return (
     <div className="space-y-1.5">
       {label || live ? (
@@ -1079,7 +1286,9 @@ export function NativeBlocksTrack({
               live={live}
             />
           );
-        if (kind === "subagent_trace")
+        if (kind === "subagent_trace") {
+          const teamRunId = String(block.team_run_id || "");
+          if (teamRunId && teamRunIds.has(teamRunId)) return null;
           return (
             <NativeSubagentTraceBlock
               key={i}
@@ -1088,6 +1297,7 @@ export function NativeBlocksTrack({
               live={live}
             />
           );
+        }
         if (kind === "approval_request") {
           const id = approvalIdFromEvent(block as Record<string, unknown>);
           return (

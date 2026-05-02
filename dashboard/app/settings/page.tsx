@@ -220,14 +220,37 @@ export default function SettingsPage() {
   const [memoryBusy, setMemoryBusy] = useState("");
   const [memoryQuery, setMemoryQuery] = useState("");
   const [memoryResults, setMemoryResults] = useState<Array<Record<string, unknown>>>([]);
+  const [embProvider, setEmbProvider] = useState("openai");
+  const [embModel, setEmbModel] = useState("text-embedding-3-small");
+  const [embBaseUrl, setEmbBaseUrl] = useState("");
+  const [embKeyRef, setEmbKeyRef] = useState("");
+  const [milvusUri, setMilvusUri] = useState("~/.memsearch/milvus.db");
+  const [milvusToken, setMilvusToken] = useState("");
+  const [milvusCollection, setMilvusCollection] = useState("memsearch_chunks");
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
   async function loadMemoryStatus() {
     try {
-      setMemoryStatus(await clientApi.memoryVectorStatus());
+      const next = await clientApi.memoryVectorStatus();
+      setMemoryStatus(next);
+      syncMemoryDrafts(next);
     } catch {
       setMemoryStatus(null);
+    }
+  }
+
+  function syncMemoryDrafts(s: MemoryVectorStatus | null | undefined) {
+    if (!s) return;
+    if (s.embedding) {
+      setEmbProvider(s.embedding.provider || "openai");
+      setEmbModel(s.embedding.model || "text-embedding-3-small");
+      setEmbBaseUrl(s.embedding.base_url || "");
+      setEmbKeyRef(s.embedding.api_key_ref || "");
+    }
+    if (s.milvus) {
+      setMilvusUri(s.milvus.uri || "~/.memsearch/milvus.db");
+      setMilvusCollection(s.milvus.collection || "memsearch_chunks");
     }
   }
 
@@ -265,6 +288,7 @@ export default function SettingsPage() {
       setModelCatalog(nextCatalog);
       setVenues((venueRes.venues || []).map((v) => ({ name: v.name, label: v.label })));
       setMemoryStatus(memoryRes);
+      syncMemoryDrafts(memoryRes);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -846,6 +870,132 @@ export default function SettingsPage() {
                 {memoryStatus?.backend || "memsearch"}
               </span>
             </Row>
+            <div className="mt-3 space-y-3 rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
+              <div className="flex items-center justify-between">
+                <div className="text-[12px] font-medium text-ink-100">Embedding provider</div>
+                <span className="text-[10px] uppercase tracking-wider text-ink-500">
+                  {memoryStatus?.embedding?.has_key ? "key resolved" : "no key resolved"}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Provider">
+                  <Select
+                    value={embProvider}
+                    onChange={setEmbProvider}
+                    options={[
+                      { value: "openai", label: "OpenAI / OpenAI-compatible" },
+                      { value: "google", label: "Google (Gemini)" },
+                      { value: "voyage", label: "Voyage" },
+                      { value: "ollama", label: "Ollama" },
+                      { value: "local", label: "Local (sentence-transformers)" },
+                    ]}
+                  />
+                </Field>
+                <Field label="Model" hint="see provider docs">
+                  <input
+                    className="input-dark text-xs"
+                    value={embModel}
+                    onChange={(e) => setEmbModel(e.target.value)}
+                    placeholder="text-embedding-3-small"
+                  />
+                </Field>
+                <Field
+                  label="Base URL"
+                  hint={embProvider === "openai" ? "optional, e.g. https://ai.gitee.com/v1" : "provider-specific"}
+                >
+                  <input
+                    className="input-dark text-xs"
+                    value={embBaseUrl}
+                    onChange={(e) => setEmbBaseUrl(e.target.value)}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                </Field>
+                <Field label="API key ref" hint="reuse existing LLM provider key">
+                  <div className="flex gap-2">
+                    <Select
+                      value={embKeyRef}
+                      onChange={setEmbKeyRef}
+                      options={[
+                        { value: "", label: "— none —" },
+                        ...providerProfiles
+                          .filter((p) => (p.provider_key_ref || "").startsWith("vault://"))
+                          .map((p) => ({
+                            value: String(p.provider_key_ref || ""),
+                            label: `${p.provider} (${String(p.provider_key_ref || "").replace("vault://", "")})`,
+                          })),
+                      ]}
+                    />
+                  </div>
+                </Field>
+              </div>
+              <div className="text-[11px] text-ink-500">
+                Milvus store (leave defaults to use the local file-backed vector store).
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Milvus URI">
+                  <input
+                    className="input-dark text-xs"
+                    value={milvusUri}
+                    onChange={(e) => setMilvusUri(e.target.value)}
+                    placeholder="~/.memsearch/milvus.db"
+                  />
+                </Field>
+                <Field label="Collection">
+                  <input
+                    className="input-dark text-xs"
+                    value={milvusCollection}
+                    onChange={(e) => setMilvusCollection(e.target.value)}
+                    placeholder="memsearch_chunks"
+                  />
+                </Field>
+                <Field
+                  label="Milvus token"
+                  hint={memoryStatus?.milvus?.has_token ? "token stored" : "optional"}
+                >
+                  <input
+                    className="input-dark text-xs"
+                    type="password"
+                    value={milvusToken}
+                    onChange={(e) => setMilvusToken(e.target.value)}
+                    placeholder={memoryStatus?.milvus?.has_token ? "•••••••• (unchanged)" : "optional"}
+                  />
+                </Field>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={memoryBusy === "save"}
+                  onClick={() =>
+                    void runMemoryAction("save", async () => {
+                      const res = await clientApi.memoryVectorConfig({
+                        embedding: {
+                          provider: embProvider,
+                          model: embModel.trim(),
+                          base_url: embBaseUrl.trim(),
+                          api_key_ref: embKeyRef.trim(),
+                        },
+                        milvus: {
+                          uri: milvusUri.trim(),
+                          collection: milvusCollection.trim(),
+                          // Only send token when user typed something: empty
+                          // means "keep existing" so we don't overwrite a
+                          // previously-saved secret with blanks.
+                          ...(milvusToken ? { token: milvusToken } : {}),
+                        },
+                      });
+                      if (res.ok) {
+                        setInfo("Memory vector embedding settings saved.");
+                        setMilvusToken("");
+                      }
+                      return res;
+                    })
+                  }
+                >
+                  Save embedding settings
+                </button>
+              </div>
+            </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"

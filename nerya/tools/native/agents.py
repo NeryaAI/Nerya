@@ -21,9 +21,12 @@ that crashes the agent loop.
 
 from __future__ import annotations
 
+import json
+import uuid
 from typing import Any
 
 from ...core.config import Config
+from ...core.redaction import redact_display_dict, redact_text
 from ...skills.kernel import SkillKernel
 from ...subagents.dispatcher import SubAgentDispatcher
 from ...subagents.registry import (
@@ -56,6 +59,44 @@ def _publish_team_event(kind: str, **payload: Any) -> None:
         get_default_bus().publish(kind, **payload)
     except Exception:
         pass
+
+
+def _team_assignment_prompt(
+    *,
+    task: str,
+    role_name: str,
+    payload: dict[str, Any],
+    instructions: str = "",
+) -> str:
+    lines = [
+        "Agent Team member assignment",
+        "",
+        f"Team mission: {task}",
+        f"Role: {role_name}",
+    ]
+    if instructions:
+        lines.extend(["", "Role-specific instructions:", instructions])
+    lines.extend([
+        "",
+        "Input payload:",
+        json.dumps(redact_display_dict(payload), ensure_ascii=False, indent=2, default=str),
+    ])
+    return redact_text("\n".join(lines))
+
+
+def _coerce_roles_arg(raw_roles: Any) -> list[Any]:
+    if isinstance(raw_roles, list):
+        return raw_roles
+    if isinstance(raw_roles, str) and raw_roles.strip():
+        try:
+            parsed = json.loads(raw_roles)
+        except Exception:
+            return []
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict) and isinstance(parsed.get("roles"), list):
+            return list(parsed["roles"])
+    return []
 
 
 SUBAGENT_LIST_SCHEMA: dict[str, Any] = {
@@ -224,7 +265,8 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
                 "List of roles to spawn in parallel. Each entry is "
                 "{name: <role>, payload: {...}}. ``name`` must match a "
                 "registered subagent (workspace or default). ``payload`` "
-                "is merged on top of the shared ``shared_payload``."
+                "is merged on top of the shared ``shared_payload``. Pass "
+                "this as a real JSON array, not a stringified JSON array."
             ),
             "items": {
                 "type": "object",
@@ -333,14 +375,17 @@ def team_run_handler(
             ),
         )
 
-    raw_roles = args.get("roles") or []
+    raw_roles = _coerce_roles_arg(args.get("roles"))
     if not isinstance(raw_roles, list) or not raw_roles:
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
             error=ToolError(
                 kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="roles must be a non-empty list",
+                message=(
+                    "roles must be a non-empty array of objects, e.g. "
+                    "[{\"name\":\"market_analyst\"}, {\"name\":\"risk_critic\"}]"
+                ),
             ),
         )
 
@@ -367,8 +412,13 @@ def team_run_handler(
         except Exception:
             usd_budget = None
 
+    team_run_id = str(args.get("team_run_id") or "").strip()
+    if not team_run_id:
+        team_run_id = f"team-{uuid.uuid4().hex[:10]}"
+    team_template = str(args.get("team_template") or "ad_hoc_parallel_team")
     role_names: list[str] = []
     role_payloads: dict[str, dict[str, Any]] = {}
+    role_assignment_prompts: dict[str, str] = {}
     for entry in raw_roles:
         if not isinstance(entry, dict):
             return ToolResult.from_error(
@@ -403,10 +453,22 @@ def team_run_handler(
         per_role = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
         merged.update(per_role)
         merged["__team_task"] = task
+        merged["team_run_id"] = team_run_id
+        merged["team_template"] = team_template
+        merged["team_call_id"] = call.id
+        merged["task_id"] = f"role-{role_name}"
+        merged["task_owner"] = role_name
+        merged["task_subject"] = task
         instructions = (entry.get("instructions") or "").strip()
         if instructions:
             merged["__team_instructions"] = instructions
         role_payloads[role_name] = merged
+        role_assignment_prompts[role_name] = _team_assignment_prompt(
+            task=task,
+            role_name=role_name,
+            payload=merged,
+            instructions=instructions,
+        )
 
     dispatcher = SubAgentDispatcher(config=config, skills=skills)
 
@@ -426,12 +488,20 @@ def team_run_handler(
         "call_id": call.id,
         "tool_call_id": call.id,
         "turn_id": call.turn_id,
+        "team_run_id": team_run_id,
+        "team_template": team_template,
         "session_id": session_id,
         "strategy_id": strategy_id,
         "trigger_event_id": trigger_event_id,
         "task": task,
+        "goal": task,
         "roles": role_names,
         "max_parallel": workers,
+        "collaboration_model": (
+            "Agent Team run: each member is a subagent runtime with its "
+            "own prompt/input/tool loop; team_run aggregates all member "
+            "outputs into one committee result."
+        ),
     }
     _publish_team_event("team.start", **common_event)
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="team") as pool:
@@ -452,6 +522,11 @@ def team_run_handler(
                 subagent=role_name,
                 role=role_name,
                 status="running",
+                team_task_id=f"role-{role_name}",
+                team_task_owner=role_name,
+                team_task_subject=task,
+                payload=redact_display_dict(role_payloads[role_name]),
+                assignment_prompt=role_assignment_prompts[role_name],
                 **common_event,
             )
         for fut in as_completed(futs):
@@ -487,6 +562,8 @@ def team_run_handler(
                 "usd": usd,
                 "wall_ms": envelope.get("wall_ms", 0),
                 "output": envelope.get("output") or {},
+                "metrics": envelope.get("metrics") or {},
+                "steps": envelope.get("steps") or [],
                 "error": envelope.get("error"),
                 "error_kind": envelope.get("error_kind"),
             }
@@ -505,6 +582,11 @@ def team_run_handler(
                 tokens=entry.get("tokens"),
                 usd=entry.get("usd"),
                 wall_ms=entry.get("wall_ms"),
+                team_task_id=f"role-{role_name}",
+                team_task_owner=role_name,
+                team_task_subject=task,
+                output=redact_display_dict(entry.get("output") or {}),
+                metrics=redact_display_dict(entry.get("metrics") or {}),
                 **common_event,
             )
             if usd_budget is not None and spent >= usd_budget:
@@ -556,6 +638,9 @@ def team_run_handler(
         roles_failed=summary["roles_failed"],
         tokens_total=summary["tokens_total"],
         usd_total=summary["usd_total"],
+        results=redact_display_dict(results),
+        failures=redact_display_dict(failures),
+        aggregated=redact_display_dict(aggregated),
         **common_event,
     )
     return ToolResult.from_json(

@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 from ..core import jsonl
 from ..core.config import Config
+from ..core.redaction import redact_display_dict
 from ..core.time import now_iso
 from ..skills.kernel import SkillKernel
 from ..subagents.dispatcher import SubAgentDispatcher, SubAgentResult
@@ -252,11 +253,18 @@ class TeamOrchestrator:
                     t = index[tid]
                     t.status = "in_progress"
                     t.started_at = now_iso()
-                    self.store.update_task(t)
                     payload = self._task_payload(
                         run=run, template=template, task=t,
                         blackboard=bb, mailbox=mailbox,
                     )
+                    t.payload = {
+                        **(t.payload or {}),
+                        "input_payload": redact_display_dict(payload),
+                        "assignment_prompt": self._assignment_prompt(
+                            run=run, template=template, task=t, payload=payload,
+                        ),
+                    }
+                    self.store.update_task(t)
                     futures[pool.submit(
                         self._run_task,
                         task=t, payload=payload,
@@ -303,6 +311,29 @@ class TeamOrchestrator:
                 "from your `allowed_skills`."
             ),
         }
+
+    def _assignment_prompt(
+        self,
+        *,
+        run: TeamRun,
+        template: TeamTemplate,
+        task: TeamTask,
+        payload: dict[str, Any],
+    ) -> str:
+        return "\n".join([
+            "Agent Team task assignment",
+            "",
+            f"Team template: {template.id}",
+            f"Team goal: {run.goal}",
+            f"Task id: {task.id}",
+            f"Owner: {task.owner}",
+            f"Subagent: {task.subagent_name}",
+            f"Subject: {task.subject}",
+            f"Description: {task.description}",
+            "",
+            "Input payload:",
+            json.dumps(redact_display_dict(payload), ensure_ascii=False, indent=2, default=str),
+        ])
 
     def _run_task(
         self,

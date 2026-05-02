@@ -1,0 +1,43 @@
+initial_capital_usd: 10000
+warmup_bars: 50
+min_backtest_days: 30
+window_days: 30
+tf: "1h"
+markets: []
+indicators:
+  sma: [20, 50]
+  ema: [12, 26]
+  rsi: [14]
+  atr: [14]
+fee_bps_by_venue:
+  BINANCE: 2
+  COINBASE: 5
+  YAHOO: 5
+  ALPACA: 1
+  DEX: 30
+slip_bps_by_venue:
+  BINANCE: 1
+  COINBASE: 2
+  YAHOO: 2
+  ALPACA: 1
+  DEX: 10
+fill_mode: "entry_current_open__exit_next_open"
+allow_short: false
+max_open_trades: 1
+stake_amount:
+  mode: "unlimited"
+  fixed_usd: null
+mock_surfaces:
+  news: {mode: "error"}
+  llm: {mode: "error"}
+  onchain: {mode: "error"}
+  subagents: {mode: "error"}
+  team: {mode: "error"}
+  messages: {mode: "error"}
+thresholds:
+  drawdown_episode_min_pct: 3.0
+  missed_profit_min_move_pct: 5.0
+  missed_profit_max_noise_pct: 2.0
+risk_free_daily: 0.0
+benchmark_mode: "buy_hold_equal_weight"
+

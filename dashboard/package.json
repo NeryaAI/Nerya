@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "lightweight-charts": "^4.2.0",
+    "nerya-workspace": "file:..",
     "next": "14.2.15",
     "react": "18.3.1",
     "react-dom": "18.3.1",

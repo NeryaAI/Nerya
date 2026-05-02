@@ -74,7 +74,7 @@ def run(ctx) -> dict:
         return {"decision": "HOLD", "reason": "trigger had no headline"}
 
     headline_id = str(headline.get("id") or "")
-    if headline_id and ctx.memory.has_seen(f"hl:{headline_id}"):
+    if headline_id and ctx.dedupe.seen(f"hl:{headline_id}"):
         return {"decision": "HOLD",
                 "reason": f"already processed {headline_id}"}
 
@@ -84,46 +84,49 @@ def run(ctx) -> dict:
         user=json.dumps({
             "headline": headline,
             "market": market,
-            "now": ctx.now().isoformat(),
+            "now": ctx.clock.now_iso(),
         }),
         max_tokens=120,
         response_format="json",
     )
     if headline_id:
-        ctx.memory.mark_seen(f"hl:{headline_id}")
+        ctx.dedupe.mark(f"hl:{headline_id}")
     if not relevance.get("relevant"):
         return {"decision": "HOLD",
                 "reason": f"filter dropped: {relevance.get('reason')}",
                 "filter": relevance}
 
-    recent = ctx.news.recent(
-        tags_any=["election", "polling", "campaign-finance"],
-        minutes=int(payload.get("lookback_minutes") or 30),
+    recent = ctx.news.fetch(
+        sources=["reuters", "bloomberg", "nytimes", "ap"],
+        since=payload.get("since"),
         limit=20,
     )
-    book = ctx.market_data.orderbook(market, depth=10)
+    book = ctx.market.orderbook(market, depth=10)
     yes_mid = (book["yes"]["bid"] + book["yes"]["ask"]) / 2
 
-    team = ctx.team.run({
-        "task": (
-            f"New headline arrived: {headline.get('text')!r}. "
-            f"Should we move on Polymarket {market} (YES mid={yes_mid:.3f})?"
-        ),
-        "roles": [
-            {"name": "market_analyst",
-             "payload": {"market": market, "yes_mid": yes_mid,
-                         "book": book, "headline": headline}},
-            {"name": "news_interpreter",
-             "payload": {"headline": headline, "recent": recent}},
-            {"name": "risk_critic",
-             "payload": {"strategy_id": ctx.strategy_id,
-                         "headline": headline}},
-        ],
-        "shared_payload": {"window_hours": 24,
-                           "kind": "polymarket-headline"},
-        "max_parallel": 3,
-        "usd_budget": 0.40,
-    })
+    team = ctx.subagents.run(
+        "team",
+        payload={
+            "task": (
+                f"New headline arrived: {headline.get('text')!r}. "
+                f"Should we move on Polymarket {market} (YES mid={yes_mid:.3f})?"
+            ),
+            "roles": [
+                {"name": "market_analyst",
+                 "payload": {"market": market, "yes_mid": yes_mid,
+                             "book": book, "headline": headline}},
+                {"name": "news_interpreter",
+                 "payload": {"headline": headline, "recent": recent}},
+                {"name": "risk_critic",
+                 "payload": {"strategy_id": ctx.strategy_id,
+                             "headline": headline}},
+            ],
+            "shared_payload": {"window_hours": 24,
+                               "kind": "polymarket-headline"},
+            "max_parallel": 3,
+            "usd_budget": 0.40,
+        },
+    )
 
     failures = team.get("roles_failed") or []
     if failures:
@@ -142,28 +145,30 @@ def run(ctx) -> dict:
                 "team": team}
 
     side = "yes" if any(d == "ENTRY_YES" for d in decisions) else "no"
-    qty_usd = min(ctx.limits.max_single_order_usd, 50.0)
-    intent = ctx.trading.submit_intent({
-        "market": market,
-        "side": side,
-        "notional_usd": qty_usd,
-        "type": "market",
-        "dedup_key": f"polymkt:{headline_id or ctx.now().isoformat()}",
-    })
+    qty_usd = 50.0
+    intent = ctx.trading.submit_intent(
+        market=market,
+        side=side,
+        size=qty_usd,
+        size_unit="usd",
+        order_type="market",
+        reasoning=f"polymkt:{headline_id or ctx.clock.now_iso()}",
+    )
     return {
         "decision": "ENTRY",
         "reason": f"team agreed (conf={avg_conf:.2f}) side={side}",
-        "intent_id": intent.get("id"),
+        "intent_id": intent.get("intent_id"),
         "team": team,
         "filter": relevance,
     }
 ```
 
-## Backtest / paper plan
+## Custom replay / backtest plan
 
 Polymarket headline backtests are lossy: news timestamps slip and team
-verdicts are LLM-stochastic. Ship a paper-trade plan instead, plus a
-*replay* test that pins LLM responses:
+verdicts are LLM-stochastic. Do not skip replay entirely. Ship a custom
+fixture replay that pins LLM/team responses, then add a paper-trade plan for
+the parts the replay cannot prove.
 
 ```python
 # tests/test_main.py
@@ -210,8 +215,34 @@ In `strategy.md`, document under `## Backtesting`:
 
 > Historical headline replay is unreliable for Polymarket because the
 > contract liquidity profile shifts mid-cycle. We rely on (a) the
-> stub-LLM unit tests above and (b) a 30-day paper-trade window with
-> daily review before any `live_trading_enabled: true` flip.
+> stub-LLM/team replay above, (b) a custom replay report under
+> `backtests/custom_replay_report.md`, and (c) a 30-day paper-trade window
+> with daily review before any `live_trading_enabled: true` flip.
+
+For OHLCV-only smoke tests, the same engine can be invoked with stubbed
+surfaces:
+
+```python
+stats = ctx.backtest_replay(
+    run,
+    mock_surfaces={
+        "news": {"mode": "stub", "payload": []},
+        "llm": {"mode": "stub", "payload": {"relevant": False, "reason": "fixture"}},
+        "subagents": {"mode": "stub", "payload": {"results": [], "aggregated": {"avg_confidence": 0}, "roles_failed": []}},
+    },
+)
+```
+
+For a richer custom replay, add `backtests/custom_replay.py` that reads
+`backtests/headline_fixture.jsonl`, calls `run(ctx)` once per headline, and
+writes:
+
+- `backtests/custom_replay_result.json`
+- `backtests/custom_replay_report.md`
+- `backtests/custom_replay_signals.csv`
+
+The report must list what was replayed, what was stubbed, every ENTRY/HOLD,
+and why this replay is still weaker than live paper trading.
 
 ## limits.yml
 

@@ -6,7 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..core import jsonl
 from ..core import yaml_io
+from ..core.redaction import redact_display_dict, redact_text
 from . import assets as evolution_assets
 from .event_store import list_events, list_signals
 from .patch_proposal import list_proposals
@@ -55,9 +57,25 @@ def build_timeline(
         strategy_id=strategy_id,
         limit=read_limit,
     )
+    strategy_audits = _strategy_tuning_audits(paths, strategy_id=strategy_id)
 
     proposals_by_id = {str(p.get("id") or ""): p for p in proposals}
     plans_by_id = {str(p.get("id") or ""): p for p in validation_plans}
+    audits_by_run = {
+        str(a.get("run_id") or ""): a
+        for a in strategy_audits
+        if a.get("run_id")
+    }
+    audits_by_proposal = {
+        str(a.get("proposal_id") or ""): a
+        for a in strategy_audits
+        if a.get("proposal_id")
+    }
+    audits_by_event = {
+        str(a.get("source_event_id") or ""): a
+        for a in strategy_audits
+        if a.get("source_event_id")
+    }
     candidates_by_source = _group_by(candidates, "source_event_id")
     capsules_by_source = _group_by(
         [row for row in asset_rows if row.get("kind") == "capsule"],
@@ -66,18 +84,34 @@ def build_timeline(
 
     items: list[dict[str, Any]] = []
     for row in signals:
-        items.append(_signal_item(row))
+        items.append(_signal_item(
+            row,
+            audit=_audit_for_refs(audits_by_run, row.get("evidence_refs")),
+        ))
     for row in events:
+        proposal = proposals_by_id.get(str(row.get("proposal_id") or ""))
         items.append(
             _event_item(
                 row,
-                proposal=proposals_by_id.get(str(row.get("proposal_id") or "")),
+                proposal=proposal,
+                validation_plan=_event_validation_plan(row, proposal, plans_by_id),
+                audit=(
+                    audits_by_event.get(str(row.get("id") or ""))
+                    or _audit_for_refs(audits_by_run, row.get("evidence_refs"))
+                ),
                 candidates=candidates_by_source.get(str(row.get("id") or ""), []),
                 capsules=capsules_by_source.get(str(row.get("id") or ""), []),
             )
         )
     for row in proposals:
-        items.append(_proposal_item(row, plans_by_id.get(str(row.get("validation_plan_id") or ""))))
+        items.append(_proposal_item(
+            row,
+            plans_by_id.get(str(row.get("validation_plan_id") or "")),
+            audit=(
+                audits_by_proposal.get(str(row.get("id") or ""))
+                or _audit_for_refs(audits_by_run, row.get("evidence_refs"))
+            ),
+        ))
     for row in validation_plans:
         items.append(_validation_item(row))
     for row in candidates:
@@ -115,11 +149,16 @@ def build_timeline(
             "assets": asset_rows,
             "candidates": candidates,
             "validation_plans": validation_plans,
+            "strategy_audits": strategy_audits,
         },
     }
 
 
-def _signal_item(row: dict[str, Any]) -> dict[str, Any]:
+def _signal_item(
+    row: dict[str, Any],
+    *,
+    audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     sid = str(row.get("id") or "")
     kind = str(row.get("kind") or "signal")
     severity = str(row.get("severity") or "info")
@@ -139,6 +178,7 @@ def _signal_item(row: dict[str, Any]) -> dict[str, Any]:
         "evidence_refs": _str_list(row.get("evidence_refs")),
         "why": row.get("summary") or f"Runtime emitted {kind}.",
         "next_step": _next_step_for_signal(severity),
+        "process": _process_trace(row=row, audit=audit),
         "raw": row,
     }
 
@@ -147,6 +187,8 @@ def _event_item(
     row: dict[str, Any],
     *,
     proposal: dict[str, Any] | None,
+    validation_plan: dict[str, Any] | None,
+    audit: dict[str, Any] | None,
     candidates: list[dict[str, Any]],
     capsules: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -182,6 +224,12 @@ def _event_item(
         "evidence_refs": _str_list(row.get("evidence_refs")),
         "why": _why_for_event(row),
         "next_step": _next_step_for_event(outcome, row.get("validation_status")),
+        "process": _process_trace(
+            row=row,
+            proposal=proposal,
+            validation_plan=validation_plan,
+            audit=audit,
+        ),
         "raw": row,
     }
 
@@ -189,6 +237,8 @@ def _event_item(
 def _proposal_item(
     row: dict[str, Any],
     validation_plan: dict[str, Any] | None,
+    *,
+    audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     pid = str(row.get("id") or "")
     state = str(row.get("state") or "draft")
@@ -209,6 +259,12 @@ def _proposal_item(
         "evidence_refs": _str_list(row.get("evidence_refs")),
         "why": row.get("summary") or "Proposal was created from evolution evidence.",
         "next_step": _next_step_for_proposal(state, bool(row.get("validation_plan_id"))),
+        "process": _process_trace(
+            row=row,
+            proposal=row,
+            validation_plan=validation_plan,
+            audit=audit,
+        ),
         "raw": row,
     }
 
@@ -237,6 +293,7 @@ def _validation_item(row: dict[str, Any]) -> dict[str, Any]:
             "Resolve blocked validation commands before review."
             if blocked else "Run a dry-run from the dashboard before approval."
         ),
+        "process": _process_trace(row=row, validation_plan=row),
         "raw": row,
     }
 
@@ -310,6 +367,347 @@ def _list_validation_plans(
         rows.append(row)
     rows.sort(key=lambda row: str(row.get("created_at") or ""))
     return rows[-max(1, int(limit)) :]
+
+
+def _strategy_tuning_audits(paths, *, strategy_id: str | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in jsonl.read_all(paths.journal("strategy_evolution")):
+        if row.get("kind") != "strategy.tuning":
+            continue
+        sid = str(row.get("strategy_id") or "")
+        if strategy_id and sid != strategy_id:
+            continue
+        run_id = str(row.get("run_id") or "")
+        if not run_id:
+            continue
+        review_path = paths.strategy(sid) / "reviews" / f"tuning_{run_id}.md"
+        audit_path = paths.strategy(sid) / "reviews" / f"tuning_{run_id}_audit.json"
+        audit_json = _read_json_file(audit_path) if audit_path.exists() else None
+        merged = {
+            **row,
+            "review_path": str(review_path) if review_path.exists() else row.get("review_path"),
+            "audit_path": str(audit_path) if audit_path.exists() else row.get("audit_path"),
+        }
+        if isinstance(audit_json, dict):
+            for key in (
+                "prompt_path", "role_prompt", "payload", "prompt_records",
+                "subagent_output", "metrics", "steps", "redacted",
+            ):
+                if key in audit_json:
+                    merged[key] = audit_json[key]
+        rows.append(merged)
+    return rows
+
+
+def _process_trace(
+    *,
+    row: dict[str, Any],
+    proposal: dict[str, Any] | None = None,
+    validation_plan: dict[str, Any] | None = None,
+    audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sections: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+
+    if audit:
+        prompt_records = [
+            rec for rec in (audit.get("prompt_records") or [])
+            if isinstance(rec, dict)
+        ]
+        if audit.get("role_prompt") or prompt_records:
+            prompt_artifacts: list[dict[str, Any]] = []
+            if audit.get("role_prompt"):
+                prompt_artifacts.append(_inline_artifact(
+                    "role_prompt",
+                    "Role prompt",
+                    str(audit.get("role_prompt") or ""),
+                    kind="prompt",
+                    language="markdown",
+                    path=str(audit.get("prompt_path") or ""),
+                ))
+            for rec in prompt_records[:3]:
+                prompt_artifacts.append(_inline_artifact(
+                    f"prompt_iteration_{rec.get('iteration', len(prompt_artifacts))}",
+                    f"Rendered prompt #{rec.get('iteration', 0)}",
+                    str(rec.get("prompt") or ""),
+                    kind="prompt",
+                    language="text",
+                    metadata={
+                        "iteration": rec.get("iteration"),
+                        "prompt_chars": rec.get("prompt_chars"),
+                        "redacted": rec.get("redacted", True),
+                    },
+                ))
+            sections.append({
+                "id": "prompt_inputs",
+                "title": "Prompt / inputs",
+                "summary": "Redacted role prompt, rendered prompt, and payload sent into the subagent.",
+                "artifacts": prompt_artifacts,
+            })
+            artifacts.extend(prompt_artifacts)
+        if audit.get("payload"):
+            payload_artifact = _inline_json_artifact(
+                "subagent_payload",
+                "Subagent payload",
+                audit.get("payload"),
+                kind="input",
+            )
+            sections.append({
+                "id": "inputs",
+                "title": "Structured inputs",
+                "summary": "Snapshot, manifest, objectives, guardrails, allowed targets, and tuning prompt.",
+                "artifacts": [payload_artifact],
+            })
+            artifacts.append(payload_artifact)
+
+    proposal_artifacts = _proposal_artifacts(proposal)
+    if proposal_artifacts:
+        sections.append({
+            "id": "proposal_files",
+            "title": "Proposal files",
+            "summary": "Files generated under the proposal directory for operator review.",
+            "artifacts": proposal_artifacts,
+        })
+        artifacts.extend(proposal_artifacts)
+
+    generated_docs = _generated_docs(row=row, audit=audit)
+    if generated_docs:
+        sections.append({
+            "id": "generated_docs",
+            "title": "Generated docs",
+            "summary": "Review and audit documents written by the self-evolution run.",
+            "artifacts": generated_docs,
+        })
+        artifacts.extend(generated_docs)
+
+    if validation_plan:
+        validation_artifact = _inline_json_artifact(
+            "validation_plan",
+            "Validation plan",
+            validation_plan,
+            kind="validation",
+        )
+        sections.append({
+            "id": "validation",
+            "title": "Validation plan",
+            "summary": _validation_summary(validation_plan),
+            "artifacts": [validation_artifact],
+        })
+        artifacts.append(validation_artifact)
+
+    if audit and audit.get("subagent_output"):
+        output_artifact = _inline_json_artifact(
+            "subagent_output",
+            "Subagent output",
+            audit.get("subagent_output"),
+            kind="output",
+        )
+        sections.append({
+            "id": "subagent_output",
+            "title": "Subagent output",
+            "summary": "Final structured answer returned by the tuning subagent.",
+            "artifacts": [output_artifact],
+        })
+        artifacts.append(output_artifact)
+
+    return {
+        "has_prompt": any(a.get("kind") == "prompt" for a in artifacts),
+        "has_inputs": any(a.get("kind") == "input" for a in artifacts),
+        "has_outputs": any(a.get("kind") == "output" for a in artifacts),
+        "has_generated_docs": any(a.get("kind") == "document" for a in artifacts),
+        "has_validation": any(a.get("kind") == "validation" for a in artifacts),
+        "sections": sections,
+        "artifacts": artifacts,
+    }
+
+
+def _proposal_artifacts(proposal: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not proposal:
+        return []
+    pdir_raw = proposal.get("path")
+    if not pdir_raw:
+        return []
+    pdir = Path(str(pdir_raw))
+    if not pdir.exists() or not pdir.is_dir():
+        return []
+    wanted = {
+        "proposal.yml", "target.yml", "rationale.md", "test_plan.md",
+        "rollback.md", "diff.patch", "reflection.json", "ranked_seeds.json",
+        "signals.json", "selected_assets.json", "provider_capabilities.json",
+        "strategy_versions.json", "indicator_state.json", "tuning_run.json",
+        "tuning_review.md", "tuning_audit.json",
+    }
+    paths = [p for p in sorted(pdir.iterdir()) if p.is_file() and p.name in wanted]
+    return [
+        _file_artifact(path, kind=_artifact_kind(path.name))
+        for path in paths[:20]
+    ]
+
+
+def _generated_docs(
+    *,
+    row: dict[str, Any],
+    audit: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    paths: list[Path] = []
+    for raw in [
+        row.get("review_path"),
+        row.get("audit_path"),
+        (audit or {}).get("review_path"),
+        (audit or {}).get("audit_path"),
+    ]:
+        if raw:
+            path = Path(str(raw))
+            if path.exists() and path.is_file() and path not in paths:
+                paths.append(path)
+    return [_file_artifact(path, kind=_artifact_kind(path.name)) for path in paths[:8]]
+
+
+def _file_artifact(path: Path, *, kind: str) -> dict[str, Any]:
+    text = _read_text_file(path)
+    return {
+        "id": _safe_artifact_id(path.name),
+        "title": path.name,
+        "kind": kind,
+        "path": str(path),
+        "language": _language_for_path(path.name),
+        "size": path.stat().st_size if path.exists() else 0,
+        "preview": _preview_text(text, path.name),
+        "truncated": len(text) > _preview_limit(path.name),
+        "redacted": True,
+    }
+
+
+def _inline_artifact(
+    aid: str,
+    title: str,
+    content: str,
+    *,
+    kind: str,
+    language: str,
+    path: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    safe = redact_text(content or "")
+    return {
+        "id": aid,
+        "title": title,
+        "kind": kind,
+        "path": path,
+        "language": language,
+        "size": len(safe),
+        "preview": _preview_text(safe, title),
+        "truncated": len(safe) > _preview_limit(title),
+        "metadata": metadata or {},
+        "redacted": True,
+    }
+
+
+def _inline_json_artifact(
+    aid: str,
+    title: str,
+    data: Any,
+    *,
+    kind: str,
+) -> dict[str, Any]:
+    safe = redact_display_dict(data)
+    text = json.dumps(safe, ensure_ascii=False, indent=2, default=str)
+    return _inline_artifact(
+        aid,
+        title,
+        text,
+        kind=kind,
+        language="json",
+        metadata={"redacted": True},
+    )
+
+
+def _read_text_file(path: Path) -> str:
+    try:
+        return redact_text(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return ""
+
+
+def _read_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _preview_limit(name: str) -> int:
+    lowered = name.lower()
+    if "prompt" in lowered or "audit" in lowered or name.endswith(".json"):
+        return 12000
+    return 8000
+
+
+def _preview_text(text: str, name: str = "") -> str:
+    limit = _preview_limit(name)
+    if not isinstance(text, str):
+        text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n... [truncated]"
+
+
+def _language_for_path(name: str) -> str:
+    lowered = name.lower()
+    if lowered.endswith((".yml", ".yaml")):
+        return "yaml"
+    if lowered.endswith(".json"):
+        return "json"
+    if lowered.endswith(".md"):
+        return "markdown"
+    if lowered.endswith(".patch"):
+        return "diff"
+    return "text"
+
+
+def _artifact_kind(name: str) -> str:
+    lowered = name.lower()
+    if "audit" in lowered or "prompt" in lowered:
+        return "prompt"
+    if lowered in {"proposal.yml", "target.yml"}:
+        return "proposal"
+    if lowered in {"rationale.md", "test_plan.md", "rollback.md", "tuning_review.md"}:
+        return "document"
+    if "validation" in lowered or lowered == "test_plan.md":
+        return "validation"
+    if lowered.endswith(".json"):
+        return "input"
+    return "document"
+
+
+def _safe_artifact_id(name: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in name).strip("_") or "artifact"
+
+
+def _audit_for_refs(
+    audits_by_run: dict[str, dict[str, Any]],
+    refs: Any,
+) -> dict[str, Any] | None:
+    for ref in _str_list(refs):
+        if ref.startswith("strategy_tuning:"):
+            run_id = ref.split(":", 1)[1]
+            if run_id in audits_by_run:
+                return audits_by_run[run_id]
+    return None
+
+
+def _event_validation_plan(
+    row: dict[str, Any],
+    proposal: dict[str, Any] | None,
+    plans_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    plan_id = (
+        metadata.get("validation_plan_id")
+        or (proposal or {}).get("validation_plan_id")
+        or row.get("validation_plan_id")
+    )
+    return plans_by_id.get(str(plan_id or ""))
 
 
 def _config_snapshot(config, *, strategy_id: str | None = None) -> dict[str, Any]:

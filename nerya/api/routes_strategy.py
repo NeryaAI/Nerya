@@ -15,9 +15,12 @@ queue, no caller-spoofing surface.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import NeryaError, TradingError
+from ..skills.builtin.backtest.scripts.render_chart import render_chart
 from ..trading import strategy_crud
 
 
@@ -190,6 +193,77 @@ def routes():
         except Exception as exc:
             return _error(f"{type(exc).__name__}: {exc}")
 
+    def list_backtests(client, payload):
+        sid = (payload or {}).get("strategy_id") or ""
+        if not sid:
+            return _error("strategy_id required")
+        root = _backtests_root(client.config.paths.strategy(str(sid)))
+        runs = []
+        for d in sorted((p for p in root.glob("*") if p.is_dir()), reverse=True):
+            metrics = _load_json(d / "metrics.json")
+            runs.append({
+                "ts": d.name,
+                "days": metrics.get("backtest_days"),
+                "total_return_pct": metrics.get("total_return_pct"),
+                "max_dd_pct": metrics.get("max_drawdown_pct"),
+                "sharpe_ratio": metrics.get("sharpe_ratio"),
+                "verdict": metrics.get("verdict"),
+                "start_utc": metrics.get("start_utc"),
+                "end_utc": metrics.get("end_utc"),
+            })
+        return {"ok": True, "strategy_id": sid, "backtests": runs}
+
+    def backtest_chart(client, payload):
+        sid = (payload or {}).get("strategy_id") or ""
+        ts = (payload or {}).get("ts") or ""
+        if not sid or not ts:
+            return _error("strategy_id and ts are required")
+        try:
+            run_dir = _safe_backtest_dir(client.config.paths.strategy(str(sid)), str(ts))
+            chart_path = run_dir / "chart.json"
+            if not chart_path.exists():
+                chart = render_chart(run_dir)
+            else:
+                chart = _load_json(chart_path)
+            return {"ok": True, "strategy_id": sid, "ts": ts, "chart": chart}
+        except Exception as exc:
+            return _error(f"{type(exc).__name__}: {exc}")
+
+    def backtest_file(client, payload):
+        sid = (payload or {}).get("strategy_id") or ""
+        ts = (payload or {}).get("ts") or ""
+        name = (payload or {}).get("name") or ""
+        if not sid or not ts or not name:
+            return _error("strategy_id, ts and name are required")
+        allowed = {
+            "config.yml",
+            "ohlcv_indicators_portfolio.csv",
+            "trades.csv",
+            "analysis_by_reason.csv",
+            "rejected_signals.csv",
+            "metrics.json",
+            "report.md",
+            "chart.json",
+        }
+        if name not in allowed:
+            return _error("unsupported backtest file")
+        try:
+            run_dir = _safe_backtest_dir(client.config.paths.strategy(str(sid)), str(ts))
+            path = (run_dir / str(name)).resolve()
+            if run_dir.resolve() not in path.parents and path != run_dir.resolve():
+                return _error("invalid path")
+            if not path.exists():
+                return _error("file not found")
+            return {
+                "ok": True,
+                "strategy_id": sid,
+                "ts": ts,
+                "name": name,
+                "content": path.read_text(encoding="utf-8"),
+            }
+        except Exception as exc:
+            return _error(f"{type(exc).__name__}: {exc}")
+
     return [
         ("POST", "/strategy/list_all", list_strategies),
         ("POST", "/strategy/get", get_strategy),
@@ -202,7 +276,30 @@ def routes():
         ("POST", "/strategy/versions", versions),
         ("POST", "/strategy/files_list", list_files),
         ("POST", "/strategy/files_write", write_file),
+        ("POST", "/strategy/backtests", list_backtests),
+        ("POST", "/strategy/backtests/chart", backtest_chart),
+        ("POST", "/strategy/backtests/file", backtest_file),
     ]
+
+
+def _backtests_root(strategy_root: Path) -> Path:
+    return strategy_root / "backtests"
+
+
+def _safe_backtest_dir(strategy_root: Path, ts: str) -> Path:
+    root = _backtests_root(strategy_root).resolve()
+    run_dir = (root / ts).resolve()
+    if root not in run_dir.parents and run_dir != root:
+        raise TradingError("invalid backtest timestamp")
+    if not run_dir.exists() or not run_dir.is_dir():
+        raise TradingError("unknown backtest run")
+    return run_dir
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 __all__ = ["routes"]

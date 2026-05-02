@@ -84,9 +84,11 @@ RECOVERY_HINTS: dict[str, str] = {
         "what is still pending, and how the user should resume."
     ),
     "ambiguous_input": (
-        "The action rejected the payload because a required field was "
-        "missing or wrongly typed. Re-read the action description, fix "
-        "the payload, and retry once. Do not loop."
+        "The tool rejected the payload. The error message names the "
+        "exact fields that need fixing. Re-issue the SAME tool call "
+        "with a corrected payload — do not abandon the tool and "
+        "answer in plain text. The operator asked you to execute "
+        "something, not describe it."
     ),
     "not_query_only": (
         "This action's name pattern is not read-only so it cannot join "
@@ -384,11 +386,12 @@ RETRY_POLICY: dict[str, RetryPolicy] = {
         notes="schema validation failed — model must fix the payload",
     ),
     "approval_pending": RetryPolicy(
-        action=RecoveryAction.ASK_MODEL,
+        action=RecoveryAction.STOP_LOOP,
         max_retries=0,
         notes=(
-            "approval is owed by the operator; surface the hint and let the "
-            "model send_message or call plan_status / approval_status"
+            "approval is owed by the operator; halt the turn so the "
+            "dashboard's approval card stays actionable instead of being "
+            "buried by the model's next step"
         ),
     ),
     "permission_denied": RetryPolicy(

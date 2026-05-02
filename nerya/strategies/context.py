@@ -74,6 +74,7 @@ from ..core.paths import WorkspacePaths
 from ..core.time import now_iso as _real_now_iso
 from ..workspace.state_store import StateStore
 from .package import StrategyManifest, StrategyPackage
+from .backtest_bridge import backtest_replay as _strategy_backtest_replay
 from .prompt_io import StrategyPromptIO
 from .result import ResultBuilder, StrategyResult
 
@@ -1343,10 +1344,15 @@ class StrategyContext:
     clock: StrategyClock
     audit: StrategyAudit
     result: ResultBuilder = field(default_factory=ResultBuilder)
+    backtest_replay: Callable[..., dict[str, Any]] | None = None
 
     @property
     def mode(self) -> str:
         return self.config.mode
+
+    @property
+    def runmode(self) -> str:
+        return "live" if self.config.mode == "live" else self.config.mode
 
 
 # ---------------------------------------------------------------------------
@@ -1504,6 +1510,10 @@ def build_strategy_context(
 
     prompt = StrategyPromptIO(strategy_root=package.root, run_id=rid)
 
+    def _bound_backtest_replay(run_fn: Callable[[Any], Any], **kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("markets", list(manifest.markets))
+        return _strategy_backtest_replay(run_fn, **kwargs)
+
     return StrategyContext(
         strategy_id=manifest.strategy_id,
         run_id=rid,
@@ -1523,6 +1533,7 @@ def build_strategy_context(
         state=state,
         clock=clock or StrategyClock(),
         audit=audit,
+        backtest_replay=_bound_backtest_replay,
     )
 
 

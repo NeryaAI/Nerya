@@ -53,7 +53,6 @@ from ..tools.orchestrator import ToolOrchestrator
 from ..tools.registry import ToolRegistry
 from ..tools.types import ToolCall, ToolResult
 from .artifact_index import summarize_batch
-from .error_recovery import classify_for_recovery
 from .transcript_blocks import (
     BlockEnvelope,
     TextBlock,
@@ -694,8 +693,36 @@ class WorkspaceNativeAgentLoop:
 
             transcript.append({"role": "user", "content": tool_result_blocks})
 
-            if stop_reason and stop_reason not in {"tool_use", "tool_calls"}:
+            # If any call in this batch landed on a permission-pending
+            # gate, stop the turn here. The dashboard now shows an
+            # actionable approval card for each pending call, and the
+            # model can't make progress until the operator decides;
+            # letting the loop continue would just have the model pick
+            # a different action and bury the card under fresh blocks.
+            # The next turn (after the operator approves/rejects) picks
+            # up from the persisted approval state.
+            if any(
+                bool(r.is_error)
+                and r.error is not None
+                and r.error.kind is not None
+                and r.error.kind.value == "permission_pending"
+                for r in batch.results
+            ):
+                stop_reason = "approval_pending"
                 break
+
+            # Once tool_uses were emitted AND tool_results fed back, always
+            # give the model another round to consume them. Some OpenAI-compat
+            # providers mislabel ``stop_reason`` as ``end_turn`` even when a
+            # tool_use block was emitted (the finish_reason=="stop" branch in
+            # the adapter); breaking here on that mislabel meant the model
+            # never saw its own tool_result and the turn ended with just a
+            # pre-tool preamble like "让我先检查一下…". The only stop_reasons
+            # that should abort the loop at this point are the hard-fail ones
+            # already handled above (max_tokens/length/content_filter).
+            # Everything else — including end_turn — falls through so the
+            # next iteration re-consults the model with the tool_result in
+            # hand.
 
         # Aborted = forcibly stopped by a fence (cancel / timeout /
         # tool-call budget / max_iterations with the model still
@@ -734,7 +761,17 @@ class WorkspaceNativeAgentLoop:
         return [t.to_provider_tool() for t in tools]
 
     def _render_tool_result(self, result: ToolResult) -> dict[str, Any]:
-        """Render a :class:`ToolResult` into an Anthropic ``tool_result`` block."""
+        """Render a :class:`ToolResult` into an Anthropic ``tool_result`` block.
+
+        On error we wrap the text in ``<tool_use_error>`` tags and
+        append a one-line retry directive, mirroring Claude Code's
+        ``toolExecution.ts:400`` / ``buildSchemaNotSentHint`` pattern.
+        The tag shape is familiar across the Anthropic training
+        distribution, which helps non-Claude models decode the
+        recovery intent too. The long schema dump that used to leak
+        into this block is now kept on ``ToolError.detail`` for
+        dashboards/telemetry only.
+        """
 
         content: list[dict[str, Any]] = []
         for part in result.content:
@@ -765,51 +802,81 @@ class WorkspaceNativeAgentLoop:
                 content.append({"type": "text", "text": shell_text})
         if not content:
             content.append({"type": "text", "text": result.text() or ""})
+
         block: dict[str, Any] = {
             "type": "tool_result",
             "tool_use_id": result.tool_use_id,
             "content": content,
         }
-        if result.is_error:
-            block["is_error"] = True
-            # append a recovery hint as an extra text part so
-            # the model sees *what to try next* in the same observation
-            # block, not just the raw failure text. Per-class policy
-            # already lives in :mod:`nerya.agent.error_recovery`; we
-            # just resolve it here and surface a one-line directive.
-            hint_text = self._recovery_hint_for(result)
-            if hint_text:
-                content.append(
-                    {"type": "text", "text": f"recovery: {hint_text}"}
-                )
+        if not result.is_error:
+            return block
+
+        # Replace the user-visible content with a ``<tool_use_error>``
+        # wrapped string + retry directive. Keeps the raw telemetry on
+        # ``result.error`` untouched.
+        err = result.error
+        raw = (err.message if err else None) or result.text() or "Unknown error"
+        kind = err.kind.value if err and err.kind else "execution_error"
+        retry_line = self._retry_directive_for(kind, result)
+        wrapped = f"<tool_use_error>{kind}: {raw}</tool_use_error>"
+        if retry_line:
+            wrapped += f"\n{retry_line}"
+        block["content"] = [{"type": "text", "text": wrapped}]
+        block["is_error"] = True
         return block
 
-    def _recovery_hint_for(self, result: ToolResult) -> str:
-        """Resolve a recovery directive for a failed :class:`ToolResult`.
+    def _retry_directive_for(self, kind: str, result: ToolResult) -> str:
+        """Return one actionable sentence to append after every error.
 
-        Order of preference:
-
-        1. ``ToolError.recovery_hint`` already populated by the
-           handler (e.g. fresh-read mismatch attaches a path-aware
-           hint). Render it as ``action: ...``.
-        2. :func:`classify_for_recovery` against the error kind /
-           message — keeps the per-class policy in one place.
+        The goal is to keep the model on the tool-use track. On a
+        schema failure we tell it to re-call the same tool; on a
+        transient failure we tell it to retry once; on unrecoverable
+        failures we tell it to stop. Mirrors the spirit of Claude
+        Code's ``buildSchemaNotSentHint`` — one explicit instruction,
+        no schema dump.
         """
 
-        err = result.error
-        if err is None:
-            return ""
-        if isinstance(err.recovery_hint, dict) and err.recovery_hint:
-            parts = [f"{k}={v}" for k, v in err.recovery_hint.items()]
-            return "; ".join(parts)
-        try:
-            verdict = classify_for_recovery(
-                error_kind=err.kind.value if err.kind else None,
-                error_message=err.message,
+        tool = result.name or "this tool"
+        if kind == "schema_validation":
+            return (
+                f"Fix the payload and call `{tool}` again with the "
+                "corrected arguments. Do not switch to writing code "
+                "in chat — the operator asked you to DO something, "
+                "not to describe it."
             )
-        except Exception:
-            return ""
-        return verdict.recovery_hint or ""
+        if kind in {"timeout", "rate_limit", "provider_error"}:
+            return (
+                f"Transient error. Retry `{tool}` once; if it fails "
+                "again, report the issue to the operator and stop."
+            )
+        if kind == "permission_denied":
+            return (
+                "This lane does not permit the tool. Pick a different "
+                "tool or ask the operator to switch lanes."
+            )
+        if kind == "permission_pending":
+            return (
+                "Approval is owed by the operator. Either wait for "
+                "the approval event or send a message explaining the "
+                "request."
+            )
+        if kind == "deduped":
+            return (
+                "Use the prior result already in the transcript; do "
+                "not re-issue this exact call."
+            )
+        if kind == "budget":
+            return (
+                "Per-turn budget exhausted. Wrap up with "
+                "send_message instead of calling more tools."
+            )
+        if kind == "unknown_tool":
+            return (
+                "The tool name was not recognised. Call tool_search "
+                "or re-read the available-tools header and pick a "
+                "registered tool."
+            )
+        return ""
 
     def _maybe_compact(
         self, transcript: list[dict[str, Any]]

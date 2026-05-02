@@ -26,6 +26,7 @@ Implementation notes:
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -39,6 +40,10 @@ from .permissions import (
     PermissionRequest,
 )
 from .registry import ToolNotFoundError, ToolRegistry
+from .tool_errors import (
+    collect_schema_issues,
+    format_schema_validation_error,
+)
 from .types import (
     ContextModifier,
     PermissionScope,
@@ -85,45 +90,82 @@ ApprovalCallback = Callable[
 
 
 def _validate_against_schema(payload: dict[str, Any], schema: dict[str, Any]) -> Optional[str]:
-    """Return None on success, an error string otherwise.
+    """Return None on success, a short error string otherwise.
 
-    Implements a *useful subset* of JSON Schema: type / required /
-    enum on direct properties. Avoids a hard dependency on jsonschema
-    (which adds ~1MB and breaks in some restricted runtimes).
+    Kept for callers outside the executor that still want a boolean
+    "valid?" check. The executor itself now walks issues through
+    :func:`collect_schema_issues` so the error the model sees is the
+    full multi-issue breakdown, not just the first failure.
     """
 
-    if not schema:
+    issues = collect_schema_issues(payload, schema)
+    if not issues:
         return None
-    expected_type = schema.get("type")
-    if expected_type == "object":
-        if not isinstance(payload, dict):
-            return f"expected object, got {type(payload).__name__}"
-        required = schema.get("required") or []
-        for key in required:
-            if key not in payload:
-                return f"missing required field: {key}"
-        props = schema.get("properties") or {}
-        for key, sub in props.items():
-            if key not in payload:
-                continue
-            sub_type = sub.get("type")
-            v = payload[key]
-            if sub_type == "string" and not isinstance(v, str):
-                return f"field {key!r} must be a string"
-            if sub_type == "integer" and not isinstance(v, int):
-                return f"field {key!r} must be an integer"
-            if sub_type == "number" and not isinstance(v, (int, float)):
-                return f"field {key!r} must be a number"
-            if sub_type == "boolean" and not isinstance(v, bool):
-                return f"field {key!r} must be a boolean"
-            if sub_type == "array" and not isinstance(v, list):
-                return f"field {key!r} must be an array"
-            if sub_type == "object" and not isinstance(v, dict):
-                return f"field {key!r} must be an object"
-            enum = sub.get("enum")
-            if enum and v not in enum:
-                return f"field {key!r} must be one of {enum}"
-    return None
+    first = issues[0]
+    kind = first.get("kind")
+    field = first.get("field")
+    if kind == "missing":
+        return f"missing required field: {field}"
+    if kind == "unexpected":
+        return f"unexpected field: {field}"
+    if kind == "type":
+        return (
+            f"field {field!r} must be {first.get('expected')} "
+            f"(got {first.get('actual')})"
+        )
+    if kind == "enum":
+        return f"field {field!r} must be one of {first.get('expected')}"
+    return "schema validation failed"
+
+
+def _repair_arguments_before_validation(call: ToolCall) -> None:
+    """Normalize narrow, recoverable provider argument mistakes.
+
+    Claude Code mirrors this with ``backfillObservableInput``
+    (src/services/tools/toolExecution.ts:783). The principle: a call
+    that *could* be rescued without lying about the user's intent
+    should be rescued in place so the model avoids a round-trip.
+
+    Keep the list of repairs small and obvious — every entry here
+    trades a schema failure for a best-effort inference, so only
+    register cases where the inference is unambiguous.
+    """
+
+    if not isinstance(call.arguments, dict):
+        return
+    args = call.arguments
+
+    if call.name == "team_run":
+        # Some providers (notably certain OpenAI-compatible backends)
+        # serialise a nested JSON array as a string even when the
+        # outer tool call is valid JSON. Unblock the Team handler so
+        # it can emit its collaboration trace.
+        raw_roles = args.get("roles")
+        if isinstance(raw_roles, str) and raw_roles.strip():
+            try:
+                parsed = json.loads(raw_roles)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                call.arguments = {**args, "roles": parsed}
+        return
+
+    if call.name == "strategy_generate_proposal":
+        # The model's reasoning typically carries a strategy_id but the
+        # serialized tool_use block sometimes drops it (long reasoning
+        # → truncated tool args). When a title is present we derive a
+        # safe lowercase slug instead of burning a round-trip on a
+        # schema failure. Schema still rules when both are missing.
+        if not args.get("strategy_id") and args.get("title"):
+            import re
+            slug = re.sub(
+                r"[^a-z0-9_]+", "_", str(args["title"]).lower(),
+            ).strip("_")
+            # strategy_id must start with a letter per the runtime
+            # schema (^[a-z][a-z0-9_]+$). Guard before applying.
+            if slug and slug[0].isalpha() and len(slug) >= 2:
+                call.arguments = {**args, "strategy_id": slug[:64]}
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -225,23 +267,32 @@ class NativeToolExecutor:
                 ),
             )
 
-        validation_error = (
-            _validate_against_schema(call.arguments or {}, descriptor.input_schema)
+        _repair_arguments_before_validation(call)
+        issues = (
+            collect_schema_issues(call.arguments or {}, descriptor.input_schema)
             if self.options.fail_fast_on_validation
-            else None
+            else []
         )
-        if validation_error:
+        if issues:
+            # Render each issue as a one-sentence English explanation so
+            # the model can act on the tool_result without reading a
+            # JSON-schema blob. The raw issues list stays in
+            # ``detail.issues`` for dashboard / telemetry consumers.
+            friendly = format_schema_validation_error(call.name, issues)
             return ToolResult.from_error(
                 tool_use_id=call.id,
                 name=call.name,
                 error=ToolError(
                     kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message=validation_error,
-                    detail={"schema": descriptor.input_schema},
+                    message=friendly,
+                    detail={
+                        "issues": [dict(i) for i in issues],
+                        "schema": descriptor.input_schema,
+                    },
                     retryable=True,
                     recovery_hint={
-                        "action": "fix_arguments",
-                        "schema": descriptor.input_schema,
+                        "action": "fix_arguments_and_retry",
+                        "tool_name": call.name,
                     },
                 ),
             )

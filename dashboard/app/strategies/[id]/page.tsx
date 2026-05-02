@@ -185,6 +185,12 @@ export default function StrategyDetailPage({
             >
               ← All strategies
             </Link>
+            <Link
+              href={`/strategies/${encodeURIComponent(strategyId)}/backtests`}
+              className="btn-ghost text-xs"
+            >
+              Backtests
+            </Link>
             <button
               onClick={() => void refresh()}
               disabled={loading}

@@ -481,11 +481,78 @@ def routes():
             return {"error": "turn_id required"}
         return load_turn_state(client.config.paths, tid).asdict()
 
+    # Session sources that represent a human-initiated chat thread — these
+    # are the only ones the dashboard chat sidebar should display by default.
+    # Anything else (strategy triggers, scheduled heartbeats, price/news
+    # event handlers, sub-agent journals, etc.) lives in the same DB but is
+    # not a conversation the operator started from the chat input.
+    _CHAT_SOURCES: frozenset[str] = frozenset({
+        "",
+        "dashboard",
+        "user_chat",
+        "user.chat",
+        "agent.user_message",
+        "manual.chat",
+        "manual",
+        "approval_continue",
+    })
+
+    # Prefixes that unambiguously identify a non-chat origin. These are used
+    # in addition to the allowlist: the frontend only wants user chats in
+    # the sidebar, so the filter is deny-by-default when ``include`` is not
+    # ``all``. Matching is case-insensitive, checked against the raw
+    # ``source`` column of ``agent_sessions``.
+    _NON_CHAT_SOURCE_PREFIXES: tuple[str, ...] = (
+        "strategy",
+        "schedule",
+        "scheduled",
+        "cron",
+        "trigger",
+        "price.",
+        "news.",
+        "social.",
+        "onchain.",
+        "subagent",
+        "team",
+        "webhook",
+    )
+
+    def _is_chat_session(row: dict[str, Any]) -> bool:
+        """Return True if ``row`` looks like a user-started chat thread.
+
+        A session is treated as "chat" when:
+        * it has no ``strategy_id`` (strategy-scoped runs belong to the
+          strategies UI, not the chat sidebar), AND
+        * its ``source`` is either empty, in the explicit allowlist, or
+          does not start with any known non-chat prefix.
+
+        File-backed sessions (``workspace/sessions/*.json``) created before
+        the source column was enforced show up with ``source == ""`` — we
+        keep those so older dashboards don't suddenly lose history.
+        """
+        if row.get("strategy_id"):
+            return False
+        source = str(row.get("source") or "").strip().lower()
+        if source in _CHAT_SOURCES:
+            return True
+        if any(source.startswith(p) for p in _NON_CHAT_SOURCE_PREFIXES):
+            return False
+        # Unknown non-empty source — err on the side of showing it so a
+        # custom integration (CLI, tests) still surfaces in the sidebar
+        # unless the operator explicitly tags it as non-chat.
+        return True
+
     def sessions_list(client, query):
         q = dict(query or {})
         store = SessionStore(client.config.paths.root)
         strategy_id = q.get("strategy_id") or None
         limit = int(q.get("limit") or 50)
+        # ``include=all`` bypasses the chat-only filter so the strategies /
+        # observability surfaces can still see every session. Default path
+        # (what the dashboard chat sidebar calls) drops strategy-scoped +
+        # trigger-driven runs so one chat thread = one sidebar entry.
+        include_mode = str(q.get("include") or "").strip().lower()
+        chat_only = include_mode != "all" and not strategy_id
         states = [s.asdict() for s in store.list(strategy_id=strategy_id, limit=limit)]
         by_id = {str(s.get("session_id") or ""): dict(s) for s in states}
         try:
@@ -508,6 +575,8 @@ def routes():
         except Exception:
             pass
         sessions = list(by_id.values())
+        if chat_only:
+            sessions = [s for s in sessions if _is_chat_session(s)]
         sessions.sort(
             key=_session_updated_ts,
             reverse=True,
@@ -714,6 +783,19 @@ def routes():
                     meta = _json.loads(r.get("meta_json") or "{}")
                 except Exception:
                     meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                # May-01 2026 — assistant rows now persist the full
+                # turn payload (blocks / tool_trace / actions / budget)
+                # under ``meta.turn`` so the dashboard can rebuild the
+                # chronological tool timeline on import. Surface it as
+                # a first-class field and strip it from the meta blob
+                # to keep ``meta`` a lightweight catch-all.
+                turn_payload = None
+                if r.get("role") == "assistant":
+                    turn_candidate = meta.pop("turn", None)
+                    if isinstance(turn_candidate, dict):
+                        turn_payload = turn_candidate
                 messages.append(
                     {
                         "message_id": r.get("message_id"),
@@ -721,7 +803,8 @@ def routes():
                         "content": r.get("content"),
                         "turn_id": r.get("turn_id"),
                         "ts": r.get("ts"),
-                        "meta": meta if isinstance(meta, dict) else {},
+                        "meta": meta,
+                        "turn": turn_payload,
                     }
                 )
         except Exception:

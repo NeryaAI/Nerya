@@ -13,12 +13,10 @@ real LLM provider auto-detected from environment variables.
 
 Session shape (single ``session_id``)::
 
-    1. strategy_design  -> design a BTC 1h trend-breakout strategy
-    2. explain_strategy -> explain the just-produced strategy spec
-    3. market_analysis  -> read the room: is this a good time to act?
-    4. risk_review      -> stress-test the risk plan
-    5. trigger_design   -> write a trigger that fires the strategy
-    6. paper_validation -> ask Nerya to outline a paper-mode validation
+    1. strategy_line    -> draft a paper-only BTC strategy production line
+    2. risk_tightening  -> tighten the risk numbers like an operator would
+    3. trigger_gate     -> turn it into a trigger + promotion checklist
+    4. demo_summary     -> produce a short Chinese stage-ready summary
 
 The driver records every HTTP call, every reply, every team-run
 artifact, and prints a final audit report so the operator can see
@@ -406,117 +404,63 @@ def _trigger(kind: str, text: str, **payload: Any) -> dict[str, Any]:
 
 
 def _session_prompts(session_id: str) -> list[dict[str, Any]]:
-    """Six-turn natural-language session, all under one session_id."""
+    """Short Chinese operator session, all under one session_id.
+
+    These prompts intentionally sound like a real user rather than a
+    benchmark prompt. They avoid claiming live market/on-chain/news data
+    is available, so the demo validates the production-line workflow
+    instead of depending on optional data skills.
+    """
 
     return [
         {
-            "label": "1_strategy_design",
+            "label": "1_strategy_line",
             "trigger": _trigger(
-                "strategy.design",
+                "user.chat",
                 (
-                    "Hey Nerya — let's design a BTC 1h trend-breakout "
-                    "strategy together. I want the team to look at the "
-                    "current 1h regime, dig out which features actually "
-                    "predict breakouts, have risk write a real risk plan "
-                    "(hard stops, no-trade windows, max drawdown), the "
-                    "execution planner pick venues and order type, the "
-                    "reviewer check whether it's even testable, and the "
-                    "verification lane sketch a backtest plan. End with "
-                    "a draft strategy spec we can iterate on. Paper "
-                    "only — keep it in draft."
+                    "帮我做一个 BTC 1 小时趋势突破策略的演示版本。"
+                    "先只做 draft/paper，不要实盘。不要只说你要创建，"
+                    "也不要调用文件创建工具，直接在聊天里一次性给出："
+                    "策略规则、入场/退出、风控限制、触发器思路、纸交易"
+                    "验收门槛。没有实时行情就明确写 demo assumptions，"
+                    "不要假装已经读取实时数据。"
                 ),
                 asset="BTC", timeframe="1h", style="trend_breakout",
             ),
         },
         {
-            "label": "2_explain_strategy",
+            "label": "2_risk_tightening",
             "trigger": _trigger(
-                # ``user.chat`` matches the operator's ``user_chat`` planner
-                # route in the canonical ``~/.nerya/nerya.yml`` (skills:
-                # strategy, strategy_review, trading, message, ...). The
-                # generic ``user.command`` kind falls through to the
-                # ``generic`` route which strips the strategy skill and
-                # makes the agent loop on permission errors.
                 "user.chat",
                 (
-                    "Now please explain the strategy you just drafted to "
-                    "me, like I'm a junior trader. Walk me through: "
-                    "(1) what edge it's trying to capture, (2) the exact "
-                    "entry/exit/invalidation rules and which indicators "
-                    "feed them, (3) why those specific risk numbers "
-                    "(stop, max drawdown, no-trade windows), and "
-                    "(4) the obvious failure modes a reviewer would "
-                    "still flag. Be honest about uncertainty."
+                    "这个策略风险哪里最大？请像风控负责人一样把参数改紧。"
+                    "必须给具体数字：单笔风险 1.5%、最多 2 个并发仓位、"
+                    "日亏损 4% 停止、周回撤 12% 暂停、CPI/FOMC/NFP 前后"
+                    " 2 小时不交易。顺便说明为什么这样更适合 demo。"
                 ),
             ),
         },
         {
-            "label": "3_market_judgment",
-            "trigger": _trigger(
-                # Same rationale as turns 2/4/5/6: ``user.chat`` lands on
-                # the operator's ``user_chat`` planner route, which has
-                # every skill needed to consume a market_analysis_team
-                # synthesis. The team is *still* triggered by the prompt
-                # content (TurnPlan team detection), so we keep the
-                # full-stack memo shape regardless of trigger.kind.
-                "user.chat",
-                (
-                    "OK, given that strategy spec, read the room for me. "
-                    "I want a multi-expert team memo: technical (1d + "
-                    "1h regime, RSI, ATR%), on-chain flows, recent ETF "
-                    "and macro news, then risk's view, then your "
-                    "portfolio-level recommendation. Should I be "
-                    "actually firing this strategy *right now*, or "
-                    "waiting? Don't trade — just give me the memo and "
-                    "tell me what would change your answer."
-                ),
-                asset="BTC", horizon="1w",
-            ),
-        },
-        {
-            "label": "4_risk_critique",
+            "label": "3_trigger_gate",
             "trigger": _trigger(
                 "user.chat",
                 (
-                    "Now act as a senior, disciplined risk reviewer. "
-                    "Read the strategy spec and the market memo above, "
-                    "and write a rigorous, professional risk review: "
-                    "what's missing, what's too loose, where the worst "
-                    "drawdowns could hide, failure modes in a flash "
-                    "crash or in a CPI surprise window. Then propose "
-                    "concrete tightenings with numbers (max DD %, "
-                    "leverage cap, no-trade windows, position cap)."
+                    "把上面的策略整理成 Nerya 可以注册的触发器和纸交易"
+                    "验收清单。不要只说准备创建，直接输出正文。"
+                    "触发器按 1 小时 K 线收盘运行，必须写清楚风控 guard、"
+                    "禁止实盘、draft -> paper -> canary -> live 每一步"
+                    "需要哪些证据。"
                 ),
             ),
         },
         {
-            "label": "5_trigger_design",
+            "label": "4_demo_summary",
             "trigger": _trigger(
                 "user.chat",
                 (
-                    "Now turn this into a concrete trigger. Tell me, in "
-                    "Nerya-style trigger spec language: which event "
-                    "fires this strategy (e.g. 1h candle close), what "
-                    "guards must be true (regime filter, no-trade "
-                    "windows, position cap), and how the trigger hands "
-                    "off to the strategy script. Show me how I'd "
-                    "register it in the workspace."
-                ),
-            ),
-        },
-        {
-            "label": "6_paper_validation",
-            "trigger": _trigger(
-                "user.chat",
-                (
-                    "Last one: outline the paper-mode validation plan "
-                    "before this thing is allowed near a live wallet. "
-                    "What do I need to see in the validation report and "
-                    "the shadow run before I'd consider promoting from "
-                    "draft -> paper -> canary -> live? Be specific "
-                    "about gates: required gates, thresholds (sharpe, "
-                    "max DD, min trades, cost stress), and what would "
-                    "automatically block promotion."
+                    "最后帮我生成一段中文演示总结，控制在 90 秒内。"
+                    "重点讲清楚：这不是普通交易机器人，而是策略生产线；"
+                    "它有风控、日志、验证、审批和后续进化。不要写成营销长文。"
                 ),
             ),
         },
@@ -525,26 +469,34 @@ def _session_prompts(session_id: str) -> list[dict[str, Any]]:
 
 # ------------------------------------------------------------ service mgmt
 
+def _service_cmd_candidates(
+    workspace: Path, host: str, port: int,
+) -> list[list[str]]:
+    """Return service launch commands in safest-first order."""
+
+    module_cmd = [
+        sys.executable, "-m", "nerya.cli.app",
+        "serve", "--workspace", str(workspace),
+        "--host", host, "--port", str(port),
+        "--no-dashboard",
+    ]
+    candidates = [module_cmd]
+    nerya_cmd = shutil.which("nerya")
+    if nerya_cmd:
+        candidates.append([
+            nerya_cmd, "serve", "--workspace", str(workspace),
+            "--host", host, "--port", str(port), "--no-dashboard",
+        ])
+    return candidates
+
+
 def _start_service(workspace: Path, host: str, port: int,
                    *, log_path: Path) -> subprocess.Popen:
-    """Start ``nerya serve`` as a subprocess (the installed CLI)."""
-
-    nerya_cmd = shutil.which("nerya")
-    if not nerya_cmd:
-        # Fall back to ``python -m nerya.cli.app`` if the entry point
-        # is not on PATH.
-        cmd = [sys.executable, "-m", "nerya.cli.app",
-               "serve", "--workspace", str(workspace),
-               "--host", host, "--port", str(port)]
-    else:
-        cmd = [nerya_cmd, "serve", "--workspace", str(workspace),
-               "--host", host, "--port", str(port)]
+    """Start ``nerya serve`` as a subprocess."""
 
     env = os.environ.copy()
     env["NERYA_DEV_MODE"] = "1"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = log_path.open("w", encoding="utf-8")
-    print(f"[demo] starting service: {' '.join(cmd)}")
     print(f"[demo] service log     : {log_path}")
 
     # On Windows we MUST start the service in its own process group, so
@@ -553,7 +505,6 @@ def _start_service(workspace: Path, host: str, port: int,
     # ``send_signal(CTRL_BREAK_EVENT)`` propagates up the entire console
     # tree and kills the demo runner with -1073741510 (STATUS_CONTROL_C_EXIT).
     popen_kwargs: dict[str, Any] = {
-        "stdout": log_fh,
         "stderr": subprocess.STDOUT,
         "env": env,
         "cwd": str(_NERYA_ROOT),
@@ -564,8 +515,22 @@ def _start_service(workspace: Path, host: str, port: int,
         )
     else:
         popen_kwargs["start_new_session"] = True
-    proc = subprocess.Popen(cmd, **popen_kwargs)
-    return proc
+    last_exc: Exception | None = None
+    for idx, cmd in enumerate(_service_cmd_candidates(workspace, host, port)):
+        log_mode = "w" if idx == 0 else "a"
+        log_fh = log_path.open(log_mode, encoding="utf-8")
+        print(f"[demo] starting service: {' '.join(cmd)}")
+        try:
+            return subprocess.Popen(cmd, stdout=log_fh, **popen_kwargs)
+        except OSError as exc:
+            last_exc = exc
+            log_fh.write(
+                f"\n[demo] failed to start {' '.join(cmd)}: {exc}\n",
+            )
+            log_fh.close()
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("no service command candidates")
 
 
 def _stop_service(proc: subprocess.Popen) -> None:
@@ -597,42 +562,61 @@ def _stop_service(proc: subprocess.Popen) -> None:
 # ------------------------------------------------------------ validation
 
 _REQUIRED_KEYWORDS_BY_LABEL: dict[str, list[list[str]]] = {
-    # Each inner list is an OR group; the reply must mention at least
-    # one term per group. Loose checks — we want signal that the LLM
-    # actually answered the question, not a regex straitjacket.
-    "1_strategy_design": [
-        ["breakout", "trend", "channel", "range"],
-        ["stop", "drawdown", "risk"],
-        ["1h", "hour"],
-        ["BTC", "Bitcoin"],
+    # Each inner list is an OR group. The Chinese terms are primary;
+    # English fallbacks keep the check robust if the model mirrors a
+    # built-in English tool/schema term.
+    "1_strategy_line": [
+        ["btc", "bitcoin"],
+        ["1 小时", "1小时", "1h", "1 hour"],
+        ["趋势", "突破", "breakout", "trend"],
+        ["入场", "进场", "entry"],
+        ["退出", "止损", "exit", "stop"],
+        ["风控", "风险", "risk"],
+        ["触发器", "trigger"],
+        ["纸交易", "paper"],
+        ["demo assumptions", "假设", "没有实时"],
     ],
-    "2_explain_strategy": [
-        ["edge", "exploit", "thesis"],
-        ["entry", "exit", "invalidation", "rule"],
-        ["risk", "stop", "drawdown"],
-        ["fail", "weakness", "limitation", "concern"],
+    "2_risk_tightening": [
+        ["1.5%", "单笔"],
+        ["2 个", "2个", "并发"],
+        ["4%", "日亏损"],
+        ["12%", "周回撤"],
+        ["cpi", "fomc", "nfp"],
+        ["2 小时", "2小时"],
     ],
-    "3_market_judgment": [
-        ["technical", "RSI", "ATR", "EMA", "regime"],
-        ["risk", "stop", "drawdown"],
-        ["recommend", "wait", "fire", "act"],
+    "3_trigger_gate": [
+        ["触发器", "trigger"],
+        ["1 小时", "1小时", "1h"],
+        ["guard", "风控", "门禁"],
+        ["禁止实盘", "不要实盘", "paper"],
+        ["draft", "paper", "canary", "live"],
+        ["证据", "验收", "validation"],
     ],
-    "4_risk_critique": [
-        ["missing", "loose", "tighten", "weakness", "fail"],
-        ["drawdown", "stop", "leverage", "exposure"],
-        ["flash", "CPI", "macro", "surprise", "FOMC"],
-    ],
-    "5_trigger_design": [
-        ["trigger", "event", "fires", "candle"],
-        ["guard", "filter", "gate"],
-        ["register", "workspace", "spec"],
-    ],
-    "6_paper_validation": [
-        ["paper", "shadow", "draft"],
-        ["sharpe", "drawdown", "trades", "cost", "stress"],
-        ["gate", "promote", "canary", "live"],
+    "4_demo_summary": [
+        ["策略生产线", "生产线"],
+        ["交易机器人", "机器人"],
+        ["风控", "风险"],
+        ["日志", "审计"],
+        ["验证", "验收"],
+        ["审批", "approval"],
+        ["进化", "复盘"],
     ],
 }
+
+_DEGRADED_REPLY_MARKERS = [
+    "hit skill access walls",
+    "didn't produce detailed outputs",
+    "我来为你创建",
+    "我现在为你创建",
+    "将为你创建",
+    "准备创建",
+    "没有实际产出",
+    "没能产出",
+    "无法访问",
+    "skillnotfounderror",
+    "approval_pending",
+    "max_tokens",
+]
 
 
 def _validate_reply(label: str, reply: str) -> dict[str, Any]:
@@ -642,6 +626,7 @@ def _validate_reply(label: str, reply: str) -> dict[str, Any]:
         "non_empty": bool(reply.strip()),
         "checks": [],
         "missing_groups": [],
+        "degraded_markers": [],
     }
     if not reply.strip():
         findings["ok"] = False
@@ -649,21 +634,18 @@ def _validate_reply(label: str, reply: str) -> dict[str, Any]:
 
     groups = _REQUIRED_KEYWORDS_BY_LABEL.get(label, [])
     text_lower = reply.lower()
+    degraded = [m for m in _DEGRADED_REPLY_MARKERS if m in text_lower]
+    findings["degraded_markers"] = degraded
     for group in groups:
         hits = [t for t in group if t.lower() in text_lower]
         findings["checks"].append({"group": group, "hits": hits})
         if not hits:
             findings["missing_groups"].append(group)
-    # ``ok`` is a soft signal the operator can eyeball — we just want
-    # evidence the LLM actually answered. Responsible models sometimes
-    # decline adversarial framings (e.g. "play the nastiest critic")
-    # and that is correct behaviour, so we require at least *one* hit
-    # group rather than full coverage.
-    hit_count = len(groups) - len(findings["missing_groups"])
     findings["ok"] = (
         findings["non_empty"]
-        and (hit_count >= 1 if groups else True)
-        and len(reply) > 200
+        and not degraded
+        and not findings["missing_groups"]
+        and len(reply) >= 300
     )
     return findings
 

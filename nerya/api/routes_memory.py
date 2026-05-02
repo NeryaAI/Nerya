@@ -9,12 +9,20 @@ def routes():
 
     def vector_config(client, payload):
         body = payload or {}
+        embedding = body.get("embedding")
+        if not isinstance(embedding, dict):
+            embedding = None
+        milvus = body.get("milvus")
+        if not isinstance(milvus, dict):
+            milvus = None
         return memsearch_index.configure(
             client.config,
             enabled=body.get("enabled") if "enabled" in body else None,
             watch_enabled=body.get("watch_enabled") if "watch_enabled" in body else None,
             paths=body.get("paths") if isinstance(body.get("paths"), list) else None,
             install_package=body.get("install_package"),
+            embedding=embedding,
+            milvus=milvus,
         )
 
     def vector_install(client, _payload):

@@ -255,6 +255,28 @@ def register_skill_tool(
     )
     registry.register(descriptor, replace=replace)
 
+    # Lowercase alias. Some models (especially OpenAI-compat and a few
+    # Claude Code prompts) emit ``"skill"`` instead of ``"Skill"``. The
+    # registry lookup is case-sensitive, so without this alias those
+    # calls hit the ``unknown tool: 'skill'`` branch in the executor and
+    # the agent loop records a hard error — the turn often recovers by
+    # restarting from scratch and loses the model's plan. Register an
+    # alias descriptor that shares the same handler / schema.
+    alias_descriptor = make_native_descriptor(
+        name=SKILL_TOOL_NAME.lower(),
+        description=SKILL_TOOL_DESCRIPTION,
+        input_schema=SKILL_TOOL_INPUT_SCHEMA,
+        handler=_handler,
+        risk=RiskLevel.READ,
+        permission_scope=PermissionScope.NONE,
+        read_only=True,
+        is_concurrency_safe=True,
+        tags=("skill", "playbook", "alias"),
+        result_kind="text",
+        auto_approve=True,
+    )
+    registry.register(alias_descriptor, replace=replace)
+
 
 __all__ = [
     "SKILL_TOOL_DESCRIPTION",

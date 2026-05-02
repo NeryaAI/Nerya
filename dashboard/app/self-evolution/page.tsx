@@ -18,6 +18,8 @@ import type {
   EvolutionAsset,
   EvolutionAssetCandidate,
   EvolutionConfigSnapshot,
+  EvolutionProcessArtifact,
+  EvolutionProcessTrace,
   EvolutionTimelineEnvelope,
   EvolutionTimelineItem,
 } from "../../lib/evolutionTypes";
@@ -196,7 +198,7 @@ export default function SelfEvolutionPage() {
       <PageHeader
         eyebrow="Learning control plane"
         title="Self Evolution"
-        description="Follow how Nerya turns runtime signals into proposals, validation gates, outcomes, and reusable learning assets."
+        description="Audit prompts, inputs, generated docs, proposals, validation gates, outcomes, and reusable learning assets."
         actions={
           <>
             <button className="btn btn-ghost" onClick={() => void load(false)} disabled={Boolean(busy)}>
@@ -472,7 +474,7 @@ function TimelineConsole({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_430px]">
+    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(460px,560px)]">
       <Card
         title={`Evolution history (${items.length})`}
         description="Newest first. Select a row to inspect why it happened, what evidence exists, and what the next governed step is."
@@ -535,6 +537,8 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
       </Card>
     );
   }
+  const process = item.process;
+  const sections = process?.sections ?? [];
   return (
     <Card
       title="Timeline detail"
@@ -550,6 +554,7 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
           <p className="mt-2 text-ink-300">{item.summary || "No summary."}</p>
         </div>
 
+        <ProcessStatus process={process} />
         <DetailRow label="Why triggered">{item.why || "No trigger explanation recorded."}</DetailRow>
         <DetailRow label="Evidence">
           <TokenList values={item.evidence_refs ?? []} empty="No evidence refs recorded." />
@@ -583,6 +588,14 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
         </DetailRow>
         <DetailRow label="Next step">{item.next_step || "Review linked evidence."}</DetailRow>
 
+        {sections.length ? (
+          <ProcessTrace sections={sections} />
+        ) : (
+          <DetailRow label="Process artifacts">
+            <span className="text-ink-500">No prompt, input, generated document, or output artifact is linked to this record yet.</span>
+          </DetailRow>
+        )}
+
         <details className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
           <summary className="cursor-pointer text-[12px] text-ink-300">Raw record</summary>
           <div className="mt-3">
@@ -592,6 +605,88 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
       </div>
     </Card>
   );
+}
+
+function ProcessStatus({ process }: { process?: EvolutionProcessTrace }) {
+  const flags = [
+    { label: "Prompt", active: Boolean(process?.has_prompt), tone: "brand" as const },
+    { label: "Inputs", active: Boolean(process?.has_inputs), tone: "brand" as const },
+    { label: "Docs", active: Boolean(process?.has_generated_docs), tone: "ok" as const },
+    { label: "Validation", active: Boolean(process?.has_validation), tone: "warn" as const },
+    { label: "Output", active: Boolean(process?.has_outputs), tone: "ok" as const },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+      {flags.map((flag) => (
+        <div key={flag.label} className="rounded-lg border border-brand-500/10 bg-ink-950/25 px-2 py-2">
+          <div className="text-[10px] uppercase tracking-[0.14em] text-ink-500">{flag.label}</div>
+          <div className="mt-1">
+            <Pill tone={flag.active ? flag.tone : "neutral"}>{flag.active ? "linked" : "none"}</Pill>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProcessTrace({ sections }: { sections: EvolutionProcessTrace["sections"] }) {
+  return (
+    <div className="space-y-3">
+      {sections.map((section) => (
+        <section key={section.id} className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{section.title}</div>
+              {section.summary ? <div className="mt-1 text-[12px] text-ink-400">{section.summary}</div> : null}
+            </div>
+            <Pill tone="neutral">{section.artifacts.length}</Pill>
+          </div>
+          <div className="mt-3 space-y-3">
+            {section.artifacts.map((artifact) => (
+              <ArtifactPreview key={`${section.id}:${artifact.id}:${artifact.path ?? ""}`} artifact={artifact} />
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function ArtifactPreview({ artifact }: { artifact: EvolutionProcessArtifact }) {
+  const preview = String(artifact.preview || "");
+  return (
+    <div className="rounded-md border border-white/10 bg-ink-900/50 p-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Pill tone={artifactTone(artifact.kind)}>{artifact.kind || "artifact"}</Pill>
+        <span className="font-medium text-ink-100">{artifact.title}</span>
+        {artifact.language ? <span className="font-mono text-[11px] text-ink-500">{artifact.language}</span> : null}
+        {typeof artifact.size === "number" ? <span className="font-mono text-[11px] text-ink-500">{formatBytes(artifact.size)}</span> : null}
+        {artifact.redacted ? <Pill tone="neutral">redacted</Pill> : null}
+        {artifact.truncated ? <Pill tone="warn">truncated</Pill> : null}
+      </div>
+      {artifact.path ? (
+        <div className="mt-1 truncate font-mono text-[11px] text-ink-500">{artifact.path}</div>
+      ) : null}
+      <pre className="embedded-scroll mt-2 max-h-72 whitespace-pre-wrap break-words rounded-md border border-ink-700/70 bg-ink-950/70 p-2 text-[11px] leading-relaxed text-ink-200">
+        {preview || "No preview available."}
+      </pre>
+    </div>
+  );
+}
+
+function artifactTone(kind?: string): "neutral" | "ok" | "warn" | "danger" | "brand" {
+  const k = String(kind || "").toLowerCase();
+  if (k === "prompt" || k === "input") return "brand";
+  if (k === "validation" || k === "proposal") return "warn";
+  if (k === "output" || k === "document") return "ok";
+  return "neutral";
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function DetailRow({ label, children }: { label: string; children: ReactNode }) {

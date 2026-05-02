@@ -367,9 +367,14 @@ class AnthropicMessagesBackend:
         if not isinstance(content, list):
             raise LLMError("anthropic returned non-list content")
         usage = doc.get("usage") or {}
+        _raw_stop = str(doc.get("stop_reason") or "")
+        if _raw_stop != "tool_use" and any(
+            b.get("type") == "tool_use" for b in content
+        ):
+            _raw_stop = "tool_use"
         return MessagesResponse(
             content=list(content),
-            stop_reason=str(doc.get("stop_reason") or ""),
+            stop_reason=_raw_stop,
             usage={
                 "input_tokens": int(usage.get("input_tokens") or 0),
                 "output_tokens": int(usage.get("output_tokens") or 0),
@@ -633,6 +638,16 @@ def _openai_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
         stop_reason = "content_filter"
     else:
         stop_reason = finish or "end_turn"
+
+    # Defensive override: some OpenAI-compat providers (and some vLLM /
+    # together / moonshot builds) emit ``finish_reason="stop"`` on the same
+    # chunk that carries tool_calls, which would normally map to
+    # ``end_turn`` and cause the agent loop to drop out after one tool call
+    # before the model has seen the tool_result. If we actually produced
+    # tool_use blocks, force ``stop_reason="tool_use"`` so the loop
+    # continues into the next iteration.
+    if any(b.get("type") == "tool_use" for b in content_blocks):
+        stop_reason = "tool_use"
 
     return content_blocks, stop_reason
 
@@ -1153,9 +1168,14 @@ class BedrockAnthropicMessagesBackend:
         if not isinstance(content, list):
             raise LLMError("bedrock returned non-list content")
         usage = doc.get("usage") or {}
+        _raw_stop = str(doc.get("stop_reason") or "")
+        if _raw_stop != "tool_use" and any(
+            b.get("type") == "tool_use" for b in content
+        ):
+            _raw_stop = "tool_use"
         return MessagesResponse(
             content=list(content),
-            stop_reason=str(doc.get("stop_reason") or ""),
+            stop_reason=_raw_stop,
             usage={
                 "input_tokens": int(usage.get("input_tokens") or 0),
                 "output_tokens": int(usage.get("output_tokens") or 0),

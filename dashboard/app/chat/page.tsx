@@ -7,7 +7,7 @@ export const metadata = {
 export default function ChatPage() {
   return (
     <div className="-mx-8 -my-6 h-screen">
-      <ChatView />
+      <ChatView sessionId={undefined} />
     </div>
   );
 }

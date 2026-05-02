@@ -62,6 +62,7 @@ class SubAgentResult:
     error_kind: str | None = None  # "spec" | "llm" | "policy" | "unknown"
     metrics: dict[str, Any] = field(default_factory=dict)
     steps: list[dict[str, Any]] = field(default_factory=list)
+    audit: dict[str, Any] = field(default_factory=dict)
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
@@ -139,6 +140,7 @@ class SubAgentDispatcher:
                 wall_ms=int((_t.monotonic() - t0) * 1000),
                 metrics=(raw.get("metrics") or {}),
                 steps=(raw.get("steps") or []),
+                audit=(raw.get("audit") or {}),
             )
         except PermissionError as exc:
             return SubAgentResult(
@@ -201,12 +203,16 @@ class SubAgentDispatcher:
             # Backwards-compatible shape for existing callers.
             return {
                 "subagent": name, "output": {}, "tier": res.tier,
-                "tokens": 0, "usd": 0.0,
+                "tokens": 0, "usd": 0.0, "wall_ms": res.wall_ms,
+                "metrics": res.metrics, "steps": res.steps,
+                "audit": res.audit,
                 "ok": False, "error": res.error, "error_kind": res.error_kind,
             }
         return {
             "subagent": name, "output": res.output, "tier": res.tier,
-            "tokens": res.tokens, "usd": res.usd, "ok": True,
+            "tokens": res.tokens, "usd": res.usd, "wall_ms": res.wall_ms,
+            "metrics": res.metrics, "steps": res.steps, "audit": res.audit,
+            "ok": True,
         }
 
     def dispatch_many(

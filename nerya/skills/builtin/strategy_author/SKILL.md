@@ -63,7 +63,7 @@ Add only what the strategy actually uses:
   webhook routes. *Cross-reference the* `triggers` *skill before
   writing this section.*
 - `subagents: [name1, name2]` — only listed if `main.py` actually
-  calls `ctx.subagents.dispatch("...")`. Listing roles you don't use
+  calls `ctx.subagents.run("...", payload=...)`. Listing roles you don't use
   costs the operator nothing but adds noise.
 - `tuning.enabled: true` — only if you also write a per-strategy
   `tuner` prompt and want the auto-evolution lane to look at this
@@ -86,31 +86,32 @@ def run(ctx) -> dict:
 
 | Surface              | Use for                                                    |
 | -------------------- | ---------------------------------------------------------- |
-| `ctx.market_data`    | Price / candle / orderbook reads (cached when stale)       |
+| `ctx.market`         | Price / candle / orderbook reads (cached when stale)       |
 | `ctx.news`           | News / social / announcements feed                         |
-| `ctx.onchain`        | On-chain reads (balances, transfers, contract state)       |
 | `ctx.llm`            | Tiered LLM calls (`tier="light"` for filtering, `"medium"` |
 |                      | for analysis, `"high"` for hard reasoning)                 |
-| `ctx.trading`        | Read-only by default. `submit_intent({...})` to place an   |
+| `ctx.trading`        | Read-only by default. `submit_intent(...)` to place an     |
 |                      | order — the kernel fans out approvals + risk gates.        |
-| `ctx.portfolio`      | Current positions, unrealised PnL, last fills              |
-| `ctx.subagents`      | `dispatch(name, payload)` for in-tick subagent analysis    |
-| `ctx.memory`         | Strategy-scoped memory append/read                         |
-| `ctx.account`        | Resolved account record (id, venue creds, base currency)   |
-| `ctx.limits`         | The package's `limits.yml` snapshot                        |
-| `ctx.now()`          | UTC timestamp the tick is operating against                |
-| `ctx.logger`         | Structured logger (writes under `runs/<run_id>.json`)      |
+| `ctx.state`          | Strategy-scoped key/value state                            |
+| `ctx.dedupe`         | Seen/mark helpers for event and news dedupe                |
+| `ctx.subagents`      | `run(name, payload=...)` for in-tick subagent analysis     |
+| `ctx.messages`       | Operator-facing messages                                   |
+| `ctx.config`         | Manifest fields: markets, accounts, mode, extras           |
+| `ctx.policy`         | Typed strategy policy snapshot                             |
+| `ctx.clock`          | UTC timestamp helpers (`now_iso`, `now_ms`)                |
+| `ctx.audit`          | Structured strategy audit log                              |
+| `ctx.runmode`        | `"backtest"`, `"paper"`, or `"live"` for surface gating    |
 
 Forbidden patterns:
 
 - Importing `nerya.api.*` or `nerya.tools.*` directly — the runtime
   hides everything for a reason.
-- Reading `os.environ` for secrets — use `ctx.account` (which reads
-  from the encrypted vault) or `ctx.config.get("...")`.
+- Reading `os.environ` for secrets — strategies never access secrets
+  directly; submit trade intents through `ctx.trading`.
 - Spawning threads / processes — return a decision and let the
   runtime schedule the next tick.
 - Holding state in module globals — strategies are reloaded across
-  ticks; persist via `ctx.memory.append_strategy(...)` instead.
+  ticks; persist via `ctx.state.set(...)` instead.
 
 ## Account / SDK access
 
@@ -121,15 +122,14 @@ The flow is:
 1. Operator provisions `<workspace>/accounts/<id>.yml` with non-secret
    fields (`venue`, `base_currency`, `paper`).
 2. Secrets land in `<workspace>/vault.enc` via the secret vault tools.
-3. The runtime resolves both into `ctx.account` for the running tick.
-4. `ctx.trading.submit_intent({...})` uses the resolved account
+3. The runtime resolves both inside the trading kernel for the running tick.
+4. `ctx.trading.submit_intent(...)` uses the resolved account
    automatically — strategies never see raw keys.
 
 If your strategy needs a venue / API the runtime doesn't model yet,
-add a small adapter in `main.py` that takes credentials from
-`ctx.account.extra` (operator-supplied, vault-resolved). Document
-the schema in `strategy.md` so the operator knows what to put in
-the vault.
+add a provider spec or skill adapter; do not read raw credentials in
+`main.py`. Document the schema in `strategy.md` so the operator knows
+what to put in the vault.
 
 ## Triggers & schedules
 
@@ -146,8 +146,8 @@ Read the `triggers` skill first. The most common patterns:
   `ctx.trigger.payload`.
 
 Each tick should be **idempotent**: rerunning the same tick on the
-same data must not double-submit. Use `ctx.memory.has_seen(event_id)`
-or a deterministic `dedup_key` in `submit_intent`.
+same data must not double-submit. Use `ctx.dedupe.seen/mark(event_id)`
+or a deterministic `reasoning` value in `submit_intent`.
 
 ## Subagents inside a strategy
 
@@ -159,21 +159,22 @@ qualitative for in-tick logic. Workflow:
 2. List the role under `strategy.yml > subagents`.
 3. In `main.py`, call:
    ```python
-   verdict = ctx.subagents.dispatch("market_analyst",
-                                    payload={"signal": signal,
-                                             "candles": last_50})
+   verdict = ctx.subagents.run(
+       "market_analyst",
+       payload={"signal": signal, "candles": last_50},
+   )
    ```
 4. The harness merges per-strategy roles on top of workspace
    defaults; operators can override either.
 
-For *low-frequency* strategies (daily, news-driven), prefer
-`ctx.team.run({...})` (delegates to the `team_run` native tool, see
-the `team` skill) so multiple roles vote before the strategy commits
-to an order.
+For *low-frequency* strategies (daily, news-driven), prefer a
+team-oriented subagent/persona via `ctx.subagents.run(...)` or the
+workspace `team` skill outside the strategy tick so multiple roles
+vote before the strategy commits to an order.
 
 ## Backtest is required when data permits
 
-If `ctx.market_data` (or your custom adapter) can return historical
+If `ctx.market` (or your custom adapter) can return historical
 candles, the package **must** ship a backtest under `tests/`:
 
 ```python
@@ -184,22 +185,31 @@ from main import run
 def test_backtest_no_blowup(make_ctx):
     """Replay 30d of 1h candles; assert no negative drawdown beyond limits."""
     ctx = make_ctx(window_days=30, tf="1h")
-    out = run(ctx)
-    assert out["decision"] in {"ENTRY", "HOLD", "EXIT"}
-    assert ctx.portfolio.max_drawdown_pct() <= ctx.limits.max_drawdown_pct
+    stats = ctx.backtest_replay(run, window_days=30, tf="1h")
+    assert stats["max_drawdown_pct"] <= 30
 ```
 
-Use `ctx.backtest_replay({...})` in tests to drive the strategy over
+Use `ctx.backtest_replay(run, **kwargs)` in tests to drive the strategy over
 historical bars — the helper handles tick-time, fill simulation, and
-fee modelling. Backtest output lands under `tests/reports/<run>.json`
-and `strategy_validate` reads it before allowing `strategy_promote`
-to flip a paper strategy live.
+fee modelling. No artefacts are written unless `artefacts_dir=...` is passed.
+Full CLI backtest artefacts land under `strategies/<id>/backtests/<ts>/`.
 
-When historical data is **not** available (Polymarket new market, a
-brand-new on-chain pool, an arbitrary news feed), call this out
-explicitly in `strategy.md` under a `## Backtesting` section and
-ship a paper-trade plan instead. Don't leave the section blank — the
-operator must know which guarantees the strategy carries.
+When standard historical candles are **not** available or are misleading
+(Polymarket / prediction markets, brand-new on-chain pools, meme coins,
+arbitrary news feeds), do not stop at "cannot backtest". The package must
+still include the simplest useful custom replay/backtest script possible:
+
+- `tests/test_main.py` with fixture replay, or
+- `scripts/custom_replay.py`, or
+- `backtests/custom_replay.py`.
+
+Use checked-in fixtures, bounded public history, swap/reserve logs,
+settlement history, headline/event JSONL, sampled prices, or stubbed
+LLM/team/news outputs. Emit at least `custom_replay_result.json` and
+`custom_replay_report.md` when the script is run. Also document the
+limitations in `strategy.md` under `## Backtesting`. A paper-trade plan
+is an add-on, not a replacement for this attempted replay, unless the
+operator explicitly accepts that no executable replay is possible.
 
 ## Reference archetypes
 
@@ -233,7 +243,7 @@ strategy.
    still owe a real tuner rubric). **Subagents are different**:
    only list a role under `subagents` when `main.py` actually
    calls `ctx.subagents.run("<role>", ...)` or
-   `ctx.team.run({...})` at runtime. A pure indicator-driven
+   the team skill through `ctx.subagents.run(...)` at runtime. A pure indicator-driven
    scalper / trend follower does not need a subagent and should
    ship with `subagents: []`. A news / sentiment / event-driven
    strategy that wants a second opinion before the order goes in
@@ -278,9 +288,61 @@ strategy.
    calling `strategy_generate_proposal` again with corrected
    `files` (overwriting the proposal) until the validator says
    `ok=true`.
+5.5. Backtest gate (REQUIRED).
+
+   After `strategy_validate` returns `ok=true`, you MUST call
+   `AskUserQuestion` with this structure (translate copy to the user's
+   language; preserve the three branch semantics):
+
+   ```text
+   question: "策略已通过校验。是否立即用过去 30 天数据进行回测？"
+   header:   "回测?"
+   options:
+     - 是（默认参数）           -> preset=default
+     - 是（自定义周期与参数）   -> draft config.yml, preview with user, then run
+     - 否，直接 promote         -> skip, record reason in proposal summary
+   ```
+
+   Default branch:
+
+   ```bash
+   python -m nerya.skills.builtin.backtest.scripts.backtest_run --strategy-id <id> --preset default
+   ```
+
+   On completion, read `backtests/<ts>/report.md`. Summarise verdict
+   (PASS/WARN/FAIL), `total_return_pct`, `max_drawdown_pct`,
+   `sharpe_ratio`, and `total_missed_profit_pct` in one paragraph. Do
+   not paste the full report. Then ask whether to proceed to
+   `strategy_promote`.
+
+   Custom branch: draft `backtests/<next_ts>/config.yml` from
+   `backtest/references/config_schema.md`, preview it to the user, then
+   run with `--config <path>` after confirmation.
+
+   Skip branch: proceed to step 6 and record
+   `backtest skipped: <user reason>` in the proposal summary.
+
+   Unreachable-data exception: if every market returns no historical
+   rows, do not silently skip and do not jump straight to promote. Ask:
+
+   ```text
+   历史数据不可达（{markets}）—— 如何处理？
+     a) 换一个有历史数据的市场再试
+     b) 写一个简化 custom replay/backtest 脚本并运行（推荐）
+     c) 中止，回去改策略
+   ```
+
+   Recommended branch (b): create `scripts/custom_replay.py` or
+   `backtests/custom_replay.py` using `backtest/references/custom_replay_template.md`.
+   Run it, read `custom_replay_report.md`, and summarize what was replayed,
+   what was stubbed, metrics/signals/trades, and limitations. Only if that
+   script cannot be made executable should you record `custom replay attempted
+   but unavailable: <reason>` and ask the operator whether to proceed with a
+   paper-only plan.
 6. Run `strategy_run_tick({proposal_id, dry_run: true})` if the
-   archetype is paper-runnable; or run the included backtest.
-7. If clean, call `strategy_promote({proposal_id})` to write the
+   archetype is paper-runnable.
+7. If clean and the backtest decision allows promotion, call
+   `strategy_promote({proposal_id})` to write the
    package to `strategies/<id>/`. Promotion now also installs
    the trading + tuning rows in `triggers/schedules.yml`
    automatically — you don't need a separate
@@ -304,6 +366,16 @@ to *this* strategy / market / mission. Operators can also create
 new personas from the dashboard's Agents page; the agent should
 prefer those over inventing one-off prompts in every package.
 
+### Backtest — two paths
+
+1. Interactive (skill-triggered). Step 5.5 above. Full artefacts land under
+   `<workspace>/strategies/<id>/backtests/<ts>/`.
+
+2. Programmatic (`tests/test_main.py`). `ctx.backtest_replay(run, **kwargs)`
+   runs the same engine in-process and returns a stats dict. No artefacts are
+   written unless `artefacts_dir=...` is passed. This is the lightweight smoke
+   path used by validation tests.
+
 ## Failure modes
 
 - **Missing the backtest.** Live promotion is blocked when
@@ -312,8 +384,8 @@ prefer those over inventing one-off prompts in every package.
   runs; the dashboard shows it as "registered, idle". Always wire
   at least one trigger.
 - **Asking the operator for keys.** Never. Use the vault flow.
-- **Hard-coded venue endpoints.** Use `ctx.account.extra.endpoint`;
-  the operator may rotate venues per environment.
+- **Hard-coded venue endpoints.** Use provider specs / account
+  configuration; the operator may rotate venues per environment.
 - **Generic prompt subagents.** A per-strategy subagent prompt
   should reference *this* strategy, *this* market, *this* mission.
   Otherwise just use a default workspace role.

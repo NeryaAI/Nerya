@@ -98,8 +98,39 @@ export type EvolutionTimelineItem = {
   why?: string;
   next_step?: string;
   outcome_score?: number;
+  process?: EvolutionProcessTrace;
   raw?: Record<string, unknown>;
   [key: string]: unknown;
+};
+
+export type EvolutionProcessArtifact = {
+  id: string;
+  title: string;
+  kind: "prompt" | "input" | "output" | "document" | "proposal" | "validation" | string;
+  path?: string;
+  language?: string;
+  size?: number;
+  preview?: string;
+  truncated?: boolean;
+  redacted?: boolean;
+  metadata?: Record<string, unknown>;
+};
+
+export type EvolutionProcessSection = {
+  id: string;
+  title: string;
+  summary?: string;
+  artifacts: EvolutionProcessArtifact[];
+};
+
+export type EvolutionProcessTrace = {
+  has_prompt?: boolean;
+  has_inputs?: boolean;
+  has_outputs?: boolean;
+  has_generated_docs?: boolean;
+  has_validation?: boolean;
+  sections: EvolutionProcessSection[];
+  artifacts?: EvolutionProcessArtifact[];
 };
 
 export type EvolutionTimelineSummary = {
@@ -158,5 +189,6 @@ export type EvolutionTimelineEnvelope = {
     assets: EvolutionAsset[];
     candidates: EvolutionAssetCandidate[];
     validation_plans: Array<Record<string, unknown>>;
+    strategy_audits?: Array<Record<string, unknown>>;
   };
 };

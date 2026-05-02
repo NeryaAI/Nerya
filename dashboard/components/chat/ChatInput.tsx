@@ -23,7 +23,6 @@ export function ChatInput({
   settings,
   onSettingsChange,
   modelOptions = [],
-  modelProviders = [],
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -34,7 +33,6 @@ export function ChatInput({
   settings: ChatRunSettings;
   onSettingsChange: (settings: ChatRunSettings) => void;
   modelOptions?: ChatModelOption[];
-  modelProviders?: string[];
 }) {
   const ref = useRef<HTMLTextAreaElement | null>(null);
   const selectedModelKey =
@@ -47,20 +45,6 @@ export function ChatInput({
     (settings.model_provider || settings.model_id || settings.model_tier
       ? "__custom"
       : "__default");
-  const providerModelOptions = Array.from(
-    new Map(
-      modelOptions
-        .filter(
-          (option) =>
-            !settings.model_provider || option.provider === settings.model_provider,
-        )
-        .map((option) => [option.model, option]),
-    ).values(),
-  );
-  const modelSelectValue = settings.model_id || "";
-  const currentModelInCatalog = providerModelOptions.some(
-    (option) => option.model === modelSelectValue,
-  );
 
   useEffect(() => {
     if (!ref.current) return;
@@ -189,59 +173,6 @@ export function ChatInput({
                 ))}
               </select>
             </label>
-            <label className="flex items-center gap-1.5">
-              <span className="sr-only">Provider</span>
-              <select
-                value={settings.model_provider}
-                disabled={sending}
-                onChange={(e) =>
-                  onSettingsChange({
-                    ...settings,
-                    model_tier: "",
-                    model_provider: e.target.value,
-                    model_id: "",
-                  })
-                }
-                className="w-24 rounded-md border border-white/10 bg-ink-900/80 px-2 py-1 text-[10px] text-ink-200 placeholder:text-ink-500 focus:outline-none focus:border-brand-500/50 disabled:opacity-60"
-              >
-                <option value="">provider</option>
-                {modelProviders.map((provider) => (
-                  <option key={provider} value={provider}>
-                    {provider}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex items-center gap-1.5">
-              <span className="sr-only">Model id</span>
-              <select
-                value={modelSelectValue}
-                disabled={sending}
-                onChange={(e) => {
-                  const picked = e.target.value;
-                  const option = providerModelOptions.find(
-                    (item) => item.model === picked,
-                  );
-                  onSettingsChange({
-                    ...settings,
-                    model_tier: "",
-                    model_provider: option?.provider || settings.model_provider,
-                    model_id: picked,
-                  });
-                }}
-                className="w-36 rounded-md border border-white/10 bg-ink-900/80 px-2 py-1 text-[10px] text-ink-200 placeholder:text-ink-500 focus:outline-none focus:border-brand-500/50 disabled:opacity-60"
-              >
-                <option value="">model</option>
-                {modelSelectValue && !currentModelInCatalog ? (
-                  <option value={modelSelectValue}>{modelSelectValue}</option>
-                ) : null}
-                {providerModelOptions.map((option) => (
-                  <option key={`${option.key}:model`} value={option.model}>
-                    {option.model}
-                  </option>
-                ))}
-              </select>
-            </label>
             <label className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2 py-1 text-ink-300">
               <input
                 type="checkbox"
@@ -257,7 +188,6 @@ export function ChatInput({
               />
               <span>YOLO</span>
             </label>
-            <span>paper mode by default</span>
           </div>
         </div>
       </div>
