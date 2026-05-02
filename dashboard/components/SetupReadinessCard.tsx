@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import { clientApi } from "../lib/clientApi";
 import type {
   ReadinessCheck,
@@ -27,6 +28,7 @@ const STATUS_TONE: Record<
  * ``fix`` action that deep-links into the right settings panel.
  */
 export function SetupReadinessCard({ collapsed = false }: { collapsed?: boolean }) {
+  const t = useTranslations("setupReadiness");
   const [env, setEnv] = useState<SetupReadinessEnvelope | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,14 +59,14 @@ export function SetupReadinessCard({ collapsed = false }: { collapsed?: boolean 
 
   if (loading && !env) {
     return collapsed ? null : (
-      <Card title="Setup readiness" description="Loading…" />
+      <Card title={t("title")} description={t("loading")} />
     );
   }
   if (error || !env) {
     return collapsed ? null : (
-      <Card title="Setup readiness" description="Endpoint unavailable">
+      <Card title={t("title")} description={t("unavailable")}>
         <div className="text-[12px] text-rose-300 font-mono break-all">
-          {error || "no data"}
+          {error || t("noData")}
         </div>
       </Card>
     );
@@ -82,7 +84,7 @@ export function SetupReadinessCard({ collapsed = false }: { collapsed?: boolean 
 
   return (
     <Card
-      title="Setup readiness"
+      title={t("title")}
       description={env.summary}
       actions={
         <div className="flex items-center gap-2">
@@ -92,7 +94,7 @@ export function SetupReadinessCard({ collapsed = false }: { collapsed?: boolean 
               onClick={() => setOpen((v) => !v)}
               className="text-[11px] px-2 py-0.5 rounded-md text-brand-200 border border-brand-500/25 hover:bg-brand-500/10"
             >
-              {open ? "Hide" : "Show"} ({checks.length})
+              {open ? t("hide") : t("show")} ({checks.length})
             </button>
           )}
         </div>

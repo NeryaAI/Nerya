@@ -1,3 +1,7 @@
+"use client";
+
+import { useTranslations } from "next-intl";
+
 type SwitchTone = "brand" | "accent" | "danger";
 type SwitchSize = "sm" | "md";
 
@@ -64,7 +68,7 @@ export function SwitchControl({
   checked,
   onCheckedChange,
   disabled = false,
-  label = "Toggle setting",
+  label,
   tone = "brand",
   size = "md",
 }: {
@@ -75,12 +79,14 @@ export function SwitchControl({
   tone?: SwitchTone;
   size?: SwitchSize;
 }) {
+  const t = useTranslations("pageCommon");
+  const ariaLabel = label ?? t("toggleSetting");
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
-      aria-label={label}
+      aria-label={ariaLabel}
       disabled={disabled}
       onClick={() => onCheckedChange(!checked)}
       className={switchTrackClass({ checked, disabled, interactive: true, size, tone })}

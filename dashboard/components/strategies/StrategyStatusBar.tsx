@@ -1,5 +1,7 @@
 "use client";
 
+import { useTranslations } from "next-intl";
+
 import { Card, Kpi, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
 import type { StrategyWorkspaceEnvelope } from "../../lib/strategyTypes";
@@ -31,6 +33,7 @@ export function StrategyStatusBar({
   onError,
   onNotice,
 }: Props) {
+  const t = useTranslations("strategyStatus");
   const manifest = envelope.manifest;
   const last = envelope.last_run;
   const kill = envelope.kill_switch;
@@ -40,7 +43,7 @@ export function StrategyStatusBar({
     if (!sid) return;
     let reason = "";
     if (action === "set") {
-      reason = window.prompt(`Kill switch reason for ${sid}`, "operator_halt") ?? "";
+      reason = window.prompt(t("killReasonPrompt", { id: sid }), "operator_halt") ?? "";
       if (!reason) return;
     }
     onSetBusy(`kill:${action}`);
@@ -52,7 +55,7 @@ export function StrategyStatusBar({
         reason,
         by: "dashboard",
       });
-      onNotice(action === "set" ? `Kill switch armed (${reason})` : "Kill switch cleared");
+      onNotice(action === "set" ? t("killArmed", { reason }) : t("killCleared"));
       await onRefresh();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -73,9 +76,11 @@ export function StrategyStatusBar({
         note: "manual_run_tick",
       });
       onNotice(
-        `Manual tick ${out.run_id ?? ""} → ${out.status ?? "?"} (${
-          out.duration_ms ?? 0
-        } ms)`,
+        t("tickResult", {
+          runId: out.run_id ?? "",
+          status: out.status ?? "?",
+          ms: out.duration_ms ?? 0,
+        }),
       );
       await onRefresh();
     } catch (e) {
@@ -90,8 +95,8 @@ export function StrategyStatusBar({
       title={manifest?.title || envelope.strategy_id}
       description={
         manifest
-          ? `${manifest.strategy_id} · v${manifest.version} · ${manifest.markets.join(", ") || "no markets"}`
-          : "Manifest unavailable"
+          ? `${manifest.strategy_id} · v${manifest.version} · ${manifest.markets.join(", ") || t("noMarkets")}`
+          : t("manifestUnavailable")
       }
       actions={
         <div className="flex items-center gap-2">
@@ -100,7 +105,7 @@ export function StrategyStatusBar({
             disabled={disabled || busy !== null}
             className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-50 text-white text-xs rounded px-3 py-1.5"
           >
-            {busy === "run_tick" ? "Running…" : "Run tick"}
+            {busy === "run_tick" ? t("running") : t("runTick")}
           </button>
           {kill?.asserted ? (
             <button
@@ -108,7 +113,7 @@ export function StrategyStatusBar({
               disabled={disabled || busy !== null}
               className="text-xs rounded px-3 py-1.5 border border-accent-500/40 text-accent-300 hover:border-accent-500/70"
             >
-              {busy === "kill:clear" ? "Clearing…" : "Clear kill"}
+              {busy === "kill:clear" ? t("clearing") : t("clearKill")}
             </button>
           ) : (
             <button
@@ -116,7 +121,7 @@ export function StrategyStatusBar({
               disabled={disabled || busy !== null}
               className="text-xs rounded px-3 py-1.5 border border-[#ef4560]/50 text-[#ef4560] hover:bg-[#ef4560]/10"
             >
-              {busy === "kill:set" ? "Arming…" : "Kill switch"}
+              {busy === "kill:set" ? t("arming") : t("killSwitch")}
             </button>
           )}
         </div>
@@ -124,7 +129,7 @@ export function StrategyStatusBar({
     >
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Kpi
-          label="Mode"
+          label={t("mode")}
           value={manifest?.mode ?? "—"}
           tone={
             manifest?.mode === "live"
@@ -135,7 +140,7 @@ export function StrategyStatusBar({
           }
         />
         <Kpi
-          label="Package"
+          label={t("package")}
           value={
             envelope.package_hash
               ? envelope.package_hash.slice(0, 12)
@@ -143,11 +148,11 @@ export function StrategyStatusBar({
           }
         />
         <Kpi
-          label="Last run"
+          label={t("lastRun")}
           value={
             last
               ? `${last.status} · ${new Date(last.finished_at).toLocaleTimeString()}`
-              : "no runs"
+              : t("noRuns")
           }
           tone={
             last?.status === "error"
@@ -160,16 +165,16 @@ export function StrategyStatusBar({
           }
         />
         <Kpi
-          label="Kill switch"
-          value={kill?.asserted ? "armed" : "clear"}
+          label={t("killSwitch")}
+          value={kill?.asserted ? t("armed") : t("clear")}
           tone={kill?.asserted ? "danger" : "ok"}
         />
       </div>
       {kill?.asserted && (
         <div className="mt-3 rounded-lg border border-[#ef4560]/30 bg-[#ef4560]/10 px-3 py-2 text-xs text-[#ef4560]">
-          armed by <span className="font-mono">{kill.by || "?"}</span> at{" "}
+          {t("armedBy")} <span className="font-mono">{kill.by || "?"}</span> {t("at")}{" "}
           {kill.at ? new Date(kill.at).toLocaleString() : "?"} —{" "}
-          {kill.reason || "no reason"}
+          {kill.reason || t("noReason")}
         </div>
       )}
       {manifest && (

@@ -1,5 +1,7 @@
 "use client";
 
+import { useTranslations } from "next-intl";
+
 import { ReactNode, useState } from "react";
 import type {
   ActionRecord,
@@ -1077,6 +1079,7 @@ export function TurnBlocks({
   activityEvents?: LiveEvent[];
   resolvingApprovalIds?: Set<string>;
 }) {
+  const t = useTranslations("chat");
   const actions = turn.actions || [];
   const tools = turn.tool_trace || [];
   const events = turn.events || [];
@@ -1112,22 +1115,20 @@ export function TurnBlocks({
     <div className="mt-3 space-y-2">
       {plan.kind || harness ? (
         <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-          {plan.kind ? <Tag>plan: {plan.kind}</Tag> : null}
-          {plan.tier ? <Tag tone="brand">tier: {plan.tier}</Tag> : null}
+          {plan.kind ? <Tag>{t("planLabel", { value: plan.kind })}</Tag> : null}
+          {plan.tier ? <Tag tone="brand">{t("tierLabel", { value: plan.tier })}</Tag> : null}
           {harness === "native" ? (
-            <Tag tone="brand">native loop</Tag>
+            <Tag tone="brand">{t("nativeLoop")}</Tag>
           ) : harness === "legacy" ? (
-            <Tag>legacy harness</Tag>
+            <Tag>{t("legacyHarness")}</Tag>
           ) : null}
           {typeof (budget as Record<string, unknown>).calls === "number" ? (
             <Tag>
-              {`${(budget as Record<string, unknown>).calls} call${
-                (budget as Record<string, unknown>).calls === 1 ? "" : "s"
-              }`}
+              {t("callsCount", { count: (budget as Record<string, unknown>).calls as number })}
             </Tag>
           ) : null}
           {typeof (budget as Record<string, unknown>).wall_ms === "number" ? (
-            <Tag>{`${(budget as Record<string, unknown>).wall_ms}ms`}</Tag>
+            <Tag>{t("wallMs", { ms: (budget as Record<string, unknown>).wall_ms as number })}</Tag>
           ) : null}
         </div>
       ) : null}

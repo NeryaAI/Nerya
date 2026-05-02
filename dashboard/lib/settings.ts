@@ -46,6 +46,7 @@ export type UiSettings = {
   timezone: TimezonePreference;
   language: LanguagePreference;
   marketStream: MarketStreamPreference;
+  darkMode: boolean;
 };
 
 export const DEFAULT_SETTINGS: UiSettings = {
@@ -62,6 +63,7 @@ export const DEFAULT_SETTINGS: UiSettings = {
   timezone: "auto",
   language: "en",
   marketStream: "standard",
+  darkMode: true,
 };
 
 const KEY = "nerya.ui_settings.v1";

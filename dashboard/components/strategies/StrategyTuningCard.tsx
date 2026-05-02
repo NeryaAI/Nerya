@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 
 import { Card, Empty, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
@@ -40,6 +41,7 @@ export function StrategyTuningCard({
   onError,
   onNotice,
 }: Props) {
+  const t = useTranslations("strategyTuning");
   const enabled = !!tuning?.tuning?.enabled;
   const schedule = tuning?.schedule ?? null;
 
@@ -102,9 +104,9 @@ export function StrategyTuningCard({
         require_shadow_run: requireShadow,
       });
       if (out.proposal_id) {
-        onNotice(`Tuning proposal ${out.proposal_id} created — promote in evolution.`);
+        onNotice(t("proposalCreated", { id: out.proposal_id }));
       } else {
-        onNotice("Tuning proposal created.");
+        onNotice(t("proposalCreatedSimple"));
       }
       setEditing(false);
       await onRefresh();
@@ -120,7 +122,7 @@ export function StrategyTuningCard({
     onError(null);
     try {
       await clientApi.strategyRuntimeTuningSchedule(strategyId);
-      onNotice("Tuning schedule installed.");
+      onNotice(t("scheduleInstalled"));
       await onRefresh();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -133,7 +135,7 @@ export function StrategyTuningCard({
     onSetBusy("tuning:pause");
     try {
       await clientApi.strategyRuntimeTuningPause(strategyId);
-      onNotice("Tuning paused.");
+      onNotice(t("paused"));
       await onRefresh();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -146,7 +148,7 @@ export function StrategyTuningCard({
     onSetBusy("tuning:resume");
     try {
       await clientApi.strategyRuntimeTuningResume(strategyId);
-      onNotice("Tuning resumed.");
+      onNotice(t("resumed"));
       await onRefresh();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -167,8 +169,8 @@ export function StrategyTuningCard({
       });
       onNotice(
         out.proposal_id
-          ? `Tuning ran (${out.status}) — proposal ${out.proposal_id}`
-          : `Tuning ran (${out.status})${out.reason ? ` · ${out.reason}` : ""}`,
+          ? t("ranWithProposal", { status: out.status, id: out.proposal_id })
+          : t("ran", { status: out.status, suffix: out.reason ? ` · ${out.reason}` : "" }),
       );
       await onRefresh();
     } catch (e) {
@@ -180,8 +182,8 @@ export function StrategyTuningCard({
 
   return (
     <Card
-      title="Self-evolution / tuning"
-      description="Strategy tuner prompt, schedule, and most-recent performance snapshot."
+      title={t("title")}
+      description={t("description")}
       actions={
         <div className="flex items-center gap-2">
           {enabled ? (
@@ -191,7 +193,7 @@ export function StrategyTuningCard({
                 disabled={busy !== null}
                 className="text-xs rounded px-2 py-1 border border-[#f5a524]/40 text-[#f5a524] hover:bg-[#f5a524]/10"
               >
-                Pause
+                {t("pause")}
               </button>
             ) : (
               <button
@@ -199,7 +201,7 @@ export function StrategyTuningCard({
                 disabled={busy !== null}
                 className="text-xs rounded px-2 py-1 border border-accent-500/40 text-accent-300 hover:bg-accent-500/10"
               >
-                Resume
+                {t("resume")}
               </button>
             )
           ) : null}
@@ -209,7 +211,7 @@ export function StrategyTuningCard({
               disabled={busy !== null}
               className="btn-ghost text-xs"
             >
-              {busy === "tuning:schedule" ? "Installing…" : "Install schedule"}
+              {busy === "tuning:schedule" ? t("installing") : t("installSchedule")}
             </button>
           )}
           <button
@@ -217,38 +219,38 @@ export function StrategyTuningCard({
             disabled={busy !== null}
             className="btn-ghost text-xs"
           >
-            {busy === "tuning:dry_run" ? "Running…" : "Dry run"}
+            {busy === "tuning:dry_run" ? t("running") : t("dryRun")}
           </button>
           <button
             onClick={() => void runNow(false)}
             disabled={busy !== null}
             className="bg-brand-500/80 hover:bg-brand-500 text-white text-xs rounded px-3 py-1.5"
           >
-            {busy === "tuning:run" ? "Running…" : "Run tuner"}
+            {busy === "tuning:run" ? t("running") : t("runTuner")}
           </button>
         </div>
       }
     >
       {!tuning?.ok && !enabled ? (
-        <Empty label="Tuning not yet enabled for this strategy. Use 'Edit & propose' below to author a tuning block." />
+        <Empty label={t("notEnabled")} />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-          <Stat label="Status" tone={enabled ? "ok" : "warn"}>
-            {enabled ? "enabled" : "disabled"}
+          <Stat label={t("status")} tone={enabled ? "ok" : "warn"}>
+            {enabled ? t("enabled") : t("disabled")}
           </Stat>
-          <Stat label="Schedule">
+          <Stat label={t("schedule")}>
             {schedule
               ? schedule.cron
                 ? `cron · ${schedule.cron}`
                 : schedule.every_seconds
-                  ? `every ${schedule.every_seconds}s`
-                  : "installed"
-              : "not installed"}
+                  ? t("everySeconds", { n: schedule.every_seconds })
+                  : t("installed")
+              : t("notInstalled")}
           </Stat>
-          <Stat label="Snapshot">
+          <Stat label={t("snapshot")}>
             {summary
-              ? `${summary.considered ?? 0} runs · trades=${summary.total_trades ?? 0}`
-              : "no data"}
+              ? t("runsTrades", { runs: summary.considered ?? 0, trades: (summary.total_trades as number) ?? 0 })
+              : t("noData")}
           </Stat>
         </div>
       )}
@@ -266,29 +268,29 @@ export function StrategyTuningCard({
           onClick={() => setEditing((v) => !v)}
           className="btn-ghost text-xs"
         >
-          {editing ? "Hide editor" : "Edit & propose"}
+          {editing ? t("hideEditor") : t("editPropose")}
         </button>
       </div>
 
       {editing && (
         <div className="mt-3 space-y-2 text-xs">
-          <Field label="tuner prompt" full>
+          <Field label={t("tunerPrompt")} full>
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               className="input-dark font-mono h-40"
-              placeholder="Describe how the tuner should reason about this strategy."
+              placeholder={t("promptPlaceholder")}
             />
           </Field>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-            <Field label="cron">
+            <Field label={t("cron")}>
               <input
                 value={cron}
                 onChange={(e) => setCron(e.target.value)}
                 className="input-dark font-mono"
               />
             </Field>
-            <Field label="objectives (comma-separated)">
+            <Field label={t("objectivesLabel")}>
               <input
                 value={objectives}
                 onChange={(e) => setObjectives(e.target.value)}
@@ -303,7 +305,7 @@ export function StrategyTuningCard({
                 checked={requireBacktest}
                 onChange={(e) => setRequireBacktest(e.target.checked)}
               />
-              require backtest
+              {t("requireBacktest")}
             </label>
             <label className="inline-flex items-center gap-2 text-[11px] text-ink-300">
               <input
@@ -311,7 +313,7 @@ export function StrategyTuningCard({
                 checked={requireShadow}
                 onChange={(e) => setRequireShadow(e.target.checked)}
               />
-              require shadow run
+              {t("requireShadow")}
             </label>
           </div>
           <div className="flex justify-end">
@@ -320,7 +322,7 @@ export function StrategyTuningCard({
               disabled={busy !== null}
               className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-50 text-white text-xs rounded px-3 py-1.5"
             >
-              {busy === "tuning:generate" ? "Submitting…" : "Submit proposal"}
+              {busy === "tuning:generate" ? t("submitting") : t("submitProposal")}
             </button>
           </div>
         </div>

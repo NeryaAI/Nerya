@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
 import { callApi, clientApi } from "../lib/clientApi";
 import { formatTime, timezoneLabel } from "../lib/format";
@@ -9,7 +10,6 @@ import { useUiSettings } from "../lib/settings";
 import { AccountSelector } from "./AccountSelector";
 import {
   BellIcon,
-  NeryaMark,
   SearchIcon,
   SettingsIcon,
   StarIcon,
@@ -21,21 +21,19 @@ type Workspace = {
   root?: string;
 };
 
-const TITLES: Record<string, string> = {
-  "/dashboard": "Home",
-  "/chat": "Agent Workspace",
-  "/portfolio": "Portfolio",
-  "/strategies": "Strategies",
-  "/agents": "Agents",
-  "/skills": "Skills",
-  "/workflows": "Workflows",
-  "/inbox": "Action Inbox",
-  "/tasks": "Agent Tasks",
-  "/settings": "Settings",
-};
+function safeTitleTranslate(t: (k: string) => string, path: string): string | null {
+  try {
+    const v = t(path);
+    if (!v) return null;
+    if (v === path) return null;
+    if (v.startsWith("nav.")) return null;
+    return v;
+  } catch {
+    return null;
+  }
+}
 
-function titleFor(path: string): string {
-  if (TITLES[path]) return TITLES[path];
+function fallbackTitle(path: string): string {
   const seg = path.split("/").filter(Boolean)[0];
   if (!seg) return "Nerya";
   return seg
@@ -62,7 +60,10 @@ function useClock(): string | null {
 
 export function TopHeader() {
   const pathname = usePathname() || "/dashboard";
-  const title = titleFor(pathname);
+  const tNav = useTranslations("nav");
+  const tHeader = useTranslations("topHeader");
+  const tCommon = useTranslations("common");
+  const title = safeTitleTranslate(tNav, pathname) ?? fallbackTitle(pathname);
   const now = useClock();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [online, setOnline] = useState<boolean>(true);
@@ -133,7 +134,7 @@ export function TopHeader() {
   if (pathname.startsWith("/chat")) return null;
 
   return (
-    <header className="sticky top-0 z-40 bg-[rgba(4,4,13,0.65)] backdrop-blur-xl border-b border-white/5">
+    <header className="sticky top-0 z-40 backdrop-blur-xl border-b" style={{ background: "var(--header-bg, rgba(4,4,13,0.65))", borderColor: "var(--line)" }}>
       <div className="px-6 lg:px-10 py-3 flex items-center gap-4">
         <div className="flex items-center gap-2 shrink-0">
           <h1 className="text-[20px] font-semibold text-white tracking-tight whitespace-nowrap">
@@ -141,7 +142,7 @@ export function TopHeader() {
           </h1>
           <button
             className="text-ink-500 hover:text-[#f5a524] transition-colors"
-            title="Pin to favorites"
+            title={tHeader("pinToFavorites")}
           >
             <StarIcon size={16} />
           </button>
@@ -166,8 +167,8 @@ export function TopHeader() {
             className="hidden md:flex items-center gap-1.5 px-2 py-1 rounded-lg border border-brand-500/10 bg-ink-900/50"
             title={
               online
-                ? `Workspace status: ${healthLabel}`
-                : "Backend unreachable"
+                ? tHeader("workspaceStatus", { status: healthLabel })
+                : tHeader("backendUnreachable")
             }
           >
             <span
@@ -176,11 +177,11 @@ export function TopHeader() {
               } ${online ? "animate-pulse" : ""}`}
             />
             <span className="text-[10px] font-mono uppercase tracking-widest text-ink-300">
-              {online ? healthLabel : "OFFLINE"}
+              {online ? healthLabel : tCommon("offline")}
             </span>
           </div>
 
-          <button className="icon-btn" title="Search">
+          <button className="icon-btn" title={tHeader("search")}>
             <SearchIcon size={16} />
           </button>
           <Link
@@ -188,8 +189,8 @@ export function TopHeader() {
             className="icon-btn relative"
             title={
               inboxNeedsAction > 0
-                ? `${inboxNeedsAction} item(s) need attention`
-                : "Action Inbox"
+                ? tHeader("itemsNeedAttention", { count: inboxNeedsAction })
+                : tHeader("actionInbox")
             }
           >
             <BellIcon size={16} />
@@ -201,11 +202,11 @@ export function TopHeader() {
               <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-ink-500 ring-2 ring-[#0a0b1a]" />
             )}
           </Link>
-          <Link href="/settings" className="icon-btn" title="Settings">
+          <Link href="/settings" className="icon-btn" title={tHeader("settings")}>
             <SettingsIcon size={16} />
           </Link>
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-500/30 to-brand-700/40 ring-1 ring-brand-500/40 flex items-center justify-center shadow-glow">
-            <NeryaMark size={18} />
+          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 via-brand-500 to-brand-700 ring-1 ring-brand-500/40 flex items-center justify-center shadow-glow text-white font-bold text-sm">
+            N
           </div>
         </div>
       </div>

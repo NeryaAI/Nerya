@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
 
@@ -25,6 +26,7 @@ interface ScaffoldResult {
 }
 
 export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: string) => void }) {
+  const t = useTranslations("exchangeAuthor");
   const [step, setStep] = useState<Step>(1);
   const [mode, setMode] = useState<Mode>("ccxt");
   const [venueId, setVenueId] = useState("");
@@ -82,7 +84,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
         try {
           endpoints = JSON.parse(endpointsRaw || "{}");
         } catch {
-          throw new Error("endpoints JSON is invalid");
+          throw new Error(t("endpointsInvalid"));
         }
         const res = await clientApi.exchangeAuthorScaffoldHttp({
           venue_id: venueId.trim(),
@@ -121,17 +123,17 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
 
   return (
     <Card
-      title="Add exchange (exchange_author)"
-      description="4-step guided flow: pick venue → fill metadata → scaffold provider spec → approve. The skill writes a draft to workspace/providers/<venue_id>/ and only activates after approval."
+      title={t("title")}
+      description={t("description")}
     >
       <div className="flex items-center gap-2 mb-3 text-xs">
-        <StepDot active={step >= 1} done={step > 1} label="Venue" />
+        <StepDot active={step >= 1} done={step > 1} label={t("stepVenue")} />
         <ArrowDot />
-        <StepDot active={step >= 2} done={step > 2} label="Scaffold" />
+        <StepDot active={step >= 2} done={step > 2} label={t("stepScaffold")} />
         <ArrowDot />
-        <StepDot active={step >= 3} done={step > 3} label="Preview" />
+        <StepDot active={step >= 3} done={step > 3} label={t("stepPreview")} />
         <ArrowDot />
-        <StepDot active={step >= 4} done={step >= 4} label="Approved" />
+        <StepDot active={step >= 4} done={step >= 4} label={t("stepApproved")} />
       </div>
 
       {step === 1 ? (
@@ -147,19 +149,19 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                     : "border-brand-500/20 text-ink-300"
                 }`}
               >
-                {m === "ccxt" ? "CCXT-supported" : "Custom HTTP"}
+                {m === "ccxt" ? t("ccxtSupported") : t("customHttp")}
               </button>
             ))}
           </div>
           <div className="text-ink-400">
             {mode === "ccxt"
-              ? `Select an exchange already supported by the ccxt library (${ccxtSupported.length} known).`
-              : "Author a brand-new venue by describing its REST endpoints — Nerya will scaffold a connector."}
+              ? t("ccxtDesc", { count: ccxtSupported.length })
+              : t("httpDesc")}
           </div>
           <div>
-            <div className="text-ink-500 mb-1">Already configured</div>
+            <div className="text-ink-500 mb-1">{t("alreadyConfigured")}</div>
             {providers.length === 0 ? (
-              <Empty label="No registered providers." />
+              <Empty label={t("noRegistered")} />
             ) : (
               <div className="flex flex-wrap gap-1.5">
                 {providers.map((p) => (
@@ -178,7 +180,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
               onClick={() => setStep(2)}
               className="btn-ghost text-xs text-accent-300"
             >
-              Continue →
+              {t("continue")}
             </button>
           </div>
         </div>
@@ -187,7 +189,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
       {step === 2 ? (
         <div className="space-y-3 text-xs">
           <div className="grid grid-cols-2 gap-2">
-            <Field label="venue_id (slug)">
+            <Field label={t("venueIdLabel")}>
               <input
                 value={venueId}
                 onChange={(e) => setVenueId(e.target.value.toLowerCase())}
@@ -195,7 +197,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                 className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 font-mono text-ink-100"
               />
             </Field>
-            <Field label="Label">
+            <Field label={t("labelField")}>
               <input
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
@@ -206,13 +208,13 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
           </div>
 
           {mode === "ccxt" ? (
-            <Field label="ccxt id">
+            <Field label={t("ccxtIdLabel")}>
               <select
                 value={ccxtId}
                 onChange={(e) => setCcxtId(e.target.value)}
                 className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
               >
-                <option value="">— select —</option>
+                <option value="">{t("selectPlaceholder")}</option>
                 {ccxtSupported.map((id) => (
                   <option key={id} value={id}>
                     {id}
@@ -223,7 +225,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
           ) : (
             <>
               <div className="grid grid-cols-2 gap-2">
-                <Field label="Kind">
+                <Field label={t("kindLabel")}>
                   <select
                     value={kind}
                     onChange={(e) =>
@@ -237,7 +239,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                     <option value="chain">chain</option>
                   </select>
                 </Field>
-                <Field label="Install hint">
+                <Field label={t("installHintLabel")}>
                   <input
                     value={installHint}
                     onChange={(e) => setInstallHint(e.target.value)}
@@ -247,7 +249,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                 </Field>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <Field label="Base URL">
+                <Field label={t("baseUrlLabel")}>
                   <input
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
@@ -255,7 +257,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                     className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
                   />
                 </Field>
-                <Field label="Docs URL">
+                <Field label={t("docsUrlLabel")}>
                   <input
                     value={docsUrl}
                     onChange={(e) => setDocsUrl(e.target.value)}
@@ -264,7 +266,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                   />
                 </Field>
               </div>
-              <Field label="Endpoints (JSON)">
+              <Field label={t("endpointsLabel")}>
                 <textarea
                   value={endpointsRaw}
                   onChange={(e) => setEndpointsRaw(e.target.value)}
@@ -275,12 +277,12 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
             </>
           )}
 
-          <Field label="Notes">
+          <Field label={t("notesLabel")}>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               rows={2}
-              placeholder="Why this venue, who approved, etc."
+              placeholder={t("notesPlaceholder")}
               className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
             />
           </Field>
@@ -290,7 +292,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
               onClick={() => setStep(1)}
               className="btn-ghost text-xs"
             >
-              ← Back
+              {t("back")}
             </button>
             <button
               onClick={runScaffold}
@@ -302,7 +304,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
               }
               className="btn-ghost text-xs text-accent-300"
             >
-              {busy ? "Scaffolding…" : "Scaffold →"}
+              {busy ? t("scaffolding") : t("scaffoldBtn")}
             </button>
           </div>
         </div>
@@ -325,28 +327,25 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
             </div>
             <div>
               <span className="text-ink-500">state:</span>{" "}
-              <Pill tone="warn">{scaffold.state || "pending"}</Pill>
+              <Pill tone="warn">{scaffold.state || t("pending")}</Pill>
             </div>
           </div>
           <div className="text-ink-400">
-            The skill staged a provider spec. Review it on disk if you want, then
-            approve to activate. After approval, an operator (you) can store API
-            credentials via Settings → Integrations and bind them to a new
-            account in the Accounts page.
+            {t("stagedSpecDesc")}
           </div>
           <div className="flex justify-between">
             <button
               onClick={() => setStep(2)}
               className="btn-ghost text-xs"
             >
-              ← Back
+              {t("back")}
             </button>
             <button
               onClick={approve}
               disabled={busy}
               className="btn-ghost text-xs text-accent-300"
             >
-              {busy ? "Approving…" : "Approve & activate ✓"}
+              {busy ? t("approving") : t("approveActivate")}
             </button>
           </div>
         </div>
@@ -355,17 +354,14 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
       {step === 4 ? (
         <div className="space-y-3 text-xs">
           <div className="rounded-md border border-accent-500/30 bg-accent-500/10 p-3 text-accent-300">
-            <div className="font-semibold">Activated.</div>
+            <div className="font-semibold">{t("activated")}</div>
             <div className="mt-1 text-ink-200">
-              <span className="font-mono">{scaffold?.venue_id}</span> is now
-              available as a venue. Next:
+              <span className="font-mono">{scaffold?.venue_id}</span>{" "}
+              {t("nowAvailableNext")}
               <ol className="list-decimal list-inside mt-1 space-y-0.5">
-                <li>Store API key/secret via Settings → Integrations → put.</li>
-                <li>Add an account on this page referencing the new venue.</li>
-                <li>
-                  Set the account to <span className="font-mono">paper</span>{" "}
-                  first, validate, then promote through shadow → canary → live.
-                </li>
+                <li>{t("stepStoreKey")}</li>
+                <li>{t("stepAddAccount")}</li>
+                <li>{t("stepPromote")}</li>
               </ol>
             </div>
           </div>
@@ -377,7 +373,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
               }}
               className="btn-ghost text-xs"
             >
-              Add another
+              {t("addAnother")}
             </button>
           </div>
         </div>

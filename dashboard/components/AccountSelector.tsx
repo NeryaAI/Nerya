@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import { clientApi, type AccountSummary } from "../lib/clientApi";
 import { useCurrentAccountId } from "../lib/currentAccount";
 
@@ -48,6 +49,7 @@ function statusColor(status: string): string {
 }
 
 export function AccountSelector() {
+  const t = useTranslations("accountSelector");
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [open, setOpen] = useState(false);
   const [currentId, setCurrentId] = useCurrentAccountId();
@@ -97,9 +99,9 @@ export function AccountSelector() {
       <Link
         href="/accounts"
         className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-amber-400/30 bg-amber-400/5 text-xs text-amber-200 hover:bg-amber-400/10"
-        title="No accounts configured yet"
+        title={t("noAccountsTitle")}
       >
-        + Add account
+        {t("addAccount")}
       </Link>
     );
   }
@@ -114,7 +116,7 @@ export function AccountSelector() {
         className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs ${modeColor(
           selected.profile.mode,
         )} hover:brightness-110`}
-        title={`Focused account (${selected.profile.mode} on ${selected.profile.venue})`}
+        title={t("focusedOn", { mode: selected.profile.mode, venue: selected.profile.venue })}
       >
         <span
           className={`w-1.5 h-1.5 rounded-full ${statusColor(
@@ -141,13 +143,13 @@ export function AccountSelector() {
           role="menu"
         >
           <div className="px-3 py-2 border-b border-white/5 text-[11px] uppercase tracking-widest text-ink-400 flex items-center justify-between">
-            <span>Focused account</span>
+            <span>{t("focusedAccount")}</span>
             <Link
               href="/accounts"
               className="text-brand-200 hover:text-brand-100 normal-case tracking-normal"
               onClick={() => setOpen(false)}
             >
-              Manage →
+              {t("manage")}
             </Link>
           </div>
           <ul className="embedded-list-scroll py-1">
@@ -197,14 +199,14 @@ export function AccountSelector() {
               }}
               className="text-ink-400 hover:text-ink-200"
             >
-              Clear focus
+              {t("clearFocus")}
             </button>
             <Link
               href={`/accounts/${encodeURIComponent(selected.profile.id)}`}
               className="text-brand-200 hover:text-brand-100"
               onClick={() => setOpen(false)}
             >
-              Open driver →
+              {t("openDriver")}
             </Link>
           </div>
         </div>

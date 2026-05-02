@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import {
   Card,
   Empty,
@@ -23,6 +24,7 @@ import type { TriggerRoute, TriggerSchedule } from "../../lib/clientApi";
  */
 
 export default function WorkflowsPage() {
+  const t = useTranslations("workflows");
   const [routes, setRoutes] = useState<TriggerRoute[]>([]);
   const [schedules, setSchedules] = useState<TriggerSchedule[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -64,16 +66,16 @@ export default function WorkflowsPage() {
       {error ? <ErrorBanner error={error} /> : null}
       <PageBody>
         <PageHeader
-          eyebrow="Operator"
-          title="Workflows"
-          description="Scheduled jobs and event-driven routes the agent runs on your behalf."
+          eyebrow={t("eyebrow")}
+          title={t("title")}
+          description={t("description")}
           actions={
             <div className="flex items-center gap-2">
               <Pill tone={activeRoutes.length > 0 ? "ok" : "brand"}>
-                {activeRoutes.length} route(s)
+                {t("routesCount", { count: activeRoutes.length })}
               </Pill>
               <Pill tone={activeSchedules.length > 0 ? "ok" : "brand"}>
-                {activeSchedules.length} schedule(s)
+                {t("schedulesCount", { count: activeSchedules.length })}
               </Pill>
             </div>
           }
@@ -82,14 +84,14 @@ export default function WorkflowsPage() {
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <Card
-            title="Schedules"
-            description="Time-based jobs (cron-style)."
+            title={t("schedulesTitle")}
+            description={t("schedulesDesc")}
             padded={false}
           >
             {loading && schedules.length === 0 ? (
-              <div className="p-4 text-[12px] text-ink-500">Loading…</div>
+              <div className="p-4 text-[12px] text-ink-500">{t("loadingEllipsis")}</div>
             ) : schedules.length === 0 ? (
-              <Empty label="No schedules registered" />
+              <Empty label={t("noSchedules")} />
             ) : (
               <ul className="embedded-list-scroll-lg">
                 {schedules.map((s) => (
@@ -116,11 +118,11 @@ export default function WorkflowsPage() {
                         {label}
                       </span>
                       <Pill tone={paused ? "brand" : "ok"}>
-                        {paused ? "PAUSED" : "ACTIVE"}
+                        {paused ? t("paused") : t("active")}
                       </Pill>
                     </div>
                     <div className="text-[10.5px] text-ink-500 mt-1 font-mono">
-                      {cadence} · {s.kind || "trigger"}
+                      {cadence} · {s.kind || t("triggerFallback")}
                     </div>
                         </>
                       );
@@ -132,14 +134,14 @@ export default function WorkflowsPage() {
           </Card>
 
           <Card
-            title="Routes"
-            description="Event-driven automations."
+            title={t("routesTitle")}
+            description={t("routesDesc")}
             padded={false}
           >
             {loading && routes.length === 0 ? (
-              <div className="p-4 text-[12px] text-ink-500">Loading…</div>
+              <div className="p-4 text-[12px] text-ink-500">{t("loadingEllipsis")}</div>
             ) : routes.length === 0 ? (
-              <Empty label="No routes registered" />
+              <Empty label={t("noRoutes")} />
             ) : (
               <ul className="embedded-list-scroll-lg">
                 {routes.map((r) => (
@@ -166,7 +168,7 @@ export default function WorkflowsPage() {
                         {r.title || r.id}
                       </span>
                       <Pill tone={r.paused ? "brand" : "ok"}>
-                        {r.paused ? "PAUSED" : "ACTIVE"}
+                        {r.paused ? t("paused") : t("active")}
                       </Pill>
                     </div>
                     <div className="text-[10.5px] text-ink-500 mt-1 font-mono">

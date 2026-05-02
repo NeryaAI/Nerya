@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import { clientApi } from "../../lib/clientApi";
 import type {
   ControlPlaneExecutor,
@@ -20,13 +21,6 @@ import { SectionTabs } from "../../components/SectionTabs";
 import { formatTsShort } from "../../lib/format";
 
 type OrderState = "active" | "cached" | "lost" | "recent";
-
-const STATE_LABELS: { value: OrderState; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "brand" }[] = [
-  { value: "active", label: "Active", tone: "ok" },
-  { value: "recent", label: "Recent", tone: "brand" },
-  { value: "cached", label: "Cached", tone: "neutral" },
-  { value: "lost", label: "Lost", tone: "danger" },
-];
 
 function orderStateTone(state: string): "neutral" | "ok" | "warn" | "danger" | "brand" {
   if (state === "filled") return "ok";
@@ -71,6 +65,8 @@ function num(v: unknown, digits = 6): string {
 }
 
 export default function OrdersPage() {
+  const t = useTranslations("orders");
+  const tCommon = useTranslations("common");
   const [stateFilter, setStateFilter] = useState<OrderState>("recent");
   const [accountFilter, setAccountFilter] = useState<string>("");
   const [orders, setOrders] = useState<ControlPlaneOrder[]>([]);
@@ -79,6 +75,13 @@ export default function OrdersPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [selected, setSelected] = useState<ControlPlaneOrder | null>(null);
+
+  const STATE_LABELS: { value: OrderState; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "brand" }[] = [
+    { value: "active", label: t("stateActive"), tone: "ok" },
+    { value: "recent", label: t("stateRecent"), tone: "brand" },
+    { value: "cached", label: t("stateCached"), tone: "neutral" },
+    { value: "lost", label: t("stateLost"), tone: "danger" },
+  ];
 
   async function load() {
     setLoading(true);
@@ -115,7 +118,11 @@ export default function OrdersPage() {
   async function cancelOrder(order: ControlPlaneOrder) {
     if (
       !confirm(
-        `Cancel order ${order.order_id} (${order.market} ${order.side})?`,
+        t("cancelOrderConfirm", {
+          orderId: order.order_id,
+          market: order.market,
+          side: order.side,
+        }),
       )
     )
       return;
@@ -135,7 +142,15 @@ export default function OrdersPage() {
   }
 
   async function cancelExecutor(exec: ControlPlaneExecutor) {
-    if (!confirm(`Cancel executor ${exec.executor_id} (${exec.market})?`)) return;
+    if (
+      !confirm(
+        t("cancelExecutorConfirm", {
+          executorId: exec.executor_id,
+          market: exec.market,
+        }),
+      )
+    )
+      return;
     setBusy(exec.executor_id);
     try {
       await clientApi.controlExecutorCancel({
@@ -167,15 +182,15 @@ export default function OrdersPage() {
   return (
     <div>
       <PageHeader
-        title="Orders & Executors"
-        description="Live order book through the durable order tracker. Each row shows account, market, executor, age and gives operator cancel controls."
+        title={t("title")}
+        description={t("description")}
         actions={
           <button
             onClick={load}
             disabled={loading}
             className="btn-ghost text-xs"
           >
-            {loading ? "Refreshing…" : "Refresh"}
+            {loading ? tCommon("refreshing") : tCommon("refresh")}
           </button>
         }
       />
@@ -185,30 +200,30 @@ export default function OrdersPage() {
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi
-            label="Active orders"
+            label={t("kpiActiveOrders")}
             value={`${(totals.open || 0) + (totals.submitted || 0) + (totals.partially_filled || 0)}`}
             tone="brand"
           />
           <Kpi
-            label="Filled"
+            label={t("kpiFilled")}
             value={`${totals.filled || 0}`}
             tone="ok"
           />
           <Kpi
-            label="Lost / canceled"
+            label={t("kpiLostCanceled")}
             value={`${(totals.lost || 0) + (totals.canceled || 0)}`}
             tone={(totals.lost || 0) > 0 ? "danger" : "neutral"}
           />
           <Kpi
-            label="Active executors"
+            label={t("kpiActiveExecutors")}
             value={`${executors.filter((e) => e.state === "running" || e.state === "pending" || e.state === "submitted").length}`}
             tone="warn"
           />
         </div>
 
-        <Card title="Filters">
+        <Card title={t("filtersTitle")}>
           <div className="flex flex-wrap gap-2 items-center text-xs">
-            <span className="text-ink-400">state:</span>
+            <span className="text-ink-400">{t("stateLabel")}</span>
             {STATE_LABELS.map((s) => (
               <button
                 key={s.value}
@@ -222,13 +237,13 @@ export default function OrdersPage() {
                 {s.label}
               </button>
             ))}
-            <span className="ml-4 text-ink-400">account:</span>
+            <span className="ml-4 text-ink-400">{t("accountLabel")}</span>
             <select
               value={accountFilter}
               onChange={(e) => setAccountFilter(e.target.value)}
               className="bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-ink-200"
             >
-              <option value="">all</option>
+              <option value="">{t("accountAll")}</option>
               {accountIds.map((id) => (
                 <option key={id} value={id}>
                   {id}
@@ -239,27 +254,27 @@ export default function OrdersPage() {
         </Card>
 
         <Card
-          title={`Orders (${orders.length})`}
-          description="Durable order tracker view. Cancel actions are journaled to journals/operator.jsonl."
+          title={t("ordersTitle", { count: orders.length })}
+          description={t("ordersDescription")}
         >
           {orders.length === 0 ? (
-            <Empty label={loading ? "Loading orders…" : "No orders match the filters."} />
+            <Empty label={loading ? t("loadingOrders") : t("noOrdersMatch")} />
           ) : (
             <div className="embedded-table-scroll">
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
-                    <th>State</th>
-                    <th>Account</th>
-                    <th>Market</th>
-                    <th>Side</th>
-                    <th>Type</th>
-                    <th>Size</th>
-                    <th>Filled</th>
-                    <th>Avg price</th>
-                    <th>Age</th>
-                    <th>Strategy</th>
-                    <th>Executor</th>
+                    <th>{t("colState")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colMarket")}</th>
+                    <th>{t("colSide")}</th>
+                    <th>{t("colType")}</th>
+                    <th>{t("colSize")}</th>
+                    <th>{t("colFilled")}</th>
+                    <th>{t("colAvgPrice")}</th>
+                    <th>{t("colAge")}</th>
+                    <th>{t("colStrategy")}</th>
+                    <th>{t("colExecutor")}</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -311,7 +326,7 @@ export default function OrdersPage() {
                             onClick={() => setSelected(o)}
                             className="btn-ghost text-[11px] py-0.5"
                           >
-                            inspect
+                            {t("inspect")}
                           </button>
                           {(o.state === "open" ||
                             o.state === "submitted" ||
@@ -321,7 +336,7 @@ export default function OrdersPage() {
                               disabled={busy === o.order_id}
                               className="btn-ghost text-[11px] py-0.5 text-[#ef4560]"
                             >
-                              {busy === o.order_id ? "…" : "cancel"}
+                              {busy === o.order_id ? "…" : t("cancel")}
                             </button>
                           )}
                         </td>
@@ -335,25 +350,25 @@ export default function OrdersPage() {
         </Card>
 
         <Card
-          title={`Executors (${executors.length})`}
-          description="Durable executor orchestrator. Cancellation flushes through risk/protection logic."
+          title={t("executorsTitle", { count: executors.length })}
+          description={t("executorsDescription")}
         >
           {executors.length === 0 ? (
-            <Empty label="No executors." />
+            <Empty label={t("noExecutors")} />
           ) : (
             <div className="embedded-table-scroll">
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
-                    <th>State</th>
-                    <th>Kind</th>
-                    <th>Account</th>
-                    <th>Strategy</th>
-                    <th>Market</th>
-                    <th>Created</th>
-                    <th>Last heartbeat</th>
-                    <th>Orders</th>
-                    <th>Executor id</th>
+                    <th>{t("colState")}</th>
+                    <th>{t("colKind")}</th>
+                    <th>{t("colAccount")}</th>
+                    <th>{t("colStrategy")}</th>
+                    <th>{t("colMarket")}</th>
+                    <th>{t("colCreated")}</th>
+                    <th>{t("colLastHeartbeat")}</th>
+                    <th>{t("colOrders")}</th>
+                    <th>{t("colExecutorId")}</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -390,7 +405,7 @@ export default function OrdersPage() {
                             disabled={busy === e.executor_id}
                             className="btn-ghost text-[11px] py-0.5 text-[#ef4560]"
                           >
-                            {busy === e.executor_id ? "…" : "cancel"}
+                            {busy === e.executor_id ? "…" : t("cancel")}
                           </button>
                         )}
                       </td>
@@ -404,14 +419,14 @@ export default function OrdersPage() {
 
         {selected ? (
           <Card
-            title={`Order ${selected.order_id}`}
+            title={t("orderDetailTitle", { orderId: selected.order_id })}
             description={`${selected.market} · ${selected.side} ${selected.order_type}`}
             actions={
               <button
                 onClick={() => setSelected(null)}
                 className="btn-ghost text-xs"
               >
-                Close
+                {tCommon("close")}
               </button>
             }
           >

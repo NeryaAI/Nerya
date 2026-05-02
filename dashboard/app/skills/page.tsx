@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useTranslations } from "next-intl";
 import {
   Card,
   Empty,
@@ -42,12 +43,12 @@ function sourceTone(source?: string): "neutral" | "ok" | "brand" | "warn" {
   return "neutral";
 }
 
-function sourceLabel(source?: string): string {
-  if (source === "workspace_installed") return "workspace installed";
-  if (source === "workspace") return "workspace";
-  if (source === "builtin") return "builtin";
-  if (source === "user_home") return "home";
-  return source || "runtime";
+function sourceLabel(source: string | undefined, t: (key: string) => string): string {
+  if (source === "workspace_installed") return t("sourceWorkspaceInstalled");
+  if (source === "workspace") return t("sourceWorkspace");
+  if (source === "builtin") return t("sourceBuiltin");
+  if (source === "user_home") return t("sourceUserHome");
+  return source || t("sourceRuntime");
 }
 
 function bytes(value: number | undefined): string {
@@ -177,6 +178,8 @@ function groupFiles(files: SkillFileSummary[] | undefined, kind: string): SkillF
 }
 
 export default function SkillsPage() {
+  const t = useTranslations("skills");
+  const tCommon = useTranslations("common");
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [installed, setInstalled] = useState<Array<Record<string, unknown>>>([]);
   const [lockStatus, setLockStatus] = useState<Record<string, unknown> | null>(null);
@@ -205,7 +208,7 @@ export default function SkillsPage() {
     try {
       const res = await clientApi.skillDetail(skillId);
       if (!res.ok || !res.skill) {
-        throw new Error(res.error || "skill detail unavailable");
+        throw new Error(res.error || t("errSkillDetailUnavailable"));
       }
       setDetail(res.skill);
       setDraft(res.skill.skill_md || "");
@@ -330,9 +333,9 @@ export default function SkillsPage() {
         reason: "dashboard skill editor",
       });
       if (!res.ok || !res.skill) {
-        throw new Error(res.detail || res.error || "skill update failed");
+        throw new Error(res.detail || res.error || t("errSkillUpdateFailed"));
       }
-      setInfo(`Saved ${detail.id}`);
+      setInfo(t("savedInfo", { id: detail.id }));
       setDetail(res.skill);
       setDraft(res.skill.skill_md || "");
       await refresh(detail.id);
@@ -345,7 +348,7 @@ export default function SkillsPage() {
 
   async function createSkill() {
     if (!createName.trim()) {
-      setError("skill name is required");
+      setError(t("errNameRequired"));
       return;
     }
     setBusy(true);
@@ -356,9 +359,9 @@ export default function SkillsPage() {
         body: createBody.trim(),
       });
       if (!res.ok || !res.skill) {
-        throw new Error(res.detail || res.error || "skill create failed");
+        throw new Error(res.detail || res.error || t("errSkillCreateFailed"));
       }
-      setInfo(`Created ${res.skill.id}`);
+      setInfo(t("createdInfo", { id: res.skill.id }));
       setCreating(false);
       setCreateName("");
       setCreateDescription("");
@@ -373,7 +376,7 @@ export default function SkillsPage() {
 
   async function installSkill() {
     if (!source.trim()) {
-      setError("source is required");
+      setError(t("errSourceRequired"));
       return;
     }
     setBusy(true);
@@ -385,7 +388,7 @@ export default function SkillsPage() {
         git_ref: advancedInstall ? gitRef.trim() || undefined : undefined,
       });
       const nextId = asText(res.skill_id || res.id || source);
-      setInfo(`Install requested: ${nextId}`);
+      setInfo(t("installRequested", { id: nextId }));
       setSource("");
       setSubdir("");
       setGitRef("");
@@ -402,7 +405,7 @@ export default function SkillsPage() {
     setBusy(true);
     try {
       await clientApi.skillsPromote(skillId);
-      setInfo(`Promoted ${skillId}`);
+      setInfo(t("promotedInfo", { id: skillId }));
       await refresh(skillId);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -414,9 +417,9 @@ export default function SkillsPage() {
   return (
     <PageBody>
       <PageHeader
-        eyebrow="Skill playbooks"
-        title="Skills"
-        description="Browse SKILL.md playbooks, folder assets, workspace installs, and editable workspace skills."
+        eyebrow={t("eyebrow")}
+        title={t("title")}
+        description={t("description")}
         actions={
           <div className="flex items-center gap-2">
             <button
@@ -425,7 +428,7 @@ export default function SkillsPage() {
               onClick={() => setCreating(true)}
             >
               <PlusIcon size={14} />
-              Create skill
+              {t("createSkill")}
             </button>
             <button
               type="button"
@@ -434,7 +437,7 @@ export default function SkillsPage() {
               disabled={loading}
             >
               <WrenchIcon size={14} />
-              {loading ? "Refreshing..." : "Refresh"}
+              {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
           </div>
         }
@@ -449,39 +452,39 @@ export default function SkillsPage() {
       ) : null}
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Metric label="Loaded" value={skills.length} detail="runtime visible" />
-        <Metric label="Workspace" value={workspaceCount} detail="editable roots" />
-        <Metric label="Builtin" value={builtinCount} detail="repo playbooks" />
-        <Metric label="Staged" value={pendingInstalled.length} detail="pending promote" />
+        <Metric label={t("metricLoaded")} value={skills.length} detail={t("metricLoadedDetail")} />
+        <Metric label={t("metricWorkspace")} value={workspaceCount} detail={t("metricWorkspaceDetail")} />
+        <Metric label={t("metricBuiltin")} value={builtinCount} detail={t("metricBuiltinDetail")} />
+        <Metric label={t("metricStaged")} value={pendingInstalled.length} detail={t("metricStagedDetail")} />
       </div>
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[340px_minmax(0,1fr)_320px]">
         <div className="min-w-0">
-        <Card title={`Playbooks (${skills.length})`} description="SKILL.md entries loaded by the runtime.">
+        <Card title={t("playbooksCount", { count: skills.length })} description={t("playbooksDesc")}>
           <div className="relative mb-3">
             <SearchIcon size={15} className="absolute left-2.5 top-2.5 text-ink-500" />
             <input
               className="input-dark pl-8"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search skills"
+              placeholder={t("searchPlaceholder")}
             />
           </div>
           <div className="mb-3 flex flex-wrap gap-1.5">
             <FilterButton active={filterMode === "all"} onClick={() => setFilterMode("all")}>
-              All
+              {t("filterAll")}
             </FilterButton>
             <FilterButton active={filterMode === "workspace"} onClick={() => setFilterMode("workspace")}>
-              Workspace
+              {t("filterWorkspace")}
             </FilterButton>
             <FilterButton active={filterMode === "builtin"} onClick={() => setFilterMode("builtin")}>
-              Builtin
+              {t("filterBuiltin")}
             </FilterButton>
             <FilterButton active={filterMode === "installed"} onClick={() => setFilterMode("installed")}>
-              Installed
+              {t("filterInstalled")}
             </FilterButton>
             <FilterButton active={filterMode === "editable"} onClick={() => setFilterMode("editable")}>
-              Editable
+              {t("filterEditable")}
             </FilterButton>
           </div>
           {filtered.length ? (
@@ -508,64 +511,64 @@ export default function SkillsPage() {
                           {skill.id}
                         </span>
                         <span className="mt-1 block truncate text-[11px] leading-snug text-ink-400">
-                          {skill.description || skill.title || "No description"}
+                          {skill.description || skill.title || t("noDescription")}
                         </span>
                       </span>
-                      <Pill tone={sourceTone(skill.source)}>{sourceLabel(skill.source)}</Pill>
+                      <Pill tone={sourceTone(skill.source)}>{sourceLabel(skill.source, t)}</Pill>
                     </div>
                     <div className="mt-2 truncate font-mono text-[10px] text-ink-500">
-                      {skill.path || "runtime registry"}
+                      {skill.path || t("runtimeRegistry")}
                     </div>
                   </button>
                 );
               })}
             </div>
           ) : (
-            <Empty title="No matching skills" subtitle="Try a different filter." />
+            <Empty title={t("noMatchingSkills")} subtitle={t("noMatchingHint")} />
           )}
         </Card>
         </div>
 
         <div className="min-w-0">
         <Card
-          title={selectedSkill?.title || selectedSkill?.id || "Select a skill"}
+          title={selectedSkill?.title || selectedSkill?.id || t("selectSkill")}
           description={
             selectedSkill
               ? selectedSkill.description || selectedSkill.id
-              : "Pick a skill to inspect its playbook and folder."
+              : t("selectSkillHint")
           }
           actions={
             selectedSkill ? (
               <div className="flex flex-wrap items-center justify-end gap-1.5">
-                <Pill tone={sourceTone(selectedSkill.source)}>{sourceLabel(selectedSkill.source)}</Pill>
-                {detail?.editable ? <Pill tone="ok">editable</Pill> : <Pill tone="neutral">read-only</Pill>}
+                <Pill tone={sourceTone(selectedSkill.source)}>{sourceLabel(selectedSkill.source, t)}</Pill>
+                {detail?.editable ? <Pill tone="ok">{t("editable")}</Pill> : <Pill tone="neutral">{t("readOnly")}</Pill>}
               </div>
             ) : null
           }
         >
           {detailLoading ? (
-            <Empty title="Loading skill detail" />
+            <Empty title={t("loadingSkillDetail")} />
           ) : selectedSkill ? (
             <div className="min-w-0 space-y-4">
               <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-                <Metric label="Version" value={selectedSkill.version || "-"} />
-                <Metric label="Files" value={fileCount} />
-                <Metric label="Scripts" value={groupFiles(detail?.files, "script").length} />
-                <Metric label="Actions" value={(selectedSkill.actions || []).length} detail="legacy bridge" />
+                <Metric label={t("metricVersion")} value={selectedSkill.version || "-"} />
+                <Metric label={t("metricFiles")} value={fileCount} />
+                <Metric label={t("metricScripts")} value={groupFiles(detail?.files, "script").length} />
+                <Metric label={t("metricActions")} value={(selectedSkill.actions || []).length} detail={t("metricActionsDetail")} />
               </div>
 
               <section className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
                 <div className="grid gap-2 text-[12px] lg:grid-cols-2">
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">Folder</div>
+                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("folderLabel")}</div>
                     <div className="mt-1 break-all font-mono text-ink-200">
                       {detail?.relative_path || selectedSkill.path || "-"}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">Edit mode</div>
+                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("editModeLabel")}</div>
                     <div className="mt-1 text-ink-200">
-                      {detail?.editable ? "workspace write enabled" : detail?.editable_reason || "read-only"}
+                      {detail?.editable ? t("workspaceWriteEnabled") : detail?.editable_reason || t("readOnly")}
                     </div>
                   </div>
                 </div>
@@ -582,7 +585,7 @@ export default function SkillsPage() {
                       disabled={busy || !dirty}
                     >
                       <EditIcon size={14} />
-                      {busy ? "Saving..." : dirty ? "Save" : "Saved"}
+                      {busy ? tCommon("saving") : dirty ? tCommon("save") : t("saved")}
                     </button>
                   ) : null}
                 </div>
@@ -595,30 +598,30 @@ export default function SkillsPage() {
                   />
                 ) : (
                   <pre className="embedded-scroll max-h-[560px] max-w-full whitespace-pre-wrap break-words rounded-lg border border-brand-500/10 bg-ink-950/40 p-3 text-[12px] leading-relaxed text-ink-200">
-                    {draft || firstLines(detail?.instructions || "", 40) || "No SKILL.md body available."}
+                    {draft || firstLines(detail?.instructions || "", 40) || t("noSkillMdBody")}
                   </pre>
                 )}
               </section>
 
               <section className="space-y-4">
-                <FileGroup title="Playbook" files={groupFiles(detail?.files, "playbook")} />
-                <FileGroup title="Scripts" files={groupFiles(detail?.files, "script")} />
-                <FileGroup title="References" files={groupFiles(detail?.files, "reference")} />
-                <FileGroup title="Templates" files={groupFiles(detail?.files, "template")} />
-                <FileGroup title="Other files" files={groupFiles(detail?.files, "file")} />
-                {!detail?.files?.length ? <Empty title="No folder files found" /> : null}
+                <FileGroup title={t("groupPlaybook")} files={groupFiles(detail?.files, "playbook")} />
+                <FileGroup title={t("groupScripts")} files={groupFiles(detail?.files, "script")} />
+                <FileGroup title={t("groupReferences")} files={groupFiles(detail?.files, "reference")} />
+                <FileGroup title={t("groupTemplates")} files={groupFiles(detail?.files, "template")} />
+                <FileGroup title={t("groupOther")} files={groupFiles(detail?.files, "file")} />
+                {!detail?.files?.length ? <Empty title={t("noFolderFiles")} /> : null}
               </section>
             </div>
           ) : (
-            <Empty title="No skill selected" />
+            <Empty title={t("noSkillSelected")} />
           )}
         </Card>
         </div>
 
         <div className="min-w-0 space-y-5">
-          <Card title="Add from repo" description="Paste a GitHub repo, GitHub folder link, local folder, or archive.">
+          <Card title={t("addFromRepo")} description={t("addFromRepoDesc")}>
             <label className="mb-3 block text-[12px] text-ink-300">
-              Source URL or path
+              {t("sourceUrlLabel")}
               <input
                 className="input-dark mt-1"
                 value={source}
@@ -628,16 +631,16 @@ export default function SkillsPage() {
             </label>
             {installPreview ? (
               <div className="mb-3 rounded-lg border border-brand-500/10 bg-ink-950/40 p-3 text-[11px] text-ink-300">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">Detected GitHub source</div>
+                <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("detectedGithubSource")}</div>
                 <div className="mt-1 break-all font-mono text-ink-100">{installPreview.repo}</div>
                 <div className="mt-2 grid grid-cols-1 gap-2">
                   <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">Ref</div>
-                    <div className="truncate font-mono text-ink-200">{installPreview.ref || "default"}</div>
+                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("refLabel")}</div>
+                    <div className="truncate font-mono text-ink-200">{installPreview.ref || t("defaultRef")}</div>
                   </div>
                   <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">Folder</div>
-                    <div className="break-all font-mono text-ink-200">{installPreview.subdir || "repo root"}</div>
+                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("folderLabel")}</div>
+                    <div className="break-all font-mono text-ink-200">{installPreview.subdir || t("repoRoot")}</div>
                   </div>
                 </div>
               </div>
@@ -648,25 +651,25 @@ export default function SkillsPage() {
               onToggle={(e) => setAdvancedInstall(e.currentTarget.open)}
             >
               <summary className="cursor-pointer px-3 py-2 text-[12px] text-ink-300">
-                Advanced overrides
+                {t("advancedOverrides")}
               </summary>
               <div className="grid grid-cols-1 gap-2 border-t border-brand-500/10 p-3">
                 <label className="text-[12px] text-ink-300">
-                  Subdir
+                  {t("subdirLabel")}
                   <input
                     className="input-dark mt-1"
                     value={subdir}
                     onChange={(e) => setSubdir(e.target.value)}
-                    placeholder={installPreview?.subdir || "optional"}
+                    placeholder={installPreview?.subdir || t("optional")}
                   />
                 </label>
                 <label className="text-[12px] text-ink-300">
-                  Git ref
+                  {t("gitRefLabel")}
                   <input
                     className="input-dark mt-1"
                     value={gitRef}
                     onChange={(e) => setGitRef(e.target.value)}
-                    placeholder={installPreview?.ref || "optional"}
+                    placeholder={installPreview?.ref || t("optional")}
                   />
                 </label>
               </div>
@@ -678,11 +681,11 @@ export default function SkillsPage() {
               disabled={busy || !source.trim()}
             >
               <PlusIcon size={14} />
-              {busy ? "Working..." : "Install"}
+              {busy ? t("working") : t("install")}
             </button>
           </Card>
 
-          <Card title={`Staged installs (${pendingInstalled.length})`} description="Pending promotion into the active registry.">
+          <Card title={t("stagedInstallsCount", { count: pendingInstalled.length })} description={t("stagedInstallsDesc")}>
             {pendingInstalled.length ? (
               <div className="embedded-list-scroll-sm space-y-2">
                 {pendingInstalled.map((row, index) => {
@@ -692,7 +695,7 @@ export default function SkillsPage() {
                       key={`${id}_${index}`}
                       className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3"
                     >
-                      <div className="font-mono text-[12px] text-ink-100">{id || "unknown"}</div>
+                      <div className="font-mono text-[12px] text-ink-100">{id || t("unknown")}</div>
                       <div className="mt-1 truncate text-[10px] text-ink-500">
                         {asText(row.path || row.source)}
                       </div>
@@ -704,7 +707,7 @@ export default function SkillsPage() {
                           disabled={busy}
                         >
                           <CheckIcon size={14} />
-                          Promote
+                          {t("promote")}
                         </button>
                       ) : null}
                     </div>
@@ -712,19 +715,19 @@ export default function SkillsPage() {
                 })}
               </div>
             ) : (
-              <Empty title="No staged installs" subtitle="Installed skills are already active." />
+              <Empty title={t("noStagedInstalls")} subtitle={t("noStagedInstallsHint")} />
             )}
           </Card>
 
-          <Card title="Lockfile" description="Workspace installed-skill integrity snapshot.">
+          <Card title={t("lockfile")} description={t("lockfileDesc")}>
             <div className="grid grid-cols-2 gap-2 text-[12px]">
-              <Metric label="Entries" value={asText(lock?.entries || lockEntries.length || 0)} />
-              <Metric label="Problems" value={asText(drift?.problem_count || drift?.problems || 0)} />
+              <Metric label={t("entries")} value={asText(lock?.entries || lockEntries.length || 0)} />
+              <Metric label={t("problems")} value={asText(drift?.problem_count || drift?.problems || 0)} />
             </div>
             {lockEntries.length ? (
               <details className="mt-3 rounded-lg border border-brand-500/10 bg-ink-950/30">
                 <summary className="cursor-pointer px-3 py-2 text-[12px] text-ink-300">
-                  Installed lock entries
+                  {t("installedLockEntries")}
                 </summary>
                 <div className="embedded-list-scroll-sm border-t border-brand-500/10">
                   {lockEntries.slice(0, 80).map((entry, index) => (
@@ -757,16 +760,18 @@ export default function SkillsPage() {
           <div className="embedded-scroll max-h-[88vh] w-[760px] max-w-full rounded-xl border border-white/10 bg-bg-card shadow-glow">
             <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-5 py-4">
               <div className="min-w-0">
-                <h3 className="text-lg font-semibold text-ink-100">Create workspace skill</h3>
+                <h3 className="text-lg font-semibold text-ink-100">{t("createWorkspaceSkill")}</h3>
                 <p className="mt-1 text-[12px] text-ink-400">
-                  Creates <code className="text-fluid-300">workspace/skills/&lt;skill&gt;/SKILL.md</code>.
+                  {t.rich("createWorkspaceSkillDesc", {
+                    code: (chunks) => <code className="text-fluid-300">{chunks}</code>,
+                  })}
                 </p>
               </div>
               <button
                 type="button"
                 className="icon-btn h-8 w-8 shrink-0"
                 onClick={() => setCreating(false)}
-                aria-label="Close"
+                aria-label={tCommon("close")}
               >
                 <XIcon size={15} />
               </button>
@@ -774,32 +779,32 @@ export default function SkillsPage() {
             <div className="space-y-4 px-5 py-4">
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <label className="text-[12px] text-ink-300">
-                  Name
+                  {t("nameLabel")}
                   <input
                     className="input-dark mt-1"
                     value={createName}
                     onChange={(e) => setCreateName(e.target.value)}
-                    placeholder="clawcast wallet"
+                    placeholder={t("namePlaceholder")}
                     autoFocus
                   />
                 </label>
                 <label className="text-[12px] text-ink-300">
-                  Description
+                  {t("descriptionLabel")}
                   <input
                     className="input-dark mt-1"
                     value={createDescription}
                     onChange={(e) => setCreateDescription(e.target.value)}
-                    placeholder="When this skill should be used"
+                    placeholder={t("descriptionPlaceholder")}
                   />
                 </label>
               </div>
               <label className="block text-[12px] text-ink-300">
-                Playbook body
+                {t("playbookBody")}
                 <textarea
                   className="input-dark mt-1 min-h-[280px] resize-y text-[12px] leading-relaxed"
                   value={createBody}
                   onChange={(e) => setCreateBody(e.target.value)}
-                  placeholder="# Workflow&#10;&#10;Describe the steps, scripts, references, and expected output."
+                  placeholder={t("playbookBodyPlaceholder")}
                   spellCheck={false}
                 />
               </label>
@@ -811,7 +816,7 @@ export default function SkillsPage() {
                   disabled={busy}
                 >
                   <XIcon size={14} />
-                  Cancel
+                  {tCommon("cancel")}
                 </button>
                 <button
                   type="button"
@@ -820,7 +825,7 @@ export default function SkillsPage() {
                   disabled={busy || !createName.trim()}
                 >
                   <CheckIcon size={14} />
-                  {busy ? "Creating..." : "Create"}
+                  {busy ? t("creating") : t("create")}
                 </button>
               </div>
             </div>

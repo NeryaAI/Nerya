@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 
 import { Card, Empty, Json, Pill } from "../Page";
 import type { StrategyHistoryEnvelope } from "../../lib/strategyTypes";
@@ -17,6 +18,7 @@ interface Props {
  * envelope so the dashboard never touches the kernel directly.
  */
 export function StrategyHistoryCard({ strategyId, history }: Props) {
+  const t = useTranslations("strategyHistory");
   const ledgers = history?.ledgers ?? {};
   const ledgerNames = useMemo(() => Object.keys(ledgers).sort(), [ledgers]);
   const [active, setActive] = useState<string | null>(null);
@@ -24,10 +26,10 @@ export function StrategyHistoryCard({ strategyId, history }: Props) {
   if (!history || ledgerNames.length === 0) {
     return (
       <Card
-        title="History ledgers"
-        description={`Per-event tail panels for ${strategyId}`}
+        title={t("title")}
+        description={t("description", { id: strategyId })}
       >
-        <Empty label="No history ledgers yet." />
+        <Empty label={t("noLedgers")} />
       </Card>
     );
   }
@@ -37,8 +39,8 @@ export function StrategyHistoryCard({ strategyId, history }: Props) {
 
   return (
     <Card
-      title="History ledgers"
-      description={`Per-event tail panels for ${strategyId}`}
+      title={t("title")}
+      description={t("description", { id: strategyId })}
     >
       <div className="flex flex-wrap gap-1.5 mb-3">
         {ledgerNames.map((name) => (
@@ -60,11 +62,11 @@ export function StrategyHistoryCard({ strategyId, history }: Props) {
       </div>
       {ledger ? (
         <div className="space-y-2">
-          <Pill tone="brand">{ledger.count} events</Pill>
+          <Pill tone="brand">{t("eventsCount", { n: ledger.count })}</Pill>
           <Json value={ledger.tail} />
         </div>
       ) : (
-        <Empty label="Ledger empty." />
+        <Empty label={t("ledgerEmpty")} />
       )}
     </Card>
   );

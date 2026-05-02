@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
 import { callApi, clientApi, type ApprovalCard } from "../../lib/clientApi";
 import {
   ChatMessage,
@@ -98,6 +99,7 @@ function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
 }
 
 export function ChatView() {
+  const t = useTranslations("chat");
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
@@ -591,7 +593,7 @@ export function ChatView() {
     if (!thread) return;
     const message = thread.messages.find((m) => m.id === messageId);
     if (!message) return;
-    if (!window.confirm("Delete this message?")) return;
+    if (!window.confirm(t("confirmDeleteMessage"))) return;
     if (editingMessageId === messageId) {
       setEditingMessageId(null);
       setEditDraft("");

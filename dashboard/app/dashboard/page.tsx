@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import {
   AgentsIcon,
   EvolutionIcon,
@@ -51,6 +52,7 @@ const INTERVAL_OPTIONS: { key: string; label: string }[] = [
 ];
 
 export default function DashboardOverview() {
+  const t = useTranslations("home");
   const [settings, patchSettings] = useUiSettings();
   const [currentAccountId] = useCurrentAccountId();
 
@@ -247,45 +249,45 @@ export default function DashboardOverview() {
   const focusedReserved = Number(focusedAccount?.reserved_usd || 0);
 
   const systemStatus: { label: string; pct: number; tone: "ok" | "warn" | "danger" }[] = [
-    { label: "Agent Core", pct: apiOnline ? 100 : 0, tone: apiOnline ? "ok" : "danger" },
-    { label: "Risk Engine", pct: apiOnline && !killed ? 100 : 0, tone: apiOnline && !killed ? "ok" : "warn" },
-    { label: "Data Feed", pct: apiOnline && !candleError ? 100 : candleError ? 55 : 0, tone: !apiOnline ? "danger" : candleError ? "warn" : "ok" },
-    { label: "LLM Gateway", pct: apiOnline ? 100 : 0, tone: apiOnline ? "ok" : "warn" },
-    { label: "Message Hub", pct: apiOnline ? 100 : 0, tone: apiOnline ? "ok" : "warn" },
+    { label: t("agentCore"), pct: apiOnline ? 100 : 0, tone: apiOnline ? "ok" : "danger" },
+    { label: t("riskEngine"), pct: apiOnline && !killed ? 100 : 0, tone: apiOnline && !killed ? "ok" : "warn" },
+    { label: t("dataFeed"), pct: apiOnline && !candleError ? 100 : candleError ? 55 : 0, tone: !apiOnline ? "danger" : candleError ? "warn" : "ok" },
+    { label: t("llmGateway"), pct: apiOnline ? 100 : 0, tone: apiOnline ? "ok" : "warn" },
+    { label: t("messageHub"), pct: apiOnline ? 100 : 0, tone: apiOnline ? "ok" : "warn" },
   ];
 
   const recentActivity: { label: string; sub: string; time: string; tone: "ok" | "brand" | "warn" }[] = [];
   for (const m of messages.slice(0, 5)) {
     const when = formatTime(m.ts);
     recentActivity.push({
-      label: m.text?.slice(0, 60) || `Message on ${m.channel}`,
-      sub: m.channel ? `channel · ${m.channel}` : "",
+      label: m.text?.slice(0, 60) || t("messageOn", { channel: m.channel || "" }),
+      sub: m.channel ? t("channelSub", { channel: m.channel }) : "",
       time: when,
       tone: m.severity === "warn" ? "warn" : m.severity === "error" ? "warn" : "brand",
     });
   }
   if (recentActivity.length === 0) {
     recentActivity.push(
-      { label: "Runtime connected", sub: "local api · /health", time: "now", tone: "ok" },
-      { label: "Skill bus ready", sub: `${skills.length} skills enabled`, time: "just now", tone: "brand" },
+      { label: t("runtimeConnected"), sub: t("localApiHealth"), time: t("now"), tone: "ok" },
+      { label: t("skillBusReady"), sub: t("skillsEnabled", { count: skills.length }), time: t("justNow"), tone: "brand" },
     );
   }
 
   const notifications: { label: string; time: string; tone: "ok" | "warn" | "danger" | "brand" }[] = [
     ...(proposals.slice(0, 3).map((p): { label: string; time: string; tone: "warn" } => ({
-      label: `Proposal pending: ${p.summary || p.kind || p.id || "unnamed"}`,
-      time: p.status || "open",
+      label: t("proposalPending", { label: p.summary || p.kind || p.id || "unnamed" }),
+      time: p.status || t("open"),
       tone: "warn",
     }))),
-    { label: `${routes.length} trigger route${routes.length === 1 ? "" : "s"} loaded`, time: "live", tone: "brand" },
-    { label: killed ? "Kill switch engaged — trading halted" : "Risk gate normal", time: "now", tone: killed ? "danger" : "ok" },
+    { label: t("triggerRoutesLoaded", { count: routes.length }), time: t("live"), tone: "brand" },
+    { label: killed ? t("killEngaged") : t("riskGateNormal"), time: t("now"), tone: killed ? "danger" : "ok" },
   ];
 
   const quickActions = [
-    { icon: <StrategiesIcon size={22} />, label: "New Strategy", href: "/strategies" },
-    { icon: <TriggersIcon size={22} />, label: "Create Workflow", href: "/workflows" },
-    { icon: <AgentsIcon size={22} />, label: "Open Agent Workspace", href: "/chat" },
-    { icon: <SendIcon size={22} />, label: "Action Inbox", href: "/inbox" },
+    { icon: <StrategiesIcon size={22} />, label: t("newStrategy"), href: "/strategies" },
+    { icon: <TriggersIcon size={22} />, label: t("createWorkflow"), href: "/workflows" },
+    { icon: <AgentsIcon size={22} />, label: t("openAgentWorkspace"), href: "/chat" },
+    { icon: <SendIcon size={22} />, label: t("actionInbox"), href: "/inbox" },
   ];
 
   const lastClose = candles.length ? candles[candles.length - 1].close : 0;
@@ -326,18 +328,18 @@ export default function DashboardOverview() {
         {/* KPI row — now driven by real backend data where available. */}
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
           <Kpi
-            label="Total Equity"
+            label={t("totalEquity")}
             value={fmtMoney(totalEquity)}
-            delta={<span className="text-ink-400">{summary ? `${summary.accounts.length} account(s)` : "—"}</span>}
+            delta={<span className="text-ink-400">{summary ? t("accountCount", { count: summary.accounts.length }) : "—"}</span>}
             icon={<PortfolioIcon size={18} />}
             spark={equitySeries.slice(-24)}
             sparkTone="brand"
           />
           <Kpi
-            label="Realized PnL"
+            label={t("realizedPnl")}
             value={fmtSigned(totalRealizedPnl)}
             delta={<span className={totalRealizedPnl >= 0 ? "stat-delta-up" : "stat-delta-dn"}>
-              {strategies.length} strategies
+              {t("strategiesCount", { count: strategies.length })}
             </span>}
             tone={totalRealizedPnl >= 0 ? "ok" : "danger"}
             icon={<OrdersIcon size={18} />}
@@ -345,7 +347,7 @@ export default function DashboardOverview() {
             sparkTone={totalRealizedPnl >= 0 ? "accent" : "magenta"}
           />
           <Kpi
-            label={`${settings.kline.symbol} Δ`}
+            label={t("symbolDelta", { symbol: settings.kline.symbol })}
             value={`${candleDeltaPct >= 0 ? "+" : ""}${candleDeltaPct.toFixed(2)}%`}
             delta={<span className="text-ink-400">
               {settings.kline.venue.toUpperCase()} · {settings.kline.interval}
@@ -356,10 +358,10 @@ export default function DashboardOverview() {
             sparkTone={candleDeltaPct >= 0 ? "accent" : "magenta"}
           />
           <Kpi
-            label="Win Rate"
+            label={t("winRate")}
             value={`${winRate.toFixed(1)}%`}
             delta={<span className="text-ink-400">
-              {strategies.reduce((a, s) => a + s.wins, 0)}W / {strategies.reduce((a, s) => a + s.losses, 0)}L
+              {t("winsLosses", { wins: strategies.reduce((a, s) => a + s.wins, 0), losses: strategies.reduce((a, s) => a + s.losses, 0) })}
             </span>}
             tone="brand"
             icon={<SkillsIcon size={18} />}
@@ -367,18 +369,18 @@ export default function DashboardOverview() {
             sparkTone="brand"
           />
           <Kpi
-            label="Active Strategies"
+            label={t("activeStrategies")}
             value={activeStrategiesCount}
-            delta={<span className="text-ink-400">{strategies.length} total</span>}
+            delta={<span className="text-ink-400">{t("totalStrategies", { count: strategies.length })}</span>}
             icon={<StrategiesIcon size={18} />}
             spark={[]}
             sparkTone="brand"
           />
           <Kpi
-            label="Open Positions"
+            label={t("openPositions")}
             value={openPositionList.length}
             delta={<span className="text-ink-400">
-              {summary ? `${summary.accounts.length} account(s)` : "—"}
+              {summary ? t("accountCount", { count: summary.accounts.length }) : "—"}
             </span>}
             icon={<AgentsIcon size={18} />}
             spark={[]}
@@ -389,18 +391,18 @@ export default function DashboardOverview() {
         {/* K-line chart + venue/symbol picker */}
         <Card
           title={`${settings.kline.symbol}`}
-          description={`Live candles · ${settings.kline.venue.toUpperCase()} · ${settings.kline.interval}`}
+          description={t("liveCandles", { venue: settings.kline.venue.toUpperCase(), interval: settings.kline.interval })}
           actions={
             <div className="flex items-center gap-2 flex-wrap">
               <select
                 value={settings.kline.venue}
                 onChange={(e) => patchSettings({ kline: { ...settings.kline, venue: e.target.value as typeof settings.kline.venue } })}
                 className="bg-ink-900 border border-brand-500/25 rounded-md px-2 py-1 text-xs text-ink-100 focus:outline-none focus:border-brand-500/60"
-                title="Data source"
+                title={t("dataSource")}
               >
                 {venues.length === 0 ? (
                   <option value={settings.kline.venue} disabled>
-                    No venues registered
+                    {t("noVenues")}
                   </option>
                 ) : (
                   venues.map((v) => (
@@ -432,7 +434,7 @@ export default function DashboardOverview() {
               <button
                 onClick={() => loadCandles()}
                 className="px-2 py-0.5 text-[10px] rounded-md text-brand-200 hover:bg-brand-500/10 border border-brand-500/25"
-                title="Refresh"
+                title={t("refresh")}
               >
                 ↻
               </button>
@@ -452,7 +454,7 @@ export default function DashboardOverview() {
 
         {/* Equity curve + Allocation + System status */}
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-          <Card title="Equity Curve" description={`${equity.length} point(s) from pnl journal`}>
+          <Card title={t("equityCurve")} description={t("equityPoints", { count: equity.length })}>
             <div className="h-[180px] relative">
               <div className="absolute inset-0">
                 <Sparkline
@@ -464,18 +466,18 @@ export default function DashboardOverview() {
                 />
               </div>
               <div className="absolute top-2 right-2 text-right">
-                <div className="text-[10px] text-ink-400 uppercase tracking-wider">equity</div>
+                <div className="text-[10px] text-ink-400 uppercase tracking-wider">{t("equity")}</div>
                 <div className="text-brand-200 font-mono text-sm">{fmtMoney(totalEquity)}</div>
               </div>
             </div>
           </Card>
 
-          <Card title="Portfolio Allocation">
+          <Card title={t("portfolioAllocation")}>
             <div className="flex items-center gap-4">
-              <DonutPreview slices={allocation} totalLabel={fmtMoney(totalEquity || allocation.reduce((a, b) => a + b.val, 0))} />
+              <DonutPreview slices={allocation} totalLabel={fmtMoney(totalEquity || allocation.reduce((a, b) => a + b.val, 0))} totalTitle={t("total")} />
               <div className="flex-1 space-y-2">
                 {allocation.length === 0 ? (
-                  <div className="text-[11.5px] text-ink-500">No holdings yet.</div>
+                  <div className="text-[11.5px] text-ink-500">{t("noHoldings")}</div>
                 ) : allocation.map((row) => (
                   <div key={row.label} className="flex items-center gap-2 text-[12px]">
                     <span className="w-2 h-2 rounded-sm" style={{ background: row.color }} />
@@ -488,7 +490,7 @@ export default function DashboardOverview() {
             </div>
           </Card>
 
-          <Card title="System Status">
+          <Card title={t("systemStatus")}>
             <div className="flex items-center gap-4">
               <HexScore score={apiOnline ? 100 : 0} />
               <div className="flex-1 space-y-2.5">
@@ -508,7 +510,7 @@ export default function DashboardOverview() {
 
         {/* Activity / Notifications */}
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          <Card title="Recent Activity" actions={<a href="/inbox" className="text-[11px] text-brand-300 hover:text-brand-200">View All →</a>}>
+          <Card title={t("recentActivity")} actions={<a href="/inbox" className="text-[11px] text-brand-300 hover:text-brand-200">{t("viewAll")}</a>}>
             <ul className="embedded-list-scroll space-y-2">
               {recentActivity.map((a, i) => (
                 <li key={i} className="flex items-start gap-3">
@@ -525,7 +527,7 @@ export default function DashboardOverview() {
             </ul>
           </Card>
 
-          <Card title="Notifications" actions={<a href="/inbox" className="text-[11px] text-brand-300 hover:text-brand-200">View All →</a>}>
+          <Card title={t("notifications")} actions={<a href="/inbox" className="text-[11px] text-brand-300 hover:text-brand-200">{t("viewAll")}</a>}>
             <ul className="embedded-list-scroll space-y-2">
               {notifications.map((n, i) => (
                 <li key={i} className="flex items-center gap-2 text-[12.5px]">
@@ -546,21 +548,21 @@ export default function DashboardOverview() {
         {/* Strategies + Positions + Quick Actions */}
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
           <Card
-            title="Active Strategies"
-            actions={<a href="/strategies" className="text-[11px] text-brand-300 hover:text-brand-200">View All →</a>}
+            title={t("activeStrategiesTitle")}
+            actions={<a href="/strategies" className="text-[11px] text-brand-300 hover:text-brand-200">{t("viewAll")}</a>}
             padded={false}
           >
             {strategies.length === 0 ? (
-              <div className="p-4 text-[12px] text-ink-500">No strategies registered yet.</div>
+              <div className="p-4 text-[12px] text-ink-500">{t("noStrategies")}</div>
             ) : (
               <div className="embedded-table-scroll max-h-72 rounded-none border-0">
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Strategy</th>
-                      <th>Status</th>
-                      <th>PnL</th>
-                      <th>Win Rate</th>
+                      <th>{t("strategyCol")}</th>
+                      <th>{t("statusCol")}</th>
+                      <th>{t("pnlCol")}</th>
+                      <th>{t("winRateCol")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -581,22 +583,22 @@ export default function DashboardOverview() {
           </Card>
 
           <Card
-            title="Open Positions"
-            actions={<a href="/portfolio" className="text-[11px] text-brand-300 hover:text-brand-200">View All →</a>}
+            title={t("openPositionsTitle")}
+            actions={<a href="/portfolio" className="text-[11px] text-brand-300 hover:text-brand-200">{t("viewAll")}</a>}
             padded={false}
           >
             {openPositionList.length === 0 ? (
-              <div className="p-4 text-[12px] text-ink-500">No open positions.</div>
+              <div className="p-4 text-[12px] text-ink-500">{t("noOpenPositions")}</div>
             ) : (
               <div className="embedded-table-scroll max-h-72 rounded-none border-0">
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Market</th>
-                      <th>Side</th>
-                      <th>Size</th>
-                      <th>Entry</th>
-                      <th>PnL</th>
+                      <th>{t("marketCol")}</th>
+                      <th>{t("sideCol")}</th>
+                      <th>{t("sizeCol")}</th>
+                      <th>{t("entryCol")}</th>
+                      <th>{t("pnlCol")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -624,7 +626,7 @@ export default function DashboardOverview() {
             )}
           </Card>
 
-          <Card title="Quick Actions">
+          <Card title={t("quickActions")}>
             <div className="grid grid-cols-2 gap-3">
               {quickActions.map((q) => (
                 <a
@@ -643,34 +645,34 @@ export default function DashboardOverview() {
         {/* Recent Trades + Strategy Performance */}
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
           <Card
-            title="Recent Trades"
-            actions={<a href="/portfolio" className="text-[11px] text-brand-300 hover:text-brand-200">View All →</a>}
+            title={t("recentTrades")}
+            actions={<a href="/portfolio" className="text-[11px] text-brand-300 hover:text-brand-200">{t("viewAll")}</a>}
             padded={false}
           >
             {recentTrades.length === 0 ? (
-              <div className="p-4 text-[12px] text-ink-500">No fills yet.</div>
+              <div className="p-4 text-[12px] text-ink-500">{t("noFills")}</div>
             ) : (
               <div className="embedded-table-scroll max-h-80 rounded-none border-0">
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Time</th>
-                      <th>Market</th>
-                      <th>Side</th>
-                      <th>Type</th>
-                      <th>Price</th>
-                      <th>Status</th>
+                      <th>{t("timeCol")}</th>
+                      <th>{t("marketCol")}</th>
+                      <th>{t("sideCol")}</th>
+                      <th>{t("typeCol")}</th>
+                      <th>{t("priceCol")}</th>
+                      <th>{t("statusCol")}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {recentTrades.slice(0, 8).map((t, i) => (
-                      <tr key={t.order_id || i}>
-                        <td className="font-mono text-[11.5px]">{formatTime(t.ts)}</td>
-                        <td className="font-mono text-[11.5px]">{t.market || "—"}</td>
-                        <td><Pill tone={t.side?.toLowerCase() === "buy" ? "ok" : "danger"}>{t.side?.toUpperCase() || "?"}</Pill></td>
-                        <td className="text-ink-200">{t.type || "MARKET"}</td>
-                        <td className="text-ink-200 font-mono">{t.price ? Number(t.price).toFixed(4) : "—"}</td>
-                        <td><Pill tone="brand">{t.status || "FILLED"}</Pill></td>
+                    {recentTrades.slice(0, 8).map((t2, i) => (
+                      <tr key={t2.order_id || i}>
+                        <td className="font-mono text-[11.5px]">{formatTime(t2.ts)}</td>
+                        <td className="font-mono text-[11.5px]">{t2.market || "—"}</td>
+                        <td><Pill tone={t2.side?.toLowerCase() === "buy" ? "ok" : "danger"}>{t2.side?.toUpperCase() || "?"}</Pill></td>
+                        <td className="text-ink-200">{t2.type || "MARKET"}</td>
+                        <td className="text-ink-200 font-mono">{t2.price ? Number(t2.price).toFixed(4) : "—"}</td>
+                        <td><Pill tone="brand">{t2.status || "FILLED"}</Pill></td>
                       </tr>
                     ))}
                   </tbody>
@@ -679,19 +681,19 @@ export default function DashboardOverview() {
             )}
           </Card>
 
-          <Card title="Strategy Performance" actions={<a href="/strategies" className="text-[11px] text-brand-300 hover:text-brand-200">View All →</a>}>
+          <Card title={t("strategyPerformance")} actions={<a href="/strategies" className="text-[11px] text-brand-300 hover:text-brand-200">{t("viewAll")}</a>}>
             {strategies.length === 0 ? (
-              <div className="text-[12px] text-ink-500">No strategies yet.</div>
+              <div className="text-[12px] text-ink-500">{t("noStrategiesYet")}</div>
             ) : (
               <ul className="embedded-list-scroll space-y-2.5">
-                {strategies.slice(0, 6).map((s, i) => (
+                {strategies.slice(0, 6).map((s) => (
                   <li key={s.id} className="flex items-center gap-3">
                     <span className="font-mono text-[12px] text-ink-100 w-28 truncate">{s.id}</span>
                     <span className={`font-mono text-[12px] w-20 ${s.realized_pnl_usd >= 0 ? "text-accent-400" : "text-[#ef4560]"}`}>
                       {fmtSigned(s.realized_pnl_usd)}
                     </span>
                     <span className="ml-auto text-[10px] text-ink-500 font-mono">
-                      {s.wins}W / {s.losses}L
+                      {t("winsLosses", { wins: s.wins, losses: s.losses })}
                     </span>
                   </li>
                 ))}
@@ -702,37 +704,37 @@ export default function DashboardOverview() {
 
         {/* Runtime footer */}
         <Card
-          title="Runtime"
-          description="Read-only view of your local Nerya runtime"
+          title={t("runtime")}
+          description={t("runtimeDesc")}
           actions={
             <div className="flex items-center gap-2">
               <StatusDot
                 tone={apiOnline ? "ok" : "danger"}
-                label={apiOnline ? "API online" : "API offline"}
+                label={apiOnline ? t("apiOnline") : t("apiOffline")}
               />
               <Pill tone={mode === "LIVE" ? "warn" : "brand"}>{mode}</Pill>
-              <Pill tone={killed ? "danger" : "ok"}>{killed ? "KILL SWITCH" : "normal"}</Pill>
+              <Pill tone={killed ? "danger" : "ok"}>{killed ? t("killSwitch") : t("normal")}</Pill>
               <button
                 onClick={() => { loadCore(); loadCandles(); }}
                 className="text-[10px] px-2 py-0.5 rounded-md text-brand-200 border border-brand-500/25 hover:bg-brand-500/10"
               >
-                Refresh
+                {t("refresh")}
               </button>
             </div>
           }
         >
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[12px]">
-            <RuntimeStat icon={<SkillsIcon size={15} />} label="Skills" value={skills.length} />
-            <RuntimeStat icon={<TriggersIcon size={15} />} label="Routes" value={routes.length} />
+            <RuntimeStat icon={<SkillsIcon size={15} />} label={t("skills")} value={skills.length} />
+            <RuntimeStat icon={<TriggersIcon size={15} />} label={t("routes")} value={routes.length} />
             <RuntimeStat
               icon={<EvolutionIcon size={15} />}
-              label="Proposals"
+              label={t("proposals")}
               value={proposals.length}
               tone={proposals.length > 0 ? "warn" : "neutral"}
             />
             <RuntimeStat
               icon={<SubagentsIcon size={15} />}
-              label="Workspace"
+              label={t("workspace")}
               value={workspace?.root?.split(/[\\/]/).pop() || "—"}
               mono
             />
@@ -758,6 +760,7 @@ function FocusedAccountStrip({
   reserved: number;
   currency: string;
 }) {
+  const t = useTranslations("home");
   const profile = account.profile;
   const tone =
     profile.mode === "live"
@@ -773,7 +776,7 @@ function FocusedAccountStrip({
     >
       <div>
         <div className="text-[11px] uppercase tracking-widest text-ink-300">
-          Focused account
+          {t("focusedAccount")}
         </div>
         <div className="font-mono text-base text-ink-100 mt-0.5">
           {profile.id}
@@ -783,19 +786,19 @@ function FocusedAccountStrip({
         </div>
       </div>
       <div className="ml-auto flex flex-wrap items-center gap-6">
-        <FocusedKpi label="NAV" value={formatBalance(nav, currency)} />
-        <FocusedKpi label="Free" value={formatBalance(free, currency)} />
+        <FocusedKpi label={t("nav")} value={formatBalance(nav, currency)} />
+        <FocusedKpi label={t("free")} value={formatBalance(free, currency)} />
         <FocusedKpi
-          label="Reserved"
+          label={t("reserved")}
           value={formatBalance(reserved, currency)}
           tone={reserved > 0 ? "warn" : "neutral"}
         />
         <FocusedKpi
-          label="Open positions"
+          label={t("openPositionsLabel")}
           value={String(account.open_position_count)}
         />
         <FocusedKpi
-          label="Active executors"
+          label={t("activeExecutors")}
           value={String(account.active_executors.length)}
           tone={account.active_executors.length > 0 ? "brand" : "neutral"}
         />
@@ -803,7 +806,7 @@ function FocusedAccountStrip({
           href={`/accounts/${encodeURIComponent(profile.id)}`}
           className="btn-ghost text-xs text-brand-200"
         >
-          Open driver →
+          {t("openDriver")}
         </a>
       </div>
     </div>
@@ -836,21 +839,19 @@ function FocusedKpi({
 }
 
 function NoFocusedAccountStrip({ hasAccounts }: { hasAccounts: boolean }) {
+  const t = useTranslations("home");
   return (
     <div className="rounded-xl border border-amber-400/20 bg-amber-400/5 px-4 py-3 text-sm text-amber-100">
       {hasAccounts ? (
-        <>
-          No account focused yet. Pick one from the dropdown in the top
-          header to scope this view.
-        </>
+        <>{t("noFocusPickOne")}</>
       ) : (
         <>
-          No accounts configured yet.{" "}
+          {t("noAccountsPrefix")}{" "}
           <a
             href="/accounts"
             className="underline hover:text-amber-50"
           >
-            Add an account →
+            {t("addAccountLink")}
           </a>
         </>
       )}
@@ -888,9 +889,10 @@ function RuntimeStat({ icon, label, value, mono, tone = "neutral" }: {
   );
 }
 
-function DonutPreview({ slices, totalLabel }: {
+function DonutPreview({ slices, totalLabel, totalTitle }: {
   slices: { label: string; pct: number; val: number; color: string }[];
   totalLabel: string;
+  totalTitle: string;
 }) {
   const size = 128;
   const stroke = 22;
@@ -931,7 +933,7 @@ function DonutPreview({ slices, totalLabel }: {
         })}
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <div className="text-[10px] text-ink-400 uppercase tracking-wider">Total</div>
+        <div className="text-[10px] text-ink-400 uppercase tracking-wider">{totalTitle}</div>
         <div className="text-white font-mono text-[13px]">{totalLabel}</div>
       </div>
     </div>

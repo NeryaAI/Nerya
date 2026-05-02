@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Card,
@@ -31,14 +32,16 @@ const STATUS_TONE: Record<AgentTaskStatus, "ok" | "warn" | "danger" | "brand"> =
   empty: "brand",
 };
 
-const STATUS_FILTERS: { id: AgentTaskStatus | "all"; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "in_progress", label: "In progress" },
-  { id: "failed", label: "Failed" },
-  { id: "done", label: "Done" },
-];
-
 export default function AgentTasksPage() {
+  const t = useTranslations("tasks");
+  const tCommon = useTranslations("common");
+  const STATUS_FILTERS: { id: AgentTaskStatus | "all"; label: string }[] = [
+    { id: "all", label: t("filterAll") },
+    { id: "in_progress", label: t("filterInProgress") },
+    { id: "failed", label: t("filterFailed") },
+    { id: "done", label: t("filterDone") },
+  ];
+
   const [env, setEnv] = useState<AgentTasksEnvelope | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -144,7 +147,7 @@ export default function AgentTasksPage() {
   async function createTask() {
     const text = taskPrompt.trim();
     if (!text) {
-      setError("task prompt is required");
+      setError(t("taskPromptRequired"));
       return;
     }
     const sessionId = `task_${Date.now().toString(36)}`;
@@ -164,7 +167,7 @@ export default function AgentTasksPage() {
       setCreating(false);
       setTaskPrompt("");
       setSelectedId(sessionId);
-      setInfo(`Created ${sessionId}${result.turn_id ? ` · turn ${String(result.turn_id)}` : ""}`);
+      setInfo(t("createdInfo", { sessionId, turnSuffix: result.turn_id ? ` · turn ${String(result.turn_id)}` : "" }));
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -185,17 +188,17 @@ export default function AgentTasksPage() {
       {error ? <ErrorBanner error={error} /> : null}
       <PageBody>
         <PageHeader
-          eyebrow="Agent Workspace"
-          title="Agent Tasks"
+          eyebrow={t("eyebrow")}
+          title={t("title")}
           description={
             env?.summary ||
-            "Agent work sessions created by chat, manual runs, or this page. Cron-style scheduled jobs live under Workflows."
+            t("description")
           }
           actions={
             <div className="flex items-center gap-2">
-              <Pill tone="warn">{counts.in_progress} in progress</Pill>
+              <Pill tone="warn">{t("inProgressCount", { count: counts.in_progress })}</Pill>
               {counts.failed > 0 ? (
-                <Pill tone="danger">{counts.failed} failed</Pill>
+                <Pill tone="danger">{t("failedCount", { count: counts.failed })}</Pill>
               ) : null}
               <button
                 type="button"
@@ -203,20 +206,20 @@ export default function AgentTasksPage() {
                 className="btn btn-primary"
               >
                 <PlusIcon size={14} />
-                New task
+                {t("newTask")}
               </button>
               <Link
                 href="/workflows"
                 className="btn btn-ghost"
               >
-                Schedules
+                {t("schedules")}
               </Link>
               <button
                 onClick={load}
                 className="btn btn-ghost"
               >
                 <WrenchIcon size={14} />
-                Refresh
+                {tCommon("refresh")}
               </button>
             </div>
           }
@@ -224,7 +227,7 @@ export default function AgentTasksPage() {
         <SectionTabs section="runtime" />
 
         <div className="rounded-lg border border-brand-500/15 bg-ink-950/30 px-3 py-2 text-[12px] text-ink-300">
-          Task here means an agent session with turns, timeline, artifacts, cancel/resume. Time-based jobs are schedules in Workflows.
+          {t("taskExplainer")}
         </div>
 
         {info ? (
@@ -233,7 +236,7 @@ export default function AgentTasksPage() {
           </div>
         ) : null}
 
-        <Card title="Filter" padded>
+        <Card title={t("filter")} padded>
           <div className="flex flex-wrap items-center gap-2">
             {STATUS_FILTERS.map((opt) => (
               <button
@@ -253,16 +256,16 @@ export default function AgentTasksPage() {
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
           <Card
-            title={`Tasks (${tasks.length})`}
+            title={t("tasksCount", { count: tasks.length })}
             description={
-              filter === "all" ? "all sessions" : `filter: ${filter}`
+              filter === "all" ? t("allSessions") : t("filterLabel", { filter })
             }
             padded={false}
           >
             {loading && tasks.length === 0 ? (
-              <div className="p-4 text-[12px] text-ink-500">Loading…</div>
+              <div className="p-4 text-[12px] text-ink-500">{tCommon("loading")}</div>
             ) : tasks.length === 0 ? (
-              <Empty label="No tasks" />
+              <Empty label={t("noTasks")} />
             ) : (
               <ul className="embedded-list-scroll-lg">
                 {tasks.map((task) => (
@@ -289,7 +292,7 @@ export default function AgentTasksPage() {
                     <div className="text-[10.5px] text-ink-500 mt-1 flex items-center gap-2">
                       <span className="font-mono">{task.id}</span>
                       <span>·</span>
-                      <span>{task.turn_count} turn(s)</span>
+                      <span>{t("turnCount", { count: task.turn_count })}</span>
                       {task.strategy_id ? (
                         <>
                           <span>·</span>
@@ -309,7 +312,7 @@ export default function AgentTasksPage() {
               <>
                 <Card
                   title={selected.title}
-                  description={`task ${selected.id}`}
+                  description={t("taskId", { id: selected.id })}
                   actions={
                     <div className="flex items-center gap-2">
                       <Pill tone={STATUS_TONE[selected.status]}>
@@ -321,7 +324,7 @@ export default function AgentTasksPage() {
                           onClick={() => cancelTask(selected)}
                           className="text-[11px] px-2 py-0.5 rounded-md border border-rose-500/40 text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"
                         >
-                          Cancel
+                          {tCommon("cancel")}
                         </button>
                       ) : null}
                       {selected.status === "failed" ? (
@@ -330,7 +333,7 @@ export default function AgentTasksPage() {
                           onClick={() => resumeTask(selected)}
                           className="text-[11px] px-2 py-0.5 rounded-md border border-amber-400/40 text-amber-200 hover:bg-amber-400/10 disabled:opacity-50"
                         >
-                          Resume
+                          {t("resume")}
                         </button>
                       ) : null}
                       <Link
@@ -339,56 +342,60 @@ export default function AgentTasksPage() {
                         )}`}
                         className="text-[11px] px-2 py-0.5 rounded-md border border-brand-500/25 text-brand-200 hover:bg-brand-500/10"
                       >
-                        Open in Chat →
+                        {t("openInChat")}
                       </Link>
                     </div>
                   }
                 >
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
                     <Stat
-                      label="Strategy"
+                      label={t("statStrategy")}
                       value={selected.strategy_id || "—"}
                       mono
                     />
-                    <Stat label="Turns" value={selected.turn_count} />
+                    <Stat label={t("statTurns")} value={selected.turn_count} />
                     <Stat
-                      label="Skills"
+                      label={t("statSkills")}
                       value={selected.skills_invoked.slice(0, 3).join(", ") || "—"}
                     />
                     <Stat
-                      label="Last action"
+                      label={t("statLastAction")}
                       value={selected.last_action || "—"}
                       mono
                     />
-                    <Stat label="Created" value={formatTime(selected.created_at)} />
-                    <Stat label="Updated" value={formatTime(selected.updated_at)} />
+                    <Stat label={t("statCreated")} value={formatTime(selected.created_at)} />
+                    <Stat label={t("statUpdated")} value={formatTime(selected.updated_at)} />
                     <Stat
-                      label="Active turns"
+                      label={t("statActiveTurns")}
                       value={selected.active_turn_ids.length}
                     />
                     <Stat
-                      label="Failed turns"
+                      label={t("statFailedTurns")}
                       value={selected.failed_turn_ids.length}
                     />
                   </div>
                 </Card>
 
                 <Card
-                  title="Artifacts"
+                  title={t("artifacts")}
                   description={
                     artifacts
-                      ? `${artifacts.data.counts.files} file(s) · ${artifacts.data.counts.messages} message(s) · ${artifacts.data.counts.orders} order(s)`
-                      : "loading…"
+                      ? t("artifactsCounts", {
+                          files: artifacts.data.counts.files,
+                          messages: artifacts.data.counts.messages,
+                          orders: artifacts.data.counts.orders,
+                        })
+                      : t("loadingLower")
                   }
                 >
                   {artifacts ? (
                     <div className="space-y-3 text-[12px]">
                       {artifacts.data.artifacts.files.length > 0 ? (
-                        <ArtifactGroup label="Files" rows={artifacts.data.artifacts.files.map((f) => `${f.action} · ${f.path}`)} />
+                        <ArtifactGroup label={t("artifactFiles")} rows={artifacts.data.artifacts.files.map((f) => `${f.action} · ${f.path}`)} />
                       ) : null}
                       {artifacts.data.artifacts.messages.length > 0 ? (
                         <ArtifactGroup
-                          label="Messages"
+                          label={t("artifactMessages")}
                           rows={artifacts.data.artifacts.messages.map(
                             (m) => `${m.channel ?? "?"} · ${m.text.slice(0, 80)}`,
                           )}
@@ -396,7 +403,7 @@ export default function AgentTasksPage() {
                       ) : null}
                       {artifacts.data.artifacts.orders.length > 0 ? (
                         <ArtifactGroup
-                          label="Orders"
+                          label={t("artifactOrders")}
                           rows={artifacts.data.artifacts.orders.map(
                             (o) => `${o.action} · ${o.symbol ?? "?"} ${o.side ?? ""} ${o.quantity ?? ""}`,
                           )}
@@ -404,7 +411,7 @@ export default function AgentTasksPage() {
                       ) : null}
                       {artifacts.data.artifacts.created.length > 0 ? (
                         <ArtifactGroup
-                          label="Created"
+                          label={t("artifactCreated")}
                           rows={artifacts.data.artifacts.created.map(
                             (c) => `${c.action} · ${JSON.stringify(c.result || {}).slice(0, 80)}`,
                           )}
@@ -412,27 +419,30 @@ export default function AgentTasksPage() {
                       ) : null}
                       {artifacts.data.artifacts.memory.length > 0 ? (
                         <ArtifactGroup
-                          label="Memory"
+                          label={t("artifactMemory")}
                           rows={artifacts.data.artifacts.memory.map(
                             (m) => `${m.key ?? "?"} · ${m.summary.slice(0, 80)}`,
                           )}
                         />
                       ) : null}
                       {Object.values(artifacts.data.counts).every((c) => c === 0) ? (
-                        <Empty label="No artifacts produced" />
+                        <Empty label={t("noArtifacts")} />
                       ) : null}
                     </div>
                   ) : (
-                    <div className="text-[12px] text-ink-500">Loading artifacts…</div>
+                    <div className="text-[12px] text-ink-500">{t("loadingArtifacts")}</div>
                   )}
                 </Card>
 
                 <Card
-                  title="Timeline"
+                  title={t("timeline")}
                   description={
                     timeline
-                      ? `${timeline.data.events.length} event(s) across ${timeline.data.surfaces.length} surfaces`
-                      : "loading…"
+                      ? t("timelineCounts", {
+                          events: timeline.data.events.length,
+                          surfaces: timeline.data.surfaces.length,
+                        })
+                      : t("loadingLower")
                   }
                 >
                   {timeline ? (
@@ -456,19 +466,19 @@ export default function AgentTasksPage() {
                     </ol>
                   ) : (
                     <div className="text-[12px] text-ink-500">
-                      Loading timeline…
+                      {t("loadingTimeline")}
                     </div>
                   )}
                 </Card>
 
-                <Card title="Raw task">
+                <Card title={t("rawTask")}>
                   <Json value={selected} />
                 </Card>
               </>
             ) : (
-              <Card title="Select a task">
+              <Card title={t("selectTask")}>
                 <div className="text-[12px] text-ink-500">
-                  Pick a task on the left to inspect its timeline and artifacts.
+                  {t("selectTaskHint")}
                 </div>
               </Card>
             )}
@@ -485,28 +495,28 @@ export default function AgentTasksPage() {
             <div className="w-[680px] max-w-full rounded-xl border border-white/10 bg-bg-card shadow-glow">
               <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-5 py-4">
                 <div className="min-w-0">
-                  <h3 className="text-lg font-semibold text-ink-100">Create agent task</h3>
+                  <h3 className="text-lg font-semibold text-ink-100">{t("createDialogTitle")}</h3>
                   <p className="mt-1 text-[12px] text-ink-400">
-                    Starts a new agent session. Scheduled jobs are created in Workflows.
+                    {t("createDialogDesc")}
                   </p>
                 </div>
                 <button
                   type="button"
                   className="icon-btn h-8 w-8 shrink-0"
                   onClick={() => setCreating(false)}
-                  aria-label="Close"
+                  aria-label={tCommon("close")}
                 >
                   <XIcon size={15} />
                 </button>
               </div>
               <div className="space-y-4 px-5 py-4">
                 <label className="block text-[12px] text-ink-300">
-                  Task prompt
+                  {t("taskPromptLabel")}
                   <textarea
                     className="input-dark mt-1 min-h-[220px] resize-y text-[12px] leading-relaxed"
                     value={taskPrompt}
                     onChange={(e) => setTaskPrompt(e.target.value)}
-                    placeholder="Ask the agent to research, plan, implement, or inspect something in this workspace."
+                    placeholder={t("taskPromptPlaceholder")}
                     autoFocus
                   />
                 </label>
@@ -518,7 +528,7 @@ export default function AgentTasksPage() {
                     disabled={busy === "new"}
                   >
                     <XIcon size={14} />
-                    Cancel
+                    {tCommon("cancel")}
                   </button>
                   <button
                     type="button"
@@ -527,7 +537,7 @@ export default function AgentTasksPage() {
                     disabled={busy === "new" || !taskPrompt.trim()}
                   >
                     <SendIcon size={14} />
-                    {busy === "new" ? "Starting..." : "Start task"}
+                    {busy === "new" ? t("starting") : t("startTask")}
                   </button>
                 </div>
               </div>

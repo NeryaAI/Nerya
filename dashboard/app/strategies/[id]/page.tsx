@@ -32,6 +32,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 
 import {
   Card,
@@ -81,6 +82,8 @@ export default function StrategyDetailPage({
 }: {
   params: { id: string };
 }) {
+  const t = useTranslations("strategyDetail");
+  const tCommon = useTranslations("common");
   const strategyId = decodeURIComponent(params.id);
   const [detail, setDetail] = useState<StrategyDetail | null>(null);
   const [workspace, setWorkspace] =
@@ -171,11 +174,11 @@ export default function StrategyDetailPage({
     <div>
       <PageHeader
         title={detail?.strategy.title || strategyId}
-        eyebrow="Strategy workspace"
+        eyebrow={t("eyebrow")}
         description={
           detail?.strategy.path
             ? detail.strategy.path
-            : "Loading strategy package…"
+            : t("loadingPackage")
         }
         actions={
           <div className="flex items-center gap-2">
@@ -183,14 +186,14 @@ export default function StrategyDetailPage({
               href="/strategies"
               className="btn-ghost text-xs"
             >
-              ← All strategies
+              {t("allStrategies")}
             </Link>
             <button
               onClick={() => void refresh()}
               disabled={loading}
               className="btn-ghost text-xs"
             >
-              {loading ? "Refreshing…" : "Refresh"}
+              {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
           </div>
         }
@@ -205,12 +208,12 @@ export default function StrategyDetailPage({
         )}
 
         {!detail ? (
-          <Card title={`Strategy ${strategyId}`}>
+          <Card title={t("strategyTitle", { id: strategyId })}>
             <Empty
               label={
                 loading
-                  ? `Loading ${strategyId}…`
-                  : "Strategy not found in this workspace."
+                  ? t("loadingStrategy", { id: strategyId })
+                  : t("strategyNotFound")
               }
             />
           </Card>
@@ -381,12 +384,13 @@ function KpiRow({
   pnl: PnlSummary;
   lastRun: StrategyRunRecord | null;
 }) {
+  const t = useTranslations("strategyDetail");
   const trading = workspace?.schedules?.trading;
   const tuning = workspace?.schedules?.tuning;
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       <Kpi
-        label="Status"
+        label={t("kpiStatus")}
         value={detail.strategy.status}
         tone={
           detail.strategy.status === "live"
@@ -399,12 +403,12 @@ function KpiRow({
         }
         delta={
           <>
-            mode <span className="text-ink-200">{detail.strategy.mode}</span>
+            {t("modeLabel")} <span className="text-ink-200">{detail.strategy.mode}</span>
           </>
         }
       />
       <Kpi
-        label="Realised PnL"
+        label={t("kpiRealisedPnl")}
         value={
           pnl.realised_usd === 0
             ? "$0.00"
@@ -419,40 +423,40 @@ function KpiRow({
               ? "danger"
               : "neutral"
         }
-        delta={`${pnl.fills} fills · ${pnl.errors} err`}
+        delta={t("kpiFillsErr", { fills: pnl.fills, errors: pnl.errors })}
       />
       <Kpi
-        label="Trading cron"
+        label={t("kpiTradingCron")}
         value={
           trading
             ? trading.cron
               ? trading.cron
               : trading.every_seconds
-                ? `every ${trading.every_seconds}s`
-                : "installed"
-            : "not installed"
+                ? t("everySeconds", { seconds: trading.every_seconds })
+                : t("installed")
+            : t("notInstalled")
         }
         tone={trading?.enabled ? "ok" : "warn"}
         delta={trading?.target ?? "—"}
       />
       <Kpi
-        label="Reflection cron"
+        label={t("kpiReflectionCron")}
         value={
           tuning
             ? tuning.cron
               ? tuning.cron
               : tuning.every_seconds
-                ? `every ${tuning.every_seconds}s`
-                : "installed"
-            : "not installed"
+                ? t("everySeconds", { seconds: tuning.every_seconds })
+                : t("installed")
+            : t("notInstalled")
         }
         tone={tuning?.enabled ? "ok" : "warn"}
         delta={
           lastRun
-            ? `last run ${new Date(
-                lastRun.finished_at || lastRun.started_at,
-              ).toLocaleString()}`
-            : "no runs yet"
+            ? t("lastRunAt", {
+                time: new Date(lastRun.finished_at || lastRun.started_at).toLocaleString(),
+              })
+            : t("noRunsYet")
         }
       />
     </div>
@@ -480,6 +484,8 @@ function SubagentPromptsCard({
   onError: (msg: string | null) => void;
   onNotice: (msg: string | null) => void;
 }) {
+  const t = useTranslations("strategyDetail");
+  const tCommon = useTranslations("common");
   const initial = useMemo(() => {
     const out: Record<string, string> = {};
     for (const f of files) {
@@ -529,7 +535,7 @@ function SubagentPromptsCard({
           `dashboard_subagent_${rel.replace(/[^a-z0-9]+/gi, "_")}`,
         );
       }
-      onNotice(`Saved ${rel}`);
+      onNotice(`${t("savedPrefix")} ${rel}`);
       await onAfterSave();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -542,11 +548,11 @@ function SubagentPromptsCard({
 
   return (
     <Card
-      title="Subagent & prompt library"
-      description="Per-strategy `subagents/*.agent.md` and `prompts/*.md` bodies. Each save also snapshots strategy.yml for rollback."
+      title={t("subagentLibraryTitle")}
+      description={t("subagentLibraryDesc")}
     >
       {orderedKeys.length === 0 ? (
-        <Empty label="No subagent or prompt files yet — list one in strategy.yml.subagents and save a body below." />
+        <Empty label={t("noSubagentFiles")} />
       ) : (
         <div className="embedded-list-scroll-lg space-y-3">
           {orderedKeys.map((rel) => {
@@ -562,14 +568,14 @@ function SubagentPromptsCard({
                     <span className="text-[11px] font-mono text-ink-200">
                       {rel}
                     </span>
-                    {isDirty ? <Pill tone="warn">unsaved</Pill> : null}
+                    {isDirty ? <Pill tone="warn">{t("unsaved")}</Pill> : null}
                   </div>
                   <button
                     onClick={() => void save(rel)}
                     disabled={busyKey !== null || !isDirty}
                     className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-40 text-white text-xs rounded px-3 py-1.5"
                   >
-                    {busyKey === rel ? "Saving…" : "Save"}
+                    {busyKey === rel ? tCommon("saving") : tCommon("save")}
                   </button>
                 </div>
                 <textarea
@@ -581,8 +587,8 @@ function SubagentPromptsCard({
                   rows={Math.min(20, Math.max(8, body.split("\n").length + 2))}
                   placeholder={
                     rel.startsWith("subagents/")
-                      ? "Describe the role, market, allowed actions, output schema."
-                      : "Prompt body (markdown)."
+                      ? t("subagentPlaceholder")
+                      : t("promptPlaceholder")
                   }
                 />
               </div>
@@ -611,6 +617,7 @@ function StrategyFilesCard({
   onError: (msg: string | null) => void;
   onNotice: (msg: string | null) => void;
 }) {
+  const t = useTranslations("strategyDetail");
   const filtered = useMemo(
     () =>
       files.filter(
@@ -662,7 +669,7 @@ function StrategyFilesCard({
         drafts[activePath] ?? "",
         `dashboard_edit_${activePath.replace(/[^a-z0-9]+/gi, "_")}`,
       );
-      onNotice(`Saved ${activePath}`);
+      onNotice(`${t("savedPrefix")} ${activePath}`);
       await onAfterSave();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -673,8 +680,8 @@ function StrategyFilesCard({
 
   return (
     <Card
-      title="Strategy package files"
-      description="Editable: main.py, strategy.md, strategy.yml, tests/*, fixtures/*. Saves snapshot the package under versions/."
+      title={t("packageFilesTitle")}
+      description={t("packageFilesDesc")}
       actions={
         activePath ? (
           <button
@@ -682,13 +689,13 @@ function StrategyFilesCard({
             disabled={!dirty || busyKey !== null}
             className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-40 text-white text-xs rounded px-3 py-1.5"
           >
-            {busyKey === activePath ? "Saving…" : "Save file"}
+            {busyKey === activePath ? t("savingFile") : t("saveFile")}
           </button>
         ) : null
       }
     >
       {filtered.length === 0 ? (
-        <Empty label="No editable files yet — promote a strategy package to populate this surface." />
+        <Empty label={t("noEditableFiles")} />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-3">
           <ul className="embedded-list-scroll-lg space-y-1 text-xs">
@@ -710,7 +717,7 @@ function StrategyFilesCard({
                       {isDirty ? <Pill tone="warn">●</Pill> : null}
                     </div>
                     <div className="text-[10px] text-ink-500 mt-0.5">
-                      {f.kind} · {f.size} bytes
+                      {f.kind} · {t("bytes", { size: f.size })}
                     </div>
                   </button>
                 </li>
@@ -719,13 +726,13 @@ function StrategyFilesCard({
           </ul>
           <div className="min-w-0">
             {!active ? (
-              <Empty label="Pick a file to edit." />
+              <Empty label={t("pickFile")} />
             ) : active.error === "too_large" ? (
               <Empty
-                label={`Too large to edit inline (${active.size} bytes). Edit on disk.`}
+                label={t("tooLarge", { size: active.size })}
               />
             ) : active.error === "decode_failed" ? (
-              <Empty label="Unreadable file (binary or non-UTF-8)." />
+              <Empty label={t("unreadableFile")} />
             ) : (
               <textarea
                 value={draftBody}
@@ -762,6 +769,8 @@ function ManifestEditorCard({
   onError: (msg: string | null) => void;
   onNotice: (msg: string | null) => void;
 }) {
+  const t = useTranslations("strategyDetail");
+  const tCommon = useTranslations("common");
   const [config, setConfig] = useState(JSON.stringify(detail.config ?? {}, null, 2));
   const [limits, setLimits] = useState(JSON.stringify(detail.limits ?? {}, null, 2));
   const [busy, setBusy] = useState<string | null>(null);
@@ -796,7 +805,7 @@ function ManifestEditorCard({
         limits: parseObj("limits", limits),
         reason: "dashboard_manifest_edit",
       });
-      onNotice("config / limits updated.");
+      onNotice(t("configLimitsUpdated"));
       await onAfterSave();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -807,15 +816,15 @@ function ManifestEditorCard({
 
   return (
     <Card
-      title="Risk limits & config"
-      description="limits.yml drives the trading kernel's per-strategy gates. config.yml is read by main.py through ctx.config."
+      title={t("riskLimitsTitle")}
+      description={t("riskLimitsDesc")}
       actions={
         <button
           onClick={() => void save()}
           disabled={busy !== null}
           className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-40 text-white text-xs rounded px-3 py-1.5"
         >
-          {busy === "save" ? "Saving…" : "Save"}
+          {busy === "save" ? tCommon("saving") : tCommon("save")}
         </button>
       }
     >

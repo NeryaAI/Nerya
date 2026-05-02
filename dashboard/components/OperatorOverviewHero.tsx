@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import { clientApi } from "../lib/clientApi";
 import type {
   AttentionItem,
@@ -25,6 +26,7 @@ const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "brand"> = {
 };
 
 export function OperatorOverviewHero() {
+  const t = useTranslations("operatorHero");
   const [env, setEnv] = useState<OperatorOverviewEnvelope | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -54,17 +56,17 @@ export function OperatorOverviewHero() {
 
   if (loading && !env) {
     return (
-      <Card title="Workspace at a glance" description="Loading runtime status…" />
+      <Card title={t("loadingTitle")} description={t("loadingDescription")} />
     );
   }
   if (error || !env) {
     return (
       <Card
-        title="Workspace at a glance"
-        description="Operator overview unavailable"
+        title={t("loadingTitle")}
+        description={t("unavailable")}
       >
         <div className="text-[12px] text-rose-300 font-mono break-all">
-          {error || "no data"}
+          {error || t("noData")}
         </div>
       </Card>
     );
@@ -75,7 +77,7 @@ export function OperatorOverviewHero() {
 
   return (
     <Card
-      title="Workspace at a glance"
+      title={t("loadingTitle")}
       description={env.summary}
       actions={
         <div className="flex items-center gap-2">
@@ -99,26 +101,26 @@ export function OperatorOverviewHero() {
     >
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         <HealthChip
-          label="Live trading"
+          label={t("liveTrading")}
           on={data.health.live_trading}
           tone={data.health.live_trading ? "warn" : "brand"}
         />
         <HealthChip
-          label="Kill switch"
+          label={t("killSwitch")}
           on={data.health.kill_switch}
           tone={data.health.kill_switch ? "danger" : "ok"}
         />
         <HealthChip
-          label="LLM ready"
+          label={t("llmReady")}
           on={data.health.llm_ready}
           tone={data.health.llm_ready ? "ok" : "danger"}
-          subtitle={`${data.llm.ready_tiers}/${data.llm.total_tiers} tiers`}
+          subtitle={t("tiersFraction", { ready: data.llm.ready_tiers, total: data.llm.total_tiers })}
         />
         <HealthChip
-          label="Strategies"
+          label={t("strategies")}
           on={data.health.strategies}
           tone={data.health.strategies ? "ok" : "warn"}
-          subtitle={`${data.counts.strategy_packages} package(s)`}
+          subtitle={t("packages", { count: data.counts.strategy_packages })}
         />
       </div>
 
@@ -138,6 +140,7 @@ function HealthChip({
   tone: "ok" | "warn" | "danger" | "brand";
   subtitle?: string;
 }) {
+  const t = useTranslations("operatorHero");
   const accent =
     tone === "ok"
       ? { bar: "bg-accent-500", text: "text-accent-400", glow: "shadow-[0_0_12px_rgba(16,217,147,0.45)]" }
@@ -152,10 +155,10 @@ function HealthChip({
       <div className="pl-2">
         <div className="flex items-center justify-between gap-2">
           <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-ink-400">
-            Status
+            {t("status")}
           </span>
           <span className={`text-[10px] font-mono uppercase tracking-[0.18em] shrink-0 ${on ? accent.text : "text-ink-500"}`}>
-            {on ? "ON" : "OFF"}
+            {on ? t("on") : t("off")}
           </span>
         </div>
         <div className="mt-1 text-[13px] font-medium leading-snug text-white">
@@ -172,10 +175,11 @@ function HealthChip({
 }
 
 function AttentionList({ items }: { items: AttentionItem[] }) {
+  const t = useTranslations("operatorHero");
   if (!items.length) {
     return (
       <div className="text-[12px] text-ink-500 px-1 py-2">
-        Nothing requires your attention right now.
+        {t("nothingToAttend")}
       </div>
     );
   }
@@ -209,7 +213,7 @@ function AttentionList({ items }: { items: AttentionItem[] }) {
               href={item.href}
               className="text-[11px] px-2 py-0.5 rounded-md text-brand-200 border border-brand-500/25 hover:bg-brand-500/10 shrink-0"
             >
-              Open →
+              {t("open")}
             </Link>
           ) : null}
         </li>

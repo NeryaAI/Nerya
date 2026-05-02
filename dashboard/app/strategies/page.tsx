@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useTranslations } from "next-intl";
 import {
   clientApi,
   type AccountSummary,
@@ -52,6 +53,8 @@ function parseList(value: string): string[] {
 }
 
 export default function StrategiesPage() {
+  const t = useTranslations("strategies");
+  const tCommon = useTranslations("common");
   const [strategies, setStrategies] = useState<StrategyRecord[]>([]);
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
@@ -128,7 +131,7 @@ export default function StrategiesPage() {
         main_prompt: draft.main_prompt.trim() || undefined,
       });
       if (!out.ok) throw new Error(JSON.stringify(out));
-      setNotice(`Created ${out.strategy_id}. Open it to configure runtime.`);
+      setNotice(`${t("createdPrefix")} ${out.strategy_id}. ${t("createdSuffix")}`);
       setDraft(EMPTY_DRAFT);
       setShowCreate(false);
       await load();
@@ -168,8 +171,8 @@ export default function StrategiesPage() {
   return (
     <div>
       <PageHeader
-        title="Strategies"
-        description="Browse every strategy package. Open a card to manage prompts, schedules, files, runs, and tuning."
+        title={t("title")}
+        description={t("description")}
         actions={
           <>
             <button
@@ -177,13 +180,13 @@ export default function StrategiesPage() {
               disabled={loading}
               className="btn btn-ghost cursor-pointer text-xs"
             >
-              {loading ? "Refreshing…" : "Refresh"}
+              {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
             <button
               onClick={() => setShowCreate((v) => !v)}
               className="btn btn-primary cursor-pointer"
             >
-              {showCreate ? "Cancel" : "+ New strategy"}
+              {showCreate ? tCommon("cancel") : t("newStrategy")}
             </button>
           </>
         }
@@ -199,11 +202,11 @@ export default function StrategiesPage() {
 
         {showCreate && (
           <Card
-            title="Create strategy"
-            description="Scaffolds strategy.yml, config.yml, limits.yml, prompts, and history/session folders. Open the card afterwards to flesh out main.py."
+            title={t("createStrategy")}
+            description={t("createStrategyDesc")}
           >
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-              <Field label="strategy_id">
+              <Field label={t("fieldStrategyId")}>
                 <input
                   value={draft.strategy_id}
                   onChange={(e) => setDraft({ ...draft, strategy_id: e.target.value })}
@@ -211,7 +214,7 @@ export default function StrategiesPage() {
                   placeholder="eth_mean_reversion"
                 />
               </Field>
-              <Field label="title">
+              <Field label={t("fieldTitle")}>
                 <input
                   value={draft.title}
                   onChange={(e) => setDraft({ ...draft, title: e.target.value })}
@@ -219,7 +222,7 @@ export default function StrategiesPage() {
                   placeholder="ETH mean reversion"
                 />
               </Field>
-              <Field label="account">
+              <Field label={t("fieldAccount")}>
                 <AccountSelect
                   value={draft.account_id}
                   accounts={accounts}
@@ -227,7 +230,7 @@ export default function StrategiesPage() {
                   onChange={(account_id) => setDraft({ ...draft, account_id })}
                 />
               </Field>
-              <Field label="wallet">
+              <Field label={t("fieldWallet")}>
                 <WalletSelect
                   value={draft.wallet_id}
                   bindings={walletBindings}
@@ -235,7 +238,7 @@ export default function StrategiesPage() {
                   onChange={(wallet_id) => setDraft({ ...draft, wallet_id })}
                 />
               </Field>
-              <Field label="markets">
+              <Field label={t("fieldMarkets")}>
                 <input
                   value={draft.markets}
                   onChange={(e) => setDraft({ ...draft, markets: e.target.value })}
@@ -243,21 +246,21 @@ export default function StrategiesPage() {
                   placeholder="binance:BTCUSDT"
                 />
               </Field>
-              <Field label="trigger kinds">
+              <Field label={t("fieldTriggerKinds")}>
                 <input
                   value={draft.trigger_kinds}
                   onChange={(e) => setDraft({ ...draft, trigger_kinds: e.target.value })}
                   className="input-dark font-mono"
                 />
               </Field>
-              <Field label="subagents">
+              <Field label={t("fieldSubagents")}>
                 <input
                   value={draft.subagents}
                   onChange={(e) => setDraft({ ...draft, subagents: e.target.value })}
                   className="input-dark font-mono"
                 />
               </Field>
-              <Field label="driver">
+              <Field label={t("fieldDriver")}>
                 <select
                   value={draft.driver}
                   onChange={(e) => setDraft({ ...draft, driver: e.target.value as DraftForm["driver"] })}
@@ -267,14 +270,14 @@ export default function StrategiesPage() {
                   <option value="script">script</option>
                 </select>
               </Field>
-              <Field label="description" full>
+              <Field label={t("fieldDescription")} full>
                 <textarea
                   value={draft.description}
                   onChange={(e) => setDraft({ ...draft, description: e.target.value })}
                   className="input-dark h-16"
                 />
               </Field>
-              <Field label="main prompt" full>
+              <Field label={t("fieldMainPrompt")} full>
                 <textarea
                   value={draft.main_prompt}
                   onChange={(e) => setDraft({ ...draft, main_prompt: e.target.value })}
@@ -288,21 +291,21 @@ export default function StrategiesPage() {
                 disabled={busy !== null || !draft.strategy_id || !draft.account_id || !draft.markets}
                 className="btn btn-primary cursor-pointer"
               >
-                {busy === "create" ? "Creating…" : "Create strategy"}
+                {busy === "create" ? t("creating") : t("createStrategyBtn")}
               </button>
             </div>
           </Card>
         )}
 
         <Card
-          title={`Strategies (${strategies.length})`}
-          description="Click any card to open its dedicated workspace."
+          title={t("strategiesCount", { count: strategies.length })}
+          description={t("strategiesDesc")}
           actions={
             <div className="flex items-center gap-2">
               <input
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                placeholder="Filter id / title / market…"
+                placeholder={t("filterPlaceholder")}
                 className="input-dark text-xs w-56"
               />
               <select
@@ -310,7 +313,7 @@ export default function StrategiesPage() {
                 onChange={(e) => setStatusFilter(e.target.value)}
                 className="input-dark text-xs"
               >
-                <option value="all">all statuses</option>
+                <option value="all">{t("allStatuses")}</option>
                 {Object.entries(counts).map(([k, v]) => (
                   <option key={k} value={k}>
                     {k} ({v})
@@ -322,11 +325,11 @@ export default function StrategiesPage() {
         >
           {filtered.length === 0 ? (
             <Empty
-              title={strategies.length === 0 ? "No strategies yet" : "Nothing matches your filter"}
+              title={strategies.length === 0 ? t("noStrategiesTitle") : t("noMatchTitle")}
               subtitle={
                 strategies.length === 0
-                  ? "Create one above or ask the chat agent to scaffold one for you."
-                  : "Clear the filter to see every strategy."
+                  ? t("noStrategiesSubtitle")
+                  : t("noMatchSubtitle")
               }
             />
           ) : (
@@ -343,6 +346,7 @@ export default function StrategiesPage() {
 }
 
 function StrategyCard({ strategy }: { strategy: StrategyRecord }) {
+  const t = useTranslations("strategies");
   const tone =
     strategy.status === "live"
       ? "ok"
@@ -361,7 +365,7 @@ function StrategyCard({ strategy }: { strategy: StrategyRecord }) {
         <div className="min-w-0">
           <div className="font-mono text-sm text-ink-100 truncate">{strategy.id}</div>
           <div className="text-[12px] text-ink-400 mt-0.5 truncate">
-            {strategy.title || "Untitled strategy"}
+            {strategy.title || t("untitledStrategy")}
           </div>
         </div>
         <span className="text-brand-300/60 group-hover:text-brand-200 transition-colors text-xs leading-none">
@@ -371,11 +375,11 @@ function StrategyCard({ strategy }: { strategy: StrategyRecord }) {
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         <Pill tone={tone}>{strategy.status}</Pill>
         <Pill tone="brand">{strategy.mode}</Pill>
-        <Pill tone="neutral">acct: {strategy.account_id || "—"}</Pill>
+        <Pill tone="neutral">{t("acct")}: {strategy.account_id || "—"}</Pill>
       </div>
       <div className="mt-2 text-[11px] text-ink-500 font-mono truncate">
-        {(strategy.markets || []).join(", ") || "no markets"} ·{" "}
-        {(strategy.trigger_kinds || []).join(", ") || "no triggers"}
+        {(strategy.markets || []).join(", ") || t("noMarkets")} ·{" "}
+        {(strategy.trigger_kinds || []).join(", ") || t("noTriggers")}
       </div>
     </Link>
   );
@@ -409,6 +413,7 @@ function AccountSelect({
   discovery: DiscoverySnapshot | null;
   onChange: (value: string) => void;
 }) {
+  const t = useTranslations("strategies");
   // Prefer /accounts/list (control plane). Falls back to the legacy
   // discovery snapshot if the new endpoint hasn't returned anything
   // yet (e.g. on a brand-new workspace).
@@ -428,7 +433,7 @@ function AccountSelect({
               key={profile.id}
               value={profile.id}
               disabled={disabled}
-              title={disabled ? `account is ${profile.status}` : undefined}
+              title={disabled ? t("accountStatus", { status: profile.status }) : undefined}
             >
               {label}
             </option>
@@ -473,6 +478,7 @@ function WalletSelect({
   discovery: DiscoverySnapshot | null;
   onChange: (value: string) => void;
 }) {
+  const t = useTranslations("strategies");
   // /wallet/configured exposes the multi-provider map (providers and
   // legacy bindings combined). The discovery snapshot still drives the
   // `ready` indicator until the control-plane wallet probe lands, so
@@ -486,14 +492,14 @@ function WalletSelect({
       onChange={(e) => onChange(e.target.value)}
       className="input-dark"
     >
-      <option value="">global wallet (account fallback)</option>
+      <option value="">{t("globalWallet")}</option>
       {bindings.map((binding) => {
         const probe = readyMap.get(binding.wallet_id);
         return (
           <option key={binding.wallet_id} value={binding.wallet_id}>
             {binding.label || binding.wallet_id} · {binding.provider}
-            {binding.source === "legacy" ? " (legacy)" : ""}
-            {probe && !probe.ready ? " · not ready" : ""}
+            {binding.source === "legacy" ? ` ${t("legacyTag")}` : ""}
+            {probe && !probe.ready ? ` ${t("notReadyDotTag")}` : ""}
           </option>
         );
       })}
@@ -502,7 +508,7 @@ function WalletSelect({
         ? (discovery?.wallets?.providers ?? []).map((wallet) => (
             <option key={wallet.id} value={wallet.id}>
               {wallet.label || wallet.id}
-              {wallet.ready ? "" : " (not ready)"}
+              {wallet.ready ? "" : ` ${t("notReadyTag")}`}
             </option>
           ))
         : null}

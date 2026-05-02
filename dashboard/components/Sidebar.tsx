@@ -1,11 +1,14 @@
 "use client";
 
+import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { useEffect, useMemo, useState } from "react";
 import { clientApi } from "../lib/clientApi";
 import type { NavEntry, OperatorNavData } from "../lib/operatorTypes";
 import { useOperatorNav } from "../lib/useOperatorNav";
+import { useUiSettings } from "../lib/settings";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -14,6 +17,7 @@ import {
   NAV_ICON_BY_NAME,
   NeryaMark,
 } from "./icons";
+import { LanguageSwitcher } from "./LanguageSwitcher";
 import { SwitchIndicator } from "./SwitchControl";
 
 const COLLAPSE_KEY = "nerya.sidebar.collapsed";
@@ -41,11 +45,13 @@ function NavList({
   pathname,
   collapsed,
   badges,
+  tNav,
 }: {
   items: NavEntry[];
   pathname: string;
   collapsed: boolean;
   badges?: Record<string, number | undefined>;
+  tNav?: (key: string) => string;
 }) {
   return (
     <ul className="space-y-0.5">
@@ -53,11 +59,12 @@ function NavList({
         const active = isActiveNavItem(pathname, item);
         const Icon = resolveIcon(item);
         const badge = badges?.[item.id];
+        const translated = tNav ? safeNavTranslate(tNav, item.href, item.label) : item.label;
         return (
-          <li key={item.href}>
+          <motion.li key={item.href} whileTap={{ scale: 0.97 }}>
             <Link
               href={item.href}
-              title={collapsed ? item.label : item.tagline ?? item.label}
+              title={collapsed ? translated : item.tagline ?? translated}
               className={[
                 "group sidebar-item",
                 active ? "sidebar-item-active" : "sidebar-item-idle",
@@ -76,7 +83,14 @@ function NavList({
               ) : null}
               {!collapsed ? (
                 <>
-                  <span className="truncate">{item.label}</span>
+                  <motion.span
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ duration: 0.15, delay: 0.08 }}
+                    className="truncate"
+                  >
+                    {translated}
+                  </motion.span>
                   {typeof badge === "number" && badge > 0 ? (
                     <span className="ml-auto inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-rose-500/20 text-rose-200 text-[10px] font-mono">
                       {badge > 99 ? "99+" : badge}
@@ -90,11 +104,25 @@ function NavList({
                 </>
               ) : null}
             </Link>
-          </li>
+          </motion.li>
         );
       })}
     </ul>
   );
+}
+
+function safeNavTranslate(t: (k: string) => string, href: string, fallback: string): string {
+  try {
+    const v = t(href);
+    // next-intl returns "nav.xxx" or the raw key when a translation is missing.
+    // Treat both as "no translation available" and fall back to the backend label.
+    if (!v) return fallback;
+    if (v === href) return fallback;
+    if (v.startsWith("nav.")) return fallback;
+    return v;
+  } catch {
+    return fallback;
+  }
 }
 
 export function Sidebar() {
@@ -103,6 +131,9 @@ export function Sidebar() {
   const [hydrated, setHydrated] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [inboxCount, setInboxCount] = useState<number | null>(null);
+  const [settings, patchSettings] = useUiSettings();
+  const t = useTranslations("sidebar");
+  const tNav = useTranslations("nav");
 
   const nav = useOperatorNav();
 
@@ -167,9 +198,10 @@ export function Sidebar() {
 
   return (
     <aside
-      className={`${width} embedded-scroll shrink-0 border-r border-white/5 bg-[rgba(4,4,13,0.6)] backdrop-blur-xl text-ink-200 h-screen sticky top-0 overflow-x-hidden flex flex-col transition-[width] duration-200`}
+      className={`${width} embedded-scroll shrink-0 border-r backdrop-blur-xl h-screen sticky top-0 overflow-x-hidden flex flex-col transition-[width] duration-200`}
+      style={{ background: "var(--panel-bg, rgba(4,4,13,0.6))", borderColor: "var(--line)", color: "var(--text-muted)" }}
     >
-      <div className="px-4 py-5 border-b border-white/5 flex items-center gap-3">
+      <div className="px-4 py-5 border-b flex items-center gap-3" style={{ borderColor: "var(--line)" }}>
         <div className="relative w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500/40 via-brand-600/30 to-fluid-500/20 ring-1 ring-brand-500/40 flex items-center justify-center shadow-glow">
           <NeryaMark size={22} />
           <span className="absolute -inset-px rounded-xl ring-1 ring-white/10 pointer-events-none" />
@@ -186,8 +218,16 @@ export function Sidebar() {
         ) : null}
       </div>
 
-      {!collapsed ? (
-        <div className="mx-3 mt-4 glass px-3 py-3">
+      <AnimatePresence initial={false} mode="wait">
+        {!collapsed ? (
+          <motion.div
+            key="agent-expanded"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="mx-3 mt-4 glass px-3 py-3"
+          >
           <div className="flex items-center gap-3">
             <div className="relative shrink-0">
               <div className="absolute inset-0 rounded-full ring-ai animate-spin-slow opacity-70" style={{ animation: "aurora-shift 8s linear infinite" }} />
@@ -216,23 +256,31 @@ export function Sidebar() {
               </div>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="flex justify-center mt-4">
+          </motion.div>
+        ) : (
+          <motion.div
+            key="agent-collapsed"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="flex justify-center mt-4"
+          >
           <div className="relative">
             <div className="w-9 h-9 rounded-full bg-gradient-to-br from-brand-400 via-brand-500 to-brand-700 flex items-center justify-center text-white font-bold text-sm shadow-glow">
               N
             </div>
             <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-accent-500 ring-2 ring-[#0a0b1a]" />
           </div>
-        </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <nav className="px-3 py-5 space-y-5 flex-1">
         <div>
           {!collapsed ? (
             <div className="px-2 mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-ink-500">
-              Operate
+              {t("sectionOperate")}
             </div>
           ) : (
             <div className="mx-3 h-px bg-brand-500/10 mb-3" />
@@ -242,6 +290,7 @@ export function Sidebar() {
             pathname={pathname}
             collapsed={collapsed}
             badges={badges}
+            tNav={tNav}
           />
         </div>
 
@@ -253,7 +302,7 @@ export function Sidebar() {
                 onClick={() => setAdvancedOpen((v) => !v)}
                 className="w-full flex items-center justify-between px-2 mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-ink-500 hover:text-ink-200"
               >
-                <span>Advanced</span>
+                <span>{t("sectionAdvanced")}</span>
                 <span className="text-[10px]">{advancedOpen ? "−" : "+"}</span>
               </button>
             ) : (
@@ -264,6 +313,7 @@ export function Sidebar() {
                 items={data.advanced}
                 pathname={pathname}
                 collapsed={collapsed}
+                tNav={tNav}
               />
             )}
           </div>
@@ -272,7 +322,7 @@ export function Sidebar() {
         {!collapsed && data.hidden.length > 0 ? (
           <div className="px-2 text-[10px] text-ink-500/70">
             <div className="font-semibold uppercase tracking-[0.2em] text-ink-500 mb-1">
-              Hidden
+              {t("sectionHidden")}
             </div>
             <ul className="space-y-1">
               {data.hidden.slice(0, 5).map((h) => (
@@ -288,7 +338,7 @@ export function Sidebar() {
                       href={h.fix_action.href}
                       className="ml-1 text-brand-300 hover:underline"
                     >
-                      fix
+                      {t("fix")}
                     </Link>
                   ) : null}
                 </li>
@@ -298,18 +348,24 @@ export function Sidebar() {
         ) : null}
       </nav>
 
-      <div className="border-t border-brand-500/10 p-3 space-y-1">
+      <div className="border-t border-brand-500/10 p-3 space-y-2">
+        {!collapsed ? (
+          <LanguageSwitcher />
+        ) : (
+          <LanguageSwitcher collapsed />
+        )}
         <button
+          onClick={() => patchSettings({ darkMode: !settings.darkMode })}
           className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-ink-300 hover:bg-brand-500/10 hover:text-white transition-colors ${
             collapsed ? "justify-center px-0" : ""
           }`}
-          title={collapsed ? "Dark Mode" : undefined}
+          title={collapsed ? (settings.darkMode ? t("lightMode") : t("darkMode")) : undefined}
         >
           <MoonIcon size={18} />
-          {!collapsed ? <span>Dark Mode</span> : null}
+          {!collapsed ? <span>{settings.darkMode ? t("darkMode") : t("lightMode")}</span> : null}
           {!collapsed ? (
             <span className="ml-auto">
-              <SwitchIndicator checked label="Dark mode" tone="brand" size="sm" />
+              <SwitchIndicator checked={settings.darkMode} label="Dark mode" tone="brand" size="sm" />
             </span>
           ) : null}
         </button>
@@ -318,14 +374,14 @@ export function Sidebar() {
           className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-ink-300 hover:bg-brand-500/10 hover:text-white transition-colors ${
             collapsed ? "justify-center px-0" : ""
           }`}
-          title={collapsed ? "Expand" : "Collapse"}
+          title={collapsed ? t("expand") : t("collapse")}
         >
           {collapsed ? (
             <ChevronRightIcon size={18} />
           ) : (
             <ChevronLeftIcon size={18} />
           )}
-          {!collapsed ? <span>Collapse</span> : null}
+          {!collapsed ? <span>{t("collapse")}</span> : null}
         </button>
       </div>
     </aside>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import {
   Card,
   Empty,
@@ -105,6 +106,7 @@ export default function AccountDetailPage({
 }: {
   params: { id: string };
 }) {
+  const t = useTranslations("accountDetail");
   const accountId = decodeURIComponent(params.id);
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [orders, setOrders] = useState<ControlPlaneOrder[]>([]);
@@ -167,9 +169,7 @@ export default function AccountDetailPage({
     const key = newHeaderKey.trim();
     const value = newHeaderValue.trim();
     if (!key || !value) {
-      setError(
-        "Header key and value are required. Use vault://<name> to reference a secret stored via /security/secrets/put.",
-      );
+      setError(t("headerRequired"));
       return;
     }
     await patchHeaders({ [key]: value });
@@ -178,7 +178,7 @@ export default function AccountDetailPage({
   }
 
   async function removeHeader(key: string) {
-    if (!confirm(`Remove header ${key}?`)) return;
+    if (!confirm(t("removeHeaderConfirm", { key }))) return;
     await patchHeaders({ [key]: null });
   }
 
@@ -230,8 +230,8 @@ export default function AccountDetailPage({
     if (!summary) return;
     if (next !== "active") {
       const reason = window.prompt(
-        `Set ${accountId} status to ${next}. Reason?`,
-        "manual_operator",
+        t("reasonPrompt", { id: accountId, status: next }),
+        t("manualOperator"),
       );
       if (reason == null) return;
       setBusy(`status:${next}`);
@@ -287,11 +287,7 @@ export default function AccountDetailPage({
     if (summary.profile.mode !== "paper") return;
     const currentBalance = Number(summary.profile.initial_balance_usd) || 0;
     const raw = window.prompt(
-      `Reset paper sandbox for ${accountId}?\n\n` +
-        "This wipes orders / fills / positions / reservations / snapshots / " +
-        "executor runs for the account, and resets the virtual ledger. " +
-        "Strategy bindings stay.\n\n" +
-        "Initial balance (USD) — leave blank to keep current:",
+      t("resetPaperPrompt", { id: accountId }),
       String(currentBalance || ""),
     );
     if (raw == null) return;
@@ -300,7 +296,7 @@ export default function AccountDetailPage({
     if (trimmed !== "") {
       const parsed = Number(trimmed);
       if (!Number.isFinite(parsed) || parsed < 0) {
-        setError(`Invalid initial balance: ${trimmed}`);
+        setError(t("invalidBalance", { value: trimmed }));
         return;
       }
       initial = parsed;
@@ -314,10 +310,12 @@ export default function AccountDetailPage({
       });
       if (!res.ok && res.error === "account_busy" && res.state) {
         const proceed = window.confirm(
-          `Account ${accountId} still has ${res.state.active_orders} order(s) / ` +
-            `${res.state.open_positions} position(s) / ` +
-            `${res.state.active_executors} executor(s).\n\n` +
-            "Force reset anyway?",
+          t("accountBusyConfirm", {
+            id: accountId,
+            orders: res.state.active_orders,
+            positions: res.state.open_positions,
+            executors: res.state.active_executors,
+          }),
         );
         if (!proceed) {
           setBusy(null);
@@ -343,8 +341,8 @@ export default function AccountDetailPage({
     if (
       !confirm(
         force
-          ? `Force-delete ${accountId}? Active state will be ignored.`
-          : `Delete ${accountId}?`,
+          ? t("forceDeleteConfirm", { id: accountId })
+          : t("deleteConfirm", { id: accountId }),
       )
     )
       return;
@@ -358,7 +356,11 @@ export default function AccountDetailPage({
       if (!res.ok) {
         if (res.state) {
           alert(
-            `Cannot delete: open_positions=${res.state.open_positions}, active_executors=${res.state.active_executors}, active_orders=${res.state.active_orders}. Use 'force' to override.`,
+            t("cannotDelete", {
+              positions: res.state.open_positions,
+              executors: res.state.active_executors,
+              orders: res.state.active_orders,
+            }),
           );
         } else {
           throw new Error(res.detail || res.error || "delete_failed");
@@ -376,10 +378,10 @@ export default function AccountDetailPage({
   if (loading && !summary) {
     return (
       <div>
-        <PageHeader title={`Account · ${accountId}`} description="Loading…" />
+        <PageHeader title={t("accountPrefix", { id: accountId })} description={t("loading")} />
         <SectionTabs section="trading" />
         <PageBody>
-          <Empty label="Loading account…" />
+          <Empty label={t("loadingAccount")} />
         </PageBody>
       </div>
     );
@@ -391,30 +393,30 @@ export default function AccountDetailPage({
   return (
     <div>
       <PageHeader
-        title={`Account · ${accountId}`}
+        title={t("accountPrefix", { id: accountId })}
         description={
           profile
-            ? `${profile.mode.toUpperCase()} on ${profile.venue} (${profile.kind}). Wallet binding: ${profile.wallet_id || "—"}.`
-            : "Account detail"
+            ? t("profileOn", { mode: profile.mode.toUpperCase(), venue: profile.venue, kind: profile.kind, wallet: profile.wallet_id || "—" })
+            : t("accountDetail")
         }
         actions={
           <div className="flex items-center gap-2">
             <Link href="/portfolio" className="btn-ghost text-xs">
-              ← Portfolio
+              {t("portfolio")}
             </Link>
             <button
               onClick={runReconcile}
               disabled={busy === "reconcile"}
               className="btn-ghost text-xs"
             >
-              {busy === "reconcile" ? "…" : "Reconcile"}
+              {busy === "reconcile" ? "…" : t("reconcile")}
             </button>
             <button
               onClick={load}
               disabled={loading}
               className="btn-ghost text-xs"
             >
-              {loading ? "…" : "Refresh"}
+              {loading ? "…" : t("refresh")}
             </button>
           </div>
         }
@@ -423,16 +425,16 @@ export default function AccountDetailPage({
       <PageBody>
         {error && <ErrorBanner error={error} />}
         {!profile ? (
-          <Empty label="Account not found." />
+          <Empty label={t("notFound")} />
         ) : (
           <>
             <div className="flex items-center gap-3 flex-wrap">
               <Pill tone={modePill(profile.mode)}>{profile.mode}</Pill>
               <Pill tone={statusPill(profile.status)}>{profile.status}</Pill>
               {profile.live_trading_enabled ? (
-                <Pill tone="warn">live trading enabled</Pill>
+                <Pill tone="warn">{t("liveTradingEnabled")}</Pill>
               ) : (
-                <Pill tone="brand">live trading off</Pill>
+                <Pill tone="brand">{t("liveTradingOff")}</Pill>
               )}
               {profile.kind ? (
                 <span className="text-xs text-ink-300 font-mono">
@@ -447,21 +449,21 @@ export default function AccountDetailPage({
                       disabled={busy?.startsWith("status:")}
                       className="btn-ghost text-xs text-[#f5a524]"
                     >
-                      Set read_only
+                      {t("setReadOnly")}
                     </button>
                     <button
                       onClick={() => setStatus("quarantined")}
                       disabled={busy?.startsWith("status:")}
                       className="btn-ghost text-xs text-[#ef4560]"
                     >
-                      Quarantine
+                      {t("quarantine")}
                     </button>
                     <button
                       onClick={() => setStatus("disabled")}
                       disabled={busy?.startsWith("status:")}
                       className="btn-ghost text-xs"
                     >
-                      Disable
+                      {t("disable")}
                     </button>
                   </>
                 ) : (
@@ -470,7 +472,7 @@ export default function AccountDetailPage({
                     disabled={busy?.startsWith("status:")}
                     className="btn-ghost text-xs text-accent-300"
                   >
-                    Re-activate
+                    {t("reactivate")}
                   </button>
                 )}
                 {profile.mode === "paper" ? (
@@ -478,9 +480,9 @@ export default function AccountDetailPage({
                     onClick={() => void resetPaper()}
                     disabled={busy === "reset_paper"}
                     className="btn-ghost text-xs text-brand-200"
-                    title="Wipe paper trading state and reset balance"
+                    title={t("resetPaperTitle")}
                   >
-                    {busy === "reset_paper" ? "Resetting…" : "Reset paper"}
+                    {busy === "reset_paper" ? t("resetting") : t("resetPaper")}
                   </button>
                 ) : null}
                 <button
@@ -488,31 +490,31 @@ export default function AccountDetailPage({
                   disabled={busy === "delete"}
                   className="btn-ghost text-xs text-[#ef4560]"
                 >
-                  Delete
+                  {t("delete")}
                 </button>
               </span>
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <Kpi
-                label={`Total (${profile.base_currency || "USDT"})`}
+                label={t("totalLabel", { currency: profile.base_currency || "USDT" })}
                 value={money(snapshot?.total_usd, profile.base_currency)}
                 tone="brand"
               />
               <Kpi
-                label="Free"
+                label={t("free")}
                 value={money(
                   snapshot?.free_usd ?? snapshot?.available_usd,
                   profile.base_currency,
                 )}
               />
               <Kpi
-                label="Reserved"
+                label={t("reserved")}
                 value={money(summary?.reserved_usd, profile.base_currency)}
                 tone={(summary?.reserved_usd ?? 0) > 0 ? "warn" : "neutral"}
               />
               <Kpi
-                label="Snapshot"
+                label={t("snapshot")}
                 value={snapshot?.health || "—"}
                 tone={
                   snapshot?.health === "ok"
@@ -521,18 +523,18 @@ export default function AccountDetailPage({
                       ? "warn"
                       : "neutral"
                 }
-                delta={snapshot ? fmtTs(snapshot.ts) : "no snapshot"}
+                delta={snapshot ? fmtTs(snapshot.ts) : t("noSnapshot")}
               />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <Card
-                title="Permissions & limits"
-                description="What this account is allowed to do, and the per-account guard rails."
+                title={t("permissionsLimits")}
+                description={t("permissionsLimitsDesc")}
               >
                 <div className="grid grid-cols-2 gap-3 text-xs">
                   <div>
-                    <div className="text-ink-500 mb-1">Permissions</div>
+                    <div className="text-ink-500 mb-1">{t("permissions")}</div>
                     <ul className="embedded-list-scroll-sm space-y-1">
                       {Object.entries(profile.permissions).map(([k, v]) => (
                         <li
@@ -551,14 +553,14 @@ export default function AccountDetailPage({
                                   : "neutral"
                             }
                           >
-                            {v ? "yes" : "no"}
+                            {v ? t("yes") : t("no")}
                           </Pill>
                         </li>
                       ))}
                     </ul>
                   </div>
                   <div>
-                    <div className="text-ink-500 mb-1">Limits</div>
+                    <div className="text-ink-500 mb-1">{t("limits")}</div>
                     <ul className="embedded-list-scroll-sm space-y-1 font-mono">
                       {Object.entries(profile.limits || {}).map(([k, v]) => (
                         <li
@@ -579,11 +581,11 @@ export default function AccountDetailPage({
               </Card>
 
               <Card
-                title="Credentials"
-                description="vault:// references only. Plaintext is rejected at upsert. Use Settings → Integrations to manage the secrets."
+                title={t("credentials")}
+                description={t("credentialsDesc")}
               >
                 {Object.keys(profile.credentials).length === 0 ? (
-                  <Empty label="No credentials bound (paper or shadow account)." />
+                  <Empty label={t("noCredentials")} />
                 ) : (
                   <ul className="embedded-list-scroll-sm text-xs font-mono space-y-1">
                     {Object.entries(profile.credentials).map(([k, v]) => (
@@ -598,7 +600,7 @@ export default function AccountDetailPage({
                   </ul>
                 )}
                 <div className="mt-3 text-xs text-ink-400">
-                  Wallet binding:{" "}
+                  {t("walletBinding")}{" "}
                   <span className="font-mono text-ink-200">
                     {profile.wallet_id || "(none)"}
                   </span>
@@ -607,11 +609,11 @@ export default function AccountDetailPage({
             </div>
 
             <Card
-              title="HTTP auth headers"
-              description="Custom auth headers for data-source / REST connectors. Plaintext keys are refused — store the secret with /security/secrets/put first and reference it as vault://<name>."
+              title={t("httpAuthHeaders")}
+              description={t("httpAuthHeadersDesc")}
             >
               {headers.length === 0 ? (
-                <Empty label="No custom auth headers configured." />
+                <Empty label={t("noHeaders")} />
               ) : (
                 <ul className="embedded-list-scroll-sm text-xs font-mono space-y-1">
                   {headers.map((h) => (
@@ -631,7 +633,7 @@ export default function AccountDetailPage({
                         disabled={busy === "headers"}
                         className="btn-ghost text-[11px] text-[#ef4560]"
                       >
-                        Remove
+                        {t("remove")}
                       </button>
                     </li>
                   ))}
@@ -640,14 +642,14 @@ export default function AccountDetailPage({
               <div className="mt-3 flex flex-col gap-2 md:flex-row md:items-center">
                 <input
                   className="input text-xs font-mono md:w-48"
-                  placeholder="X-API-Key"
+                  placeholder={t("headerKeyPlaceholder")}
                   value={newHeaderKey}
                   onChange={(e) => setNewHeaderKey(e.target.value)}
                   disabled={busy === "headers"}
                 />
                 <input
                   className="input text-xs font-mono flex-1"
-                  placeholder="vault://my_token  or  Bearer vault://my_token"
+                  placeholder={t("headerValuePlaceholder")}
                   value={newHeaderValue}
                   onChange={(e) => setNewHeaderValue(e.target.value)}
                   disabled={busy === "headers"}
@@ -657,18 +659,18 @@ export default function AccountDetailPage({
                   disabled={busy === "headers"}
                   className="btn-ghost text-xs text-brand-200"
                 >
-                  {busy === "headers" ? "…" : "Add / update"}
+                  {busy === "headers" ? "…" : t("addUpdate")}
                 </button>
               </div>
             </Card>
 
             {profile.wallet_id ? (
               <Card
-                title="Wallet portfolio"
-                description="Live balances pulled from the bound on-chain wallet provider. Configure addresses under provider_config.balances on the account row."
+                title={t("walletPortfolio")}
+                description={t("walletPortfolioDesc")}
               >
                 {walletPortfolio == null ? (
-                  <Empty label="No wallet snapshot yet — install the wallet provider, log in, and configure provider_config.balances." />
+                  <Empty label={t("noWalletSnapshot")} />
                 ) : (
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 flex-wrap text-xs">
@@ -695,7 +697,7 @@ export default function AccountDetailPage({
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                       <Kpi
-                        label="NAV (stablecoin)"
+                        label={t("navStable")}
                         value={money(
                           walletPortfolio.nav_usd,
                           profile.base_currency,
@@ -703,14 +705,14 @@ export default function AccountDetailPage({
                         tone="brand"
                       />
                       <Kpi
-                        label="Distinct assets"
+                        label={t("distinctAssets")}
                         value={String(
                           Object.keys(walletPortfolio.free_by_asset || {})
                             .length,
                         )}
                       />
                       <Kpi
-                        label="Mode"
+                        label={t("mode")}
                         value={walletPortfolio.mode}
                       />
                     </div>
@@ -748,30 +750,30 @@ export default function AccountDetailPage({
             ) : null}
 
             <Card
-              title={`Open positions (${summary?.open_position_count ?? 0})`}
+              title={t("openPositionsTitle", { count: summary?.open_position_count ?? 0 })}
             >
               {(summary?.open_positions || []).length === 0 ? (
-                <Empty label="No open positions." />
+                <Empty label={t("noOpenPositions")} />
               ) : (
                 <Json value={summary?.open_positions} />
               )}
             </Card>
 
             <Card
-              title={`Active protections (${summary?.protection_count ?? 0})`}
+              title={t("activeProtections", { count: summary?.protection_count ?? 0 })}
             >
               {(summary?.protections || []).length === 0 ? (
-                <Empty label="No active protection rules." />
+                <Empty label={t("noProtections")} />
               ) : (
                 <Json value={summary?.protections} />
               )}
             </Card>
 
             <Card
-              title={`Active executors (${summary?.active_executors.length ?? 0})`}
+              title={t("activeExecutors", { count: summary?.active_executors.length ?? 0 })}
             >
               {(summary?.active_executors || []).length === 0 ? (
-                <Empty label="No active executors." />
+                <Empty label={t("noActiveExecutors")} />
               ) : (
                 <ul className="embedded-list-scroll-sm space-y-1">
                   {summary!.active_executors.map((exec) => (
@@ -793,24 +795,24 @@ export default function AccountDetailPage({
             </Card>
 
             <Card
-              title={`Recent orders (${orders.length})`}
-              description="Latest order tracker rows for this account."
+              title={t("recentOrders", { count: orders.length })}
+              description={t("recentOrdersDesc")}
             >
               {orders.length === 0 ? (
-                <Empty label="No recent orders." />
+                <Empty label={t("noRecentOrders")} />
               ) : (
                 <div className="embedded-table-scroll">
                   <table className="table w-full">
                     <thead>
                       <tr className="text-[11px] text-ink-400">
-                        <th>State</th>
-                        <th>Market</th>
-                        <th>Side</th>
-                        <th>Size</th>
-                        <th>Filled</th>
-                        <th>Avg</th>
-                        <th>Strategy</th>
-                        <th>Created</th>
+                        <th>{t("colState")}</th>
+                        <th>{t("colMarket")}</th>
+                        <th>{t("colSide")}</th>
+                        <th>{t("colSize")}</th>
+                        <th>{t("colFilled")}</th>
+                        <th>{t("colAvg")}</th>
+                        <th>{t("colStrategy")}</th>
+                        <th>{t("colCreated")}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -837,11 +839,11 @@ export default function AccountDetailPage({
             </Card>
 
             <Card
-              title={`Reconciliation reports (${reports.length})`}
-              description="Severity-tagged drift reports for this account."
+              title={t("reconciliationReports", { count: reports.length })}
+              description={t("reconciliationDesc")}
             >
               {reports.length === 0 ? (
-                <Empty label="No reports." />
+                <Empty label={t("noReports")} />
               ) : (
                 <div className="embedded-list-scroll-sm space-y-1.5">
                   {reports.map((r) => (
@@ -852,7 +854,7 @@ export default function AccountDetailPage({
                       <Pill tone={severityTone(r.severity)}>{r.severity}</Pill>
                       <span className="font-mono text-ink-300">{r.scope}</span>
                       <span className="text-ink-400">
-                        {Number(r.summary?.issue_count ?? 0)} issue(s)
+                        {t("issues", { count: Number(r.summary?.issue_count ?? 0) })}
                       </span>
                       <span className="ml-auto text-ink-500 font-mono">
                         {fmtTs(r.ts)}
@@ -864,8 +866,8 @@ export default function AccountDetailPage({
             </Card>
 
             <Card
-              title="Raw profile"
-              description="Full account row as stored in accounts/accounts.yml."
+              title={t("rawProfile")}
+              description={t("rawProfileDesc")}
             >
               <Json value={profile} />
             </Card>
