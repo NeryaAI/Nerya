@@ -26,6 +26,10 @@ import {
   CopyIcon,
   WrenchIcon,
 } from "../icons";
+import {
+  StrategyProposalApprovalCard,
+  strategyProposalFromToolResult,
+} from "../strategies/StrategyProposalApprovalCard";
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -146,6 +150,10 @@ function Tag({
 
 function ActionBlock({ action }: { action: ActionRecord }) {
   const ok = !action.error;
+  const strategyProposal = strategyProposalFromToolResult(
+    action.result,
+    action.action,
+  );
   const title = (
     <span className="flex items-center gap-2">
       <span className="text-ink-400">action</span>
@@ -164,6 +172,13 @@ function ActionBlock({ action }: { action: ActionRecord }) {
         <div className="space-y-2">
           {art ? (
             <div className="text-[11px] text-ink-300">Landed: {art}</div>
+          ) : null}
+          {strategyProposal ? (
+            <StrategyProposalApprovalCard
+              proposal={strategyProposal}
+              compact
+              approveNote="approved from chat action"
+            />
           ) : null}
           <JsonBlock value={action.result} />
         </div>
@@ -222,6 +237,10 @@ function artifactSummary(a: ActionRecord): ReactNode {
 
 function ToolBlock({ t }: { t: ToolTraceEntry }) {
   const ok = t.ok;
+  const strategyProposal = strategyProposalFromToolResult(
+    t.result,
+    String(t.action || ""),
+  );
   const title = (
     <span className="flex items-center gap-2 min-w-0">
       <span className="text-ink-400">tool</span>
@@ -255,6 +274,13 @@ function ToolBlock({ t }: { t: ToolTraceEntry }) {
         <div className="text-[10px] uppercase tracking-wider text-ink-400">
           result
         </div>
+        {strategyProposal ? (
+          <StrategyProposalApprovalCard
+            proposal={strategyProposal}
+            compact
+            approveNote="approved from chat tool trace"
+          />
+        ) : null}
         <JsonBlock value={t.result ?? t.error} />
       </div>
     </Collapsible>
@@ -1149,6 +1175,7 @@ function NativeToolResultBlock({
   const ok = block.ok !== false && !block.error;
   const action = (block.action as string | undefined) || "tool";
   const skill = (block.skill_id as string | undefined) || "native";
+  const strategyProposal = strategyProposalFromToolResult(block.result ?? block, action);
   const title = (
     <span className="flex items-center gap-2 min-w-0">
       <WrenchIcon size={13} className="text-ink-400" />
@@ -1183,6 +1210,13 @@ function NativeToolResultBlock({
         <div className="text-[10px] uppercase tracking-wider text-ink-400">
           output
         </div>
+        {strategyProposal ? (
+          <StrategyProposalApprovalCard
+            proposal={strategyProposal}
+            compact
+            approveNote="approved from chat tool result"
+          />
+        ) : null}
         <JsonBlock value={block.result ?? block} />
       </div>
     </Collapsible>

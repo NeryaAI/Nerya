@@ -43,9 +43,10 @@ class PermissionMode(str, enum.Enum):
     * ``AUTO``       — unattended for low/medium-risk work (used by eval /
       cron); DANGEROUS operations still ask and the engine still enforces
       deny rules and sandboxed scopes.
-    * ``YOLO``       — unattended for low/medium-risk work, but still
-      escalates dangerous operations. Reserved for explicitly-acknowledged
-      power users.
+    * ``YOLO``       — unattended native-tool execution. The permission
+      layer still enforces deny rules, but does not stop on risk labels.
+      Domain safety gates inside handlers (for example trading risk /
+      approval gates) remain responsible for their own invariants.
     """
 
     DEFAULT = "default"
@@ -225,15 +226,6 @@ class PermissionEngine:
                         risk=risk,
                         scope=scope,
                     )
-            if risk is RiskLevel.DANGEROUS:
-                return PermissionDecision(
-                    kind=PermissionDecisionKind.ASK,
-                    reason="yolo mode escalates DANGEROUS to ask",
-                    risk=risk,
-                    scope=scope,
-                    requires_approval=True,
-                    approval_reason="dangerous tool requires explicit approval",
-                )
             return PermissionDecision(
                 kind=PermissionDecisionKind.ALLOW,
                 reason="yolo mode",

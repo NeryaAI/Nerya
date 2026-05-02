@@ -281,7 +281,7 @@ def session_transcript(
             user_text = row.get("user_text")
             if isinstance(user_text, str) and user_text:
                 starts[tid] = {
-                    "content": user_text[:per_msg_cap],
+                    "content": user_text if per_msg_cap <= 0 else user_text[:per_msg_cap],
                     "ts": str(row.get("ts") or ""),
                 }
                 if tid not in order:
@@ -290,7 +290,7 @@ def session_transcript(
             final_text = row.get("final_text")
             if isinstance(final_text, str) and final_text:
                 ends[tid] = {
-                    "content": final_text[:per_msg_cap],
+                    "content": final_text if per_msg_cap <= 0 else final_text[:per_msg_cap],
                     "ts": str(row.get("ts") or ""),
                 }
     ordered = [t for t in order if t in starts]

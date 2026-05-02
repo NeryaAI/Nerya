@@ -148,8 +148,8 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
     1. If a ``connector`` is supplied, use it directly.
     2. Else if ``registry`` + ``account_cfg`` are supplied, build one from
        the account and use it.
-    3. Else parse the venue from ``VENUE:SYMBOL`` and try
-       ``registry.build_connector`` with a minimal config.
+    3. Else parse the venue from ``VENUE:SYMBOL`` and try to build a
+       public, read-only connector from the provider registry.
     4. On error, return mock candles only when mock mode is authorised;
        otherwise return ``[]`` tagged with a degraded envelope.
     """
@@ -163,6 +163,14 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
             else:
                 from ..connectors.registry import build_connector
                 conn = build_connector({"venue": venue, "kind": "cex"})
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            conn = None
+
+    if conn is None and venue and venue not in ("MOCK", "PAPER"):
+        try:
+            from ..connectors.registry import build_connector
+            conn = build_connector({"venue": venue.lower(), "kind": "cex", "live": False})
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
             conn = None

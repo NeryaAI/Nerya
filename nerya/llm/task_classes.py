@@ -56,6 +56,8 @@ _BUILTIN_TASK_CLASS_MAP: dict[str, str] = {
     "summarise": CONTENT_COMPRESSION,
     "summarize": CONTENT_COMPRESSION,
     "context_compress": CONTENT_COMPRESSION,
+    "summary": CONTENT_COMPRESSION,
+    "brief_summary": CONTENT_COMPRESSION,
     # subagent reasoning
     "subagent_analysis": SUBAGENT_REASONING,
     "market_analyst_summary": SUBAGENT_REASONING,
@@ -79,6 +81,15 @@ _BUILTIN_TASK_CLASS_MAP: dict[str, str] = {
     "complex_signal_analysis": COMPLEX_REASONING,
     "large_loss_postmortem": COMPLEX_REASONING,
     "deep_research": COMPLEX_REASONING,
+    "analysis": COMPLEX_REASONING,
+    "research": COMPLEX_REASONING,
+    "market_analysis": COMPLEX_REASONING,
+    "market_research": COMPLEX_REASONING,
+    "investment_analysis": COMPLEX_REASONING,
+    "investment_guide": COMPLEX_REASONING,
+    "stock_investment_guide": COMPLEX_REASONING,
+    "a_share_investment_guide": COMPLEX_REASONING,
+    "china_a_share_investment_guide": COMPLEX_REASONING,
 }
 
 

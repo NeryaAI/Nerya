@@ -86,6 +86,10 @@ def _session_updated_ts(session: dict[str, Any]) -> float:
         return 0.0
 
 
+def _truthy_query(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "full"}
+
+
 def normalise_trigger_payload(payload):
     """Accept both {trigger: {...}} and a bare trigger object.
 
@@ -402,6 +406,7 @@ def routes():
                 trigger=trigger,
                 strategy_id=payload.get("strategy_id"),
                 session_id=payload.get("session_id"),
+                turn_id=payload.get("turn_id"),
             )
         except Exception as exc:
             tb = traceback.format_exc()
@@ -763,6 +768,15 @@ def routes():
         if not sid:
             return {"ok": False, "error": "session_id required"}
         messages: list[dict] = []
+        full = _truthy_query(q.get("full")) or _truthy_query(q.get("all"))
+        try:
+            max_pairs = int(q.get("max_pairs") or 200)
+        except Exception:
+            max_pairs = 200
+        try:
+            per_msg_cap = int(q.get("per_msg_cap") or 12_000)
+        except Exception:
+            per_msg_cap = 12_000
         try:
             import json as _json
 
@@ -772,7 +786,7 @@ def routes():
             con = connect(client.config.paths.db)
             rows = AgentSessionRepository(con).transcript(
                 str(sid),
-                limit=int(q.get("max_pairs") or 200) * 2,
+                limit=0 if full else max_pairs * 2,
             )
             con.close()
             for r in rows:
@@ -814,8 +828,8 @@ def routes():
                 messages = _txn(
                     client.config.paths,
                     session_id=str(sid),
-                    per_msg_cap=int(q.get("per_msg_cap") or 12_000),
-                    max_pairs=int(q.get("max_pairs") or 200),
+                    per_msg_cap=0 if full else per_msg_cap,
+                    max_pairs=0 if full else max_pairs,
                 )
             except Exception as exc:
                 return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

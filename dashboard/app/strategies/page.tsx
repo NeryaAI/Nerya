@@ -7,6 +7,7 @@ import {
   clientApi,
   type AccountSummary,
   type DiscoverySnapshot,
+  type EvolutionProposal,
   type StrategyRecord,
   type WalletBinding,
 } from "../../lib/clientApi";
@@ -19,6 +20,10 @@ import {
   Pill,
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
+import {
+  StrategyProposalApprovalCard,
+  isActiveStrategyProposal,
+} from "../../components/strategies/StrategyProposalApprovalCard";
 
 type DraftForm = {
   strategy_id: string;
@@ -56,6 +61,7 @@ export default function StrategiesPage() {
   const t = useTranslations("strategies");
   const tCommon = useTranslations("common");
   const [strategies, setStrategies] = useState<StrategyRecord[]>([]);
+  const [strategyProposals, setStrategyProposals] = useState<EvolutionProposal[]>([]);
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [walletBindings, setWalletBindings] = useState<WalletBinding[]>([]);
@@ -78,14 +84,16 @@ export default function StrategiesPage() {
       // binding) and the configured wallet providers from
       // /wallet/configured. The legacy /discovery snapshot is kept
       // around as a fallback for very old workspaces.
-      const [snap, res, accList, wallets] = await Promise.all([
+      const [snap, res, accList, wallets, proposalRes] = await Promise.all([
         clientApi.discoverySnapshot().catch(() => null),
         clientApi.strategiesAll(true),
         clientApi.accountsList().catch(() => ({ accounts: [], ts: 0 })),
         clientApi.walletConfigured().catch(() => ({ bindings: [], count: 0 })),
+        clientApi.proposalsList().catch(() => ({ proposals: [] })),
       ]);
       setDiscovery(snap);
       setStrategies(res.strategies ?? []);
+      setStrategyProposals((proposalRes.proposals ?? []).filter(isActiveStrategyProposal));
       setAccounts(accList.accounts ?? []);
       setWalletBindings(wallets.bindings ?? []);
       const firstBindable =
@@ -159,6 +167,11 @@ export default function StrategiesPage() {
       return haystack.includes(q);
     });
   }, [strategies, filter, statusFilter]);
+
+  const pendingStrategyProposals = useMemo(
+    () => strategyProposals.filter(isActiveStrategyProposal),
+    [strategyProposals],
+  );
 
   const counts = useMemo(() => {
     const tally: Record<string, number> = {};
@@ -296,6 +309,28 @@ export default function StrategiesPage() {
             </div>
           </Card>
         )}
+
+        {pendingStrategyProposals.length > 0 ? (
+          <Card
+            title={t("pendingProposalsTitle", { count: pendingStrategyProposals.length })}
+            description={t("pendingProposalsDesc")}
+          >
+            <div className="embedded-list-scroll-lg grid gap-3">
+              {pendingStrategyProposals.map((proposal) => (
+                <StrategyProposalApprovalCard
+                  key={proposal.id}
+                  proposal={proposal}
+                  approveNote="approved from strategies dashboard"
+                  onApproved={async () => {
+                    await load();
+                  }}
+                  onError={setError}
+                  onNotice={setNotice}
+                />
+              ))}
+            </div>
+          </Card>
+        ) : null}
 
         <Card
           title={t("strategiesCount", { count: strategies.length })}

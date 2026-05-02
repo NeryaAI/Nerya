@@ -1,4 +1,4 @@
-"""Fetch a URL and return the body, optionally stripped to readable text.
+"""Fetch a URL and return readable markdown/text with safe fallbacks.
 
 Standalone CLI usage::
 
@@ -15,7 +15,10 @@ Output schema::
       "content_type": str,
       "bytes": int,
       "truncated": bool,
+      "fetch_method": str,
+      "fallback_errors": [str, ...],
       "elapsed_ms": int,
+      "markdown": str,
       "text": str
     }
 """
@@ -23,17 +26,40 @@ Output schema::
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import re
 import sys
 import time
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urlparse
+
+from nerya.security.web_safety import evaluate_url
 
 from ._http import DEFAULT_TIMEOUT, HARD_FETCH_BYTES, http_get
 
 
 _DEFAULT_FETCH_BYTES = 200_000
+_MIN_USEFUL_CHARS = 160
+_JINA_READER_PREFIX = "https://r.jina.ai/"
+_BLOCKER_PATTERNS = (
+    "enable javascript",
+    "just a moment",
+    "checking your browser",
+    "captcha",
+    "access denied",
+    "forbidden",
+    "request blocked",
+)
+
+
+@dataclass
+class _Extraction:
+    text: str
+    title: str = ""
+    method: str = "plain_text"
+    error: str = ""
 
 
 class _TextExtractor(HTMLParser):
@@ -92,56 +118,286 @@ class _TextExtractor(HTMLParser):
         return normalized.strip()
 
 
+def _normalize_markdown(text: str) -> str:
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{4,}", "\n\n\n", text)
+    return text.strip()
+
+
+def _looks_low_quality(text: str, *, min_chars: int) -> bool:
+    clean = " ".join((text or "").split())
+    if len(clean) < min_chars:
+        return True
+    lowered = clean[:1200].lower()
+    return any(pattern in lowered for pattern in _BLOCKER_PATTERNS)
+
+
+def _extract_with_trafilatura(html_text: str, url: str) -> _Extraction:
+    try:
+        import trafilatura  # type: ignore[import-not-found]
+    except Exception as exc:
+        return _Extraction("", method="trafilatura", error=f"unavailable: {exc}")
+    try:
+        extracted = trafilatura.extract(
+            html_text,
+            url=url,
+            output_format="markdown",
+            include_comments=False,
+            include_tables=True,
+            include_links=True,
+            deduplicate=True,
+        )
+    except Exception as exc:
+        return _Extraction("", method="trafilatura", error=f"{type(exc).__name__}: {exc}")
+    return _Extraction(_normalize_markdown(extracted or ""), method="trafilatura")
+
+
+def _extract_with_markdownify(html_text: str) -> _Extraction:
+    try:
+        from markdownify import markdownify as md  # type: ignore[import-not-found]
+    except Exception as exc:
+        return _Extraction("", method="markdownify", error=f"unavailable: {exc}")
+    try:
+        cleaned = re.sub(
+            r"<(script|style|noscript|svg|head)\b[^>]*>.*?</\1>",
+            "",
+            html_text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        markdown = md(
+            cleaned,
+            heading_style="ATX",
+            strip=["script", "style", "noscript", "svg", "head"],
+        )
+    except Exception as exc:
+        return _Extraction("", method="markdownify", error=f"{type(exc).__name__}: {exc}")
+    return _Extraction(_normalize_markdown(markdown), method="markdownify")
+
+
+def _extract_with_stdlib(html_text: str) -> _Extraction:
+    extractor = _TextExtractor()
+    try:
+        extractor.feed(html_text)
+    except Exception:
+        pass
+    return _Extraction(
+        text=extractor.text(),
+        title=extractor.title.strip(),
+        method="stdlib_html_text",
+    )
+
+
+def _extract_html(html_text: str, *, url: str, min_content_chars: int) -> _Extraction:
+    errors: list[str] = []
+    for extractor in (
+        lambda: _extract_with_trafilatura(html_text, url),
+        lambda: _extract_with_markdownify(html_text),
+        lambda: _extract_with_stdlib(html_text),
+    ):
+        result = extractor()
+        if result.error:
+            errors.append(f"{result.method}: {result.error}")
+        if result.text and not _looks_low_quality(result.text, min_chars=min_content_chars):
+            return result
+    fallback = _extract_with_stdlib(html_text)
+    if errors:
+        fallback.error = "; ".join(errors)
+    return fallback
+
+
+def _jina_reader_url(url: str) -> str:
+    # Reader's public contract is prefix-based:
+    # https://r.jina.ai/https://example.com/page
+    return _JINA_READER_PREFIX + url
+
+
+def _extract_jina_title(markdown: str) -> str:
+    for line in (markdown or "").splitlines()[:8]:
+        stripped = line.strip()
+        if stripped.lower().startswith("title:"):
+            return stripped.split(":", 1)[1].strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip()
+    return ""
+
+
+def _fetch_jina_reader(
+    *,
+    safe_url: str,
+    max_bytes: int,
+    timeout_s: float,
+) -> tuple[dict[str, Any] | None, str | None]:
+    reader_url = _jina_reader_url(safe_url)
+    decision = evaluate_url(reader_url)
+    if not decision.is_allowed():
+        return None, f"jina_reader blocked by safety policy: {decision.reason}: {decision.note}"
+    try:
+        status, headers, body = http_get(
+            decision.url,
+            timeout=timeout_s,
+            extra_headers={"Accept": "text/plain"},
+        )
+    except Exception as exc:
+        return None, f"jina_reader: {type(exc).__name__}: {exc}"
+    truncated = len(body) > max_bytes
+    body = body[:max_bytes]
+    markdown = _normalize_markdown(body.decode("utf-8", errors="replace"))
+    if status >= 400:
+        return None, f"jina_reader HTTP {status}"
+    if not markdown:
+        return None, "jina_reader returned empty content"
+    return {
+        "status": status,
+        "url": safe_url,
+        "reader_url": decision.url,
+        "title": _extract_jina_title(markdown),
+        "content_type": (headers.get("content-type") or "text/plain").lower(),
+        "bytes": len(body),
+        "truncated": truncated,
+        "fetch_method": "jina_reader",
+        "markdown": markdown,
+        "text": markdown,
+    }, None
+
+
 def run(
     *,
     url: str,
     strip_html: bool = True,
     max_bytes: int = _DEFAULT_FETCH_BYTES,
     timeout_s: float = DEFAULT_TIMEOUT,
+    use_jina_fallback: bool = True,
+    prefer_jina: bool = False,
+    min_content_chars: int = _MIN_USEFUL_CHARS,
 ) -> dict[str, Any]:
     if not url:
         return {"ok": False, "error": "url is required"}
-    if not (url.startswith("http://") or url.startswith("https://")):
-        return {"ok": False, "error": "url must be http(s)"}
+    safety = evaluate_url(url)
+    if not safety.is_allowed():
+        return {
+            "ok": False,
+            "url": url,
+            "error": f"{safety.reason}: {safety.note}",
+            "safety": safety.to_dict(),
+        }
 
     max_bytes = max(1024, min(int(max_bytes), HARD_FETCH_BYTES))
+    min_content_chars = max(0, int(min_content_chars))
     started = time.monotonic()
+    fallback_errors: list[str] = []
+
+    if prefer_jina:
+        jina, err = _fetch_jina_reader(
+            safe_url=safety.url,
+            max_bytes=max_bytes,
+            timeout_s=timeout_s,
+        )
+        if jina is not None:
+            jina["ok"] = True
+            jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            jina["fallback_errors"] = fallback_errors
+            jina["safety"] = safety.to_dict()
+            return jina
+        if err:
+            fallback_errors.append(err)
+
     try:
-        status, headers, body = http_get(url, timeout=timeout_s)
+        status, headers, body = http_get(safety.url, timeout=timeout_s)
     except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        fallback_errors.append(f"direct_fetch: {type(exc).__name__}: {exc}")
+        if use_jina_fallback:
+            jina, err = _fetch_jina_reader(
+                safe_url=safety.url,
+                max_bytes=max_bytes,
+                timeout_s=timeout_s,
+            )
+            if jina is not None:
+                jina["ok"] = True
+                jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+                jina["fallback_errors"] = fallback_errors
+                jina["safety"] = safety.to_dict()
+                return jina
+            if err:
+                fallback_errors.append(err)
+        return {
+            "ok": False,
+            "url": safety.url,
+            "error": f"{type(exc).__name__}: {exc}",
+            "fallback_errors": fallback_errors,
+            "safety": safety.to_dict(),
+        }
 
     truncated = len(body) > max_bytes
     body = body[:max_bytes]
     content_type = (headers.get("content-type") or "").lower()
-    text = ""
+    markdown = ""
     title = ""
-    if "text/html" in content_type or url.endswith((".html", ".htm")):
+    fetch_method = "direct_text"
+    if "text/html" in content_type or urlparse(safety.url).path.endswith((".html", ".htm")):
         decoded = body.decode("utf-8", errors="replace")
         if strip_html:
-            extractor = _TextExtractor()
-            try:
-                extractor.feed(decoded)
-            except Exception:
-                pass
-            text = extractor.text()
-            title = extractor.title.strip()
+            extracted = _extract_html(
+                decoded,
+                url=safety.url,
+                min_content_chars=min_content_chars,
+            )
+            markdown = extracted.text
+            title = extracted.title
+            fetch_method = extracted.method
+            if extracted.error:
+                fallback_errors.append(extracted.error)
         else:
-            text = decoded
+            markdown = decoded
+            fetch_method = "direct_html"
     else:
-        text = body.decode("utf-8", errors="replace")
+        markdown = body.decode("utf-8", errors="replace")
+
+    should_try_jina = (
+        use_jina_fallback
+        and strip_html
+        and (
+            status >= 400
+            or (
+                ("text/html" in content_type or urlparse(safety.url).path.endswith((".html", ".htm")))
+                and _looks_low_quality(markdown, min_chars=min_content_chars)
+            )
+        )
+    )
+    if should_try_jina:
+        jina, err = _fetch_jina_reader(
+            safe_url=safety.url,
+            max_bytes=max_bytes,
+            timeout_s=timeout_s,
+        )
+        if jina is not None and not _looks_low_quality(
+            jina["markdown"], min_chars=min_content_chars,
+        ):
+            jina["ok"] = True
+            jina["direct_status"] = status
+            jina["direct_fetch_method"] = fetch_method
+            jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            jina["fallback_errors"] = fallback_errors
+            jina["safety"] = safety.to_dict()
+            return jina
+        if err:
+            fallback_errors.append(err)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {
         "ok": 200 <= status < 400,
         "status": status,
-        "url": url,
+        "url": safety.url,
         "title": title,
         "content_type": content_type,
         "bytes": len(body),
         "truncated": truncated,
+        "fetch_method": fetch_method,
+        "fallback_errors": fallback_errors,
         "elapsed_ms": elapsed_ms,
-        "text": text,
+        "markdown": markdown,
+        "text": markdown,
+        "safety": safety.to_dict(),
     }
 
 
@@ -155,6 +411,17 @@ def _load_payload(args: argparse.Namespace) -> dict[str, Any]:
         raw = sys.stdin.read().strip()
         return json.loads(raw) if raw else {}
     return {}
+
+
+def _payload_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in payload:
+        return default
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off", ""}
+    return bool(value)
 
 
 def main() -> None:
@@ -173,9 +440,12 @@ def main() -> None:
     try:
         result = run(
             url=url,
-            strip_html=bool(payload.get("strip_html", True)),
+            strip_html=_payload_bool(payload, "strip_html", True),
             max_bytes=int(payload.get("max_bytes") or _DEFAULT_FETCH_BYTES),
             timeout_s=float(payload.get("timeout_s") or DEFAULT_TIMEOUT),
+            use_jina_fallback=_payload_bool(payload, "use_jina_fallback", True),
+            prefer_jina=_payload_bool(payload, "prefer_jina", False),
+            min_content_chars=int(payload.get("min_content_chars") or _MIN_USEFUL_CHARS),
         )
     except Exception as exc:
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")

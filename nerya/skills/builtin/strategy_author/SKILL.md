@@ -43,25 +43,49 @@ runtime decides what `ctx` is allowed to do based on `mode`,
 Minimum viable manifest:
 
 ```yaml
+version: 1
 strategy_id: ashare_600519_sma_crossover
 title: 600519 SMA 5/20 Crossover
-mode: paper                # paper | live
+description: Paper-only SMA crossover example.
+mode: paper                # paper | shadow | live
+entrypoint: main.py:run
 accounts: [paper_main]
 markets: ["cn:600519"]
-trigger_kinds: [schedule]
+schedule:
+  type: cron
+  cron: "0 9 * * 1-5"
+  enabled: true
+policy:
+  max_single_order_usd: 100
+  max_daily_notional_usd: 1000
+  max_open_positions: 1
+  min_confidence: 0.55
+  allow_direct_order: true
+  require_subagent_before_order: false
+  default_order_usd: 50
+llm_policy:
+  default_tier: light
+  allowed_tiers: [light]
+  max_calls_per_run: 2
 subagents: []              # leave empty unless you actually need subagent analysis
+news_sources: []
 tuning:
   enabled: false
 ```
 
 Add only what the strategy actually uses:
 
-- `triggers:` — list of `{kind, schedule|event, payload}`. Use
-  `kind: schedule` with a `cron:` field for time-based runs (`*/1 *
-  * * *` for one-minute scalpers, `0 9 * * 1-5` for daily-open
-  trend strategies). Use `kind: event` for price/news/on-chain
-  webhook routes. *Cross-reference the* `triggers` *skill before
-  writing this section.*
+- `schedule:` is required in `strategy.yml`. Use `type: cron` with a
+  `cron:` field for time-based runs (`*/1 * * * *` for one-minute
+  scalpers, `0 9 * * 1-5` for daily-open trend strategies), or
+  `type: interval` with `every_seconds:`. When calling
+  `strategy_generate_proposal`, pass `schedule_cron` or
+  `schedule_every_seconds`; the generator renders the manifest
+  schedule block and the runtime compiles it into trigger schedules.
+- For event/news/on-chain strategies, keep the package manifest small
+  and declare only the fields it actually consumes (`news_sources`,
+  `subagents`, strategy docs). Cross-reference the `triggers` skill
+  when wiring external trigger routes outside the package.
 - `subagents: [name1, name2]` — only listed if `main.py` actually
   calls `ctx.subagents.run("...", payload=...)`. Listing roles you don't use
   costs the operator nothing but adds noise.
@@ -131,6 +155,34 @@ add a provider spec or skill adapter; do not read raw credentials in
 `main.py`. Document the schema in `strategy.md` so the operator knows
 what to put in the vault.
 
+## Market context inheritance
+
+Treat the active chat/session market scope as part of the operator
+brief. This is advisory context for your judgment, not a hard router:
+you still choose the right market only after reading the user request,
+prior turns, attached session context, and available data.
+
+Rules:
+
+- Preserve the market scope that the session has already established.
+  For example, if prior turns clearly discuss China-listed AI companies
+  or A-share investing, a later short follow-up such as "generate a
+  strategy", "strategy 1", "continue", or "backtest it" should be read
+  as the same equity scope unless the user explicitly changes domains.
+- Do not turn a generic follow-up into a crypto, futures, or other
+  unrelated market just because an archetype, template, or older example
+  uses that market. Examples are examples, not defaults.
+- Before selecting `markets`, write the market-scope assumption into
+  `strategy.md` or the proposal rationale, for example:
+  `Market scope assumption: prior session context is China-listed AI
+  companies, so this proposal keeps an equity market scope.`
+- If the scope is ambiguous, ask a short clarification or state a
+  reversible assumption before calling `strategy_generate_proposal`.
+- Use `strategy_generate_proposal` for strategy packages. Avoid direct
+  native file writes into `strategies/<id>/...` unless the operator
+  explicitly asks for raw file editing; proposal-first review is the
+  normal path.
+
 ## Triggers & schedules
 
 Read the `triggers` skill first. The most common patterns:
@@ -151,12 +203,19 @@ or a deterministic `reasoning` value in `submit_intent`.
 
 ## Subagents inside a strategy
 
-Add a subagent only when the analysis is too expensive or too
-qualitative for in-tick logic. Workflow:
+Subagents are optional analysis helpers, not an order-placement
+requirement. No strategy class or mode must use a subagent before it
+can call `ctx.trading.submit_intent(...)`. Recommend a subagent when
+the strategy's own signal logic explicitly depends on Agent/subagent
+analysis, for example a news, sentiment, on-chain, or qualitative
+research verdict that is read by `main.py` before deciding whether to
+trade. Suggested workflow:
 
 1. Author `subagents/<role>.agent.md` *inside the strategy package*
-   (per-strategy prompt, narrower than the workspace defaults).
-2. List the role under `strategy.yml > subagents`.
+   (per-strategy prompt, narrower than the workspace defaults) when
+   the strategy needs a role specialised to this market/mission.
+2. List the role under `strategy.yml > subagents` so the operator can
+   see the strategy's intended analysis roles.
 3. In `main.py`, call:
    ```python
    verdict = ctx.subagents.run(
@@ -165,12 +224,16 @@ qualitative for in-tick logic. Workflow:
    )
    ```
 4. The harness merges per-strategy roles on top of workspace
-   defaults; operators can override either.
+   defaults; operators can override either. If the per-strategy file
+   is missing, runtime resolution can fall back to a workspace/default
+   persona, so absence of a generated subagent prompt is not a
+   validation failure by itself.
 
-For *low-frequency* strategies (daily, news-driven), prefer a
-team-oriented subagent/persona via `ctx.subagents.run(...)` or the
-workspace `team` skill outside the strategy tick so multiple roles
-vote before the strategy commits to an order.
+For low-frequency strategies (daily, news-driven), a team-oriented
+subagent/persona via `ctx.subagents.run(...)` or the workspace `team`
+skill can be useful, but it is still an authoring choice. Pure
+indicator, rule-based, or directly LLM-scored strategies should keep
+`subagents: []` unless `main.py` actually calls `ctx.subagents.run(...)`.
 
 ## Backtest is required when data permits
 
@@ -179,19 +242,33 @@ candles, the package **must** ship a backtest under `tests/`:
 
 ```python
 # tests/test_main.py
-import pytest
-from main import run
+from pathlib import Path
+import importlib.util
+import sys
 
-def test_backtest_no_blowup(make_ctx):
+from nerya.strategies.backtest_bridge import backtest_replay
+
+
+def _load_run():
+    main_path = Path(__file__).resolve().parent.parent / "main.py"
+    spec = importlib.util.spec_from_file_location("_strategy_under_test", main_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.run
+
+def test_backtest_no_blowup():
     """Replay 30d of 1h candles; assert no negative drawdown beyond limits."""
-    ctx = make_ctx(window_days=30, tf="1h")
-    stats = ctx.backtest_replay(run, window_days=30, tf="1h")
+    stats = backtest_replay(_load_run(), markets=["MOCK:BTCUSDT"], window_days=30, tf="1h")
     assert stats["max_drawdown_pct"] <= 30
 ```
 
-Use `ctx.backtest_replay(run, **kwargs)` in tests to drive the strategy over
-historical bars — the helper handles tick-time, fill simulation, and
-fee modelling. No artefacts are written unless `artefacts_dir=...` is passed.
+Use `nerya.strategies.backtest_bridge.backtest_replay(run, **kwargs)` in
+strategy-local tests; do not depend on an undefined `make_ctx` fixture. The
+helper drives the strategy over historical or mock bars and handles tick-time,
+fill simulation, and fee modelling. No artefacts are written unless
+`artefacts_dir=...` is passed.
 Full CLI backtest artefacts land under `strategies/<id>/backtests/<ts>/`.
 
 When standard historical candles are **not** available or are misleading
@@ -240,17 +317,19 @@ strategy.
    inline. **Every non-trivial strategy must wire** a real
    `schedule_cron` and a `tuning_prompt` + `tuning_cron` (the
    generator defaults `create_tuning=true` for you, but you
-   still owe a real tuner rubric). **Subagents are different**:
-   only list a role under `subagents` when `main.py` actually
-   calls `ctx.subagents.run("<role>", ...)` or
-   the team skill through `ctx.subagents.run(...)` at runtime. A pure indicator-driven
-   scalper / trend follower does not need a subagent and should
-   ship with `subagents: []`. A news / sentiment / event-driven
-   strategy that wants a second opinion before the order goes in
-   should list the role(s) it dispatches and provide either a
-   per-strategy `subagents/<role>.agent.md` override under
-   `files`, or rely on the workspace persona from the Agents
-   library by name. Example:
+   still owe a real tuner rubric). **Subagents are optional**:
+   never add them just to satisfy a strategy-generation rule, because
+   there is no runtime requirement that strategies use subagents
+   before placing orders. Only list a role under `subagents` when
+   `main.py` actually calls `ctx.subagents.run("<role>", ...)` or the
+   team skill through `ctx.subagents.run(...)` at runtime. If the
+   strategy needs Agent/subagent analysis as an input before it decides
+   to trade, suggest the matching `subagents/<role>.agent.md` prompt or
+   explicitly reuse a workspace persona by name. Missing subagent
+   files are allowed: the runtime can use workspace/default personas.
+   Pure indicator-driven, rule-based, or directly LLM-scored
+   strategies should ship with `subagents: []`. The example below is
+   the optional Agent-assisted form:
 
    ```jsonc
    strategy_generate_proposal({
@@ -267,13 +346,13 @@ strategy.
      "tuning_cron": "0 */6 * * *",
      "tuning_prompt": "You are the strategy_tuner for `<id>`. \nReview the last 200 ticks under runs/, the closed trades, and \nthe strategy.md objectives. Propose at most one parameter \nchange per cycle (e.g. RSI band, EMA period, max_single_order_usd). \nAlways write a one-paragraph rationale into the proposal note. \nNever flip live_trading_enabled.",
      "tuning_objectives": [
-       "drawdown < 5%",
-       "win_rate > 55%",
-       "respect max_single_order_usd"
+       "risk_adjusted_return",
+       "drawdown",
+       "win_rate"
      ],
      "files": {
        "main.py": "# real implementation, not the template ...",
-       "tests/test_main.py": "# real backtest using ctx.backtest_replay ...",
+       "tests/test_main.py": "# real backtest using nerya.strategies.backtest_bridge.backtest_replay ...",
        "strategy.md": "# overrides the prompt-derived playbook if needed",
        "subagents/market_analyst.agent.md": "# per-strategy market_analyst prompt ..."
      }
@@ -371,10 +450,11 @@ prefer those over inventing one-off prompts in every package.
 1. Interactive (skill-triggered). Step 5.5 above. Full artefacts land under
    `<workspace>/strategies/<id>/backtests/<ts>/`.
 
-2. Programmatic (`tests/test_main.py`). `ctx.backtest_replay(run, **kwargs)`
-   runs the same engine in-process and returns a stats dict. No artefacts are
-   written unless `artefacts_dir=...` is passed. This is the lightweight smoke
-   path used by validation tests.
+2. Programmatic (`tests/test_main.py`).
+   `nerya.strategies.backtest_bridge.backtest_replay(run, **kwargs)` runs the
+   same engine in-process and returns a stats dict. No artefacts are written
+   unless `artefacts_dir=...` is passed. This is the lightweight smoke path
+   used by validation tests.
 
 ## Failure modes
 

@@ -130,7 +130,7 @@ def _build_register_kwargs(config) -> dict[str, Any]:
     block = (config.data.get("integrations") or {}).get("anet") or {}
     api_block = config.data.get("api") or {}
     host = str(api_block.get("host") or "127.0.0.1")
-    port = int(api_block.get("port") or 8787)
+    port = int(api_block.get("port") or 18317)
 
     name = str(block.get("service_name") or "").strip()
     if not name:
@@ -197,7 +197,7 @@ def main(config=None, *, argv: list[str] | None = None) -> int:
 
     api_block = config.data.get("api") or {}
     api_host = str(api_block.get("host") or "127.0.0.1")
-    api_port = int(api_block.get("port") or 8787)
+    api_port = int(api_block.get("port") or 18317)
 
     print(f"[anet] waiting for Nerya API on {api_host}:{api_port} …", flush=True)
     if not _wait_for_nerya_api(api_host, api_port):

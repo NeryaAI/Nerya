@@ -325,7 +325,45 @@ def _mock_call(*, tier: str, task: str, prompt: str, schema: dict | None) -> Pro
         return _wrap(head)
 
     if task == "subagent_analysis":
+        if "risk" in low:
+            signal = "neutral"
+            risks = [
+                {"summary": "macro event risk can invalidate a BTC long-cycle entry"},
+                {"summary": "stale data or wide spread should block execution"},
+            ]
+        elif "sentiment" in low or "news" in low:
+            signal = "neutral"
+            risks = [{"summary": "headline risk remains unresolved"}]
+        elif "technical" in low or "breakout" in low:
+            signal = "bullish"
+            risks = [{"summary": "breakout failure below support invalidates the signal"}]
+        else:
+            signal = "neutral"
+            risks = [{"summary": "confidence is not high enough for live execution"}]
         return _wrap(json.dumps({
+            "summary": (
+                "Mock structured research memo for Agent Team validation. "
+                "BTC view is based on the assignment payload and remains paper-only."
+            ),
+            "signal": signal,
+            "confidence": 0.68,
+            "evidence": [
+                {
+                    "summary": "BTC demo research considered technical, sentiment, and risk inputs.",
+                    "source": "mock_subagent_payload",
+                },
+                {
+                    "summary": "No live order is allowed; output is decision input only.",
+                    "source": "nerya_demo_policy",
+                },
+            ],
+            "risks": risks,
+            "output": {
+                "rating": "Hold" if signal == "neutral" else "Overweight",
+                "data_freshness": "demo_offline",
+                "key_risks": [r["summary"] for r in risks],
+            },
+            "done": True,
             "bias": "bullish" if "breakout" in low else "neutral",
             "strength": 0.6,
             "support": 78000,

@@ -52,6 +52,7 @@
   },
   "nav": {
     "/dashboard": "首页",
+    "/_not-found": "页面未找到",
     "/chat": "智能体工作区",
     "/portfolio": "投资组合",
     "/strategies": "策略",
@@ -198,7 +199,9 @@
     "deleteMessage": "删除消息",
     "cancelEdit": "取消编辑",
     "saveEdit": "保存编辑",
-    "confirmDeleteMessage": "确认删除此消息？"
+    "confirmDeleteMessage": "确认删除此消息？",
+    "approvalPaused": "等待操作员审批。请先处理上方授权卡片，之后 agent 会继续。",
+    "approvalPausedCount": "{count} 个授权请求待处理。批准或拒绝前，agent 已暂停。"
   },
   "approvals": {
     "needsPermission": "此工具调用需要操作员授权。",
@@ -320,7 +323,24 @@
     "globalWallet": "全局钱包（账户回退）",
     "legacyTag": "(遗留)",
     "notReadyDotTag": "· 未就绪",
-    "notReadyTag": "(未就绪)"
+    "notReadyTag": "(未就绪)",
+    "pendingProposalsTitle": "待审批策略 ({count})",
+    "pendingProposalsDesc": "对话生成的策略包会先进入提案审查。批准后才会写入策略工作区并出现在下方列表。"
+  },
+  "strategyProposal": {
+    "approveAdd": "批准并添加",
+    "appliedNotice": "已添加策略 {strategy}",
+    "blocked": "验证阻塞",
+    "blockers": "阻塞项 ({count})",
+    "fallbackSummary": "待审批策略包",
+    "files": "{count} 个文件",
+    "openStrategy": "打开策略",
+    "proposalId": "提案",
+    "target": "目标",
+    "validating": "校验中",
+    "validationBlockedNotice": "策略校验未通过，不能添加。",
+    "validationOk": "验证通过",
+    "warnings": "警告 ({count})"
   },
   "strategyDetail": {
     "eyebrow": "策略工作区",

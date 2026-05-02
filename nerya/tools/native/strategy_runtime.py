@@ -39,7 +39,7 @@ from typing import Any, Optional
 
 from ...core.config import Config
 from ...core.errors import NeryaError, TradingError
-from ...evolution.patch_proposal import list_proposals, set_state
+from ...evolution.patch_proposal import set_state
 from ...evolution.promotion import apply_proposal
 from ...evolution.strategy_code_generator import (
     StrategyCodeGenerator,
@@ -51,6 +51,7 @@ from ...evolution.strategy_tuning_generator import (
 )
 from ...strategies.evolution import StrategyEvolutionRunner
 from ...strategies.package import load_package
+from ...strategies.proposal_files import read_proposal_strategy_files
 from ...strategies.scheduler_bridge import apply_strategy_schedules
 from ...strategies.performance import build_snapshot
 from ...strategies.runner import StrategyRunner
@@ -307,7 +308,7 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
         subagents=tuple(str(s) for s in (args.get("subagents") or ())),
         policy_overrides=dict(args.get("policy_overrides") or {}),
         llm_policy_overrides=dict(args.get("llm_policy_overrides") or {}),
-        create_tuning=bool(args.get("create_tuning", False)),
+        create_tuning=bool(args.get("create_tuning", True)),
         tuning_prompt=str(args.get("tuning_prompt") or ""),
         tuning_cron=str(args.get("tuning_cron") or "0 */6 * * *"),
         tuning_objectives=tuple(
@@ -333,29 +334,7 @@ def _read_proposal_files(
     sees the same shape it does for promoted packages.
     """
 
-    for prop in list_proposals(paths):
-        if prop.id != proposal_id:
-            continue
-        after_dir = prop.path / "after" / "strategies"
-        if not after_dir.exists():
-            return None, {}
-        candidates = [d for d in after_dir.iterdir() if d.is_dir()]
-        if not candidates:
-            return None, {}
-        # Take the only declared strategy in the proposal — the
-        # generator always writes exactly one.
-        sd = candidates[0]
-        files: dict[str, str] = {}
-        for p in sd.rglob("*"):
-            if not p.is_file():
-                continue
-            rel = p.relative_to(sd).as_posix()
-            try:
-                files[rel] = p.read_text(encoding="utf-8")
-            except OSError:
-                continue
-        return sd.name, files
-    return None, {}
+    return read_proposal_strategy_files(paths, proposal_id)
 
 
 # ---------------------------------------------------------------------------

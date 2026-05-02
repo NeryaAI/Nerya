@@ -18,6 +18,7 @@ def test_team_orchestrator_synthesizes_completed_status(tmp_path, monkeypatch) -
         def _run_one(self, name, *, payload, **_kwargs):
             output = {
                 "summary": f"{payload['task_id']} done",
+                "signal": "neutral",
                 "confidence": 0.8,
                 "evidence": [{"summary": "stub evidence", "source": "test"}],
                 "risks": ["stub risk"] if payload["task_id"] == "t-risk" else [],
@@ -62,3 +63,4 @@ def test_team_orchestrator_synthesizes_completed_status(tmp_path, monkeypatch) -
     } <= event_kinds
     assert any(e.get("task_id") == "t-risk" for e in events)
     assert any(e.get("content") for e in events if e.get("team_event_kind") == "message.sent")
+    assert result.final_context["signal_distribution"].get("neutral", 0) > 0

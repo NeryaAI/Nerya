@@ -52,6 +52,7 @@
   },
   "nav": {
     "/dashboard": "Home",
+    "/_not-found": "Not Found",
     "/chat": "Agent Workspace",
     "/portfolio": "Portfolio",
     "/strategies": "Strategies",
@@ -198,7 +199,9 @@
     "deleteMessage": "Delete message",
     "cancelEdit": "Cancel edit",
     "saveEdit": "Save edit",
-    "confirmDeleteMessage": "Delete this message?"
+    "confirmDeleteMessage": "Delete this message?",
+    "approvalPaused": "Waiting for operator approval. Use the approval card above to continue.",
+    "approvalPausedCount": "{count} pending approval(s). The agent is paused until you approve or reject."
   },
   "approvals": {
     "needsPermission": "This tool call needs operator permission.",
@@ -320,7 +323,24 @@
     "globalWallet": "global wallet (account fallback)",
     "legacyTag": "(legacy)",
     "notReadyDotTag": "· not ready",
-    "notReadyTag": "(not ready)"
+    "notReadyTag": "(not ready)",
+    "pendingProposalsTitle": "Pending strategy proposals ({count})",
+    "pendingProposalsDesc": "Strategies generated from chat land as review proposals first. Approving one writes it into the strategy workspace and makes it appear in the list below."
+  },
+  "strategyProposal": {
+    "approveAdd": "Approve and add",
+    "appliedNotice": "Added strategy {strategy}",
+    "blocked": "validation blocked",
+    "blockers": "blockers ({count})",
+    "fallbackSummary": "Strategy package pending approval",
+    "files": "{count} file(s)",
+    "openStrategy": "Open strategy",
+    "proposalId": "proposal",
+    "target": "target",
+    "validating": "validating",
+    "validationBlockedNotice": "Strategy validation did not pass, so it cannot be added.",
+    "validationOk": "validation ok",
+    "warnings": "warnings ({count})"
   },
   "strategyDetail": {
     "eyebrow": "Strategy workspace",

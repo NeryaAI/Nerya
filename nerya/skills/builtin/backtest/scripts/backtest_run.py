@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -36,18 +37,35 @@ def main(argv: list[str] | None = None) -> int:
         config_path=args.config,
         markets=list(package.manifest.markets),
     )
+    discovered_timeframes = _discover_strategy_timeframes(package.root)
+    if discovered_timeframes:
+        cfg.timeframes = _unique([cfg.tf, *cfg.timeframes, *discovered_timeframes])
+        if not args.config:
+            cfg.tf = min(cfg.timeframes, key=_tf_seconds)
+            cfg.timeframes = _unique([cfg.tf, *cfg.timeframes])
     now = int(time.time())
     start = now - (cfg.window_days * 86400) - (cfg.warmup_bars * _tf_seconds(cfg.tf))
     cache_root = Path(cfg.cache_root) if cfg.cache_root else config_obj.paths.artifacts / "backtest_cache"
-    candles_by_market = {
-        market: get_candles(market, cfg.tf, start, now, cache_root, allow_mock=args.allow_mock)
+    timeframe_candles_by_market = {
+        market: {
+            tf: get_candles(market, tf, start, now, cache_root, allow_mock=args.allow_mock)
+            for tf in cfg.timeframes
+        }
         for market in cfg.markets
     }
+    candles_by_market = {market: by_tf[cfg.tf] for market, by_tf in timeframe_candles_by_market.items()}
     ts_name = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
     out_dir = package.root / "backtests" / ts_name
     out_dir.mkdir(parents=True, exist_ok=True)
     yaml_io.dump(out_dir / "config.yml", cfg.asdict())
-    result = run_backtest(package.root, cfg, candles_by_market=candles_by_market, artefacts_dir=out_dir)
+    result = run_backtest(
+        package.root,
+        cfg,
+        candles_by_market=candles_by_market,
+        timeframe_candles_by_market=timeframe_candles_by_market,
+        artefacts_dir=out_dir,
+        strategy_config=package.manifest.asdict(),
+    )
     csvs = write_csv_artifacts(result, out_dir)
     metrics = assemble_metrics(result)
     (out_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -69,6 +87,34 @@ def main(argv: list[str] | None = None) -> int:
         "chart_panels": len(chart.get("panels", [])),
     }, ensure_ascii=False, default=str))
     return 0
+
+
+def _discover_strategy_timeframes(strategy_root: Path) -> list[str]:
+    main_path = strategy_root / "main.py"
+    if not main_path.exists():
+        return []
+    text = main_path.read_text(encoding="utf-8", errors="ignore")
+    constants: dict[str, str] = {}
+    for name, value in re.findall(r"\b([A-Z][A-Z0-9_]*)\s*=\s*[\"'](\d+[mhd])[\"']", text):
+        constants[name] = value
+    out: list[str] = []
+    for value in re.findall(r"timeframe\s*=\s*[\"'](\d+[mhd])[\"']", text):
+        out.append(value)
+    for name in re.findall(r"timeframe\s*=\s*([A-Z][A-Z0-9_]*)", text):
+        if name in constants:
+            out.append(constants[name])
+    return _unique(out)
+
+
+def _unique(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
 
 
 if __name__ == "__main__":

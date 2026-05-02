@@ -76,6 +76,7 @@ class BacktestConfig:
     min_backtest_days: int = 30
     window_days: int = 30
     tf: str = "1h"
+    timeframes: list[str] = field(default_factory=list)
     markets: list[str] = field(default_factory=list)
     indicators: dict[str, list[int]] = field(default_factory=lambda: {
         "sma": [20, 50],
@@ -129,6 +130,7 @@ class BacktestConfig:
             min_backtest_days=int(raw.get("min_backtest_days", 30)),
             window_days=int(raw.get("window_days", 30)),
             tf=str(raw.get("tf", "1h")),
+            timeframes=_str_list(raw.get("timeframes")),
             markets=[str(m) for m in (raw.get("markets") or [])],
             indicators=_int_list_map(raw.get("indicators")),
             fee_bps_by_venue=_float_map(raw.get("fee_bps_by_venue"), cls().fee_bps_by_venue),
@@ -167,6 +169,10 @@ class BacktestConfig:
             raise BacktestConfigError("max_open_trades must be positive")
         if self.fill_mode != "entry_current_open__exit_next_open":
             raise BacktestConfigError("unsupported fill_mode")
+        if not self.timeframes:
+            self.timeframes = [self.tf]
+        else:
+            self.timeframes = _unique([self.tf, *self.timeframes])
 
     def asdict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -230,6 +236,28 @@ def _int_list_map(raw: Any) -> dict[str, list[int]]:
         if not isinstance(value, (list, tuple)):
             raise BacktestConfigError(f"indicators.{key} must be a list")
         out[str(key)] = [int(v) for v in value]
+    return out
+
+
+def _str_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if not isinstance(raw, (list, tuple)):
+        raise BacktestConfigError("timeframes must be a string or list")
+    return [str(v) for v in raw if str(v).strip()]
+
+
+def _unique(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = str(value).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
     return out
 
 

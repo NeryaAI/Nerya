@@ -171,6 +171,7 @@ _RULES: tuple[RouteRule, ...] = (
 
     # gateway
     RouteRule("GET", "/gateway/platforms", "read:runtime", ""),
+    RouteRule("GET", "/gateway/status", "read:runtime", ""),
     RouteRule("POST", "/gateway/inbound", "gateway:webhook",
               "actor resolved per platform"),
     RouteRule("POST", "/gateway/send", "gateway:send",

@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Iterable, Optional
 
 from ..core import yaml_io
@@ -64,6 +64,16 @@ _LOG = logging.getLogger(__name__)
 _VALID_CLASSES: frozenset[str] = frozenset({"scalping", "trend", "news"})
 _VALID_MODES: frozenset[str] = frozenset({"paper", "shadow", "live"})
 _STRATEGY_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,62}$")
+_VALID_TUNING_OBJECTIVES: frozenset[str] = frozenset({
+    "risk_adjusted_return",
+    "drawdown",
+    "win_rate",
+    "slippage",
+    "execution_quality",
+    "return",
+    "sharpe",
+    "sortino",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +173,12 @@ class StrategyCodeGenerator:
         """Build files for ``request`` and (optionally) write the proposal."""
 
         self._validate_request(request)
+        request = replace(
+            request,
+            tuning_objectives=_normalize_tuning_objectives(
+                request.tuning_objectives,
+            ),
+        )
         files = self._build_files(request)
 
         validation: Optional[StrategyValidation] = None
@@ -394,10 +410,8 @@ def _default_policy(strategy_class: str) -> dict[str, Any]:
         "max_subagent_calls_per_run": 4,
     }
     if strategy_class == "trend":
-        base["require_subagent_before_order"] = True
         base["min_confidence"] = 0.6
     elif strategy_class == "news":
-        base["require_subagent_before_order"] = True
         base["min_confidence"] = 0.65
         base["max_subagent_calls_per_run"] = 6
     return base
@@ -452,6 +466,50 @@ def _tuning_block(req: StrategyGenerationRequest) -> dict[str, Any]:
         },
         "tuning_prompt": req.tuning_prompt or "",
     }
+
+
+def _normalize_tuning_objectives(objectives: Iterable[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+
+    def add(value: str) -> None:
+        if value in _VALID_TUNING_OBJECTIVES and value not in normalized:
+            normalized.append(value)
+
+    for raw in objectives:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        key = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+        add(key)
+        if "risk_adjust" in key or ("sharpe" in key and "sortino" in key):
+            add("risk_adjusted_return")
+        if "drawdown" in key or "max_dd" in key or "downside" in key:
+            add("drawdown")
+        if "win_rate" in key or ("win" in key and "rate" in key):
+            add("win_rate")
+        if "slippage" in key:
+            add("slippage")
+        if "execution" in key:
+            add("execution_quality")
+        if "sharpe" in key:
+            add("sharpe")
+        if "sortino" in key:
+            add("sortino")
+        if (
+            "return" in key
+            or "profit" in key
+            or "pnl" in key
+            or "收益" in text
+            or "回报" in text
+        ):
+            add("return")
+        if "回撤" in text:
+            add("drawdown")
+        if "胜率" in text:
+            add("win_rate")
+        if "滑点" in text:
+            add("slippage")
+    return tuple(normalized or ("risk_adjusted_return",))
 
 
 # ----- main.py templates ---------------------------------------------------
@@ -612,12 +670,14 @@ _CONTRACT_TEST_TEMPLATE = (
     "\n"
     "def test_strategy_imports():\n"
     "    import importlib.util\n"
+    "    import sys\n"
     "    from pathlib import Path\n"
     "\n"
     '    main_path = Path(__file__).resolve().parent.parent / "main.py"\n'
     '    spec = importlib.util.spec_from_file_location("_smoke_{strategy_id}", main_path)\n'
     "    assert spec is not None and spec.loader is not None\n"
     "    module = importlib.util.module_from_spec(spec)\n"
+    "    sys.modules[spec.name] = module\n"
     "    spec.loader.exec_module(module)\n"
     '    assert callable(getattr(module, "run", None))\n'
 )

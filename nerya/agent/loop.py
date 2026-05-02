@@ -259,6 +259,33 @@ def _is_transient_llm_error(exc: BaseException) -> bool:
     return False
 
 
+def _build_deterministic_final_summary(
+    *,
+    stop_reason: str,
+    abort_reason: str,
+    iterations: int,
+    tool_calls: int,
+    error_count: int,
+    had_model_text: bool,
+) -> str:
+    lines = [
+        "Turn stopped before a complete model-written final answer was produced.",
+        f"- stop_reason: {stop_reason or 'unknown'}",
+        f"- abort_reason: {abort_reason or stop_reason or 'unknown'}",
+        f"- iterations: {iterations}",
+        f"- tool calls: {tool_calls}",
+        f"- tool errors: {error_count}",
+    ]
+    if had_model_text:
+        lines.append("- note: the model had emitted partial text, but not a reliable final answer.")
+    else:
+        lines.append("- note: no final assistant text was available after the last tool cycle.")
+    lines.append(
+        "Next: resume the same turn or retry with a narrower request so the agent can synthesize the completed tool results."
+    )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
@@ -728,12 +755,45 @@ class WorkspaceNativeAgentLoop:
         # tool-call budget / max_iterations with the model still
         # asking for more tools). End-of-turn / explicit stop reasons
         # don't count as aborts.
+        last_msg = transcript[-1] if transcript else {}
+        last_content = last_msg.get("content") if isinstance(last_msg, dict) else None
+        ended_after_tool_result = (
+            isinstance(last_content, list)
+            and any(
+                isinstance(part, dict) and part.get("type") == "tool_result"
+                for part in last_content
+            )
+        )
         was_aborted = bool(aborted_reason) or (
             iterations >= self.config.max_iterations
-            and stop_reason in {"tool_use", "tool_calls"}
+            and (stop_reason in {"tool_use", "tool_calls"} or ended_after_tool_result)
         )
         if was_aborted and not aborted_reason:
             aborted_reason = "max_iterations"
+        if was_aborted:
+            existing_text = final_text.strip()
+            summary = _build_deterministic_final_summary(
+                stop_reason=stop_reason or (
+                    "max_iterations"
+                    if iterations >= self.config.max_iterations
+                    else "aborted"
+                ),
+                abort_reason=aborted_reason,
+                iterations=iterations,
+                tool_calls=total_tool_calls,
+                error_count=error_count,
+                had_model_text=bool(existing_text),
+            )
+            final_text = (
+                f"{existing_text}\n\n{summary}"
+                if len(existing_text) >= 32
+                else summary
+            )
+            transcript.append({
+                "role": "assistant",
+                "content": [{"type": "text", "text": final_text}],
+            })
+            emit("assistant", TextBlock(text=summary).as_dict())
         return LoopOutcome(
             transcript=transcript,
             iterations=iterations,

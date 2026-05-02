@@ -41,6 +41,41 @@ def test_transcript_returns_latest_messages_in_chronological_order(tmp_path):
     con.close()
 
 
+def test_transcript_limit_zero_returns_full_history(tmp_path):
+    con = connect(tmp_path / "nerya.db")
+    repo = AgentSessionRepository(con)
+    repo.upsert_session(session_id="s1", title="Session")
+    for i in range(3):
+        repo.record_message(
+            message_id=f"t{i}:user",
+            session_id="s1",
+            turn_id=f"t{i}",
+            role="user",
+            content=f"user {i}",
+            ts=1000 + i * 2,
+        )
+        repo.record_message(
+            message_id=f"t{i}:assistant",
+            session_id="s1",
+            turn_id=f"t{i}",
+            role="assistant",
+            content=f"assistant {i}",
+            ts=1001 + i * 2,
+        )
+
+    rows = repo.transcript("s1", limit=0)
+
+    assert [r["message_id"] for r in rows] == [
+        "t0:user",
+        "t0:assistant",
+        "t1:user",
+        "t1:assistant",
+        "t2:user",
+        "t2:assistant",
+    ]
+    con.close()
+
+
 def test_message_edit_delete_and_session_lookup(tmp_path):
     con = connect(tmp_path / "nerya.db")
     repo = AgentSessionRepository(con)

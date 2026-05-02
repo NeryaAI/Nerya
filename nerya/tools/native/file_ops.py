@@ -82,7 +82,6 @@ _SENSITIVE_MUTATION_GLOBS = (
     "providers/**/*",
 )
 
-
 def _normalise_mutation_path(value: Any) -> str:
     raw = str(value or "").strip().replace("\\", "/")
     while raw.startswith("./"):

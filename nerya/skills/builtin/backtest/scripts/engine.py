@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import bisect
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .config import BacktestConfig
 from .indicators import compute_indicators
-from .mock_ctx import MockCtx, MockState, append_jsonl
+from .mock_ctx import MockCtx, MockPolicy, MockState, SimpleConfigView, append_jsonl
 from .portfolio import PortfolioState
 from .slippage import apply_slippage, compute_fee, fee_bps_for, slip_bps_for
 
@@ -107,14 +109,21 @@ def run_backtest(
     config: BacktestConfig,
     *,
     candles_by_market: dict[str, list[dict[str, Any]]],
+    timeframe_candles_by_market: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
     run_fn: Any | None = None,
     artefacts_dir: str | Path | None = None,
+    strategy_config: dict[str, Any] | None = None,
 ) -> BacktestResult:
     if not config.markets:
         config.markets = list(candles_by_market.keys())
     strategy_root = Path(strategy_pkg_path) if strategy_pkg_path else None
     strategy_id = strategy_root.name if strategy_root else "in_process"
     strategy_run = run_fn or _load_run_fn(strategy_root)
+    row_indexes = _row_indexes(candles_by_market)
+    timeframe_indexes = {
+        market: {tf: _ts_index(rows) for tf, rows in by_tf.items()}
+        for market, by_tf in (timeframe_candles_by_market or {}).items()
+    }
     indicators = {
         market: compute_indicators(rows, config.indicators, warmup_bars=config.warmup_bars)
         for market, rows in candles_by_market.items()
@@ -126,12 +135,14 @@ def run_backtest(
     result = BacktestResult(strategy_id=strategy_id, strategy_root=strategy_root, config=config)
     audit_sink = append_jsonl(Path(artefacts_dir) / "logs" / "engine.log") if artefacts_dir else None
     benchmark_start = _benchmark_value(candles_by_market, config.markets, bar_index[0]) if bar_index else 0.0
+    strategy_view, policy_view = _views_from_strategy_config(strategy_id, config, strategy_config)
+    tf_rows = timeframe_candles_by_market or {}
 
     for i, ts in enumerate(bar_index):
         current: dict[str, dict[str, Any]] = {}
         next_bars: dict[str, dict[str, Any] | None] = {}
         for market, rows in candles_by_market.items():
-            idx = _index_for_ts(rows, ts)
+            idx = row_indexes[market].get(ts)
             if idx is None:
                 continue
             current[market] = rows[idx]
@@ -145,9 +156,10 @@ def run_backtest(
             if market not in current:
                 continue
             rows_so_far = {
-                m: _rows_until_ts(rows, ts)
+                m: _rows_until_ts_indexed(rows, ts, row_indexes[m])
                 for m, rows in candles_by_market.items()
             }
+            tf_rows_so_far = _timeframe_rows_until_ts(tf_rows, rows_so_far, config.tf, ts, timeframe_indexes)
             ctx = MockCtx(
                 strategy_id=strategy_id,
                 market_name=market,
@@ -157,6 +169,9 @@ def run_backtest(
                 config_obj=config,
                 state=state,
                 audit_sink=audit_sink,
+                timeframe_bars_by_market=tf_rows_so_far,
+                policy_obj=policy_view,
+                config=strategy_view,
             )
             decision = strategy_run(ctx)
             result.decisions.append(_decision_row(ts, market, decision))
@@ -175,14 +190,14 @@ def run_backtest(
                 "equity": portfolio.equity(),
             })
             for name, values in indicators.get(market, {}).items():
-                idx = _index_for_ts(candles_by_market[market], ts)
+                idx = row_indexes[market].get(ts)
                 row[name] = values[idx] if idx is not None and idx < len(values) else None
             result.ohlcv_rows.append(row)
         prices = {m: float(b.get("close", 0.0)) for m, b in current.items()}
         if prices:
             equity = portfolio.mark_to_market(ts, prices)
             result.equity_series.append((ts, equity))
-            bench_now = _benchmark_value(candles_by_market, config.markets, ts)
+            bench_now = _benchmark_value_from_current(current, config.markets)
             bench_equity = config.initial_capital_usd
             if benchmark_start:
                 bench_equity = config.initial_capital_usd * bench_now / benchmark_start
@@ -227,12 +242,55 @@ def _load_run_fn(strategy_root: Path | None) -> Any:
     if strategy_root is None:
         raise ValueError("strategy_pkg_path or run_fn is required")
     main_path = strategy_root / "main.py"
-    spec = importlib.util.spec_from_file_location(f"nerya_backtest_{strategy_root.name}", main_path)
+    module_name = f"nerya_backtest_{strategy_root.name}"
+    spec = importlib.util.spec_from_file_location(module_name, main_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load strategy entrypoint: {main_path}")
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = mod
     spec.loader.exec_module(mod)
     return getattr(mod, "run")
+
+
+def _views_from_strategy_config(
+    strategy_id: str,
+    config: BacktestConfig,
+    strategy_config: dict[str, Any] | None,
+) -> tuple[SimpleConfigView, MockPolicy]:
+    raw = dict(strategy_config or {})
+    llm_raw = raw.get("llm_policy") if isinstance(raw.get("llm_policy"), dict) else {}
+    policy_raw = raw.get("policy") if isinstance(raw.get("policy"), dict) else {}
+    view = SimpleConfigView(
+        strategy_id=str(raw.get("strategy_id") or strategy_id),
+        title=str(raw.get("title") or ""),
+        mode=str(raw.get("mode") or "backtest"),
+        markets=tuple(raw.get("markets") or config.markets),
+        accounts=tuple(raw.get("accounts") or ()),
+        news_sources=tuple(raw.get("news_sources") or ()),
+        extras={
+            k: v
+            for k, v in raw.items()
+            if k not in {"strategy_id", "title", "mode", "markets", "accounts", "news_sources"}
+        },
+    )
+    return view, MockPolicy.from_raw(policy_raw, llm_raw)
+
+
+def _timeframe_rows_until_ts(
+    timeframe_candles_by_market: dict[str, dict[str, list[dict[str, Any]]]],
+    primary_rows_by_market: dict[str, list[dict[str, Any]]],
+    primary_tf: str,
+    ts: int,
+    timeframe_indexes: dict[str, dict[str, dict[int, int]]],
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    out: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for market, rows in primary_rows_by_market.items():
+        out.setdefault(market, {})[primary_tf] = rows
+    for market, by_tf in timeframe_candles_by_market.items():
+        target = out.setdefault(market, {})
+        for tf, rows in by_tf.items():
+            target[tf] = _rows_until_ts_indexed(rows, ts, timeframe_indexes.get(market, {}).get(tf) or _ts_index(rows))
+    return out
 
 
 def _stake_notional(
@@ -266,6 +324,23 @@ def _index_for_ts(rows: list[dict[str, Any]], ts: int) -> int | None:
 
 def _rows_until_ts(rows: list[dict[str, Any]], ts: int) -> list[dict[str, Any]]:
     return [row for row in rows if int(row.get("ts", 0)) <= int(ts)]
+
+
+def _ts_index(rows: list[dict[str, Any]]) -> dict[int, int]:
+    return {int(row.get("ts", 0)): i for i, row in enumerate(rows)}
+
+
+def _row_indexes(candles_by_market: dict[str, list[dict[str, Any]]]) -> dict[str, dict[int, int]]:
+    return {market: _ts_index(rows) for market, rows in candles_by_market.items()}
+
+
+def _rows_until_ts_indexed(rows: list[dict[str, Any]], ts: int, index: dict[int, int]) -> list[dict[str, Any]]:
+    idx = index.get(int(ts))
+    if idx is not None:
+        return rows[:idx + 1]
+    timestamps = [int(row.get("ts", 0)) for row in rows]
+    end = bisect.bisect_right(timestamps, int(ts))
+    return rows[:end]
 
 
 def _status_of(decision: Any) -> str:
@@ -303,5 +378,14 @@ def _benchmark_value(candles_by_market: dict[str, list[dict[str, Any]]], markets
         rows = _rows_until_ts(candles_by_market.get(market, []), ts)
         if rows:
             vals.append(float(rows[-1].get("close", 0.0)))
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _benchmark_value_from_current(current: dict[str, dict[str, Any]], markets: list[str]) -> float:
+    vals: list[float] = []
+    for market in markets:
+        row = current.get(market)
+        if row:
+            vals.append(float(row.get("close", 0.0)))
     return sum(vals) / len(vals) if vals else 0.0
 

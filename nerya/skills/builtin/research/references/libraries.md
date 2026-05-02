@@ -46,9 +46,13 @@ Useful libraries:
 
 For URL → markdown:
 
-- The native `fetch_url` tool when a single page is enough.
-- A bundled `fetch_url.py` (this skill) when the agent needs the
-  raw markdown for a downstream script.
+- `scripts/fetch_url.py` when a single page is enough. It applies
+  Nerya web-safety checks, then tries `trafilatura` markdown
+  extraction, `markdownify`, and stdlib text stripping.
+- `scripts/search_fetch.py` when the agent should search and fetch
+  the top N results in one bounded pass.
+- Jina Reader (`https://r.jina.ai/<url>`) only as a fallback for
+  blocked, JS-thin, or low-quality pages, not as the default path.
 
 For JS-heavy pages:
 

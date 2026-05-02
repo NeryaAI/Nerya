@@ -9,7 +9,7 @@ npm install @nerya/sdk
 ```ts
 import { connect } from "@nerya/sdk";
 
-const nerya = connect({ baseUrl: "http://127.0.0.1:8787", caller: "script:my_bot" });
+const nerya = connect({ baseUrl: "http://127.0.0.1:18317", caller: "script:my_bot" });
 
 // Probe a route without firing it
 const dry = await nerya.triggers.dryRun({

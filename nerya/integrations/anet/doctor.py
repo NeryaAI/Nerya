@@ -125,7 +125,7 @@ def run_doctor(config) -> dict[str, Any]:
     token = _resolve_token(config, str(block.get("token_ref") or ""))
     api_block = config.data.get("api") or {}
     api_host = str(api_block.get("host") or "127.0.0.1")
-    api_port = int(api_block.get("port") or 8787)
+    api_port = int(api_block.get("port") or 18317)
     api_url = f"http://{api_host}:{api_port}"
 
     extras = [p for p in (block.get("expose_paths") or []) if isinstance(p, str)]

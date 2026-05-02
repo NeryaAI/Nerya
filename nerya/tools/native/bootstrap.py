@@ -144,6 +144,14 @@ from .trading import (
     trade_intent_submit_handler,
     virtual_ledger_handler,
 )
+from .web import (
+    WEB_FETCH_SCHEMA,
+    WEB_SEARCH_FETCH_SCHEMA,
+    WEB_SEARCH_SCHEMA,
+    web_fetch_handler,
+    web_search_fetch_handler,
+    web_search_handler,
+)
 from .strategy_runtime import (
     STRATEGY_GENERATE_PROPOSAL_SCHEMA,
     STRATEGY_KILL_SWITCH_SCHEMA,
@@ -1336,6 +1344,58 @@ def register_native_tools(
             tags=("skill", "script", "exec"),
             result_kind="shell",
         ),
+        # ----- web research -----
+        make_native_descriptor(
+            name="web_search",
+            description=(
+                "Search the public web and return ranked result URLs/snippets. "
+                "Use web_fetch to read a selected page, or web_search_fetch "
+                "to fetch the top results in one bounded pass."
+            ),
+            input_schema=WEB_SEARCH_SCHEMA,
+            handler=web_search_handler,
+            risk=RiskLevel.READ,
+            permission_scope=PermissionScope.NETWORK,
+            read_only=True,
+            is_concurrency_safe=True,
+            tags=("web", "research", "search"),
+            result_kind="json",
+            auto_approve=True,
+        ),
+        make_native_descriptor(
+            name="web_fetch",
+            description=(
+                "Fetch one HTTP(S) URL as readable markdown/text. Applies "
+                "Nerya web-safety checks, local HTML extraction, and Jina "
+                "Reader fallback for blocked or thin pages."
+            ),
+            input_schema=WEB_FETCH_SCHEMA,
+            handler=web_fetch_handler,
+            risk=RiskLevel.READ,
+            permission_scope=PermissionScope.NETWORK,
+            read_only=True,
+            is_concurrency_safe=True,
+            tags=("web", "research", "fetch"),
+            result_kind="json",
+            auto_approve=True,
+        ),
+        make_native_descriptor(
+            name="web_search_fetch",
+            description=(
+                "Search the public web and fetch the top N result pages as "
+                "markdown documents. Use for research briefs that need source "
+                "content, not just snippets."
+            ),
+            input_schema=WEB_SEARCH_FETCH_SCHEMA,
+            handler=web_search_fetch_handler,
+            risk=RiskLevel.READ,
+            permission_scope=PermissionScope.NETWORK,
+            read_only=True,
+            is_concurrency_safe=False,
+            tags=("web", "research", "search", "fetch"),
+            result_kind="json",
+            auto_approve=True,
+        ),
         # ----- connector / venue discovery -----
         # Surfaces the in-process ``ExchangeProviderRegistry`` so the
         # agent can authoritatively answer "is X integrated?" before
@@ -2033,7 +2093,14 @@ def register_native_tools(
                     "and tests/test_main.py via `files`, do NOT rely "
                     "on the default scaffold. `extra_subagent_prompts` "
                     "still works for legacy callers but `files` is "
-                    "preferred because it covers main.py + tests too."
+                    "preferred because it covers main.py + tests too.\n\n"
+                    "Before choosing `markets`, preserve the session market "
+                    "context from prior user turns and document the market "
+                    "scope assumption in strategy.md or the proposal rationale. "
+                    "If the user gives only a generic follow-up, infer the "
+                    "intended scope from the conversation instead of copying "
+                    "an unrelated example market; ask for clarification when "
+                    "the scope is genuinely ambiguous."
                 ),
                 input_schema=STRATEGY_GENERATE_PROPOSAL_SCHEMA,
                 handler=_wrap_strategy_generate_proposal(deps),

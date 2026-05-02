@@ -7,6 +7,8 @@ and CI. Production deployments should front it with a real framework.
 from __future__ import annotations
 
 import json
+import os
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -29,6 +31,8 @@ from . import routes_control_plane
 Route = tuple[str, str, Callable[[InternalClient, dict[str, Any]], dict[str, Any]]]
 
 _ROUTES: list[Route] = []
+_CRON_THREADS: dict[str, threading.Thread] = {}
+_THREAD_CLIENTS = threading.local()
 
 
 def _register(method: str, path: str, handler):
@@ -79,10 +83,53 @@ def _match(method: str, path: str):
     return None
 
 
-def build_server(config: Config, host: str = "127.0.0.1", port: int = 8787) -> ThreadingHTTPServer:
+def _start_cron_scheduler(client: InternalClient) -> None:
+    if os.environ.get("NERYA_DISABLE_CRON", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    key = str(client.config.paths.root.resolve())
+    thread = _CRON_THREADS.get(key)
+    if thread is not None and thread.is_alive():
+        return
+
+    from ..triggers.cron import CronScheduler
+
+    scheduler = CronScheduler(client.config, client.triggers_runtime)
+    thread = threading.Thread(
+        target=scheduler.run_forever,
+        kwargs={"poll_s": 1.0},
+        name=f"nerya-cron-{client.config.paths.root.name}",
+        daemon=True,
+    )
+    thread.start()
+    _CRON_THREADS[key] = thread
+
+
+def _client_for_current_thread(config: Config) -> InternalClient:
+    """Return a client whose lazy DB handles belong to this request thread."""
+    key = str(config.paths.root.resolve())
+    cache = getattr(_THREAD_CLIENTS, "clients", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        _THREAD_CLIENTS.clients = cache
+    client = cache.get(key)
+    if client is None:
+        client = InternalClient.from_config(config)
+        cache[key] = client
+    return client
+
+
+def build_server(
+    config: Config,
+    host: str = "127.0.0.1",
+    port: int = 18317,
+    *,
+    start_cron: bool = True,
+) -> ThreadingHTTPServer:
     _collect_routes(config)
-    client = InternalClient.boot(config.paths.root)
-    routes_gateway.launch_configured_gateways_on_start(client)
+    startup_client = InternalClient.from_config(config)
+    routes_gateway.launch_configured_gateways_on_start(startup_client)
+    if start_cron:
+        _start_cron_scheduler(startup_client)
 
     class Handler(BaseHTTPRequestHandler):
         def _cors(self) -> None:
@@ -162,7 +209,7 @@ def build_server(config: Config, host: str = "127.0.0.1", port: int = 8787) -> T
             query = {k: v[0] if len(v) == 1 else v
                      for k, v in parse_qs(parsed.query).items()}
             try:
-                result = handler(client, query)
+                result = handler(_client_for_current_thread(config), query)
                 self._write(200, result if result is not None else {})
             except Exception as exc:  # pragma: no cover
                 self._write(500, {"error": f"{type(exc).__name__}: {exc}"})
@@ -181,7 +228,11 @@ def build_server(config: Config, host: str = "127.0.0.1", port: int = 8787) -> T
                 self._write(404, {"error": "not_found", "path": self.path})
                 return
             try:
-                self._write(200, handler(client, self._read_body()))
+                result = handler(
+                    _client_for_current_thread(config),
+                    self._read_body(),
+                )
+                self._write(200, result)
             except Exception as exc:  # pragma: no cover
                 import traceback
                 tb = traceback.format_exc()
@@ -196,7 +247,7 @@ def build_server(config: Config, host: str = "127.0.0.1", port: int = 8787) -> T
     return ThreadingHTTPServer((host, port), Handler)
 
 
-def serve(config: Config, host: str = "127.0.0.1", port: int = 8787) -> None:
+def serve(config: Config, host: str = "127.0.0.1", port: int = 18317) -> None:
     srv = build_server(config, host=host, port=port)
     print(f"[nerya] local api on http://{host}:{port}")
     srv.serve_forever()

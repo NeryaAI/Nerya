@@ -732,12 +732,11 @@ class StrategyTrading:
 
     * order size cap (``policy.max_single_order_usd``);
     * direct-order allowance (``policy.allow_direct_order``);
-    * subagent-confirmation requirement (``policy.require_subagent_before_order``)
-      — strategies that require this must call ``submit_intent`` with
-      ``confidence`` and ``reasoning`` derived from a subagent run; we
-      don't enforce that the subagent actually ran (that's the
-      validator's job at promotion time), only that the strategy
-      passes ``confidence >= policy.min_confidence``.
+    * confidence floor (``policy.min_confidence``).
+
+    Subagents are optional analysis helpers. A strategy can choose to
+    call them before submitting an intent, but the runtime does not
+    require subagent confirmation for any strategy class or mode.
 
     All intents inherit ``strategy_id`` and ``source="strategy_runtime"``
     automatically.
@@ -1211,6 +1210,10 @@ class StrategyAudit:
             jsonl.append(self.paths.journal("strategy_runs"), record)
         except Exception:
             _LOG.exception("strategy audit append failed")
+        self._events.append(record)
+
+    def events(self) -> list[dict[str, Any]]:
+        return list(self._events)
 
 
 @dataclass(frozen=True)

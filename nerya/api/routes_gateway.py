@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import os
 import threading
 import time
 
@@ -133,6 +134,12 @@ _TELEGRAM_POLLER_THREADS: dict[str, threading.Thread] = {}
 _TELEGRAM_POLLER_STOPS: dict[str, threading.Event] = {}
 
 
+def _telegram_polling_disabled() -> bool:
+    return os.environ.get("NERYA_DISABLE_TELEGRAM_POLLER", "").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
 def _channel_uses_polling(cfg: dict[str, Any]) -> bool:
     """A channel is poll-driven unless explicitly set to webhook mode."""
     mode = str(cfg.get("mode") or "").strip().lower()
@@ -237,6 +244,8 @@ def launch_telegram_pollers(client) -> list[str]:
     is already alive. Returns the list of channels for which a poller
     is running after this call.
     """
+    if _telegram_polling_disabled():
+        return []
     started: list[str] = []
     for channel, cfg in _configured_telegram_channels(client):
         if not _channel_uses_polling(cfg):
@@ -267,6 +276,59 @@ def stop_telegram_pollers() -> None:
         stop.set()
     _TELEGRAM_POLLER_THREADS.clear()
     _TELEGRAM_POLLER_STOPS.clear()
+
+
+def gateway_runtime_status(client) -> dict[str, Any]:
+    """Return operator-safe gateway startup state.
+
+    The status intentionally reports whether secret references are present,
+    never their values. It is used by the Windows launcher and the dashboard
+    to distinguish "not configured" from "configured but not running".
+    """
+    doc = yaml_io.load(client.config.paths.messages_channels, default={}) or {}
+    raw_channels = doc.get("channels") if isinstance(doc, dict) else {}
+    channels = raw_channels if isinstance(raw_channels, dict) else {}
+    state = _load_state(client)
+    telegram_channels: list[dict[str, Any]] = []
+    configured_count = 0
+    poller_count = 0
+    for name, raw_cfg in sorted(channels.items()):
+        cfg = dict(raw_cfg or {})
+        kind = str(cfg.get("kind") or ("telegram" if name == "telegram" else "")).lower()
+        if kind != "telegram":
+            continue
+        token_ref = cfg.get("bot_token_ref") or cfg.get("token_ref")
+        configured = bool(token_ref)
+        if configured:
+            configured_count += 1
+        polling_enabled = configured and _channel_uses_polling(cfg)
+        thread = _TELEGRAM_POLLER_THREADS.get(str(name))
+        poller_alive = bool(thread is not None and thread.is_alive())
+        if poller_alive:
+            poller_count += 1
+        mode = str(cfg.get("mode") or ("polling" if polling_enabled else "webhook"))
+        telegram_channels.append({
+            "channel": str(name),
+            "kind": "telegram",
+            "configured": configured,
+            "bot_token_ref_configured": bool(token_ref),
+            "chat_id_configured": bool(cfg.get("chat_id")),
+            "polling_enabled": polling_enabled,
+            "poller_alive": poller_alive,
+            "mode": mode,
+        })
+    return {
+        "ok": True,
+        "channels_file_exists": client.config.paths.messages_channels.exists(),
+        "configured_gateway_count": configured_count,
+        "telegram": {
+            "polling_disabled_by_env": _telegram_polling_disabled(),
+            "poller_count": poller_count,
+            "channels": telegram_channels,
+            "startup_sync": state.get("startup_sync") if isinstance(state, dict) else None,
+            "offset": state.get("offset") if isinstance(state, dict) else None,
+        },
+    }
 
 
 def _state_path(client):
@@ -801,6 +863,9 @@ def routes():
     def platforms(client, _payload):
         return {"platforms": list_platforms()}
 
+    def gateway_status(client, _payload):
+        return gateway_runtime_status(client)
+
     def gateway_inbound(client, payload):
         platform = str(payload.get("platform") or payload.get("kind") or "webhook").lower()
         spec = require_platform(platform)
@@ -859,6 +924,7 @@ def routes():
 
     return [
         ("GET", "/gateway/platforms", platforms),
+        ("GET", "/gateway/status", gateway_status),
         ("POST", "/gateway/inbound", gateway_inbound),
         ("POST", "/gateway/send", gateway_send),
         ("POST", "/gateway/telegram/setup", telegram_setup),

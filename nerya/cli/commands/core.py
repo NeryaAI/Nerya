@@ -126,7 +126,7 @@ def _spawn_dashboard(port: int, *, api_host: str = "127.0.0.1", api_port: int = 
     Both ``NERYA_API`` (used by ``app/api/proxy/[...path]/route.ts`` and
     ``lib/api.ts`` server-side) and ``NEXT_PUBLIC_NERYA_API_BASE`` (legacy
     public env, kept for compatibility) are exported so the dashboard
-    proxies hit the API server we just booted — not the 8787 default.
+    proxies hit the API server we just booted — not a stale default.
     """
     import os
     import shutil
@@ -312,7 +312,7 @@ def register(sub) -> None:
         p = sub.add_parser(name)
         _add_ws(p)
         p.add_argument("--host", default="127.0.0.1")
-        p.add_argument("--port", type=int, default=8787)
+        p.add_argument("--port", type=int, default=18317)
         # compatibility:
         # ``nerya run`` is the "boot everything" command — service +
         # dashboard + configured gateways (Telegram long-poll auto-

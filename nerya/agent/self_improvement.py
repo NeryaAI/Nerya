@@ -9,16 +9,22 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from ..core import jsonl
 from ..core.config import Config
+from ..core.time import now
 from ..data import indicators as _indicators
 from ..evolution.journal_analyzer import summarize_errors, summarize_risk
 from ..evolution.patch_proposal import create_proposal
 from ..evolution.reflection_engine import run_reflection
 from ..llm.capability_matrix import summary as capability_summary
 from ..trading import strategy_versions as _versions
+
+_AUTO_PROPOSAL_KIND = "self_improvement.auto_proposal"
+_NOOP_AUTO_PROPOSAL_TRIGGER = "consecutive_noops"
+_DEFAULT_NOOP_AUTO_PROPOSAL_COOLDOWN_SECONDS = 10 * 60
 
 
 def evolve(config: Config) -> dict[str, Any]:
@@ -199,6 +205,13 @@ def maybe_propose_from_turn(config: Config, *, turn: dict[str, Any]) -> dict[str
     noops = sum(1 for t in tail[-10:] if t.get("action") == "noop")
     if noops < 9:
         return None
+    cooldown_seconds = _noop_auto_proposal_cooldown_seconds(config)
+    if cooldown_seconds and _recent_auto_proposal(
+        config,
+        trigger=_NOOP_AUTO_PROPOSAL_TRIGGER,
+        cooldown_seconds=cooldown_seconds,
+    ):
+        return None
     summary = f"{noops}/10 recent turns were noop — consider adjusting plan heuristics."
     prop = create_proposal(
         config.paths,
@@ -212,8 +225,56 @@ def maybe_propose_from_turn(config: Config, *, turn: dict[str, Any]) -> dict[str
         ),
     )
     jsonl.append(config.paths.journal("self_improvement"), {
-        "kind": "self_improvement.auto_proposal",
-        "trigger": "consecutive_noops",
+        "kind": _AUTO_PROPOSAL_KIND,
+        "trigger": _NOOP_AUTO_PROPOSAL_TRIGGER,
         "proposal_id": prop.id,
     })
     return prop.asdict()
+
+
+def _noop_auto_proposal_cooldown_seconds(config: Config) -> int:
+    raw = config.get(
+        "agent.native.self_improvement_noop_cooldown_seconds",
+        _DEFAULT_NOOP_AUTO_PROPOSAL_COOLDOWN_SECONDS,
+    )
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_NOOP_AUTO_PROPOSAL_COOLDOWN_SECONDS
+
+
+def _recent_auto_proposal(
+    config: Config,
+    *,
+    trigger: str,
+    cooldown_seconds: int,
+) -> bool:
+    p = config.paths.journal("self_improvement")
+    if not p.exists():
+        return False
+    current = _as_utc(now())
+    for row in reversed(jsonl.tail(p, 100)):
+        if row.get("kind") != _AUTO_PROPOSAL_KIND:
+            continue
+        if row.get("trigger") != trigger:
+            continue
+        created_at = _parse_iso_datetime(row.get("ts"))
+        if created_at is None:
+            continue
+        return (current - created_at).total_seconds() < cooldown_seconds
+    return False
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

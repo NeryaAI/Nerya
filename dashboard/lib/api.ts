@@ -2,7 +2,7 @@
 // All calls run inside Next route handlers / Server Components so we never
 // have to worry about CORS or exposing the backend to the browser.
 
-const BASE = process.env.NERYA_API || "http://127.0.0.1:8787";
+const BASE = process.env.NERYA_API || "http://127.0.0.1:18317";
 
 export class ApiError extends Error {
   status: number;

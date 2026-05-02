@@ -14,7 +14,7 @@ import {
 export interface NeryaClientOptions {
   /**
    * Base URL of the local Nerya HTTP API. Defaults to the daemon started
-   * by `nerya serve` (port 8787).
+   * by `nerya serve` (port 18317).
    */
   baseUrl?: string;
   /**
@@ -40,7 +40,7 @@ export class NeryaClient {
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: NeryaClientOptions = {}) {
-    this.baseUrl = (opts.baseUrl ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
+    this.baseUrl = (opts.baseUrl ?? "http://127.0.0.1:18317").replace(/\/+$/, "");
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.caller = opts.caller;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch;

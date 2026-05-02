@@ -362,11 +362,29 @@ export type MemoryRecallResult = {
 
 export type EvolutionProposal = {
   id: string;
+  kind?: string;
   state?: string;
   scope?: string;
   summary?: string;
+  ts?: string;
   created_at?: string;
+  target?: string | null;
   rationale?: string;
+  metadata?: Record<string, unknown> | null;
+  [key: string]: unknown;
+};
+
+export type StrategyRuntimePromotionResult = {
+  ok: boolean;
+  proposal_id: string;
+  strategy_id?: string | null;
+  state?: string;
+  note?: string;
+  reason?: string;
+  error?: string;
+  validation?: StrategyValidationReport;
+  promotion?: Record<string, unknown>;
+  schedules?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
@@ -1769,7 +1787,7 @@ export const clientApi = {
       body,
     ),
   strategyRuntimePromote: (proposal_id: string, note?: string) =>
-    post<{ ok: boolean; proposal_id: string; state: string; note?: string }>(
+    post<StrategyRuntimePromotionResult>(
       "/strategies/runtime/promote",
       { proposal_id, note },
     ),
@@ -2051,11 +2069,24 @@ export const clientApi = {
       "/agent/session/skill_state",
       { session_id, skill_id, state },
     ),
-  sessionTranscript: (session_id: string) =>
-    get<{
+  sessionTranscript: (
+    session_id: string,
+    opts?: { full?: boolean; max_pairs?: number; per_msg_cap?: number },
+  ) => {
+    const qs = new URLSearchParams();
+    qs.set("session_id", session_id);
+    if (opts?.full) qs.set("full", "1");
+    if (typeof opts?.max_pairs === "number") {
+      qs.set("max_pairs", String(opts.max_pairs));
+    }
+    if (typeof opts?.per_msg_cap === "number") {
+      qs.set("per_msg_cap", String(opts.per_msg_cap));
+    }
+    return get<{
       ok: boolean;
       session_id: string;
       strategy_id?: string | null;
+      title?: string;
       created_at?: string;
       updated_at?: string;
       messages: Array<{
@@ -2069,9 +2100,8 @@ export const clientApi = {
       }>;
       count: number;
       error?: string;
-    }>(
-      `/agent/session/transcript?session_id=${encodeURIComponent(session_id)}`,
-    ),
+    }>(`/agent/session/transcript?${qs.toString()}`);
+  },
   approvalsPending: () =>
     get<{
       ok: boolean;

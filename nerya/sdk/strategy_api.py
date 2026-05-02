@@ -33,7 +33,7 @@ from typing import Any, Optional
 
 from ..core.config import Config
 from ..core.errors import NeryaError, TradingError
-from ..evolution.patch_proposal import list_proposals, set_state
+from ..evolution.patch_proposal import set_state
 from ..evolution.promotion import apply_proposal
 from ..evolution.strategy_code_generator import (
     StrategyCodeGenerator,
@@ -47,6 +47,7 @@ from ..skills.kernel import SkillKernel
 from ..strategies.evolution import StrategyEvolutionRunner
 from ..strategies.package import load_package, load_packages
 from ..strategies.performance import build_snapshot
+from ..strategies.proposal_files import read_proposal_strategy_files
 from ..strategies.runner import StrategyRunner
 from ..strategies.scheduler_bridge import (
     apply_strategy_schedules,
@@ -496,27 +497,7 @@ class StrategyAPI:
     def _read_proposal_files(
         self, proposal_id: str
     ) -> tuple[Optional[str], dict[str, str]]:
-        for prop in list_proposals(self.config.paths):
-            if prop.id != proposal_id:
-                continue
-            after_dir = prop.path / "after" / "strategies"
-            if not after_dir.exists():
-                return None, {}
-            candidates = [d for d in after_dir.iterdir() if d.is_dir()]
-            if not candidates:
-                return None, {}
-            sd = candidates[0]
-            files: dict[str, str] = {}
-            for p in sd.rglob("*"):
-                if not p.is_file():
-                    continue
-                rel = p.relative_to(sd).as_posix()
-                try:
-                    files[rel] = p.read_text(encoding="utf-8")
-                except OSError:
-                    continue
-            return sd.name, files
-        return None, {}
+        return read_proposal_strategy_files(self.config.paths, proposal_id)
 
 
 # ---------------------------------------------------------------------------

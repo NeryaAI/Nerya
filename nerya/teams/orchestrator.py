@@ -396,7 +396,7 @@ class TeamOrchestrator:
 
         # Append blackboard entries derived from the subagent's output.
         wanted = set(task.payload.get("output_kinds") or [])
-        if signal and ("signal" in wanted or not wanted):
+        if signal:
             blackboard.append(
                 kind="signal", author=task.owner,
                 summary=summary,

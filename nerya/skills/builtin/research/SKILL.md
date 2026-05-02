@@ -36,6 +36,8 @@ When in doubt, research. Citing is cheap; hallucinating is not.
    Confirm at least once before quoting as established.
 3. **Read the page, do not summarise the snippet.** Snippets lie.
    Fetch the full content via `scripts/fetch_url.py` before quoting.
+   For fast source gathering, use `scripts/search_fetch.py` to search
+   and fetch the top results in one bounded pass.
 4. **Date-filter.** For anything time-sensitive, filter to the last
    N days/weeks at the search stage; do not rely on yourself to
    notice a stale result.
@@ -57,7 +59,16 @@ so the user can audit the inference chain.
 |---|---|
 | `scripts/web_search.py` | Plain web search → ranked URLs. |
 | `scripts/news_search.py` | News-filtered search. |
-| `scripts/fetch_url.py` | Pull a URL → markdown. |
+| `scripts/fetch_url.py` | Pull a URL → readable markdown/text with web-safety checks, HTML extraction, and Jina Reader fallback. |
+| `scripts/search_fetch.py` | Search → fetch top N results as markdown documents. |
 | `scripts/social_search.py` | Search posts on X / Reddit / Discord. |
 
 Each accepts JSON payload via `--json` / `--payload-file` / stdin.
+
+`fetch_url.py` returns both `markdown` and the legacy-compatible `text`
+field. It tries local extraction first (`trafilatura`, then
+`markdownify`, then stdlib text stripping). If the direct fetch is
+blocked, too thin, or low quality, it can fall back to Jina Reader via
+`https://r.jina.ai/<url>`. The result records `fetch_method`,
+`fallback_errors`, and the `safety` decision so downstream reports can
+explain where content came from.

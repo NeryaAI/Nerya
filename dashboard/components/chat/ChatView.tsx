@@ -21,15 +21,144 @@ import {
   upsertThread,
   uuid,
 } from "../../lib/chat";
+import { AssistantBubble, UserBubble } from "./ChatMessage";
+import { ChatInput } from "./ChatInput";
+import { ChatSidebar } from "./ChatSidebar";
 
 function parseTs(ts: string | undefined | null): number | null {
   if (!ts) return null;
   const v = typeof ts === "string" ? Date.parse(ts) : Number(ts);
   return Number.isFinite(v) && v > 0 ? v : null;
 }
-import { AssistantBubble, UserBubble } from "./ChatMessage";
-import { ChatInput } from "./ChatInput";
-import { ChatSidebar } from "./ChatSidebar";
+
+const DELETED_SESSIONS_KEY = "nerya.chat.deletedSessions.v1";
+
+function loadDeletedSessionIds(): Set<string> {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return new Set();
+  }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DELETED_SESSIONS_KEY) || "[]");
+    return new Set(
+      Array.isArray(parsed)
+        ? parsed.filter((id): id is string => typeof id === "string" && !!id)
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function rememberDeletedSession(id: string): Set<string> {
+  const next = loadDeletedSessionIds();
+  next.add(id);
+  if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+    try {
+      localStorage.setItem(
+        DELETED_SESSIONS_KEY,
+        JSON.stringify(Array.from(next).slice(-500)),
+      );
+    } catch {
+      // Ignore quota/privacy-mode failures; the backend delete still runs.
+    }
+  }
+  return next;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function approvalState(value: unknown): string {
+  const record = asRecord(value);
+  const nested = asRecord(record.record);
+  return String(
+    record.state ||
+      record.resolved_state ||
+      nested.state ||
+      "",
+  ).toLowerCase();
+}
+
+function isApprovalResolved(value: unknown): boolean {
+  const state = approvalState(value);
+  return state === "approved" || state === "rejected";
+}
+
+function approvalIdFromRecord(value: unknown): string {
+  const record = asRecord(value);
+  return String(record.approval_id || record.id || "");
+}
+
+function approvalBlockFromEnvelope(value: unknown): Record<string, unknown> {
+  const env = asRecord(value);
+  return asRecord(env.block || env);
+}
+
+function cardSessionId(card: ApprovalCard): string {
+  const record = asRecord(card.record);
+  const metadata = asRecord(card.prompt?.metadata);
+  return String(record.session_id || metadata.session_id || "");
+}
+
+function pendingApprovalIdsForThread(
+  thread: ChatThread | null,
+  pendingApprovals: Map<string, ApprovalCard>,
+): string[] {
+  if (!thread) return [];
+  const requested = new Set<string>();
+  const resolved = new Set<string>();
+  const currentStopRequests = new Set<string>();
+  const pendingRecordIds = new Set<string>();
+  const latestAssistant = [...thread.messages]
+    .reverse()
+    .find(
+      (msg): msg is Extract<ChatMessage, { role: "assistant" }> =>
+        msg.role === "assistant",
+    );
+  const latestStoppedOnApproval =
+    latestAssistant &&
+    String(latestAssistant.turn?.stopped_reason || "").toLowerCase() ===
+      "approval_pending";
+
+  for (const msg of thread.messages) {
+    if (msg.role !== "assistant") continue;
+    for (const ev of msg.live_events ?? []) {
+      const id = approvalIdFromRecord(ev);
+      if (!id) continue;
+      if (ev.kind === "approval.request") requested.add(id);
+      if (ev.kind === "approval.resolved" || isApprovalResolved(ev)) {
+        resolved.add(id);
+      }
+    }
+
+    const stoppedOnApproval =
+      latestStoppedOnApproval && msg.id === latestAssistant.id;
+    for (const env of msg.turn?.blocks ?? []) {
+      const block = approvalBlockFromEnvelope(env);
+      if (String(block.kind || "") !== "approval_request") continue;
+      const id = approvalIdFromRecord(block);
+      if (!id) continue;
+      requested.add(id);
+      if (stoppedOnApproval) currentStopRequests.add(id);
+      if (isApprovalResolved(block)) resolved.add(id);
+    }
+  }
+
+  for (const [id, card] of pendingApprovals) {
+    if (cardSessionId(card) !== thread.id) continue;
+    requested.add(id);
+    pendingRecordIds.add(id);
+  }
+
+  return Array.from(requested).filter(
+    (id) =>
+      !resolved.has(id) &&
+      (pendingRecordIds.has(id) || currentStopRequests.has(id)),
+  );
+}
 
 function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
   const suggestions: { title: string; body: string; prompt: string }[] = [
@@ -127,6 +256,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     timer: ReturnType<typeof setInterval> | null;
     stop: boolean;
   }>({ timer: null, stop: false });
+  const deletedSessionIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     return () => {
@@ -144,6 +274,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   useEffect(() => {
     const loaded = loadThreads();
     const savedSettings = loadRunSettings();
+    deletedSessionIdsRef.current = loadDeletedSessionIds();
     setSettings(savedSettings);
     setThreads(loaded);
     setHydrated(true);
@@ -378,13 +509,14 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   async function buildImportedThread(
     sid: string,
     sessionMeta: { created_at?: string; updated_at?: string; title?: string },
+    opts: { full?: boolean } = {},
   ): Promise<ChatThread | null> {
-    const t = await clientApi.sessionTranscript(sid);
+    const t = await clientApi.sessionTranscript(sid, opts);
     if (!t?.ok || !Array.isArray(t.messages) || t.messages.length === 0) {
       return null;
     }
-    const created = parseTs(sessionMeta.created_at) ?? Date.now();
-    const updated = parseTs(sessionMeta.updated_at) ?? created;
+    const created = parseTs(t.created_at) ?? parseTs(sessionMeta.created_at) ?? Date.now();
+    const updated = parseTs(t.updated_at) ?? parseTs(sessionMeta.updated_at) ?? created;
     const msgs: ChatMessage[] = [];
     let firstUser = "";
     for (const m of t.messages) {
@@ -435,7 +567,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         });
       }
     }
-    const titleSeed = sessionMeta.title || firstUser || `Session ${sid.slice(0, 8)}`;
+    const titleSeed = t.title || sessionMeta.title || firstUser || `Session ${sid.slice(0, 8)}`;
     return {
       id: sid,
       title: deriveTitle(titleSeed),
@@ -457,6 +589,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       for (const s of sessions) {
         const sid = s.session_id;
         if (!sid) continue;
+        if (deletedSessionIdsRef.current.has(sid)) continue;
         const existing = localById.get(sid);
         // Skip locally-grown threads (i.e. created in this browser) —
         // they may be richer than the journal-reconstructed transcript
@@ -503,23 +636,53 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     () => (sessionId ? threads.find((t) => t.id === sessionId) || null : null),
     [threads, sessionId],
   );
+  const activeApprovalIds = useMemo(
+    () => pendingApprovalIdsForThread(active, pendingApprovals),
+    [active, pendingApprovals],
+  );
+  const activeApprovalKey = activeApprovalIds.join("|");
+  const activeLiveEventCount = useMemo(
+    () =>
+      active?.messages.reduce(
+        (count, msg) =>
+          msg.role === "assistant" ? count + (msg.live_events?.length ?? 0) : count,
+        0,
+      ) ?? 0,
+    [active],
+  );
+  const awaitingApproval = activeApprovalIds.length > 0;
 
-  // When the URL points at a session we haven't seen locally, pull its
-  // transcript from the backend. This is what makes deep links / refresh
-  // / curl-started sessions work without a prior visit.
+  function pendingFirstMessageThreadId(): string {
+    try {
+      const raw = sessionStorage.getItem("nerya.chat.pendingFirstMessage");
+      if (!raw) return "";
+      const parsed = JSON.parse(raw) as { threadId?: unknown };
+      return typeof parsed.threadId === "string" ? parsed.threadId : "";
+    } catch {
+      return "";
+    }
+  }
+
+  // When the URL points at a saved session, treat the backend transcript
+  // as authoritative. LocalStorage is only a UI cache and may contain an
+  // older partial import from a previous dashboard load.
   useEffect(() => {
     if (!hydrated || !sessionId) {
       setMissingSession(false);
       return;
     }
-    if (threads.some((t) => t.id === sessionId)) {
+    if (pendingFirstMessageThreadId() === sessionId) {
       setMissingSession(false);
+      return;
+    }
+    if (deletedSessionIdsRef.current.has(sessionId)) {
+      setMissingSession(true);
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const built = await buildImportedThread(sessionId, {});
+        const built = await buildImportedThread(sessionId, {}, { full: true });
         if (cancelled) return;
         if (built) {
           setThreads((prev) => upsertThread(prev, built));
@@ -535,7 +698,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, sessionId, threads]);
+  }, [hydrated, sessionId]);
 
   // Pick up a first message that was staged on `/chat` before the route
   // switched to `/chat/[id]`. Running it here keeps the turn alive across
@@ -561,10 +724,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       top: scrollRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [active?.messages.length, active?.id]);
+  }, [active?.messages.length, active?.id, activeLiveEventCount, activeApprovalKey]);
 
-  function createThread(seedText?: string): ChatThread {
-    const t = newThread(seedText);
+  function createThread(seedText?: string, id?: string): ChatThread {
+    const t = id ? { ...newThread(seedText), id } : newThread(seedText);
     setThreads((prev) => upsertThread(prev, t));
     return t;
   }
@@ -576,6 +739,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   }
 
   function deleteThread(id: string) {
+    deletedSessionIdsRef.current = rememberDeletedSession(id);
     setThreads((prev) => {
       const next = prev.filter((t) => t.id !== id);
       if (sessionId === id) {
@@ -586,6 +750,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         else router.replace("/chat");
       }
       return next;
+    });
+    void clientApi.sessionDelete(id).catch(() => {
+      // Keep the local tombstone so a transient backend failure does not
+      // immediately re-import the session the operator just deleted.
     });
   }
 
@@ -739,11 +907,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   ) {
     const clean = text.trim();
     if (!clean) return;
+    const approvalContinue =
+      options.source === "approval_continue" ||
+      options.kind === "approval.continue";
+    if (awaitingApproval && !approvalContinue) return;
     const visibleUser = options.visibleUser !== false;
 
     let thread = active;
     if (!thread) {
-      thread = createThread(clean);
+      thread = createThread(clean, sessionId);
     }
     const threadId = thread.id;
 
@@ -762,7 +934,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         // sessionStorage may be disabled; fall back to in-place send.
       }
       // Persist the freshly-created thread now so the next mount sees it.
-      saveThreads(upsertThread(threads, thread));
+      saveThreads(upsertThread(loadThreads(), thread));
       router.replace(`/chat/${threadId}`);
       return;
     }
@@ -1066,12 +1238,27 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
             </div>
           )}
         </div>
+        {awaitingApproval ? (
+          <div
+            className="border-t border-[#f5a524]/25 bg-[#f5a524]/[0.06] px-4 py-2 text-xs text-[#ffd58a]"
+            role="status"
+          >
+            <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
+              <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
+              <span className="font-mono text-[10px] text-[#f5a524]/80">
+                {activeApprovalIds[0]?.slice(0, 18)}
+              </span>
+            </div>
+          </div>
+        ) : null}
         <ChatInput
           value={input}
           onChange={setInput}
           onSend={() => send(input)}
           onCancel={cancel}
           sending={sending}
+          locked={awaitingApproval}
+          lockMessage={t("approvalPaused")}
           settings={settings}
           onSettingsChange={setSettings}
           modelOptions={modelOptions}

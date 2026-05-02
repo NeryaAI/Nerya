@@ -40,6 +40,10 @@ class InternalClient:
         profile: str | None = None,
     ) -> "InternalClient":
         config = load_config(workspace, profile=profile)
+        return cls.from_config(config)
+
+    @classmethod
+    def from_config(cls, config: Config) -> "InternalClient":
         skills = SkillKernel.boot(config)
         triggers_runtime = TriggerRuntime.boot(config)
         return cls(

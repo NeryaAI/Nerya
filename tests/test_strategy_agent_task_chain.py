@@ -140,6 +140,39 @@ def _write_agent_task_strategy(cfg: Config) -> None:
     )
 
 
+def _write_tick_strategy(cfg: Config, strategy_id: str = "cron_tick") -> None:
+    root = cfg.paths.strategy(strategy_id)
+    yaml_io.dump(
+        root / "strategy.yml",
+        {
+            "version": 1,
+            "strategy_id": strategy_id,
+            "title": "Cron Tick Strategy",
+            "mode": "paper",
+            "entrypoint": "main.py:run",
+            "markets": ["mock:BTC/USDT"],
+            "accounts": ["paper_main"],
+            "schedule": {"type": "interval", "every_seconds": 60},
+            "policy": {
+                "max_single_order_usd": 100,
+                "max_daily_notional_usd": 500,
+                "max_open_positions": 1,
+                "min_confidence": 0.7,
+                "max_run_seconds": 5,
+            },
+        },
+    )
+    (root / "main.py").write_text(
+        "\n".join(
+            [
+                "def run(ctx):",
+                "    return ctx.result.hold(reason='scheduled tick executed')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 class _FakeKernel:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -237,6 +270,35 @@ def test_trigger_runtime_dispatches_strategy_built_prompt_to_stable_agent_sessio
     assert "custom_factor" in detail["prompt"]
     assert detail["session"]["profile"]["profile"]["title"] == "MACD execution agent"
     assert strategy_api.history("macd_agent")["ledgers"]["agent_tasks"]["count"] == 2
+
+
+def test_trigger_runtime_executes_strategy_run_tick_targets(tmp_path):
+    cfg = _config(tmp_path)
+    _write_tick_strategy(cfg)
+    runtime = TriggerRuntime.boot(cfg)
+
+    result = runtime.emit(
+        runtime.from_payload(
+            {
+                "source": "schedule",
+                "kind": "strategy.tick",
+                "payload": {
+                    "strategy_id": "cron_tick",
+                    "mode": "paper",
+                    "reason": "cron",
+                },
+                "target": "skill:strategy.run_tick",
+                "strategy_id": "cron_tick",
+            }
+        )
+    )
+
+    assert result.status == "executed"
+    assert result.strategy_id == "cron_tick"
+    assert result.result["status"] == "hold"
+    assert result.result["reason"] == "scheduled tick executed"
+    assert result.result["trigger_event_id"] == result.event_id
+    assert len(list((cfg.paths.strategy("cron_tick") / "runs").glob("*.json"))) == 1
 
 
 def test_strategy_agent_trade_wrapper_pins_strategy_source_and_trigger_context(tmp_path):

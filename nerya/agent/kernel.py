@@ -40,6 +40,7 @@ import hashlib
 import json
 import re
 import time
+from datetime import timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -47,7 +48,7 @@ from typing import Any, Optional
 from ..core import jsonl
 from ..core.config import Config
 from ..core.ids import turn_id as new_turn_id
-from ..core.time import now_iso
+from ..core.time import now, now_iso
 from ..llm.gateway import LLMGateway
 from ..skills.kernel import SkillKernel
 from ..tools import (
@@ -69,6 +70,10 @@ from .file_state import FileStateCache
 from .hooks import HookContext, HookRegistry, _bind_config, _unbind_config
 from .loop import LoopConfig, LoopOutcome, WorkspaceNativeAgentLoop
 from .artifact_index import build_artifact_index, render_final_report
+from .market_context import (
+    load_session_market_context,
+    render_session_market_context_block,
+)
 from .memory import Memory
 from .self_improvement import maybe_propose_from_turn
 from .session import SessionStore
@@ -183,6 +188,39 @@ _MANUAL_TRIGGER_KINDS = {
     "manual.chat",
     "manual.order",
 }
+
+
+def _render_temporal_context_block() -> str:
+    """Render the per-turn date and freshness rules.
+
+    Claude Code injects a small ``currentDate`` context block into each
+    conversation. Nerya needs the same always-on anchor because trading
+    and research questions often depend on what "current" means.
+    """
+
+    current = now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local = current.astimezone()
+    utc = current.astimezone(timezone.utc)
+    utc_iso = utc.isoformat(timespec="seconds").replace("+00:00", "Z")
+    local_date = local.date().isoformat()
+    return (
+        f"Temporal context: Today's date is {local_date} (local time). "
+        f"Current UTC time is {utc_iso}.\n"
+        "Current and recent fact rule: for facts that could have changed "
+        "recently, including markets, news, regulations, model/provider "
+        "availability, public/company figures, prices, schedules, and anything "
+        "the user calls current/latest/recent/today/this year, use live tools "
+        "such as web_search_fetch, web_fetch, connector_list/connector_view, "
+        "portfolio/strategy tools, or journals before answering. Report the "
+        "evidence date/source you used. If current tools fail or are "
+        "unavailable, say the current status is unverified instead of "
+        "presenting model-memory facts as current. Do not describe 2024-2025 "
+        "as the current environment when the date above is 2026 unless the "
+        "evidence explicitly says that period is the relevant historical "
+        "context."
+    )
 
 
 def _strategy_triggered_order_turn(
@@ -367,6 +405,7 @@ class AgentKernel:
         trigger: dict[str, Any],
         strategy_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         attached_skills: Optional[list[str]] = None,
         cancel_token: Any = None,
     ) -> AgentTurnResult:
@@ -380,7 +419,7 @@ class AgentKernel:
         """
 
         trigger_event_id = trigger.get("id") or trigger.get("event_id")
-        turn_id = new_turn_id()
+        turn_id = str(turn_id or "").strip() or new_turn_id()
 
         session_existed = False
         if session_id:
@@ -2244,6 +2283,15 @@ class AgentKernel:
             except Exception:
                 profile_block = ""
 
+        market_context_block = ""
+        if session_id:
+            try:
+                market_context_block = render_session_market_context_block(
+                    load_session_market_context(self._sessions, session_id)
+                )
+            except Exception:
+                market_context_block = ""
+
         # Recipe digest — restored from the legacy planner. Recipes are
         # short, vetted "if you see X, run Y" runbooks the operator
         # ships in ``workspace/recipes/`` (or via builtin packs). They
@@ -2274,7 +2322,9 @@ class AgentKernel:
             " before long ones; dry-run trade intents through risk_check"
             " before trade_intent_submit."
         )
+
         sections.append(f"Workspace root: {deps.workspace_root}")
+        sections.append(_render_temporal_context_block())
         if attached_skills:
             sections.append(
                 "Attached skills (preferred for this turn): "
@@ -2284,6 +2334,8 @@ class AgentKernel:
             sections.append(memory_block)
         if profile_block:
             sections.append(profile_block)
+        if market_context_block:
+            sections.append(market_context_block)
         if recipe_block:
             sections.append(recipe_block)
         if skill_block:

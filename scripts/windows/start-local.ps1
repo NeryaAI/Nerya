@@ -11,7 +11,6 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $dashboardDir = Join-Path $repoRoot "dashboard"
-$telegramPollerScript = Join-Path $PSScriptRoot "telegram-poller.ps1"
 $logDir = Join-Path $Workspace "logs"
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
@@ -39,10 +38,16 @@ function Start-Api {
         return
     }
 
+    $telegramEnv = if ($NoTelegramPoller) {
+        "`$env:NERYA_DISABLE_TELEGRAM_POLLER='1'"
+    } else {
+        "Remove-Item Env:NERYA_DISABLE_TELEGRAM_POLLER -ErrorAction SilentlyContinue"
+    }
     $command = @(
         "`$env:PYTHONPATH='$repoRoot'"
         "`$env:NERYA_WORKSPACE='$Workspace'"
-        "python -m nerya.cli.app run --workspace '$Workspace' --host 127.0.0.1 --port $ApiPort"
+        $telegramEnv
+        "python -m nerya.cli.app run --workspace '$Workspace' --host 127.0.0.1 --port $ApiPort --no-dashboard"
     ) -join "; "
 
     $stdout = Join-Path $logDir "api.out.log"
@@ -50,6 +55,7 @@ function Start-Api {
     $process = Start-Process -FilePath "pwsh" `
         -ArgumentList @("-NoProfile", "-Command", $command) `
         -WorkingDirectory $repoRoot `
+        -WindowStyle Hidden `
         -RedirectStandardOutput $stdout `
         -RedirectStandardError $stderr `
         -PassThru
@@ -66,7 +72,7 @@ function Start-Dashboard {
     $command = @(
         "`$env:NERYA_API='http://127.0.0.1:$ApiPort'"
         "`$env:NERYA_BASE_URL='http://127.0.0.1:$ApiPort'"
-        "npm run dev"
+        "npm.cmd run dev -- --hostname 127.0.0.1 --port $DashboardPort"
     ) -join "; "
 
     $stdout = Join-Path $logDir "dashboard.out.log"
@@ -74,6 +80,7 @@ function Start-Dashboard {
     $process = Start-Process -FilePath "pwsh" `
         -ArgumentList @("-NoProfile", "-Command", $command) `
         -WorkingDirectory $dashboardDir `
+        -WindowStyle Hidden `
         -RedirectStandardOutput $stdout `
         -RedirectStandardError $stderr `
         -PassThru
@@ -81,38 +88,59 @@ function Start-Dashboard {
     Write-Host "Started dashboard pid=$($process.Id) on :$DashboardPort"
 }
 
-function Start-TelegramPoller {
-    if (-not (Test-Path $telegramPollerScript)) {
-        Write-Host "Telegram poller script missing: $telegramPollerScript"
+function Wait-Api {
+    param([int]$Attempts = 30)
+    $healthUrl = "http://127.0.0.1:$ApiPort/health"
+    for ($i = 0; $i -lt $Attempts; $i++) {
+        try {
+            Invoke-RestMethod -Method Get -Uri $healthUrl -TimeoutSec 2 | Out-Null
+            return $true
+        } catch {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    return $false
+}
+
+function Show-GatewayStatus {
+    if (-not (Wait-Api)) {
+        Write-Host "Gateway status skipped: API did not become healthy on :$ApiPort"
         return
     }
 
-    $escapedScript = $telegramPollerScript.Replace("'", "''")
-    $apiUrl = "http://127.0.0.1:$ApiPort"
-    $existing = Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe' OR Name = 'powershell.exe'" |
-        Where-Object { $_.CommandLine -like "*$escapedScript*" -and $_.CommandLine -like "*$apiUrl*" } |
-        Select-Object -First 1
-    if ($existing) {
-        Write-Host "Telegram poller already running pid=$($existing.ProcessId)"
+    $statusUrl = "http://127.0.0.1:$ApiPort/gateway/status"
+    try {
+        $status = Invoke-RestMethod -Method Get -Uri $statusUrl -TimeoutSec 5
+    } catch {
+        Write-Host "Gateway status unavailable at $statusUrl"
         return
     }
 
-    $stdout = Join-Path $logDir "telegram-poller.out.log"
-    $stderr = Join-Path $logDir "telegram-poller.err.log"
-    $process = Start-Process -FilePath "pwsh" `
-        -ArgumentList @("-NoProfile", "-File", $telegramPollerScript, "-ApiUrl", $apiUrl) `
-        -WorkingDirectory $repoRoot `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr `
-        -PassThru
+    if (-not $status.channels_file_exists) {
+        Write-Host "Gateway: no messages/channels.yml configured; Telegram is not started."
+        return
+    }
 
-    Write-Host "Started Telegram poller pid=$($process.Id)"
+    $telegram = $status.telegram
+    $channels = @($telegram.channels)
+    if ($channels.Count -eq 0) {
+        Write-Host "Gateway: channels.yml has no Telegram channel."
+        return
+    }
+
+    $running = @($channels | Where-Object { $_.poller_alive })
+    if ($telegram.polling_disabled_by_env) {
+        Write-Host "Gateway: Telegram polling disabled by NERYA_DISABLE_TELEGRAM_POLLER."
+    } elseif ($running.Count -gt 0) {
+        $names = ($running | ForEach-Object { $_.channel }) -join ", "
+        Write-Host "Gateway: Telegram poller running for $names."
+    } else {
+        Write-Host "Gateway: Telegram configured, but no poller is currently alive."
+    }
 }
 
 Start-Api
-if (-not $NoTelegramPoller) {
-    Start-TelegramPoller
-}
+Show-GatewayStatus
 if (-not $ApiOnly) {
     Start-Dashboard
 }

@@ -61,18 +61,19 @@ class PortfolioState:
         self.turnover_notional += abs(notional)
         pos = self.positions.get(market, Position(market=market))
         signed_qty = qty if side == "buy" else -qty
+        cash_delta = -notional if side == "buy" else notional
         if pos.qty == 0 or (pos.qty > 0 and signed_qty > 0) or (pos.qty < 0 and signed_qty < 0):
             old_notional = abs(pos.qty) * pos.avg_price
             new_qty_abs = abs(pos.qty) + abs(signed_qty)
             pos.avg_price = (old_notional + abs(signed_qty) * price) / new_qty_abs if new_qty_abs else 0.0
             pos.qty += signed_qty
             pos.opened_ts = int(fill.get("ts", 0)) or pos.opened_ts
-            self.cash = float(self.cash or 0.0) - notional - fee
+            self.cash = float(self.cash or 0.0) + cash_delta - fee
         else:
             closing_qty = min(abs(pos.qty), abs(signed_qty))
             pnl = closing_qty * (price - pos.avg_price) * (1.0 if pos.qty > 0 else -1.0)
             self.realized_pnl += pnl
-            self.cash = float(self.cash or 0.0) - notional - fee
+            self.cash = float(self.cash or 0.0) + cash_delta - fee
             pos.qty += signed_qty
             if abs(pos.qty) < 1e-12:
                 pos.qty = 0.0

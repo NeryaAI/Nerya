@@ -232,6 +232,8 @@ export default function StrategyDetailPage({
               lastRun={lastRun}
             />
 
+            <StrategyDefinitionCard detail={detail} />
+
             {workspace?.ok && (
               <StrategyStatusBar
                 envelope={workspace}
@@ -340,6 +342,60 @@ export default function StrategyDetailPage({
           </>
         )}
       </PageBody>
+    </div>
+  );
+}
+
+function StrategyDefinitionCard({ detail }: { detail: StrategyDetail }) {
+  const description =
+    typeof detail.strategy_yml.description === "string"
+      ? detail.strategy_yml.description
+      : "";
+  return (
+    <Card
+      title="Strategy definition"
+      description={description || "Package fields loaded from strategy.yml."}
+    >
+      <div className="grid gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
+        <DefinitionBlock label="Markets" values={detail.strategy.markets} />
+        <DefinitionBlock label="Triggers" values={detail.strategy.trigger_kinds} />
+        <DefinitionBlock label="Subagents" values={detail.strategy.subagents} />
+        <DefinitionBlock
+          label="Mode"
+          values={[
+            `status:${detail.strategy.status}`,
+            `mode:${detail.strategy.mode}`,
+            `account:${detail.strategy.account_id || "-"}`,
+          ]}
+        />
+      </div>
+    </Card>
+  );
+}
+
+function DefinitionBlock({
+  label,
+  values,
+}: {
+  label: string;
+  values: string[];
+}) {
+  return (
+    <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
+      <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">
+        {label}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {values.length ? (
+          values.map((value) => (
+            <Pill key={value} tone="neutral">
+              {value}
+            </Pill>
+          ))
+        ) : (
+          <span className="text-[12px] text-ink-500">not configured</span>
+        )}
+      </div>
     </div>
   );
 }

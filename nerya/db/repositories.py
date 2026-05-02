@@ -343,32 +343,51 @@ class AgentSessionRepository:
         return [dict(r) for r in rows]
 
     def transcript(self, session_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
-        rows = self.con.execute(
-            """
-            SELECT message_id, session_id, turn_id, role, content, ts, meta_json
-            FROM (
+        limit = int(limit)
+        if limit > 0:
+            rows = self.con.execute(
+                """
+                SELECT message_id, session_id, turn_id, role, content, ts, meta_json
+                FROM (
+                    SELECT message_id, session_id, turn_id, role, content, ts, meta_json
+                    FROM agent_messages
+                    WHERE session_id=? AND deleted=0
+                    ORDER BY
+                        ts DESC,
+                        CASE role
+                            WHEN 'assistant' THEN 0
+                            WHEN 'user' THEN 1
+                            ELSE 2
+                        END,
+                        message_id DESC
+                    LIMIT ?
+                )
+                ORDER BY
+                    ts ASC,
+                    CASE role
+                        WHEN 'user' THEN 0
+                        WHEN 'assistant' THEN 1
+                        ELSE 2
+                    END,
+                    message_id ASC
+                """,
+                (session_id, limit),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                """
                 SELECT message_id, session_id, turn_id, role, content, ts, meta_json
                 FROM agent_messages
                 WHERE session_id=? AND deleted=0
                 ORDER BY
-                    ts DESC,
+                    ts ASC,
                     CASE role
-                        WHEN 'assistant' THEN 0
-                        WHEN 'user' THEN 1
+                        WHEN 'user' THEN 0
+                        WHEN 'assistant' THEN 1
                         ELSE 2
                     END,
-                    message_id DESC
-                LIMIT ?
-            )
-            ORDER BY
-                ts ASC,
-                CASE role
-                    WHEN 'user' THEN 0
-                    WHEN 'assistant' THEN 1
-                    ELSE 2
-                END,
-                message_id ASC
-            """,
-            (session_id, int(limit)),
-        ).fetchall()
+                    message_id ASC
+                """,
+                (session_id,),
+            ).fetchall()
         return [dict(r) for r in rows]

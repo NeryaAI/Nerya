@@ -311,30 +311,6 @@ def _validate_loaded(package: StrategyPackage) -> StrategyValidation:
                 where="strategy.yml",
             )
         )
-    if package.manifest.policy.require_subagent_before_order and not package.manifest.subagents:
-        issues.append(
-            StrategyValidationIssue(
-                severity="blocker",
-                code="missing_required_subagent",
-                message=(
-                    "policy.require_subagent_before_order=True but manifest.subagents is empty"
-                ),
-                where="strategy.yml",
-            )
-        )
-    if package.manifest.mode == "live" and not package.manifest.subagents and not package.manifest.policy.require_subagent_before_order:
-        issues.append(
-            StrategyValidationIssue(
-                severity="warning",
-                code="live_without_subagent",
-                message=(
-                    "live mode without any subagent confirmation step; "
-                    "consider setting require_subagent_before_order=True"
-                ),
-                where="strategy.yml",
-            )
-        )
-
     main_path = package.root / package.manifest.entrypoint_module
     if not main_path.exists():
         issues.append(

@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from .....strategies.result import ResultBuilder
 from .config import BacktestConfig, MockSurfaceCfg
 
 
@@ -27,6 +26,7 @@ class BacktestUnsupportedSurfaceError(RuntimeError):
 class MockMarket:
     market: str
     bars_by_market: dict[str, list[dict[str, Any]]]
+    timeframe_bars_by_market: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
 
     def candles(
         self,
@@ -36,8 +36,11 @@ class MockMarket:
         limit: int = 100,
         account: str | None = None,
     ) -> list[dict[str, Any]]:
-        del timeframe, account
-        return list(self.bars_by_market.get(market, []))[-int(limit):]
+        del account
+        rows = self.timeframe_bars_by_market.get(market, {}).get(timeframe)
+        if rows is None:
+            rows = self.bars_by_market.get(market, [])
+        return list(rows)[-int(limit):]
 
     def ticker(self, market: str, *, account: str | None = None) -> dict[str, Any]:
         del account
@@ -47,6 +50,9 @@ class MockMarket:
     def mark_price(self, market: str, *, account: str | None = None) -> float:
         del account
         rows = self.bars_by_market.get(market, [])
+        if not rows:
+            by_tf = self.timeframe_bars_by_market.get(market, {})
+            rows = next((candidate for candidate in by_tf.values() if candidate), [])
         if not rows:
             return 0.0
         return float(rows[-1].get("close", 0.0))
@@ -101,7 +107,7 @@ class MockTrading:
             "size": payload.get("size", payload.get("notional_usd", payload.get("amount", 0))),
             "size_unit": payload.get("size_unit", "usd"),
             "order_type": payload.get("order_type", "market"),
-            "reason": payload.get("reason") or payload.get("reasoning_ref") or "",
+            "reason": payload.get("reason") or payload.get("reasoning") or payload.get("reasoning_ref") or "",
             "confidence": payload.get("confidence"),
             "raw": dict(payload),
         }
@@ -175,6 +181,74 @@ class MockClock:
 
     def now(self) -> datetime:
         return datetime.fromtimestamp(self.ts, tz=timezone.utc)
+
+
+@dataclass
+class MockPolicy:
+    max_single_order_usd: float = 0.0
+    max_daily_notional_usd: float = 0.0
+    max_open_positions: int = 1
+    min_confidence: float = 0.0
+    allow_direct_order: bool = True
+    require_subagent_before_order: bool = False
+    default_order_usd: float = 100.0
+    max_run_seconds: float = 60.0
+    default_tier: str = "light"
+    allowed_tiers: tuple[str, ...] = ("light",)
+    max_calls_per_run: int = 0
+    raw_policy: dict[str, Any] = field(default_factory=dict)
+    raw_llm_policy: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_raw(cls, raw: dict[str, Any] | None = None, llm_raw: dict[str, Any] | None = None) -> "MockPolicy":
+        raw = dict(raw or {})
+        llm_raw = dict(llm_raw or {})
+        return cls(
+            max_single_order_usd=float(raw.get("max_single_order_usd", 0.0) or 0.0),
+            max_daily_notional_usd=float(raw.get("max_daily_notional_usd", 0.0) or 0.0),
+            max_open_positions=int(raw.get("max_open_positions", 1) or 1),
+            min_confidence=float(raw.get("min_confidence", 0.0) or 0.0),
+            allow_direct_order=bool(raw.get("allow_direct_order", True)),
+            require_subagent_before_order=bool(raw.get("require_subagent_before_order", False)),
+            default_order_usd=float(raw.get("default_order_usd", 100.0) or 100.0),
+            max_run_seconds=float(raw.get("max_run_seconds", 60.0) or 60.0),
+            default_tier=str(llm_raw.get("default_tier", "light") or "light"),
+            allowed_tiers=tuple(str(v) for v in (llm_raw.get("allowed_tiers") or ["light"])),
+            max_calls_per_run=int(llm_raw.get("max_calls_per_run", 0) or 0),
+            raw_policy=raw,
+            raw_llm_policy=llm_raw,
+        )
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+@dataclass
+class MockPortfolio:
+    state: MockState
+
+    def positions(self, market: str | None = None) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for key, value in self.state.data.items():
+            if not key.startswith("position:") or not isinstance(value, dict):
+                continue
+            pos_market = key.split(":", 1)[1]
+            if market and pos_market != market:
+                continue
+            qty = float(value.get("qty", 0.0) or 0.0)
+            if abs(qty) <= 1e-12:
+                continue
+            out.append({
+                "market": pos_market,
+                "size": abs(qty),
+                "quantity": abs(qty),
+                "entry_price": float(value.get("avg_price", 0.0) or 0.0),
+                "side": "long" if qty > 0 else "short",
+            })
+        return out
+
+    def open_positions(self, market: str | None = None) -> list[dict[str, Any]]:
+        return self.positions(market=market)
 
 
 @dataclass
@@ -263,20 +337,23 @@ class MockCtx:
     config_obj: BacktestConfig
     state: MockState
     audit_sink: Callable[[dict[str, Any]], None] | None = None
+    timeframe_bars_by_market: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    policy_obj: MockPolicy | None = None
     config: SimpleConfigView | None = None
-    result: ResultBuilder = field(default_factory=ResultBuilder)
+    result: Any = field(default_factory=lambda: _result_builder())
 
     def __post_init__(self) -> None:
-        self.market = MockMarket(self.market_name, self.bars_by_market)
+        self.market = MockMarket(self.market_name, self.bars_by_market, self.timeframe_bars_by_market)
         self.trading = MockTrading(self.pending_orders, self.strategy_id)
         self.audit = MockAudit(self.audit_sink)
         self.clock = MockClock(int(self.current_bar.get("ts", 0)))
         self.dedupe = MockDedupe()
+        self.portfolio = MockPortfolio(self.state)
         self.news = MockNews("news", self.config_obj.mock_surfaces["news"])
         self.llm = MockLLM("llm", self.config_obj.mock_surfaces["llm"])
         self.subagents = MockSubAgents("subagents", self.config_obj.mock_surfaces["subagents"])
         self.messages = MockMessages("messages", self.config_obj.mock_surfaces["messages"])
-        self.policy = {"mode": "backtest"}
+        self.policy = self.policy_obj or MockPolicy()
         self.trigger = {"source": "backtest"}
         self.prompt = None
         if self.config is None:
@@ -300,4 +377,9 @@ def append_jsonl(path: Any) -> Callable[[dict[str, Any]], None]:
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     return _write
+
+
+def _result_builder() -> Any:
+    from .....strategies.result import ResultBuilder
+    return ResultBuilder()
 

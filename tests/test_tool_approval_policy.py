@@ -83,7 +83,7 @@ def test_default_mode_allows_research_shell_but_asks_on_dangerous_shell():
     assert delete_decision.requires_approval is True
 
 
-def test_yolo_still_asks_for_dangerous_operations():
+def test_yolo_allows_dangerous_native_tool_permissions():
     descriptor = _descriptor(risk_classifier=classify_shell_risk)
 
     decision = _decision(
@@ -92,8 +92,9 @@ def test_yolo_still_asks_for_dangerous_operations():
         PermissionMode.YOLO,
     )
 
-    assert decision.is_ask()
-    assert decision.requires_approval is True
+    assert decision.is_allow()
+    assert decision.requires_approval is False
+    assert decision.risk is RiskLevel.DANGEROUS
 
 
 def test_sensitive_config_writes_escalate_but_code_edits_remain_fluid():

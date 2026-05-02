@@ -76,16 +76,14 @@ Next.js dashboard.
 
 ### Ports at a glance
 
-Nerya separates the interactive local daemon from the background host
-service so they can coexist on one machine:
+Nerya uses one local API port by default:
 
-- `8787` — local daemon default (`nerya serve`, `nerya/api/local_server.py`,
-dashboard proxy, TypeScript SDK `NERYA_BASE_URL` default).
-- `18317` — background host-service default (`nerya service install`).
+- `18317` — local daemon, background host service, dashboard proxy, and SDK
+defaults.
 
-If you run both at once, point the dashboard / SDKs at whichever port
-you are actually developing against. Everything else (CLI, skills, SDKs,
-dashboard) reads the same `NERYA_BASE_URL` so you only configure it once.
+If you need a temporary alternate port, pass `--port` to `nerya serve` or
+`nerya service install`, and point the dashboard / SDKs at that same URL via
+`NERYA_API`.
 
 ## Quick start (manual, without installer)
 
@@ -128,9 +126,8 @@ The launcher is idempotent:
 - if the API is already listening on `18317`, it leaves it running,
 - if the dashboard is already listening on `3001`, it leaves it running,
 - logs go to `~/.nerya/logs/api.out.log`, `~/.nerya/logs/api.err.log`,
-`~/.nerya/logs/dashboard.out.log`, `~/.nerya/logs/dashboard.err.log`,
-`~/.nerya/logs/telegram-poller.out.log`, and
-`~/.nerya/logs/telegram-poller.err.log`.
+`~/.nerya/logs/dashboard.out.log`, and
+`~/.nerya/logs/dashboard.err.log`.
 
 Useful variants:
 
@@ -146,14 +143,15 @@ The dashboard launcher sets:
 - `NERYA_API=http://127.0.0.1:18317`
 - `NERYA_BASE_URL=http://127.0.0.1:18317`
 
-The launcher also starts a local Telegram poller by default. Bot menus are
-synchronised by Nerya itself during API startup whenever a Telegram channel with
-`bot_token_ref` or `token_ref` exists in `~/.nerya/messages/channels.yml`; the
-poller only calls `/gateway/telegram/poll` so user messages reach the local
-agent without manual curl commands. The menu is generated from the same gateway
-command registry used by `/help` and `/menu`, keeping the Bot API menu aligned
-with the gateway command behavior. Use `-NoTelegramPoller` when you
-only want API + dashboard.
+The API starts configured Telegram pollers internally during startup. Bot menus
+are synchronised by Nerya itself whenever a Telegram channel with
+`bot_token_ref` or `token_ref` exists in `~/.nerya/messages/channels.yml`, and
+the poller dispatches updates through the same handler as
+`/gateway/telegram/poll` so user messages reach the local agent without manual
+curl commands. The menu is generated from the same gateway command registry used
+by `/help` and `/menu`, keeping the Bot API menu aligned with the gateway
+command behavior. Use `-NoTelegramPoller` when you want API + dashboard without
+starting Telegram long-polling in a newly launched API process.
 
 If you want real e2e LLM calls after boot, make sure the machine or user
 environment already has a valid `NERYA_E2E_LLM_KEY`. Without it the API still
@@ -197,6 +195,8 @@ enables `live_trading_enabled: true` and provisions signed approvals.
 Nerya exposes a universal platform contract:
 
 - `GET /gateway/platforms` returns the platform matrix and support status.
+- `GET /gateway/status` returns configured-channel and poller liveness state
+  without exposing secret values.
 - `POST /gateway/inbound` accepts normalized inbound messages from any platform.
 - `POST /gateway/send` sends outbound messages through native or webhook-backed channels.
 - Agent turn responses include `events`, a user-visible decision trail (`plan`, `think`, `act`, `observe`, `close`).

@@ -20,6 +20,8 @@ export function ChatInput({
   onSend,
   onCancel,
   sending,
+  locked = false,
+  lockMessage,
   placeholder,
   settings,
   onSettingsChange,
@@ -30,6 +32,8 @@ export function ChatInput({
   onSend: () => void;
   onCancel?: () => void;
   sending: boolean;
+  locked?: boolean;
+  lockMessage?: string;
   placeholder?: string;
   settings: ChatRunSettings;
   onSettingsChange: (settings: ChatRunSettings) => void;
@@ -58,7 +62,7 @@ export function ChatInput({
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (!sending && value.trim()) onSend();
+      if (!sending && !locked && value.trim()) onSend();
     }
   }
 
@@ -71,9 +75,10 @@ export function ChatInput({
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
+            disabled={locked}
             rows={1}
-            placeholder={placeholder ?? t("inputPlaceholder")}
-            className="flex-1 bg-transparent resize-none text-sm text-ink-100 placeholder:text-ink-500 focus:outline-none py-1.5 min-h-[28px] max-h-[240px]"
+            placeholder={locked ? lockMessage : placeholder ?? t("inputPlaceholder")}
+            className="flex-1 bg-transparent resize-none text-sm text-ink-100 placeholder:text-ink-500 focus:outline-none py-1.5 min-h-[28px] max-h-[240px] disabled:cursor-not-allowed disabled:opacity-70"
           />
           {sending && onCancel ? (
             <button
@@ -87,10 +92,10 @@ export function ChatInput({
           ) : null}
           <button
             onClick={onSend}
-            disabled={sending || !value.trim()}
+            disabled={sending || locked || !value.trim()}
             className="inline-flex h-8 w-8 items-center justify-center bg-gradient-to-r from-brand-500 to-brand-700 hover:from-brand-400 hover:to-brand-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm rounded-md transition-all shadow-glow cursor-pointer"
-            title={sending ? t("running") : t("send")}
-            aria-label={sending ? t("running") : t("send")}
+            title={locked ? lockMessage : sending ? t("running") : t("send")}
+            aria-label={locked ? lockMessage : sending ? t("running") : t("send")}
           >
             {sending ? (
               <span className="inline-flex items-center gap-1.5">
@@ -103,7 +108,7 @@ export function ChatInput({
           </button>
         </div>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-ink-500 px-1">
-          <span>{t("enterToSend")}</span>
+          <span>{locked ? lockMessage : t("enterToSend")}</span>
           <div className="flex items-center gap-2">
             <label className="flex items-center gap-1.5">
               <span className="inline-flex items-center gap-1 text-ink-300">
@@ -118,7 +123,7 @@ export function ChatInput({
                     reasoning_effort: e.target.value as ReasoningEffort,
                   })
                 }
-                disabled={sending}
+                disabled={sending || locked}
                 className="rounded-md border border-white/10 bg-ink-900/80 px-2 py-1 text-[10px] text-ink-200 focus:outline-none focus:border-brand-500/50 disabled:opacity-60"
               >
                 {THINK_LEVELS.map((level) => (
@@ -156,7 +161,7 @@ export function ChatInput({
                     model_id: option.model,
                   });
                 }}
-                disabled={sending}
+                disabled={sending || locked}
                 className="max-w-[220px] rounded-md border border-white/10 bg-ink-900/80 px-2 py-1 text-[10px] text-ink-200 focus:outline-none focus:border-brand-500/50 disabled:opacity-60"
               >
                 <option value="__default">{t("runtimeDefault")}</option>
@@ -174,7 +179,7 @@ export function ChatInput({
               <input
                 type="checkbox"
                 checked={settings.permission_mode === "yolo"}
-                disabled={sending}
+                disabled={sending || locked}
                 onChange={(e) =>
                   onSettingsChange({
                     ...settings,

@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 // The runtime' dashboard performs the same forwarding via its Next.js proxy;
 // without this, the Nerya dashboard would silently lose auth context.
 
-const BASE = process.env.NERYA_API || "http://127.0.0.1:8787";
+const BASE = process.env.NERYA_API || "http://127.0.0.1:18317";
 const SERVER_TOKEN = process.env.NERYA_API_TOKEN || "";
 
 const HOP_BY_HOP = new Set([
