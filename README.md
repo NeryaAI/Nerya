@@ -1,39 +1,338 @@
+<p align="center">
+<img src="branding/banner.png" alt="Nerya" width="100%" />
+</p>
+
+<div align="center">
+
 # Nerya
 
-Nerya is a **skill-first, trading-native, self-evolving autonomous agent
-runtime**. It owns its own agent loop, LLM gateway, subagent runtime,
-trigger plane, skill runtime, trading kernel and evolution pipeline — it
-does **not** attach to an external agent runtime at execution time.
+### A self-evolving AI trading team that runs on your laptop.
 
-Every capability (market data, trading, risk, messaging, script generation,
-strategy review, evolution) is exposed as a **Skill** inside a secure
-runtime, never as a raw tool call against an exchange API.
+Skill-first. Trading-native. Self-evolving.
+Nerya ships its own agent kernel, LLM gateway, sub-agents, memory, triggers,
+**Agent Team** orchestrator, trading kernel, and evolution pipeline. No external
+agent framework attached at runtime.
 
-## Design pillars
+[English](README.md) · [简体中文](README.zh-CN.md)
 
-1. **Skill-first** — the agent never talks to an exchange, a provider key, or
-  a bot token directly. It always goes through a registered skill action
-   that is bounded by a manifest, permissions, a Risk Gate and an Approval
-   Gate.
-2. **Trading-native** — Risk Gate, Approval Gate, paper/live separation,
-  virtual ledger, strategy history, trade review, kill switch and
-   reconciliation are first-class citizens.
-3. **Self-evolving** — the agent can write learning notes, propose prompt
-  patches, new scripts, new skills, new trigger routes and strategy config
-   patches — but only as **proposals**. Active limits, live-trading flags,
-   signer policies and secret policies are immutable from Agent side.
-4. **Nerya-native runtime** — the agent loop (`nerya/agent/kernel.py`),
-  LLM gateway (`nerya/llm/gateway.py`), subagents (`nerya/subagents/`),
-   triggers (`nerya/triggers/`) and skill runtime (`nerya/skills/runtime.py`)
-   are all implemented in-repo. Nerya never imports or attaches to an
-   external agent runtime at execution time.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blueviolet.svg?style=flat-square)](https://www.apache.org/licenses/LICENSE-2.0)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg?style=flat-square)](https://www.python.org/downloads/)
+![Paper trading default](https://img.shields.io/badge/trading-paper%20by%20default-success.svg?style=flat-square)
+![CEX + DEX](https://img.shields.io/badge/CEX%20%2B%20DEX-Binance%20%C2%B7%20Bybit%20%C2%B7%20OKX%20%C2%B7%20Hyperliquid%20%C2%B7%20PancakeSwap%20%C2%B7%20Jupiter-8b5cf6.svg?style=flat-square)
+![SDK: Python + TS](https://img.shields.io/badge/SDK-Python%20%2B%20TypeScript-3178c6.svg?style=flat-square)
 
-## Layout
+</div>
 
-The main source layout is documented in `AGENTS.md`; runtime behavior is
-covered by the code and tests checked into this repository.
+---
 
-## One-liner install
+## No strategy? Ask the agent for one.
+
+> _"I have **$500** in a paper account. Make me money on BTC. Don't blow it up."_
+
+One sentence is enough. The `strategy_author` skill turns that prompt into a working
+strategy package in a single chat turn: trigger, sub-agent prompt library, candle
+source, account binding, risk limits, session ledger. You approve. It runs.
+
+After it runs, the agent journals every decision, reviews every fill, reflects between
+sessions, and drafts upgrade proposals (prompt patches, new scripts, new skills, tuned
+configs). Operator signs the diff or rejects it.
+
+Live trading stays off until you sign for it. Mistakes go into memory, not into your wallet.
+
+---
+
+## The six pillars
+
+<p align="center">
+<img src="branding/feature-grid.png" alt="Nerya core pillars: Agent Team, Self-Evolution, Typed Memory, SKILL.md First, Trading Kernel, SDK + Gateway" width="100%" />
+</p>
+
+---
+
+## Why Nerya is different
+
+|   | Most agent frameworks | Nerya |
+|---|---|---|
+| **Trading primitives** | Tool calls against exchange SDKs | Risk Gate, Approval Gate, paper/live separation, virtual ledger, reconciliation |
+| **Memory** | A vector blob, maybe | 5 typed markdown surfaces: global, mistakes, market regimes, skill learnings, per-strategy |
+| **Self-improvement** | You write the prompts | Reflection writes proposals. Operator signs. Runtime applies with rollback snapshot. |
+| **Multi-agent** | Loose function calls | Durable Agent Team with leader, analysts, risk critic, shared blackboard, task board, mailbox, gates |
+| **Connectors** | One SDK per venue | Binance, Bybit, OKX, Hyperliquid, PancakeSwap, Jupiter, generic EVM, **plus 100+ via CCXT**. Missing one? Ask the agent to author it. |
+| **Security** | "Don't log keys" | Vault-only secrets, `vault://` refs in context, prompt firewall, signer policy, script sandbox |
+| **Ops** | Write your own supervisor | One-liner installer plus systemd / launchd / NSSM service |
+
+---
+
+## Screenshots
+
+### Operator home
+
+<img src="branding/screenshots/dashboard-home.png" alt="Operator overview" />
+
+Total equity, today's P&L, active strategies, open positions, setup-readiness
+checklist (LLM provider, trading account, risk policy, wallet/exchange in green / yellow
+/ red), and a live candle chart for whichever venue you configured.
+
+<br/>
+
+### Agent workspace
+
+> _"Write a monitoring script. Create a subagent. Schedule a heartbeat. Run a postmortem."_
+
+Each message runs one agent turn. The planner picks a route, calls tools, writes
+artifacts to disk. Per-message controls:
+
+| Knob          | What it does                                                       |
+|---------------|--------------------------------------------------------------------|
+| Think mode    | Force the planner to draft a plan before tool calls                |
+| Model tier    | `light` / `medium` / `high` / `intent` for cost vs. capability      |
+| YOLO          | Skip extra reviews on cheap turns                                  |
+| Iteration cap | Hard ceiling on agent loops per message                            |
+| Tool budget   | Maximum tool calls before the kernel ends the turn                 |
+| Turn budget   | LLM token budget for this turn                                     |
+
+Four starter prompts ship with the workspace: build a monitoring script, create a
+subagent, schedule a heartbeat, run a postmortem. Click and they run.
+
+<br/>
+
+### Setup wizard
+
+<img src="branding/screenshots/dashboard-setup.png" alt="Setup wizard" />
+
+Same wizard from CLI (`nerya setup --tui`) and the dashboard (`/setup`). Seven
+domains: Password, LLM model, Gateway, Memory, Browser, Trading account, Web search.
+Only the LLM model needs your input. Hit Enter through every other prompt and you
+get a working install.
+
+<br/>
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**Skills · `SKILL.md` is the only definition**
+
+<img src="branding/screenshots/dashboard-skills.png" alt="Skills" />
+
+74 loaded skills. 2 editable in the workspace, 72 built-in, 0 staged. Inline `SKILL.md`
+reader, filter by workspace / built-in / installed / editable, and an "Add from repo"
+installer that takes GitHub URLs, local folders, or archives.
+
+</td>
+<td width="50%" valign="top">
+
+**Memory · typed backends, notebook, evidence vault**
+
+<img src="branding/screenshots/dashboard-memory.png" alt="Memory" />
+
+The built-in notebook is always on. Optional plug-ins: `memsearch` (Milvus +
+embedding model) or `agentmemory` (external service). Tabs for Notebook, Activity,
+Write rules, Providers, Evidence, Profile.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+**Portfolio · exchanges and wallets, one ledger**
+
+<img src="branding/screenshots/dashboard-portfolio.png" alt="Portfolio" />
+
+CEX accounts and on-chain wallets share the same virtual ledger. Balances, exposure,
+recent fills, reconciliation status, equity curve. All denominated in your reporting
+currency, even when the underlying venues report in different stablecoins.
+
+</td>
+<td width="50%" valign="top">
+
+**Agent Team · durable, role-typed, gated**
+
+<img src="branding/screenshots/dashboard-agents.png" alt="Agent Team" />
+
+A team is a durable config, not a `Promise.all`. Typed members (lead, analyst, risk
+critic, executor) with per-role skill allowlist and denylist. Task board with
+dependencies. Mailbox. Shared blackboard. Leader synthesis. Approval gates.
+
+</td>
+</tr>
+<tr>
+<td colspan="2" valign="top">
+
+**Universal gateway · Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, Webhook**
+
+<img src="branding/screenshots/dashboard-gateway.png" alt="Gateway" />
+
+One contract per platform: channel ID, enabled toggle, trade-notification fan-out,
+auto-reply, topic filters, access control, setup checklist. Plaintext tokens get
+rewritten as `vault://` refs the moment you submit them. The token never sits in the
+channel config.
+
+</td>
+</tr>
+</table>
+
+> The dashboard ships under `dashboard/` (Next.js 14, App Router, `:3001`). Run it
+> locally with the one-liner below. No cloud account, no telemetry phone-home.
+
+---
+
+## Feature highlights
+
+### Agent Team
+
+A `TeamRun` is a durable team config, not a parallel `Promise.all`. It carries:
+
+- typed members (strategy lead, market analyst, on-chain analyst, news analyst,
+  technical analyst, risk critic, execution planner, portfolio manager)
+- per-role skill allowlist + denylist. `execution_planner` cannot touch `trading`.
+- task board with dependencies, locks, priorities, owners
+- mailbox for inter-agent messaging, plus a shared blackboard for evidence
+- leader synthesis: the lead waits for required reports, resolves conflicts, emits a
+  decision memo
+- gates: plan-artefact gate, all-tasks-complete gate, verification gate, optional
+  human approval gate
+
+Three templates ship today: `market_analysis_team`, `strategy_design_team`,
+`trade_decision_committee`. Drop new ones under `nerya/teams/templates`.
+
+### Self-evolution
+
+After each closed session, `nerya/agent/reflection.py` writes memory entries.
+`nerya/evolution/` reads those entries and produces typed proposals:
+
+```
+learning_update        markdown patch to memory
+prompt_patch           unified diff of an agent / subagent prompt
+script_proposal        new script + manifest in workspace/scripts/pending/
+skill_proposal         new skill directory in workspace/skills/pending/
+trigger_route_patch    unified diff to workspace/triggers/routes.yml
+strategy_config_patch  unified diff to strategies/<id>/strategy.yml
+risk_limit_suggestion  advisory only; never overwrites limits.yml
+```
+
+Code-enforced immutables: no agent-authored patch touches `accounts.yml`, `limits.yml`,
+the vault, signer policy, or `live_trading_enabled`. `promotion.py` rejects any diff
+that tries. Every applied proposal carries a `rollback.py` snapshot.
+
+### Memory
+
+```
+workspace/memory/
+├── global.md                       runtime-wide
+├── mistakes.md                     reflection writes, agent reads
+├── market_regimes.md               weekly review + news skill
+├── skill_learnings.md              per-skill insights
+└── strategy_learnings/<id>.md      per-strategy
+```
+
+Plain markdown. You can read it, diff it, version-control it. Nothing reaches a prompt
+without passing the firewall first.
+
+### Skills
+
+Every capability lives under `nerya/skills/builtin/<name>_skill/`:
+
+```
+SKILL.md       when to use, workflow, examples
+scripts/       executable helpers, JSON in, JSON out
+references/    lazy-loaded methodology and research playbooks
+templates/     code and config templates
+```
+
+Twenty-plus built-ins ship today: `market_data`, `trading`, `portfolio`, `risk`,
+`triggers`, `llm`, `script`, `message`, `strategy`, `strategy_review`,
+`strategy_author`, `evolution`, `onchain`, `news_social`, `exchange`,
+`exchange_author`, `sdk_writer`, `wallet`, `subagent`, `trace`, `creative`,
+`data_science`, `devops`, `team`.
+
+### Trading kernel
+
+```
+TradeIntent → RiskGate → ApprovalGate → PaperExecution | LiveConnector
+                                                 │
+                                                 ▼
+                              VirtualLedger · positions · PnL · reconciliation
+```
+
+- Risk Gate checks live status, limits, ledger, confidence, slippage, staleness,
+  duplicates, conflicts. One failure stops the order.
+- Approval Gate routes over-threshold intents to the operator queue.
+- Strategy History logs trigger, context, decision, intent, risk verdict, execution,
+  messages, outcome, review, reflection. One JSONL session per run.
+- CCXT adapter for Binance, Bybit, OKX, Hyperliquid. On-chain support: BSC
+  (PancakeSwap v2), Solana (Jupiter), generic EVM via `eth_account`.
+
+### Adding a new exchange
+
+Your venue isn't in the list? You don't have to wait for a release. Ask the agent:
+
+> **You:** Add Bitget perpetual futures. Here are the API docs: https://bitgetlimited.github.io/apidoc/en/
+
+The `coding` skill checks the CCXT bridge first (100+ venues already wired). If your
+venue is one of them, the agent registers an alias and you're done. If not, the
+agent drops a new `workspace/providers/<id>/provider.py` exposing a `SPEC` constant,
+calls `ConnectorRegistry.reload_providers()` for hot-reload, and verifies with
+`connector_view`. No daemon restart, no source-tree commit. Once the venue
+stabilises, a maintainer can lift the workspace file into `nerya/connectors/`.
+
+### Triggers
+
+`workspace/triggers/routes.yml` maps `kind` to a target (main agent, sub-agent, or
+direct skill). Built-in kinds: cron, webhook, gateway inbound, price breakout,
+funding spike, news keyword, whale wallet, strategy session close, manual operator.
+Idempotency keys, dry-run, dedupe are built in.
+
+### Gateway
+
+Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, generic webhook.
+
+- `GET /gateway/platforms` returns the support matrix.
+- `POST /gateway/inbound` accepts normalized inbound messages.
+- `POST /gateway/send` dispatches outbound through native or webhook channels.
+- Trade notifications fan out through `messaging/pipeline.py` to every configured channel.
+- Telegram keeps the `typing` indicator open until the agent turn closes.
+
+### SDKs
+
+The SDKs never touch keys, exchanges, or RPCs. They are thin clients over the local
+daemon. The daemon enforces every skill permission, risk gate, and approval gate.
+
+```python
+from nerya_sdk import connect
+
+client = connect()
+client.triggers.emit(
+    source="script",
+    kind="price.breakout",
+    payload={"symbol": "BTC", "price": 82_000},
+    target="subagent:market_analyst",
+    strategy_id="btc_momentum",
+)
+```
+
+```ts
+import { connect } from "@nerya/sdk";
+
+const nerya = connect({ baseUrl: "http://127.0.0.1:18317", caller: "script:my_bot" });
+await nerya.trading.submitIntent({
+  strategy_id: "btc_momentum",
+  account_id: "paper_main",
+  market: "PAPER:BTCUSDT",
+  side: "buy",
+  size: 0.01,
+  size_unit: "base",
+  order_type: "market",
+  confidence: 0.6,
+  reasoning: "ts-sdk demo",
+});
+```
+
+---
+
+## Quick start
+
+### One-liner install
 
 ```bash
 # macOS / Linux
@@ -43,49 +342,32 @@ curl -LsSf https://example.com/install.sh | sh
 iwr https://example.com/install.ps1 -UseBasicParsing | iex
 ```
 
-The installer is idempotent and does the following:
+The installer is idempotent. It:
 
-1. installs `[uv](https://github.com/astral-sh/uv)` if missing,
+1. installs [`uv`](https://github.com/astral-sh/uv) if missing,
 2. clones Nerya into `~/.nerya/src` and runs `uv sync --extra trading`,
 3. drops a `nerya` shim into `~/.local/bin` (POSIX) or `%USERPROFILE%\.local\bin` (Windows),
 4. initialises a workspace at `~/nerya-ws`,
-5. registers a host service (`systemd --user` on Linux, `launchd` on macOS,
-  NSSM on Windows) so the local API boots with the machine on port 18317.
+5. registers a host service (`systemd --user`, `launchd`, or NSSM) so the local API
+   boots with the machine on port `18317`.
 
-After install, self-check with:
-
-```bash
-nerya doctor            # python / uv / node / package versions, workspace path
-nerya service status    # is the background service running?
-```
-
-### Manage the service yourself
+### Beginner mode
 
 ```bash
-nerya service install --port 18317   # registers and starts the unit
-nerya service status
-nerya service uninstall
+nerya setup --tui      # rich text wizard for password, LLM key, gateway, memory, account
+nerya setup --web      # same wizard in the browser at http://127.0.0.1:18317/setup
 ```
 
-These are thin wrappers around `systemctl --user`, `launchctl`, and `nssm` —
-no sudo/UAC required for the default per-user path. On Windows you need
-`nssm` on `PATH` (`winget install nssm` or `choco install nssm`).
+Every domain except the LLM model carries a safe default. Hit Enter through every
+prompt and you get a working install. Then open the dashboard and chat:
 
-On Windows this service path manages the **API only**. It does not start the
-Next.js dashboard.
+> **You:** I have $500 in a paper account. Make me money on BTC. Don't blow it up.
+>
+> **Nerya:** _Drafts a `demo_btc_5m_scalper` strategy package, wires up
+> `binance:BTCUSDT` candles, binds `paper_main`, sets a 0.4% max-drawdown guard,
+> schedules the trigger every 5 minutes, and asks you to approve._
 
-### Ports at a glance
-
-Nerya uses one local API port by default:
-
-- `18317` — local daemon, background host service, dashboard proxy, and SDK
-defaults.
-
-If you need a temporary alternate port, pass `--port` to `nerya serve` or
-`nerya service install`, and point the dashboard / SDKs at that same URL via
-`NERYA_API`.
-
-## Quick start (manual, without installer)
+### Manual quick start (no installer)
 
 ```bash
 # 1. create a workspace
@@ -94,189 +376,192 @@ python -m nerya.cli.app init --workspace ~/.nerya
 # 2. inspect installed skills
 python -m nerya.cli.app skill list
 
-# 3. run the vertical slice demo (paper trading via PAPER:* markets, no live keys)
-#    (Mock markets/chain are opt-in; seeded defaults are paper, not mock.)
+# 3. run the vertical slice demo (paper trading, no live keys)
 python sdk/python/examples/price_tracker.py --workspace ~/.nerya
 
 # 4. review the resulting strategy session
 python -m nerya.cli.app strategy history btc_momentum --workspace ~/.nerya
 
-# 5. reflect + generate evolution proposals
-python -m nerya.cli.app reflect --workspace ~/.nerya
-python -m nerya.cli.app evolve --workspace ~/.nerya
+# 5. reflect and generate evolution proposals
+python -m nerya.cli.app reflect  --workspace ~/.nerya
+python -m nerya.cli.app evolve   --workspace ~/.nerya
 python -m nerya.cli.app proposals list --workspace ~/.nerya
 ```
 
-## Local dashboard workflow on Windows
-
-The current repo-accurate local workflow for Windows is:
-
-1. Start the local API on `:18317`.
-2. Start the dashboard dev server on `:3001`.
-3. Open `http://127.0.0.1:3001/dashboard`.
-
-Use the checked-in launcher instead of manually retyping the commands:
+### Open the local dashboard (Windows)
 
 ```powershell
 pwsh -File .\scripts\windows\start-local.ps1 -OpenDashboard
 ```
 
-The launcher is idempotent:
+The launcher is idempotent. Re-run it whenever. API on `:18317`, dashboard on
+`:3001`, logs in `~/.nerya/logs/`.
 
-- if the API is already listening on `18317`, it leaves it running,
-- if the dashboard is already listening on `3001`, it leaves it running,
-- logs go to `~/.nerya/logs/api.out.log`, `~/.nerya/logs/api.err.log`,
-`~/.nerya/logs/dashboard.out.log`, and
-`~/.nerya/logs/dashboard.err.log`.
+---
 
-Useful variants:
+## Architecture
 
-```powershell
-pwsh -File .\scripts\windows\start-local.ps1
-pwsh -File .\scripts\windows\start-local.ps1 -ApiOnly
-pwsh -File .\scripts\windows\start-local.ps1 -NoTelegramPoller
-pwsh -File .\scripts\windows\start-local.ps1 -Workspace "$HOME\.nerya"
+```
+┌──────────────────────────── Nerya runtime ────────────────────────────┐
+│                                                                        │
+│   ┌──────────────────┐   ┌─────────────┐   ┌──────────────────────┐    │
+│   │ Trigger router   │──►│ Nerya kernel│──►│ Skills runtime         │   │
+│   │ schedule / NL /  │   │  agent loop │   │ registry + dispatch    │   │
+│   │ webhook / gateway│   │  + planner  │   │ permissions + manifest │   │
+│   └──────────────────┘   └──────┬──────┘   └───────────┬──────────┘    │
+│                                 │                      │               │
+│                                 ▼                      ▼               │
+│   ┌─────────────┐   ┌─────────────┐   ┌──────────────────────────┐    │
+│   │ LLM gateway │   │ Subagents + │   │  Trading kernel           │   │
+│   │ tiers +     │   │ Agent Team  │   │  intents → Risk Gate →    │   │
+│   │ budget +    │   │ blackboard +│   │  Approval Gate →           │   │
+│   │ adapters    │   │ mailbox     │   │  paper / live execution    │   │
+│   └─────────────┘   └─────────────┘   └──────────────┬───────────┘    │
+│                                                       │               │
+│   ┌─────────────┐   ┌─────────────┐   ┌──────────┐   │               │
+│   │ Messaging   │   │ Security    │   │ MCP /    │   │               │
+│   │ Gateway     │   │ vault +     │   │ ACP      │   │               │
+│   │ pipeline    │   │ signer +    │   │ bridges  │   │               │
+│   │             │   │ firewall    │   │          │   │               │
+│   └─────────────┘   └─────────────┘   └──────────┘   ▼               │
+│                                         Strategy history + journals   │
+└────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌───────────────────────── Nerya workspace (files only) ────────────────┐
+│  state/ journals/ inbox/ outbox/ memory/ vault/ approvals/             │
+│  strategies/<id>/{strategy.yml, limits.yml, history/, sessions/}       │
+│  skills/{enabled.yml, installed/, pending/}                            │
+│  scripts/{pending/, approved/, rejected/}                              │
+│  evolution/proposals/                                                  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-The dashboard launcher sets:
+Code lives in the repo. Runtime state (strategies, journals, sessions, approvals,
+memory, vault, proposals) lives in your workspace directory. Tarball it, grep it,
+or `rm -rf` it.
 
-- `NERYA_API=http://127.0.0.1:18317`
-- `NERYA_BASE_URL=http://127.0.0.1:18317`
+---
 
-The API starts configured Telegram pollers internally during startup. Bot menus
-are synchronised by Nerya itself whenever a Telegram channel with
-`bot_token_ref` or `token_ref` exists in `~/.nerya/messages/channels.yml`, and
-the poller dispatches updates through the same handler as
-`/gateway/telegram/poll` so user messages reach the local agent without manual
-curl commands. The menu is generated from the same gateway command registry used
-by `/help` and `/menu`, keeping the Bot API menu aligned with the gateway
-command behavior. Use `-NoTelegramPoller` when you want API + dashboard without
-starting Telegram long-polling in a newly launched API process.
+## SDKs
 
-If you want real e2e LLM calls after boot, make sure the machine or user
-environment already has a valid `NERYA_E2E_LLM_KEY`. Without it the API still
-starts, but real model calls will fail at runtime.
-
-## Windows autostart
-
-If you want the local API + dashboard + Telegram poller to come up automatically
-when you log in, install the current-user Startup entry:
-
-```powershell
-pwsh -File .\scripts\windows\install-autostart.ps1
-```
-
-This writes a small launcher command file into the current user's Windows
-Startup folder so the same local bootstrap runs after logon, without requiring
-`nssm`, Task Scheduler admin setup, or a machine-wide service.
-
-Custom file name / ports:
-
-```powershell
-pwsh -File .\scripts\windows\install-autostart.ps1 `
-  -ShortcutName "NeryaLocal.cmd" `
-  -Workspace "$HOME\.nerya" `
-  -ApiPort 18317 `
-  -DashboardPort 3001
-```
-
-Remove the autostart task:
-
-```powershell
-pwsh -File .\scripts\windows\install-autostart.ps1 -Remove
-```
-
-Live trading is **disabled by default**. Paper trading is the only mode
-reachable from Agent skills until the operator edits `accounts/accounts.yml`,
-enables `live_trading_enabled: true` and provisions signed approvals.
-
-## Gateway Platform
-
-Nerya exposes a universal platform contract:
-
-- `GET /gateway/platforms` returns the platform matrix and support status.
-- `GET /gateway/status` returns configured-channel and poller liveness state
-  without exposing secret values.
-- `POST /gateway/inbound` accepts normalized inbound messages from any platform.
-- `POST /gateway/send` sends outbound messages through native or webhook-backed channels.
-- Agent turn responses include `events`, a user-visible decision trail (`plan`, `think`, `act`, `observe`, `close`).
-- Telegram keeps `typing` active until the turn finishes; other platforms can use native status adapters or `status_webhook_url`.
-
-For platform adapter development, use the built-in `capability_developer` skill
-and the gateway APIs above.
-
-## Safety summary
-
-- Agent context never sees raw secrets; only `secret_ref` and redacted previews.
-- Agent skills never call an exchange, a wallet, Telegram, or Discord directly —
-they go through `connectors/`, `security/signer.py`, `messaging/pipeline.py`.
-- Scripts must be approved before they can run, and they cannot bypass
-Trading SDK + Risk Gate.
-- `evolution` can mutate prompts, scripts, skills, routes, strategy configs —
-never `limits.yml`, `live_trading_enabled`, signer policy or secret policy.
-
-## What Nerya implements natively
-
-Every trading-critical, security-critical and orchestration-critical
-capability is Nerya-native:
-
-- `nerya/trading/` — TradeIntent, RiskGate, ApprovalGate, paper execution,
-VirtualLedger, positions, PnL, reconciliation, conflict resolution.
-- `nerya/security/` — SecretVault, Signer, PolicySigner, redaction,
-prompt firewall, script sandbox, audit log.
-- `nerya/strategy_history/` — per-strategy JSONL ledgers and session
-artifacts (trigger, context, decision, intent, risk, execution, messages,
-outcome, review, reflection).
-- `nerya/evolution/` — reflection, learning writer, skill/script/prompt
-proposal generators, `promotion.py` with operator-signed apply,
-`rollback.py` with snapshot restore.
-- `nerya/sdk/` — internal in-process client + Trigger / Trading / LLM /
-Strategy / Message / Skill surfaces used by the CLI, file-mode SDK and
-local HTTP API.
-- `nerya/connectors/` — CEX (Binance / Bybit / OKX / Hyperliquid) and DEX
-(BSC / PancakeSwap, Solana / Jupiter, generic EVM) connectors with real
-signed order placement / cancellation.
-- `nerya/skills/builtin/` — 20+ built-in skills covering market_data,
-trading, portfolio, risk, trigger, llm, script, message, strategy,
-strategy_review, evolution, onchain, news_social, exchange,
-exchange_author, sdk_writer, wallet, subagent, trace, creative,
-data_science, devops.
-- `nerya/install/` — cross-platform service installer (systemd / launchd / NSSM).
-
-## Running the demos
+| Surface  | Path                                  | What it does                                                                |
+|----------|---------------------------------------|-----------------------------------------------------------------------------|
+| Python   | `sdk/python/nerya_sdk/`               | Thin client over the local daemon. Triggers, trading, LLM, strategy, memory. |
+| TypeScript | `sdk/typescript/` → `@nerya/sdk`    | Same surface. Node, Bun, and Edge friendly.                                  |
+| MCP      | `nerya/mcp/`                          | Exposes every skill as an MCP tool for Claude Desktop, Cursor, etc.         |
+| ACP      | `nerya/acp/`                          | Agent-to-agent bridges for inter-swarm communication.                        |
 
 ```bash
-python sdk/python/examples/price_tracker.py        # trigger → subagent → trading skill → paper fill
-python sdk/python/examples/news_alpha_watcher.py   # light+high LLM filtering → main agent
-python sdk/python/examples/direct_order_strategy.py  # Trading SDK direct order (still via Risk Gate)
+# Python SDK examples
+python sdk/python/examples/price_tracker.py          # trigger → sub-agent → paper fill
+python sdk/python/examples/news_alpha_watcher.py     # light + high LLM filter chain
+python sdk/python/examples/direct_order_strategy.py  # direct order, still via Risk Gate
+python sdk/python/examples/funding_spike_trigger.py  # perp funding spike trigger
+python sdk/python/examples/whale_wallet_trigger.py   # whale wallet activity trigger
 ```
 
-Trigger routing, subagents, Risk Gate, paper execution, strategy history,
-strategy review and reflection all run in every demo.
+---
 
-## Running the tests
+## Safety
+
+- Paper trading is the default. Live trading stays off unless
+  `runtime.live_trading_enabled: true` **and** the Approval Gate signs off.
+- No raw secrets reach agent context. Only `secret_ref` and redacted previews.
+  `SecretVault` resolves `vault://` refs in-memory for one call, then discards them.
+- No direct exchange calls from agent-authored code. Every external call goes through
+  a registered skill, then a connector, then a signer.
+- Scripts run in a sandbox: whitelisted imports, JSON I/O, manual approval before
+  first run, no bypass of Trading SDK or Risk Gate.
+- Evolution can mutate prompts, scripts, skills, routes, strategy configs. It cannot
+  mutate `limits.yml`, `live_trading_enabled`, signer policy, or secret policy.
+  `promotion.py` rejects protected diffs.
+
+---
+
+## What ships in `nerya/*` today
+
+| Module               | What it owns                                                                                        |
+|----------------------|-----------------------------------------------------------------------------------------------------|
+| `agent/`             | Kernel, planner, context builder, memory, working memory, reflection                                |
+| `subagents/`         | Per-role runtimes with skill allow/denylists, budget caps, parallel dispatcher, result aggregator   |
+| `teams/`             | Durable Agent Team: config, store, mailbox, blackboard, templates, orchestrator, gates, aggregator  |
+| `triggers/`          | Cron + trigger router, `schedules.yml`, idempotency, dry-run                                        |
+| `skills/`            | `SKILL.md` kernel + 20+ built-in skills                                                             |
+| `trading/`           | TradeIntent, RiskGate, ApprovalGate, paper execution, virtual ledger, positions, PnL, reconciliation |
+| `connectors/`        | CCXT adapter (Binance/Bybit/OKX/Hyperliquid), native EVM/BSC/Solana, dynamic provider spec          |
+| `wallet/`            | Self-custody, OKX OS, Bitget, Binance Agentic, Coinbase wallet providers                            |
+| `llm/`               | ModelRouter, OpenAI/Anthropic/Gemini/Ollama adapters, credential pool, compression, tiers, budget   |
+| `security/`          | Vault, signer, prompt firewall, redaction, structured-output validator, script sandbox              |
+| `evolution/`         | Reflection engine, typed proposals, operator-signed promotion, snapshot rollback                    |
+| `strategy_history/`  | Per-strategy JSONL ledgers, session artifacts, replay                                                |
+| `messaging/`         | Universal gateway: Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, webhooks            |
+| `mcp/`, `acp/`       | FastMCP server + ACP adapter for bridging skills to external agent ecosystems                       |
+| `install/`           | Cross-platform service (systemd, launchd, NSSM) installer                                           |
+| `sdk/`               | In-process InternalClient + Trigger, Trading, LLM, Strategy, Message, Skill surfaces                |
+
+---
+
+## Run the tests
 
 ```bash
 python -m pytest tests/
 ```
 
-The regression suite covers skill manifests and YAML flow DSL, trigger
-router (dedupe, dry-run, subagent routing), schedule operator lifecycle
-(create/edit/pause/resume/run-now/tick/status), Trading SDK (risk gate,
-kill switch, over-size, low-confidence, paper fill, strategy session
-creation), LLM gateway and OpenRouter-style provider routing, model
-catalog refresh, secret redaction, script sandbox, reflection and
-evolution, strategy history and explain-trade, subagent / agent kernel
-turn, dynamic connector discovery and hot-load, certification evidence
-gates, CEX live-signed order placement (Binance/Bybit/OKX/Hyperliquid),
-DEX live-signed swaps (BSC PancakeSwap, Solana Jupiter), MCP and ACP
+500+ tests cover: skill manifests, trigger router (dedupe, dry-run, sub-agent
+routing), schedule operator lifecycle, Trading SDK (risk gate, kill switch, over-size,
+paper fill, strategy session creation), LLM gateway and OpenRouter-style routing,
+model catalog refresh, secret redaction, script sandbox, reflection and evolution,
+strategy history and explain-trade, sub-agent and agent-kernel turns, dynamic
+connector discovery, CEX live-signed order placement (Binance, Bybit, OKX,
+Hyperliquid), DEX live-signed swaps (BSC PancakeSwap, Solana Jupiter), MCP and ACP
 adapters, dev-mode journaling, and the service installer.
+
+The suite runs without network. LLM adapters use `FakeTransport`. Exchanges use
+`mock_exchange.py` and `mock_chain.py`. End-to-end LLM behavior is driven by
+deterministic `<<MOCK_DECISION:{…}>>` hooks.
+
+---
+
+## Ports
+
+One local port by default: `18317`. Local daemon, host service, dashboard proxy,
+SDK target all share it. Pass `--port` to `nerya serve` or `nerya service install`
+and point the dashboard and SDKs at the new URL via the `NERYA_API` environment
+variable.
+
+---
 
 ## Status
 
-- Vertical slice complete: `nerya init → skill list → demo trigger → subagent turn → TradeIntent → Risk Gate → paper fill → strategy history → review → reflect → proposals` runs end-to-end.
-- Real CEX order placement / cancellation for Binance, Bybit, OKX,
-Hyperliquid. Real DEX swaps for BSC (PancakeSwap v2) and Solana (Jupiter).
-- Dev mode captures HTTP / tool / error traces; accessible via
-`nerya dev status|tail|clear` and the local HTTP API.
-- One-line installer with service registration on Linux / macOS / Windows.
+- ✅ Vertical slice end-to-end: `init → skill list → trigger → sub-agent turn →
+  TradeIntent → Risk Gate → paper fill → strategy history → review → reflect →
+  proposals`.
+- ✅ Agent Team Phase 1–4 live: durable team core, templates, orchestrator,
+  planner/kernel integration, skill and HTTP surface. Phase 5
+  (snapshot/replay/team-close memory) deferred.
+- ✅ CEX live-signed order placement and cancellation for Binance, Bybit, OKX, and
+  Hyperliquid. DEX swaps for BSC PancakeSwap v2 and Solana Jupiter.
+- ✅ Cross-platform one-line installer with service registration.
+- ✅ Dashboard (Next.js 14): Setup wizard, Chat, Strategies, Self-Evolution, Memory,
+  Skills, Workflows, Inbox, Portfolio, Gateway, Env Vault, Settings.
+- 🚧 Agent Team Phase 5: snapshot and replay.
+- 🚧 More native gateway adapters: Feishu rich cards, Discord slash commands,
+  WhatsApp Business.
+
+---
+
+## License
+
+[Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)
+
+---
+
+<div align="center">
+
+Built for operators who want an agent that thinks, trades, remembers, and grows up
+without ever holding the hot keys.
+
+<sub>Nerya · Evolutionary Brain</sub>
+
+</div>
