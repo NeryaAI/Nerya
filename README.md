@@ -15,7 +15,8 @@ agent framework attached at runtime.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blueviolet.svg?style=flat-square)](https://www.apache.org/licenses/LICENSE-2.0)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm--NC--1.0-blue.svg?style=flat-square)](https://polyformproject.org/licenses/noncommercial/1.0.0)
+[![Commercial license](https://img.shields.io/badge/Commercial%20use-license%20required-orange.svg?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg?style=flat-square)](https://www.python.org/downloads/)
 ![Paper trading default](https://img.shields.io/badge/trading-paper%20by%20default-success.svg?style=flat-square)
 ![CEX + DEX](https://img.shields.io/badge/CEX%20%2B%20DEX-Binance%20%C2%B7%20Bybit%20%C2%B7%20OKX%20%C2%B7%20Hyperliquid%20%C2%B7%20PancakeSwap%20%C2%B7%20Jupiter-8b5cf6.svg?style=flat-square)
@@ -553,7 +554,22 @@ variable.
 
 ## License
 
-[Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0)
+Nerya is released under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
+The full text lives in [`LICENSE`](LICENSE).
+
+- ✅ **Free for personal use** — study, research, hobby projects, experiments,
+  writing papers, running it against your own paper or live account with your
+  own money. Read it, modify it, fork it, share it.
+- ✅ **Free for nonprofits, schools, and public-interest organizations** — the
+  license is explicit about this.
+- ❌ **Commercial use needs a separate license**, including hosting Nerya as a
+  managed/SaaS service, embedding it in a paid product, running it inside a
+  for-profit firm's trading or fund-management operations, or selling
+  Nerya-powered strategy execution to third parties.
+
+Want a commercial license? Open a GitHub issue describing your use case, or
+email the maintainers — see the [Commercial Use Addendum](LICENSE) at the end
+of the LICENSE file.
 
 ---
 
