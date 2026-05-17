@@ -177,14 +177,12 @@ function ScrollLinkedEdge({
         style={{ opacity, strokeWidth }}
       />
       {/* 流动光点 — 边点亮后开始连续来回流动 */}
-      <motion.circle
-        r="4"
-        fill="#b48bff"
-        filter="url(#arch-glow)"
+      <motion.g
         style={{ opacity: pointOpacity }}
+        initial={{ x: from.x, y: from.y }}
         animate={{
-          cx: [from.x, to.x],
-          cy: [from.y, to.y],
+          x: [from.x, to.x],
+          y: [from.y, to.y],
         }}
         transition={{
           duration: 2.4,
@@ -192,7 +190,9 @@ function ScrollLinkedEdge({
           repeat: Infinity,
           ease: "easeInOut",
         }}
-      />
+      >
+        <circle cx="0" cy="0" r="4" fill="#b48bff" filter="url(#arch-glow)" />
+      </motion.g>
     </g>
   );
 }

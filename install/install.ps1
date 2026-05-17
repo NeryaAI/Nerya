@@ -20,18 +20,48 @@
 param()
 
 $ErrorActionPreference = "Stop"
-function Say    ($m) { Write-Host "[nerya] $m" -ForegroundColor Cyan }
-function Warn   ($m) { Write-Host "[warn ] $m" -ForegroundColor Yellow }
-function Fatal  ($m) { Write-Host "[fatal] $m" -ForegroundColor Red; exit 1 }
+function Say     ($m) { Write-Host "[nerya] $m" -ForegroundColor Cyan }
+function Note    ($m) { Write-Host "        $m" -ForegroundColor DarkGray }
+function Warn    ($m) { Write-Host "[warn ] $m" -ForegroundColor Yellow }
+function Fatal   ($m) { Write-Host "[fatal] $m" -ForegroundColor Red; exit 1 }
+function Ok      ($m) { Write-Host "[ok   ] $m" -ForegroundColor Green }
+function Hr      ()   { Write-Host ("-" * 60) -ForegroundColor Blue }
 
-$NeryaHome      = if ($env:NERYA_HOME)      { $env:NERYA_HOME }      else { Join-Path $env:USERPROFILE ".nerya" }
-$NeryaWorkspace = if ($env:NERYA_WORKSPACE) { $env:NERYA_WORKSPACE } else { Join-Path $env:USERPROFILE "nerya-ws" }
-$NeryaRef       = if ($env:NERYA_REF)       { $env:NERYA_REF }       else { "main" }
-$NeryaPort      = if ($env:NERYA_PORT)      { $env:NERYA_PORT }      else { "18317" }
-$NeryaService   = if ($env:NERYA_SERVICE)   { $env:NERYA_SERVICE }   else { "1" }
+$NeryaHome         = if ($env:NERYA_HOME)             { $env:NERYA_HOME }         else { Join-Path $env:USERPROFILE ".nerya" }
+$NeryaWorkspace    = if ($env:NERYA_WORKSPACE)        { $env:NERYA_WORKSPACE }    else { Join-Path $env:USERPROFILE "nerya-ws" }
+$NeryaRef          = if ($env:NERYA_REF)              { $env:NERYA_REF }          else { "main" }
+$NeryaPort         = if ($env:NERYA_PORT)             { $env:NERYA_PORT }         else { "18317" }
+$NeryaService      = if ($env:NERYA_SERVICE)          { $env:NERYA_SERVICE }      else { "1" }
+$NeryaNoAutoSetup  = if ($env:NERYA_NO_AUTO_SETUP)    { $env:NERYA_NO_AUTO_SETUP } else { "0" }
+# Optional: re-use a local source checkout instead of cloning the
+# GitHub mirror. Useful for offline / air-gapped / dev installs.
+$NeryaSrc          = if ($env:NERYA_SRC)              { $env:NERYA_SRC }          else { "" }
+$Script:NeryaResolvedSrc = $null
+
+function Ensure-Git {
+  if (Get-Command git -ErrorAction SilentlyContinue) { Ok "git already installed"; return }
+  Warn "git is not on PATH."
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    Note "Trying: winget install --id Git.Git -e --silent"
+    try {
+      winget install --id Git.Git -e --silent --accept-source-agreements --accept-package-agreements
+      # winget installs to %ProgramFiles%\Git\cmd by default; surface it
+      # to the current session.
+      $env:PATH = "$env:ProgramFiles\Git\cmd;$env:PATH"
+    } catch {
+      Warn "winget install failed: $_"
+    }
+  }
+  if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Note "Install git manually: https://git-scm.com/download/win"
+    Note "Then re-run this installer."
+    Fatal "git missing"
+  }
+  Ok "git ready"
+}
 
 function Ensure-Uv {
-  if (Get-Command uv -ErrorAction SilentlyContinue) { return }
+  if (Get-Command uv -ErrorAction SilentlyContinue) { Ok "uv already installed"; return }
   Say "installing uv"
   try {
     iwr https://astral.sh/uv/install.ps1 -UseBasicParsing | iex
@@ -40,24 +70,36 @@ function Ensure-Uv {
   }
   $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.local\bin;$env:PATH"
   if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { Fatal "uv not on PATH" }
+  Ok "uv ready"
 }
 
 function Install-Nerya {
   New-Item -ItemType Directory -Force -Path $NeryaHome | Out-Null
-  $src = Join-Path $NeryaHome "src"
-  if (-not (Test-Path $src)) {
-    Say "cloning nerya source into $src"
-    git clone --depth 1 --branch $NeryaRef https://github.com/nerya-project/nerya.git $src
+
+  if ($NeryaSrc -and $NeryaSrc.Trim() -ne "") {
+    $pyproject = Join-Path $NeryaSrc "pyproject.toml"
+    if (-not (Test-Path $pyproject)) {
+      Fatal "NERYA_SRC=$NeryaSrc does not contain pyproject.toml"
+    }
+    $src = (Resolve-Path $NeryaSrc).Path
+    Ok "using local source at $src (NERYA_SRC)"
   } else {
-    Say "updating existing nerya source"
-    try {
-      git -C $src fetch --depth 1 origin $NeryaRef
-      git -C $src reset --hard FETCH_HEAD
-    } catch {
-      Warn "git update skipped: $_"
+    $src = Join-Path $NeryaHome "src"
+    if (-not (Test-Path $src)) {
+      Say "cloning nerya source into $src"
+      git clone --depth 1 --branch $NeryaRef https://github.com/nerya-project/nerya.git $src
+    } else {
+      Say "updating existing nerya source"
+      try {
+        git -C $src fetch --depth 1 origin $NeryaRef
+        git -C $src reset --hard FETCH_HEAD
+      } catch {
+        Warn "git update skipped: $_"
+      }
     }
   }
-  Say "uv sync --extra trading"
+
+  Say "uv sync --extra trading (this can take ~30s on first install)"
   uv --project $src sync --extra trading
 
   $binDir = Join-Path $env:USERPROFILE ".local\bin"
@@ -74,6 +116,9 @@ uv --project "$src" run nerya %*
     [Environment]::SetEnvironmentVariable("Path", "$userPath;$binDir", "User")
     Say "added $binDir to user PATH (open a new terminal to pick it up)"
   }
+
+  # Surface the resolved src path to later stages (summary, smoke).
+  $Script:NeryaResolvedSrc = $src
 }
 
 function Ensure-Workspace {
@@ -105,14 +150,98 @@ function Install-Nssm-Service {
   Say "service status: sc query $svc"
 }
 
+function Print-Summary {
+  Hr
+  Write-Host "  Nerya is installed." -ForegroundColor Cyan
+  Hr
+  Write-Host ("  Workspace : {0}" -f $NeryaWorkspace)
+  if ($Script:NeryaResolvedSrc) {
+    Write-Host ("  Source    : {0}" -f $Script:NeryaResolvedSrc)
+  } else {
+    Write-Host ("  Source    : {0}" -f (Join-Path $NeryaHome "src"))
+  }
+  Write-Host ("  CLI       : {0}" -f (Join-Path $env:USERPROFILE ".local\bin\nerya.cmd"))
+  Write-Host ("  API port  : {0}" -f $NeryaPort)
+  if ($NeryaService -eq "1") {
+    Write-Host "  Service   : enabled (boots with Windows via NSSM)"
+  } else {
+    Write-Host "  Service   : disabled (start manually with `nerya serve`)"
+  }
+  Hr
+  Write-Host "  Next:" -ForegroundColor Yellow
+  Write-Host "    nerya quickstart    # one-command: workspace + service + 1-question setup + open dashboard"
+  Write-Host "    nerya setup --tui   # 7-step terminal wizard (advanced)"
+  Write-Host "    nerya setup --quick # one-question LLM-only setup"
+  Write-Host "    nerya doctor        # diagnostics"
+
+  if ($NeryaService -eq "1") {
+    Write-Host ""
+    Write-Host "  Service control:" -ForegroundColor Yellow
+    Write-Host "    sc query nerya-agent             # health"
+    Write-Host "    nssm restart nerya-agent         # bounce after config change"
+    Write-Host ("    Get-Content -Wait '{0}\nerya.err.log'   # live logs" -f $NeryaHome)
+  }
+
+  Hr
+  Write-Host ("  Uninstall later: powershell -ExecutionPolicy Bypass -File '{0}\src\install\uninstall.ps1'   (or pass -Purge)" -f $NeryaHome)
+  Hr
+}
+
+function Post-Install-Smoke {
+  # Cheap "did the shim actually work?" check. We don't run the
+  # service -- we just want a confirmation that `nerya --version`
+  # resolves and produces a non-empty response. Network-free.
+  $shim = Join-Path $env:USERPROFILE ".local\bin\nerya.cmd"
+  if (-not (Test-Path $shim)) {
+    Warn "shim not found at $shim -- re-run the installer."
+    return $false
+  }
+  try {
+    $out = & $shim --version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      Warn "smoke check failed: ``nerya --version`` returned $LASTEXITCODE"
+      Note ($out -join "`n")
+      return $false
+    }
+    Ok "smoke: $out"
+    return $true
+  } catch {
+    Warn "smoke check failed: $_"
+    return $false
+  }
+}
+
+function Auto-Run-Quick-Setup {
+  if ($NeryaNoAutoSetup -eq "1") {
+    Note "skipping auto setup (NERYA_NO_AUTO_SETUP=1)"
+    return
+  }
+  if (-not (Get-Command nerya -ErrorAction SilentlyContinue)) {
+    Note "skipping auto setup — `nerya` not on PATH yet."
+    Note "Open a new PowerShell and run: nerya quickstart"
+    return
+  }
+  Say "launching the quick setup wizard (Ctrl-C to skip)..."
+  try {
+    & nerya setup --tui --quick
+  } catch {
+    Note "auto setup exited: $_"
+  }
+}
+
+Hr
+Write-Host "  Installing Nerya" -ForegroundColor Cyan
+Hr
 Say  "target:  $NeryaHome"
 Say  "workspc: $NeryaWorkspace"
 Say  "port:    $NeryaPort"
+if ($NeryaSrc) { Say "src:     $NeryaSrc (local checkout)" }
+Ensure-Git
 Ensure-Uv
 Install-Nerya
 Ensure-Workspace
 Install-Nssm-Service
-
-Write-Host ""
-Say "installation complete."
-Say "Open a new PowerShell and run:   nerya dashboard"
+$Script:SmokeOk = Post-Install-Smoke
+if (-not $Script:SmokeOk) { Warn "skipping auto setup because the smoke check failed." }
+Print-Summary
+if ($Script:SmokeOk) { Auto-Run-Quick-Setup }

@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from ...security.runtime_env import build_process_env
 from ..types import (
     RiskLevel,
     ToolCall,
@@ -305,6 +306,20 @@ def _script_path(skill_index: SkillIndex, skill_id: str, name: str) -> Optional[
     return candidate
 
 
+def is_browser_skill_script_run(payload: dict[str, Any]) -> bool:
+    """Return true for scripts dispatched from the built-in browser skill.
+
+    Browser operations are intentionally exposed through the browser
+    skill scripts. They need to be low-friction for agent browser work,
+    while other skill scripts remain under the normal EXEC approval
+    policy.
+    """
+
+    sid = str(payload.get("skill_id") or payload.get("id") or "").strip().lower()
+    name = str(payload.get("name") or payload.get("script") or "").strip()
+    return sid == "browser" and bool(name)
+
+
 def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult:
     args = call.arguments or {}
     sid = str(args.get("skill_id") or "").strip()
@@ -406,10 +421,16 @@ def script_run_handler(
     else:
         cmd = [str(p), *[str(a) for a in argv_extra]]
     started = time.time()
+    root = cwd or p.parent
+    try:
+        env = build_process_env(None, root)
+    except Exception:
+        env = None
     try:
         proc = subprocess.run(
             cmd,
-            cwd=str(cwd or p.parent),
+            cwd=str(root),
+            env=env,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -466,6 +487,7 @@ __all__ = [
     "SkillIndex",
     "SkillRecord",
     "index_skills",
+    "is_browser_skill_script_run",
     "script_inspect_handler",
     "script_run_handler",
     "skill_index_handler",

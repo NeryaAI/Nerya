@@ -219,7 +219,6 @@ llm:
       max_tokens: 2048
       temperature: 0.1
       timeout_s: 60
-      daily_budget_usd: 5
       allowed_classes:
         - classification
         - structured_extraction
@@ -231,7 +230,6 @@ llm:
       max_tokens: 8192
       temperature: 0.2
       timeout_s: 180
-      daily_budget_usd: 25
       allowed_classes:
         - agent_loop
         - subagent_reasoning
@@ -243,7 +241,6 @@ llm:
       max_tokens: 16384
       temperature: 0.2
       timeout_s: 300
-      daily_budget_usd: 60
       allowed_classes:
         - proposal_generation
         - complex_reasoning

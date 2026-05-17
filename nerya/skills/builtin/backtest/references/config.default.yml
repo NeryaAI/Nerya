@@ -1,7 +1,7 @@
 initial_capital_usd: 10000
 warmup_bars: 50
 min_backtest_days: 30
-window_days: 30
+window_days: 45
 tf: "1h"
 markets: []
 indicators:
@@ -40,4 +40,3 @@ thresholds:
   missed_profit_max_noise_pct: 2.0
 risk_free_daily: 0.0
 benchmark_mode: "buy_hold_equal_weight"
-

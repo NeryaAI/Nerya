@@ -1,6 +1,6 @@
 """Risk Gate — pure function of (intent, strategy, account, market snapshot, ledger).
 
-04-29 §3.2 / P1 — every decision now carries a stable
+Every decision now carries a stable
 ``risk_evaluation_id`` (matching the new ``risk_evaluations`` table)
 so reservations, executors, and journal entries can pin themselves to
 exactly which decision allowed them.
@@ -18,10 +18,11 @@ from ..core.ids import risk_evaluation_id as _new_risk_evaluation_id
 from ..core.time import now_iso
 from ..db import DedupeRepository
 from ..db.sqlite import connect
-from .account_snapshots import latest_snapshot
+from .account_snapshots import fresh_snapshot
 from .accounts import Account, load_accounts
 from .capital import CapitalReservationStore
 from .intents import TradeIntent
+from .position_book import PositionBook
 from .reconciliation import ReconciliationStore
 from .strategies import Strategy, load_strategy
 from .virtual_ledger import open_ledger
@@ -139,11 +140,47 @@ _FIX_HINT_CATALOGUE: list[tuple[str, dict[str, Any]]] = [
         },
     ),
     (
+        "account_binding_mismatch",
+        {
+            "title": "Intent targets the wrong account",
+            "detail": "This intent's account_id does not match the "
+            "strategy's bound account. Rebind the strategy or "
+            "re-route the intent.",
+            "action": "rebind_account",
+            "href_template": "/strategies/{strategy_id}",
+        },
+    ),
+    (
+        "account_snapshot_stale_exempt",
+        {
+            "title": "Snapshot stale (allowed because intent reduces position)",
+            "detail": "The balance loop hasn't refreshed recently, but this "
+            "intent shrinks exposure so we let it through. Investigate "
+            "the snapshot worker / venue connectivity ASAP.",
+            "action": "open_account",
+            "href_template": "/accounts/{account_id}",
+        },
+    ),
+    (
         "account_snapshot_stale",
         {
             "title": "Account snapshot is stale",
             "detail": "The balance loop hasn't refreshed recently. Check the "
             "snapshot worker / venue connectivity, then retry.",
+            "action": "open_account",
+            "href_template": "/accounts/{account_id}",
+        },
+    ),
+    # Order matters: the more specific ``_exempt`` reason must be
+    # checked before the broader ``account_snapshot_health_`` prefix,
+    # otherwise the broader hint would swallow the exempt variant.
+    (
+        "account_snapshot_health_exempt",
+        {
+            "title": "Snapshot unhealthy (allowed because intent reduces position)",
+            "detail": "The latest balance fetch failed but this intent "
+            "shrinks exposure so we let it through. Investigate from the "
+            "account driver page.",
             "action": "open_account",
             "href_template": "/accounts/{account_id}",
         },
@@ -418,6 +455,29 @@ class RiskGate:
             )
         account: Account = accounts[intent.account_id]
 
+        # 1b. Strategy ↔ account binding integrity.
+        #
+        # Risk evaluates against `intent.account_id` (snapshots, PositionBook,
+        # ledger, reservations). If a caller routes an intent at a *different*
+        # account than the one the strategy is bound to in `strategy.yml`,
+        # every downstream check silently moves to the wrong book and the
+        # strategy can effectively trade on an account it was never approved
+        # for. Reject early and short-circuit so we never touch the wrong
+        # snapshot/ledger.
+        bound_account_id = (strategy.account_id or "").strip()
+        if bound_account_id and bound_account_id != intent.account_id:
+            reasons.append(
+                f"account_binding_mismatch:strategy={bound_account_id}!=intent={intent.account_id}"
+            )
+            return RiskDecision(
+                intent.intent_id,
+                "reject",
+                reasons,
+                limits_snapshot=asdict(strategy.limits),
+                estimated_notional_usd=intent.notional_usd_estimate,
+                fix_hints=derive_fix_hints(reasons, intent=intent),
+            )
+
         # 2. Live flag
         if account.mode == "live" and not self.config.live_trading_enabled():
             reasons.append("live_trading_disabled_runtime")
@@ -426,8 +486,15 @@ class RiskGate:
             reasons.append("live_trading_disabled_account")
             decision = "reject"
 
-        # 3. Strategy status
-        if not strategy.is_tradable:
+        plan_action = str((intent.meta or {}).get("plan_action") or "").strip()
+        risk_reducing = plan_action in {"close_position", "reduce_position"}
+
+        # 3. Strategy status. Operators still need to flatten exposure
+        # after a pause/quarantine/archive, so risk-reducing close/reduce
+        # plans are allowed to continue through the safety checks.
+        if not strategy.is_tradable and not (
+            risk_reducing and strategy.status in {"paused", "quarantined", "archived"}
+        ):
             reasons.append(f"strategy_status_{strategy.status}")
             decision = "reject"
 
@@ -471,14 +538,14 @@ class RiskGate:
 
         # 6. Per-single-order cap
         cap = strategy.limits.max_single_order_usd
-        if cap > 0 and notional > cap:
+        if not risk_reducing and cap > 0 and notional > cap:
             reasons.append(f"max_single_order_exceeded:{notional:.2f}>{cap:.2f}")
             decision = "reject"
 
         # 6b. canary forces a stricter cap regardless of
         # what the strategy's own ``limits.yml`` says, so a too-loose
         # YAML cannot bypass the canary safety net.
-        if strategy.status == "canary":
+        if not risk_reducing and strategy.status == "canary":
             canary_cap = float(self.config.get("trading.canary.max_single_order_usd", 250.0))
             if canary_cap > 0 and notional > canary_cap:
                 reasons.append(
@@ -486,44 +553,136 @@ class RiskGate:
                 )
                 decision = "reject"
 
-        # 7. Total exposure cap — using ledger snapshot
+        # 7. Total exposure cap.
+        #
+        # PositionBook is the source of truth for both live and paper
+        # accounts after v6 — the merged ``size_base * mark`` per market
+        # gives the same gross figure regardless of how many strategies
+        # contributed. Fall back to the virtual ledger when the book is
+        # empty (e.g. a fresh account before any fill has landed) so
+        # paper-only tests that pre-populated the ledger keep passing.
         ledger = open_ledger(paths, account.id, account.initial_balance_usd)
         ledger_snapshot = ledger.snapshot()
-        current_exposure = sum(
-            abs(p.get("size", 0) * p.get("avg_price", 0))
-            for p in ledger_snapshot["positions"].values()
-        )
+        book = PositionBook(paths)
+        try:
+            book_open = book.open_positions(account_id=account.id)
+        except Exception:
+            book_open = []
+        if book_open:
+            current_exposure = 0.0
+            current_merged_size_by_market: dict[str, float] = {}
+            current_merged_avg_by_market: dict[str, float] = {}
+            for pos in book_open:
+                size = float(pos.size_base or 0.0)
+                avg = float(pos.avg_entry_price or 0.0)
+                mark = float(pos.mark_price or avg or 0.0)
+                current_exposure += abs(size * mark)
+                current_merged_size_by_market[pos.market] = size
+                current_merged_avg_by_market[pos.market] = avg
+        else:
+            current_exposure = sum(
+                abs(p.get("size", 0) * p.get("avg_price", 0))
+                for p in ledger_snapshot["positions"].values()
+            )
+            current_merged_size_by_market = {
+                m: float((p or {}).get("size") or 0.0)
+                for m, p in (ledger_snapshot["positions"] or {}).items()
+            }
+            current_merged_avg_by_market = {
+                m: float((p or {}).get("avg_price") or 0.0)
+                for m, p in (ledger_snapshot["positions"] or {}).items()
+            }
         total_cap = strategy.limits.max_total_exposure_usd
-        if total_cap > 0 and current_exposure + notional > total_cap:
+        if not risk_reducing and total_cap > 0 and current_exposure + notional > total_cap:
             reasons.append(
                 f"max_total_exposure_exceeded:{current_exposure:.2f}+{notional:.2f}>{total_cap:.2f}"
             )
             decision = "reject"
 
+        # 7b. Per-(account, market) merged-position size cap.
+        #
+        # ``max_position_size_usd`` protects the *merged* position from
+        # runaway aggregation when several strategies hit the same
+        # exchange + symbol. We project the new merged size after this
+        # fill and compare to the cap in USD. Risk-reducing intents are
+        # exempt — a close/reduce can only ever shrink the merged
+        # position so it never blows the cap.
+        current_size = current_merged_size_by_market.get(intent.market, 0.0)
+        current_avg = current_merged_avg_by_market.get(intent.market, 0.0)
+        # New size delta in base units. Used by the per-market cap and
+        # by the snapshot-freshness exemption below.
+        base_size = (
+            float(intent.size)
+            if intent.size_unit == "base"
+            else (float(intent.size) / float(mark or 1.0) if mark else 0.0)
+        )
+        signed_delta = base_size if intent.side == "buy" else -base_size
+        projected_size = current_size + signed_delta
+        # An intent is "position-reducing" if it shrinks the absolute
+        # merged size — that covers explicit close/reduce plan actions
+        # AND ad-hoc operator sells that mathematically de-risk the
+        # book (e.g. a sell against an existing long, even without a
+        # `plan_action` tag). We use this to relax gates that exist to
+        # protect against *adding* exposure (snapshot freshness, etc.).
+        position_reducing = bool(
+            risk_reducing
+            or (abs(current_size) > 0 and abs(projected_size) < abs(current_size))
+        )
+
+        per_market_cap = strategy.limits.max_position_size_usd
+        if not risk_reducing and per_market_cap > 0 and notional > 0:
+            projected_notional = abs(projected_size) * float(mark or current_avg or 0.0)
+            if projected_notional > per_market_cap:
+                reasons.append(
+                    f"max_position_size_exceeded:{intent.market}:"
+                    f"{projected_notional:.2f}>{per_market_cap:.2f}"
+                )
+                decision = "reject"
+
         # 8. Virtual ledger balance (paper mode only)
-        if account.mode == "paper" and intent.side == "buy" and ledger_snapshot["cash_usd"] < notional:
+        if (
+            not risk_reducing
+            and account.mode == "paper"
+            and intent.side == "buy"
+            and ledger_snapshot["cash_usd"] < notional
+        ):
             reasons.append("insufficient_paper_cash")
             decision = "reject"
 
         # 8b. Account snapshot freshness + reservation overlay.
-        # We *don't* hard-reject in legacy mode if the snapshot is missing
-        # (paper/legacy callers haven't built a snapshot loop yet) — but
-        # if a snapshot exists and is stale, that's a hard reject because
-        # it means the runtime *is* wired but the data is broken.
-        snap = latest_snapshot(paths, intent.account_id)
+        # Refresh on demand before risk evaluation so scheduled strategies
+        # are not rejected just because the background loop cadence is wider
+        # than the risk freshness threshold.
         snapshot_payload: dict[str, Any] = {}
         reservation_blocked_usd = 0.0
         max_age_s = float(self.config.get("trading.snapshot.max_age_seconds", 60))
+        snap = fresh_snapshot(self.config, intent.account_id, max_age_s=max_age_s)
         if snap is not None:
             snapshot_payload = snap.asdict()
+            # Position-reducing intents (close/reduce plan actions OR
+            # sells that mathematically shrink the merged position)
+            # bypass the freshness/health rejection: the operator needs
+            # an exit valve even when the balance loop has stalled or
+            # the venue is sneezing. The reason is still appended for
+            # audit, with an ``_exempt`` suffix so the dashboard can
+            # show the warning without coloring the intent red.
+            stale_age = int(time.time() - snap.ts)
             if snap.is_stale(max_age_s=max_age_s):
-                reasons.append(
-                    f"account_snapshot_stale:{int(time.time() - snap.ts)}s>{int(max_age_s)}s"
-                )
-                decision = "reject"
+                if position_reducing:
+                    reasons.append(
+                        f"account_snapshot_stale_exempt:{stale_age}s>{int(max_age_s)}s"
+                    )
+                else:
+                    reasons.append(
+                        f"account_snapshot_stale:{stale_age}s>{int(max_age_s)}s"
+                    )
+                    decision = "reject"
             if snap.health != "ok":
-                reasons.append(f"account_snapshot_health_{snap.health}")
-                decision = "reject"
+                if position_reducing:
+                    reasons.append(f"account_snapshot_health_exempt:{snap.health}")
+                else:
+                    reasons.append(f"account_snapshot_health_{snap.health}")
+                    decision = "reject"
             try:
                 reservation_blocked_usd = CapitalReservationStore(paths).total_blocked_usd(
                     intent.account_id
@@ -532,7 +691,7 @@ class RiskGate:
                 reservation_blocked_usd = 0.0
             # On real-money modes, blocked reservations must not exceed
             # the snapshot's free balance + the new notional.
-            if account.is_live and intent.side == "buy":
+            if not risk_reducing and account.is_live and intent.side == "buy":
                 free_usd = snap.free_usd
                 if reservation_blocked_usd + notional > free_usd:
                     reasons.append(
@@ -554,7 +713,7 @@ class RiskGate:
             )
         except Exception:
             worst = None
-        if worst is not None:
+        if not risk_reducing and worst is not None:
             if worst.severity == "trading_halted":
                 reasons.append(f"reconciliation_halt:{worst.report_id}")
                 decision = "reject"
@@ -581,15 +740,20 @@ class RiskGate:
                 decision = "reject"
 
         # 14. Duplicate / dedupe
-        dedupe_key = f"{intent.strategy_id}:{intent.market}:{intent.side}:{round(notional, 2)}"
-        dedupe = DedupeRepository(self._con_lazy())
-        window = float(self.config.get("trading.dedupe_window_seconds", 300))
-        if dedupe.seen("trade_intent", dedupe_key, window_s=window):
-            reasons.append("duplicate_intent")
-            decision = "reject"
+        if not risk_reducing:
+            dedupe_key = f"{intent.strategy_id}:{intent.market}:{intent.side}:{round(notional, 2)}"
+            dedupe = DedupeRepository(self._con_lazy())
+            window = float(self.config.get("trading.dedupe_window_seconds", 300))
+            if dedupe.seen("trade_intent", dedupe_key, window_s=window):
+                reasons.append("duplicate_intent")
+                decision = "reject"
 
         # 12 & 15 & 16. Slippage / conflicts / approval threshold (advisory)
-        if strategy.limits.approval_threshold_usd > 0 and notional >= strategy.limits.approval_threshold_usd:
+        if (
+            not risk_reducing
+            and strategy.limits.approval_threshold_usd > 0
+            and notional >= strategy.limits.approval_threshold_usd
+        ):
             if decision != "reject":
                 reasons.append(
                     f"approval_required_threshold:{notional:.2f}>={strategy.limits.approval_threshold_usd:.2f}"
@@ -602,7 +766,7 @@ class RiskGate:
         # is set by ``submit_trade_plan`` when a TradePlan declares one;
         # legacy ``submit_trade_intent`` callers can opt in by passing
         # ``meta={'protection_present': True}``.
-        if strategy.status == "canary":
+        if not risk_reducing and strategy.status == "canary":
             meta = intent.meta or {}
             protection_present = bool(
                 meta.get("protection_present")

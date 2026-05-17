@@ -7,8 +7,7 @@ external MCP tool exactly the same way it sees ``read_file`` —
 identical schema validation, permission engine, hooks, error
 taxonomy, transcript invariants.
 
-Design points (mirrors coding-agent's
-``services/mcp/client.ts::reconnectAndCall`` pattern):
+Design points:
 
 * The adapter holds a *single* live connection to one MCP server.
   Multiple servers register their own adapters with their own
@@ -39,7 +38,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Optional, Protocol, TYPE_CHECKING
+from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, TYPE_CHECKING
 
 from ..tools.registry import ToolRegistry
 from ..tools.resources import ResourceEntry, ResourceIndex
@@ -445,12 +444,31 @@ def register_external_mcp_tools(
     registry: ToolRegistry,
     adapter: MCPSessionAdapter,
     replace: bool = False,
+    lazy: bool = False,
+    deny_tools: Iterable[str] = (),
+    allow_tools: Optional[Iterable[str]] = None,
 ) -> list[str]:
     """Pull ``adapter.client.list_tools()`` onto ``registry``.
 
     Returns the list of public tool names that were registered. Caller
     is responsible for refreshing the registry on reconnect (a
     re-call will replace=True the existing entries).
+
+    When ``lazy=True`` every descriptor is replaced with a
+    ``lazy=True`` clone before registration. The descriptor stays in
+    the registry (so ``mcp_call`` can dispatch its handler), but the
+    agent loop's prompt-time render filter hides it until the namespace
+    has been promoted via ``mcp_describe``.
+
+    ``deny_tools`` / ``allow_tools`` are per-server filters applied
+    **before** descriptors are built. Names match the upstream
+    tool name (the ``name`` field returned by ``tools/list``), not the
+    namespaced public name. Filtered tools never enter the registry,
+    so they cannot be dispatched via ``mcp_call``, never appear in
+    ``mcp_describe`` output, and never inflate ``mcp_namespaces``
+    counts. Use this to retire MCP tools that overlap with native
+    Nerya connectors. ``deny_tools`` is applied first; ``allow_tools``
+    (if not ``None``) then keeps only the listed survivors.
     """
 
     try:
@@ -459,13 +477,40 @@ def register_external_mcp_tools(
         _LOG.exception("mcp list_tools failed for %s", adapter.server_id)
         return []
 
+    deny_set = {str(name) for name in deny_tools or ()}
+    allow_set: Optional[set[str]] = (
+        {str(name) for name in allow_tools} if allow_tools is not None else None
+    )
+
     descriptors: list[ToolDescriptor] = []
+    skipped: list[str] = []
     for raw in raw_entries:
         if not isinstance(raw, dict):
             continue
+        upstream_name = str(raw.get("name") or "")
+        if upstream_name and upstream_name in deny_set:
+            skipped.append(upstream_name)
+            continue
+        if (
+            upstream_name
+            and allow_set is not None
+            and upstream_name not in allow_set
+        ):
+            skipped.append(upstream_name)
+            continue
         d = _make_descriptor(adapter=adapter, raw=raw)
-        if d is not None:
-            descriptors.append(d)
+        if d is None:
+            continue
+        if lazy:
+            from dataclasses import replace as _replace
+            d = _replace(d, lazy=True)
+        descriptors.append(d)
+
+    if skipped:
+        _LOG.info(
+            "mcp filter: server=%s dropped %d tool(s) by deny/allow: %s",
+            adapter.server_id, len(skipped), sorted(skipped),
+        )
 
     if not descriptors:
         return []
@@ -532,6 +577,9 @@ def attach_mcp_adapters(
     transforms: Optional[Iterable[MCPOutputTransform]] = None,
     replace: bool = True,
     resource_index: Optional[ResourceIndex] = None,
+    lazy_servers: Optional[Iterable[str]] = None,
+    deny_tools_by_server: Optional[Mapping[str, Iterable[str]]] = None,
+    allow_tools_by_server: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> dict[str, list[str]]:
     """Single-call wiring for "register MCP servers + install hook".
 
@@ -545,12 +593,29 @@ def attach_mcp_adapters(
     transforms (secret redaction, large-blob compactor, etc.) in
     front of the default for cumulative behaviour.
 
+    ``lazy_servers`` — set of adapter ``server_id`` values whose tool
+    descriptors should be registered with ``lazy=True`` so
+    the prompt-time render filter hides them until ``mcp_describe`` is
+    called for that namespace. Adapters not in the set keep eager
+    visibility (legacy behavior).
+
+    ``deny_tools_by_server`` / ``allow_tools_by_server`` — per-server
+    overlap filters keyed by ``server_id``. Forwarded
+    verbatim to :func:`register_external_mcp_tools`, which drops
+    matching upstream tools BEFORE the descriptor is built (so they
+    never enter the registry, never appear in ``mcp_describe``, and
+    cannot be dispatched via ``mcp_call``). Use this to retire MCP
+    tools that overlap with native Nerya connectors.
+
     Returns a ``{server_id: [public_tool_name, ...]}`` map for
     diagnostics. Adapters whose ``list_tools`` raise are skipped with
     an empty entry rather than aborting the whole boot.
     """
 
     transforms_list = list(transforms or [default_output_transform])
+    lazy_set = set(lazy_servers or ())
+    deny_map = dict(deny_tools_by_server or {})
+    allow_map = dict(allow_tools_by_server or {})
     out: dict[str, list[str]] = {}
     for adapter in adapters:
         try:
@@ -558,6 +623,9 @@ def attach_mcp_adapters(
                 registry=registry,
                 adapter=adapter,
                 replace=replace,
+                lazy=adapter.server_id in lazy_set,
+                deny_tools=deny_map.get(adapter.server_id, ()),
+                allow_tools=allow_map.get(adapter.server_id),
             )
         except Exception:
             _LOG.exception("attach_mcp_adapters: register failed for %s", adapter.server_id)

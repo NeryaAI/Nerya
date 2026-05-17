@@ -1,4 +1,4 @@
-"""Position protection executor (04-29 §7).
+"""Position protection executor.
 
 Watches a position against its :class:`ProtectionRule`. Default mode
 is *soft runtime* — the executor evaluates the rule against the

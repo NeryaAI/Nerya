@@ -8,24 +8,34 @@ import {
   type BacktestPanel,
 } from "../../lib/clientApi";
 import { Card, Empty, ErrorBanner } from "../Page";
+import { JsonView } from "../JsonView";
 import { SummaryCards } from "./SummaryCards";
 import { BacktestTables } from "./BacktestTables";
 
 export function BacktestChart({
   strategyId,
   ts,
+  proposalId,
 }: {
   strategyId: string;
   ts: string;
+  proposalId?: string | null;
 }) {
   const [chart, setChart] = useState<BacktestChartData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    clientApi.strategyBacktestChart(strategyId, ts)
+    setChart(null);
+    setError(null);
+    clientApi.strategyBacktestChart(strategyId, ts, proposalId)
       .then((res) => {
-        if (!cancelled) setChart(res.chart);
+        if (cancelled) return;
+        if (res.ok === false || !res.chart) {
+          setError(res.error || "Backtest chart is unavailable for this run.");
+          return;
+        }
+        setChart(res.chart);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -33,7 +43,7 @@ export function BacktestChart({
     return () => {
       cancelled = true;
     };
-  }, [strategyId, ts]);
+  }, [strategyId, ts, proposalId]);
 
   if (error) return <ErrorBanner error={error} />;
   if (!chart) return <Card title="Backtest"><Empty label="Loading backtest chart..." /></Card>;
@@ -58,7 +68,11 @@ function ChartPanel({ panel }: { panel: BacktestPanel }) {
     if (!node) return;
     const api = createChart(node, {
       height: panel.id === "price" ? 340 : 220,
-      layout: { background: { color: "transparent" }, textColor: "#cbd5e1" },
+      layout: {
+        background: { color: "transparent" },
+        textColor: "#cbd5e1",
+        attributionLogo: false,
+      },
       grid: { vertLines: { color: "rgba(148,163,184,.12)" }, horzLines: { color: "rgba(148,163,184,.12)" } },
       rightPriceScale: { borderColor: "rgba(148,163,184,.2)" },
       timeScale: { borderColor: "rgba(148,163,184,.2)", timeVisible: true },
@@ -80,9 +94,7 @@ function ChartPanel({ panel }: { panel: BacktestPanel }) {
       <Card title={panel.title}>
         <div className="embedded-list-scroll max-h-64 space-y-2">
           {(panel.annotations ?? []).map((row, idx) => (
-            <div key={idx} className="rounded border border-white/5 bg-ink-900/50 p-3 text-xs text-ink-200 font-mono">
-              {JSON.stringify(row)}
-            </div>
+            <JsonView key={idx} value={row} showRawToggle={false} />
           ))}
         </div>
       </Card>
@@ -98,6 +110,8 @@ function ChartPanel({ panel }: { panel: BacktestPanel }) {
 
 function renderSeries(api: IChartApi, panel: BacktestPanel) {
   for (const series of panel.series ?? []) {
+    const data = normalizeSeriesData(series.data ?? []);
+    if (!data.length) continue;
     if (series.kind === "candles") {
       const s = api.addCandlestickSeries({
         upColor: "#22c55e",
@@ -106,17 +120,17 @@ function renderSeries(api: IChartApi, panel: BacktestPanel) {
         wickUpColor: "#22c55e",
         wickDownColor: "#ef4444",
       });
-      s.setData(series.data as never);
+      s.setData(data as never);
     } else if (series.kind === "area") {
       const s = api.addAreaSeries({
         lineColor: "#ef4444",
         topColor: "rgba(239,68,68,.22)",
         bottomColor: "rgba(239,68,68,.02)",
       });
-      s.setData(series.data as never);
+      s.setData(data as never);
     } else if (series.kind === "line") {
       const s = api.addLineSeries({ color: panel.id === "rsi" ? "#38bdf8" : "#22c55e", lineWidth: 2 });
-      s.setData(series.data as never);
+      s.setData(data as never);
     } else if (series.kind === "markers") {
       // Markers attach to the first candlestick series; skipped when
       // no price series exists because lightweight-charts requires a series host.
@@ -125,3 +139,36 @@ function renderSeries(api: IChartApi, panel: BacktestPanel) {
   api.timeScale().fitContent();
 }
 
+function normalizeSeriesData(
+  rows: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const byTime = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const key = timeKey(row.time);
+    if (!key) continue;
+    byTime.set(key, row);
+  }
+  return Array.from(byTime.entries())
+    .sort((a, b) => compareTimeKeys(a[0], b[0]))
+    .map(([, row]) => row);
+}
+
+function timeKey(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value && typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function compareTimeKeys(a: string, b: string): number {
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+  return a.localeCompare(b);
+}

@@ -1,4 +1,4 @@
-"""Promotion gate — research promotion workflow §5 Task 7.
+"""Promotion gate.
 
 Gates the canonical ``draft -> paper -> canary -> live`` lifecycle on the
 presence and shape of structured ``ValidationReport`` artifacts (plus, in

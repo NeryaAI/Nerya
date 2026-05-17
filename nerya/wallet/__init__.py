@@ -10,6 +10,7 @@ Supported backends (all optional, all lazy-loaded):
 * ``okx_os``       — OKX On-Chain OS (https://web3.okx.com) REST API.
 * ``bitget``       — bitget-wallet-skill (Node/TS skill invoked via subprocess).
 * ``binance_agentic`` — binance-web3/binance-agentic-wallet skill (Node/TS).
+* ``xagt_agent_plugin`` — @xagt/agent-plugin login + OKX OnchainOS skill setup.
 
 Nothing in this package performs ``pip install`` or ``npm install`` on its
 own — each provider raises a :class:`WalletDependencyError` containing the
@@ -39,6 +40,8 @@ from .registry import (
     build_provider,
     list_configured_providers,
     list_providers,
+    list_wallet_market_data_sources,
+    market_data_sources_for_provider,
     readiness_report,
     resolve_active,
     resolve_for_account,
@@ -63,7 +66,9 @@ __all__ = [
     "WalletRegistry",
     "build_provider",
     "list_configured_providers",
+    "list_wallet_market_data_sources",
     "list_providers",
+    "market_data_sources_for_provider",
     "readiness_report",
     "resolve_active",
     "resolve_for_account",

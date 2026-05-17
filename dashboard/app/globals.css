@@ -4,23 +4,30 @@
 
 @import url("https://rsms.me/inter/inter.css");
 @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");
+/* Plus Jakarta Sans — refreshed display + body face. Matches the
+   "airy" reference dashboard look (rounded geometry, generous
+   x-height, gentle weight contrast) without losing legibility on the
+   dense data tables Nerya ships. */
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap");
 
 /* ── 暗色模式（默认）──────────────────────────────────────────── */
 :root {
   color-scheme: dark;
 
-  /* Ink 调色板 — 暗色默认值，亮色在 html.light 中覆盖 */
-  --ink-50:  #f6f5fb;
-  --ink-100: #e7e5f2;
-  --ink-200: #c9c7db;
-  --ink-300: #9c98ba;
-  --ink-400: #6b6a85;
-  --ink-500: #454560;
-  --ink-600: #2a2a3e;
-  --ink-700: #1e1e30;
-  --ink-800: #131426;
-  --ink-900: #0a0b1a;
-  --ink-950: #04040d;
+  /* Ink palette — RGB triples so Tailwind ``<alpha-value>`` opacity
+     modifiers (``bg-ink-800/70`` etc.) can compose against them.
+     The ``rgb(...)`` is constructed in ``tailwind.config.ts``. */
+  --ink-50:  246 245 251;
+  --ink-100: 231 229 242;
+  --ink-200: 201 199 219;
+  --ink-300: 156 152 186;
+  --ink-400: 107 106 133;
+  --ink-500: 69 69 96;
+  --ink-600: 42 42 62;
+  --ink-700: 30 30 48;
+  --ink-800: 19 20 38;
+  --ink-900: 10 11 26;
+  --ink-950: 4 4 13;
 
   --grid: rgba(139, 92, 246, 0.06);
   --bg-deep: #04040d;
@@ -50,18 +57,18 @@
 html.light {
   color-scheme: light;
 
-  /* Ink 调色板 — 亮色（与暗色近似翻转，保留紫调） */
-  --ink-50:  #0f0e1a;
-  --ink-100: #1a1830;
-  --ink-200: #2d2b50;
-  --ink-300: #4e4b72;
-  --ink-400: #6b6885;
-  --ink-500: #9895b8;
-  --ink-600: #c8c4e8;
-  --ink-700: #ddd9f5;
-  --ink-800: #eae7ff;
-  --ink-900: #f2f0ff;
-  --ink-950: #f8f7ff;
+  /* Ink palette — light mode (RGB triples, see :root above) */
+  --ink-50:  15 14 26;
+  --ink-100: 26 24 48;
+  --ink-200: 45 43 80;
+  --ink-300: 78 75 114;
+  --ink-400: 107 104 133;
+  --ink-500: 152 149 184;
+  --ink-600: 200 196 232;
+  --ink-700: 221 217 245;
+  --ink-800: 234 231 255;
+  --ink-900: 242 240 255;
+  --ink-950: 248 247 255;
 
   --grid: rgba(139, 92, 246, 0.05);
   --bg-deep: #ebe8ff;
@@ -88,14 +95,23 @@ html.light {
 }
 
 @supports (font-variation-settings: normal) {
-  html { font-family: "InterVariable", "Inter", system-ui, sans-serif; }
+  html { font-family: "Plus Jakarta Sans", "InterVariable", "Inter", system-ui, sans-serif; }
 }
 
 html, body {
   background-color: var(--bg-deep);
   color: var(--text-base);
+  font-family: "Plus Jakarta Sans", "InterVariable", "Inter", system-ui, sans-serif;
   font-feature-settings: "cv03", "cv04", "cv09", "ss01";
+  letter-spacing: 0;
+  overflow-x: clip;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+}
+
+@supports not (overflow: clip) {
+  html, body { overflow-x: hidden; }
 }
 
 body {
@@ -108,77 +124,53 @@ html.light body {
   background-color: var(--bg-deep);
 }
 
-/* Aurora — slow-drifting fluid mesh that lives in a fixed layer behind
-   the app. ::before / ::after give us two independently animated blobs
-   so the motion never looks tiled. */
+/* Aurora background — disabled in the airy redesign (2026-05).
+   The animated mesh competed with content and added visual noise. */
 body::before,
 body::after {
-  content: "";
-  position: fixed;
-  inset: -10%;
-  z-index: -1;
-  pointer-events: none;
-  filter: blur(96px);
-  will-change: transform;
-}
-body::before {
-  background:
-    radial-gradient(40% 36% at 18% 22%, rgba(109, 40, 217, 0.35), transparent 70%),
-    radial-gradient(30% 30% at 78% 10%, rgba(139, 92, 246, 0.18), transparent 70%);
-  opacity: 0.6;
-  animation: aurora-shift 18s ease-in-out infinite;
-}
-body::after {
-  background:
-    radial-gradient(34% 32% at 82% 88%, rgba(88, 28, 135, 0.28), transparent 70%),
-    radial-gradient(28% 30% at 12% 86%, rgba(139, 92, 246, 0.15), transparent 70%);
-  opacity: 0.5;
-  animation: aurora-shift 26s ease-in-out infinite reverse;
-}
-
-/* 亮色模式关闭 Aurora — 明亮背景下光晕无意义 */
-html.light body::before,
-html.light body::after {
   display: none;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  body::before, body::after { animation: none; }
-}
-
 @layer components {
+  /* Card surface — single thin shadow, no inset highlight, no violet glow.
+     2026-05 airy redesign: trade depth illusion for calm legibility. */
   .card {
-    @apply rounded-xl border border-brand-500/15 backdrop-blur-glass shadow-glass;
+    @apply rounded-xl border;
+    border-color: var(--line);
     background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
   }
   html.light .card {
-    box-shadow:
-      0 1px 3px rgba(109, 40, 217, 0.10),
-      0 4px 16px rgba(109, 40, 217, 0.08),
-      inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    background: var(--card);
+    border-color: rgba(109, 40, 217, 0.10);
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
   }
+  /* Hover: only darken the border, no translate, no extra shadow. */
   .card-hover {
-    @apply hover:border-brand-500/30 transition-colors;
+    @apply transition-colors duration-150;
   }
-  /* Liquid-glass surface — premium feature panels and the chat
-     transcript card. Uses a soft inner highlight + heavy backdrop
-     blur to feel translucent. */
+  .card-hover:hover {
+    border-color: var(--line-hi);
+  }
+  /* Glass surfaces collapsed into the same look as .card.
+     Kept as aliases so the 50+ existing call sites still compile. */
   .glass {
-    @apply rounded-2xl border border-white/5 backdrop-blur-glass shadow-glass;
-    background: rgba(255, 255, 255, 0.03);
+    @apply rounded-xl border;
+    border-color: var(--line);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
   }
   .glass-hi {
-    @apply rounded-2xl border border-white/10 backdrop-blur-glass shadow-glass;
-    background: rgba(255, 255, 255, 0.05);
+    @apply rounded-xl border;
+    border-color: var(--line-hi);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
   }
-  html.light .glass {
-    background: rgba(255, 255, 255, 0.7);
-    border-color: rgba(139, 92, 246, 0.1);
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 8px 24px rgba(139,92,246,0.06);
-  }
+  html.light .glass,
   html.light .glass-hi {
-    background: rgba(255, 255, 255, 0.85);
-    border-color: rgba(139, 92, 246, 0.15);
+    background: var(--card);
+    border-color: rgba(109, 40, 217, 0.10);
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
   }
   /* Subtle "thinking" gradient ring used on the agent avatar / running
      turn indicators. */
@@ -191,51 +183,63 @@ html.light body::after {
         rgba(139, 92, 246, 0) 360deg);
   }
   .card-head {
-    @apply flex items-center justify-between px-5 py-4 border-b border-brand-500/15;
+    @apply flex items-center justify-between px-5 py-4 border-b border-brand-500/10;
+  }
+  html.light .card-head {
+    @apply border-b-[rgba(109,40,217,0.08)];
   }
   .card-title {
-    @apply text-[15px] font-semibold tracking-tight;
-    color: #ffffff;
-  }
-  html.light .card-title {
+    @apply text-[15px] font-medium;
     color: var(--text-base);
+    letter-spacing: 0;
   }
   .card-subtle {
-    @apply text-[12px] leading-relaxed;
+    @apply text-[13px] leading-relaxed;
     color: var(--text-muted);
   }
   .stat-label {
-    @apply text-[10px] uppercase tracking-[0.18em] font-medium;
+    @apply text-[12px] font-medium;
     color: var(--text-muted);
+    letter-spacing: 0;
   }
   .stat-value {
-    @apply text-[26px] leading-tight font-semibold tabular-nums;
+    @apply text-[24px] leading-tight font-medium tabular-nums;
     color: var(--text-base);
+    letter-spacing: 0;
   }
-  .stat-delta-up { @apply text-accent-400 text-xs font-medium; }
-  .stat-delta-down { @apply text-[#ef4560] text-xs font-medium; }
+  .stat-delta-up { @apply text-emerald-500 text-[12px] font-medium; }
+  .stat-delta-down { @apply text-rose-500 text-[12px] font-medium; }
 
   .pill {
-    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px];
+    @apply inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-medium;
     border-color: var(--line-hi);
     background: var(--card);
     color: var(--text-muted);
+    letter-spacing: 0;
+    text-transform: none;
   }
-  .pill-ok { @apply border-accent-400/40 bg-accent-400/10 text-accent-400; }
-  .pill-warn { @apply border-[#f5a524]/40 bg-[#f5a524]/10 text-[#f5a524]; }
-  .pill-err { @apply border-[#ef4560]/40 bg-[#ef4560]/10 text-[#ef4560]; }
-  .pill-brand { @apply border-brand-500/40 bg-brand-500/15 text-brand-200; }
+  .pill-ok { @apply border-emerald-500/30 bg-emerald-500/10 text-emerald-500; }
+  .pill-warn { @apply border-amber-500/30 bg-amber-500/10 text-amber-500; }
+  .pill-err { @apply border-rose-500/30 bg-rose-500/10 text-rose-500; }
+  .pill-brand { @apply border-brand-500/30 bg-brand-500/10 text-brand-300; }
 
   .chip {
-    @apply inline-flex items-center gap-1 rounded-md bg-ink-800/70 border border-brand-500/20 px-2 py-0.5 text-[11px] text-ink-200 font-mono;
+    @apply inline-flex items-center gap-1 rounded-md border border-brand-500/20 px-2 py-0.5 text-[12px] text-ink-200 font-mono;
+    background: rgba(19, 20, 38, 0.7);
+    letter-spacing: 0;
+  }
+  html.light .chip {
+    background: rgba(255, 255, 255, 0.7);
   }
   .divider { @apply border-t border-brand-500/10; }
 
   .table {
-    @apply w-full text-sm text-ink-200;
+    @apply w-full text-[14px] text-ink-200;
   }
   .table th {
-    @apply text-left font-normal text-[10px] uppercase tracking-[0.14em] text-ink-400 border-b border-brand-500/10 py-2.5 px-3;
+    @apply text-left font-medium text-[12px] text-ink-400 border-b border-brand-500/10 py-2.5 px-3;
+    letter-spacing: 0;
+    text-transform: none;
   }
   .table td {
     @apply border-b border-brand-500/10 py-3 px-3 align-top;
@@ -274,7 +278,8 @@ html.light body::after {
   }
 
   .btn {
-    @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors;
+    @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors;
+    letter-spacing: 0;
   }
   .btn-ghost {
     @apply btn border border-brand-500/20 hover:bg-brand-500/10 hover:border-brand-500/40 transition-colors;
@@ -284,23 +289,29 @@ html.light body::after {
     color: var(--text-base);
   }
   .btn-primary {
-    @apply btn bg-brand-500 text-white hover:bg-brand-400 shadow-glow;
+    @apply btn bg-brand-500 text-white hover:bg-brand-400;
   }
 
   .input-dark {
-    @apply w-full bg-ink-900 border border-brand-500/20 rounded-md px-3 py-1.5 text-xs
+    @apply w-full bg-ink-900 border border-brand-500/20 rounded-md px-3 py-1.5 text-[13px]
            text-ink-100 placeholder:text-ink-500 focus:outline-none focus:border-brand-500/60;
   }
   textarea.input-dark { @apply font-mono; }
 
   .mode-toggle-wrap {
-    @apply inline-flex rounded-full border border-brand-500/20 bg-ink-900/60 p-0.5;
+    @apply inline-flex rounded-full border border-brand-500/20 p-0.5;
+    background: rgba(10, 11, 26, 0.6);
+  }
+  html.light .mode-toggle-wrap {
+    background: rgba(248, 247, 255, 0.6);
   }
   .mode-toggle-btn {
-    @apply px-3.5 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] rounded-full transition-colors;
+    @apply px-3.5 py-1 text-[12px] font-medium rounded-full transition-colors;
+    letter-spacing: 0;
+    text-transform: none;
   }
   .mode-toggle-active {
-    @apply bg-brand-500 text-white shadow-glow;
+    @apply bg-brand-500 text-white;
   }
   .mode-toggle-idle {
     @apply text-ink-300 hover:text-white;
@@ -330,27 +341,146 @@ html.light body::after {
     background: rgba(139, 92, 246, 0.08);
   }
   .sidebar-item-active {
-    @apply bg-gradient-to-r from-brand-500/30 via-brand-500/15 to-transparent text-white
-           shadow-[inset_2px_0_0_#b48bff,0_0_24px_-6px_rgba(139,92,246,0.45)];
+    @apply bg-brand-500/15 text-white
+           shadow-[inset_2px_0_0_#b48bff,0_0_18px_-8px_rgba(139,92,246,0.35)];
   }
 
-  /* Gradient text — used for hero titles and brand wordmarks. */
+  /* ── Top-nav pills ─────────────────────────────────────────────
+     2026-05 redesign: still pill-shaped, but no glass shell, no
+     multi-layer shadow. Just a thin border + single subtle shadow. */
+  .topnav-rail {
+    @apply inline-flex items-center gap-0.5 rounded-full border px-1 py-1;
+    border-color: var(--line);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+  }
+  html.light .topnav-rail {
+    background: var(--card);
+    border-color: rgba(109, 40, 217, 0.10);
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
+  }
+  .topnav-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5
+           text-[13px] font-medium transition-colors;
+    color: var(--text-muted);
+    letter-spacing: 0;
+  }
+  .topnav-pill:hover {
+    color: var(--text-base);
+    background: rgba(139, 92, 246, 0.08);
+  }
+  .topnav-pill-active {
+    color: #ffffff;
+    background: var(--violet);
+  }
+  html.light .topnav-pill-active {
+    color: #ffffff;
+    background: var(--violet);
+  }
+
+  /* Light mode contrast guard for the authenticated operator surface.
+     A lot of dashboard pages were originally tuned for dark glass panels
+     and still use ``text-white`` or pale accent tokens on translucent
+     cards. In light mode those surfaces become white or near-white, so
+     keep text dark unless the element itself is a solid action/badge. */
+  html.light .nerya-app-shell .text-white,
+  html.light .nerya-app-shell .hover\:text-white:hover {
+    color: var(--text-base);
+  }
+  html.light .nerya-app-shell .topnav-pill-active,
+  html.light .nerya-app-shell .topnav-pill-active .text-white,
+  html.light .nerya-app-shell .btn-primary,
+  html.light .nerya-app-shell .mode-toggle-active,
+  html.light .nerya-app-shell [class~="bg-brand-500"].text-white,
+  html.light .nerya-app-shell [class~="bg-brand-500/80"].text-white,
+  html.light .nerya-app-shell [class~="bg-rose-500"].text-white,
+  html.light .nerya-app-shell [class~="bg-amber-500"].text-white,
+  html.light .nerya-app-shell [class~="bg-[#ef4560]"].text-white {
+    color: #ffffff;
+  }
+  html.light .nerya-app-shell .sidebar-item-active {
+    color: var(--text-base);
+    background: rgba(139, 92, 246, 0.10);
+    box-shadow: inset 2px 0 0 #7c3aed, 0 10px 24px -18px rgba(109, 40, 217, 0.24);
+  }
+  html.light .nerya-app-shell .mode-toggle-idle {
+    color: var(--text-muted);
+  }
+  html.light .nerya-app-shell .mode-toggle-idle:hover {
+    color: var(--text-base);
+  }
+  html.light .nerya-app-shell .pill-brand,
+  html.light .nerya-app-shell .text-brand-100,
+  html.light .nerya-app-shell .text-brand-200,
+  html.light .nerya-app-shell .text-brand-300,
+  html.light .nerya-app-shell .text-brand-200\/80,
+  html.light .nerya-app-shell .text-brand-300\/60,
+  html.light .nerya-app-shell .text-brand-300\/80,
+  html.light .nerya-app-shell .hover\:text-brand-100:hover,
+  html.light .nerya-app-shell .hover\:text-brand-200:hover,
+  html.light .nerya-app-shell .group:hover .group-hover\:text-brand-200 {
+    color: #5b21b6;
+  }
+  html.light .nerya-app-shell .text-fluid-300,
+  html.light .nerya-app-shell .text-fluid-400,
+  html.light .nerya-app-shell .text-fluid-400\/80 {
+    color: #0e7490;
+  }
+  html.light .nerya-app-shell .text-accent-300,
+  html.light .nerya-app-shell .text-accent-400 {
+    color: #047857;
+  }
+  html.light .nerya-app-shell .text-amber-100,
+  html.light .nerya-app-shell .text-amber-200,
+  html.light .nerya-app-shell .text-\[\#f5a524\],
+  html.light .nerya-app-shell .text-\[\#ffd58a\],
+  html.light .nerya-app-shell .text-\[\#f5a524\]\/80 {
+    color: #92400e;
+  }
+  html.light .nerya-app-shell .text-rose-100,
+  html.light .nerya-app-shell .text-rose-100\/85,
+  html.light .nerya-app-shell .text-rose-200,
+  html.light .nerya-app-shell .text-rose-200\/60,
+  html.light .nerya-app-shell .text-rose-300,
+  html.light .nerya-app-shell .text-\[\#ffb3bd\],
+  html.light .nerya-app-shell .text-\[\#ef4560\],
+  html.light .nerya-app-shell .text-\[\#ef5564\] {
+    color: #be123c;
+  }
+  html.light .nerya-app-shell .text-emerald-100,
+  html.light .nerya-app-shell .text-emerald-200,
+  html.light .nerya-app-shell .text-emerald-200\/90 {
+    color: #047857;
+  }
+  html.light .nerya-app-shell .text-sky-200 {
+    color: #0369a1;
+  }
+  .topnav-pill-icon {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full p-2 transition-colors;
+    color: var(--text-muted);
+  }
+  .topnav-pill-icon:hover {
+    color: var(--text-base);
+    background: rgba(139, 92, 246, 0.10);
+  }
+
+  /* Gradient text — softer, single-tone violet wash for hero titles
+     and brand wordmarks. Cyan accents removed to keep the chrome
+     monochromatic instead of constantly competing with the AI palette. */
   .text-gradient-brand {
     @apply bg-clip-text text-transparent;
     background-image: linear-gradient(
       120deg,
-      #ffffff 0%,
-      #c9a8ff 38%,
-      #67e8f9 72%,
-      #ffffff 100%
+      #f5f1ff 0%,
+      #c9a8ff 60%,
+      #f5f1ff 100%
     );
   }
   html.light .text-gradient-brand {
     background-image: linear-gradient(
       120deg,
       #1a1830 0%,
-      #7c3aed 38%,
-      #0891b2 72%,
+      #7c3aed 60%,
       #1a1830 100%
     );
   }
@@ -358,34 +488,46 @@ html.light body::after {
     @apply bg-clip-text text-transparent;
     background-image: linear-gradient(
       90deg,
-      #b48bff 0%,
-      #22d3ee 100%
+      #d6c2ff 0%,
+      #a87cff 100%
+    );
+  }
+  html.light .text-gradient-ai {
+    background-image: linear-gradient(
+      90deg,
+      #5b21b6 0%,
+      #7c3aed 100%
     );
   }
 
-  /* AI-native message bubbles — used by the chat transcript. */
+  /* Chat bubbles — single thin shadow, keeps boundary feel for
+     dialog without competing with content. */
   .bubble-user {
-    @apply rounded-2xl rounded-br-md border border-brand-500/30
-           bg-gradient-to-br from-brand-500/30 to-brand-700/10
-           px-4 py-3 text-sm shadow-glow;
+    @apply rounded-2xl rounded-br-md border border-brand-500/25
+           px-4 py-3 text-[14px];
+    background: rgba(139, 92, 246, 0.12);
     color: var(--text-base);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.04);
   }
   html.light .bubble-user {
-    background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(109,40,217,0.08));
+    background: rgba(139, 92, 246, 0.08);
+    border-color: rgba(109, 40, 217, 0.18);
     color: #1a1830;
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
   }
   .bubble-ai {
-    @apply rounded-2xl rounded-bl-md border border-white/10
-           bg-white/[0.04] backdrop-blur-glass
-           px-4 py-3 text-sm shadow-glass;
-    border-left: 2px solid rgba(34, 211, 238, 0.55);
+    @apply rounded-2xl rounded-bl-md border
+           px-4 py-3 text-[14px];
+    border-color: var(--line);
+    background: var(--card);
     color: var(--text-base);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.04);
   }
   html.light .bubble-ai {
-    background: rgba(255,255,255,0.75);
-    border-color: rgba(139,92,246,0.1);
-    border-left: 2px solid rgba(8, 145, 178, 0.6);
+    background: var(--card);
+    border-color: rgba(109, 40, 217, 0.10);
     color: #1a1830;
+    box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
   }
   .typing-dot {
     @apply inline-block w-1.5 h-1.5 rounded-full bg-fluid-400;
@@ -417,6 +559,72 @@ html.light body::after {
   background-position: -1px -1px;
 }
 
+/* Hide scrollbar but keep scroll on the top-nav rail. The rail is
+   horizontally scrollable on narrow viewports — without this, a 1px
+   tall WebKit scrollbar adds a visible artifact to the pill bar. */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+@media (max-width: 640px) {
+  .card,
+  .glass,
+  .glass-hi {
+    border-radius: 0.875rem;
+  }
+
+  .card-head {
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+  }
+
+  .card-head > div {
+    max-width: 100%;
+  }
+
+  .stat-value {
+    font-size: 1.375rem;
+  }
+
+  .table th {
+    padding: 0.6rem 0.625rem;
+    font-size: 0.625rem;
+  }
+
+  .table td {
+    padding: 0.7rem 0.625rem;
+  }
+
+  .topnav-rail {
+    justify-content: flex-start;
+    border-radius: 0.875rem;
+    padding: 0.25rem;
+  }
+
+  .topnav-pill {
+    padding: 0.45rem 0.65rem;
+    font-size: 0.75rem;
+  }
+
+  .topnav-pill-icon {
+    width: 2rem;
+    height: 2rem;
+    padding: 0.375rem;
+  }
+
+  .embedded-table-scroll {
+    max-height: min(420px, 70dvh);
+  }
+
+  .input-dark {
+    font-size: 16px;
+  }
+
+  textarea.input-dark {
+    font-size: 13px;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -429,18 +637,23 @@ html.light body::after {
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
 
-@keyframes pulse-ring {
-  0% { box-shadow: 0 0 0 0 rgba(16, 217, 147, 0.55); }
-  70% { box-shadow: 0 0 0 10px rgba(16, 217, 147, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(16, 217, 147, 0); }
+/* pulse-ring / pulse-violet — softened in 2026-05 redesign.
+   Decorative status pulsing was too attention-grabbing; we now just
+   render a still dot. The classes are kept as no-ops so call sites
+   still compile during the rollout, and so prefers-reduced-motion
+   automatically benefits without per-call-site changes. */
+.pulse-ring,
+.pulse-violet {
+  animation: none;
 }
-.pulse-ring { animation: pulse-ring 2s infinite; }
 
-@keyframes pulse-violet {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.55); }
-  50% { box-shadow: 0 0 0 10px rgba(139, 92, 246, 0); }
+@media (prefers-reduced-motion: reduce) {
+  .pulse-ring,
+  .pulse-violet,
+  .typing-dot {
+    animation: none;
+  }
 }
-.pulse-violet { animation: pulse-violet 2.5s infinite; }
 
 /* 打字机光标闪烁 */
 @keyframes typewriter-blink {

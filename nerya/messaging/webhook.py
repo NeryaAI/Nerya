@@ -47,6 +47,7 @@ def send(outbox_messages: Path, message: dict[str, Any], *,
         "strategy_id": message.get("strategy_id"),
         "ts": message.get("ts"),
         "text": message.get("text"),
+        "attachments": message.get("attachments") if isinstance(message.get("attachments"), list) else [],
     }
     status, resp = tx.post(url, headers=headers, body=body, timeout=10.0)
     ok = 200 <= status < 300

@@ -131,7 +131,7 @@ function ScheduleRow({
   if (!entry) {
     return (
       <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3">
-        <div className="text-[10px] uppercase tracking-wider text-ink-500">
+        <div className="text-[11px] text-ink-500 font-medium">
           {label}
         </div>
         <div className="mt-1.5 text-xs text-ink-500 italic">
@@ -143,7 +143,7 @@ function ScheduleRow({
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3 text-sm">
       <div className="flex items-center justify-between">
-        <div className="text-[10px] uppercase tracking-wider text-ink-500">
+        <div className="text-[11px] text-ink-500 font-medium">
           {label}
         </div>
         <Pill tone={entry.enabled ? "ok" : "warn"}>

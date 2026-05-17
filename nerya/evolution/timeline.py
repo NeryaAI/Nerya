@@ -32,7 +32,7 @@ def build_timeline(
 
     paths = config.paths
     capped = max(1, min(int(limit or 120), 500))
-    read_limit = max(capped, 250)
+    read_limit = max(capped, 80)
 
     signals = list_signals(paths, strategy_id=strategy_id, limit=read_limit)
     events = list_events(paths, strategy_id=strategy_id, limit=read_limit)
@@ -57,7 +57,11 @@ def build_timeline(
         strategy_id=strategy_id,
         limit=read_limit,
     )
-    strategy_audits = _strategy_tuning_audits(paths, strategy_id=strategy_id)
+    strategy_audits = _strategy_tuning_audits(
+        paths,
+        strategy_id=strategy_id,
+        limit=min(read_limit, 20),
+    )
 
     proposals_by_id = {str(p.get("id") or ""): p for p in proposals}
     plans_by_id = {str(p.get("id") or ""): p for p in validation_plans}
@@ -205,14 +209,21 @@ def _event_item(
         for x in [*candidates, *capsules]
         if x.get("id")
     ]
+    summary = str(row.get("summary") or "")
+    if summary.startswith("Agent turn "):
+        title = "Agent turn completed"
+    elif summary.startswith("Agent session "):
+        title = "Agent session ended"
+    else:
+        title = _title(f"{outcome} evolution event")
     return {
         "id": f"event:{eid}",
         "record_id": eid,
         "type": "event",
         "stage": _stage_for_outcome(outcome),
         "ts": row.get("ts") or "",
-        "title": _title(f"{outcome} evolution event"),
-        "summary": row.get("summary") or "",
+        "title": title,
+        "summary": summary,
         "status": outcome,
         "outcome": outcome,
         "strategy_id": row.get("strategy_id"),
@@ -369,8 +380,13 @@ def _list_validation_plans(
     return rows[-max(1, int(limit)) :]
 
 
-def _strategy_tuning_audits(paths, *, strategy_id: str | None = None) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def _strategy_tuning_audits(
+    paths,
+    *,
+    strategy_id: str | None = None,
+    limit: int = 80,
+) -> list[dict[str, Any]]:
+    source_rows: list[dict[str, Any]] = []
     for row in jsonl.read_all(paths.journal("strategy_evolution")):
         if row.get("kind") != "strategy.tuning":
             continue
@@ -380,6 +396,11 @@ def _strategy_tuning_audits(paths, *, strategy_id: str | None = None) -> list[di
         run_id = str(row.get("run_id") or "")
         if not run_id:
             continue
+        source_rows.append(row)
+    rows: list[dict[str, Any]] = []
+    for row in source_rows[-max(1, int(limit)) :]:
+        sid = str(row.get("strategy_id") or "")
+        run_id = str(row.get("run_id") or "")
         review_path = paths.strategy(sid) / "reviews" / f"tuning_{run_id}.md"
         audit_path = paths.strategy(sid) / "reviews" / f"tuning_{run_id}_audit.json"
         audit_json = _read_json_file(audit_path) if audit_path.exists() else None
@@ -515,6 +536,7 @@ def _process_trace(
         "has_inputs": any(a.get("kind") == "input" for a in artifacts),
         "has_outputs": any(a.get("kind") == "output" for a in artifacts),
         "has_generated_docs": any(a.get("kind") == "document" for a in artifacts),
+        "has_file_changes": any(a.get("kind") == "change" for a in artifacts),
         "has_validation": any(a.get("kind") == "validation" for a in artifacts),
         "sections": sections,
         "artifacts": artifacts,
@@ -538,10 +560,45 @@ def _proposal_artifacts(proposal: dict[str, Any] | None) -> list[dict[str, Any]]
         "tuning_review.md", "tuning_audit.json",
     }
     paths = [p for p in sorted(pdir.iterdir()) if p.is_file() and p.name in wanted]
-    return [
-        _file_artifact(path, kind=_artifact_kind(path.name))
+    artifacts = [
+        _file_artifact(
+            path,
+            kind=_artifact_kind(path.name),
+            metadata={"scope": "proposal"},
+        )
         for path in paths[:20]
     ]
+    after_root = pdir / "after"
+    if after_root.exists() and after_root.is_dir():
+        for path in _proposal_after_files(after_root)[:40]:
+            rel = path.relative_to(pdir).as_posix()
+            workspace_rel = path.relative_to(after_root).as_posix()
+            artifacts.append(_file_artifact(
+                path,
+                kind="change",
+                metadata={
+                    "scope": "after",
+                    "operation": "proposed_write",
+                    "proposal_path": rel,
+                    "workspace_path": workspace_rel,
+                },
+            ))
+    return artifacts[:60]
+
+
+def _proposal_after_files(after_root: Path) -> list[Path]:
+    text_suffixes = {
+        ".cfg", ".conf", ".css", ".csv", ".diff", ".env", ".ini", ".js",
+        ".json", ".md", ".mjs", ".patch", ".py", ".toml", ".ts", ".tsx",
+        ".txt", ".yaml", ".yml",
+    }
+    out: list[Path] = []
+    for path in sorted(after_root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name == "SKILL.md" or path.suffix.lower() in text_suffixes:
+            out.append(path)
+    return out
 
 
 def _generated_docs(
@@ -563,7 +620,12 @@ def _generated_docs(
     return [_file_artifact(path, kind=_artifact_kind(path.name)) for path in paths[:8]]
 
 
-def _file_artifact(path: Path, *, kind: str) -> dict[str, Any]:
+def _file_artifact(
+    path: Path,
+    *,
+    kind: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     text = _read_text_file(path)
     return {
         "id": _safe_artifact_id(path.name),
@@ -575,6 +637,7 @@ def _file_artifact(path: Path, *, kind: str) -> dict[str, Any]:
         "preview": _preview_text(text, path.name),
         "truncated": len(text) > _preview_limit(path.name),
         "redacted": True,
+        "metadata": metadata or {},
     }
 
 
@@ -712,6 +775,7 @@ def _event_validation_plan(
 
 def _config_snapshot(config, *, strategy_id: str | None = None) -> dict[str, Any]:
     tuning = _strategy_tuning_snapshot(config.paths, strategy_id=strategy_id)
+    from .periodic_reflection import get_periodic_reflection
     return {
         "hooks": {
             "enabled": bool(config.get("agent.native.evolution_hooks_enabled", True)),
@@ -734,6 +798,7 @@ def _config_snapshot(config, *, strategy_id: str | None = None) -> dict[str, Any
             "allowed_step_types": sorted(ALLOWED_STEP_TYPES),
         },
         "strategy_tuning": tuning,
+        "periodic_reflection": get_periodic_reflection(config.paths),
     }
 
 

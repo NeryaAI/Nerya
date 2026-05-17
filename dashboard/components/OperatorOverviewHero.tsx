@@ -150,14 +150,14 @@ function HealthChip({
       ? { bar: "bg-[#ef4560]", text: "text-[#ef4560]", glow: "shadow-[0_0_12px_rgba(239,69,96,0.45)]" }
       : { bar: "bg-brand-400", text: "text-brand-300", glow: "shadow-[0_0_12px_rgba(180,139,255,0.45)]" };
   return (
-    <div className="relative overflow-hidden rounded-xl border border-white/5 bg-white/[0.03] backdrop-blur-glass px-3 py-3 hover:border-white/10 transition-colors min-w-0">
+    <div className="relative overflow-hidden rounded-xl border border-brand-500/15 bg-white/[0.03] backdrop-blur-glass px-3 py-3 hover:border-brand-500/25 transition-colors min-w-0">
       <span className={`absolute left-0 top-0 bottom-0 w-[2px] ${accent.bar} ${on ? accent.glow : "opacity-30"}`} />
       <div className="pl-2">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-ink-400">
+          <span className="text-[11px] font-medium text-ink-400">
             {t("status")}
           </span>
-          <span className={`text-[10px] font-mono uppercase tracking-[0.18em] shrink-0 ${on ? accent.text : "text-ink-500"}`}>
+          <span className={`text-[11px] font-mono shrink-0 ${on ? accent.text : "text-ink-500"}`}>
             {on ? t("on") : t("off")}
           </span>
         </div>

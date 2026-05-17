@@ -16,6 +16,9 @@ The script should:
 
 1. Load historical or fixture data from a checked-in JSON/CSV/JSONL file, or
    fetch a bounded public history when that is safe and deterministic enough.
+   Fixtures must be derived from observed historical facts. Do not use random,
+   synthetic, generated, or placeholder candles as evidence for performance
+   when `allow_mock=false`.
 2. Build a lightweight fake context that exposes only the surfaces the strategy
    uses.
 3. Step through events/bars/swaps in timestamp order.
@@ -56,7 +59,16 @@ The script should:
 - Prefer a crude executable replay over a polished paragraph claiming the
   market is hard to backtest.
 - Do not fabricate precision. If fills are unknown, report signals only.
+- If real historical/event data is unavailable, mark the replay blocked rather
+  than inventing data.
 - For meme coins, a reserve/swap replay is better than a generic CEX candle
   proxy.
+- For meme smart-money strategies, replay wallet labels, top-trader flow,
+  holder concentration, liquidity changes, swap history, and token security
+  snapshots when those histories are available. If only current snapshots are
+  available, mark the replay blocked or signal-only instead of inventing fills.
 - For prediction markets, settlement/outcome history plus event fixtures is
   better than pretending candles capture the information edge.
+- If this replay cannot be built from durable historical data, the operator may
+  still approve a standard-backtest waiver for promotion/live progression, but
+  the report must say this is a waiver rather than performance evidence.

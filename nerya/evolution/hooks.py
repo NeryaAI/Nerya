@@ -73,6 +73,7 @@ class EvolutionHookBus:
                 summary=f"Agent turn {turn_id} completed.",
                 evidence_refs=[f"turn:{turn_id}"],
                 metadata={
+                    "scope": "agent_turn",
                     "session_id": session_id,
                     "stopped_reason": getattr(result, "stopped_reason", None),
                     "tool_calls": (getattr(result, "budget", {}) or {}).get("tool_calls"),

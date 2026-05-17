@@ -62,12 +62,13 @@ import sys
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
-from .package import StrategyPackage, _parse_manifest, load_package
 from ..core import yaml_io
 from ..core.errors import TradingError
 from ..core.paths import WorkspacePaths
+from .agent_task_mode import agent_task_requested
+from .package import StrategyPackage, _parse_manifest, load_package
 
 
 _LOG = logging.getLogger(__name__)
@@ -137,6 +138,35 @@ DANGEROUS_OS_ATTRIBUTES: frozenset[str] = frozenset(
         "environ", "getenv",  # secret leakage
     }
 )
+
+BACKTEST_UNSUPPORTED_CONTEXT_ATTRIBUTES: dict[str, str] = {
+    "market_data.get_candles": (
+        "ctx.market_data.get_candles uses the native market_data tool shape, "
+        "not the StrategyContext facade. Use ctx.market.candles(market, "
+        "timeframe=..., limit=...) so the same code runs in live and backtest."
+    ),
+    "portfolio.get_account": (
+        "ctx.portfolio.get_account is not part of the strategy facade. Use "
+        "ctx.portfolio.equity_usd / cash_usd for account sizing and "
+        "ctx.config.accounts[0] for the configured account id."
+    ),
+    "portfolio.get_positions": (
+        "ctx.portfolio.get_positions is not part of the strategy facade. Use "
+        "ctx.portfolio.positions(market), which returns this strategy's own "
+        "position share and is mirrored by the backtest engine."
+    ),
+    "account_id": (
+        "ctx.account_id is not part of StrategyContext. Use "
+        "ctx.config.accounts[0] when the strategy needs its configured account."
+    ),
+}
+"""Generated-code surfaces that validate but fail during backtest.
+
+These are not security hazards; they are contract hazards. The agent often
+mixes the native ``market_data`` tool schema or older SDK snippets into
+``main.py``. Static validation should reject that before the operator sees a
+"validated" proposal whose first real backtest crashes.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +329,11 @@ def _validate_loaded(package: StrategyPackage) -> StrategyValidation:
 
     # Schema layer was already enforced when load_package returned —
     # but it doesn't check the cross-cuts we care about. Do those here.
-    if package.manifest.policy.allow_direct_order is False and not package.manifest.subagents:
+    if (
+        package.manifest.policy.allow_direct_order is False
+        and not package.manifest.subagents
+        and not agent_task_requested(package.manifest)
+    ):
         issues.append(
             StrategyValidationIssue(
                 severity="warning",
@@ -492,7 +526,33 @@ def _check_attribute(node: ast.Attribute, *, where: str) -> list[StrategyValidat
                 where=where,
             )
         )
+    issue = _strategy_context_contract_issue(name, lineno=node.lineno, where=where)
+    if issue is not None:
+        out.append(issue)
     return out
+
+
+def _strategy_context_contract_issue(
+    name: str,
+    *,
+    lineno: int,
+    where: str,
+) -> StrategyValidationIssue | None:
+    if not name:
+        return None
+    parts = name.split(".")
+    if not parts or parts[0] not in {"ctx", "context"}:
+        return None
+    suffix = ".".join(parts[1:])
+    message = BACKTEST_UNSUPPORTED_CONTEXT_ATTRIBUTES.get(suffix)
+    if not message:
+        return None
+    return StrategyValidationIssue(
+        severity="blocker",
+        code="unsupported_strategy_context_surface",
+        message=f"{message} (line {lineno})",
+        where=where,
+    )
 
 
 def _flatten_attr(node: ast.AST) -> str:

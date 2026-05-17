@@ -53,6 +53,8 @@ export type NativeBlockKind =
   | "thinking"
   | "tool_use"
   | "tool_result"
+  | "chart"
+  | "attachment"
   | string;
 
 export type NativeBlock = {
@@ -75,6 +77,20 @@ export type NativeBlock = {
   result?: unknown;
   // catch-all
   [key: string]: unknown;
+};
+
+export type ChatAttachment = {
+  id: string;
+  name: string;
+  mime_type: string;
+  size: number;
+  kind?: "image" | "document" | "file" | string;
+  data_url?: string;
+  url?: string;
+  text?: string;
+  artifact_uri?: string;
+  model_sent?: boolean;
+  reason?: string;
 };
 
 export type NativeBlockEnvelope = {
@@ -103,6 +119,7 @@ export type TurnPayload = {
   reply_text?: string;
   final_text?: string;
   events?: GatewayEvent[];
+  activity_events?: LiveEvent[];
   turn_id?: string;
   stopped_reason?: string | null;
   /** block envelopes emitted by the workspace-native agent
@@ -111,6 +128,7 @@ export type TurnPayload = {
    * The dashboard prefers ``blocks`` over ``actions``/``tool_trace``
    * when this array is non-empty. */
   blocks?: NativeBlockEnvelope[];
+  attachments?: ChatAttachment[];
   /** Identifies which agent harness produced this turn. Useful for
    * debug overlays (legacy vs native). */
   harness?: "legacy" | "native" | string;
@@ -121,6 +139,7 @@ export type UserMessage = {
   role: "user";
   ts: number;
   text: string;
+  attachments?: ChatAttachment[];
   backend_message_id?: string;
 };
 
@@ -206,6 +225,9 @@ export type ChatRunSettings = {
   model_tier: string;
   model_provider: string;
   model_id: string;
+  max_iterations: number;
+  max_total_tool_calls: number;
+  max_wall_seconds: number;
 };
 
 export type ChatModelOption = {
@@ -223,6 +245,7 @@ export type ChatThread = {
   created_ts: number;
   updated_ts: number;
   messages: ChatMessage[];
+  message_count?: number;
   /** When true, this thread mirrors a backend session that was started
    * outside the dashboard (curl, gateway, scripted run). The transcript
    * is reconstructed from the agent journal on hydrate. New messages
@@ -233,11 +256,17 @@ export type ChatThread = {
   /** Last time we re-pulled this thread's transcript from the backend.
    * Used to decide whether a refresh on focus is worth doing. */
   imported_at?: number;
+  transcript_loaded?: boolean;
+  transcript_cached_at?: number;
+  backend_updated_ts?: number;
 };
 
 const STORAGE_KEY = "nerya.chat.threads.v1";
 const ACTIVE_KEY = "nerya.chat.active";
-const SETTINGS_KEY = "nerya.chat.runSettings.v1";
+const SETTINGS_KEY = "nerya.chat.runSettings.v2";
+const TRANSCRIPT_CACHE_PREFIX = "nerya.chat.transcript.v1:";
+const TRANSCRIPT_CACHE_INDEX_KEY = "nerya.chat.transcriptIndex.v1";
+const MAX_TRANSCRIPT_CACHE_ENTRIES = 20;
 
 export const DEFAULT_CHAT_RUN_SETTINGS: ChatRunSettings = {
   reasoning_effort: "off",
@@ -245,6 +274,9 @@ export const DEFAULT_CHAT_RUN_SETTINGS: ChatRunSettings = {
   model_tier: "",
   model_provider: "",
   model_id: "",
+  max_iterations: 120,
+  max_total_tool_calls: 400,
+  max_wall_seconds: 1800,
 };
 
 export function uuid(): string {
@@ -256,6 +288,188 @@ export function uuid(): string {
 
 function isBrowser() {
   return typeof window !== "undefined" && typeof localStorage !== "undefined";
+}
+
+type TranscriptCacheIndexEntry = {
+  id: string;
+  cached_at: number;
+  updated_ts: number;
+  bytes: number;
+};
+
+function stripLargeMessagePayloads(message: ChatMessage): ChatMessage {
+  if (message.role !== "user" || !message.attachments?.length) return message;
+  return {
+    ...message,
+    attachments: message.attachments.map((attachment) => ({
+      ...attachment,
+      data_url: undefined,
+      text: undefined,
+    })),
+  };
+}
+
+function compactThreadForHistory(thread: ChatThread): ChatThread {
+  if (thread.imported && thread.transcript_cached_at) {
+    return {
+      ...thread,
+      messages: [],
+      transcript_loaded: false,
+    };
+  }
+  return {
+    ...thread,
+    messages: thread.messages.map(stripLargeMessagePayloads),
+  };
+}
+
+function transcriptCacheKey(id: string): string {
+  return `${TRANSCRIPT_CACHE_PREFIX}${id}`;
+}
+
+function loadTranscriptCacheIndex(): TranscriptCacheIndexEntry[] {
+  if (!isBrowser()) return [];
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(TRANSCRIPT_CACHE_INDEX_KEY) || "[]",
+    );
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((row): row is TranscriptCacheIndexEntry => {
+      return (
+        row &&
+        typeof row === "object" &&
+        typeof row.id === "string" &&
+        typeof row.cached_at === "number"
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveTranscriptCacheIndex(index: TranscriptCacheIndexEntry[]) {
+  if (!isBrowser()) return;
+  try {
+    localStorage.setItem(
+      TRANSCRIPT_CACHE_INDEX_KEY,
+      JSON.stringify(index.slice(0, MAX_TRANSCRIPT_CACHE_ENTRIES)),
+    );
+  } catch {
+    // The transcript cache is opportunistic; history metadata still works.
+  }
+}
+
+function pruneTranscriptCache(keepId?: string) {
+  if (!isBrowser()) return;
+  const index = loadTranscriptCacheIndex()
+    .filter((row) => row.id !== keepId)
+    .sort((a, b) => b.cached_at - a.cached_at);
+  const keep = index.slice(0, Math.max(0, MAX_TRANSCRIPT_CACHE_ENTRIES - 1));
+  const drop = index.slice(keep.length);
+  for (const row of drop) {
+    try {
+      localStorage.removeItem(transcriptCacheKey(row.id));
+    } catch {
+      // best effort
+    }
+  }
+  saveTranscriptCacheIndex(keep);
+}
+
+export function cacheThreadTranscript(thread: ChatThread): ChatThread {
+  if (!isBrowser() || thread.messages.length === 0) {
+    return { ...thread, transcript_loaded: thread.messages.length > 0 };
+  }
+  const cachedAt = Date.now();
+  const next: ChatThread = {
+    ...thread,
+    transcript_loaded: true,
+    transcript_cached_at: cachedAt,
+    backend_updated_ts: thread.updated_ts,
+    message_count: Math.max(thread.message_count ?? 0, thread.messages.length),
+  };
+  const raw = JSON.stringify({
+    thread: {
+      ...next,
+      messages: next.messages.map(stripLargeMessagePayloads),
+    },
+    cached_at: cachedAt,
+  });
+  pruneTranscriptCache(thread.id);
+  try {
+    localStorage.setItem(transcriptCacheKey(thread.id), raw);
+  } catch {
+    // Quota can be hit by very large tool traces. Drop older cached
+    // transcripts once more before giving up on this one.
+    for (const row of loadTranscriptCacheIndex().sort((a, b) => a.cached_at - b.cached_at)) {
+      if (row.id === thread.id) continue;
+      try {
+        localStorage.removeItem(transcriptCacheKey(row.id));
+        localStorage.setItem(transcriptCacheKey(thread.id), raw);
+        break;
+      } catch {
+        // keep pruning
+      }
+    }
+  }
+  try {
+    if (localStorage.getItem(transcriptCacheKey(thread.id)) !== raw) {
+      return { ...thread, transcript_loaded: true };
+    }
+    const index = loadTranscriptCacheIndex().filter((row) => row.id !== thread.id);
+    index.unshift({
+      id: thread.id,
+      cached_at: cachedAt,
+      updated_ts: thread.updated_ts,
+      bytes: raw.length,
+    });
+    saveTranscriptCacheIndex(index);
+    return next;
+  } catch {
+    return { ...thread, transcript_loaded: true };
+  }
+}
+
+export function loadCachedThreadTranscript(
+  id: string,
+  minUpdatedTs = 0,
+): ChatThread | null {
+  if (!isBrowser() || !id) return null;
+  try {
+    const raw = localStorage.getItem(transcriptCacheKey(id));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const thread = parsed?.thread as ChatThread | undefined;
+    if (!thread || thread.id !== id || !Array.isArray(thread.messages)) {
+      return null;
+    }
+    if (thread.messages.length === 0) {
+      localStorage.removeItem(transcriptCacheKey(id));
+      saveTranscriptCacheIndex(
+        loadTranscriptCacheIndex().filter((row) => row.id !== id),
+      );
+      return null;
+    }
+    const updated = Number(thread.backend_updated_ts || thread.updated_ts || 0);
+    if (minUpdatedTs > 0 && updated + 1000 < minUpdatedTs) return null;
+    const cachedAt = Date.now();
+    const index = loadTranscriptCacheIndex().filter((row) => row.id !== id);
+    index.unshift({
+      id,
+      cached_at: cachedAt,
+      updated_ts: updated,
+      bytes: raw.length,
+    });
+    saveTranscriptCacheIndex(index);
+    return {
+      ...thread,
+      transcript_loaded: true,
+      transcript_cached_at: cachedAt,
+      imported: true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function loadThreads(): ChatThread[] {
@@ -274,7 +488,10 @@ export function loadThreads(): ChatThread[] {
 export function saveThreads(threads: ChatThread[]) {
   if (!isBrowser()) return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(threads));
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(threads.map(compactThreadForHistory)),
+    );
   } catch {
     // ignore quota errors — the UI will keep working with in-memory state.
   }
@@ -289,6 +506,22 @@ export function saveActiveId(id: string | null) {
   if (!isBrowser()) return;
   if (id === null) localStorage.removeItem(ACTIVE_KEY);
   else localStorage.setItem(ACTIVE_KEY, id);
+}
+
+function saneRunLimit(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const n =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
 }
 
 export function loadRunSettings(): ChatRunSettings {
@@ -313,6 +546,24 @@ export function loadRunSettings(): ChatRunSettings {
           : "",
       model_id:
         typeof parsed.model_id === "string" ? parsed.model_id.trim() : "",
+      max_iterations: saneRunLimit(
+        parsed.max_iterations,
+        DEFAULT_CHAT_RUN_SETTINGS.max_iterations,
+        1,
+        240,
+      ),
+      max_total_tool_calls: saneRunLimit(
+        parsed.max_total_tool_calls,
+        DEFAULT_CHAT_RUN_SETTINGS.max_total_tool_calls,
+        1,
+        1000,
+      ),
+      max_wall_seconds: saneRunLimit(
+        parsed.max_wall_seconds,
+        DEFAULT_CHAT_RUN_SETTINGS.max_wall_seconds,
+        10,
+        7200,
+      ),
     };
   } catch {
     return DEFAULT_CHAT_RUN_SETTINGS;
@@ -358,7 +609,7 @@ export function upsertThread(
 
 /**
  * Convert the bus-event stream from ``/agent/stream/events`` into the
- * Anthropic-style block envelope shape used by the dashboard's
+ * block-envelope shape used by the dashboard's
  * ``NativeBlocksTrack`` renderer. The kernel maps native blocks ↔ bus
  * events 1:1 on the way out (see ``nerya/agent/kernel.py`` ``_event_sink``):
  *
@@ -366,6 +617,7 @@ export function upsertThread(
  *   thinking      → ``turn.step`` step.kind=thinking
  *   tool_use      → ``tool.start``
  *   tool_result   → ``tool.complete``
+ *   chart         → ``chart.block``        (kernel chart_hook splice)
  *
  * Reversing the mapping lets us render live progress through the same
  * block UI used for the final ``turn.blocks`` payload — one transcript
@@ -860,6 +1112,56 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         const block = ensureTeamTrace(ev);
         block.status = ev.ok === false || ev.error ? "failed" : "completed";
         block.result = (ev as Record<string, unknown>).result;
+      }
+      continue;
+    }
+
+    if (ev.kind === "chart.block") {
+      flushText();
+      const evRec = ev as Record<string, unknown>;
+      const chartBlockRaw = evRec.chart_block;
+      if (!chartBlockRaw || typeof chartBlockRaw !== "object") continue;
+      const chartBlock = chartBlockRaw as Record<string, unknown>;
+      const chartId = String(chartBlock.chart_id ?? evRec.chart_id ?? "");
+      if (!chartId) continue;
+      // Idempotent: if we already saw this chart_id, skip — the
+      // streaming bus may emit the same envelope after a reconnect.
+      const dup = out.find(
+        (entry) =>
+          entry.kind === "chart" &&
+          entry.block &&
+          (entry.block as Record<string, unknown>).chart_id === chartId,
+      );
+      if (dup) continue;
+      const callId = String(evRec.call_id ?? evRec.tool_call_id ?? "");
+      const block: Record<string, unknown> = {
+        ...chartBlock,
+        kind: "chart",
+        index: out.length,
+      };
+      if (callId && !block.call_id) block.call_id = callId;
+      // Try to insert immediately after the matching tool_result so
+      // the chart sits where the user expects (next to the call). If
+      // we never saw the tool_result yet (event ordering), append.
+      let insertAt = -1;
+      if (callId) {
+        for (let i = out.length - 1; i >= 0; i -= 1) {
+          const entry = out[i];
+          if (
+            entry.kind === "tool_result" &&
+            entry.block &&
+            (entry.block as Record<string, unknown>).call_id === callId
+          ) {
+            insertAt = i + 1;
+            break;
+          }
+        }
+      }
+      const env: NativeBlockEnvelope = { block, kind: "chart" };
+      if (insertAt >= 0) {
+        out.splice(insertAt, 0, env);
+      } else {
+        out.push(env);
       }
       continue;
     }

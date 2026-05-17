@@ -136,9 +136,24 @@ def _equity_curve(client, limit: int = 120) -> list[dict[str, Any]]:
 
 def _llm_tier_summary(client) -> dict[str, Any]:
     cfg = client.config
-    tiers = cfg.get("llm.tiers") or {}
+    # IMPORTANT: credentials live one level up from the tier in the YAML —
+    # they are stored on ``llm.providers.<name>.provider_key_ref`` rather
+    # than directly on the tier. The previous implementation read the
+    # tier dict in isolation and reported `has_key=False` for every
+    # operator who used the standard "configure provider once, point
+    # multiple tiers at it" flow, which made the wizard wedge on
+    # "No LLM tier has both a provider and credentials" even when the
+    # `/llm/config` merged view showed all four tiers as ready.
+    # `effective_tiers` performs the same inheritance the dashboard
+    # already relies on, so we reuse it instead of re-implementing the
+    # merge here.
+    try:
+        from ..llm.ops import effective_tiers
+        tiers_map = effective_tiers(cfg)
+    except Exception:
+        tiers_map = cfg.get("llm.tiers") or {}
     summary: list[dict[str, Any]] = []
-    for name, raw in tiers.items():
+    for name, raw in tiers_map.items():
         cfg_dict = raw or {}
         provider = (cfg_dict.get("provider") or "").lower()
         has_key = bool(
@@ -158,10 +173,23 @@ def _llm_tier_summary(client) -> dict[str, Any]:
 
 
 def _strategy_package_count(client) -> int:
-    try:
-        from ..strategies.package import load_packages
+    """Return a cheap package count for high-frequency dashboard BFF calls.
 
-        return len(list(load_packages(client.config.paths)))
+    ``load_packages`` validates and hashes every file in every strategy
+    package. That is appropriate for strategy detail/validation surfaces, but
+    the operator nav, overview, and setup-readiness endpoints only need a
+    presence/count signal and are fetched on every dashboard page.
+    """
+
+    try:
+        root = client.config.paths.strategies
+        if not root.exists():
+            return 0
+        return sum(
+            1
+            for path in root.iterdir()
+            if path.is_dir() and (path / "strategy.yml").exists()
+        )
     except Exception:
         return 0
 
@@ -197,10 +225,33 @@ def _exchange_providers(client) -> list[dict[str, Any]]:
 
 
 def _accounts(client) -> list[dict[str, Any]]:
+    """Return the list of configured trading accounts.
+
+    Previously this called ``client.discovery.accounts()``, but
+    ``InternalClient`` does not expose a ``.discovery`` attribute, so
+    the call always raised ``AttributeError``, was silently swallowed,
+    and the readiness probe reported "no trading account" even when
+    ``accounts.yml`` had a perfectly good `paper_main` row. We delegate
+    to :mod:`nerya.trading.accounts` directly — the same source the
+    ``/discovery/accounts`` BFF route uses.
+    """
     try:
-        return list(client.discovery.accounts().get("accounts", []))
+        from ..trading import accounts as accounts_mod
+        loaded = accounts_mod.load_accounts(client.config.paths)
     except Exception:
         return []
+    out: list[dict[str, Any]] = []
+    for acc in loaded.values():
+        out.append({
+            "id": acc.id,
+            "exchange": acc.exchange,
+            "venue": acc.venue or acc.exchange,
+            "kind": acc.kind,
+            "mode": acc.mode,
+            "status": acc.status,
+            "live_trading_enabled": bool(acc.live_trading_enabled),
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -256,14 +307,6 @@ _PRIMARY_NAV: tuple[dict[str, Any], ...] = (
         "always_visible": True,
     },
     {
-        "id": "self_evolution",
-        "label": "Self Evolution",
-        "href": "/self-evolution",
-        "icon": "evolution",
-        "tagline": "Signals, assets, proposals, validation, outcomes.",
-        "always_visible": True,
-    },
-    {
         "id": "inbox",
         "label": "Action Inbox",
         "href": "/inbox",
@@ -282,7 +325,56 @@ _PRIMARY_NAV: tuple[dict[str, Any], ...] = (
 )
 
 
-_ADVANCED_NAV: tuple[dict[str, Any], ...] = ()
+_ADVANCED_NAV: tuple[dict[str, Any], ...] = (
+    {
+        "id": "self_evolution",
+        "label": "Self Evolution",
+        "href": "/self-evolution",
+        "icon": "evolution",
+        "tagline": "Signals, assets, proposals, validation, outcomes.",
+        "always_visible": True,
+    },
+    {
+        "id": "memory",
+        "label": "Memory",
+        "href": "/memory",
+        "icon": "memory",
+        "tagline": "Notebook entries, activity log, write rules, evidence vault, operator profile.",
+        "always_visible": True,
+    },
+    {
+        "id": "web_search",
+        "label": "Web search",
+        "href": "/web-search",
+        "icon": "search",
+        "tagline": "Multi-engine search chain + per-engine API keys with rotation.",
+        "always_visible": True,
+    },
+    {
+        "id": "browsers",
+        "label": "Browsers",
+        "href": "/browsers",
+        "icon": "browsers",
+        "tagline": "Engines + interactive session in one workspace. Install engines, then drive a live browser with click/scroll/type and watch its console & network.",
+        "always_visible": True,
+    },
+    {
+        "id": "env_vault",
+        "label": "Env & Vault",
+        "href": "/env-vault",
+        "icon": "vault",
+        "tagline": "Encrypted runtime env injection plus reusable vault:// references.",
+        "always_visible": True,
+    },
+    {
+        "id": "gateway",
+        "label": "Gateway",
+        "href": "/gateway",
+        "icon": "messages",
+        "tagline": "Configure each chat platform with its own inline setup docs, then watch live traffic.",
+        "always_visible": True,
+    },
+)
 
 
 def _capability_flags(client) -> dict[str, bool]:

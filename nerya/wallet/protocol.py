@@ -67,6 +67,7 @@ class WalletCapabilities:
     balance: WalletCapability = field(default_factory=WalletCapability)
     quote: WalletCapability = field(default_factory=WalletCapability)
     swap: WalletCapability = field(default_factory=WalletCapability)
+    market_data: WalletCapability = field(default_factory=WalletCapability)
     execution_profile: str = "stub"
     chains: tuple[str, ...] = ()
     notes: str = ""
@@ -83,6 +84,7 @@ class WalletCapabilities:
             "balance": self.balance.to_dict(),
             "quote": self.quote.to_dict(),
             "swap": self.swap.to_dict(),
+            "market_data": self.market_data.to_dict(),
             "execution_profile": self.execution_profile,
             "chains": list(self.chains),
             "notes": self.notes,

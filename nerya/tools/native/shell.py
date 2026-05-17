@@ -1,9 +1,8 @@
 """Native ``run_shell`` tool with risk classification + sandbox enforcement.
 
 Implementation notes:
-* coding-agent's ``BashTool/bashPermissions.ts`` — we approximate the
-  *intent* (per-call risk classification, prefix rules, destructive
-  patterns) without taking a runtime dep on a JS shell parser.
+* Use per-call risk classification, prefix rules, and destructive-pattern
+  detection without taking a runtime dependency on a shell parser.
 
 Behaviour:
 
@@ -31,6 +30,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from ...security.runtime_env import build_process_env
 from ..types import (
     ContextModifier,
     RiskLevel,
@@ -138,9 +138,8 @@ def _looks_like_config_write(cmd: str, heads: list[str]) -> bool:
 def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     """Map ``run_shell`` arguments -> :class:`RiskLevel`.
 
-    Matches coding-agent's *spirit* (allow read commands without prompt,
-    ask on writes/network, hard-block destructive without explicit
-    approval) without forking ``mvdan/sh``.
+    Allow read commands without prompt, ask on writes/network, and
+    hard-block destructive commands without explicit approval.
     """
 
     cmd = str((arguments or {}).get("command") or "")
@@ -243,7 +242,10 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
             ),
         )
 
-    env = os.environ.copy()
+    try:
+        env = build_process_env(os.environ, root)
+    except Exception:
+        env = os.environ.copy()
     started = time.monotonic()
     proc: Optional[subprocess.Popen[str]] = None
     try:

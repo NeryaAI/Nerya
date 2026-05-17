@@ -3,11 +3,13 @@
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, Pill } from "../Page";
+import { Select } from "../Select";
 import {
   clientApi,
   type AccountSummary,
   type WalletBinding,
 } from "../../lib/clientApi";
+import { confirm as confirmDialog } from "../../lib/dialogs";
 
 interface Props {
   strategyId: string;
@@ -19,7 +21,7 @@ interface Props {
 }
 
 /**
- * Strategy bind card (04-29 §11 P9).
+ * Strategy bind card.
  *
  * Pulls the live account roster from /accounts/list and the wallet
  * bindings from /wallet/configured so the operator can re-bind a
@@ -82,12 +84,53 @@ export function StrategyBindCard({
 
   async function applyAccount() {
     if (!accountDirty) return;
+    // Pre-flight soft warning: if the target
+    // account is already bound to a non-archived strategy, surface
+    // a confirm dialog *before* we hit /strategy/bind_account so the
+    // operator can either back out or be reminded that
+    // PnL / capital reservations / snapshots are shared once two
+    // strategies share an account. The dialog explicitly recommends
+    // setting up an exchange sub-account, which is what the backend
+    // warning text says too — keeping the two in sync.
+    if (selectedAccount) {
+      const shared = (selectedAccount.bound_strategies || []).filter(
+        (entry) => entry.strategy_id && entry.strategy_id !== strategyId,
+      );
+      if (shared.length > 0) {
+        const names = shared
+          .slice(0, 5)
+          .map((entry) => entry.strategy_id)
+          .join(", ");
+        const proceed = await confirmDialog({
+          title: t("shareWarningTitle"),
+          message: t("shareWarningMessage", {
+            count: shared.length,
+            accountId,
+            strategies: names,
+          }),
+          okLabel: t("shareWarningContinue"),
+          cancelLabel: t("shareWarningCancel"),
+          tone: "warning",
+        });
+        if (!proceed) return;
+      }
+    }
     setBusy("account");
     onError(null);
     try {
       const res = await clientApi.strategyBindAccount(strategyId, accountId);
       if (!res.ok) throw new Error("strategy_bind_account_failed");
-      onNotice(t("boundAccount", { strategyId, accountId }));
+      if (res.warning && res.warning.code === "account_already_bound") {
+        onNotice(
+          t("boundAccountWithWarning", {
+            strategyId,
+            accountId,
+            count: res.warning.strategies?.length ?? 0,
+          }),
+        );
+      } else {
+        onNotice(t("boundAccount", { strategyId, accountId }));
+      }
       await onRefresh();
       void load();
     } catch (e) {
@@ -139,35 +182,39 @@ export function StrategyBindCard({
         <div>
           <label className="text-[11px] text-ink-400">{t("account")}</label>
           <div className="mt-1 flex gap-2">
-            <select
-              value={accountId}
-              onChange={(e) => setAccountId(e.target.value)}
-              className="input-dark font-mono flex-1"
-              disabled={accounts.length === 0}
-            >
-              {accounts.length === 0 ? (
-                <option value="">{t("noAccounts")}</option>
-              ) : null}
-              {!accountId && accounts.length > 0 ? (
-                <option value="">{t("pickAccount")}</option>
-              ) : null}
-              {accounts.map(({ profile }) => {
-                const disabled = profile.status !== "active";
-                return (
-                  <option
-                    key={profile.id}
-                    value={profile.id}
-                    disabled={disabled}
-                    title={
-                      disabled ? t("accountIs", { status: profile.status }) : undefined
-                    }
-                  >
-                    {profile.id} · {profile.venue} · {profile.mode}
-                    {disabled ? ` (${profile.status})` : ""}
-                  </option>
-                );
-              })}
-            </select>
+            <div className="flex-1">
+              <Select
+                value={accountId}
+                onChange={(value) => setAccountId(value)}
+                disabled={accounts.length === 0}
+                options={(() => {
+                  const opts = [] as Array<{
+                    value: string;
+                    label: string;
+                    disabled?: boolean;
+                  }>;
+                  if (accounts.length === 0) {
+                    opts.push({ value: "", label: t("noAccounts") });
+                  } else if (!accountId) {
+                    opts.push({ value: "", label: t("pickAccount") });
+                  }
+                  for (const { profile } of accounts) {
+                    const disabled = profile.status !== "active";
+                    opts.push({
+                      value: profile.id,
+                      disabled,
+                      label: `${profile.id} · ${profile.venue} · ${profile.mode}${
+                        disabled ? ` (${profile.status})` : ""
+                      }`,
+                    });
+                  }
+                  return opts;
+                })()}
+                size="sm"
+                ariaLabel={t("account")}
+                className="font-mono"
+              />
+            </div>
             <button
               onClick={() => void applyAccount()}
               disabled={!accountDirty || Boolean(accountBlocked) || busy !== null}
@@ -208,19 +255,23 @@ export function StrategyBindCard({
         <div>
           <label className="text-[11px] text-ink-400">{t("wallet")}</label>
           <div className="mt-1 flex gap-2">
-            <select
-              value={walletId}
-              onChange={(e) => setWalletId(e.target.value)}
-              className="input-dark flex-1"
-            >
-              <option value="">{t("walletFallback")}</option>
-              {walletBindings.map((binding) => (
-                <option key={binding.wallet_id} value={binding.wallet_id}>
-                  {binding.label || binding.wallet_id} · {binding.provider}
-                  {binding.source === "legacy" ? ` (${t("legacyTag")})` : ""}
-                </option>
-              ))}
-            </select>
+            <div className="flex-1">
+              <Select
+                value={walletId}
+                onChange={(value) => setWalletId(value)}
+                options={[
+                  { value: "", label: t("walletFallback") },
+                  ...walletBindings.map((binding) => ({
+                    value: binding.wallet_id,
+                    label: `${binding.label || binding.wallet_id} · ${binding.provider}${
+                      binding.source === "legacy" ? ` (${t("legacyTag")})` : ""
+                    }`,
+                  })),
+                ]}
+                size="sm"
+                ariaLabel={t("wallet")}
+              />
+            </div>
             <button
               onClick={() => void applyWallet()}
               disabled={!walletDirty || busy !== null}

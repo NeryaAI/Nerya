@@ -1,6 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import { Card, Empty } from "../Page";
+import { JsonView } from "../JsonView";
+import { ChevronDownIcon, ChevronRightIcon } from "../icons";
 
 export function BacktestTables({
   tables,
@@ -27,10 +30,10 @@ export function BacktestTables({
                 </thead>
                 <tbody>
                   {table.rows.map((row, idx) => (
-                    <tr key={idx} className="border-t border-white/5">
+                    <tr key={idx} className="border-t border-brand-500/10">
                       {row.map((cell, cellIdx) => (
-                        <td key={cellIdx} className="py-2 pr-3 text-ink-200 font-mono">
-                          {formatCell(cell)}
+                        <td key={cellIdx} className="py-2 pr-3 text-ink-200 font-mono align-top">
+                          <Cell value={cell} />
                         </td>
                       ))}
                     </tr>
@@ -45,9 +48,51 @@ export function BacktestTables({
   );
 }
 
-function formatCell(value: unknown): string {
-  if (typeof value === "number") return Number.isFinite(value) ? value.toFixed(4) : "inf";
-  if (value && typeof value === "object") return JSON.stringify(value);
-  return String(value ?? "");
+function Cell({ value }: { value: unknown }) {
+  const [open, setOpen] = useState(false);
+  if (value === null || value === undefined || value === "") {
+    return <span className="text-ink-500">—</span>;
+  }
+  if (typeof value === "number") {
+    return <span>{Number.isFinite(value) ? formatNumber(value) : "inf"}</span>;
+  }
+  if (typeof value === "boolean") {
+    return (
+      <span className={value ? "text-emerald-300" : "text-rose-300"}>
+        {value ? "true" : "false"}
+      </span>
+    );
+  }
+  if (typeof value !== "object") {
+    return <span>{String(value)}</span>;
+  }
+  const summary = Array.isArray(value)
+    ? `[${value.length} item${value.length === 1 ? "" : "s"}]`
+    : `{${Object.keys(value as Record<string, unknown>).length} field${
+        Object.keys(value as Record<string, unknown>).length === 1 ? "" : "s"
+      }}`;
+  return (
+    <div className="min-w-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="cursor-pointer inline-flex items-center gap-1 text-[11px] text-brand-200 hover:text-brand-100"
+      >
+        {open ? <ChevronDownIcon className="h-3 w-3" /> : <ChevronRightIcon className="h-3 w-3" />}
+        {summary}
+      </button>
+      {open ? (
+        <div className="mt-1 normal-case">
+          <JsonView value={value} showRawToggle={false} className="bg-ink-950/40" />
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
+function formatNumber(value: number): string {
+  if (!Number.isFinite(value)) return "inf";
+  if (Math.abs(value) >= 100) return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (Math.abs(value) >= 1) return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  return value.toLocaleString(undefined, { maximumFractionDigits: 6 });
+}

@@ -4,12 +4,15 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useEffect, useState } from "react";
+import { authHeaders, isLocalDashboardHost } from "../lib/auth";
 import { callApi, clientApi } from "../lib/clientApi";
+import { useDialogs } from "../lib/dialogs";
 import { formatTime, timezoneLabel } from "../lib/format";
 import { useUiSettings } from "../lib/settings";
 import { AccountSelector } from "./AccountSelector";
 import {
   BellIcon,
+  PowerIcon,
   SearchIcon,
   SettingsIcon,
   StarIcon,
@@ -64,11 +67,13 @@ export function TopHeader() {
   const tNav = useTranslations("nav");
   const tHeader = useTranslations("topHeader");
   const tCommon = useTranslations("common");
+  const { confirm, toast } = useDialogs();
   const title = safeTitleTranslate(tNav, pathname) ?? fallbackTitle(pathname);
   const now = useClock();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [online, setOnline] = useState<boolean>(true);
   const [inboxNeedsAction, setInboxNeedsAction] = useState<number>(0);
+  const [restartBusy, setRestartBusy] = useState<boolean>(false);
   const [systemHealth, setSystemHealth] = useState<"ok" | "warn" | "blocked" | "error">(
     "ok",
   );
@@ -123,26 +128,102 @@ export function TopHeader() {
   // ``workspace`` (live_trading_enabled, kill_switch, root) is still
   // polled to drive the OFFLINE indicator below.
   void workspace;
-  const healthColor =
+  const healthTextClass =
     systemHealth === "ok"
-      ? "bg-emerald-500"
+      ? "text-emerald-500"
       : systemHealth === "warn"
-      ? "bg-amber-400"
-      : "bg-rose-500";
-  const healthLabel = systemHealth.toUpperCase();
+      ? "text-amber-500"
+      : "text-rose-500";
+  // The /workspace probe may have already flipped us offline before
+  // /operator/overview returns; collapse them into a single text label.
+  const healthLabel = online
+    ? systemHealth === "ok"
+      ? tCommon("online")
+      : systemHealth === "warn"
+      ? tHeader("workspaceWarn")
+      : tHeader("workspaceBlocked")
+    : tCommon("offline");
+  const canRestartLocal = isLocalDashboardHost();
 
   // Hide on the chat page because it uses a full-height custom layout.
   if (pathname.startsWith("/chat")) return null;
 
+  async function waitForRuntimeRecovery(): Promise<void> {
+    const startedAt = Date.now();
+    const deadlineMs = 90_000;
+    while (Date.now() - startedAt < deadlineMs) {
+      try {
+        const res = await fetch("/api/proxy/health", {
+          cache: "no-store",
+          headers: authHeaders(),
+        });
+        if (res.ok) return;
+      } catch {
+        // Expected while the dashboard/API are restarting.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    throw new Error(tHeader("restartTimeout"));
+  }
+
+  async function handleRestartClick() {
+    if (!canRestartLocal || restartBusy) return;
+    const confirmed = await confirm({
+      title: tHeader("restartTitle"),
+      message: tHeader("restartConfirm"),
+      okLabel: tHeader("restartNow"),
+      cancelLabel: tCommon("cancel"),
+      tone: "danger",
+    });
+    if (!confirmed) return;
+
+    setRestartBusy(true);
+    toast({ message: tHeader("restartStarted"), tone: "warn", durationMs: 5000 });
+
+    try {
+      const res = await fetch("/api/system/restart", {
+        method: "POST",
+        headers: authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify({
+          workspace: workspace?.root || "",
+          apiPort: 18317,
+        }),
+        cache: "no-store",
+      });
+      const payload = (await res.json().catch(() => null)) as
+        | { detail?: string; error?: string }
+        | null;
+      if (!res.ok) {
+        throw new Error(payload?.detail || payload?.error || tHeader("restartFailed"));
+      }
+      await waitForRuntimeRecovery();
+      toast({ message: tHeader("restartRecovered"), tone: "ok", durationMs: 2500 });
+      window.setTimeout(() => window.location.reload(), 600);
+    } catch (error) {
+      setRestartBusy(false);
+      toast({
+        message: error instanceof Error ? error.message : tHeader("restartFailed"),
+        tone: "error",
+        durationMs: 7000,
+      });
+    }
+  }
+
   return (
-    <header className="sticky top-0 z-40 backdrop-blur-xl border-b" style={{ background: "var(--header-bg, rgba(4,4,13,0.65))", borderColor: "var(--line)" }}>
+    <header
+      className="sticky top-0 z-40 backdrop-blur-xl border-b"
+      style={{
+        background: "var(--header-bg, rgba(4,4,13,0.65))",
+        borderColor: "var(--line)",
+      }}
+    >
       <div className="px-6 lg:px-10 py-3 flex items-center gap-4">
         <div className="flex items-center gap-2 shrink-0">
-          <h1 className="text-[20px] font-semibold text-white tracking-tight whitespace-nowrap">
+          <h1 className="text-[18px] font-medium text-[color:var(--text-base)] whitespace-nowrap">
             {title}
           </h1>
           <button
-            className="text-ink-500 hover:text-[#f5a524] transition-colors"
+            className="text-ink-500 hover:text-amber-500 transition-colors"
             title={tHeader("pinToFavorites")}
           >
             <StarIcon size={16} />
@@ -150,35 +231,24 @@ export function TopHeader() {
         </div>
 
         <div className="ml-auto flex items-center gap-3">
-          {/* 04-29 §11 P9 — replaced the global Paper/Live
-              toggle with a real account chooser. The chosen id is the
-              "operator focus" used by the Home page KPIs and any
-              other multi-account surface. */}
           <AccountSelector />
 
-          {/* Clock — rendered client-side only to avoid hydration drift. */}
-          <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-brand-500/10 bg-ink-900/50">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent-500 animate-pulse" />
-            <span className="text-xs font-mono text-ink-200" suppressHydrationWarning>
-              {now ?? "—"}
-            </span>
-          </div>
-
+          {/* Clock + system health collapsed into a single low-key strip.
+              No pulse dot; offline state is conveyed by color alone. */}
           <div
-            className="hidden md:flex items-center gap-1.5 px-2 py-1 rounded-lg border border-brand-500/10 bg-ink-900/50"
+            className="hidden md:flex items-center gap-2 text-[12px] text-[color:var(--text-muted)]"
             title={
               online
                 ? tHeader("workspaceStatus", { status: healthLabel })
                 : tHeader("backendUnreachable")
             }
           >
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                online ? healthColor : "bg-ink-500"
-              } ${online ? "animate-pulse" : ""}`}
-            />
-            <span className="text-[10px] font-mono uppercase tracking-widest text-ink-300">
-              {online ? healthLabel : tCommon("offline")}
+            <span className="font-mono tabular-nums" suppressHydrationWarning>
+              {now ?? "—"}
+            </span>
+            <span aria-hidden className="opacity-50">·</span>
+            <span className={online ? healthTextClass : "text-rose-500"}>
+              {healthLabel}
             </span>
           </div>
 
@@ -196,18 +266,32 @@ export function TopHeader() {
           >
             <BellIcon size={16} />
             {inboxNeedsAction > 0 ? (
-              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-[#ef4560] text-white text-[9px] font-mono flex items-center justify-center ring-2 ring-[#0a0b1a]">
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-rose-500 text-white text-[10px] flex items-center justify-center">
                 {inboxNeedsAction > 99 ? "99+" : inboxNeedsAction}
               </span>
-            ) : online ? null : (
-              <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-ink-500 ring-2 ring-[#0a0b1a]" />
-            )}
+            ) : null}
           </Link>
+          {canRestartLocal ? (
+            <button
+              className="icon-btn text-rose-300 hover:text-white hover:bg-rose-500/15 disabled:opacity-60 disabled:cursor-not-allowed"
+              title={restartBusy ? tHeader("restartInProgress") : tHeader("restart")}
+              aria-label={
+                restartBusy ? tHeader("restartInProgress") : tHeader("restart")
+              }
+              onClick={() => void handleRestartClick()}
+              disabled={restartBusy}
+            >
+              <PowerIcon
+                size={16}
+                className={restartBusy ? "animate-pulse" : undefined}
+              />
+            </button>
+          ) : null}
           <Link href="/settings" className="icon-btn" title={tHeader("settings")}>
             <SettingsIcon size={16} />
           </Link>
-          <div className="w-9 h-9 rounded-full overflow-hidden ring-1 ring-brand-500/40 shadow-glow bg-black/30 flex items-center justify-center">
-            <NeryaLogo size={36} />
+          <div className="w-8 h-8 rounded-full overflow-hidden bg-black/30 flex items-center justify-center">
+            <NeryaLogo size={32} />
           </div>
         </div>
       </div>

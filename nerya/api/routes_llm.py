@@ -34,6 +34,9 @@ def routes():
     def tiers(client, _payload):
         return _llm_ops.tier_list(client.config)
 
+    def catalog_endpoint(client, _payload):
+        return _llm_ops.catalog(client.config)
+
     def config_get(client, _payload):
         return _llm_ops.llm_config(client.config)
 
@@ -69,6 +72,11 @@ def routes():
                 provider_key=body.get("provider_key"),
                 provider_key_ref=body.get("provider_key_ref"),
                 vault_passphrase=body.get("vault_passphrase"),
+                # Forward the compat-shape hint so a custom (non-catalog)
+                # provider id can dispatch through the right list-models
+                # adapter. ``"chat_completions"`` for OpenAI-compat,
+                # ``"anthropic_messages"`` for Anthropic-compat.
+                api_mode=body.get("api_mode"),
             )
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
@@ -109,6 +117,7 @@ def routes():
         ("GET", "/llm/capabilities", capabilities),
         ("POST", "/llm/capabilities", capabilities),
         ("GET", "/llm/providers", providers),
+        ("GET", "/llm/catalog", catalog_endpoint),
         ("GET", "/llm/tiers", tiers),
         ("GET", "/llm/config", config_get),
         ("POST", "/llm/config", config_set),

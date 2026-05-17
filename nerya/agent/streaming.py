@@ -42,8 +42,7 @@ publishes:
   tool_result)
 - ``turn.complete`` — turn finished
 
-P0 §3,
-"Streaming Contract".
+Streaming contract.
 """
 
 from __future__ import annotations

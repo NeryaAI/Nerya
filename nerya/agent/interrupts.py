@@ -1,8 +1,8 @@
 """Cooperative interrupts (cancel / pause / resume) for long agent turns.
 
-- Mirrors coding-agent's "interrupts must always succeed" guarantee:
-  ESC at any point flushes the current step, stops the model stream,
-  drains the journal, and yields control back to the operator.
+- Interrupts should always succeed: a cancel at any point flushes the
+  current step, stops the model stream, drains the journal, and yields
+  control back to the operator.
 
 Why
 ---

@@ -1,162 +1,87 @@
-"""Search the public web via DuckDuckGo (HTML SERP + lite fallback).
+"""Multi-engine web search with per-engine multi-key rotation.
+
+Supported engines (in default chain order):
+``exa`` → ``tavily`` → ``perplexity`` → ``brave`` → ``serper`` →
+``bing`` → ``duckduckgo`` (keyless fallback) → ``duckduckgo_lite``.
 
 Standalone CLI usage::
 
     python -m nerya.skills.builtin.research.scripts.web_search \\
-        --json '{"query": "Hyperliquid funding rate", "max_results": 5}'
+        --json '{"query": "Apple Q4 earnings", "max_results": 8}'
+
+    # Force a specific engine chain:
+    python -m nerya.skills.builtin.research.scripts.web_search \\
+        --json '{"query": "...", "engines": ["exa", "tavily", "duckduckgo"]}'
+
+    # Inline keys (otherwise resolved from workspace/search_engines.json
+    # → NERYA_SEARCH_<ENGINE>_KEYS env → vault://search.<engine>.keys):
+    python -m nerya.skills.builtin.research.scripts.web_search --json '{
+      "query": "...",
+      "engines": ["exa"],
+      "keys": {"exa": ["k1", "k2"]}
+    }'
 
 Output schema::
 
     {
       "ok": bool,
       "query": str,
-      "engine": "duckduckgo_html" | "duckduckgo_lite",
-      "fallback_errors": [str, ...],
+      "engine": str,            # engine that returned the results
+      "engine_chain": [str],    # full chain considered
+      "key_index": int,         # which key (0-based) succeeded; -1 if keyless
+      "fallback_errors": [str], # one entry per failed engine attempt
       "elapsed_ms": int,
       "count": int,
-      "results": [{"title": str, "url": str, "snippet": str, "source": str}, ...]
+      "results": [{"title": str, "url": str, "snippet": str,
+                   "source": str, "engine": str, "key_index": int}]
     }
-
-Pure stdlib — no extra wheels needed. Uses the same HTML POST trick as
-``websearch_skill`` to dodge DuckDuckGo's anti-bot stub.
 """
 
 from __future__ import annotations
 
 import argparse
-import html
 import json
-import re
 import sys
 import time
-import urllib.parse
-from html.parser import HTMLParser
 from typing import Any
 
-from ._http import http_get
+from ._engine_config import resolve_config
+from ._engines import (
+    EngineError,
+    EngineKeyExhausted,
+    EngineKeylessFailure,
+    build_adapter,
+)
 
 
 _DEFAULT_MAX_RESULTS = 8
 _HARD_RESULT_CAP = 25
 
 
-class _DDGHtmlParser(HTMLParser):
-    """Pull ``{title, url, snippet}`` triples from html.duckduckgo HTML."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.results: list[dict[str, str]] = []
-        self._mode: str | None = None
-        self._buf: list[str] = []
-        self._href = ""
-
-    def handle_starttag(self, tag, attrs):
-        if tag != "a":
-            return
-        attrs_d = dict(attrs)
-        css = attrs_d.get("class") or ""
-        if "result__a" in css:
-            self._mode = "title"
-            self._buf = []
-            self._href = attrs_d.get("href") or ""
-        elif "result__snippet" in css:
-            self._mode = "snippet"
-            self._buf = []
-
-    def handle_endtag(self, tag):
-        if tag != "a" or self._mode is None:
-            return
-        text = " ".join("".join(self._buf).split()).strip()
-        if self._mode == "title":
-            url = _decode_ddg_redirect(self._href)
-            if url:
-                self.results.append({"title": text, "url": url, "snippet": ""})
-        elif self._mode == "snippet":
-            if self.results and not self.results[-1].get("snippet"):
-                self.results[-1]["snippet"] = text
-        self._mode = None
-        self._buf = []
-
-    def handle_data(self, data):
-        if self._mode is not None:
-            self._buf.append(data)
+def _normalize_keys_arg(value: Any) -> dict[str, list[str]]:
+    if not value:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for engine, keys in value.items():
+        if isinstance(keys, str):
+            out[engine] = [k.strip() for k in keys.split(",") if k.strip()]
+        elif isinstance(keys, list):
+            out[engine] = [str(k).strip() for k in keys if str(k).strip()]
+    return out
 
 
-def _decode_ddg_redirect(href: str) -> str:
-    if not href:
-        return ""
-    if href.startswith("//"):
-        href = "https:" + href
-    try:
-        parsed = urllib.parse.urlparse(href)
-        qs = urllib.parse.parse_qs(parsed.query)
-        target = qs.get("uddg") or qs.get("u")
-        if target:
-            return urllib.parse.unquote(target[0])
-    except Exception:
-        pass
-    if href.startswith("http"):
-        return href
-    return ""
-
-
-def _ddg_html(query: str, *, max_results: int, region: str, safesearch: str) -> list[dict[str, Any]]:
-    form = {
-        "q": query,
-        "kl": region or "wt-wt",
-        "kp": {"strict": "1", "moderate": "-1", "off": "-2"}.get(safesearch, "-1"),
-    }
-    status, _h, body = http_get(
-        "https://html.duckduckgo.com/html/",
-        method="POST", form=form,
-        extra_headers={"Referer": "https://html.duckduckgo.com/"},
-    )
-    if status == 202 or (status == 200 and b"result__a" not in body):
-        raise RuntimeError(
-            f"duckduckgo_html anti-bot guard hit (status {status}, len={len(body)})"
-        )
-    if status >= 400:
-        raise RuntimeError(f"duckduckgo_html HTTP {status}")
-    parser = _DDGHtmlParser()
-    parser.feed(body.decode("utf-8", errors="replace"))
-    return [
-        {
-            "title": html.unescape(r["title"]),
-            "url": r["url"],
-            "snippet": html.unescape(r.get("snippet") or ""),
-            "source": "duckduckgo_html",
-        }
-        for r in parser.results[:max_results]
-    ]
-
-
-def _ddg_lite(query: str, *, max_results: int, region: str) -> list[dict[str, Any]]:
-    form = {"q": query, "kl": region or "wt-wt"}
-    status, _h, body = http_get(
-        "https://lite.duckduckgo.com/lite/",
-        method="POST", form=form,
-        extra_headers={"Referer": "https://lite.duckduckgo.com/"},
-    )
-    if status >= 400:
-        raise RuntimeError(f"duckduckgo_lite HTTP {status}")
-    text_html = body.decode("utf-8", errors="replace")
-    pattern = re.compile(
-        r'<a[^>]+class="result-link"[^>]+href="([^"]+)"[^>]*>(.*?)</a>'
-        r'.*?<td[^>]+class="result-snippet">(.*?)</td>',
-        re.DOTALL,
-    )
-    out: list[dict[str, Any]] = []
-    for m in pattern.finditer(text_html):
-        href = _decode_ddg_redirect(m.group(1)) or m.group(1)
-        title = html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip()
-        snippet = html.unescape(re.sub(r"<[^>]+>", "", m.group(3))).strip()
-        if title and href:
-            out.append({
-                "title": title, "url": href, "snippet": snippet,
-                "source": "duckduckgo_lite",
-            })
-        if len(out) >= max_results:
-            break
+def _normalize_base_urls_arg(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for engine, url in value.items():
+        if not isinstance(engine, str):
+            continue
+        text = str(url or "").strip().rstrip("/")
+        if text:
+            out[engine.strip().lower()] = text
     return out
 
 
@@ -166,66 +91,107 @@ def run(
     max_results: int = _DEFAULT_MAX_RESULTS,
     region: str = "wt-wt",
     safesearch: str = "moderate",
-    engine: str = "duckduckgo",
+    engine: str | None = None,
+    engines: list[str] | None = None,
+    keys: dict[str, list[str]] | None = None,
+    base_urls: dict[str, str] | None = None,
+    **engine_kwargs: Any,
 ) -> dict[str, Any]:
     if not query:
         return {"ok": False, "error": "query is required", "results": []}
+
     max_results = max(1, min(int(max_results), _HARD_RESULT_CAP))
-    chain: list[str]
-    if engine in ("duckduckgo", "ddg"):
-        chain = ["duckduckgo_html", "duckduckgo_lite"]
-    elif engine in ("duckduckgo_html", "ddg_html"):
-        chain = ["duckduckgo_html"]
-    elif engine in ("duckduckgo_lite", "ddg_lite"):
-        chain = ["duckduckgo_lite"]
-    else:
-        return {
-            "ok": False,
-            "error": f"unsupported engine {engine!r}",
-            "results": [],
-        }
+    if engine and not engines:
+        engines = [engine]
 
-    started = time.monotonic()
-    used = ""
-    results: list[dict[str, Any]] = []
-    errors: list[str] = []
-    for candidate in chain:
-        try:
-            if candidate == "duckduckgo_html":
-                results = _ddg_html(
-                    query, max_results=max_results,
-                    region=region, safesearch=safesearch,
-                )
-            elif candidate == "duckduckgo_lite":
-                results = _ddg_lite(
-                    query, max_results=max_results, region=region,
-                )
-            if results:
-                used = candidate
-                break
-            errors.append(f"{candidate}: empty result set")
-        except Exception as exc:
-            errors.append(f"{candidate}: {type(exc).__name__}: {exc}")
-
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    if not results and not used:
+    cfg = resolve_config(
+        engines=engines,
+        region=region,
+        safesearch=safesearch,
+        extra_keys=_normalize_keys_arg(keys),
+        extra_base_urls=_normalize_base_urls_arg(base_urls),
+    )
+    chain = cfg.usable_chain()
+    if not chain:
         return {
             "ok": False,
             "query": query,
-            "engine_chain": chain,
+            "engine_chain": [e.name for e in cfg.engines],
+            "fallback_errors": [
+                f"{e.name}: no API keys configured" for e in cfg.engines if not e.usable
+            ],
+            "elapsed_ms": 0,
+            "count": 0,
+            "results": [],
+            "error": "no usable engines (configure keys or fall back to duckduckgo)",
+        }
+
+    started = time.monotonic()
+    errors: list[str] = []
+    used_engine = ""
+    used_key_index = -1
+    results: list[dict[str, Any]] = []
+
+    for spec in chain:
+        try:
+            adapter = build_adapter(spec.name, spec.keys, **spec.adapter_config())
+        except ValueError as exc:
+            errors.append(f"{spec.name}: {exc}")
+            continue
+        try:
+            results = adapter.run(
+                query=query, max_results=max_results,
+                region=cfg.region, safesearch=cfg.safesearch,
+                **engine_kwargs,
+            )
+        except EngineKeyExhausted as exc:
+            errors.append(str(exc))
+            continue
+        except EngineKeylessFailure as exc:
+            errors.append(f"{spec.name}: {exc}")
+            continue
+        except EngineError as exc:
+            errors.append(f"{spec.name}: {exc}")
+            continue
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{spec.name}: {type(exc).__name__}: {exc}")
+            continue
+        if results:
+            used_engine = spec.name
+            used_key_index = results[0].get("key_index", -1)
+            break
+        errors.append(f"{spec.name}: empty result set")
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    if not results:
+        return {
+            "ok": False,
+            "query": query,
+            "engine_chain": [e.name for e in cfg.engines],
             "fallback_errors": errors,
             "elapsed_ms": elapsed_ms,
+            "count": 0,
             "results": [],
         }
+
     return {
         "ok": True,
         "query": query,
-        "engine": used,
+        "engine": used_engine,
+        "engine_chain": [e.name for e in cfg.engines],
+        "key_index": used_key_index,
         "fallback_errors": errors,
         "elapsed_ms": elapsed_ms,
         "count": len(results),
         "results": results,
+        "config_sources": cfg.sources,
     }
+
+
+# ---------------------------------------------------------------------------
+# CLI plumbing
+# ---------------------------------------------------------------------------
 
 
 def _load_payload(args: argparse.Namespace) -> dict[str, Any]:
@@ -249,15 +215,25 @@ def main() -> None:
 
     payload = _load_payload(args)
     query = args.query or payload.get("query") or ""
+    engines_raw = payload.get("engines")
+    engines: list[str] | None = None
+    if isinstance(engines_raw, str):
+        engines = [e.strip() for e in engines_raw.split(",") if e.strip()]
+    elif isinstance(engines_raw, list):
+        engines = [str(e).strip() for e in engines_raw if str(e).strip()]
+
     try:
         result = run(
             query=query,
             max_results=int(payload.get("max_results") or _DEFAULT_MAX_RESULTS),
             region=str(payload.get("region") or "wt-wt"),
             safesearch=str(payload.get("safesearch") or "moderate"),
-            engine=str(payload.get("engine") or "duckduckgo"),
+            engine=payload.get("engine"),
+            engines=engines,
+            keys=payload.get("keys") or None,
+            base_urls=payload.get("base_urls") or None,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
         raise SystemExit(1)
 

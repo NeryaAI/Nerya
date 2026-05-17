@@ -55,12 +55,10 @@ class SubAgentSpec:
 DEFAULT_SUBAGENT_SKILLS = {
     # Research/analyst lanes get ``operator`` + ``script`` so they can
     # write ad-hoc Python (yfinance, requests, ccxt, web3, …) when the
-    # built-in market_data / onchain / news_social skills don't cover the
-    # ask. ``websearch`` (Apr-27 2026) is added to every research lane
-    # so the subagent can pull live evidence from DuckDuckGo before
-    # writing a fetcher script — this is the coding-agent
-    # "research → write code → run code → cross-check → summarise" loop
-    # the operator asked for. The dispatcher's
+    # built-in market_data / onchain / web_search_fetch tools don't cover the
+    # ask. ``web_search`` / ``web_search_fetch`` are added to research lanes
+    # so the subagent can pull live evidence before writing a fetcher script
+    # and then cross-check the result before summarising. The dispatcher's
     # ``SUBAGENT_SKILL_DENYLIST`` still keeps trading_write / wallet /
     # script_runtime out of these lanes.
     #
@@ -71,25 +69,25 @@ DEFAULT_SUBAGENT_SKILLS = {
     # dispatcher's denylist now enforces the read-only side, so listing
     # ``trading_read`` here grants planning context without ever giving
     # a subagent the ability to submit an order.
-    "market_analyst": ["market_data", "news_social", "websearch",
+    "market_analyst": ["market_data", "web_search_fetch",
                        "operator", "script", "trace", "llm"],
     "technical_analyst": [
         "market_data", "markets", "market_data_routing", "market_research",
-        "quant_research", "analysis", "websearch", "operator", "script",
+        "quant_research", "analysis", "web_search_fetch", "operator", "script",
         "trace", "llm",
     ],
     "fundamentals_analyst": [
         "market_data", "markets", "market_data_routing", "market_research",
-        "research", "research_report", "analysis", "websearch", "operator",
+        "research", "research_report", "analysis", "web_search_fetch", "operator",
         "script", "trace", "llm",
     ],
     "sentiment_analyst": [
-        "news_social", "research", "market_research", "market_data_routing",
-        "websearch", "operator", "script", "trace", "llm",
+        "market_data", "markets", "market_data_routing", "web_search_fetch",
+        "research", "market_research", "operator", "script", "trace", "llm",
     ],
     "macro_strategist": [
         "research", "market_research", "market_data_routing",
-        "research_report", "analysis", "market_data", "websearch",
+        "research_report", "analysis", "market_data", "web_search_fetch",
         "operator", "script", "trace", "llm",
     ],
     "quant_researcher": [
@@ -98,26 +96,32 @@ DEFAULT_SUBAGENT_SKILLS = {
         "script", "trace", "llm",
     ],
     "bull_researcher": [
+        "market_data", "markets", "market_data_routing",
         "market_research", "research_report", "quant_research",
-        "portfolio", "risk", "websearch", "llm",
+        "portfolio_summary", "risk_check", "web_search_fetch", "llm",
     ],
     "bear_researcher": [
+        "market_data", "markets", "market_data_routing",
         "market_research", "research_report", "quant_research",
-        "portfolio", "risk", "websearch", "llm",
+        "portfolio_summary", "risk_check", "web_search_fetch", "llm",
     ],
     "research_manager": [
+        "market_data", "markets", "market_data_routing",
         "market_research", "research_report", "quant_research",
-        "portfolio", "risk", "trading_read", "llm",
+        "portfolio_summary", "risk_check", "web_search_fetch", "llm",
     ],
     "research_editor": [
         "research_report", "market_research", "quant_research",
         "analysis", "llm",
     ],
-    "risk_critic": ["risk", "portfolio", "websearch", "llm"],
+    "risk_critic": [
+        "market_data", "markets", "market_data_routing",
+        "risk_check", "portfolio_summary", "web_search_fetch", "llm",
+    ],
     "execution_planner": ["trading_read", "market_data", "llm"],
-    "onchain_watcher": ["onchain", "news_social", "websearch",
+    "onchain_watcher": ["onchain", "web_search_fetch",
                         "operator", "script", "trace", "llm"],
-    "news_interpreter": ["news_social", "websearch", "operator",
+    "news_interpreter": ["web_search_fetch", "operator",
                          "script", "trace", "llm"],
     "portfolio_manager": ["portfolio", "trading_read", "llm"],
     "portfolio_auditor": ["portfolio", "risk", "market_data",
@@ -159,14 +163,13 @@ DEFAULT_SUBAGENT_SKILLS = {
 }
 
 
-# Apr-30 2026 — Cunzi feedback: subagents were running with empty
-# ``spec.prompt`` because the workspace had no ``<name>.agent.md``
-# files. The model would just get "You are the {name} subagent.\n\n"
-# and nothing else, so the role was nominally invoked but had no
-# personality / scope / output contract. We now ship default prompt
-# bodies for every default role; ``StrategySubAgentRegistry`` falls
-# back to them when neither the strategy package nor the workspace
-# ships a custom prompt. The operator can always override with
+# Some workspaces do not ship ``<name>.agent.md`` files. Without a
+# fallback prompt body the model would receive only
+# "You are the {name} subagent.\n\n" and the role would have no scope or
+# output contract. We therefore ship default prompt bodies for every
+# default role; ``StrategySubAgentRegistry`` falls back to them when
+# neither the strategy package nor the workspace ships a custom prompt.
+# The operator can always override with
 # ``save_role`` (writes ``workspace/subagents/<name>.agent.md``) or
 # by shipping a per-strategy prompt under
 # ``strategies/<id>/subagents/<name>.agent.md`` — the workspace /
@@ -183,9 +186,10 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "How you work.\n"
         "1. Use ``connector_list`` to discover which venues are wired\n"
         "   in before assuming a data source is missing.\n"
-        "2. Pull recent candles, news, and any on-chain signals via the\n"
-        "   appropriate skills (``market_data``, ``news_social``,\n"
-        "   ``onchain``, ``websearch``). Prefer at most one fetch per\n"
+        "2. Pull ticker/candles/indicators with the native ``market_data``\n"
+        "   tool (actions: ``get_candles``, ``calculate_features``), then\n"
+        "   use ``news_social``, ``onchain``, or ``websearch`` for the\n"
+        "   remaining evidence. Prefer at most one fetch per\n"
         "   evidence dimension — speed matters.\n"
         "3. Cross-check anything that looks anomalous (sudden price\n"
         "   move, headline-driven spike) before reporting it.\n\n"
@@ -223,6 +227,20 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "valuation, catalysts, and red flags. Keep the detailed\n"
         "research framework in ``market_research`` / ``research_report``\n"
         "and load those skills only when needed.\n\n"
+        "How you work.\n"
+        "1. Pull current quote / market context with ``market_data``\n"
+        "   (``get_ticker`` first, candles only if valuation or momentum\n"
+        "   context needs them) and use direct provider tools such as\n"
+        "   Yahoo stock info when visible.\n"
+        "2. Pull at least income statement and balance sheet; cash flow is\n"
+        "   preferred but not mandatory for a first-pass report.\n"
+        "3. If one financial statement source fails, try an alternate path:\n"
+        "   direct provider tool, ``market_data``, ``market_data_routing``,\n"
+        "   or ``web_search_fetch`` for the missing headline metrics.\n"
+        "4. Do not mark valuation unavailable when you have enough inputs\n"
+        "   for a bounded estimate (price, market cap, EPS, revenue,\n"
+        "   EBITDA, or analyst multiples). State missing fields and lower\n"
+        "   confidence instead of dropping the section.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``quality``: short paragraph\n"
         "  - ``growth``: short paragraph\n"
@@ -341,11 +359,22 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "the worst plausible session in the next week?\n\n"
         "How you work.\n"
         "1. Read the candidate intent from the parent's payload.\n"
-        "2. Pull current portfolio + recent fills via ``portfolio`` /\n"
-        "   ``risk`` skills.\n"
-        "3. Stress-test: assume +/- 2 ATR or +/- one historical worst\n"
+        "2. Pull market evidence via ``market_data`` before verdict:\n"
+        "   use ``get_ticker`` for current price, ``get_candles`` for a\n"
+        "   recent lookback, and ``calculate_features`` or your own\n"
+        "   candle math for ATR / volatility. Use ``market_data_routing``\n"
+        "   first when source, venue, or symbol mapping is unclear.\n"
+        "3. Pull current portfolio + recent fills via ``portfolio`` /\n"
+        "   ``risk`` skills when portfolio exposure matters.\n"
+        "4. Stress-test: assume +/- 2 ATR or +/- one historical worst\n"
         "   day; compute drawdown; check open-position cap; flag any\n"
         "   single-venue concentration > 60%.\n\n"
+        "Do not declare market data unavailable until you have tried\n"
+        "``market_data`` and at least one alternate evidence path\n"
+        "(``market_data_routing`` / ``web_search_fetch`` / direct native\n"
+        "provider tool when visible). If data is still missing, report the\n"
+        "exact failed source and continue with lower confidence rather\n"
+        "than returning only a query plan.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``verdict``: ``approve`` | ``approve_with_reductions`` |\n"
         "    ``reject``\n"
@@ -501,13 +530,14 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "Mission. Read the last N runs of the strategy you are tuning,\n"
         "the closed paper trades, and the operator's tuning policy.\n"
         "Propose *small*, evidence-backed parameter changes. Never\n"
-        "enable live trading. Never expand risk limits beyond the\n"
+        "change execution from paper/shadow into live. Never expand risk limits beyond the\n"
         "policy cap (default 25% per proposal). Prefer fewer, cleaner\n"
         "signals over higher activity.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``analysis``: short paragraph (what worked / what didn't)\n"
-        "  - ``proposed_patches``: list[{file, operation, summary,\n"
+        "  - ``proposed_changes``: list[{file, operation, summary,\n"
         "    diff}]\n"
+        "  - ``validation_plan``: list[str] such as [\"unit\", \"backtest\"]\n"
         "  - ``backtest_required``: bool\n"
         "  - ``shadow_run_required``: bool\n"
         "  - ``confidence``: float in [0, 1]\n"

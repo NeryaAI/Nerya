@@ -24,12 +24,18 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..core.errors import LLMError
 from ..core.truth import resolve_allow_mock
+from .provider_catalog import (
+    default_base_url as _catalog_default_base_url,
+    default_env_keys_for as _catalog_default_env_keys,
+    lookup as _catalog_lookup,
+    resolve_alias as _catalog_resolve_alias,
+)
 from .providers import (
     DEFAULT_BASE_URLS,
     ProviderCallable,
@@ -37,6 +43,31 @@ from .providers import (
     Transport,
     builtin_providers,
 )
+
+
+# Map operator-facing effort labels to the wire-format the adapters expect.
+# * ``extra_high`` → ``xhigh`` (OpenAI Responses/Chat reasoning_effort + Anthropic adaptive).
+# * ``none``       → empty string so the adapter skips reasoning entirely.
+# Other levels pass through unchanged.
+_REASONING_EFFORT_WIRE_MAP: dict[str, str] = {
+    "none": "",
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "extra_high": "xhigh",
+    "xhigh": "xhigh",
+    "max": "xhigh",
+}
+
+
+def _normalise_reasoning_effort(value: Any) -> str:
+    if value is None:
+        return ""
+    s = str(value).strip().lower().replace("-", "_")
+    if not s:
+        return ""
+    return _REASONING_EFFORT_WIRE_MAP.get(s, s)
 
 
 log = logging.getLogger(__name__)
@@ -81,7 +112,6 @@ class ModelRouter:
               temperature: 0.1
               prices: {prompt_per_1k: 0.00015, completion_per_1k: 0.0006}
               allowed_tasks: [classify, extract_json, ...]
-              daily_budget_usd: 2.0
 
     If no provider / no key / or provider = ``"mock"``, the router only
     returns mock content when mock mode is explicitly authorised
@@ -125,18 +155,26 @@ class ModelRouter:
         caller: str | None = None,
     ) -> CallResult:
         cfg = self.tiers.get(tier) or {}
-        provider_name = (cfg.get("provider") or "mock").lower()
+        raw_provider = (cfg.get("provider") or "mock").lower()
+        provider_name = _catalog_resolve_alias(raw_provider) or raw_provider
         model = cfg.get("model") or ""
-        base_url = cfg.get("base_url") or DEFAULT_BASE_URLS.get(provider_name)
+        # Base URL precedence: explicit tier override → catalog default →
+        # legacy DEFAULT_BASE_URLS map (kept for tests that monkeypatch it).
+        base_url = (
+            cfg.get("base_url")
+            or _catalog_default_base_url(provider_name)
+            or DEFAULT_BASE_URLS.get(provider_name)
+        )
         max_tokens = int(cfg.get("max_tokens") or 1024)
         temperature = float(cfg.get("temperature") or 0.1)
         price_overrides = cfg.get("prices") or None
         # Per-tier timeout override (seconds). Heavy reasoning tiers can
         # legitimately take > 60 s; expose the knob on the tier config.
         timeout_override = cfg.get("timeout_s") or cfg.get("timeout")
-        # Reasoning controls. Strings are normalised to
-        # "minimal" | "low" | "medium" | "high"; empty disables reasoning.
-        reasoning_effort = str(cfg.get("reasoning_effort") or "").strip().lower()
+        # Reasoning controls. Operator-facing levels normalise via the
+        # catalogue (none / minimal / low / medium / high / extra_high)
+        # to the wire-format each adapter expects.
+        reasoning_effort = _normalise_reasoning_effort(cfg.get("reasoning_effort"))
         reasoning_summary = str(cfg.get("reasoning_summary") or "").strip().lower()
 
         # Resolve provider key. First preference is a vault ref
@@ -151,8 +189,42 @@ class ModelRouter:
             if env_name:
                 import os
                 api_key = os.environ.get(env_name) or None
+        # OAuth-managed providers (openai-codex, claude-code) prefer the
+        # stored login record over env-var fallbacks. This is the path
+        # operators take when they click "Sign in with ChatGPT" /
+        # "Sign in with Claude" in the dashboard.
+        if not api_key and self._config_like is not None:
+            try:
+                from .oauth_login import OAUTH_PROVIDERS, resolve_oauth_token
+                if provider_name in OAUTH_PROVIDERS:
+                    api_key = resolve_oauth_token(
+                        self._config_like, provider=provider_name,
+                    ) or None
+            except Exception:
+                # Never block the call on the OAuth lookup; fall through
+                # to env-var fallback.
+                pass
+        # Catalog-driven env-var fallback (e.g. ``ANTHROPIC_API_KEY`` →
+        # ``ANTHROPIC_TOKEN`` → ``CLAUDE_CODE_OAUTH_TOKEN`` for the
+        # ``anthropic`` provider, ``CLAUDE_CODE_OAUTH_TOKEN`` for
+        # ``claude-code``). Tier-level overrides above still win.
+        if not api_key:
+            import os
+            for env_name in _catalog_default_env_keys(provider_name):
+                value = os.environ.get(env_name)
+                if value:
+                    api_key = value
+                    break
 
-        if provider_name == "mock" or not api_key:
+        # Catalog can mark a provider as ``key_optional`` (e.g. local Ollama,
+        # which accepts requests without a bearer token). Treat a missing
+        # key on those providers as "no key required" instead of degraded.
+        catalog_entry = _catalog_lookup(provider_name)
+        key_optional = bool(
+            catalog_entry and catalog_entry.extra.get("key_optional")
+        )
+
+        if provider_name == "mock" or (not api_key and not key_optional):
             # Production truth gate: only return mock content when mock mode
             # is explicitly authorised (tests, paper mode, env flag). Otherwise
             # surface an explicit LLMError so callers handle degradation.

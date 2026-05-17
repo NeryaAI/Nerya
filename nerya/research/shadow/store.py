@@ -1,4 +1,4 @@
-"""Filesystem store for shadow runs — research runtime spec §5 Task 8."""
+"""Filesystem store for shadow runs."""
 from __future__ import annotations
 
 import json

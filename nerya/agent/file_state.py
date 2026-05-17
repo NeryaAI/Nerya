@@ -1,11 +1,11 @@
-"""FileStateCache — coding-agent fresh-read tracking for file edits.
+"""FileStateCache — fresh-read tracking for file edits.
 
   "fresh read before edit" invariant that the file_first lane enforces).
 
 Why
 ---
-Every coding agent (coding-agent, IDE, coding agent, coding agent, the runtime) has the
-same pathology: the model edits a file based on stale context (its own
+Every coding environment has the same pathology: the model edits a file
+based on stale context (its own
 memory of what the file looked like a few turns ago), the on-disk copy
 has since been changed by the user / a sibling tool / git, and the
 edit either silently overwrites the user's work or fails because the

@@ -1,4 +1,4 @@
-"""Sandboxed account-intake flow (04-29 §11 P10).
+"""Sandboxed account-intake flow.
 
 The account intake module solves the "let the agent walk an operator
 through adding an exchange / wallet without ever seeing the operator's
@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import calendar
 import hashlib
-import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -276,15 +275,20 @@ def _resolve_schema(account_kind: str, venue: str) -> tuple[list[AccountIntakeFi
     kind = (account_kind or "cex").lower()
     v = (venue or "").lower()
     if kind == "chain":
-        from ..wallet.registry import PROVIDERS as WALLET_PROVIDERS
+        from ..wallet.registry import (
+            PROVIDERS as WALLET_PROVIDERS,
+            resolve_provider_name as _resolve_wallet_provider_name,
+        )
 
-        entry = WALLET_PROVIDERS.get(v)
+        provider_name = _resolve_wallet_provider_name(v)
+        entry = WALLET_PROVIDERS.get(provider_name or "")
         if entry is None:
             raise AccountIntakeError(
                 f"unknown wallet provider {venue!r}; "
                 f"known: {sorted(WALLET_PROVIDERS)}"
             )
-        fields_raw = entry.get("credential_fields") or []
+        fields_raw = list(entry.get("credential_fields") or [])
+        fields_raw.extend(list(entry.get("advanced_credential_fields") or []))
         fields = [AccountIntakeField.from_dict(dict(f)) for f in fields_raw]
         return fields, str(entry.get("label") or v)
     spec = get_registry().find(v)

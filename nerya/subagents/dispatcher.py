@@ -6,7 +6,7 @@ native subagent runtime.
   ``ok``, ``error_kind`` and ``error`` fields so the caller has a uniform
   failure story.
 * ``dispatch_many`` runs multiple subagents concurrently (bounded by
-  ``agent.subagents.max_parallel``) under a shared budget ceiling.
+  ``agent.subagents.max_parallel``).
 * A hard denylist prevents subagents from ever touching live-trading
   surfaces even if their spec allows it; those skills can only be called
   from the main agent.
@@ -81,12 +81,11 @@ def _assert_allowed_skills(spec: SubAgentSpec) -> None:
 class SubAgentDispatcher:
     config: Config
     skills: SkillKernel
-    # Apr-30 2026 — operator directive: subagents must inherit the
-    # parent's full native-tool surface (connector_list / connector_view,
-    # memory, search, file primitives, …), not just the skill kernel.
-    # The dispatcher accepts an optional ``tool_registry`` so the parent
-    # kernel can pass its already-built native registry. When supplied,
-    # the runtime falls through to native tools whenever the model
+    # Allow subagents to inherit the parent's native-tool surface
+    # (connector_list / connector_view, memory, search, file primitives,
+    # …), not just the skill kernel. When the parent passes a tool
+    # registry, the runtime can fall through to native tools whenever the
+    # model
     # emits a ``skill_call`` whose ``skill`` name matches a registered
     # native tool. Default ``None`` keeps every existing test / call
     # site (which only ever passes ``config + skills``) working.
@@ -114,6 +113,8 @@ class SubAgentDispatcher:
         self, name: str, *, payload: dict[str, Any],
         trigger_event_id: str | None, strategy_id: str | None,
         session_id: str | None,
+        turn_id: str | None = None,
+        parent_call_id: str | None = None,
     ) -> SubAgentResult:
         import time as _t
         t0 = _t.monotonic()
@@ -129,6 +130,8 @@ class SubAgentDispatcher:
                 spec, trigger_event_id=trigger_event_id,
                 payload=payload, strategy_id=strategy_id,
                 session_id=session_id,
+                turn_id=turn_id,
+                parent_call_id=parent_call_id,
             )
             return SubAgentResult(
                 ok=True,
@@ -185,6 +188,8 @@ class SubAgentDispatcher:
         trigger_event_id: str | None = None,
         strategy_id: str | None = None,
         session_id: str | None = None,
+        turn_id: str | None = None,
+        parent_call_id: str | None = None,
     ) -> dict[str, Any]:
         if not target.startswith("subagent:"):
             return {"ok": False, "reason": "not_subagent_target"}
@@ -193,6 +198,8 @@ class SubAgentDispatcher:
             name, payload=payload,
             trigger_event_id=trigger_event_id,
             strategy_id=strategy_id, session_id=session_id,
+            turn_id=turn_id,
+            parent_call_id=parent_call_id,
         )
         self._journal(
             res,
@@ -224,16 +231,11 @@ class SubAgentDispatcher:
         strategy_id: str | None = None,
         session_id: str | None = None,
         max_parallel: int | None = None,
-        usd_budget: float | None = None,
     ) -> list[SubAgentResult]:
-        """Run multiple subagents concurrently with a shared USD budget.
+        """Run multiple subagents concurrently.
 
         * ``max_parallel`` defaults to ``config.agent.subagents.max_parallel``
           (or 4 if unset) and is capped at the number of subagents.
-        * ``usd_budget`` defaults to ``config.agent.subagents.usd_budget``
-          (or ``None`` for no cap).
-        * Cancellation is cooperative: once the running total crosses the
-          budget, no new subagent is started, but in-flight runs finish.
         """
         names_list = [n for n in names]
         if not names_list:
@@ -243,12 +245,8 @@ class SubAgentDispatcher:
                 self.config.get("agent.subagents.max_parallel", 4) or 4
             )
         max_parallel = max(1, min(max_parallel, len(names_list)))
-        if usd_budget is None:
-            raw_budget = self.config.get("agent.subagents.usd_budget", None)
-            usd_budget = float(raw_budget) if raw_budget is not None else None
 
         results: list[SubAgentResult] = []
-        spent = 0.0
         with ThreadPoolExecutor(max_workers=max_parallel) as pool:
             futures = {
                 pool.submit(
@@ -268,18 +266,6 @@ class SubAgentDispatcher:
                     trigger_event_id=trigger_event_id,
                     strategy_id=strategy_id, session_id=session_id,
                 )
-                spent += res.usd
-                if usd_budget is not None and spent >= usd_budget:
-                    # Mark any pending futures as budget-skipped.
-                    for pending_fut, pending_name in list(futures.items()):
-                        if pending_fut.done() or pending_fut is fut:
-                            continue
-                        if pending_fut.cancel():
-                            results.append(SubAgentResult(
-                                ok=False, subagent=pending_name,
-                                error_kind="budget",
-                                error=f"subagent usd budget {usd_budget} exhausted",
-                            ))
         # Stable order by original request order for deterministic tests.
         order = {n: i for i, n in enumerate(names_list)}
         results.sort(key=lambda r: (order.get(r.subagent, 0), r.subagent))

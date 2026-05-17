@@ -1,4 +1,4 @@
-﻿"""Unified exchange/venue provider spec + registry.
+"""Unified exchange/venue provider spec + registry.
 
 Every venue (``binance``, ``polymarket``, user-authored ``hyperliquid_v2``…)
 publishes an :class:`ExchangeProviderSpec` that tells the registry:
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -88,16 +88,50 @@ _CEX_API_SECRET = CredentialField(
 _CEX_API_PASSPHRASE = CredentialField(
     name="api_passphrase", label="API Passphrase", kind="secret",
     required=True,
-    description="Passphrase set on the API key (OKX / KuCoin / Bitget / Coinbase Pro).",
+    description="Passphrase/password set on the API key (OKX / KuCoin / Bitget / Coinbase Exchange-style APIs).",
     placeholder="passphrase", vault_scope="exchange",
 )
+_CEX_UID = CredentialField(
+    name="uid", label="UID / User ID", kind="public",
+    sensitive=False,
+    description="Exchange UID required by some CCXT venues.",
+    placeholder="user id", vault_scope="exchange",
+)
+_CEX_ACCOUNT_ID = CredentialField(
+    name="account_id", label="Account ID", kind="public",
+    sensitive=False,
+    description="Account/profile id required by some venues.",
+    placeholder="account id", vault_scope="exchange",
+)
+_CEX_LOGIN = CredentialField(
+    name="login", label="Login", kind="public",
+    sensitive=False,
+    description="Login/account number required by some CCXT venues.",
+    placeholder="login", vault_scope="exchange",
+)
+_CEX_PRIVATE_KEY = CredentialField(
+    name="private_key", label="Private Key", kind="secret",
+    description="Private key used by wallet-signed exchange APIs.",
+    placeholder="0x...", vault_scope="exchange",
+)
+_CEX_WALLET_ADDRESS = CredentialField(
+    name="wallet_address", label="Wallet Address", kind="public",
+    sensitive=False,
+    description="Wallet/account address used by wallet-signed exchange APIs.",
+    placeholder="0x...", vault_scope="exchange",
+)
+_CEX_TOKEN = CredentialField(
+    name="token", label="Token", kind="secret",
+    description="Provider token required by some CCXT venues.",
+    vault_scope="exchange",
+)
 _HL_PRIVATE_KEY = CredentialField(
-    name="api_secret", label="Wallet Private Key", kind="secret",
+    name="private_key", label="Wallet Private Key", kind="secret",
     description="Hex-encoded private key controlling the Hyperliquid account.",
     placeholder="0x...", vault_scope="exchange",
 )
-_HL_VAULT_ADDRESS = CredentialField(
-    name="api_key", label="Account Address", kind="public",
+_HL_WALLET_ADDRESS = CredentialField(
+    name="wallet_address", label="Account / Vault Address", kind="public",
     sensitive=False,
     description="0x address of the Hyperliquid account (sub-account vault address allowed).",
     placeholder="0x...", vault_scope="exchange",
@@ -299,6 +333,78 @@ def reset_registry() -> None:
     _registry = None
 
 
+_CCXT_CREDENTIAL_FIELDS: dict[str, CredentialField] = {
+    "apiKey": _CEX_API_KEY,
+    "secret": _CEX_API_SECRET,
+    "password": _CEX_API_PASSPHRASE,
+    "uid": _CEX_UID,
+    "accountId": _CEX_ACCOUNT_ID,
+    "login": _CEX_LOGIN,
+    "privateKey": _CEX_PRIVATE_KEY,
+    "walletAddress": _CEX_WALLET_ADDRESS,
+    "token": _CEX_TOKEN,
+}
+_CCXT_CREDENTIAL_ORDER = (
+    "apiKey",
+    "secret",
+    "password",
+    "uid",
+    "accountId",
+    "login",
+    "walletAddress",
+    "privateKey",
+    "token",
+)
+
+
+def _ccxt_required_credentials(ccxt_id: str) -> dict[str, bool] | None:
+    """Return CCXT's live credential contract for an exchange id.
+
+    CCXT is the runtime adapter for these venues, so its
+    ``requiredCredentials`` is the source of truth for which constructor
+    params must be available before private calls such as
+    ``fetch_balance`` can work. If CCXT is absent or does not currently
+    ship the exchange class, callers fall back to the static schema.
+    """
+
+    try:
+        import ccxt  # type: ignore
+    except Exception:
+        return None
+    klass = getattr(ccxt, (ccxt_id or "").lower(), None)
+    if klass is None:
+        return None
+    try:
+        required = getattr(klass({}), "requiredCredentials", None)
+    except Exception:
+        return None
+    if not isinstance(required, dict):
+        return None
+    return {str(k): bool(v) for k, v in required.items()}
+
+
+def _ccxt_credential_fields(
+    ccxt_id: str,
+    *,
+    fallback_passphrase: bool = False,
+) -> tuple[CredentialField, ...]:
+    required = _ccxt_required_credentials(ccxt_id)
+    if required is None:
+        fields: tuple[CredentialField, ...] = (_CEX_API_KEY, _CEX_API_SECRET)
+        if fallback_passphrase:
+            fields = fields + (_CEX_API_PASSPHRASE,)
+        return fields
+
+    fields = []
+    for param in _CCXT_CREDENTIAL_ORDER:
+        if not required.get(param):
+            continue
+        field = _CCXT_CREDENTIAL_FIELDS.get(param)
+        if field is not None:
+            fields.append(replace(field, required=True))
+    return tuple(fields)
+
+
 # --------------------------------------------------------- builtin factories
 def _resolve_cex_creds(account_cfg, workspace, vault_passphrase, *,
                       with_passphrase: bool = False):
@@ -339,8 +445,11 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         """Build a factory that binds a venue to a concrete ccxt exchange id."""
 
         def _build(cfg, *, workspace=None, vault_passphrase=None):
-            raw = (cfg.get("ccxt_id") or cfg.get("exchange_id")
-                   or cfg.get("venue") or default_id).lower()
+            raw = cfg.get("ccxt_id") or cfg.get("exchange_id")
+            if not raw:
+                venue_raw = str(cfg.get("venue") or "")
+                raw = venue_raw if venue_raw.startswith("ccxt:") else default_id
+            raw = str(raw).lower()
             if raw.startswith("ccxt:"):
                 raw = raw.split(":", 1)[-1]
             # Venue aliases (binance_spot → binance, okex → okx, hl → hyperliquid)
@@ -488,7 +597,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
                   "balances": True, "place_order": True},
         # HL identifies an account by the EVM 0x address that signs the
         # EIP-712 order and the corresponding private key.
-        credential_fields=(_HL_VAULT_ADDRESS, _HL_PRIVATE_KEY),
+        credential_fields=(_HL_WALLET_ADDRESS, _HL_PRIVATE_KEY),
     ))
     reg.register(ExchangeProviderSpec(
         id="ccxt", label="ccxt (unified)", kind="cex", runtime="python_ccxt",
@@ -501,7 +610,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         description="Unified ccxt adapter — works with 100+ exchanges "
                      "(kraken, gate, mexc, kucoin, coinbase, …). Some "
                      "venues additionally need a passphrase (KuCoin, "
-                     "Bitget, Coinbase Pro/Advanced) — fill it in if "
+                     "OKX, Bitget, Coinbase Exchange-style APIs) — fill it in if "
                      "the upstream venue requires it.",
         supports={"ticker": True, "klines": True, "order_book": True,
                   "balances": True, "place_order": True},
@@ -512,7 +621,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
                 kind="secret", required=False,
                 description=(
                     "Only needed for venues that require it (KuCoin, "
-                    "Bitget, Coinbase Pro/Advanced)."
+                    "OKX, Bitget, Coinbase Exchange-style APIs)."
                 ),
                 vault_scope="exchange",
             ),
@@ -600,9 +709,10 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         aliases: tuple[str, ...] = (),
         kind: str = "cex",
     ) -> ExchangeProviderSpec:
-        fields: tuple[CredentialField, ...] = (_CEX_API_KEY, _CEX_API_SECRET)
-        if with_passphrase:
-            fields = fields + (_CEX_API_PASSPHRASE,)
+        fields = _ccxt_credential_fields(
+            ccxt_id or venue_id,
+            fallback_passphrase=with_passphrase,
+        )
         return ExchangeProviderSpec(
             id=venue_id, label=label, kind=kind, runtime="python_ccxt",
             aliases=aliases or (ccxt_id or venue_id,),
@@ -630,10 +740,25 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     reg.register(_ccxt_spec(
         "coinbase", "Coinbase Advanced Trade (ccxt)",
         ccxt_id="coinbase",
-        with_passphrase=True,
-        aliases=("coinbase_advanced_trade", "coinbasepro", "coinbaseprime"),
-        docs_url="https://docs.cdp.coinbase.com/exchange/docs/",
+        aliases=("coinbase_advanced_trade", "coinbaseadvanced"),
+        docs_url="https://docs.cdp.coinbase.com/coinbase-business/advanced-trade-apis/rest-api",
         api_keys_url="https://www.coinbase.com/settings/api",
+    ))
+    reg.register(_ccxt_spec(
+        "coinbase_exchange", "Coinbase Exchange (ccxt)",
+        ccxt_id="coinbaseexchange",
+        with_passphrase=True,
+        aliases=("coinbaseexchange", "coinbase_pro", "coinbasepro", "gdax"),
+        docs_url="https://docs.cdp.coinbase.com/exchange/rest-api/authentication",
+        api_keys_url="https://exchange.coinbase.com/profile/api",
+    ))
+    reg.register(_ccxt_spec(
+        "coinbase_international", "Coinbase International Exchange (ccxt)",
+        ccxt_id="coinbaseinternational",
+        with_passphrase=True,
+        aliases=("coinbaseinternational", "coinbase_intx", "intx"),
+        docs_url="https://docs.cdp.coinbase.com/api-reference/international-exchange-api/rest-api/authentication",
+        api_keys_url="https://international.coinbase.com/profile/api",
     ))
     reg.register(_ccxt_spec(
         "gate", "Gate.io (ccxt)",
@@ -721,9 +846,10 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         api_keys_url: str = "",
         aliases: tuple[str, ...] = (),
     ) -> ExchangeProviderSpec:
-        fields: tuple[CredentialField, ...] = (_CEX_API_KEY, _CEX_API_SECRET)
-        if with_passphrase:
-            fields = fields + (_CEX_API_PASSPHRASE,)
+        fields = _ccxt_credential_fields(
+            ccxt_id,
+            fallback_passphrase=with_passphrase,
+        )
         base_factory = _ccxt_factory(ccxt_id)
 
         def factory(cfg, *, workspace=None, vault_passphrase=None):
@@ -1297,4 +1423,3 @@ __all__ = [
     "CredentialField", "ExchangeProviderSpec", "ExchangeProviderRegistry",
     "get_registry", "reset_registry",
 ]
-

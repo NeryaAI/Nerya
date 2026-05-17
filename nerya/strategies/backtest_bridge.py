@@ -22,7 +22,7 @@ def backtest_replay(
     run_fn: Callable[[Any], Any],
     *,
     markets: list[str] | tuple[str, ...] | None = None,
-    window_days: int = 30,
+    window_days: int = 45,
     tf: str = "1h",
     fee_bps: float | None = None,
     slippage_bps: float | None = None,
@@ -53,4 +53,3 @@ def backtest_replay(
         (root / "report.md").write_text(render_report(metrics, result, cfg.asdict(), outputs), encoding="utf-8")
         render_chart(root)
     return metrics
-

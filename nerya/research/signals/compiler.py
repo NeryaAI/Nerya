@@ -1,6 +1,6 @@
 """Compile :class:`SignalFrame` outputs into :class:`IntentCandidate`.
 
-+ §5 Task 4: turn target-weight deltas into ``buy/sell/hold``
++ Turn target-weight deltas into ``buy/sell/hold``
 intent candidates that the trading skill / Risk Gate path can consume.
 
 The compiler is deliberately *pure*:

@@ -1,8 +1,7 @@
 """Async / background subagent tools — .
 
-Mirrors coding-agent's ``AgentTool`` background mode: the parent
-spawns a subagent, gets a ``task_id`` back immediately, and uses
-companion tools to inspect / pull / stop the work later.
+The parent spawns a subagent, gets a ``task_id`` back immediately, and
+uses companion tools to inspect / pull / stop the work later.
 
 Tools registered here:
 
@@ -213,6 +212,46 @@ def _usage_error(call: ToolCall, message: str) -> ToolResult:
     )
 
 
+def _cached_team_summary(call: ToolCall, args: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        from .agents import cached_team_run_summary_for_call
+
+        return cached_team_run_summary_for_call(call, args)
+    except Exception:
+        return None
+
+
+def _team_task_view(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": summary.get("team_run_id"),
+        "name": "team_run",
+        "state": summary.get("status") or "completed",
+        "started_at": None,
+        "finished_at": None,
+        "tokens": summary.get("tokens_total", 0),
+        "usd": summary.get("usd_total", 0.0),
+        "wall_ms": None,
+        "progress_count": 0,
+    }
+
+
+def _team_task_hint(summary: dict[str, Any]) -> str:
+    output_language = str(
+        summary.get("output_language") or "the original user prompt language"
+    )
+    return (
+        "The latest team_run in this turn was synchronous and already "
+        "returned this result. Synthesize the final answer from "
+        "team_summary now in the original user prompt language "
+        f"({output_language}), translating team member outputs as needed "
+        "including headings, labels, and natural-language field names while "
+        "preserving proper nouns, tickers, "
+        "source names, code identifiers, and URLs. team_run_id is not an async "
+        "task_id; do not inspect task_list/task_get/task_output again for this "
+        "team_run."
+    )
+
+
 def subagent_run_async_handler(
     call: ToolCall,
     *,
@@ -282,6 +321,18 @@ def task_list_handler(
     state = args.get("state") or None
     session_id = args.get("session_id") or None
     limit = max(1, int(args.get("limit") or 25))
+    team_summary = _cached_team_summary(call, args)
+    if team_summary is not None:
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "count": 1,
+                "tasks": [_team_task_view(team_summary)],
+                "team_summary": team_summary,
+                "next_action": _team_task_hint(team_summary),
+            },
+        )
     rows = store.list(state=state, parent_session_id=session_id, limit=limit)
     return ToolResult.from_json(
         tool_use_id=call.id,
@@ -317,6 +368,19 @@ def task_get_handler(
         return _usage_error(call, "task_id is required")
     rec = store.load(task_id)
     if rec is None:
+        team_summary = _cached_team_summary(call, args)
+        if team_summary is not None:
+            return ToolResult.from_json(
+                tool_use_id=call.id,
+                name=call.name,
+                data={
+                    **_team_task_view(team_summary),
+                    "requested_task_id": task_id,
+                    "output": team_summary,
+                    "team_summary": team_summary,
+                    "next_action": _team_task_hint(team_summary),
+                },
+            )
         return _usage_error(call, f"task not found: {task_id}")
     return ToolResult.from_json(
         tool_use_id=call.id,
@@ -336,6 +400,21 @@ def task_output_handler(
         return _usage_error(call, "task_id is required")
     rec = store.load(task_id)
     if rec is None:
+        team_summary = _cached_team_summary(call, args)
+        if team_summary is not None:
+            return ToolResult.from_json(
+                tool_use_id=call.id,
+                name=call.name,
+                data={
+                    "task_id": team_summary.get("team_run_id"),
+                    "requested_task_id": task_id,
+                    "state": team_summary.get("status") or "completed",
+                    "output": team_summary,
+                    "error": None,
+                    "error_kind": None,
+                    "next_action": _team_task_hint(team_summary),
+                },
+            )
         return _usage_error(call, f"task not found: {task_id}")
     return ToolResult.from_json(
         tool_use_id=call.id,
@@ -386,8 +465,8 @@ def task_update_handler(
     Used by the parent agent (or, more usefully, a worker subagent
     threading its progress back to the parent) to surface partial
     findings without polluting the parent's context with a full
-    output read. Mirrors coding-agent's ``AgentTool`` progress
-    notification path.
+    output read. This keeps partial findings visible without flooding
+    the parent with full output.
     """
 
     args = call.arguments or {}
@@ -430,6 +509,19 @@ def task_summary_handler(
         return _usage_error(call, "task_id is required")
     rec = store.load(task_id)
     if rec is None:
+        team_summary = _cached_team_summary(call, args)
+        if team_summary is not None:
+            return ToolResult.from_json(
+                tool_use_id=call.id,
+                name=call.name,
+                data={
+                    **_team_task_view(team_summary),
+                    "requested_task_id": task_id,
+                    "summary": team_summary.get("next_action"),
+                    "team_summary": team_summary,
+                    "next_action": _team_task_hint(team_summary),
+                },
+            )
         return _usage_error(call, f"task not found: {task_id}")
     progress_recent = list(rec.progress[-5:])
     summary_text: str | None = None

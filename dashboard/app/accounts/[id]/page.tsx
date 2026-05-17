@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
@@ -14,7 +15,9 @@ import {
   Pill,
 } from "../../../components/Page";
 import { SectionTabs } from "../../../components/SectionTabs";
+import { AccountEquityCurveCard } from "../../../components/accounts/AccountEquityCurveCard";
 import { clientApi } from "../../../lib/clientApi";
+import { alert as alertDialog, confirm as confirmDialog, prompt as promptDialog } from "../../../lib/dialogs";
 import type {
   AccountSummary,
   ControlPlaneOrder,
@@ -101,6 +104,198 @@ function fmtTs(ts: unknown): string {
   return formatTsShort(new Date(ms).toISOString());
 }
 
+function asStr(v: unknown): string {
+  if (v == null) return "";
+  return String(v);
+}
+
+function asNum(v: unknown): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function fmtNum(v: unknown, digits = 6): string {
+  const n = asNum(v);
+  if (n === null) return "—";
+  return n.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+function positionSideTone(side: unknown): "ok" | "danger" | "neutral" {
+  const s = asStr(side).toLowerCase();
+  if (s === "long" || s === "buy") return "ok";
+  if (s === "short" || s === "sell") return "danger";
+  return "neutral";
+}
+
+function pnlTone(value: number | null): string {
+  if (value === null) return "text-ink-500";
+  if (value > 0) return "text-emerald-300";
+  if (value < 0) return "text-rose-300";
+  return "text-ink-400";
+}
+
+function protectionStatusTone(status: unknown): "ok" | "warn" | "danger" | "neutral" {
+  const s = asStr(status).toLowerCase();
+  if (s === "armed" || s === "active") return "ok";
+  if (s === "triggered" || s === "executing") return "warn";
+  if (s === "disarmed" || s === "failed" || s === "canceled") return "danger";
+  return "neutral";
+}
+
+type PositionShareRow = {
+  strategy_id?: string;
+  size_base?: number;
+  avg_entry_price?: number;
+  realized_pnl_usd?: number;
+  fees_usd?: number;
+  funding_usd?: number;
+  unrealized_pnl_usd?: number;
+  notional_usd?: number;
+};
+
+function PositionRow({ pos }: { pos: Record<string, unknown> }) {
+  const t = useTranslations("accountDetail.positions");
+  const [expanded, setExpanded] = useState(false);
+  const market = asStr(pos.market) || "—";
+  const side = asStr(pos.side) || "—";
+  const size = asNum(pos.size_base);
+  const avg = asNum(pos.avg_entry_price);
+  const mark = asNum(pos.mark_price);
+  const unreal = asNum(pos.unrealized_pnl_usd);
+  const strategy = asStr(pos.strategy_id);
+  const rawShares = Array.isArray(pos.shares)
+    ? (pos.shares as PositionShareRow[])
+    : [];
+  // The merged sentinel ``__merged__`` is an internal value; if we see
+  // it we hide the strategy footer line and rely on the shares list
+  // for per-strategy attribution. Same with positions that have
+  // multiple shares — even if the merged row labels itself with one
+  // strategy, the breakdown is the source of truth.
+  const isMerged = strategy === "__merged__" || rawShares.length > 1;
+  const hasShares = rawShares.length > 0;
+  return (
+    <li className="border border-brand-500/10 rounded px-2 py-1.5 text-xs">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {hasShares ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="text-ink-400 hover:text-ink-100 transition-colors"
+            aria-label={expanded ? t("collapse") : t("expand")}
+            aria-expanded={expanded}
+          >
+            <span className="font-mono text-[10px]">
+              {expanded ? "▾" : "▸"}
+            </span>
+          </button>
+        ) : (
+          <span className="w-3" />
+        )}
+        <span className="font-mono text-ink-100 min-w-[110px]">{market}</span>
+        <Pill tone={positionSideTone(side)}>{side}</Pill>
+        <span className="font-mono text-ink-300">
+          {size !== null ? fmtNum(Math.abs(size)) : "—"}
+          {avg !== null ? (
+            <span className="text-ink-500"> @ {fmtNum(avg, 4)}</span>
+          ) : null}
+        </span>
+        {mark !== null ? (
+          <span className="font-mono text-ink-500 text-[11px]">
+            mark {fmtNum(mark, 4)}
+          </span>
+        ) : null}
+        {isMerged ? (
+          <Pill tone="brand">
+            {t("mergedBadge", { count: rawShares.length })}
+          </Pill>
+        ) : null}
+        <span className={`font-mono ${pnlTone(unreal)} ml-auto`}>
+          {unreal !== null
+            ? (unreal >= 0 ? "+" : "") + fmtNum(unreal, 2)
+            : "—"}
+        </span>
+        {strategy && !isMerged ? (
+          <span className="font-mono text-ink-500 text-[11px] w-full truncate">
+            {strategy}
+          </span>
+        ) : null}
+      </div>
+      {expanded && hasShares ? (
+        <ul className="mt-1.5 ml-4 space-y-0.5 border-l border-brand-500/15 pl-2">
+          {rawShares.map((share, idx) => {
+            const shareSize = asNum(share.size_base);
+            const shareAvg = asNum(share.avg_entry_price);
+            const shareUnreal = asNum(share.unrealized_pnl_usd);
+            const shareRealized = asNum(share.realized_pnl_usd);
+            const shareFees = asNum(share.fees_usd);
+            return (
+              <li
+                key={share.strategy_id || idx}
+                className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]"
+              >
+                <span className="font-mono text-ink-200 min-w-[110px] truncate">
+                  {share.strategy_id || "—"}
+                </span>
+                <span className="font-mono text-ink-300">
+                  {shareSize !== null ? fmtNum(Math.abs(shareSize)) : "—"}
+                  {shareAvg !== null ? (
+                    <span className="text-ink-500">
+                      {" "}
+                      @ {fmtNum(shareAvg, 4)}
+                    </span>
+                  ) : null}
+                </span>
+                {shareRealized !== null ? (
+                  <span className={`font-mono text-[10px] ${pnlTone(shareRealized)}`}>
+                    {t("realized")}: {shareRealized >= 0 ? "+" : ""}
+                    {fmtNum(shareRealized, 2)}
+                  </span>
+                ) : null}
+                {shareFees !== null && shareFees > 0 ? (
+                  <span className="font-mono text-[10px] text-ink-500">
+                    {t("fees")}: {fmtNum(shareFees, 2)}
+                  </span>
+                ) : null}
+                <span className={`font-mono ml-auto ${pnlTone(shareUnreal)}`}>
+                  {shareUnreal !== null
+                    ? (shareUnreal >= 0 ? "+" : "") + fmtNum(shareUnreal, 2)
+                    : "—"}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+function ProtectionRow({ rule }: { rule: Record<string, unknown> }) {
+  const market = asStr(rule.market) || "—";
+  const side = asStr(rule.side) || "—";
+  const status = asStr(rule.status) || "—";
+  const mode = asStr(rule.mode);
+  const sl = rule.stop_loss as Record<string, unknown> | undefined;
+  const tp = rule.take_profit as Record<string, unknown> | undefined;
+  const slPrice = sl ? asNum(sl.trigger_price) ?? asNum(sl.price) : null;
+  const tpPrice = tp ? asNum(tp.trigger_price) ?? asNum(tp.price) : null;
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs border border-brand-500/10 rounded px-2 py-1.5">
+      <span className="font-mono text-ink-100 min-w-[110px]">{market}</span>
+      <Pill tone={positionSideTone(side)}>{side}</Pill>
+      <Pill tone={protectionStatusTone(status)}>{status}</Pill>
+      {mode ? <span className="text-[11px] text-ink-500 font-mono">{mode}</span> : null}
+      {slPrice !== null ? (
+        <span className="font-mono text-rose-300 text-[11px]">SL {fmtNum(slPrice, 4)}</span>
+      ) : null}
+      {tpPrice !== null ? (
+        <span className="font-mono text-emerald-300 text-[11px]">TP {fmtNum(tpPrice, 4)}</span>
+      ) : null}
+    </li>
+  );
+}
+
 export default function AccountDetailPage({
   params,
 }: {
@@ -114,6 +309,7 @@ export default function AccountDetailPage({
   const [headers, setHeaders] = useState<AuthHeader[]>([]);
   const [newHeaderKey, setNewHeaderKey] = useState("");
   const [newHeaderValue, setNewHeaderValue] = useState("");
+  const [vaultedToast, setVaultedToast] = useState<string | null>(null);
   const [walletPortfolio, setWalletPortfolio] =
     useState<WalletPortfolioRow | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -145,19 +341,29 @@ export default function AccountDetailPage({
     }
   }
 
-  async function patchHeaders(patch: Record<string, string | null>) {
+  async function patchHeaders(
+    patch: Record<string, string | null>,
+    opts?: { autoVault?: boolean },
+  ) {
     setBusy("headers");
     setError(null);
+    setVaultedToast(null);
     try {
       const res = await clientApi.accountsHeadersPatch({
         account_id: accountId,
         headers: patch,
         operator: "dashboard",
+        auto_vault: opts?.autoVault ?? false,
       });
       if (!res.ok) {
         throw new Error(res.detail || res.error || "headers_patch_failed");
       }
       setHeaders(res.headers || []);
+      const vaulted = res.vaulted_refs || {};
+      const entries = Object.entries(vaulted);
+      if (entries.length > 0) {
+        setVaultedToast(entries.map(([k, ref]) => `${k} → ${ref}`).join(", "));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -172,13 +378,17 @@ export default function AccountDetailPage({
       setError(t("headerRequired"));
       return;
     }
-    await patchHeaders({ [key]: value });
+    await patchHeaders({ [key]: value }, { autoVault: true });
     setNewHeaderKey("");
     setNewHeaderValue("");
   }
 
   async function removeHeader(key: string) {
-    if (!confirm(t("removeHeaderConfirm", { key }))) return;
+    const ok = await confirmDialog({
+      message: t("removeHeaderConfirm", { key }),
+      tone: "danger",
+    });
+    if (!ok) return;
     await patchHeaders({ [key]: null });
   }
 
@@ -229,10 +439,10 @@ export default function AccountDetailPage({
   ) {
     if (!summary) return;
     if (next !== "active") {
-      const reason = window.prompt(
-        t("reasonPrompt", { id: accountId, status: next }),
-        t("manualOperator"),
-      );
+      const reason = await promptDialog({
+        message: t("reasonPrompt", { id: accountId, status: next }),
+        defaultValue: t("manualOperator"),
+      });
       if (reason == null) return;
       setBusy(`status:${next}`);
       try {
@@ -286,10 +496,10 @@ export default function AccountDetailPage({
     if (!summary) return;
     if (summary.profile.mode !== "paper") return;
     const currentBalance = Number(summary.profile.initial_balance_usd) || 0;
-    const raw = window.prompt(
-      t("resetPaperPrompt", { id: accountId }),
-      String(currentBalance || ""),
-    );
+    const raw = await promptDialog({
+      message: t("resetPaperPrompt", { id: accountId }),
+      defaultValue: String(currentBalance || ""),
+    });
     if (raw == null) return;
     const trimmed = raw.trim();
     let initial: number | undefined;
@@ -309,14 +519,15 @@ export default function AccountDetailPage({
         operator: "dashboard",
       });
       if (!res.ok && res.error === "account_busy" && res.state) {
-        const proceed = window.confirm(
-          t("accountBusyConfirm", {
+        const proceed = await confirmDialog({
+          message: t("accountBusyConfirm", {
             id: accountId,
             orders: res.state.active_orders,
             positions: res.state.open_positions,
             executors: res.state.active_executors,
           }),
-        );
+          tone: "danger",
+        });
         if (!proceed) {
           setBusy(null);
           return;
@@ -338,14 +549,13 @@ export default function AccountDetailPage({
   }
 
   async function deleteAccount(force = false) {
-    if (
-      !confirm(
-        force
-          ? t("forceDeleteConfirm", { id: accountId })
-          : t("deleteConfirm", { id: accountId }),
-      )
-    )
-      return;
+    const ok = await confirmDialog({
+      message: force
+        ? t("forceDeleteConfirm", { id: accountId })
+        : t("deleteConfirm", { id: accountId }),
+      tone: "danger",
+    });
+    if (!ok) return;
     setBusy("delete");
     try {
       const res = await clientApi.accountsDelete({
@@ -355,13 +565,13 @@ export default function AccountDetailPage({
       });
       if (!res.ok) {
         if (res.state) {
-          alert(
-            t("cannotDelete", {
+          await alertDialog({
+            message: t("cannotDelete", {
               positions: res.state.open_positions,
               executors: res.state.active_executors,
               orders: res.state.active_orders,
             }),
-          );
+          });
         } else {
           throw new Error(res.detail || res.error || "delete_failed");
         }
@@ -527,6 +737,11 @@ export default function AccountDetailPage({
               />
             </div>
 
+            <AccountEquityCurveCard
+              accountId={accountId}
+              currency={profile.base_currency || "USDT"}
+            />
+
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <Card
                 title={t("permissionsLimits")}
@@ -662,6 +877,14 @@ export default function AccountDetailPage({
                   {busy === "headers" ? "…" : t("addUpdate")}
                 </button>
               </div>
+              <p className="mt-2 text-[11px] text-ink-500">
+                {t("headerAutoVaultHint")}
+              </p>
+              {vaultedToast ? (
+                <div className="mt-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200 font-mono">
+                  {t("headerVaultedToast")} {vaultedToast}
+                </div>
+              ) : null}
             </Card>
 
             {profile.wallet_id ? (
@@ -749,49 +972,64 @@ export default function AccountDetailPage({
               </Card>
             ) : null}
 
-            <Card
-              title={t("openPositionsTitle", { count: summary?.open_position_count ?? 0 })}
-            >
-              {(summary?.open_positions || []).length === 0 ? (
-                <Empty label={t("noOpenPositions")} />
-              ) : (
-                <Json value={summary?.open_positions} />
-              )}
-            </Card>
+            <Card title={t("liveStateTitle")} description={t("liveStateDesc")}>
+              <div className="space-y-4">
+                <section>
+                  <div className="mb-2 flex items-center gap-2 text-[12px] text-ink-400">
+                    <span className="font-medium text-ink-200">{t("openPositionsTitle", { count: summary?.open_position_count ?? 0 })}</span>
+                  </div>
+                  {(summary?.open_positions || []).length === 0 ? (
+                    <Empty label={t("noOpenPositions")} />
+                  ) : (
+                    <ul className="embedded-list-scroll-sm space-y-1">
+                      {(summary?.open_positions || []).map((pos, idx) => (
+                        <PositionRow key={asStr(pos.position_id) || idx} pos={pos} />
+                      ))}
+                    </ul>
+                  )}
+                </section>
 
-            <Card
-              title={t("activeProtections", { count: summary?.protection_count ?? 0 })}
-            >
-              {(summary?.protections || []).length === 0 ? (
-                <Empty label={t("noProtections")} />
-              ) : (
-                <Json value={summary?.protections} />
-              )}
-            </Card>
+                <section>
+                  <div className="mb-2 flex items-center gap-2 text-[12px] text-ink-400">
+                    <span className="font-medium text-ink-200">{t("activeProtections", { count: summary?.protection_count ?? 0 })}</span>
+                  </div>
+                  {(summary?.protections || []).length === 0 ? (
+                    <Empty label={t("noProtections")} />
+                  ) : (
+                    <ul className="embedded-list-scroll-sm space-y-1">
+                      {(summary?.protections || []).map((p, idx) => (
+                        <ProtectionRow key={asStr(p.protection_id) || idx} rule={p} />
+                      ))}
+                    </ul>
+                  )}
+                </section>
 
-            <Card
-              title={t("activeExecutors", { count: summary?.active_executors.length ?? 0 })}
-            >
-              {(summary?.active_executors || []).length === 0 ? (
-                <Empty label={t("noActiveExecutors")} />
-              ) : (
-                <ul className="embedded-list-scroll-sm space-y-1">
-                  {summary!.active_executors.map((exec) => (
-                    <li
-                      key={exec.executor_id}
-                      className="flex items-center gap-2 text-xs font-mono border border-brand-500/10 rounded px-2 py-1"
-                    >
-                      <Pill tone="brand">{exec.kind}</Pill>
-                      <span>{exec.state}</span>
-                      <span className="text-ink-500">{exec.market}</span>
-                      <span className="text-ink-400">{exec.strategy_id}</span>
-                      <span className="ml-auto text-ink-500">
-                        {fmtTs(exec.created_at)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+                <section>
+                  <div className="mb-2 flex items-center gap-2 text-[12px] text-ink-400">
+                    <span className="font-medium text-ink-200">{t("activeExecutors", { count: summary?.active_executors.length ?? 0 })}</span>
+                  </div>
+                  {(summary?.active_executors || []).length === 0 ? (
+                    <Empty label={t("noActiveExecutors")} />
+                  ) : (
+                    <ul className="embedded-list-scroll-sm space-y-1">
+                      {summary!.active_executors.map((exec) => (
+                        <li
+                          key={exec.executor_id}
+                          className="flex items-center gap-2 text-xs font-mono border border-brand-500/10 rounded px-2 py-1"
+                        >
+                          <Pill tone="brand">{exec.kind}</Pill>
+                          <span>{exec.state}</span>
+                          <span className="text-ink-500">{exec.market}</span>
+                          <span className="text-ink-400">{exec.strategy_id}</span>
+                          <span className="ml-auto text-ink-500">
+                            {fmtTs(exec.created_at)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </div>
             </Card>
 
             <Card
@@ -838,9 +1076,11 @@ export default function AccountDetailPage({
               )}
             </Card>
 
-            <Card
+            <Advanced
               title={t("reconciliationReports", { count: reports.length })}
               description={t("reconciliationDesc")}
+              count={reports.length || undefined}
+              storageKey={`nerya.account.advanced.recon.${profile?.id ?? "unknown"}`}
             >
               {reports.length === 0 ? (
                 <Empty label={t("noReports")} />
@@ -863,14 +1103,14 @@ export default function AccountDetailPage({
                   ))}
                 </div>
               )}
-            </Card>
+            </Advanced>
 
-            <Card
+            <Advanced
               title={t("rawProfile")}
-              description={t("rawProfileDesc")}
+              storageKey={`nerya.account.advanced.rawProfile.${profile?.id ?? "unknown"}`}
             >
               <Json value={profile} />
-            </Card>
+            </Advanced>
           </>
         )}
       </PageBody>

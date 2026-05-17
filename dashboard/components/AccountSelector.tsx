@@ -7,7 +7,7 @@ import { clientApi, type AccountSummary } from "../lib/clientApi";
 import { useCurrentAccountId } from "../lib/currentAccount";
 
 /**
- * Top-bar account selector (04-29 §11 P9).
+ * Top-bar account selector.
  *
  * Replaces the static Paper/Live indicator with a real chooser that
  * spans every account configured in ``accounts.yml``. The chosen id
@@ -98,7 +98,7 @@ export function AccountSelector() {
     return (
       <Link
         href="/accounts"
-        className="hidden md:flex items-center gap-2 px-3 py-1.5 rounded-lg border border-amber-400/30 bg-amber-400/5 text-xs text-amber-200 hover:bg-amber-400/10"
+        className="flex max-w-[42vw] items-center gap-2 truncate rounded-lg border border-amber-400/30 bg-amber-400/5 px-2 py-1.5 text-xs text-amber-200 hover:bg-amber-400/10 sm:max-w-none sm:px-3"
         title={t("noAccountsTitle")}
       >
         {t("addAccount")}
@@ -110,10 +110,10 @@ export function AccountSelector() {
     accounts.find((a) => a.profile.id === currentId) ?? accounts[0];
 
   return (
-    <div className="relative" data-account-selector>
+    <div className="relative min-w-0" data-account-selector>
       <button
         onClick={() => setOpen((v) => !v)}
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs ${modeColor(
+        className={`flex max-w-[42vw] items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs sm:max-w-none sm:gap-2 sm:px-3 ${modeColor(
           selected.profile.mode,
         )} hover:brightness-110`}
         title={t("focusedOn", { mode: selected.profile.mode, venue: selected.profile.venue })}
@@ -123,8 +123,10 @@ export function AccountSelector() {
             selected.profile.status,
           )}`}
         />
-        <span className="font-mono text-[12px]">{selected.profile.id}</span>
-        <span className="text-[10px] uppercase tracking-widest opacity-70">
+        <span className="max-w-[86px] truncate font-mono text-[12px] sm:max-w-[160px]">
+          {selected.profile.id}
+        </span>
+        <span className="hidden text-[12px] opacity-70 sm:inline">
           {selected.profile.mode}
         </span>
         <svg
@@ -139,14 +141,14 @@ export function AccountSelector() {
       </button>
       {open ? (
         <div
-          className="absolute right-0 mt-2 w-80 rounded-xl border border-white/10 bg-[#0c0d1d] shadow-2xl z-50"
+          className="absolute right-0 z-50 mt-2 w-[calc(100vw-1rem)] max-w-[20rem] rounded-xl border border-brand-500/20 bg-[#0c0d1d] shadow-2xl sm:w-80"
           role="menu"
         >
-          <div className="px-3 py-2 border-b border-white/5 text-[11px] uppercase tracking-widest text-ink-400 flex items-center justify-between">
+          <div className="px-3 py-2 border-b border-brand-500/10 text-[12px] text-ink-400 flex items-center justify-between">
             <span>{t("focusedAccount")}</span>
             <Link
               href="/accounts"
-              className="text-brand-200 hover:text-brand-100 normal-case tracking-normal"
+              className="text-brand-300 hover:text-brand-200"
               onClick={() => setOpen(false)}
             >
               {t("manage")}
@@ -177,13 +179,13 @@ export function AccountSelector() {
                       {p.id}
                     </span>
                     <span
-                      className={`text-[10px] px-1.5 py-0.5 rounded border ${modeColor(
+                      className={`text-[11px] px-1.5 py-0.5 rounded border ${modeColor(
                         p.mode,
                       )}`}
                     >
                       {p.mode}
                     </span>
-                    <span className="text-[10px] font-mono text-ink-400 w-14 text-right">
+                    <span className="text-[11px] font-mono text-ink-400 w-14 text-right">
                       {p.base_currency || "USDT"}
                     </span>
                   </button>
@@ -191,7 +193,7 @@ export function AccountSelector() {
               );
             })}
           </ul>
-          <div className="px-3 py-2 border-t border-white/5 flex items-center justify-between text-[11px]">
+          <div className="px-3 py-2 border-t border-brand-500/10 flex items-center justify-between text-[11px]">
             <button
               onClick={() => {
                 setCurrentId(null);

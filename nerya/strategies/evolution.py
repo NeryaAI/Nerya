@@ -61,7 +61,6 @@ from typing import Any, Optional
 from ..core import jsonl
 from ..core.atomic_write import atomic_write_text
 from ..core.config import Config
-from ..core.errors import NeryaError
 from ..core.ids import new_id
 from ..core.paths import WorkspacePaths
 from ..core.redaction import redact_display_dict
@@ -174,6 +173,7 @@ class StrategyEvolutionRunner:
             strategy_id,
             lookback_runs=int(cfg.lookback.runs or 200),
             package=pkg,
+            config_like=self.config,
         )
 
         if (
@@ -253,7 +253,7 @@ class StrategyEvolutionRunner:
 
         accepted, dropped, warnings = _filter_changes(output, cfg)
         validation_plan = build_validation_plan(
-            output.get("validation_plan"),
+            _validation_plan_input(output),
             source="strategy_evolution",
             strategy_id=pkg.strategy_id,
             require=bool(accepted),
@@ -579,7 +579,12 @@ def _filter_changes(
     output: dict[str, Any],
     cfg: StrategyTuningConfig,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    raw_changes = output.get("proposed_changes") or output.get("changes") or []
+    raw_changes = (
+        output.get("proposed_changes")
+        or output.get("proposed_patches")
+        or output.get("changes")
+        or []
+    )
     if not isinstance(raw_changes, list):
         return [], [], ["proposed_changes was not a list"]
     accepted: list[dict[str, Any]] = []
@@ -608,6 +613,22 @@ def _filter_changes(
             )
             break
     return accepted, dropped, warnings
+
+
+def _validation_plan_input(output: dict[str, Any]) -> Any:
+    raw = output.get("validation_plan")
+    if raw is not None:
+        return raw
+    if "backtest_required" not in output and "shadow_run_required" not in output:
+        return None
+    steps = ["unit"]
+    if bool(output.get("backtest_required")):
+        steps.append("backtest")
+    else:
+        steps.append("manual_review")
+    if bool(output.get("shadow_run_required")):
+        steps.append("shadow_run")
+    return steps
 
 
 def _render_review(

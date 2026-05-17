@@ -1,6 +1,6 @@
 """Reconciliation — local projection vs. exchange truth.
 
-04-29 §5.2 / §11 (P4) — three passes:
+Three passes:
 
 1. ``reconcile_strategy`` (legacy): per-strategy fills journal vs.
    :class:`VirtualLedger`. Kept stable so the existing CLI/cron path
@@ -219,6 +219,9 @@ class ReconciliationReport:
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def asdict(self) -> dict[str, Any]:
+        return self.as_dict()
+
 
 _SEVERITY_ORDER: dict[ReconcileSeverity, int] = {
     "info": 0,
@@ -402,16 +405,22 @@ def reconcile_local(
     ).fetchall()
     summary["open_positions"] = len(open_positions)
     for p in open_positions:
-        # Sum buy minus sell for the same account/strategy/market
-        # within the position's lifetime.
+        # Post-v6 ``positions.strategy_id`` is the merged sentinel
+        # (``__merged__``) for any position that aggregates more than
+        # one strategy. The fills replay must therefore key on
+        # (account_id, market) — not (account_id, strategy_id, market) —
+        # so the sum matches the merged size regardless of which
+        # strategies contributed. We further constrain by ``order_id``
+        # ownership later (in Pass 3) where a per-strategy break is
+        # needed.
         replay = con.execute(
             """
             SELECT side, COALESCE(SUM(size_base), 0) AS s
               FROM fills
-             WHERE account_id = ? AND strategy_id = ? AND market = ?
+             WHERE account_id = ? AND market = ?
              GROUP BY side
             """,
-            (p["account_id"], p["strategy_id"], p["market"]),
+            (p["account_id"], p["market"]),
         ).fetchall()
         net = 0.0
         for row in replay:

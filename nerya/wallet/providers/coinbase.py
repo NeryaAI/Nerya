@@ -1,13 +1,15 @@
-"""Coinbase wallet provider.
+"""Coinbase Agentic Wallet / CDP wallet provider.
 
 Supports two installation paths, whichever the operator has on their box.
 Neither is auto-installed by Nerya:
 
-1. **Python CDP SDK** (preferred) — ``pip install cdp-sdk`` or the newer
+1. **Agentic Wallet CLI** — Coinbase's authenticate-wallet skill uses
+   ``npx awal@2.10.0 auth login <email> --json`` and an email OTP.
+2. **Python CDP SDK** (preferred) — ``pip install cdp-sdk`` or the newer
    ``pip install coinbase-agentkit``. When present we use it for balance
    lookups + quote/swap via ``Wallet``.  Docs:
    https://docs.cdp.coinbase.com/
-2. **Node CDP skill** (fallback) — point ``wallet.coinbase.skill_path`` at
+3. **Node CDP skill** (fallback) — point ``wallet.coinbase.skill_path`` at
    a checkout of ``@coinbase/cdp-sdk`` /
    ``@coinbase/coinbase-sdk`` wrapped in a Nerya skill entry (see
    :mod:`nerya.wallet.providers._node_skill` for the wire protocol). This
@@ -72,6 +74,14 @@ _CAPABILITIES = WalletCapabilities(
             "WalletPolicyDenied."
         ),
     ),
+    market_data=WalletCapability(
+        supported=True,
+        status="real",
+        note=(
+            "GET /products/{product_id}/candles from Coinbase public product "
+            "candles. This is product-pair market data, not token-contract OHLCV."
+        ),
+    ),
     execution_profile="partial",
     chains=("base", "base-sepolia", "ethereum", "ethereum-sepolia"),
     notes=(
@@ -82,10 +92,21 @@ _CAPABILITIES = WalletCapabilities(
 )
 
 
+_COINBASE_PRODUCTS_URL = "https://api.exchange.coinbase.com/products"
+_COINBASE_GRANULARITY = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
+    "6h": 21600,
+    "1d": 86400,
+}
+
+
 @dataclass
 class CoinbaseWallet(WalletProvider):
     id: str = "coinbase"
-    label: str = "Coinbase CDP Wallet (cdp-sdk / coinbase-agentkit or Node skill)"
+    label: str = "Coinbase Agentic Wallet / CDP Wallet"
 
     api_key_name: str = ""
     api_private_key: str = ""
@@ -98,6 +119,9 @@ class CoinbaseWallet(WalletProvider):
 
     def _have_creds(self) -> bool:
         return bool(self.api_key_name and self.api_private_key)
+
+    def _have_agentic_session(self) -> bool:
+        return bool(str(self.config.get("agentic_session_path") or "").strip())
 
     def _probe_py(self) -> str | None:
         for mod in _PY_PREFERRED:
@@ -125,27 +149,28 @@ class CoinbaseWallet(WalletProvider):
         if self.skill_path:
             node_ok, node_missing = self._ref().skill_ready()
 
+        agentic_ready = self._have_agentic_session()
         missing: list[str] = []
-        if not py_mod:
-            missing.append("pip:cdp-sdk (or coinbase-agentkit)")
-        if self.skill_path and not node_ok:
-            missing.extend(node_missing)
-        if not self._have_creds():
-            missing.append("cred:api_key_name/api_private_key")
-
-        ready = bool((py_mod or node_ok) and self._have_creds())
+        if not agentic_ready:
+            if not py_mod:
+                missing.append("pip:cdp-sdk (or coinbase-agentkit)")
+            if self.skill_path and not node_ok:
+                missing.extend(node_missing)
+            if not self._have_creds():
+                missing.append("cred:api_key_name/api_private_key")
+        ready = bool(agentic_ready or ((py_mod or node_ok) and self._have_creds()))
         install_hint = (
-            "pip install cdp-sdk  # or: pip install coinbase-agentkit. "
-            "Then create an API key at https://portal.cdp.coinbase.com/ and "
-            "store it via `nerya vault create-secret`, setting "
+            "For Agentic Wallet, use `npx awal@2.10.0 auth login <email> "
+            "--json` and verify the email OTP. For CDP SDK methods, run "
+            "`pip install cdp-sdk` and configure "
             "wallet.coinbase.{api_key_name_ref, api_private_key_ref}."
         )
         reason = ""
         if not ready:
-            if not (py_mod or node_ok):
+            if not agentic_ready and not (py_mod or node_ok):
                 reason = "no python cdp-sdk and no coinbase node skill_path."
             elif not self._have_creds():
-                reason = "Coinbase requires api_key_name + api_private_key."
+                reason = "Coinbase CDP SDK methods require api_key_name + api_private_key."
         return WalletReadiness(
             provider=self.id, ready=ready, missing=missing,
             install_hint=install_hint, reason=reason,
@@ -155,6 +180,67 @@ class CoinbaseWallet(WalletProvider):
         return _CAPABILITIES
 
     # --------------------------------------------------------------
+    def get_market_klines(
+        self,
+        *,
+        market: str,
+        interval: str = "1h",
+        limit: int = 100,
+        **_kw: Any,
+    ) -> list[dict[str, Any]]:
+        """Fetch Coinbase public product candles.
+
+        ``market`` is a Coinbase product id such as ``BTC-USD``.
+        """
+
+        product = str(market or "").strip().upper().replace("/", "-")
+        if not product:
+            raise WalletPolicyDenied("Coinbase market data requires product id")
+        granularity = _COINBASE_GRANULARITY.get(str(interval or "1h").lower(), 3600)
+        from urllib.parse import quote, urlencode
+
+        from ...connectors.http import UrllibHttp
+
+        params = urlencode({"granularity": str(granularity)})
+        url = f"{_COINBASE_PRODUCTS_URL}/{quote(product, safe='')}/candles?{params}"
+        status, doc = UrllibHttp().request("GET", url, timeout=20.0)
+        if status >= 400:
+            raise WalletPolicyDenied(f"Coinbase product candles returned {status}: {doc}")
+        rows = doc.get("raw") if isinstance(doc, dict) else doc
+        if not isinstance(rows, list):
+            rows = doc if isinstance(doc, list) else []
+        out: list[dict[str, Any]] = []
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                if isinstance(row, dict):
+                    ts = row.get("time") or row.get("ts")
+                    lo = row.get("low")
+                    h = row.get("high")
+                    o = row.get("open")
+                    c = row.get("close")
+                    v = row.get("volume")
+                elif isinstance(row, (list, tuple)) and len(row) >= 5:
+                    ts = row[0]
+                    lo = row[1]
+                    h = row[2]
+                    o = row[3]
+                    c = row[4]
+                    v = row[5] if len(row) > 5 else 0
+                else:
+                    continue
+                out.append({
+                    "ts": int(float(ts)),
+                    "open": float(o),
+                    "high": float(h),
+                    "low": float(lo),
+                    "close": float(c),
+                    "volume": float(v or 0),
+                })
+            except (TypeError, ValueError):
+                continue
+        out.sort(key=lambda r: r["ts"])
+        return out[-max(1, min(int(limit or 100), 300)):]
+
     def _py_wallet(self):
         """Return a live CDP wallet handle using whichever SDK is installed."""
         r = self.readiness()

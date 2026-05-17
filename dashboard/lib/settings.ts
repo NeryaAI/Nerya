@@ -32,6 +32,8 @@ export type LanguagePreference = "en" | "zh" | "ja";
 
 export type MarketStreamPreference = "basic" | "standard" | "pro";
 
+export type ThemeMode = "light" | "dark" | "system";
+
 export type UiSettings = {
   kline: {
     venue: KlineVenue;
@@ -46,7 +48,7 @@ export type UiSettings = {
   timezone: TimezonePreference;
   language: LanguagePreference;
   marketStream: MarketStreamPreference;
-  darkMode: boolean;
+  darkMode: ThemeMode;
 };
 
 export const DEFAULT_SETTINGS: UiSettings = {
@@ -63,7 +65,7 @@ export const DEFAULT_SETTINGS: UiSettings = {
   timezone: "auto",
   language: "en",
   marketStream: "standard",
-  darkMode: true,
+  darkMode: "dark",
 };
 
 const KEY = "nerya.ui_settings.v1";
@@ -73,12 +75,33 @@ let cachedRaw: string | null | undefined;
 let cachedSettings: UiSettings = DEFAULT_SETTINGS;
 
 /** Merge helper that tolerates missing keys / extra fields in old blobs. */
+function resolveThemeMode(value: unknown): ThemeMode {
+  if (value === "light" || value === "dark" || value === "system") {
+    return value;
+  }
+  if (typeof value === "boolean") {
+    return value ? "dark" : "light";
+  }
+  return DEFAULT_SETTINGS.darkMode;
+}
+
+export function getSystemDarkPreference(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+export function isDarkThemeMode(mode: ThemeMode): boolean {
+  return mode === "system" ? getSystemDarkPreference() : mode === "dark";
+}
+
 function merge(stored: unknown): UiSettings {
   if (!stored || typeof stored !== "object") return DEFAULT_SETTINGS;
-  const s = stored as Partial<UiSettings>;
+  const s = stored as Partial<UiSettings> & { darkMode?: unknown };
+  const darkMode = resolveThemeMode(s.darkMode);
   return {
     ...DEFAULT_SETTINGS,
     ...s,
+    darkMode,
     kline: { ...DEFAULT_SETTINGS.kline, ...(s.kline ?? {}) },
   };
 }

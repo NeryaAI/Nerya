@@ -33,12 +33,13 @@ payload:
   trading: true      # vs tuning=false
 ```
 
-The trigger router uses ``target=skill:strategy.run_tick`` for
-trading ticks and ``target=skill:strategy.run_tuning`` for tuning
-ticks. The actual handlers live in :mod:`nerya.api.routes_strategies_runtime`
-and :mod:`nerya.cli.commands.strategy`; both ultimately call
-:meth:`StrategyRunner.run_tick` or, for tuning, the
-:class:`StrategyEvolutionRunner` from .
+Most trading ticks use ``target=skill:strategy.run_tick``. Strategies
+that declare an Agent task runtime, or older generated ``*team*``
+strategies with multiple research roles, use
+``target=skill:strategy.agent_task`` so the scheduler enters
+AgentKernel and can call native tools such as ``team_run`` before any
+trade intent is submitted. Tuning still uses
+``target=skill:strategy.run_tuning``.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from typing import Any, Iterable, Optional
 from ..core.errors import TradingError
 from ..core.paths import WorkspacePaths
 from ..triggers.schedule import ScheduleEntry, load_schedules, save_schedules
+from .agent_task_mode import AGENT_TASK_TARGET, agent_task_requested
 from .package import StrategyManifest, StrategyPackage, StrategySchedule, load_package
 
 
@@ -106,6 +108,7 @@ def compile_trading_schedule(package: StrategyPackage) -> ScheduleEntry:
 
     manifest = package.manifest
     sid = manifest.strategy_id
+    use_agent_task = agent_task_requested(manifest)
     payload: dict[str, Any] = {
         "strategy_id": sid,
         "reason": "cron",
@@ -113,10 +116,12 @@ def compile_trading_schedule(package: StrategyPackage) -> ScheduleEntry:
         "trading": True,
         "tuning": False,
     }
+    if use_agent_task:
+        payload["agent_task"] = True
     return ScheduleEntry(
         id=trading_schedule_id(sid),
         kind=TRADING_KIND,
-        target=TRADING_TARGET,
+        target=AGENT_TASK_TARGET if use_agent_task else TRADING_TARGET,
         strategy_id=sid,
         payload=payload,
         **_schedule_kwargs(manifest.schedule),
@@ -337,6 +342,7 @@ def _entries_equal(a: ScheduleEntry, b: ScheduleEntry) -> bool:
 
 __all__ = [
     "StrategyScheduleApplyResult",
+    "AGENT_TASK_TARGET",
     "TRADING_KIND",
     "TRADING_TARGET",
     "TUNING_KIND",

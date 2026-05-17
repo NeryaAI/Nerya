@@ -9,7 +9,7 @@ that the registry + wallet providers (e.g. ``okx_os``) still read.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -17,6 +17,7 @@ class CEXCredentials:
     api_key: str = ""
     api_secret: str = ""
     api_passphrase: str = ""  # OKX / KuCoin / Bitget etc.
+    extras: dict[str, str] = field(default_factory=dict)
 
 
 __all__ = ["CEXCredentials"]

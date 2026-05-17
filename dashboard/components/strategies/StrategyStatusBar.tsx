@@ -4,6 +4,7 @@ import { useTranslations } from "next-intl";
 
 import { Card, Kpi, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
+import { prompt as promptDialog } from "../../lib/dialogs";
 import type { StrategyWorkspaceEnvelope } from "../../lib/strategyTypes";
 
 interface Props {
@@ -43,8 +44,13 @@ export function StrategyStatusBar({
     if (!sid) return;
     let reason = "";
     if (action === "set") {
-      reason = window.prompt(t("killReasonPrompt", { id: sid }), "operator_halt") ?? "";
-      if (!reason) return;
+      const entered = await promptDialog({
+        message: t("killReasonPrompt", { id: sid }),
+        defaultValue: "operator_halt",
+        placeholder: "operator_halt",
+      });
+      reason = entered ?? "";
+      if (!reason.trim()) return;
     }
     onSetBusy(`kill:${action}`);
     onError(null);

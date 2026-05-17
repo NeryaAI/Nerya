@@ -5,10 +5,23 @@ from pathlib import Path
 
 import pytest
 
-from nerya.skills.builtin.backtest.scripts.config import BacktestConfigError, load_config
+from nerya.core.paths import WorkspacePaths
+from nerya.core.config import Config
+from nerya.evolution.strategy_code_generator import (
+    StrategyCodeGenerator,
+    StrategyGenerationRequest,
+)
+from nerya.skills.builtin.backtest.scripts.config import BacktestConfig, BacktestConfigError, load_config
 from nerya.skills.builtin.backtest.scripts.data_cache import get_candles
 from nerya.skills.builtin.backtest.scripts.engine import run_backtest
 from nerya.skills.builtin.backtest.scripts.portfolio import PortfolioState
+from nerya.skills.builtin.backtest.scripts.backtest_run import (
+    _apply_coverage_gate,
+    _discover_strategy_timeframes,
+    run_strategy_backtest,
+)
+from nerya.skills.builtin.backtest.scripts.data_cache import NoHistoricalDataError
+from nerya.skills.builtin.backtest.scripts.mock_ctx import MockMarket
 from nerya.strategies.backtest_bridge import backtest_replay
 
 
@@ -46,6 +59,7 @@ def _bar(ts: int, close: float) -> dict:
 def test_backtest_config_default_and_validation():
     cfg = load_config(preset="default", markets=["MOCK:BTCUSDT"])
     assert cfg.initial_capital_usd == 10000
+    assert cfg.window_days == 45
     assert cfg.timeframes == ["1h"]
     assert cfg.markets == ["MOCK:BTCUSDT"]
     cfg = load_config(preset="default", markets=["MOCK:BTCUSDT"], overrides={"tf": "5m", "timeframes": ["1h"]})
@@ -58,6 +72,17 @@ def test_backtest_config_default_and_validation():
             preset="default",
             overrides={"mock_surfaces": {"news": {"mode": "bad"}}},
         )
+
+
+def test_backtest_discovers_strategy_declared_default_timeframe(tmp_path: Path):
+    strategy_root = tmp_path / "strategies" / "daily_team"
+    strategy_root.mkdir(parents=True)
+    (strategy_root / "main.py").write_text(
+        '_DEFAULT_TIMEFRAME = "1d"\n',
+        encoding="utf-8",
+    )
+
+    assert _discover_strategy_timeframes(strategy_root) == ["1d"]
 
 
 def test_backtest_replay_returns_metrics_and_artifacts(tmp_path: Path):
@@ -74,6 +99,9 @@ def test_backtest_replay_returns_metrics_and_artifacts(tmp_path: Path):
     assert (out / "metrics.json").exists()
     assert (out / "report.md").exists()
     assert (out / "chart.json").exists()
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "| total_return_pct |" in report
+    assert "| total_return_pct | " in report and "% |" in report
     chart = json.loads((out / "chart.json").read_text(encoding="utf-8"))
     assert [p["id"] for p in chart["panels"]] == ["price", "equity", "drawdown", "rsi", "missed"]
 
@@ -83,6 +111,8 @@ def test_backtest_engine_exposes_requested_timeframes_and_policy():
 
     def strategy(ctx):
         market = ctx.config.markets[0]
+        assert ctx.market_data is ctx.market
+        assert ctx.logger.name.endswith(".backtest")
         candles_5m = ctx.market.candles(market, timeframe="5m", limit=3)
         candles_1h = ctx.market.candles(market, timeframe="1h", limit=3)
         seen.append({
@@ -170,6 +200,144 @@ def test_backtest_engine_imports_dataclass_strategy_module(tmp_path: Path):
 
     assert result.decisions
     assert result.decisions[0]["reason"] == "dataclass import ok"
+
+
+def test_backtest_run_accepts_in_flight_strategy_proposal(tmp_path: Path):
+    paths = WorkspacePaths(root=tmp_path)
+    generated = StrategyCodeGenerator(paths).generate(
+        StrategyGenerationRequest(
+            strategy_id="proposal_backtest_smoke",
+            title="Proposal Backtest Smoke",
+            prompt="Smoke-test a proposal before promotion.",
+            markets=("MOCK:BTCUSDT",),
+            accounts=("paper_main",),
+            schedule_cron="*/5 * * * *",
+            files={
+                "main.py": "\n".join([
+                    "def run(ctx):",
+                    "    return ctx.result.hold(reason='proposal backtest smoke')",
+                ]),
+            },
+        ),
+        validate=True,
+        create_proposal_record=True,
+    )
+
+    assert generated.proposal is not None
+    out = run_strategy_backtest(
+        proposal_id=generated.proposal.id,
+        workspace=tmp_path,
+        allow_mock=True,
+    )
+
+    assert out["ok"] is True
+    assert out["strategy_id"] == "proposal_backtest_smoke"
+    assert out["proposal_id"] == generated.proposal.id
+    assert out["metrics_path"].endswith("metrics.json")
+    assert out["report_path"].endswith("report.md")
+    assert out["strategy_root"].endswith("proposal_backtest_smoke")
+    assert out["main_path"].endswith("main.py")
+    assert out["strategy_yml_path"].endswith("strategy.yml")
+    assert "coverage_ok" in out
+    assert "coverage_message" in out
+    assert out["metric_units"]["*_pct"].startswith("percentage points")
+    assert "metrics_display" in out
+    assert "operator_summary" in out
+    assert "operator_summary_text" in out
+    assert "0.0274 means 0.0274%" in out["operator_summary_text"]
+    assert out["operator_summary"]["unit_warning"].endswith(
+        "never multiply them by 100."
+    )
+    out_dir = Path(out["out_dir"])
+    assert "proposals" in out_dir.parts
+    assert (out_dir / "metrics.json").exists()
+    assert (out_dir / "report.md").exists()
+
+
+def test_backtest_marks_insufficient_loaded_coverage() -> None:
+    metrics = {
+        "backtest_days": 20.79,
+        "flags": [],
+        "verdict": "PASS",
+    }
+    _apply_coverage_gate(metrics, BacktestConfig(min_backtest_days=30, window_days=45))
+
+    assert metrics["coverage_ok"] is False
+    assert metrics["verdict"] == "FAIL"
+    assert "insufficient_backtest_window" in metrics["flags"]
+    assert "one-month-plus backtest" in metrics["coverage_message"]
+
+
+def test_strategy_backtest_handler_structures_missing_history(monkeypatch, tmp_path: Path) -> None:
+    from nerya.skills.builtin.backtest.scripts import backtest_run
+    from nerya.tools.native.strategy_runtime import strategy_backtest_handler
+    from nerya.tools.types import ToolCall
+
+    def fail_missing_history(**_kwargs):
+        raise NoHistoricalDataError("no historical candles for solana:USDC 1h")
+
+    monkeypatch.setattr(backtest_run, "run_strategy_backtest", fail_missing_history)
+    result = strategy_backtest_handler(
+        ToolCall(
+            name="strategy_backtest",
+            arguments={"proposal_id": "prp_missing_history", "allow_mock": False},
+        ),
+        config=Config(paths=WorkspacePaths(root=tmp_path)),
+    )
+
+    assert result.is_error is False
+    data = result.content[0].data
+    assert data["ok"] is False
+    assert data["reason"] == "no_historical_data"
+    assert data["coverage_ok"] is False
+    assert "Do not retry with mock" in data["next_required_action"]["message"]
+
+
+def test_strategy_backtest_handler_returns_display_metrics_to_model(monkeypatch, tmp_path: Path) -> None:
+    from nerya.skills.builtin.backtest.scripts import backtest_run
+    from nerya.tools.native.strategy_runtime import strategy_backtest_handler
+    from nerya.tools.types import ToolCall
+
+    def fake_backtest(**_kwargs):
+        return {
+            "ok": True,
+            "strategy_id": "s1",
+            "proposal_id": "prp_123",
+            "backtest_ts": "20260517_010203",
+            "metrics_path": str(tmp_path / "metrics.json"),
+            "total_return_pct": 0.0274,
+            "max_drawdown_pct": 0.0282,
+            "metrics": {"total_return_pct": 0.0274, "max_drawdown_pct": 0.0282},
+            "metrics_display": {
+                "total_return_pct": "0.0274%",
+                "max_drawdown_pct": "0.0282%",
+            },
+            "operator_summary_text": "total_return_pct: 0.0274%",
+        }
+
+    monkeypatch.setattr(backtest_run, "run_strategy_backtest", fake_backtest)
+    result = strategy_backtest_handler(
+        ToolCall(name="strategy_backtest", arguments={"proposal_id": "prp_123"}),
+        config=Config(paths=WorkspacePaths(root=tmp_path)),
+    )
+
+    data = result.content[0].data
+    assert "total_return_pct" not in data
+    assert "max_drawdown_pct" not in data
+    assert data["metrics"]["total_return_pct"] == "0.0274%"
+    assert data["metrics_are_display_strings"] is True
+    assert data["raw_metrics_file"].endswith("metrics.json")
+
+
+def test_backtest_mock_market_exposes_common_aliases() -> None:
+    rows = [
+        {"open": 99, "high": 101, "low": 98, "close": 100, "volume": 1},
+        {"open": 100, "high": 102, "low": 99, "close": 101, "volume": 2},
+    ]
+    market = MockMarket("MOCK:BTCUSDT", {"MOCK:BTCUSDT": rows})
+
+    assert market.get_candles("MOCK:BTCUSDT", interval="1m", count=1)[0]["close"] == 101
+    assert market.get_ticker("MOCK:BTCUSDT")["mid"] == 101
 
 
 def test_portfolio_sell_fill_adds_cash():
@@ -263,4 +431,3 @@ def test_binance_perpetual_uses_usdm_archive(monkeypatch, tmp_path: Path):
     assert rows[0]["close"] == 3005
     assert seen_urls
     assert "/data/futures/um/daily/klines/ETHUSDT/1m/" in seen_urls[0]
-

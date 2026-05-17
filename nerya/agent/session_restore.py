@@ -2,11 +2,9 @@
 
 Implementation notes:
 
-* ``coding-agent/.../src/utils/sessionRestore.ts:73`` — walks the
-  transcript looking for the most recent ``TodoWrite`` ``tool_use``
-  and replays its arguments into app state.
-* ``coding-agent/.../src/utils/sessionRestore.ts:138`` — the same
-  pass restores plan-mode flag + recently-read file pins.
+* Walk the transcript looking for the most recent ``TodoWrite``
+  ``tool_use`` and replay its arguments into app state.
+* The same pass restores the plan-mode flag and recently-read file pins.
 
 Why we need this in Nerya
 -------------------------

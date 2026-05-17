@@ -1,10 +1,13 @@
 "use client";
 
 /**
- * 统一的 Nerya 品牌 logo 组件。
+ * Unified Nerya brand-logo component.
  *
- * 使用 branding 里的高清 PNG（512x512）作为源，浏览器按需缩放。
- * 所有 sidebar / topheader / landing 的 N 字 logo 都经过这里。
+ * Sources the high-res ``Logo.png`` shipped under
+ * ``public/branding/`` (the new "Nerya" branded mark replacing the
+ * legacy 512x512 SVG render). The browser scales it on demand, so the
+ * one source covers every consumer (top nav, chat header, landing
+ * splash, favicon-adjacent surfaces).
  */
 export function NeryaLogo({
   size = 24,
@@ -17,12 +20,40 @@ export function NeryaLogo({
 }) {
   return (
     <img
-      src="/branding/svg/logo-512x512.png"
+      src="/branding/Logo.png"
       alt={alt}
       width={size}
       height={size}
       className={className}
-      style={{ display: "block" }}
+      style={{ display: "block", objectFit: "contain" }}
+      draggable={false}
+    />
+  );
+}
+
+/**
+ * Nerya assistant avatar — the smiling-character reference asset
+ * (``Nerya.png``) used for the chat / agent presence circle. Distinct
+ * from ``NeryaLogo`` (the brand mark) so the two assets can evolve
+ * independently and we can swap one without touching the other.
+ */
+export function NeryaAvatar({
+  size = 36,
+  className = "",
+  alt = "Nerya assistant",
+}: {
+  size?: number;
+  className?: string;
+  alt?: string;
+}) {
+  return (
+    <img
+      src="/branding/Nerya.png"
+      alt={alt}
+      width={size}
+      height={size}
+      className={className}
+      style={{ display: "block", objectFit: "cover", borderRadius: "999px" }}
       draggable={false}
     />
   );

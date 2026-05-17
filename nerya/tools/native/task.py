@@ -337,9 +337,9 @@ def plan_status_handler(call: ToolCall, *, task_state: TaskState) -> ToolResult:
     """Return the current state of plan_mode + the most recent plan submission.
 
     The model uses this between turns to decide whether the operator has
-    accepted the plan body it submitted via ``exit_plan_mode``. Mirrors
-    coding-agent's behaviour where ExitPlanMode returns ``permission_pending``
-    until the user resolves it; we accomplish the same loop with two tools.
+    accepted the plan body it submitted via ``exit_plan_mode``. A
+    pending plan stays in ``permission_pending`` until the user resolves
+    it; we accomplish that loop with two tools.
     """
 
     args = call.arguments or {}

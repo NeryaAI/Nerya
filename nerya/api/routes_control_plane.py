@@ -1,4 +1,4 @@
-"""Control-plane operator endpoints (04-29 §11 P7).
+"""Control-plane operator endpoints.
 
 Exposes the new account-aware control plane to the dashboard and any
 HTTP-driven operator tooling. Every handler is read-only or
@@ -7,6 +7,7 @@ operator-explicit (no risk-bypassing endpoints).
 Routes:
 
 * ``/portfolio/health``      — account snapshot + reservations + positions + executors + protections.
+* ``/portfolio/refresh``     — refresh open-position marks, executor ticks and snapshots.
 * ``/orders/list``           — orders from :class:`OrderTracker` (filterable).
 * ``/orders/cancel``         — request a cancel.
 * ``/executors/list``        — executors from :class:`ExecutorOrchestrator`.
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from ..core import jsonl
@@ -59,6 +61,10 @@ def _portfolio_health(client, _payload):
     book = PositionBook(paths)
     protections = ProtectionStore(paths)
     orchestrator = ExecutorOrchestrator(client.config)
+    legacy_positions = {
+        aid: _legacy_ledger_position_rows(paths, profile)
+        for aid, profile in profiles.items()
+    }
 
     # Active executors keyed by account.
     exec_index: dict[str, list[dict[str, Any]]] = {}
@@ -80,7 +86,9 @@ def _portfolio_health(client, _payload):
             blocked_usd = float(res_store.total_blocked_usd(aid))
         except Exception:
             blocked_usd = 0.0
-        open_pos = [p for p in book.open_positions(account_id=aid)]
+        book_open = [p.asdict() for p in book.open_positions(account_id=aid)]
+        ledger_open = legacy_positions.get(aid, [])
+        open_pos = book_open or ledger_open
         prot_rules = protections.list_active(account_id=aid)
         accounts.append({
             "account_id": aid,
@@ -91,7 +99,9 @@ def _portfolio_health(client, _payload):
             "snapshot": snap.asdict() if snap else None,
             "reserved_usd": blocked_usd,
             "open_position_count": len(open_pos),
-            "open_positions": [p.asdict() for p in open_pos],
+            "open_positions": open_pos,
+            "position_book_open_positions": book_open,
+            "legacy_ledger_positions": ledger_open,
             "protection_count": len(prot_rules),
             "protections": [r.asdict() for r in prot_rules],
             "active_executors": exec_index.get(aid, []),
@@ -108,6 +118,19 @@ def _portfolio_health(client, _payload):
     }
 
     return {"accounts": accounts, "totals": totals, "ts": now_iso()}
+
+
+def _portfolio_refresh(client, payload):
+    from ..trading.account_refresh import refresh_account_marks
+
+    account_id = payload.get("account_id") or None
+    run_executors = bool(payload.get("run_executors", True))
+    return refresh_account_marks(
+        client.config,
+        account_id=account_id,
+        persist_snapshot=True,
+        run_executors=run_executors,
+    )
 
 
 def _orders_list(client, payload):
@@ -131,8 +154,19 @@ def _orders_list(client, payload):
         active = tracker.active_orders(account_id=account_id)
         cached = tracker.cached_orders(account_id=account_id)
         rows = list(active) + list(cached)
+    order_rows = [_order_summary(r) for r in rows]
+    if state in ("", "recent", "cached"):
+        order_rows.extend(
+            _strategy_history_orders(
+                paths,
+                account_id=account_id,
+                limit=max(limit, 500),
+            )
+        )
+    order_rows = _dedupe_order_rows(order_rows)
+    order_rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
     return {
-        "orders": [_order_summary(r) for r in rows[:limit]],
+        "orders": order_rows[:limit],
         "filter": {"account_id": account_id, "state": state or "recent"},
     }
 
@@ -391,7 +425,7 @@ def _kill_switch_set(client, payload):
 def _risk_evaluations(client, payload):
     """Return recent rejected / escalated risk evaluations.
 
-    04-29 §11 P9 — surfaces ``RiskGate`` rejections in the
+    Surfaces ``RiskGate`` rejections in the
     dashboard so operators see *why* an intent was blocked and which
     button to click. ``fix_hints`` is decoded from ``snapshot_json``
     (where ``RiskGate._persist`` stows it under ``_fix_hints``); if the
@@ -496,6 +530,178 @@ def _risk_evaluations(client, payload):
 # ---------------------------------------------------------------------------
 
 
+def _legacy_ledger_position_rows(paths, profile) -> list[dict[str, Any]]:
+    try:
+        from ..trading.position_book import PositionBook
+        from ..trading.virtual_ledger import open_ledger
+
+        ledger = open_ledger(paths, profile.id, profile.initial_balance_usd)
+        snap = ledger.snapshot()
+        marks = {
+            pos.market: float(pos.mark_price or pos.avg_entry_price or 0.0)
+            for pos in PositionBook(paths).open_positions(account_id=profile.id)
+            if float(pos.mark_price or pos.avg_entry_price or 0.0) > 0
+        }
+        rows = []
+        for market, pos in (snap.get("positions") or {}).items():
+            size = float((pos or {}).get("size") or 0.0)
+            if not size:
+                continue
+            avg = float((pos or {}).get("avg_price") or 0.0)
+            mark = float(marks.get(str(market)) or avg or 0.0)
+            rows.append({
+                "account_id": profile.id,
+                "market": str(market),
+                "size": size,
+                "avg_price": avg,
+                "realized_pnl_usd": float((pos or {}).get("realized_pnl_usd") or 0.0),
+                "mark_price": mark,
+                "market_value_usd": abs(size * mark),
+                "notional_usd": abs(size * mark),
+                "unrealized_pnl_usd": (mark - avg) * size if avg and mark else 0.0,
+            })
+        return rows
+    except Exception:
+        return []
+
+
+def _strategy_history_orders(
+    paths,
+    *,
+    account_id: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    from ..trading.strategies import list_strategies
+
+    out: dict[str, dict[str, Any]] = {}
+    for strategy in list_strategies(paths):
+        intents = _strategy_history_intents(paths, strategy.id)
+        orders_path = paths.strategy_history(strategy.id) / "orders.jsonl"
+        if not orders_path.exists():
+            continue
+        for record in jsonl.read_all(orders_path):
+            payload = record.get("payload") or {}
+            if not isinstance(payload, dict):
+                continue
+            order_id = str(payload.get("order_id") or "").strip()
+            if not order_id:
+                continue
+            intent_id = str(payload.get("intent_id") or "").strip()
+            intent = intents.get(intent_id, {})
+            fills = payload.get("fills") if isinstance(payload.get("fills"), list) else []
+            first_fill = fills[0] if fills and isinstance(fills[0], dict) else {}
+            row_account_id = str(
+                payload.get("account_id")
+                or intent.get("account_id")
+                or ""
+            )
+            if account_id and row_account_id != account_id:
+                continue
+            ts = _history_ts(record.get("ts") or first_fill.get("ts") or intent.get("created_at"))
+            state = _history_order_state(payload)
+            row = {
+                "order_id": order_id,
+                "client_order_id": payload.get("client_order_id"),
+                "exchange_order_id": payload.get("exchange_order_id"),
+                "account_id": row_account_id,
+                "strategy_id": str(payload.get("strategy_id") or strategy.id),
+                "market": (
+                    payload.get("market")
+                    or first_fill.get("market")
+                    or intent.get("market")
+                    or ""
+                ),
+                "side": payload.get("side") or intent.get("side") or "",
+                "order_type": payload.get("order_type") or intent.get("order_type") or "market",
+                "size_base": payload.get("size_base") or payload.get("filled_size"),
+                "filled_size": payload.get("filled_size"),
+                "avg_price": payload.get("avg_price"),
+                "state": state,
+                "created_at": ts,
+                "submitted_at": ts,
+                "last_seen_at": ts,
+                "terminal_at": ts if state in _TERMINAL_ORDER_STATES else None,
+                "executor_id": payload.get("executor_id"),
+                "intent_id": intent_id or None,
+                "plan_id": payload.get("plan_id"),
+                "source": "strategy_history",
+            }
+            existing = out.get(order_id)
+            if existing is None or _history_order_prefer(row, existing):
+                out[order_id] = row
+    rows = list(out.values())
+    rows.sort(key=lambda r: float(r.get("created_at") or 0.0), reverse=True)
+    return rows[:limit]
+
+
+def _strategy_history_intents(paths, strategy_id: str) -> dict[str, dict[str, Any]]:
+    intents_path = paths.strategy_history(strategy_id) / "intents.jsonl"
+    if not intents_path.exists():
+        return {}
+    intents: dict[str, dict[str, Any]] = {}
+    for record in jsonl.read_all(intents_path):
+        intent = record.get("intent") or {}
+        if not isinstance(intent, dict):
+            continue
+        intent_id = str(intent.get("intent_id") or "").strip()
+        if intent_id and intent_id not in intents:
+            intents[intent_id] = intent
+    return intents
+
+
+_TERMINAL_ORDER_STATES = {"filled", "canceled", "rejected", "expired", "failed"}
+
+
+def _history_order_state(payload: dict[str, Any]) -> str:
+    raw = str(payload.get("state") or payload.get("status") or "").strip().lower()
+    if raw == "cancelled":
+        raw = "canceled"
+    if raw:
+        return raw
+    if float(payload.get("filled_size") or 0.0) > 0:
+        return "filled"
+    return "unknown"
+
+
+def _history_order_prefer(candidate: dict[str, Any], existing: dict[str, Any]) -> bool:
+    candidate_ts = float(candidate.get("created_at") or 0.0)
+    existing_ts = float(existing.get("created_at") or 0.0)
+    if candidate_ts != existing_ts:
+        return candidate_ts > existing_ts
+    candidate_has_fill = float(candidate.get("filled_size") or 0.0) > 0
+    existing_has_fill = float(existing.get("filled_size") or 0.0) > 0
+    return candidate_has_fill and not existing_has_fill
+
+
+def _history_ts(raw: Any) -> float:
+    if raw is None:
+        return 0.0
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+        return value / 1000.0 if value > 1e12 else value
+    text = str(raw).strip()
+    if not text:
+        return 0.0
+    try:
+        return _history_ts(float(text))
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _dedupe_order_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        order_id = str(row.get("order_id") or "").strip()
+        if not order_id or order_id in out:
+            continue
+        out[order_id] = row
+    return list(out.values())
+
+
 def _order_summary(order) -> dict[str, Any]:
     return {
         "order_id": order.order_id,
@@ -550,6 +756,7 @@ def routes() -> list[tuple[str, str, Any]]:
     out: list[tuple[str, str, Any]] = []
     spec: list[tuple[str, Any]] = [
         ("/portfolio/health", _portfolio_health),
+        ("/portfolio/refresh", _portfolio_refresh),
         ("/orders/list", _orders_list),
         ("/orders/cancel", _orders_cancel),
         ("/executors/list", _executors_list),

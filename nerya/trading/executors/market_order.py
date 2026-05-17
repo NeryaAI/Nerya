@@ -1,4 +1,4 @@
-"""Market-order executor (04-29 §3.2 / §6).
+"""Market-order executor.
 
 Single-leg market order with optional protection rule attached on
 fill. Behaves identically in paper, shadow, canary, and live modes:

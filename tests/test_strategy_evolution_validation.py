@@ -8,7 +8,11 @@ from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
 from nerya.evolution.validation_plan import build_validation_plan
 from nerya.llm.gateway import LLMCall
-from nerya.strategies.evolution import StrategyEvolutionRunner, _filter_changes
+from nerya.strategies.evolution import (
+    StrategyEvolutionRunner,
+    _filter_changes,
+    _validation_plan_input,
+)
 from nerya.subagents.runtime import SubAgentRuntime
 import pytest
 
@@ -41,6 +45,28 @@ def test_strategy_tuning_drops_forbidden_targets():
 
     assert accepted == []
     assert dropped[0]["reason"] == "forbidden_target"
+
+
+def test_strategy_tuning_accepts_legacy_proposed_patches_alias():
+    output = {"proposed_patches": [{"file": "main.py", "kind": "code_patch"}]}
+    accepted, dropped, _warnings = _filter_changes(output, _Cfg())
+
+    assert accepted == [{"file": "main.py", "kind": "code_patch"}]
+    assert dropped == []
+
+
+def test_strategy_tuning_derives_validation_plan_from_required_flags():
+    raw = _validation_plan_input(
+        {"backtest_required": True, "shadow_run_required": True}
+    )
+    plan = build_validation_plan(raw, source="test", require=True)
+
+    assert [step.type for step in plan.steps] == [
+        "unit_test",
+        "backtest",
+        "shadow_run",
+    ]
+    assert plan.blocked_reasons == []
 
 
 def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatch):

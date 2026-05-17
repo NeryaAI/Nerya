@@ -28,6 +28,9 @@ in their preferred shape (ToolResult / SDK return / context shim).
 
 from __future__ import annotations
 
+import logging
+import time
+from dataclasses import replace
 from typing import Any, Optional
 
 from ..core import jsonl
@@ -41,16 +44,20 @@ from ..core.truth import (
     mock_envelope,
     resolve_allow_mock,
 )
+from ..messaging.trade_notifications import broadcast_trade_event, event_from_order_result
 from ..strategy_history import open_session, store as history_store, track_outcome
-from .account_snapshots import fresh_snapshot
+from .account_snapshots import capture_snapshot, fresh_snapshot
 from .accounts import get_account_profile
 from .approval import ApprovalGate
 from .capital import BudgetChecker, CapitalReservationStore
 from .execution import ExecutionEngine
 from .executors.orchestrator import ExecutorOrchestrator
 from .intents import TradeIntent
-from .order_intents import TradePlan
+from .order_intents import SizingPolicy, TradePlan
+from .position_book import PositionBook
 from .risk import RiskGate
+
+log = logging.getLogger(__name__)
 
 
 _STRATEGY_ORDER_SOURCES = {
@@ -317,7 +324,18 @@ def submit_trade_intent(
                 "ts": f.ts,
             },
         )
+    _sync_position_book_after_execution(config, intent, result)
     track_outcome(paths, intent.strategy_id, session_id)
+    notification_summary = _safe_broadcast_trade_event(
+        config,
+        event_from_order_result(
+            intent=intent,
+            result=result,
+            session_id=session_id,
+            risk_decision=risk.asdict(),
+            approval=_approval_summary(approval_record),
+        ),
+    )
 
     response = {
         "status": result.status,
@@ -325,10 +343,85 @@ def submit_trade_intent(
         "session_id": session_id,
         "risk_decision": risk.asdict(),
         "order": result.asdict(),
+        "notifications": notification_summary,
     }
     if approval_record is not None:
         response["approval"] = _approval_summary(approval_record)
     return response
+
+
+def _sync_position_book_after_execution(config: Config, intent: TradeIntent, result) -> None:
+    """Mirror legacy execution fills into the account position book."""
+
+    if not result.fills:
+        return
+    paths = config.paths
+    source = "paper" if result.reason == "paper_executed" else "live"
+    book = PositionBook(paths)
+    marks: dict[str, float] = {}
+    try:
+        for fill in result.fills:
+            price = float(fill.price or 0.0)
+            size = float(fill.size or 0.0)
+            if price <= 0 or size <= 0:
+                continue
+            book.apply_fill(
+                account_id=intent.account_id,
+                strategy_id=intent.strategy_id,
+                market=fill.market or intent.market,
+                side=intent.side,
+                price=price,
+                size_base=size,
+                fee_usd=float(fill.fee_usd or 0.0),
+                venue=_venue_of(fill.market or intent.market),
+                leverage=float((intent.meta or {}).get("leverage") or 1.0),
+                source=source,
+                order_id=fill.order_id,
+                fill_id=fill.fill_id,
+            )
+            marks[fill.market or intent.market] = price
+        if marks:
+            profile = get_account_profile(paths, intent.account_id)
+            capture_snapshot(
+                config,
+                intent.account_id,
+                profile=profile,
+                persist=True,
+                marks=marks,
+            )
+    except Exception:
+        log.exception("position book sync failed for intent %s", intent.intent_id)
+        jsonl.append(paths.journal("trading"), {
+            "kind": "position_book.sync_failed",
+            "ts": now_iso(),
+            "strategy_id": intent.strategy_id,
+            "intent_id": intent.intent_id,
+            "order_id": result.order_id,
+        })
+
+
+def _safe_broadcast_trade_event(config: Config, event: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return broadcast_trade_event(config, event)
+    except Exception as exc:  # pragma: no cover - notification must not break trading
+        log.exception("trade notification fan-out failed")
+        try:
+            jsonl.append(config.paths.journal("trading"), {
+                "kind": "trade.notification_failed",
+                "ts": now_iso(),
+                "strategy_id": event.get("strategy_id"),
+                "session_id": event.get("session_id"),
+                "intent_id": event.get("intent_id"),
+                "order_id": event.get("order_id"),
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        except Exception:
+            pass
+        return {"ok": False, "channels": [], "deliveries": [], "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _venue_of(market: str) -> str:
+    return market.split(":", 1)[0].lower() if ":" in str(market or "") else ""
 
 
 # --------------------------------------------------------------------------
@@ -351,6 +444,38 @@ def _resolve_market_snapshot(
                 venue=venue_hint,
             ).as_dict()
         return snap
+    try:
+        from ..data.candles import fetch_candles, fetch_public_ticker
+
+        ticker = fetch_public_ticker(
+            intent.market,
+            allow_mock=False,
+            config_like=config,
+        )
+        if ticker and ticker.get("price") and (ticker.get("_envelope") or {}).get("mode") == "live":
+            return ticker
+
+        rows = fetch_candles(
+            intent.market,
+            count=1,
+            interval="1m",
+            allow_mock=False,
+            config_like=config,
+        )
+        if rows:
+            last = dict(rows[-1])
+            envelope = dict(last.get("_envelope") or {})
+            if envelope.get("mode") == "live":
+                ts = float(last.get("ts") or 0)
+                age_s = max(0, int(time.time() - ts)) if ts > 0 else 0
+                return {
+                    "price": float(last["close"]),
+                    "age_s": age_s,
+                    "source": envelope.get("source") or venue_hint or "market_data",
+                    "_envelope": envelope,
+                }
+    except Exception:
+        pass
     if resolve_allow_mock(None, config):
         try:
             from ..connectors.mock_exchange import MockExchange
@@ -382,7 +507,7 @@ def submit_trade_plan(
 ) -> dict[str, Any]:
     """Run a :class:`TradePlan` through the new control-plane.
 
-    04-29 §3 / §4 / §6 — the full pipeline:
+    The full pipeline:
 
     1. Translate the plan into a legacy :class:`TradeIntent` for the
        existing :class:`RiskGate`. This preserves every existing
@@ -401,6 +526,15 @@ def submit_trade_plan(
     """
 
     paths = config.paths
+    # Resolve ``close_all`` / ``reduce_pct`` sizing against the live
+    # PositionBook *before* the BudgetChecker / executor see the plan.
+    # Otherwise the BudgetChecker emits an ``OrderCandidate(size_base
+    # = None, notional = 0)`` and the MarketOrderExecutor rejects with
+    # ``candidate_has_no_size`` — closes never fire. We swap in a
+    # concrete ``fixed_base`` sizing equal to the strategy's *share*
+    # of the merged position so the close cannot accidentally take
+    # out another strategy's slice.
+    plan = _resolve_position_sized_plan(paths, plan)
     intent = _plan_to_intent(plan)
     session_id = open_session(
         paths,
@@ -496,6 +630,7 @@ def submit_trade_plan(
     checker = BudgetChecker(profile=profile, snapshot=snap, store=store)
     mark_price = (snapshot or {}).get("price") or plan.entry.limit_price
     side = plan.buy_or_sell if plan.action != "attach_protection" else "buy"
+    risk_reducing = plan.action in ("close_position", "reduce_position")
     decision = checker.evaluate(
         plan_strategy_id=plan.strategy_id,
         market=plan.market,
@@ -503,6 +638,7 @@ def submit_trade_plan(
         sizing=plan.sizing,
         mark_price=float(mark_price) if mark_price else None,
         order_type=plan.entry.order_type,
+        reduce_only=risk_reducing,
         time_in_force=plan.entry.time_in_force,
         intent_id=intent.intent_id,
         plan_id=plan.plan_id,
@@ -520,6 +656,10 @@ def submit_trade_plan(
         }
 
     candidate = decision.candidate
+    candidate.meta.update({
+        "plan_action": plan.action,
+        **dict(plan.meta or {}),
+    })
     reservation = store.reserve(
         account_id=candidate.account_id,
         strategy_id=candidate.strategy_id,
@@ -588,6 +728,54 @@ def submit_trade_plan(
     return response
 
 
+def _resolve_position_sized_plan(paths: Any, plan: TradePlan) -> TradePlan:
+    """Replace position-relative sizing with a concrete ``fixed_base``.
+
+    Reads the originating strategy's *share* of the merged position
+    (post-v6 merged-position contract, see :mod:`nerya.trading.position_book`)
+    and converts ``SizingPolicy(method="close_all" | "reduce_pct")`` into
+    ``SizingPolicy(method="fixed_base", fixed_base=<size>)`` so the
+    BudgetChecker and the MarketOrderExecutor each see a concrete size.
+
+    No-op for non-position-relative sizing methods.
+    """
+
+    method = plan.sizing.method
+    if method not in ("close_all", "reduce_pct"):
+        return plan
+    try:
+        book = PositionBook(paths)
+        share = book.get_share(
+            strategy_id=plan.strategy_id,
+            account_id=plan.account_id,
+            market=plan.market,
+        )
+    except Exception:  # pragma: no cover - defensive only
+        return plan
+    share_size = abs(float(getattr(share, "size_share_base", 0.0) or 0.0)) if share else 0.0
+    if share_size <= 0.0:
+        # No share to close — leave the plan alone so the executor's
+        # ``candidate_has_no_size`` rejection path produces an honest
+        # rejection (rather than us silently building a zero-sized
+        # order). Keeps audit trail truthful.
+        return plan
+    if method == "reduce_pct":
+        pct = float(plan.sizing.reduce_pct or 0.0)
+        if pct <= 0.0 or pct > 1.0:
+            return plan
+        new_size = share_size * pct
+    else:  # close_all
+        new_size = share_size
+
+    new_sizing = SizingPolicy(method="fixed_base", fixed_base=new_size)
+    new_meta = {
+        **(dict(plan.meta) if plan.meta else {}),
+        "resolved_from_method": method,
+        "resolved_share_size": share_size,
+    }
+    return replace(plan, sizing=new_sizing, meta=new_meta)
+
+
 def _plan_to_intent(plan: TradePlan) -> TradeIntent:
     """Bridge a :class:`TradePlan` into a legacy :class:`TradeIntent`.
 
@@ -602,19 +790,40 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
     side = plan.buy_or_sell if plan.action in (
         "open_position", "close_position", "reduce_position"
     ) else "buy"
-    estimated_notional = (
-        float(plan.sizing.fixed_usd or 0.0)
-        if plan.sizing.method == "fixed_usd"
-        else 0.0
-    )
+    if plan.sizing.method == "fixed_base":
+        intent_size = float(plan.sizing.fixed_base or 0.0)
+        intent_unit = "base"
+    elif plan.sizing.method == "fixed_usd":
+        intent_size = float(plan.sizing.fixed_usd or 0.0)
+        intent_unit = "usd"
+    elif plan.sizing.method in (
+        "close_all",
+        "reduce_pct",
+        "pct_nav",
+        "risk_to_stop",
+        "volatility_target",
+        "target_weight",
+    ):
+        # Sizing is resolved downstream by ``BudgetChecker.evaluate``
+        # against the current PositionBook share / NAV / risk budget.
+        # RiskGate only uses ``size`` to compute the notional estimate
+        # for dedupe / cap checks; for risk-reducing or NAV-derived
+        # sizing that estimate is irrelevant. We feed a tiny positive
+        # placeholder so the :class:`TradeIntent` validator
+        # (``size must be positive``) passes.
+        intent_size = 1e-9
+        intent_unit = "base"
+    else:  # pragma: no cover - any unknown method falls through
+        intent_size = 1e-9
+        intent_unit = "base"
     protection_present = bool(plan.protection)
     payload = {
         "strategy_id": plan.strategy_id,
         "account_id": plan.account_id,
         "market": plan.market,
         "side": side,
-        "size": estimated_notional or 0.0,
-        "size_unit": "usd",
+        "size": intent_size,
+        "size_unit": intent_unit,
         "order_type": plan.entry.order_type,
         "limit_price": plan.entry.limit_price,
         "time_in_force": plan.entry.time_in_force,
@@ -632,6 +841,7 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
         "trigger_event_id": plan.trigger_event_id,
         "meta": {
             "plan_id": plan.plan_id,
+            "plan_action": plan.action,
             "protection_present": protection_present,
             **dict(plan.meta or {}),
         },

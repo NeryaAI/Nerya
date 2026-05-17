@@ -1,10 +1,11 @@
-"""Artifact index — .
-end of every coding turn coding-agent emits an autonomous summary
-listing the files that were modified, the commands that were run,
-the errors encountered, and any unverified risks (e.g. "I changed
+"""Artifact index.
+
+At the end of every coding turn the runtime emits an autonomous summary
+listing the files that were modified, the commands that were run, the
+errors encountered, and any unverified risks (for example, "I changed
 ``config.yml`` but never re-ran the test that depends on it"). This
-summary is independent of whatever the model puts in its final
-text — operators rely on it for spot checks.
+summary is independent of whatever the model puts in its final text —
+operators rely on it for spot checks.
 
 We compute the same digest from the per-turn :class:`BlockEnvelope`
 list. The kernel attaches the result to ``AgentTurnResult`` and

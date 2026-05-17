@@ -37,13 +37,6 @@ trading = [
     "pynacl>=1.5",
     "base58>=2.1",
 ]
-# Opt-in: AgentNetwork P2P integration. Requires the daemon binary
-# (Linux / macOS / WSL2 only) installed separately via
-# ``curl -fsSL https://agentnetwork.org.cn/install.sh | sh``.
-anet = [
-    "anet>=1.1.0",
-    "python-dotenv>=1.0",
-]
 
 [project.scripts]
 nerya = "nerya.cli.app:main"
@@ -62,5 +55,6 @@ pythonpath = ["."]
 addopts = "-m smoke"
 markers = [
     "smoke: curated end-to-end smoke suite (default)",
+    "integration: opt-in checks that may touch real external services",
     "profile: per-profile gate (unit_mock | strict_runtime | live_opt_in)",
 ]

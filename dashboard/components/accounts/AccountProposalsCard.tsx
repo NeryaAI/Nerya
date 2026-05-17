@@ -3,10 +3,12 @@
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
+import { JsonView } from "../JsonView";
 import {
   clientApi,
   type AccountProposalView,
 } from "../../lib/clientApi";
+import { confirm as confirmDialog, prompt as promptDialog } from "../../lib/dialogs";
 
 interface Props {
   onApplied?: () => void;
@@ -25,12 +27,31 @@ function formatTs(ts: string): string {
 
 function formatValue(value: unknown): string {
   if (value === undefined || value === null) return "—";
-  if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
 
+function DiffValue({ value, tone }: { value: unknown; tone: "before" | "after" }) {
+  if (value && typeof value === "object") {
+    return (
+      <JsonView
+        value={value}
+        showRawToggle={false}
+        initialCollapsed
+        maxDepth={2}
+        className="!border-0 !bg-transparent !px-0 !py-0"
+      />
+    );
+  }
+  const toneClass = tone === "after" ? "text-amber-200" : "text-ink-400";
+  return (
+    <span className={`break-all font-mono text-[11px] ${toneClass}`}>
+      {formatValue(value)}
+    </span>
+  );
+}
+
 /**
- * Pending account proposal review card (04-29 §11 P9).
+ * Pending account proposal review card.
  *
  * Shows account_roster_patch proposals staged via /accounts/upsert
  * with ``apply: false``. The operator can approve (writes the YAML
@@ -65,17 +86,16 @@ export function AccountProposalsCard({ onApplied }: Props) {
   }, []);
 
   async function approve(p: AccountProposalView) {
-    if (
-      !window.confirm(
-        t("approveConfirm", {
-          id: p.id,
-          operation: p.operation,
-          target: p.target_id,
-          count: Object.keys(p.diff || {}).length,
-        }),
-      )
-    )
-      return;
+    const confirmed = await confirmDialog({
+      message: t("approveConfirm", {
+        id: p.id,
+        operation: p.operation,
+        target: p.target_id,
+        count: Object.keys(p.diff || {}).length,
+      }),
+      tone: "brand",
+    });
+    if (!confirmed) return;
     setBusy(`${p.id}:apply`);
     setError(null);
     try {
@@ -94,7 +114,10 @@ export function AccountProposalsCard({ onApplied }: Props) {
   }
 
   async function reject(p: AccountProposalView) {
-    const note = window.prompt(t("rejectPrompt", { id: p.id }), "");
+    const note = await promptDialog({
+      message: t("rejectPrompt", { id: p.id }),
+      defaultValue: "",
+    });
     if (note == null) return;
     setBusy(`${p.id}:reject`);
     setError(null);
@@ -186,7 +209,7 @@ export function AccountProposalsCard({ onApplied }: Props) {
                 </div>
                 {isOpen ? (
                   <div className="embedded-table-scroll mt-2 max-h-64">
-                    <table className="table w-full font-mono text-[11px]">
+                    <table className="table w-full text-[11px]">
                       <thead>
                         <tr className="text-ink-400">
                           <th>{t("colField")}</th>
@@ -198,11 +221,11 @@ export function AccountProposalsCard({ onApplied }: Props) {
                         {Object.entries(p.diff || {}).map(([field, change]) => (
                           <tr key={field}>
                             <td className="text-brand-200">{field}</td>
-                            <td className="text-ink-400 max-w-xs truncate">
-                              {formatValue(change.before)}
+                            <td className="max-w-xs align-top">
+                              <DiffValue value={change.before} tone="before" />
                             </td>
-                            <td className="text-amber-200 max-w-xs truncate">
-                              {formatValue(change.after)}
+                            <td className="max-w-xs align-top">
+                              <DiffValue value={change.after} tone="after" />
                             </td>
                           </tr>
                         ))}

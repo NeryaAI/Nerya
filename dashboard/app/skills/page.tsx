@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
 import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
@@ -124,7 +125,7 @@ function FilterButton({
       className={`rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
         active
           ? "border-brand-400/50 bg-brand-500/15 text-white"
-          : "border-white/5 bg-ink-950/30 text-ink-400 hover:border-brand-500/25 hover:text-white"
+          : "border-brand-500/10 bg-ink-950/30 text-ink-400 hover:border-brand-500/25 hover:text-white"
       }`}
     >
       {children}
@@ -143,7 +144,7 @@ function Metric({
 }) {
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
-      <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{label}</div>
+      <div className="text-[11px] text-ink-500 font-medium">{label}</div>
       <div className="mt-1 text-xl font-semibold text-white">{value}</div>
       {detail ? <div className="mt-0.5 text-[11px] text-ink-500">{detail}</div> : null}
     </div>
@@ -499,7 +500,7 @@ export default function SkillsPage() {
                     className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
                       active
                         ? "border-brand-400/60 bg-brand-500/10"
-                        : "border-white/5 bg-ink-950/30 hover:border-brand-500/25 hover:bg-white/5"
+                        : "border-brand-500/10 bg-ink-950/30 hover:border-brand-500/25 hover:bg-brand-500/[0.04]"
                     }`}
                   >
                     <div className="flex items-start gap-2.5">
@@ -560,13 +561,13 @@ export default function SkillsPage() {
               <section className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
                 <div className="grid gap-2 text-[12px] lg:grid-cols-2">
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("folderLabel")}</div>
+                    <div className="text-[11px] text-ink-500 font-medium">{t("folderLabel")}</div>
                     <div className="mt-1 break-all font-mono text-ink-200">
                       {detail?.relative_path || selectedSkill.path || "-"}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("editModeLabel")}</div>
+                    <div className="text-[11px] text-ink-500 font-medium">{t("editModeLabel")}</div>
                     <div className="mt-1 text-ink-200">
                       {detail?.editable ? t("workspaceWriteEnabled") : detail?.editable_reason || t("readOnly")}
                     </div>
@@ -619,7 +620,11 @@ export default function SkillsPage() {
         </div>
 
         <div className="min-w-0 space-y-5">
-          <Card title={t("addFromRepo")} description={t("addFromRepoDesc")}>
+          <Advanced
+            title={t("addFromRepo")}
+            description={t("addFromRepoDesc")}
+            storageKey="nerya.skills.advanced.addFromRepo"
+          >
             <label className="mb-3 block text-[12px] text-ink-300">
               {t("sourceUrlLabel")}
               <input
@@ -631,15 +636,15 @@ export default function SkillsPage() {
             </label>
             {installPreview ? (
               <div className="mb-3 rounded-lg border border-brand-500/10 bg-ink-950/40 p-3 text-[11px] text-ink-300">
-                <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("detectedGithubSource")}</div>
+                <div className="text-[11px] text-ink-500 font-medium">{t("detectedGithubSource")}</div>
                 <div className="mt-1 break-all font-mono text-ink-100">{installPreview.repo}</div>
                 <div className="mt-2 grid grid-cols-1 gap-2">
                   <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("refLabel")}</div>
+                    <div className="text-[11px] text-ink-500 font-medium">{t("refLabel")}</div>
                     <div className="truncate font-mono text-ink-200">{installPreview.ref || t("defaultRef")}</div>
                   </div>
                   <div className="min-w-0">
-                    <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("folderLabel")}</div>
+                    <div className="text-[11px] text-ink-500 font-medium">{t("folderLabel")}</div>
                     <div className="break-all font-mono text-ink-200">{installPreview.subdir || t("repoRoot")}</div>
                   </div>
                 </div>
@@ -683,10 +688,10 @@ export default function SkillsPage() {
               <PlusIcon size={14} />
               {busy ? t("working") : t("install")}
             </button>
-          </Card>
+          </Advanced>
 
-          <Card title={t("stagedInstallsCount", { count: pendingInstalled.length })} description={t("stagedInstallsDesc")}>
-            {pendingInstalled.length ? (
+          {pendingInstalled.length > 0 ? (
+            <Card title={t("stagedInstallsCount", { count: pendingInstalled.length })} description={t("stagedInstallsDesc")}>
               <div className="embedded-list-scroll-sm space-y-2">
                 {pendingInstalled.map((row, index) => {
                   const id = asText(row.id || row.skill_id || row.name);
@@ -714,21 +719,23 @@ export default function SkillsPage() {
                   );
                 })}
               </div>
-            ) : (
-              <Empty title={t("noStagedInstalls")} subtitle={t("noStagedInstallsHint")} />
-            )}
-          </Card>
+            </Card>
+          ) : null}
 
-          <Card title={t("lockfile")} description={t("lockfileDesc")}>
+          <Advanced
+            title={t("lockfile")}
+            description={t("lockfileDesc")}
+            storageKey="nerya.skills.advanced.lockfile"
+          >
             <div className="grid grid-cols-2 gap-2 text-[12px]">
               <Metric label={t("entries")} value={asText(lock?.entries || lockEntries.length || 0)} />
               <Metric label={t("problems")} value={asText(drift?.problem_count || drift?.problems || 0)} />
             </div>
             {lockEntries.length ? (
-              <details className="mt-3 rounded-lg border border-brand-500/10 bg-ink-950/30">
-                <summary className="cursor-pointer px-3 py-2 text-[12px] text-ink-300">
+              <div className="mt-3 rounded-lg border border-brand-500/10 bg-ink-950/30">
+                <div className="px-3 py-2 text-[12px] text-ink-300 font-medium">
                   {t("installedLockEntries")}
-                </summary>
+                </div>
                 <div className="embedded-list-scroll-sm border-t border-brand-500/10">
                   {lockEntries.slice(0, 80).map((entry, index) => (
                     <div
@@ -744,9 +751,9 @@ export default function SkillsPage() {
                     </div>
                   ))}
                 </div>
-              </details>
+              </div>
             ) : null}
-          </Card>
+          </Advanced>
         </div>
       </div>
 
@@ -757,7 +764,7 @@ export default function SkillsPage() {
             if (e.target === e.currentTarget) setCreating(false);
           }}
         >
-          <div className="embedded-scroll max-h-[88vh] w-[760px] max-w-full rounded-xl border border-white/10 bg-bg-card shadow-glow">
+          <div className="embedded-scroll max-h-[88vh] w-[760px] max-w-full rounded-xl border border-brand-500/20 bg-bg-card shadow-glow">
             <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-5 py-4">
               <div className="min-w-0">
                 <h3 className="text-lg font-semibold text-ink-100">{t("createWorkspaceSkill")}</h3>

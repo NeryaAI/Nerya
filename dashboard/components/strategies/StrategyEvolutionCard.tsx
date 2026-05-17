@@ -3,6 +3,7 @@
 import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
+import { alert as alertDialog, confirm as confirmDialog } from "../../lib/dialogs";
 import type { PendingTuningProposal } from "../../lib/strategyTypes";
 
 interface Props {
@@ -32,17 +33,19 @@ export function StrategyEvolutionCard({
   const t = useTranslations("strategyEvolution");
   async function apply(proposalId: string) {
     if (!proposalId) return;
-    if (
-      !window.confirm(
-        t("promoteConfirm", { id: proposalId, strategyId }),
-      )
-    )
-      return;
+    const confirmed = await confirmDialog({
+      message: t("promoteConfirm", { id: proposalId, strategyId }),
+      tone: "brand",
+    });
+    if (!confirmed) return;
     try {
       await clientApi.proposalApply(proposalId);
       await onRefresh();
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : String(e));
+      await alertDialog({
+        message: e instanceof Error ? e.message : String(e),
+        tone: "danger",
+      });
     }
   }
 
@@ -52,7 +55,10 @@ export function StrategyEvolutionCard({
       await clientApi.proposalRollback(proposalId);
       await onRefresh();
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : String(e));
+      await alertDialog({
+        message: e instanceof Error ? e.message : String(e),
+        tone: "danger",
+      });
     }
   }
 
@@ -100,7 +106,7 @@ export function StrategyEvolutionCard({
 
       {dropped.length > 0 && (
         <div className="mt-4">
-          <div className="text-[11px] uppercase tracking-wider text-ink-500 mb-1">
+          <div className="text-[12px] text-ink-500 font-medium mb-1">
             {t("droppedByGuardrail")}
           </div>
           <ul className="embedded-list-scroll-sm text-[11px] space-y-1">

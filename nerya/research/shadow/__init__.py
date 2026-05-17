@@ -1,4 +1,4 @@
-"""Shadow runtime — research promotion workflow §5 Task 8.
+"""Shadow runtime.
 
 The shadow runtime replays a strategy candidate's signals against
 fixture (or paper-snapshot) market data, **without** writing to the

@@ -72,6 +72,32 @@ from .state import (
 _LOG = logging.getLogger(__name__)
 
 _VALID_MODES: frozenset[str] = frozenset({"paper", "shadow", "live"})
+_RETURN_STATUS_VALUES: frozenset[str] = frozenset(s.value for s in StrategyResultStatus)
+
+
+def _normalise_return_status(raw: dict[str, Any]) -> str:
+    value = raw.get("status")
+    if value is None:
+        value = raw.get("decision")
+    if value is None:
+        value = raw.get("action")
+    return str(value or "").strip().lower()
+
+
+def _metadata_from_return(raw: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {}
+    summary = {
+        k: v
+        for k, v in raw.items()
+        if k not in {"status", "decision", "action", "reason", "metadata", "execution"}
+    }
+    if summary:
+        metadata["return_summary"] = summary
+    if "decision" in raw:
+        metadata["decision"] = raw.get("decision")
+    if "action" in raw:
+        metadata["action"] = raw.get("action")
+    return metadata
 
 
 # ---------------------------------------------------------------------------
@@ -440,10 +466,63 @@ class StrategyRunner:
         if isinstance(raw, StrategyResult):
             return raw, None
 
+        # Be lenient with older generated strategies: some return
+        # {"decision": "HOLD"} / {"action": "hold"} instead of the
+        # canonical StrategyResult envelope.
+        if isinstance(raw, dict):
+            execution = raw.get("execution")
+            reason = str(raw.get("reason") or raw.get("summary") or "")
+            metadata = _metadata_from_return(raw)
+            if isinstance(execution, StrategyResult):
+                execution.metadata.update(metadata)
+                if reason and not execution.reason:
+                    execution.reason = reason
+                return execution, None
+            if isinstance(execution, dict):
+                status = str(execution.get("status") or "").strip().lower()
+                if status in _RETURN_STATUS_VALUES:
+                    return (
+                        StrategyResult.from_trade_envelope(
+                            execution,
+                            reason=reason,
+                            metadata=metadata,
+                        ),
+                        None,
+                    )
+
+            return_status = _normalise_return_status(raw)
+            if return_status in _RETURN_STATUS_VALUES:
+                try:
+                    return (
+                        StrategyResult(
+                            status=StrategyResultStatus(return_status),
+                            reason=reason,
+                            intent=dict(raw.get("intent") or {}),
+                            order=dict(raw.get("order") or {}),
+                            risk_decision=dict(raw.get("risk_decision") or {}),
+                            approval_id=raw.get("approval_id"),
+                            order_id=raw.get("order_id"),
+                            session_id=raw.get("session_id"),
+                            metadata=metadata,
+                            error_kind=raw.get("error_kind"),
+                        ),
+                        None,
+                    )
+                except Exception:
+                    pass
+            if return_status in {"buy", "sell", "reduce", "exit", "enter"}:
+                return (
+                    StrategyResult.ok(
+                        reason=reason or f"entrypoint returned decision={return_status}",
+                        metadata=metadata,
+                    ),
+                    None,
+                )
+
         # Be lenient: a dict with a known status survives, anything
         # else gets wrapped into an OK result with the original return
         # captured so the operator can debug.
-        if isinstance(raw, dict) and raw.get("status") in {s.value for s in StrategyResultStatus}:
+        if isinstance(raw, dict) and raw.get("status") in _RETURN_STATUS_VALUES:
             try:
                 return (
                     StrategyResult(

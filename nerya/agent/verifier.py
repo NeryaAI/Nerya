@@ -1,17 +1,12 @@
 """Verification-agent nudge — .
 
-Agent runtime reference:
+When the model marks several todos completed without running a
+verification step (tests, type-check, dry-run), the harness nudges a
+verifier so the user does not have to accept "all done" on faith.
 
-* ``coding-agent/.../src/tools/TodoWriteTool/TodoWriteTool.ts:72`` — when
-  the model marks several todos completed without running a verification
-  step (tests, type-check, dry-run), the harness *nudges* a verifier
-  agent so the user doesn't accept "all done" on faith.
-
-compatibility:
-
-* The runtime' ``after_turn`` reflection hook fires the same shape — count
-  completed todos this turn, compare to validation evidence, attach a
-  follow-up suggestion to the next observation.
+The ``after_turn`` reflection hook counts completed todos, compares them
+to validation evidence, and attaches a follow-up suggestion to the next
+observation.
 
 This module is the *detection* half. The kernel uses
 :func:`compute_verifier_nudge` after a turn and, when triggered, emits
@@ -27,7 +22,7 @@ existing memory-recall block, so the model sees:
 
 What counts as "validation"
 ---------------------------
-Configurable, but the defaults match coding-agent's heuristic:
+Configurable, but the defaults follow the same basic heuristic:
 
 * a ``run_shell`` call whose command matches one of ``test_patterns``
   (``pytest``/``go test``/``cargo test``/``npm test``/``make test``/…),

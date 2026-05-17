@@ -1,8 +1,13 @@
 "use client";
 
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
+import {
+  EditIcon,
+  PauseIcon,
+  TrashIcon,
+} from "../../components/icons";
 import {
   clientApi,
   type AccountSummary,
@@ -12,14 +17,22 @@ import {
   type WalletBinding,
 } from "../../lib/clientApi";
 import {
+  confirm as confirmDialog,
+  prompt as promptDialog,
+} from "../../lib/dialogs";
+import type { StrategyCard as StrategyScorecard } from "../../lib/api";
+import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
+  Kpi,
   PageBody,
   PageHeader,
-  Pill,
+  StatusDot,
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
+import { Select } from "../../components/Select";
 import {
   StrategyProposalApprovalCard,
   isActiveStrategyProposal,
@@ -57,10 +70,32 @@ function parseList(value: string): string[] {
   return value.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+function pnlClassName(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value) || value === 0) {
+    return "text-ink-400";
+  }
+  return value > 0 ? "text-accent-400" : "text-[#ef4560]";
+}
+
+function formatSignedUsd(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "—";
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}$${Math.abs(value).toLocaleString(undefined, {
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function finiteNumber(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 export default function StrategiesPage() {
   const t = useTranslations("strategies");
   const tCommon = useTranslations("common");
   const [strategies, setStrategies] = useState<StrategyRecord[]>([]);
+  const [strategyScorecards, setStrategyScorecards] = useState<
+    Record<string, StrategyScorecard>
+  >({});
   const [strategyProposals, setStrategyProposals] = useState<EvolutionProposal[]>([]);
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
@@ -78,21 +113,28 @@ export default function StrategiesPage() {
     setLoading(true);
     setError(null);
     try {
-      // 04-29 §11 P9 — strategy create / rebind reads the
+      // Strategy create / rebind reads the
       // account roster from /accounts/list (the new control-plane
       // surface; quarantine/read_only/disabled are filtered out for
       // binding) and the configured wallet providers from
       // /wallet/configured. The legacy /discovery snapshot is kept
       // around as a fallback for very old workspaces.
-      const [snap, res, accList, wallets, proposalRes] = await Promise.all([
-        clientApi.discoverySnapshot().catch(() => null),
-        clientApi.strategiesAll(true),
-        clientApi.accountsList().catch(() => ({ accounts: [], ts: 0 })),
-        clientApi.walletConfigured().catch(() => ({ bindings: [], count: 0 })),
-        clientApi.proposalsList().catch(() => ({ proposals: [] })),
-      ]);
+      const [snap, res, accList, wallets, proposalRes, scorecardRes] =
+        await Promise.all([
+          clientApi.discoverySnapshot().catch(() => null),
+          clientApi.strategiesAll(true),
+          clientApi.accountsList().catch(() => ({ accounts: [], ts: 0 })),
+          clientApi.walletConfigured().catch(() => ({ bindings: [], count: 0 })),
+          clientApi.proposalsList().catch(() => ({ proposals: [] })),
+          clientApi.strategyList().catch(() => ({ strategies: [] })),
+        ]);
       setDiscovery(snap);
       setStrategies(res.strategies ?? []);
+      setStrategyScorecards(
+        Object.fromEntries(
+          (scorecardRes.strategies ?? []).map((item) => [item.id, item]),
+        ),
+      );
       setStrategyProposals((proposalRes.proposals ?? []).filter(isActiveStrategyProposal));
       setAccounts(accList.accounts ?? []);
       setWalletBindings(wallets.bindings ?? []);
@@ -121,6 +163,34 @@ export default function StrategiesPage() {
   }, []);
 
   async function createStrategy() {
+    // Surface the same soft warning we put on the
+    // /strategy/bind_account flow. The backend will return ``warning``
+    // post-hoc, but at the form level we already know which account
+    // the operator picked, so we pre-flight against the cached
+    // ``bound_strategies`` summary and let them back out before the
+    // manifest gets written.
+    const targetAccount = draft.account_id.trim();
+    if (targetAccount) {
+      const acct = accounts.find((a) => a.profile.id === targetAccount);
+      const shared = (acct?.bound_strategies || []).filter(
+        (entry) => entry.strategy_id && entry.strategy_id !== draft.strategy_id.trim().toLowerCase(),
+      );
+      if (shared.length > 0) {
+        const names = shared.slice(0, 5).map((entry) => entry.strategy_id).join(", ");
+        const proceed = await confirmDialog({
+          title: t("shareWarningTitle"),
+          message: t("shareWarningMessage", {
+            count: shared.length,
+            accountId: targetAccount,
+            strategies: names,
+          }),
+          okLabel: t("shareWarningContinue"),
+          cancelLabel: t("shareWarningCancel"),
+          tone: "warning",
+        });
+        if (!proceed) return;
+      }
+    }
     setBusy("create");
     setError(null);
     setNotice(null);
@@ -139,9 +209,170 @@ export default function StrategiesPage() {
         main_prompt: draft.main_prompt.trim() || undefined,
       });
       if (!out.ok) throw new Error(JSON.stringify(out));
-      setNotice(`${t("createdPrefix")} ${out.strategy_id}. ${t("createdSuffix")}`);
+      let notice = `${t("createdPrefix")} ${out.strategy_id}. ${t("createdSuffix")}`;
+      if (out.warning && out.warning.code === "account_already_bound") {
+        notice += ` · ${t("createdAccountSharedSuffix", {
+          count: out.warning.strategies?.length ?? 0,
+        })}`;
+      }
+      setNotice(notice);
       setDraft(EMPTY_DRAFT);
       setShowCreate(false);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function renameStrategy(strategy: StrategyRecord) {
+    const nextTitle = await promptDialog({
+      title: t("editName"),
+      message: t("renamePrompt", { id: strategy.id }),
+      defaultValue: strategy.title || strategy.id,
+      placeholder: t("fieldTitle"),
+      okLabel: tCommon("save"),
+    });
+    if (nextTitle === null) return;
+    const trimmed = nextTitle.trim();
+    if (!trimmed) {
+      setError(t("nameRequired"));
+      return;
+    }
+    if (trimmed === (strategy.title || strategy.id)) return;
+    setBusy(`rename:${strategy.id}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await clientApi.strategyUpdate(strategy.id, {
+        title: trimmed,
+        reason: "dashboard_rename_strategy",
+      });
+      if (!res.ok) throw new Error("strategy_rename_failed");
+      setNotice(t("nameUpdated", { id: strategy.id, title: trimmed }));
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deleteStrategy(strategy: StrategyRecord, force = false) {
+    const ok = await confirmDialog({
+      message: force
+        ? t("forceDeleteConfirm", { id: strategy.id })
+        : t("deleteConfirm", { id: strategy.id }),
+      tone: "danger",
+      okLabel: force ? t("forceDelete") : tCommon("delete"),
+    });
+    if (!ok) return;
+    setBusy(`delete:${strategy.id}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await clientApi.strategyDelete({
+        strategy_id: strategy.id,
+        force,
+      });
+      if (!res.ok) {
+        if (res.state && !force) {
+          const closeFirst = res.state.open_positions > 0
+            ? await confirmDialog({
+                title: t("cannotDeleteTitle"),
+                message: t("cannotDelete", {
+                  positions: res.state.open_positions,
+                  executors: res.state.active_executors,
+                  orders: res.state.active_orders,
+                }),
+                okLabel: t("closePositions"),
+                cancelLabel: t("pauseInstead"),
+                tone: "warning",
+              })
+            : false;
+          if (closeFirst) {
+            await closeStrategyPositions(strategy);
+          } else {
+            await pauseStrategy(strategy);
+          }
+          return;
+        }
+        throw new Error(res.error || "strategy_delete_failed");
+      }
+      setNotice(t("deletedInfo", { id: strategy.id }));
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function closeStrategyPositions(strategy: StrategyRecord) {
+    setBusy(`close:${strategy.id}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const preview = await clientApi.strategyClosePositions({
+        strategy_id: strategy.id,
+        dry_run: true,
+      });
+      if (!preview.ok) throw new Error(preview.error || "strategy_close_preview_failed");
+      if (preview.count <= 0) {
+        setNotice(t("noPositionsToClose", { id: strategy.id }));
+        await load();
+        return;
+      }
+      const ok = await confirmDialog({
+        title: t("closePositionsTitle"),
+        message: t("closePositionsConfirm", {
+          id: strategy.id,
+          count: preview.count,
+          notional: preview.positions
+            .reduce((sum, row) => sum + (Number(row.notional_usd) || 0), 0)
+            .toFixed(2),
+        }),
+        okLabel: t("closePositions"),
+        tone: "warning",
+      });
+      if (!ok) return;
+      const res = await clientApi.strategyClosePositions({
+        strategy_id: strategy.id,
+        operator: "dashboard",
+        reason: "strategy_delete_prepare",
+      });
+      if (!res.ok) throw new Error(res.error || "strategy_close_positions_failed");
+      setNotice(t("closeSubmitted", {
+        id: strategy.id,
+        count: res.submitted?.length ?? res.count,
+      }));
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function pauseStrategy(strategy: StrategyRecord) {
+    if (strategy.status === "paused") {
+      setNotice(t("pausedInfo", { id: strategy.id }));
+      return;
+    }
+    const ok = await confirmDialog({
+      message: t("pauseConfirm", { id: strategy.id }),
+      okLabel: t("pauseStrategy"),
+      tone: "warning",
+    });
+    if (!ok) return;
+    setBusy(`pause:${strategy.id}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await clientApi.strategySetStatus(strategy.id, "paused", "dashboard_pause");
+      if (!res.ok) throw new Error("strategy_pause_failed");
+      setNotice(t("pausedInfo", { id: strategy.id }));
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -181,27 +412,32 @@ export default function StrategiesPage() {
     return tally;
   }, [strategies]);
 
+  const totalPnlSum = useMemo(() => {
+    let sum = 0;
+    for (const s of strategies) {
+      const card = strategyScorecards[s.id];
+      const value =
+        finiteNumber(card?.total_pnl_usd) ??
+        ((finiteNumber(card?.realized_pnl_usd) ?? 0) +
+          (finiteNumber(card?.unrealized_pnl_usd) ?? 0));
+      if (Number.isFinite(value)) sum += value;
+    }
+    return sum;
+  }, [strategies, strategyScorecards]);
+
   return (
     <div>
       <PageHeader
         title={t("title")}
         description={t("description")}
         actions={
-          <>
-            <button
-              onClick={() => void load()}
-              disabled={loading}
-              className="btn btn-ghost cursor-pointer text-xs"
-            >
-              {loading ? tCommon("refreshing") : tCommon("refresh")}
-            </button>
-            <button
-              onClick={() => setShowCreate((v) => !v)}
-              className="btn btn-primary cursor-pointer"
-            >
-              {showCreate ? tCommon("cancel") : t("newStrategy")}
-            </button>
-          </>
+          <button
+            onClick={() => void load()}
+            disabled={loading}
+            className="btn btn-ghost cursor-pointer text-xs"
+          >
+            {loading ? tCommon("refreshing") : tCommon("refresh")}
+          </button>
         }
       />
       <SectionTabs section="strategy" />
@@ -213,102 +449,126 @@ export default function StrategiesPage() {
           </div>
         )}
 
-        {showCreate && (
-          <Card
-            title={t("createStrategy")}
-            description={t("createStrategyDesc")}
-          >
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-              <Field label={t("fieldStrategyId")}>
-                <input
-                  value={draft.strategy_id}
-                  onChange={(e) => setDraft({ ...draft, strategy_id: e.target.value })}
-                  className="input-dark font-mono"
-                  placeholder="eth_mean_reversion"
-                />
-              </Field>
-              <Field label={t("fieldTitle")}>
-                <input
-                  value={draft.title}
-                  onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-                  className="input-dark"
-                  placeholder="ETH mean reversion"
-                />
-              </Field>
-              <Field label={t("fieldAccount")}>
-                <AccountSelect
-                  value={draft.account_id}
-                  accounts={accounts}
-                  discovery={discovery}
-                  onChange={(account_id) => setDraft({ ...draft, account_id })}
-                />
-              </Field>
-              <Field label={t("fieldWallet")}>
-                <WalletSelect
-                  value={draft.wallet_id}
-                  bindings={walletBindings}
-                  discovery={discovery}
-                  onChange={(wallet_id) => setDraft({ ...draft, wallet_id })}
-                />
-              </Field>
-              <Field label={t("fieldMarkets")}>
-                <input
-                  value={draft.markets}
-                  onChange={(e) => setDraft({ ...draft, markets: e.target.value })}
-                  className="input-dark font-mono"
-                  placeholder="binance:BTCUSDT"
-                />
-              </Field>
-              <Field label={t("fieldTriggerKinds")}>
-                <input
-                  value={draft.trigger_kinds}
-                  onChange={(e) => setDraft({ ...draft, trigger_kinds: e.target.value })}
-                  className="input-dark font-mono"
-                />
-              </Field>
-              <Field label={t("fieldSubagents")}>
-                <input
-                  value={draft.subagents}
-                  onChange={(e) => setDraft({ ...draft, subagents: e.target.value })}
-                  className="input-dark font-mono"
-                />
-              </Field>
-              <Field label={t("fieldDriver")}>
-                <select
-                  value={draft.driver}
-                  onChange={(e) => setDraft({ ...draft, driver: e.target.value as DraftForm["driver"] })}
-                  className="input-dark"
-                >
-                  <option value="prompt">prompt</option>
-                  <option value="script">script</option>
-                </select>
-              </Field>
-              <Field label={t("fieldDescription")} full>
-                <textarea
-                  value={draft.description}
-                  onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-                  className="input-dark h-16"
-                />
-              </Field>
-              <Field label={t("fieldMainPrompt")} full>
-                <textarea
-                  value={draft.main_prompt}
-                  onChange={(e) => setDraft({ ...draft, main_prompt: e.target.value })}
-                  className="input-dark font-mono h-28"
-                />
-              </Field>
-            </div>
-            <div className="mt-3 flex justify-end">
-              <button
-                onClick={() => void createStrategy()}
-                disabled={busy !== null || !draft.strategy_id || !draft.account_id || !draft.markets}
-                className="btn btn-primary cursor-pointer"
-              >
-                {busy === "create" ? t("creating") : t("createStrategyBtn")}
-              </button>
-            </div>
-          </Card>
-        )}
+        <div className="flex flex-wrap items-end gap-x-8 gap-y-3 px-1">
+          <Kpi inline label={t("kpiTotal")} value={String(strategies.length)} />
+          <Kpi
+            inline
+            label={t("kpiLive")}
+            value={String(counts["live"] || 0)}
+            tone={(counts["live"] || 0) > 0 ? "ok" : "neutral"}
+          />
+          <Kpi
+            inline
+            label={t("kpiPending")}
+            value={String(pendingStrategyProposals.length)}
+            tone={pendingStrategyProposals.length > 0 ? "warn" : "neutral"}
+          />
+          <Kpi
+            inline
+            label={t("kpiTotalPnl")}
+            value={formatSignedUsd(totalPnlSum)}
+            tone={totalPnlSum > 0 ? "ok" : totalPnlSum < 0 ? "danger" : "neutral"}
+          />
+        </div>
+
+        <Advanced
+          title={t("createAdvancedTitle")}
+          description={t("createAdvancedHint")}
+          open={showCreate}
+          onToggle={(next) => setShowCreate(next)}
+        >
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <Field label={t("fieldStrategyId")}>
+              <input
+                value={draft.strategy_id}
+                onChange={(e) => setDraft({ ...draft, strategy_id: e.target.value })}
+                className="input-dark font-mono"
+                placeholder="eth_mean_reversion"
+              />
+            </Field>
+            <Field label={t("fieldTitle")}>
+              <input
+                value={draft.title}
+                onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+                className="input-dark"
+                placeholder="ETH mean reversion"
+              />
+            </Field>
+            <Field label={t("fieldAccount")}>
+              <AccountSelect
+                value={draft.account_id}
+                accounts={accounts}
+                discovery={discovery}
+                onChange={(account_id) => setDraft({ ...draft, account_id })}
+              />
+            </Field>
+            <Field label={t("fieldWallet")}>
+              <WalletSelect
+                value={draft.wallet_id}
+                bindings={walletBindings}
+                discovery={discovery}
+                onChange={(wallet_id) => setDraft({ ...draft, wallet_id })}
+              />
+            </Field>
+            <Field label={t("fieldMarkets")}>
+              <input
+                value={draft.markets}
+                onChange={(e) => setDraft({ ...draft, markets: e.target.value })}
+                className="input-dark font-mono"
+                placeholder="binance:BTCUSDT"
+              />
+            </Field>
+            <Field label={t("fieldTriggerKinds")}>
+              <input
+                value={draft.trigger_kinds}
+                onChange={(e) => setDraft({ ...draft, trigger_kinds: e.target.value })}
+                className="input-dark font-mono"
+              />
+            </Field>
+            <Field label={t("fieldSubagents")}>
+              <input
+                value={draft.subagents}
+                onChange={(e) => setDraft({ ...draft, subagents: e.target.value })}
+                className="input-dark font-mono"
+              />
+            </Field>
+            <Field label={t("fieldDriver")}>
+              <Select<DraftForm["driver"]>
+                value={draft.driver}
+                onChange={(value) => setDraft({ ...draft, driver: value })}
+                options={[
+                  { value: "prompt", label: "prompt" },
+                  { value: "script", label: "script" },
+                ]}
+                size="sm"
+                ariaLabel={t("fieldDriver")}
+              />
+            </Field>
+            <Field label={t("fieldDescription")} full>
+              <textarea
+                value={draft.description}
+                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                className="input-dark h-16"
+              />
+            </Field>
+            <Field label={t("fieldMainPrompt")} full>
+              <textarea
+                value={draft.main_prompt}
+                onChange={(e) => setDraft({ ...draft, main_prompt: e.target.value })}
+                className="input-dark font-mono h-28"
+              />
+            </Field>
+          </div>
+          <div className="mt-3 flex justify-end">
+            <button
+              onClick={() => void createStrategy()}
+              disabled={busy !== null || !draft.strategy_id || !draft.account_id || !draft.markets}
+              className="btn btn-primary cursor-pointer"
+            >
+              {busy === "create" ? t("creating") : t("createStrategyBtn")}
+            </button>
+          </div>
+        </Advanced>
 
         {pendingStrategyProposals.length > 0 ? (
           <Card
@@ -341,20 +601,23 @@ export default function StrategiesPage() {
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
                 placeholder={t("filterPlaceholder")}
-                className="input-dark text-xs w-56"
+                className="input-dark text-[12px] w-56"
               />
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="input-dark text-xs"
-              >
-                <option value="all">{t("allStatuses")}</option>
-                {Object.entries(counts).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {k} ({v})
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-[180px]">
+                <Select
+                  value={statusFilter}
+                  onChange={(value) => setStatusFilter(value)}
+                  options={[
+                    { value: "all", label: t("allStatuses") },
+                    ...Object.entries(counts).map(([k, v]) => ({
+                      value: k,
+                      label: `${k} (${v})`,
+                    })),
+                  ]}
+                  size="sm"
+                  ariaLabel={t("allStatuses")}
+                />
+              </div>
             </div>
           }
         >
@@ -368,9 +631,17 @@ export default function StrategiesPage() {
               }
             />
           ) : (
-            <div className="embedded-list-scroll-lg grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(320px,1fr))]">
               {filtered.map((strategy) => (
-                <StrategyCard key={strategy.id} strategy={strategy} />
+                <StrategyCard
+                  key={strategy.id}
+                  strategy={strategy}
+                  scorecard={strategyScorecards[strategy.id]}
+                  busy={busy}
+                  onRename={renameStrategy}
+                  onDelete={deleteStrategy}
+                  onPause={pauseStrategy}
+                />
               ))}
             </div>
           )}
@@ -380,43 +651,129 @@ export default function StrategiesPage() {
   );
 }
 
-function StrategyCard({ strategy }: { strategy: StrategyRecord }) {
+function statusTone(status: string): "ok" | "warn" | "danger" | "brand" | "neutral" {
+  if (status === "live") return "ok";
+  if (status === "paper" || status === "canary") return "brand";
+  if (status === "paused") return "warn";
+  if (status === "archived") return "neutral";
+  return "neutral";
+}
+
+function StrategyCard({
+  strategy,
+  scorecard,
+  busy,
+  onRename,
+  onDelete,
+  onPause,
+}: {
+  strategy: StrategyRecord;
+  scorecard?: StrategyScorecard;
+  busy: string | null;
+  onRename: (strategy: StrategyRecord) => Promise<void>;
+  onDelete: (strategy: StrategyRecord, force?: boolean) => Promise<void>;
+  onPause: (strategy: StrategyRecord) => Promise<void>;
+}) {
   const t = useTranslations("strategies");
-  const tone =
-    strategy.status === "live"
-      ? "ok"
-      : strategy.status === "paper" || strategy.status === "canary"
-      ? "brand"
-      : strategy.status === "archived" || strategy.status === "paused"
-      ? "neutral"
-      : "neutral";
+  const tCommon = useTranslations("common");
+  const totalPnl =
+    finiteNumber(scorecard?.total_pnl_usd) ??
+    (scorecard
+      ? (finiteNumber(scorecard?.realized_pnl_usd) ?? 0) +
+        (finiteNumber(scorecard?.unrealized_pnl_usd) ?? 0)
+      : undefined);
+  const renaming = busy === `rename:${strategy.id}`;
+  const deleting = busy === `delete:${strategy.id}`;
+  const pausing = busy === `pause:${strategy.id}`;
+  const closing = busy === `close:${strategy.id}`;
+  const canPause = !["paused", "archived", "draft", "static_review", "backtested"].includes(
+    strategy.status,
+  );
+  const markets = (strategy.markets || []).join(", ") || t("noMarkets");
+  const tone = statusTone(strategy.status);
+  const router = useRouter();
+  const strategyHref = `/strategies/${encodeURIComponent(strategy.id)}`;
+
   return (
-    <Link
-      href={`/strategies/${encodeURIComponent(strategy.id)}`}
-      className="group block rounded-xl border border-white/8 bg-bg-card hover:bg-white/[0.04] hover:border-brand-500/30 transition-colors duration-200 p-4 cursor-pointer"
+    <div
       data-strategy-id={strategy.id}
+      className="group relative flex cursor-pointer flex-col gap-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] p-4 transition-colors hover:border-[color:var(--line-hi)]"
+      onClick={() => {
+        void router.push(strategyHref);
+      }}
     >
-      <div className="flex items-start justify-between gap-2">
+      <div className="relative flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="font-mono text-sm text-ink-100 truncate">{strategy.id}</div>
-          <div className="text-[12px] text-ink-400 mt-0.5 truncate">
+          <div className="truncate text-[15px] font-medium text-[color:var(--text-base)]">
             {strategy.title || t("untitledStrategy")}
           </div>
+          <div className="mt-0.5 truncate font-mono text-[12px] text-[color:var(--text-muted)]">
+            {strategy.id}
+          </div>
         </div>
-        <span className="text-brand-300/60 group-hover:text-brand-200 transition-colors text-xs leading-none">
-          →
-        </span>
+        <StatusDot tone={tone} label={strategy.status} />
       </div>
-      <div className="mt-3 flex flex-wrap items-center gap-1.5">
-        <Pill tone={tone}>{strategy.status}</Pill>
-        <Pill tone="brand">{strategy.mode}</Pill>
-        <Pill tone="neutral">{t("acct")}: {strategy.account_id || "—"}</Pill>
+      <div className="relative flex items-baseline justify-between gap-3">
+        <div className="text-[12px] text-[color:var(--text-muted)]">
+          {strategy.mode || "—"} · {strategy.account_id || "—"}
+        </div>
+        <div className={`text-[18px] font-medium tabular-nums ${pnlClassName(totalPnl)}`}>
+          {formatSignedUsd(totalPnl)}
+        </div>
       </div>
-      <div className="mt-2 text-[11px] text-ink-500 font-mono truncate">
-        {(strategy.markets || []).join(", ") || t("noMarkets")} ·{" "}
-        {(strategy.trigger_kinds || []).join(", ") || t("noTriggers")}
+      <div className="relative truncate font-mono text-[12px] text-[color:var(--text-muted)]">
+        {markets}
       </div>
-    </Link>
+      <div className="relative flex items-center justify-end gap-1 pt-1">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void onRename(strategy);
+          }}
+          disabled={busy !== null}
+          title={t("editName")}
+          aria-label={t("editName")}
+          className="btn btn-ghost cursor-pointer text-[12px] py-0.5 px-1.5"
+        >
+          <EditIcon size={13} />
+          {renaming ? <span className="ml-1">{t("renaming")}</span> : null}
+        </button>
+        {canPause ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              void onPause(strategy);
+            }}
+            disabled={busy !== null}
+            title={t("pauseStrategy")}
+            aria-label={t("pauseStrategy")}
+            className="btn btn-ghost cursor-pointer text-amber-500 text-[12px] py-0.5 px-1.5"
+          >
+            <PauseIcon size={13} />
+            {pausing ? <span className="ml-1">{t("pausing")}</span> : null}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void onDelete(strategy);
+          }}
+          disabled={busy !== null}
+          title={tCommon("delete")}
+          aria-label={tCommon("delete")}
+          className="btn btn-ghost cursor-pointer text-rose-500 text-[12px] py-0.5 px-1.5"
+        >
+          <TrashIcon size={13} />
+          {closing ? <span className="ml-1">{t("closingPositions")}</span> : deleting ? <span className="ml-1">{t("deleting")}</span> : null}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -454,27 +811,23 @@ function AccountSelect({
   // yet (e.g. on a brand-new workspace).
   if (accounts.length > 0) {
     return (
-      <select
+      <Select
         value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="input-dark font-mono"
-      >
-        {accounts.map(({ profile }) => {
+        onChange={(next) => onChange(next)}
+        options={accounts.map(({ profile }) => {
           const disabled = profile.status !== "active";
-          const label = `${profile.id} · ${profile.venue} · ${profile.mode}` +
-            (disabled ? ` (${profile.status})` : "");
-          return (
-            <option
-              key={profile.id}
-              value={profile.id}
-              disabled={disabled}
-              title={disabled ? t("accountStatus", { status: profile.status }) : undefined}
-            >
-              {label}
-            </option>
-          );
+          return {
+            value: profile.id,
+            disabled,
+            label:
+              `${profile.id} · ${profile.venue} · ${profile.mode}` +
+              (disabled ? ` (${profile.status})` : ""),
+          };
         })}
-      </select>
+        size="sm"
+        ariaLabel="account"
+        className="font-mono"
+      />
     );
   }
   if (!discovery?.accounts?.length) {
@@ -488,17 +841,17 @@ function AccountSelect({
     );
   }
   return (
-    <select
+    <Select
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="input-dark font-mono"
-    >
-      {discovery.accounts.map((account) => (
-        <option key={account.id} value={account.id}>
-          {account.id} · {account.venue || account.exchange} · {account.mode}
-        </option>
-      ))}
-    </select>
+      onChange={(next) => onChange(next)}
+      options={discovery.accounts.map((account) => ({
+        value: account.id,
+        label: `${account.id} · ${account.venue || account.exchange} · ${account.mode}`,
+      }))}
+      size="sm"
+      ariaLabel="account"
+      className="font-mono"
+    />
   );
 }
 
@@ -521,32 +874,37 @@ function WalletSelect({
   const readyMap = new Map(
     (discovery?.wallets?.providers ?? []).map((p) => [p.id, p]),
   );
+  const options = [
+    { value: "", label: t("globalWallet") } as {
+      value: string;
+      label: string;
+    },
+  ];
+  for (const binding of bindings) {
+    const probe = readyMap.get(binding.wallet_id);
+    options.push({
+      value: binding.wallet_id,
+      label:
+        `${binding.label || binding.wallet_id} · ${binding.provider}` +
+        (binding.source === "legacy" ? ` ${t("legacyTag")}` : "") +
+        (probe && !probe.ready ? ` ${t("notReadyDotTag")}` : ""),
+    });
+  }
+  if (bindings.length === 0 && discovery?.wallets?.providers?.length) {
+    for (const wallet of discovery.wallets.providers) {
+      options.push({
+        value: wallet.id,
+        label: `${wallet.label || wallet.id}${wallet.ready ? "" : ` ${t("notReadyTag")}`}`,
+      });
+    }
+  }
   return (
-    <select
+    <Select
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="input-dark"
-    >
-      <option value="">{t("globalWallet")}</option>
-      {bindings.map((binding) => {
-        const probe = readyMap.get(binding.wallet_id);
-        return (
-          <option key={binding.wallet_id} value={binding.wallet_id}>
-            {binding.label || binding.wallet_id} · {binding.provider}
-            {binding.source === "legacy" ? ` ${t("legacyTag")}` : ""}
-            {probe && !probe.ready ? ` ${t("notReadyDotTag")}` : ""}
-          </option>
-        );
-      })}
-      {/* Legacy fallback for installs that don't expose /wallet/configured yet */}
-      {bindings.length === 0
-        ? (discovery?.wallets?.providers ?? []).map((wallet) => (
-            <option key={wallet.id} value={wallet.id}>
-              {wallet.label || wallet.id}
-              {wallet.ready ? "" : ` ${t("notReadyTag")}`}
-            </option>
-          ))
-        : null}
-    </select>
+      onChange={(next) => onChange(next)}
+      options={options}
+      size="sm"
+      ariaLabel={t("globalWallet")}
+    />
   );
 }

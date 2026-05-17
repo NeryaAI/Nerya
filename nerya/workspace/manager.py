@@ -125,9 +125,8 @@ _DEFAULT_ENABLED_SKILLS = [
     # validation reports, and surface promotion blockers without
     # touching live execution paths.
     "strategy_validation",
-    # Workspace introspection — Apr-26 2026 operator directive
-    # ("8 个查询型 action 应该是一个 skill 让 Agent 在需要的时候加载然后
-    # 去使用"). Single consolidated entry point that proxies to the
+    # Workspace introspection stays load-on-demand. Single consolidated
+    # entry point that proxies to the
     # underlying domain skills (strategy / script / portfolio /
     # trading / trigger) for every read-only "what do I have here?"
     # question. The context builder is intentionally thin — the

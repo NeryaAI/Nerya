@@ -2,7 +2,7 @@
 
 The original :class:`Account` shape (``id``, ``mode``, ``initial_balance_usd``,
 ``status``, ``venue``/``kind``/``raw``) is kept verbatim so existing call
-sites continue to work. 04-29 §3.2 introduces a richer
+sites continue to work. This module introduces a richer
 :class:`AccountProfile` view layered on top — operators get
 mode/permission/limits/credentials in one place, while existing code
 keeps using the slim :class:`Account` dataclass.
@@ -27,7 +27,7 @@ from ..core.paths import WorkspacePaths
 
 
 # ---------------------------------------------------------------------------
-# AccountMode and AccountStatus literals (04-29 §3.2)
+# AccountMode and AccountStatus literals.
 # ---------------------------------------------------------------------------
 
 AccountMode = Literal["paper", "shadow", "canary", "live"]
@@ -140,7 +140,7 @@ class AccountProfile:
     permissions: AccountPermissions = field(default_factory=AccountPermissions)
     limits: AccountLimits = field(default_factory=AccountLimits)
     credentials: dict[str, str] = field(default_factory=dict)
-    # 04-29 §11 P8 — every account can pin a specific wallet
+    # Every account can pin a specific wallet
     # provider id (declared under ``wallet.providers.<id>`` in
     # ``nerya.yml``). Empty falls back to the legacy single
     # ``wallet.provider`` selection so existing fixtures stay green.
@@ -376,7 +376,7 @@ def get_account_profile(paths: WorkspacePaths, account_id: str) -> AccountProfil
 def _atomic_write_accounts_doc(paths: WorkspacePaths, doc: dict[str, Any]) -> None:
     """Persist the accounts roster back to ``accounts/accounts.yml``.
 
-    04-29 §11 P8 — every mutation goes through this helper so
+    Every mutation goes through this helper so
     we (a) deduplicate writes, (b) keep a single source of truth, and
     (c) make sure the directory exists for fresh workspaces.
     """
@@ -416,6 +416,152 @@ def _coerce_credentials_row(raw: Any) -> dict[str, str]:
     return out
 
 
+_DEDUP_CREDENTIAL_PRIORITY = (
+    "api_key",
+    "apiKey",
+    "key",
+    "access_key",
+    "accessKey",
+    "user_id",
+    "userId",
+    "wallet_id",
+)
+
+
+def _credential_fingerprint(credentials: dict[str, str]) -> str:
+    """Stable fingerprint of an account's primary credential reference.
+
+    We deliberately keep this rough — just the ``vault://`` ref of the
+    first known "primary" credential field. That's enough to spot
+    "you're about to register the same Binance API key twice"
+    without leaking anything sensitive, and the comparison happens
+    against pre-existing ``vault://`` refs only.
+    """
+
+    if not credentials:
+        return ""
+    for key in _DEDUP_CREDENTIAL_PRIORITY:
+        value = credentials.get(key)
+        if isinstance(value, str) and value.startswith("vault://"):
+            return value
+    for value in credentials.values():
+        if isinstance(value, str) and value.startswith("vault://"):
+            return value
+    return ""
+
+
+def find_duplicate_account(
+    paths: WorkspacePaths,
+    *,
+    venue: str,
+    kind: str,
+    credentials: dict[str, str],
+    ignore_id: str | None = None,
+) -> AccountProfile | None:
+    """Look for an existing account with the same venue + primary cred.
+
+    Used by the HTTP upsert flow to surface a "did you mean to update
+    `<existing_id>` instead of registering a new one?" hint. Returning
+    a profile does **not** block the operator — the call site decides
+    whether to warn or hard-fail. The fingerprint comparison only
+    checks ``vault://`` references (never plaintext) so this is safe
+    to expose to the dashboard.
+    """
+
+    venue_l = (venue or "").strip().lower()
+    kind_l = (kind or "").strip().lower()
+    fingerprint = _credential_fingerprint(credentials)
+    if not venue_l or not kind_l or not fingerprint:
+        return None
+    for profile in load_account_profiles(paths).values():
+        if ignore_id and profile.id == ignore_id:
+            continue
+        if (profile.venue or "").strip().lower() != venue_l:
+            continue
+        if (profile.kind or "").strip().lower() != kind_l:
+            continue
+        if _credential_fingerprint(profile.credentials) != fingerprint:
+            continue
+        return profile
+    return None
+
+
+def _connection_field_present(
+    field_name: str,
+    *,
+    credentials: dict[str, str],
+    provider_config: dict[str, Any],
+    raw_account: dict[str, Any],
+) -> bool:
+    value = credentials.get(field_name)
+    if isinstance(value, str) and value.strip():
+        return True
+    value = provider_config.get(field_name)
+    if isinstance(value, (str, int, float)) and str(value).strip():
+        return True
+    value = raw_account.get(field_name)
+    if isinstance(value, (str, int, float)) and str(value).strip():
+        return True
+    # Backward compatibility for pre-schema Hyperliquid accounts that
+    # used api_key/api_secret for wallet_address/private_key.
+    legacy_aliases = {
+        "wallet_address": ("api_key", "address"),
+        "private_key": ("api_secret", "wallet_private_key"),
+    }
+    for alias in legacy_aliases.get(field_name, ()):
+        if _connection_field_present(
+            alias,
+            credentials=credentials,
+            provider_config=provider_config,
+            raw_account=raw_account,
+        ):
+            return True
+    return False
+
+
+def _missing_required_connection_fields(
+    *,
+    venue: str,
+    mode: AccountMode,
+    permissions: dict[str, Any],
+    credentials: dict[str, str],
+    provider_config: dict[str, Any],
+    raw_account: dict[str, Any],
+    wallet_bound_account: bool,
+) -> list[str]:
+    """Return provider-required fields missing from a real account row."""
+
+    if wallet_bound_account:
+        return []
+    reads_real_balances = bool(permissions.get("read_balances", True))
+    requires_connection = mode in ("live", "canary") or (
+        mode == "shadow" and reads_real_balances
+    )
+    if not requires_connection:
+        return []
+    try:
+        from ..connectors.provider_spec import get_registry
+
+        spec = get_registry().find(venue)
+    except Exception:  # pragma: no cover - provider registry is best effort here
+        spec = None
+    if spec is None:
+        return []
+    missing: list[str] = []
+    for credential_field in spec.credential_fields or ():
+        if not credential_field.required:
+            continue
+        if _connection_field_present(
+            credential_field.name,
+            credentials=credentials,
+            provider_config=provider_config,
+            raw_account=raw_account,
+        ):
+            continue
+        missing.append(credential_field.name)
+    return missing
+
+
 def upsert_account(
     paths: WorkspacePaths,
     account: dict[str, Any],
@@ -443,13 +589,20 @@ def upsert_account(
     venue = str(account.get("venue") or account.get("exchange") or "").strip().lower()
     if not venue:
         raise TradingError("account.venue is required")
+    wallet_id = str(account.get("wallet_id") or "").strip()
+    if kind in ("chain", "dex") and wallet_id:
+        try:
+            from ..wallet.registry import resolve_provider_name
+
+            wallet_provider = resolve_provider_name(venue)
+        except Exception:  # pragma: no cover - wallet registry is optional here
+            wallet_provider = None
+        if wallet_provider:
+            venue = wallet_provider
     live_enabled = bool(account.get("live_trading_enabled", False))
 
     credentials = _coerce_credentials_row(account.get("credentials"))
-    if mode in ("live", "canary") and not credentials:
-        raise TradingError(
-            f"account {aid}: live/canary accounts must reference vault credentials"
-        )
+    wallet_bound_account = bool(wallet_id) and kind in ("chain", "dex")
 
     row: dict[str, Any] = {
         "id": aid,
@@ -481,11 +634,21 @@ def upsert_account(
                 provider_config[str(k)] = v
             elif isinstance(v, dict):
                 provider_config[str(k)] = dict(v)
+            elif isinstance(v, list):
+                # Wallet bindings stash ``balances`` (an address/token
+                # list) here so the snapshot loop can pull live
+                # on-chain numbers. Preserve list-of-dicts shapes
+                # verbatim — the snapshot helper validates each row.
+                provider_config[str(k)] = [
+                    dict(row) if isinstance(row, dict) else row
+                    for row in v
+                ]
     _PUBLIC_OVERRIDE_KEYS = (
         "host", "port", "client_id", "account_id",  # IBKR
         "server", "login", "path", "deviation",      # MT5
         "rpc_url", "chain_id", "router",             # DEX
         "ccxt_id", "category", "options",            # ccxt
+        "uid", "wallet_address", "address",          # ccxt non-secret auth
         "paper",                                      # Alpaca / generic
         "base_url", "clob_url", "gamma_url", "data_url",  # REST overrides
     )
@@ -494,9 +657,23 @@ def upsert_account(
             v = account[k]
             if isinstance(v, (str, int, float, bool, dict)):
                 provider_config.setdefault(str(k), v)
+    missing_connection_fields = _missing_required_connection_fields(
+        venue=venue,
+        mode=mode,
+        permissions=row["permissions"],
+        credentials=credentials,
+        provider_config=provider_config,
+        raw_account=account,
+        wallet_bound_account=wallet_bound_account,
+    )
+    if missing_connection_fields:
+        raise TradingError(
+            f"account {aid}: {mode} account for venue {venue!r} is missing "
+            "required connection fields: "
+            + ", ".join(missing_connection_fields)
+        )
     if provider_config:
         row["provider_config"] = provider_config
-    wallet_id = account.get("wallet_id")
     if wallet_id:
         row["wallet_id"] = str(wallet_id)
     provider_spec = account.get("provider_spec")
@@ -571,7 +748,7 @@ def reset_paper_account(
 ) -> AccountProfile:
     """Wipe all paper-mode trading state for ``account_id``.
 
-    04-29 §11 P9 — operators iterate fast on paper. This
+    Operators iterate fast on paper. This
     helper resets the paper sandbox without touching live or canary
     accounts:
 
@@ -710,4 +887,5 @@ __all__ = [
     "set_account_status",
     "delete_account",
     "reset_paper_account",
+    "find_duplicate_account",
 ]

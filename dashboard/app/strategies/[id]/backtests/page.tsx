@@ -75,7 +75,7 @@ export default function StrategyBacktestsPage({
                 </thead>
                 <tbody>
                   {runs.map((run) => (
-                    <tr key={run.ts} className="border-t border-white/5">
+                    <tr key={run.ts} className="border-t border-brand-500/10">
                       <td className="py-2 pr-3 font-mono">
                         <Link className="text-brand-300 hover:text-brand-200" href={`/strategies/${encodeURIComponent(strategyId)}/backtests/${encodeURIComponent(run.ts)}`}>
                           {run.ts}

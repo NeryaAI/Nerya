@@ -1,7 +1,7 @@
 """Backtest metrics.
 
-Implements the deterministic metrics required by research runtime spec §5
-Task 5 step 6.  All math lives inside Nerya — no research runtime import.
+Implements the deterministic metrics required by the research runtime.
+All math lives inside Nerya — no research runtime import.
 """
 from __future__ import annotations
 

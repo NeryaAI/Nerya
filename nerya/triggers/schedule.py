@@ -33,6 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..core import yaml_io
 from ..core.errors import TriggerValidationError
@@ -55,6 +56,7 @@ class ScheduleEntry:
     target: str = "main"
     strategy_id: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
+    timezone: str | None = None
     # ---- compatibility cron/session extension (all optional) -----------
     session_kind: str = "trigger"
     attached_skills: list[str] = field(default_factory=list)
@@ -72,6 +74,14 @@ class ScheduleEntry:
             )
         if self.cron:
             _parse_cron(self.cron)  # raises if malformed
+        if self.timezone:
+            try:
+                ZoneInfo(self.timezone)
+            except ZoneInfoNotFoundError as exc:
+                raise TriggerValidationError(
+                    f"schedule {self.id!r} timezone is unknown: "
+                    f"{self.timezone!r}"
+                ) from exc
         if self.session_kind not in _VALID_SESSION_KINDS:
             raise TriggerValidationError(
                 f"schedule {self.id!r} session_kind must be one of "
@@ -137,15 +147,21 @@ class ScheduleEntry:
             elapsed = (now - last_fired).total_seconds()
             return elapsed >= max(1, self.every_seconds)
         assert self.cron is not None
-        if not _cron_matches(self.cron, now):
+        match_now = self._cron_time(now)
+        if not _cron_matches(self.cron, match_now):
             return False
         # Avoid firing twice within the same minute for cron schedules.
         if last_fired is not None:
-            minute_now = now.replace(second=0, microsecond=0)
-            minute_last = last_fired.replace(second=0, microsecond=0)
+            minute_now = match_now.replace(second=0, microsecond=0)
+            minute_last = self._cron_time(last_fired).replace(second=0, microsecond=0)
             if minute_last >= minute_now:
                 return False
         return True
+
+    def _cron_time(self, value: datetime) -> datetime:
+        if not self.timezone:
+            return value
+        return value.astimezone(ZoneInfo(self.timezone))
 
 
 def load_schedules(paths: WorkspacePaths) -> list[ScheduleEntry]:
@@ -158,6 +174,7 @@ def load_schedules(paths: WorkspacePaths) -> list[ScheduleEntry]:
             "target": row.get("target") or "main",
             "strategy_id": row.get("strategy_id"),
             "payload": row.get("payload") or {},
+            "timezone": row.get("timezone"),
             "starts_at": row.get("starts_at"),
             "ends_at": row.get("ends_at"),
             "enabled": bool(row.get("enabled", True)),
@@ -214,6 +231,8 @@ def save_schedules(paths: WorkspacePaths, entries: list[ScheduleEntry]) -> None:
             row["strategy_id"] = e.strategy_id
         if e.payload:
             row["payload"] = dict(e.payload)
+        if e.timezone:
+            row["timezone"] = e.timezone
         if e.session_kind and e.session_kind != "trigger":
             row["session_kind"] = e.session_kind
         if e.attached_skills:
@@ -296,11 +315,10 @@ def _parse_cron(expr: str) -> list[set[int]]:
 def _cron_matches(expr: str, now: datetime) -> bool:
     """Return True iff the cron expression fires on ``now`` (to-the-minute)."""
     sets = _parse_cron(expr)
-    # Normalise to UTC for comparison.
+    # Compare against the caller-provided wall clock. CronScheduler passes UTC
+    # by default; ScheduleEntry.timezone passes a localized clock.
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
-    else:
-        now = now.astimezone(timezone.utc)
     return (
         now.minute in sets[0]
         and now.hour in sets[1]

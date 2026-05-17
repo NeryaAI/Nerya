@@ -646,6 +646,7 @@ class StrategyTuningAPI:
             strategy_id,
             lookback_runs=lookback_runs,
             package=pkg,
+            config_like=self.config,
         )
         return {
             "ok": True,
@@ -671,7 +672,10 @@ class StrategyTuningAPI:
         self, strategy_id: str, *, lookback_runs: int = 200
     ) -> dict[str, Any]:
         snap = build_snapshot(
-            self.config.paths, strategy_id, lookback_runs=lookback_runs
+            self.config.paths,
+            strategy_id,
+            lookback_runs=lookback_runs,
+            config_like=self.config,
         )
         return snap.asdict()
 

@@ -22,6 +22,8 @@ import {
   XIcon,
 } from "../../components/icons";
 import { clientApi, type SkillSummary } from "../../lib/clientApi";
+import { confirm as confirmDialog } from "../../lib/dialogs";
+import { Select } from "../../components/Select";
 
 type AgentSummary = {
   name: string;
@@ -231,7 +233,11 @@ export default function AgentsPage() {
   }
 
   async function deleteAgent(name: string) {
-    if (!confirm(t("deleteConfirm", { name }))) return;
+    const ok = await confirmDialog({
+      message: t("deleteConfirm", { name }),
+      tone: "danger",
+    });
+    if (!ok) return;
     setBusy(true);
     try {
       const res = await clientApi.agentsDelete(name);
@@ -342,7 +348,7 @@ export default function AgentsPage() {
                     className={`group w-full text-left rounded-lg border px-3 py-2.5 text-[12px] cursor-pointer transition-colors duration-200 ${
                       selected === agent.name
                         ? "border-brand-400/60 bg-brand-500/10"
-                        : "border-white/5 bg-ink-950/30 hover:border-brand-500/25 hover:bg-white/5"
+                        : "border-brand-500/10 bg-ink-950/30 hover:border-brand-500/25 hover:bg-brand-500/[0.04]"
                     }`}
                     onClick={() => setSelected(agent.name)}
                   >
@@ -367,7 +373,7 @@ export default function AgentsPage() {
                           {agent.allowed_skills.slice(0, 2).map((skill) => (
                             <span
                               key={skill}
-                              className="max-w-[96px] truncate rounded-md border border-white/5 bg-white/[0.03] px-1.5 py-0.5 font-mono"
+                              className="max-w-[96px] truncate rounded-md border border-brand-500/10 bg-white/[0.03] px-1.5 py-0.5 font-mono"
                             >
                               {skill}
                             </span>
@@ -428,7 +434,7 @@ export default function AgentsPage() {
             if (e.target === e.currentTarget) setCreating(false);
           }}
         >
-          <div className="embedded-scroll w-[760px] max-w-[92vw] max-h-[88vh] rounded-2xl border border-white/10 bg-bg-card shadow-glow">
+          <div className="embedded-scroll w-[760px] max-w-[92vw] max-h-[88vh] rounded-2xl border border-brand-500/20 bg-bg-card shadow-glow">
             <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-6 py-4">
               <div className="flex items-start gap-3">
                 <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-brand-500/20 bg-brand-500/10 text-brand-200">
@@ -468,19 +474,21 @@ export default function AgentsPage() {
                     autoFocus
                   />
                 </label>
-                <label className="text-[12px] text-ink-300">
+                <label className="text-[12px] text-ink-300 block">
                   {t("llmTier")}
-                  <select
-                    className="input-dark mt-1 w-full"
-                    value={draft.tier}
-                    onChange={(e) =>
-                      setDraft({ ...draft, tier: e.target.value as typeof draft.tier })
-                    }
-                  >
-                    <option value="light">light</option>
-                    <option value="medium">medium</option>
-                    <option value="high">high</option>
-                  </select>
+                  <div className="mt-1">
+                    <Select<"light" | "medium" | "high">
+                      value={draft.tier}
+                      onChange={(value) => setDraft({ ...draft, tier: value })}
+                      options={[
+                        { value: "light", label: "light" },
+                        { value: "medium", label: "medium" },
+                        { value: "high", label: "high" },
+                      ]}
+                      size="sm"
+                      ariaLabel={t("llmTier")}
+                    />
+                  </div>
                 </label>
               </div>
 
@@ -564,17 +572,21 @@ function AgentEditor({
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-1 xl:grid-cols-[220px_1fr] gap-3">
-        <label className="text-[12px] text-ink-300">
+        <label className="text-[12px] text-ink-300 block">
           {t("llmTier")}
-          <select
-            className="input-dark mt-1 w-full"
-            value={tier}
-            onChange={(e) => setTier(e.target.value)}
-          >
-            <option value="light">light</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-          </select>
+          <div className="mt-1">
+            <Select
+              value={tier}
+              onChange={(value) => setTier(value)}
+              options={[
+                { value: "light", label: "light" },
+                { value: "medium", label: "medium" },
+                { value: "high", label: "high" },
+              ]}
+              size="sm"
+              ariaLabel={t("llmTier")}
+            />
+          </div>
         </label>
         <div className="text-[12px] text-ink-300">
           <div className="mb-1">{t("preloadedSkills")}</div>
@@ -697,7 +709,7 @@ function SkillSelector({
                 </button>
               ))}
               {selected.length > 6 ? (
-                <span className="rounded-md border border-white/5 bg-white/[0.03] px-2 py-0.5 text-[10px] text-ink-400">
+                <span className="rounded-md border border-brand-500/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-ink-400">
                   +{selected.length - 6}
                 </span>
               ) : null}
@@ -710,7 +722,7 @@ function SkillSelector({
           <button
             type="button"
             onClick={() => onChange([])}
-            className="rounded-md border border-white/5 px-2 py-1 text-[10px] text-ink-400 hover:border-brand-500/30 hover:text-white"
+            className="rounded-md border border-brand-500/10 px-2 py-1 text-[10px] text-ink-400 hover:border-brand-500/30 hover:text-white"
           >
             {t("clear")}
           </button>
@@ -747,7 +759,7 @@ function SkillSelector({
                   className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-[11px] transition-colors ${
                     checked
                       ? "border-brand-400/50 bg-brand-500/15 text-white"
-                      : "border-white/5 bg-ink-950/40 text-ink-300 hover:bg-white/5"
+                      : "border-brand-500/10 bg-ink-950/40 text-ink-300 hover:bg-brand-500/[0.04]"
                   }`}
                 >
                   <span
@@ -774,7 +786,7 @@ function SkillSelector({
               );
             })}
             {!visible.length ? (
-              <div className="rounded-lg border border-white/5 bg-ink-950/30 px-3 py-6 text-center text-[11px] text-ink-500">
+              <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 px-3 py-6 text-center text-[11px] text-ink-500">
                 {t("noSkillsMatch")}
               </div>
             ) : null}

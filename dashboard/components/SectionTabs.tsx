@@ -64,7 +64,7 @@ export function SectionTabs({ section }: { section: SectionKey }) {
       aria-label={t("tabsAriaLabel", { section: t(config.labelKey) })}
       className="mb-5 -mt-3 overflow-x-auto pb-1"
     >
-      <div className="inline-flex min-w-full items-center gap-1 border-b border-white/5">
+      <div className="inline-flex min-w-full items-center gap-1 border-b border-brand-500/10">
         {config.tabs.map((tab) => {
           const active = isActive(pathname, tab);
           return (

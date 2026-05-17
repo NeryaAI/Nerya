@@ -152,8 +152,20 @@ def status(config: Config) -> dict[str, Any]:
 
 
 def _apply_embedding_patch(
-    vector: dict[str, Any], patch: dict[str, Any] | None
+    vector: dict[str, Any], patch: dict[str, Any] | None,
+    *,
+    config: Config | None = None,
 ) -> None:
+    """Merge an embedding patch into ``vector["embedding"]``.
+
+    When the patch contains a non-empty ``api_key_plain`` and a
+    ``Config`` is supplied, the plaintext key is stored in the
+    SecretVault under a deterministic name and ``api_key_ref`` is
+    rewritten to ``vault://<name>``. This is what powers the dashboard's
+    "paste a new key" affordance: the operator never has to manage a
+    `vault://...` ref manually.
+    """
+
     if not isinstance(patch, dict):
         return
     current = vector.get("embedding")
@@ -167,7 +179,47 @@ def _apply_embedding_patch(
         current["base_url"] = str(patch["base_url"]).strip()
     if "api_key_ref" in patch and patch["api_key_ref"] is not None:
         current["api_key_ref"] = str(patch["api_key_ref"]).strip()
+    plain = str(patch.get("api_key_plain") or "").strip()
+    if plain and config is not None:
+        provider = current.get("provider") or "openai"
+        ref = _persist_embedding_key(config, provider=str(provider), value=plain)
+        if ref:
+            current["api_key_ref"] = ref
     vector["embedding"] = current
+
+
+def _persist_embedding_key(config: Config, *, provider: str, value: str) -> str:
+    """Stash a plaintext embedding key in the SecretVault.
+
+    Returns the ``vault://<name>`` reference that should be written to
+    the embedding config, or empty string if the vault is unreachable
+    (the caller will fall through to whatever ``api_key_ref`` the
+    operator typed manually).
+
+    The vault entry is named ``memory_embedding_<provider>`` so re-saving
+    rotates the key in place rather than creating an audit pile-up.
+    """
+
+    try:
+        from ..security.secrets import SecretVault  # local import, optional dep
+    except Exception:
+        return ""
+    try:
+        vault = SecretVault.open(config.paths.vault_enc)
+    except Exception:
+        return ""
+    name = f"memory_embedding_{(provider or 'openai').strip().lower()}"
+    try:
+        vault.put(
+            name=name,
+            value=value,
+            kind="api_key",
+            scope=["memory:embedding"],
+            owner="dashboard",
+        )
+    except Exception:
+        return ""
+    return f"vault://{name}"
 
 
 def _apply_milvus_patch(
@@ -233,6 +285,13 @@ def configure(
     )
     if enabled is not None:
         vector["enabled"] = bool(enabled)
+        if enabled:
+            # Enhanced memory backends are operator-selected. memsearch and
+            # agentmemory must not both inject recall for the same workspace.
+            external = memory.setdefault("external", {})
+            if isinstance(external, dict):
+                external["enabled"] = False
+                external["provider"] = ""
     if watch_enabled is not None:
         vector["watch_enabled"] = bool(watch_enabled)
     if paths is not None:
@@ -240,7 +299,7 @@ def configure(
         vector["paths"] = cleaned or ["memory", "strategies"]
     if install_package:
         vector["install_package"] = install_package
-    _apply_embedding_patch(vector, embedding)
+    _apply_embedding_patch(vector, embedding, config=config)
     _apply_milvus_patch(vector, milvus)
 
     yaml_io.dump(config.paths.config, existing)
@@ -248,6 +307,10 @@ def configure(
     if not isinstance(config.data["memory"], dict):
         config.data["memory"] = {}
     config.data["memory"]["vector_search"] = vector
+    if enabled:
+        external_cfg = memory.get("external")
+        if isinstance(external_cfg, dict):
+            config.data["memory"]["external"] = external_cfg
     return status(config)
 
 
@@ -394,10 +457,32 @@ def search(config: Config, *, query: str, top_k: int = 5) -> dict[str, Any]:
     clean = str(query or "").strip()
     if not clean:
         return {"ok": False, "error": "query_required"}
+    import time as _time
+    started = _time.time()
     rows = asyncio.run(
         _search_async(config, source_paths(config), clean, top_k=max(1, top_k))
     )
-    return {"ok": True, "query": clean, "results": rows, "count": len(rows or [])}
+    latency_ms = int((_time.time() - started) * 1000)
+    # Emit a search event into the activity log so the dashboard's
+    # live-feed shows operator searches as they happen. Best-effort —
+    # failures here never block the result.
+    try:
+        from .writer import MemoryWriter
+        MemoryWriter(config=config).record_search(
+            query=clean,
+            result_count=len(rows or []),
+            latency_ms=latency_ms,
+            source="api:memsearch",
+        )
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "query": clean,
+        "results": rows,
+        "count": len(rows or []),
+        "latency_ms": latency_ms,
+    }
 
 
 def start_watcher(config: Config) -> dict[str, Any]:

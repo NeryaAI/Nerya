@@ -1,10 +1,8 @@
 """Layered prompt assembly for the workspace-native agent loop.
 
-- Mirrors coding-agent's "system message is a stack of named sections"
-  pattern. The kernel composes the prompt from explicit, ordered
-  sections so individual layers (project rules, skill catalog, tool
-  catalog, context budget header) can be re-rendered/truncated
-  independently.
+- The kernel composes the prompt from explicit, ordered sections so
+  individual layers (project rules, skill catalog, tool catalog,
+  context budget header) can be re-rendered or truncated independently.
 
 The existing ``context_builder.py`` already produces a rich rules
 block; this module is *complementary* — it provides the building

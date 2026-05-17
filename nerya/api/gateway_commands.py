@@ -53,6 +53,9 @@ class CommandContext:
     chat_id: str
     session_id: str
     raw_text: str
+    session_key: str = ""
+    user_id: str = ""
+    thread_id: str = ""
     state: Mapping[str, Any] = field(default_factory=dict)
     save_state: Callable[[Mapping[str, Any]], None] | None = None
     delete_session: Callable[[str], None] | None = None
@@ -79,7 +82,7 @@ class CommandOutcome:
 CommandHandler = Callable[[CommandSpec, CommandContext], CommandOutcome]
 
 
-_DEFAULT_DASHBOARD_URL = "http://127.0.0.1:3001/dashboard"
+_DEFAULT_DASHBOARD_URL = "http://127.0.0.1:18380/dashboard"
 
 
 def resolve_dashboard_url(config: Any) -> str:
@@ -95,6 +98,12 @@ def resolve_dashboard_url(config: Any) -> str:
             value = config.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+        try:
+            from ..core.dashboard import dashboard_url
+
+            return dashboard_url(config).rstrip("/") + "/dashboard"
+        except Exception:
+            pass
     return _DEFAULT_DASHBOARD_URL
 
 
@@ -127,7 +136,11 @@ def _handle_new(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
             pass
     if isinstance(ctx.state, Mapping):
         active = dict(ctx.state.get("active_sessions") or {})
+        if ctx.session_key:
+            active.pop(str(ctx.session_key), None)
         active.pop(str(ctx.chat_id), None)
+        if ctx.platform and ctx.chat_id:
+            active.pop(f"{ctx.platform}:{ctx.chat_id}", None)
         ctx.update_state(active_sessions=active)
     text = (
         f"Started a fresh Nerya {ctx.platform} session. "
@@ -460,7 +473,7 @@ def _handle_session(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
             command=spec.name,
         )
     active = dict(ctx.state.get("active_sessions") or {}) if isinstance(ctx.state, Mapping) else {}
-    active[str(ctx.chat_id)] = target
+    active[str(ctx.session_key or ctx.chat_id)] = target
     ctx.update_state(active_sessions=active)
     reply = (
         f"Switched to `{target}` · {_session_title(state)}\n\n"
@@ -494,7 +507,7 @@ def _handle_skills(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
 
 
 def _handle_accounts(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
-    """04-29 §11 P10 — ``/accounts`` renders the configured accounts roster.
+    """``/accounts`` renders the configured accounts roster.
 
     The output is intentionally compact (one line per account) so it
     survives Telegram's 4096-character limit even on workspaces with
@@ -591,8 +604,149 @@ def _handle_accounts(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
     return CommandOutcome(handled=True, reply_text="\n".join(lines), command=spec.name)
 
 
+def _handle_strategies(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
+    try:
+        from ..trading import strategy_crud
+
+        records = strategy_crud.list_records(ctx.client.config.paths)
+    except Exception as exc:
+        return CommandOutcome(
+            handled=True,
+            reply_text=f"⚠ strategies unavailable: {type(exc).__name__}: {exc}",
+            command=spec.name,
+        )
+    if not records:
+        return CommandOutcome(
+            handled=True,
+            reply_text=(
+                "No strategies are applied in this workspace yet.\n\n"
+                "Generated strategies remain proposals until promoted; open the "
+                "dashboard Strategies page to validate and promote one."
+            ),
+            command=spec.name,
+        )
+
+    parts = (ctx.raw_text or "").strip().split()
+    target_id = parts[1] if len(parts) >= 2 else ""
+    if target_id:
+        try:
+            detail = strategy_crud.get_detail(ctx.client.config.paths, target_id)
+        except Exception as exc:
+            return CommandOutcome(
+                handled=True,
+                reply_text=(
+                    f"No strategy detail for `{target_id}`: "
+                    f"{type(exc).__name__}: {exc}\n"
+                    "Send `/strategies` for the full list."
+                ),
+                command=spec.name,
+            )
+        row = detail.get("strategy") if isinstance(detail, dict) else {}
+        yml = detail.get("strategy_yml") if isinstance(detail, dict) else {}
+        limits = detail.get("limits") if isinstance(detail, dict) else {}
+        markets = ", ".join(str(m) for m in (row.get("markets") or [])[:5]) or "—"
+        triggers = ", ".join(str(t) for t in (row.get("trigger_kinds") or [])) or "—"
+        subagents = ", ".join(str(s) for s in (row.get("subagents") or [])) or "—"
+        text = (
+            f"Strategy `{row.get('id') or target_id}` · {row.get('status') or 'unknown'}\n"
+            f"title: {row.get('title') or target_id}\n"
+            f"mode: {row.get('mode') or yml.get('mode') or 'paper'} · "
+            f"enabled: {row.get('enabled')}\n"
+            f"account: {row.get('account_id') or '—'} · wallet: {row.get('wallet_id') or '—'}\n"
+            f"markets: {markets}\n"
+            f"triggers: {triggers}\n"
+            f"subagents: {subagents}\n"
+            f"risk: min_confidence={limits.get('min_confidence', '—')} · "
+            f"max_order_usd={limits.get('max_single_order_usd', '—')} · "
+            f"approval_threshold_usd={limits.get('approval_threshold_usd', '—')}"
+        )
+        return CommandOutcome(handled=True, reply_text=text, command=spec.name)
+
+    lines = [f"Strategies ({len(records)})"]
+    for row in records[:20]:
+        markets = ", ".join(str(m) for m in (row.get("markets") or [])[:3]) or "—"
+        triggers = ", ".join(str(t) for t in (row.get("trigger_kinds") or [])) or "—"
+        lines.append(
+            f"- `{row.get('id')}` · {row.get('status')}/{row.get('mode') or 'paper'}"
+            f" · account={row.get('account_id') or '—'} · {markets} · triggers={triggers}"
+        )
+    if len(records) > 20:
+        lines.append(f"... plus {len(records) - 20} more")
+    lines.append("")
+    lines.append("Tip: send `/strategies <id>` for manifest/risk detail.")
+    return CommandOutcome(handled=True, reply_text="\n".join(lines), command=spec.name)
+
+
+def _handle_portfolio(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
+    try:
+        from ..trading import portfolio as portfolio_mod
+    except Exception as exc:
+        return CommandOutcome(
+            handled=True,
+            reply_text=f"⚠ portfolio unavailable: {type(exc).__name__}: {exc}",
+            command=spec.name,
+        )
+
+    head = (ctx.raw_text or "").strip().split()[0].lower()
+    parts = (ctx.raw_text or "").strip().split()
+    wants_positions = head == "/positions" or (len(parts) > 1 and parts[1].lower() == "positions")
+    if wants_positions:
+        try:
+            positions = portfolio_mod.get_positions(ctx.client.config.paths)
+        except Exception as exc:
+            return CommandOutcome(
+                handled=True,
+                reply_text=f"⚠ positions unavailable: {type(exc).__name__}: {exc}",
+                command=spec.name,
+            )
+        if not positions:
+            return CommandOutcome(handled=True, reply_text="No open positions.", command=spec.name)
+        lines = [f"Open positions ({len(positions)})"]
+        for pos in positions[:20]:
+            size = pos.get("size") or pos.get("size_base") or "—"
+            market = pos.get("market") or "—"
+            pnl = pos.get("unrealized_pnl_usd")
+            pnl_text = f"{float(pnl):,.2f}" if isinstance(pnl, (int, float)) else "—"
+            lines.append(
+                f"- `{pos.get('account_id') or '—'}` · {market} · size={size} · uPnL={pnl_text}"
+            )
+        if len(positions) > 20:
+            lines.append(f"... plus {len(positions) - 20} more")
+        return CommandOutcome(handled=True, reply_text="\n".join(lines), command=spec.name)
+
+    try:
+        summary = portfolio_mod.get_portfolio_summary(ctx.client.config.paths)
+        pnl = portfolio_mod.get_pnl(ctx.client.config.paths)
+    except Exception as exc:
+        return CommandOutcome(
+            handled=True,
+            reply_text=f"⚠ portfolio unavailable: {type(exc).__name__}: {exc}",
+            command=spec.name,
+        )
+    accounts = summary.get("accounts") or []
+    totals = summary.get("totals") or {}
+    lines = [
+        "Portfolio summary",
+        f"cash_usd: {float(totals.get('cash_usd') or 0):,.2f}",
+        f"equity_usd: {float(totals.get('equity_usd') or 0):,.2f}",
+        f"realized_pnl_usd: {float(pnl.get('realized_usd') or 0):,.2f}",
+        f"accounts: {len(accounts)}",
+        "",
+    ]
+    for account in accounts[:10]:
+        lines.append(
+            f"- `{account.get('id')}` · {account.get('mode')} · "
+            f"cash={float(account.get('cash_usd') or 0):,.2f} · "
+            f"equity={float(account.get('equity_usd') or 0):,.2f} · "
+            f"trades={account.get('trade_count') or 0}"
+        )
+    lines.append("")
+    lines.append("Tip: send `/portfolio positions` or `/positions` for open positions.")
+    return CommandOutcome(handled=True, reply_text="\n".join(lines), command=spec.name)
+
+
 def _handle_wallets(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
-    """04-29 §11 P10 — ``/wallets`` lists on-chain wallet providers.
+    """``/wallets`` lists on-chain wallet providers.
 
     Mirrors ``/accounts`` for the on-chain side: shows every wallet
     provider declared in :mod:`nerya.wallet.registry` plus its install
@@ -896,7 +1050,9 @@ BUILTIN_COMMANDS: tuple[tuple[CommandSpec, CommandHandler], ...] = (
     (CommandSpec(name="/session", description="Switch to a shared session — usage: /session <id>"), _handle_session),
     (CommandSpec(name="/status", description="Check local runtime status"), _handle_status),
     (CommandSpec(name="/trace", description="Explain the last agent turn"), _handle_trace),
+    (CommandSpec(name="/strategies", description="List applied strategies — usage: /strategies [<id>]"), _handle_strategies),
     (CommandSpec(name="/accounts", description="List configured trading accounts — usage: /accounts [<id>]"), _handle_accounts),
+    (CommandSpec(name="/portfolio", description="Portfolio summary — usage: /portfolio [positions]", aliases=("/positions",)), _handle_portfolio),
     (CommandSpec(name="/wallets", description="List on-chain wallet providers — usage: /wallets [<id>]"), _handle_wallets),
     (CommandSpec(name="/intake", description="List pending account-credential intakes"), _handle_intake),
     (CommandSpec(name="/skills", description="List skills and agent actions"), _handle_skills),

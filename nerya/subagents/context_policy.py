@@ -28,6 +28,8 @@ from typing import Any
 
 from ..core.config import Config
 from ..core.market_defaults import resolve_market_defaults
+from ..data.candles import fetch_candles
+from ..data.features import compute_features
 from ..skills.kernel import SkillKernel
 from .registry import SubAgentSpec
 
@@ -98,8 +100,38 @@ def _iter_capability_actions(
     return out
 
 
+def _render_builtin_market_context(config: Config, market: str) -> list[str]:
+    rows = fetch_candles(
+        market,
+        count=96,
+        interval="1m",
+        allow_mock=False,
+        config_like=config,
+    )
+    features = compute_features(rows)
+    if not rows:
+        return [
+            "-- market_data --",
+            (
+                f"{market}: no OHLCV rows available; indicators are unavailable "
+                "for this prompt."
+            ),
+        ]
+    macd = features.get("macd") if isinstance(features.get("macd"), dict) else {}
+    return [
+        "-- market_data --",
+        (
+            f"{market}: rows={len(rows)}, close={features.get('close')}, "
+            f"ret_1={features.get('ret_1')}, rsi_14={features.get('rsi_14')}, "
+            f"ema_20={features.get('ema_20')}, atr_14={features.get('atr_14')}, "
+            f"macd_hist={macd.get('hist')}, "
+            f"indicator_backend={features.get('indicator_backend')}"
+        ),
+    ]
+
+
 def _render_market_context(
-    skills: SkillKernel, spec: SubAgentSpec, market: str,
+    config: Config, skills: SkillKernel, spec: SubAgentSpec, market: str,
     strategy_id: str | None,
 ) -> list[str]:
     """Dispatch any ``context.market`` capability-tagged action, falling
@@ -107,8 +139,6 @@ def _render_market_context(
     no manifest currently advertises the tag."""
     lines: list[str] = []
     providers = _iter_capability_actions(skills, spec.allowed_skills, CAP_MARKET)
-    if not providers and "market_data" in spec.allowed_skills:
-        providers = [("market_data", "compress_context")]
     for skill_id, action_name in providers:
         try:
             summary = skills.call(
@@ -130,6 +160,11 @@ def _render_market_context(
             if k in ("context", "raw", "envelope", "_envelope"):
                 continue
             lines.append(f"{k}: {v}")
+    if not lines and (
+        "market_data" in spec.allowed_skills
+        or "markets" in spec.allowed_skills
+    ):
+        lines.extend(_render_builtin_market_context(config, market))
     return lines
 
 
@@ -177,6 +212,6 @@ def build_context(
         if market:
             lines.append(f"(market inferred from user text: {market})")
     if market:
-        lines.extend(_render_market_context(skills, spec, market, strategy_id))
+        lines.extend(_render_market_context(config, skills, spec, market, strategy_id))
         lines.extend(_render_news_context(skills, spec, market, strategy_id))
     return "\n".join(lines) or "(no structured context)"

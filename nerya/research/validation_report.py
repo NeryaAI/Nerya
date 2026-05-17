@@ -1,4 +1,4 @@
-"""ValidationReport contract (research runtime spec §4.4).
+"""ValidationReport contract.
 
 A validation report is the single artifact that promotion gates and the
 dashboard consume.  It must be reproducible: every report

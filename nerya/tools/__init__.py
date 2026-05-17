@@ -1,7 +1,7 @@
 """nerya.tools — Native tool harness (workspace-native agent layer).
 
-This package implements the *IDE-style / coding-agent* tool harness
-described in:
+This package implements the provider-native tool harness used by the
+agent loop.
 
 Goal: a provider-native ``messages + tools -> tool_use -> tool_result``
 loop. ``nerya.tools`` is the home for:

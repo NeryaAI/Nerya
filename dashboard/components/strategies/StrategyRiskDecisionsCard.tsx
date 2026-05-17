@@ -20,7 +20,7 @@ function fmtTs(ts: number): string {
 }
 
 /**
- * Strategy risk-decision panel (04-29 §11 P9).
+ * Strategy risk-decision panel.
  *
  * Reads ``/risk/evaluations`` and renders the most recent
  * rejected/escalated decisions for this strategy with operator
@@ -85,7 +85,7 @@ export function StrategyRiskDecisionsCard({ strategyId }: Props) {
         {rows.map((row) => (
           <div
             key={row.risk_evaluation_id}
-            className="rounded-xl border border-white/8 bg-bg-card p-3 text-xs"
+            className="rounded-xl border border-brand-500/15 bg-bg-card p-3 text-xs"
           >
             <div className="flex flex-wrap items-center gap-2">
               <Pill tone={row.decision === "reject" ? "danger" : "warn"}>

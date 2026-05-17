@@ -1,4 +1,17 @@
-"""Render dashboard chart.json from backtest artifacts."""
+"""Render dashboard chart.json from backtest artifacts.
+
+Also returns ``chart_blocks`` — interactive ``ChartBlock`` envelopes
+the agent kernel splices into the chat. We emit two:
+
+1. Equity curve (with auto-derived drawdown overlay) via
+   :func:`nerya.charting.equity_curve_from_rows`.
+2. Price + trade markers as a candlestick block, showing the agent's
+   entries/exits over the price action.
+
+The legacy ``chart.json`` panel layout is preserved for the existing
+backtest detail page; ``chart_blocks`` is purely additive for the
+chat-side renderer.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +19,12 @@ import csv
 import json
 from pathlib import Path
 from typing import Any
+
+# ``nerya.charting`` is imported lazily inside ``render_chart`` — eager
+# imports would form a cycle (this module is reachable from
+# ``nerya.strategies.context`` during CLI bootstrap, and the charting
+# package eventually pulls in ``nerya.agent.kernel``, which in turn
+# imports back into ``nerya.strategies``).
 
 
 def render_chart(backtest_dir: str | Path) -> dict[str, Any]:
@@ -69,7 +88,86 @@ def render_chart(backtest_dir: str | Path) -> dict[str, Any]:
         ],
     }
     (root / "chart.json").write_text(json.dumps(chart, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+    # Build interactive chart_blocks the kernel will splice into the
+    # chat. We use bulk path because backtest series are easily
+    # multi-thousand points; passing them inline would burn the LLM's
+    # context for nothing.
+    from .....charting import (  # local import — see top-of-file note
+        BulkContext,
+        candle_chart_from_rows,
+        equity_curve_from_rows,
+    )
+    from .....core.paths import WorkspacePaths
+    from .....workspace.artifact_store import ArtifactStore
+
+    workspace_root = _workspace_root_from_backtest_dir(root)
+    ctx: BulkContext | None = None
+    chart_path: str = "inline"
+    if workspace_root is not None:
+        try:
+            ctx = BulkContext(artifact_store=ArtifactStore(WorkspacePaths(root=workspace_root)))
+            chart_path = "bulk"
+        except Exception:
+            ctx = None
+            chart_path = "inline"
+
+    strategy_id = root.parent.parent.name if root.parent and root.parent.parent else "backtest"
+    backtest_ts = root.name
+    initial_capital = metrics.get("initial_capital_usd")
+
+    blocks: list[dict[str, Any]] = []
+
+    equity_block = equity_curve_from_rows(
+        equity,
+        title=f"{strategy_id} · Equity vs B&H · {backtest_ts}",
+        skill="backtest",
+        action="render_chart",
+        path=chart_path,
+        ctx=ctx,
+        initial_capital=float(initial_capital) if initial_capital else None,
+        insights=[
+            f"verdict: {metrics.get('verdict', '?')}",
+            f"max_drawdown_pct: {metrics.get('max_drawdown_pct', '?')}",
+            f"sharpe: {metrics.get('sharpe_ratio', '?')}",
+        ],
+    )
+    if equity_block is not None:
+        blocks.append(equity_block)
+
+    if price_series:
+        candle_block = candle_chart_from_rows(
+            price_series,
+            title=f"{strategy_id} · Price + trades · {backtest_ts}",
+            skill="backtest",
+            action="render_chart",
+            path=chart_path,
+            ctx=ctx,
+            insights=[f"trades: {len(markers)}"],
+        )
+        if candle_block is not None:
+            blocks.append(candle_block)
+
+    if blocks:
+        chart["chart_blocks"] = blocks
     return chart
+
+
+def _workspace_root_from_backtest_dir(backtest_dir: Path) -> Path | None:
+    """Climb the artifact path looking for ``nerya.yml``.
+
+    Backtest artifacts live at ``<workspace>/.../backtest/<strategy>/<ts>/``;
+    rather than hardcode the depth (it varies between research /
+    production layouts) we walk parents looking for the workspace
+    config marker. Returns ``None`` if we never find it — the caller
+    degrades to inline.
+    """
+
+    cur = backtest_dir.resolve()
+    for parent in [cur, *cur.parents]:
+        if (parent / "nerya.yml").exists():
+            return parent
+    return None
 
 
 def _read_csv(path: Path) -> list[dict[str, Any]]:
@@ -109,4 +207,3 @@ def _summary_cards(metrics: dict[str, Any]) -> list[dict[str, Any]]:
 def _table(table_id: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     columns = list(rows[0].keys()) if rows else []
     return {"id": table_id, "columns": columns, "rows": [[r.get(c) for c in columns] for r in rows]}
-

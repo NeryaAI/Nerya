@@ -1,4 +1,4 @@
-"""Shadow runtime data models — research runtime spec §5 Task 8."""
+"""Shadow runtime data models."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

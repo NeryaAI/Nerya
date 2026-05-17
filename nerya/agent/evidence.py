@@ -1,8 +1,7 @@
 """EvidenceBundle — structured per-turn ledger of agent activity.
 
-- Mirrors the the runtime "evidence ledger" pattern + coding-agent's per-turn
-  activity log used to render the dashboard timeline and to seed
-  retrospective compaction.
+- Records the higher-level turn summary used to render the dashboard
+  timeline and to seed retrospective compaction.
 
 Why
 ---

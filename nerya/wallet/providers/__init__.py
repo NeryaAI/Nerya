@@ -7,6 +7,7 @@ from .okx_os import OkxOsWallet
 from .bitget import BitgetWalletSkill
 from .binance_agentic import BinanceAgenticWallet
 from .coinbase import CoinbaseWallet
+from .xagt_agent_plugin import XagtAgentPluginWallet
 
 __all__ = [
     "SelfCustodyWallet",
@@ -14,4 +15,5 @@ __all__ = [
     "BitgetWalletSkill",
     "BinanceAgenticWallet",
     "CoinbaseWallet",
+    "XagtAgentPluginWallet",
 ]

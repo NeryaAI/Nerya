@@ -415,7 +415,7 @@ _V3_TRADING_CONTROL_PLANE = (
 
 
 def _v3_trading_control_plane(con: sqlite3.Connection) -> None:
-    """Trading control-plane (04-29 §10).
+    """Trading control-plane.
 
     Introduces the durable tables that back account snapshots, capital
     reservations, the order tracker, executor runs, the position book,
@@ -479,7 +479,7 @@ _V4_STRATEGY_PROMOTION = (
 
 
 def _v4_strategy_promotion(con: sqlite3.Connection) -> None:
-    """Strategy promotion gate (04-29 §11 P5).
+    """Strategy promotion gate.
 
     Adds the durable tables that back the promotion ramp:
 
@@ -551,6 +551,271 @@ def _v5_agent_chat_sessions(con: sqlite3.Connection) -> None:
         con.execute(stmt)
 
 
+_V6_POSITION_SHARES_DDL = (
+    # Per-strategy slice of a merged (account_id, market) position. Each
+    # share keeps that strategy's own avg-entry, realized PnL, fees and
+    # funding — so the strategy detail page can still show "my PnL".
+    # The parent ``positions`` row remains the source of truth for the
+    # merged size_base and unrealized PnL: it equals SUM(shares.size_share_base)
+    # but is materialised for cheap reads and to keep mark-price updates
+    # cheap (one row per merged position rather than one per strategy).
+    """
+    CREATE TABLE IF NOT EXISTS position_shares (
+        share_id              TEXT PRIMARY KEY,
+        position_id           TEXT NOT NULL,
+        account_id            TEXT NOT NULL,
+        strategy_id           TEXT NOT NULL,
+        market                TEXT NOT NULL,
+        venue                 TEXT NOT NULL DEFAULT '',
+        size_share_base       REAL NOT NULL DEFAULT 0,
+        avg_entry_share_price REAL NOT NULL DEFAULT 0,
+        realized_pnl_share_usd REAL NOT NULL DEFAULT 0,
+        fees_share_usd        REAL NOT NULL DEFAULT 0,
+        funding_share_usd     REAL NOT NULL DEFAULT 0,
+        opened_at             REAL NOT NULL,
+        updated_at            REAL NOT NULL,
+        closed_at             REAL,
+        meta_json             TEXT NOT NULL DEFAULT '{}'
+    )
+    """,
+    # Exactly one open share per (position, strategy). A second-open by
+    # the same strategy must update the existing row, not insert a new
+    # one — same invariant the merged ``positions`` row enforces above
+    # at (account_id, market).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_position_shares_open ON position_shares(position_id, strategy_id) WHERE closed_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_position_shares_strategy_open ON position_shares(strategy_id, account_id, market) WHERE closed_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_position_shares_account ON position_shares(account_id, closed_at)",
+)
+
+
+def _v6_position_shares(con: sqlite3.Connection) -> None:
+    """Merge same-(account, market) positions across strategies.
+
+    Until now ``positions`` was keyed by ``(account_id, strategy_id, market)``
+    so two strategies running on the same exchange + symbol produced two
+    independent rows — even though the broker only sees one merged
+    position. v6 promotes the merged position to the primary row and
+    moves strategy-level attribution into the new ``position_shares``
+    table.
+
+    Steps (run as one transaction):
+
+    1. Create ``position_shares``.
+    2. For every existing OPEN positions row, create the corresponding
+       share row (1:1 backfill so single-strategy callers keep working
+       and the merged sums match the prior per-strategy state).
+    3. Collapse rows where multiple strategies share an
+       (account_id, market) tuple into one merged row, summing
+       ``size_base`` (signed), recomputing ``avg_entry_price`` from
+       cost-basis, and aggregating realised PnL / fees / funding /
+       unrealized. The surviving row keeps the oldest ``position_id``
+       so downstream FK-style references (protection_rules.position_id)
+       remain valid; the absorbed rows are closed with a marker event.
+    4. Install the unique partial index that locks "one open merged row
+       per (account_id, market)" going forward.
+
+    Closed-history rows are left untouched — they're audit-only and
+    keying them differently is a non-goal.
+    """
+
+    for stmt in _V6_POSITION_SHARES_DDL:
+        con.execute(stmt)
+
+    # Inspect actual columns once so the backfill survives both fresh
+    # databases (v1 schema as-shipped) and any legacy column ordering
+    # we might pick up in the wild.
+    cur = con.execute("PRAGMA table_info(positions)")
+    pos_cols = {row[1] for row in cur.fetchall()}
+    if not pos_cols:
+        return  # positions table was never created — nothing to backfill
+
+    now = time.time()
+
+    # Step 2: 1:1 share backfill for every still-open positions row.
+    # We skip rows where a share already exists so re-applying the
+    # migration after a partial run remains safe.
+    open_rows = con.execute(
+        """
+        SELECT position_id, account_id, strategy_id, market, venue,
+               size_base, avg_entry_price,
+               COALESCE(realized_pnl_usd, 0), COALESCE(fees_usd, 0),
+               COALESCE(funding_usd, 0), opened_at, updated_at
+          FROM positions
+         WHERE closed_at IS NULL
+        """
+    ).fetchall()
+
+    for row in open_rows:
+        (
+            position_id, account_id, strategy_id, market, venue,
+            size_base, avg_entry_price,
+            realized, fees, funding, opened_at, updated_at,
+        ) = row
+        existing = con.execute(
+            "SELECT 1 FROM position_shares WHERE position_id = ? AND strategy_id = ? AND closed_at IS NULL",
+            (position_id, strategy_id),
+        ).fetchone()
+        if existing:
+            continue
+        share_id = f"shr_{position_id[-12:]}_{strategy_id[:16]}"
+        con.execute(
+            """
+            INSERT INTO position_shares(
+                share_id, position_id, account_id, strategy_id, market, venue,
+                size_share_base, avg_entry_share_price,
+                realized_pnl_share_usd, fees_share_usd, funding_share_usd,
+                opened_at, updated_at, closed_at, meta_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '{"source":"v6_backfill"}')
+            """,
+            (
+                share_id, position_id, account_id, strategy_id, market, venue or "",
+                float(size_base or 0), float(avg_entry_price or 0),
+                float(realized or 0), float(fees or 0), float(funding or 0),
+                float(opened_at or now), float(updated_at or now),
+            ),
+        )
+
+    # Step 3: collapse duplicate (account_id, market) open rows into
+    # one merged row. We pick the oldest ``position_id`` as the
+    # survivor and re-point all shares to it. Avg entry on the merged
+    # row uses cost-basis aggregation so opposite-direction shares net
+    # cleanly: avg = SUM(size_i * price_i) / SUM(size_i).
+    dupe_groups = con.execute(
+        """
+        SELECT account_id, market
+          FROM positions
+         WHERE closed_at IS NULL
+         GROUP BY account_id, market
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+
+    for account_id, market in dupe_groups:
+        rows = con.execute(
+            """
+            SELECT position_id, strategy_id, venue, side,
+                   size_base, avg_entry_price,
+                   mark_price, liquidation_price,
+                   realized_pnl_usd, unrealized_pnl_usd,
+                   fees_usd, funding_usd, leverage, source,
+                   executor_id, protection_id,
+                   opened_at, updated_at
+              FROM positions
+             WHERE account_id = ? AND market = ? AND closed_at IS NULL
+             ORDER BY opened_at ASC
+            """,
+            (account_id, market),
+        ).fetchall()
+
+        survivor_id = rows[0][0]
+        cost_basis = 0.0
+        size_total = 0.0
+        notional_total = 0.0
+        realized_sum = 0.0
+        unrealized_sum = 0.0
+        fees_sum = 0.0
+        funding_sum = 0.0
+        max_leverage = 0.0
+        first_opened = rows[0][16]
+        last_updated = rows[0][17]
+        venue_value = rows[0][2] or ""
+        mark_value = rows[0][6]
+        source_value = rows[0][13] or "paper"
+
+        for r in rows:
+            sz = float(r[4] or 0)
+            avg = float(r[5] or 0)
+            cost_basis += sz * avg
+            size_total += sz
+            notional_total += abs(sz) * avg
+            realized_sum += float(r[8] or 0)
+            unrealized_sum += float(r[9] or 0)
+            fees_sum += float(r[10] or 0)
+            funding_sum += float(r[11] or 0)
+            max_leverage = max(max_leverage, float(r[12] or 1))
+            first_opened = min(first_opened, float(r[16] or first_opened))
+            last_updated = max(last_updated, float(r[17] or last_updated))
+
+        merged_avg = (cost_basis / size_total) if abs(size_total) > 1e-12 else 0.0
+        merged_side = "long" if size_total > 0 else ("short" if size_total < 0 else "long")
+
+        # Re-point every share that used to point at one of the
+        # absorbed rows at the surviving merged row. The absorbed
+        # row's share already exists from step 2, so this is just a
+        # FK rewrite.
+        for r in rows[1:]:
+            absorbed_id = r[0]
+            con.execute(
+                "UPDATE position_shares SET position_id = ?, updated_at = ? WHERE position_id = ?",
+                (survivor_id, now, absorbed_id),
+            )
+            # Close the absorbed positions row with a marker so audit
+            # history shows the merge — emit a position_event for it.
+            con.execute(
+                "UPDATE positions SET closed_at = ?, updated_at = ?, meta_json = COALESCE(meta_json, '{}') WHERE position_id = ?",
+                (now, now, absorbed_id),
+            )
+            con.execute(
+                """
+                INSERT OR IGNORE INTO position_events(
+                    event_id, position_id, kind, ts,
+                    size_delta, price, pnl_delta, fee_delta,
+                    order_id, fill_id, payload_json
+                ) VALUES (?, ?, 'merged_into', ?, 0, NULL, 0, 0, NULL, NULL, ?)
+                """,
+                (
+                    f"evt_v6merge_{absorbed_id[-12:]}",
+                    absorbed_id,
+                    now,
+                    f'{{"merged_into":"{survivor_id}"}}',
+                ),
+            )
+
+        # Update the survivor with merged aggregates. strategy_id on
+        # the merged row is set to a sentinel so callers know to read
+        # ``position_shares`` for per-strategy attribution.
+        con.execute(
+            """
+            UPDATE positions
+               SET strategy_id      = '__merged__',
+                   side             = ?,
+                   size_base        = ?,
+                   avg_entry_price  = ?,
+                   realized_pnl_usd = ?,
+                   unrealized_pnl_usd = ?,
+                   fees_usd         = ?,
+                   funding_usd      = ?,
+                   leverage         = ?,
+                   opened_at        = ?,
+                   updated_at       = ?,
+                   meta_json        = json_set(COALESCE(meta_json, '{}'), '$.v6_merged', json('true'))
+             WHERE position_id = ?
+            """,
+            (
+                merged_side,
+                size_total,
+                merged_avg,
+                realized_sum,
+                unrealized_sum,
+                fees_sum,
+                funding_sum,
+                max_leverage or 1.0,
+                first_opened,
+                last_updated,
+                survivor_id,
+            ),
+        )
+
+    # Step 4: enforce "one open merged position per (account, market)".
+    # The partial index makes future inserts that ignore the merge
+    # contract fail loudly instead of silently shadowing the merged
+    # row.
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_open_unique "
+        "ON positions(account_id, market) WHERE closed_at IS NULL"
+    )
+
+
 # Append new migrations to the end of this list. Never renumber; new
 # work always becomes a *new* version. The registry validator above
 # enforces a contiguous 1..N sequence at startup.
@@ -560,6 +825,7 @@ MIGRATIONS: list[Migration] = [
     Migration(version=3, name="trading_control_plane", up=_v3_trading_control_plane),
     Migration(version=4, name="strategy_promotion", up=_v4_strategy_promotion),
     Migration(version=5, name="agent_chat_sessions", up=_v5_agent_chat_sessions),
+    Migration(version=6, name="position_shares_merge", up=_v6_position_shares),
 ]
 
 

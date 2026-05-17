@@ -239,6 +239,7 @@ def make_native_descriptor(
     max_result_tokens: int = 4_000,
     tags: Iterable[str] = (),
     auto_approve: bool = False,
+    auto_approve_when: Any = None,
     risk_classifier: Any = None,
     permission_scope: Any = None,
 ) -> ToolDescriptor:
@@ -274,6 +275,7 @@ def make_native_descriptor(
         tags=tuple(tags),
         risk_classifier=risk_classifier,
         auto_approve=auto_approve,
+        auto_approve_when=auto_approve_when,
     )
 
 

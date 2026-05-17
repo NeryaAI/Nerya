@@ -128,6 +128,7 @@ export type EvolutionProcessTrace = {
   has_inputs?: boolean;
   has_outputs?: boolean;
   has_generated_docs?: boolean;
+  has_file_changes?: boolean;
   has_validation?: boolean;
   sections: EvolutionProcessSection[];
   artifacts?: EvolutionProcessArtifact[];
@@ -175,6 +176,19 @@ export type EvolutionConfigSnapshot = {
     enabled_strategies: number;
     strategies: Array<Record<string, unknown> & { strategy_id: string; enabled: boolean }>;
   };
+  periodic_reflection: EvolutionPeriodicReflectionSchedule;
+};
+
+export type EvolutionPeriodicReflectionSchedule = {
+  id: string;
+  kind: string;
+  target: string;
+  enabled: boolean;
+  configured: boolean;
+  cron?: string | null;
+  time?: string | null;
+  timezone?: string | null;
+  payload?: Record<string, unknown>;
 };
 
 export type EvolutionTimelineEnvelope = {

@@ -1,7 +1,6 @@
 """Resource native tools — existing.
 
-Two read-only tools mirror what coding-agent's MCP layer exposes for
-``resources/list`` and ``resources/read``:
+Two read-only tools expose ``resources/list`` and ``resources/read``:
 
 * ``resource_list`` — enumerate everything in the workspace
   :class:`ResourceIndex` (typically populated from MCP servers'

@@ -61,7 +61,12 @@ ALL_SCOPES: frozenset[str] = frozenset({
 WILDCARD_SCOPE = "api:all"
 
 # Endpoints that never require auth (mirrors check_request behaviour).
-ANONYMOUS_PATHS: frozenset[str] = frozenset({"/", "/health"})
+ANONYMOUS_PATHS: frozenset[str] = frozenset({
+    "/",
+    "/health",
+    "/auth/status",
+    "/auth/login",
+})
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,11 @@ _RULES: tuple[RouteRule, ...] = (
     # health / ops
     RouteRule("GET", "/health", None, "always anonymous"),
     RouteRule("GET", "/", None, "service banner"),
+    RouteRule("GET", "/auth/status", None, "auth bootstrap status"),
+    RouteRule("POST", "/auth/status", None, "auth bootstrap status"),
+    RouteRule("POST", "/auth/login", None, "password-to-JWT exchange"),
+    RouteRule("POST", "/auth/admin/password", "write:config", "set or rotate admin password"),
+    RouteRule("POST", "/auth/logout", "read:runtime", "stateless JWT logout"),
     RouteRule("GET", "/ops/preflight", "read:runtime", ""),
     RouteRule("GET", "/ops/certify", "read:runtime", ""),
     RouteRule("GET", "/ops/evidence", "read:runtime", ""),
@@ -109,9 +119,14 @@ _RULES: tuple[RouteRule, ...] = (
     # workspace
     RouteRule(None, "/workspace", "read:runtime", ""),
     RouteRule(None, "/workspace/", "read:runtime", "writes still pass through specific routes"),
+    RouteRule("POST", "/workspace/file/save", "write:config", "dashboard files drawer save"),
+    RouteRule("POST", "/workspace/file/delete", "write:config", "dashboard files drawer delete"),
+    RouteRule("POST", "/workspace/file/create", "write:config", "dashboard files drawer create"),
+    RouteRule("POST", "/workspace/file/rename", "write:config", "dashboard files drawer rename"),
 
     # agent / sessions / streaming
     RouteRule("POST", "/agent/run_turn", "write:chat", ""),
+    RouteRule("POST", "/agent/attachments/upload", "write:chat", ""),
     RouteRule("POST", "/agent/trace", "read:sessions", ""),
     RouteRule("POST", "/agent/explain", "read:sessions", ""),
     RouteRule("POST", "/agent/turn_state", "read:sessions", ""),
@@ -130,6 +145,15 @@ _RULES: tuple[RouteRule, ...] = (
     # workspace-native tool registry view.
     RouteRule("GET", "/agent/tools", "read:runtime", ""),
 
+    # charts
+    RouteRule("GET", "/charts/get", "read:runtime", "fetch chart bulk artifact by id"),
+    RouteRule(
+        "POST",
+        "/charts/publish",
+        "write:tools",
+        "persist a dynamic-code chart_block; returns chart_id + bulk_data_uri",
+    ),
+
     # skills
     RouteRule("GET", "/skills", "read:runtime", ""),
     RouteRule("GET", "/skills/detail", "read:runtime", ""),
@@ -144,6 +168,21 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/skills/lock/verify", "read:runtime", ""),
     RouteRule("POST", "/skills/lock/sign", "write:skills", ""),
     RouteRule("POST", "/skills/lock/clear_signature", "write:skills", ""),
+
+    # browser engines / browser sessions
+    RouteRule("GET", "/browsers/registry", "read:runtime", ""),
+    RouteRule("GET", "/browsers/status", "read:runtime", ""),
+    RouteRule("POST", "/browsers/select", "write:config", ""),
+    RouteRule("POST", "/browsers/configure", "write:config", ""),
+    RouteRule("POST", "/browsers/install", "admin:ops",
+              "installs optional browser dependencies"),
+    RouteRule("POST", "/browsers/uninstall", "admin:ops",
+              "removes optional browser dependencies"),
+    RouteRule("POST", "/browsers/probe", "read:runtime", ""),
+    RouteRule("GET", "/browsers/session/list", "read:runtime", ""),
+    RouteRule("GET", "/browsers/session/get", "read:runtime", ""),
+    RouteRule(None, "/browsers/session/", "write:tools",
+              "browser navigation/actions may execute page code or network requests"),
 
     # security / secrets
     RouteRule(None, "/security/secrets/", "write:secrets", "no reveal route"),
@@ -166,12 +205,35 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/trading/cancel", "trade:paper", ""),
     RouteRule("POST", "/trading/history", "read:runtime", ""),
     RouteRule("POST", "/trading/recent_trades", "read:runtime", ""),
+    RouteRule("POST", "/accounts/test_balance", "read:runtime", ""),
     RouteRule(None, "/portfolio/", "read:runtime", ""),
+    RouteRule("POST", "/strategy/list_all", "read:runtime", ""),
+    RouteRule("POST", "/strategy/get", "read:runtime", ""),
+    RouteRule("POST", "/strategy/create", "write:config", ""),
+    RouteRule("POST", "/strategy/update", "write:config", ""),
+    RouteRule("POST", "/strategy/close_positions", "trade:paper",
+              "live close still requires risk_gate + approval_gate"),
+    RouteRule("POST", "/strategy/delete", "write:config", ""),
+    RouteRule("POST", "/strategy/set_status", "write:config", ""),
+    RouteRule("POST", "/strategy/bind_wallet", "write:config", ""),
+    RouteRule("POST", "/strategy/bind_account", "write:config", ""),
+    RouteRule("POST", "/strategy/resolve_runtime", "read:runtime", ""),
+    RouteRule("POST", "/strategy/versions", "read:runtime", ""),
+    RouteRule("POST", "/strategy/files_list", "read:runtime", ""),
+    RouteRule("POST", "/strategy/files_write", "write:config", ""),
+    RouteRule("POST", "/strategy/backtests", "read:runtime", ""),
+    RouteRule("POST", "/strategy/backtests/chart", "read:runtime", ""),
+    RouteRule("POST", "/strategy/backtests/file", "read:runtime", ""),
     RouteRule(None, "/strategy/", "read:runtime", ""),
 
     # gateway
     RouteRule("GET", "/gateway/platforms", "read:runtime", ""),
+    RouteRule("GET", "/gateway/config", "read:runtime", ""),
+    RouteRule("POST", "/gateway/config/upsert", "write:config", ""),
+    RouteRule("POST", "/gateway/config/delete", "write:config", ""),
+    RouteRule("POST", "/gateway/config/test", "gateway:send", ""),
     RouteRule("GET", "/gateway/status", "read:runtime", ""),
+    RouteRule(None, "/gateway/commands", "read:runtime", ""),
     RouteRule("POST", "/gateway/inbound", "gateway:webhook",
               "actor resolved per platform"),
     RouteRule("POST", "/gateway/send", "gateway:send",
@@ -224,6 +286,60 @@ _RULES: tuple[RouteRule, ...] = (
 
     # runtime / capabilities
     RouteRule(None, "/runtime/", "read:runtime", ""),
+    # Runtime feature-flag endpoints.
+    RouteRule("GET", "/runtime/flags", "read:runtime", ""),
+    RouteRule("POST", "/runtime/flags/set", "write:config", ""),
+    RouteRule("POST", "/runtime/flags/refresh", "write:config", ""),
+    # Durable raw tool-result store.
+    RouteRule("GET", "/runtime/tool_raw", "read:runtime", ""),
+    RouteRule("GET", "/runtime/tool_raw/list", "read:runtime", ""),
+    # Capability catalog.
+    RouteRule(None, "/capabilities/", "read:runtime", ""),
+    # Data-source sync state.
+    RouteRule(None, "/data-sources", "read:runtime", ""),
+    RouteRule("GET", "/data-sources/status", "read:runtime", ""),
+    RouteRule("GET", "/data-sources/events", "read:runtime", ""),
+    RouteRule("POST", "/data-sources/sync-now", "write:config", ""),
+    # Trading evidence vault.
+    RouteRule("GET", "/evidence/sources", "read:runtime", ""),
+    RouteRule("GET", "/evidence/topics", "read:runtime", ""),
+    RouteRule("GET", "/evidence/search", "read:runtime", ""),
+    RouteRule("GET", "/evidence/get", "read:runtime", ""),
+    RouteRule("GET", "/evidence/topic", "read:runtime", ""),
+    RouteRule("POST", "/evidence/ingest/run", "write:memory", ""),
+    # Prompt-guard review queue.
+    RouteRule("GET", "/security/prompt_guard/items", "read:runtime", ""),
+    RouteRule("POST", "/security/prompt_guard/resolve", "approve:tool", ""),
+    RouteRule("POST", "/security/prompt_guard/classify", "read:runtime", ""),
+    # Operator preference profile.
+    RouteRule("GET", "/memory/profile", "read:runtime", ""),
+    RouteRule("POST", "/memory/profile/set", "write:memory", ""),
+    RouteRule("POST", "/memory/profile/pin", "write:memory", ""),
+    RouteRule("POST", "/memory/profile/forget", "write:memory", ""),
+    RouteRule("POST", "/memory/profile/rebuild", "write:memory", ""),
+    # Memory backend installer + tester (Selected backend settings UX)
+    RouteRule("POST", "/memory/external/install/run", "admin:ops", ""),
+    RouteRule("POST", "/memory/test", "read:runtime", ""),
+    # E2E artifact capture.
+    RouteRule("GET", "/ops/e2e/runs", "read:runtime", ""),
+    RouteRule("GET", "/ops/e2e/run", "read:runtime", ""),
+    RouteRule("POST", "/ops/e2e/run/start", "admin:ops", ""),
+    RouteRule("POST", "/ops/e2e/run/record", "admin:ops", ""),
+    RouteRule("POST", "/ops/e2e/run/finalize", "admin:ops", ""),
+    RouteRule("POST", "/ops/e2e/auto-capture", "admin:ops", ""),
+    RouteRule("GET", "/network/proxy", "read:runtime", ""),
+    RouteRule("POST", "/network/proxy", "write:config", ""),
+    RouteRule("POST", "/network/proxy/test", "read:runtime", ""),
+    RouteRule("GET", "/network/dashboard", "read:runtime", ""),
+    RouteRule("POST", "/network/dashboard", "write:config", ""),
+    RouteRule("GET", "/network/tunnels", "read:runtime", ""),
+    RouteRule("POST", "/network/tunnels/config", "write:config", ""),
+    RouteRule("POST", "/network/tunnels/install", "admin:ops",
+              "installs optional tunnel binaries"),
+    RouteRule("POST", "/network/tunnels/start", "admin:ops",
+              "starts an external tunnel process"),
+    RouteRule("POST", "/network/tunnels/stop", "admin:ops",
+              "stops an external tunnel process"),
 
     # triggers
     RouteRule("POST", "/triggers/emit", "write:chat", ""),
@@ -242,8 +358,15 @@ _RULES: tuple[RouteRule, ...] = (
 
     # wallet
     RouteRule(None, "/wallet/providers", "read:runtime", ""),
+    RouteRule(None, "/wallet/configured", "read:runtime", ""),
     RouteRule("POST", "/wallet/status", "read:runtime", ""),
     RouteRule("POST", "/wallet/install_hint", "read:runtime", ""),
+    RouteRule(None, "/wallet/credential_schema", "read:runtime", ""),
+    RouteRule("POST", "/wallet/install", "write:config", ""),
+    RouteRule("POST", "/wallet/auth/start", "write:config", ""),
+    RouteRule("POST", "/wallet/auth/verify", "write:config", ""),
+    RouteRule("POST", "/wallet/auth/status", "read:runtime", ""),
+    RouteRule(None, "/wallet/installed", "read:runtime", ""),
     RouteRule("POST", "/wallet/configure", "write:config", ""),
     RouteRule("POST", "/wallet/quote", "read:runtime", ""),
     RouteRule("POST", "/wallet/balance", "read:runtime", ""),

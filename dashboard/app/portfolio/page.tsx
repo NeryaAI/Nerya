@@ -6,6 +6,7 @@ import { useTranslations } from "next-intl";
 import { clientApi } from "../../lib/clientApi";
 import type {
   EquityPoint,
+  PortfolioPnl,
   PortfolioPosition,
   PortfolioSummary,
 } from "../../lib/api";
@@ -28,12 +29,6 @@ import {
 import { SectionTabs } from "../../components/SectionTabs";
 import { Sparkline } from "../../components/Sparkline";
 import { formatTsShort } from "../../lib/format";
-
-type PnlSummary = {
-  realized_usd?: number;
-  equity_usd?: number;
-  [key: string]: unknown;
-};
 
 function money(value: unknown): string {
   const n = Number(value);
@@ -112,7 +107,7 @@ export default function PortfolioPage() {
   const tCommon = useTranslations("common");
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [positions, setPositions] = useState<PortfolioPosition[]>([]);
-  const [pnl, setPnl] = useState<PnlSummary | null>(null);
+  const [pnl, setPnl] = useState<PortfolioPnl | null>(null);
   const [curve, setCurve] = useState<EquityPoint[]>([]);
   const [health, setHealth] = useState<ControlPlanePortfolioHealth | null>(
     null,
@@ -223,11 +218,13 @@ export default function PortfolioPage() {
   const equityValues = curve
     .map((p) => Number(p.equity_usd))
     .filter(Number.isFinite);
-  const liveAccounts = accounts.filter((a) => a.live_trading_enabled).length;
-  const totalTrades = accounts.reduce(
-    (sum, a) => sum + Number(a.trade_count || 0),
-    0,
-  );
+  const tradeCountByAccount = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const account of accounts) {
+      map[account.id] = Number(account.trade_count || 0);
+    }
+    return map;
+  }, [accounts]);
 
   const totals = health?.totals;
   const hasHealth = !!health && health.accounts.length > 0;
@@ -274,50 +271,55 @@ export default function PortfolioPage() {
         (worstReport.severity === "action_required" ||
           worstReport.severity === "trading_halted") ? (
           <div
-            className={`rounded-lg border px-4 py-3 text-sm ${
+            className={`rounded-lg border px-4 py-3 text-[13px] ${
               worstReport.severity === "trading_halted"
-                ? "border-[#ef4560]/50 bg-[#ef4560]/10 text-[#ef4560]"
-                : "border-[#f5a524]/40 bg-[#f5a524]/10 text-[#f5a524]"
+                ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
+                : "border-amber-500/40 bg-amber-500/10 text-amber-300"
             }`}
           >
             <div className="flex items-center gap-2">
               <Pill tone={severityTone(worstReport.severity)}>
-                {worstReport.severity}
+                {worstReport.severity.replace("_", " ")}
               </Pill>
-              <span className="font-mono text-[11px]">
+              <span className="font-mono text-[12px]">
                 {worstReport.scope}
                 {worstReport.account_id ? `:${worstReport.account_id}` : ""}
               </span>
-              <span className="ml-auto text-[11px] text-ink-400">
+              <span className="ml-auto text-[12px] text-[color:var(--text-muted)]">
                 {formatTsShort(worstReport.ts)}
               </span>
             </div>
-            <div className="mt-1 text-xs">
+            <div className="mt-1 text-[12.5px]">
               {t("driftIssues", { count: Number(worstReport.summary?.issue_count ?? 0) })}
             </div>
           </div>
         ) : null}
 
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <section className="grid grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-4">
           <Kpi
+            inline
             label={t("equity")}
             value={money(summary?.totals?.equity_usd ?? pnl?.equity_usd)}
             tone="brand"
-            spark={equityValues}
           />
-          <Kpi label={t("cash")} value={money(summary?.totals?.cash_usd)} />
           <Kpi
+            inline
+            label={t("cash")}
+            value={money(summary?.totals?.cash_usd)}
+          />
+          <Kpi
+            inline
             label={t("realizedPnl")}
             value={money(pnl?.realized_usd)}
             tone={Number(pnl?.realized_usd || 0) >= 0 ? "ok" : "danger"}
           />
           <Kpi
-            label={t("activeExecutors")}
-            value={`${totals?.active_executors ?? 0}`}
-            delta={t("protectionRules", { count: totals?.active_protections ?? 0 })}
-            tone={(totals?.active_executors ?? 0) > 0 ? "warn" : "neutral"}
+            inline
+            label={t("unrealizedPnl")}
+            value={money(pnl?.unrealized_usd)}
+            tone={Number(pnl?.unrealized_usd || 0) >= 0 ? "ok" : "danger"}
           />
-        </div>
+        </section>
 
         {hasHealth ? (
           <Card
@@ -332,93 +334,84 @@ export default function PortfolioPage() {
                 <AccountHealthCard
                   key={entry.account_id}
                   entry={entry}
+                  tradeCount={tradeCountByAccount[entry.account_id]}
                   onReconcile={() => runReconcile(entry.account_id)}
                   busy={reconcileBusy === entry.account_id}
                 />
               ))}
             </div>
           </Card>
-        ) : (
-          accounts.length === 0 &&
-          !loading &&
-          !error && (
-            <Card
-              title={t("noAccountsTitle")}
-              description={t("noAccountsDesc")}
-            >
-              <div className="text-sm text-ink-300">
-                {t("noAccountsUse")}{" "}
-                <a
-                  className="text-brand-300 hover:text-brand-200"
-                  href="/settings"
-                >
-                  {t("settingsLink")}
-                </a>{" "}
-                {t("noAccountsHint")}
-              </div>
-            </Card>
-          )
-        )}
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        ) : accounts.length > 0 ? (
           <Card
             title={t("accounts")}
-            description={t("accountsDesc", { count: totalTrades })}
+            description={t("accountsDesc", {
+              count: accounts.reduce((sum, a) => sum + Number(a.trade_count || 0), 0),
+            })}
           >
-            {accounts.length === 0 ? (
-              <Empty
-                label={loading ? t("loadingAccounts") : t("noAccountsFound")}
-              />
-            ) : (
-              <div className="space-y-3">
-                {accounts.map((account) => (
-                  <div
-                    key={account.id}
-                    className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-sm text-ink-100">
-                        {account.id}
-                      </span>
-                      <Pill
-                        tone={account.live_trading_enabled ? "warn" : "brand"}
-                      >
-                        {account.live_trading_enabled ? t("live") : t("paper")}
-                      </Pill>
-                      <span className="ml-auto text-xs text-ink-400">
-                        {account.mode}
-                      </span>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              {accounts.map((account) => (
+                <div
+                  key={account.id}
+                  className="rounded-lg border border-[color:var(--line)] p-3"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[13px] text-[color:var(--text-base)]">
+                      {account.id}
+                    </span>
+                    <Pill tone={account.live_trading_enabled ? "warn" : "brand"}>
+                      {account.live_trading_enabled ? t("live") : t("paper")}
+                    </Pill>
+                    <span className="ml-auto text-[12px] text-[color:var(--text-muted)]">
+                      {account.mode}
+                    </span>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-[12px]">
+                    <div>
+                      <div className="text-[color:var(--text-muted)]">{t("cashLower")}</div>
+                      <div className="text-[color:var(--text-base)]">
+                        {money(account.cash_usd)}
+                      </div>
                     </div>
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <div className="text-ink-500">{t("cashLower")}</div>
-                        <div className="text-ink-100">
-                          {money(account.cash_usd)}
-                        </div>
+                    <div>
+                      <div className="text-[color:var(--text-muted)]">{t("equityLower")}</div>
+                      <div className="text-brand-300">
+                        {money(account.equity_usd)}
                       </div>
-                      <div>
-                        <div className="text-ink-500">{t("equityLower")}</div>
-                        <div className="text-brand-200">
-                          {money(account.equity_usd)}
-                        </div>
+                    </div>
+                    <div>
+                      <div className="text-[color:var(--text-muted)]">{t("positionsLower")}</div>
+                      <div className="text-[color:var(--text-base)]">
+                        {Object.keys(account.positions || {}).length}
                       </div>
-                      <div>
-                        <div className="text-ink-500">{t("positionsLower")}</div>
-                        <div className="text-ink-100">
-                          {Object.keys(account.positions || {}).length}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-ink-500">{t("tradesLower")}</div>
-                        <div className="text-ink-100">{account.trade_count}</div>
-                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[color:var(--text-muted)]">{t("tradesLower")}</div>
+                      <div className="text-[color:var(--text-base)]">{account.trade_count}</div>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
+                </div>
+              ))}
+            </div>
           </Card>
+        ) : !loading && !error ? (
+          <Card
+            title={t("noAccountsTitle")}
+            description={t("noAccountsDesc")}
+          >
+            <div className="text-sm text-ink-300">
+              {t("noAccountsUse")}{" "}
+              <a
+                className="text-brand-300 hover:text-brand-200"
+                href="/settings"
+              >
+                {t("settingsLink")}
+              </a>{" "}
+              {t("noAccountsHint")}
+            </div>
+          </Card>
+        ) : null}
 
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <Card
             title={t("equityCurve")}
             description={t("equityCurveDesc")}
@@ -432,8 +425,9 @@ export default function PortfolioPage() {
                   width={420}
                   height={120}
                   tone="brand"
+                  fill
                 />
-                <div className="embedded-list-scroll-sm mt-3 text-xs font-mono text-ink-300 space-y-1">
+                <div className="embedded-list-scroll-sm mt-3 text-[12px] font-mono text-[color:var(--text-muted)] space-y-1">
                   {curve
                     .slice(-12)
                     .reverse()
@@ -443,7 +437,7 @@ export default function PortfolioPage() {
                         className="flex justify-between gap-3"
                       >
                         <span>{formatTsShort(point.ts)}</span>
-                        <span className="text-ink-100">
+                        <span className="text-[color:var(--text-base)]">
                           {money(point.equity_usd)}
                         </span>
                       </div>
@@ -464,23 +458,23 @@ export default function PortfolioPage() {
                 {reports.slice(0, 8).map((report) => (
                   <div
                     key={report.report_id}
-                    className="flex items-start justify-between gap-2 border border-brand-500/10 rounded-md px-2.5 py-2 bg-ink-900/30"
+                    className="flex items-start justify-between gap-2 border border-[color:var(--line)] rounded-md px-2.5 py-2"
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <Pill tone={severityTone(report.severity)}>
-                          {report.severity}
+                          {report.severity.replace("_", " ")}
                         </Pill>
-                        <span className="font-mono text-[11px] text-ink-300">
+                        <span className="font-mono text-[12px] text-[color:var(--text-muted)]">
                           {report.scope}
                           {report.account_id ? `:${report.account_id}` : ""}
                         </span>
                       </div>
-                      <div className="text-[11px] text-ink-400 mt-0.5">
+                      <div className="text-[12px] text-[color:var(--text-muted)] mt-0.5">
                         {t("issueCount", { count: Number(report.summary?.issue_count ?? 0) })}
                       </div>
                     </div>
-                    <span className="text-[10px] text-ink-500 font-mono shrink-0">
+                    <span className="text-[11px] text-[color:var(--text-muted)] font-mono shrink-0">
                       {formatTsShort(report.ts)}
                     </span>
                   </div>
@@ -494,11 +488,12 @@ export default function PortfolioPage() {
           <Card
             title={t("walletPortfolio", { count: walletPortfolio.length })}
             description={t("walletPortfolioDesc")}
+            padded={false}
           >
             <div className="embedded-table-scroll">
               <table className="table w-full">
                 <thead>
-                  <tr className="text-[11px] text-ink-400">
+                  <tr>
                     <th>{t("colAccount")}</th>
                     <th>{t("colWallet")}</th>
                     <th>{t("colMode")}</th>
@@ -521,7 +516,7 @@ export default function PortfolioPage() {
                       .join(" · ") || "—";
                     return (
                       <tr key={row.account_id}>
-                        <td className="font-mono text-xs">
+                        <td className="font-mono text-[12px]">
                           <Link
                             href={`/accounts/${encodeURIComponent(row.account_id)}`}
                             className="hover:text-brand-300"
@@ -529,7 +524,7 @@ export default function PortfolioPage() {
                             {row.account_id}
                           </Link>
                         </td>
-                        <td className="font-mono text-xs text-ink-300">
+                        <td className="font-mono text-[12px] text-[color:var(--text-muted)]">
                           {row.wallet_id}
                         </td>
                         <td>
@@ -544,13 +539,13 @@ export default function PortfolioPage() {
                             {row.health}
                           </Pill>
                         </td>
-                        <td className="font-mono text-xs">
+                        <td className="font-mono text-[12px]">
                           {money(row.nav_usd)}
                         </td>
-                        <td className="font-mono text-[11px] text-ink-300">
+                        <td className="font-mono text-[12px] text-[color:var(--text-muted)]">
                           {assets}
                         </td>
-                        <td className="text-ink-400 font-mono text-[11px]">
+                        <td className="text-[color:var(--text-muted)] font-mono text-[12px]">
                           {tsLabel}
                         </td>
                       </tr>
@@ -565,14 +560,17 @@ export default function PortfolioPage() {
         <Card
           title={t("openPositions", { count: allPositions.length })}
           description={t("openPositionsDesc")}
+          padded={false}
         >
           {allPositions.length === 0 ? (
-            <Empty label={t("noOpenPositions")} />
+            <div className="px-5 py-4">
+              <Empty label={t("noOpenPositions")} />
+            </div>
           ) : (
             <div className="embedded-table-scroll">
               <table className="table w-full">
                 <thead>
-                  <tr className="text-[11px] text-ink-400">
+                  <tr>
                     <th>{t("colAccount")}</th>
                     <th>{t("colMarket")}</th>
                     <th>{t("colSide")}</th>
@@ -583,37 +581,35 @@ export default function PortfolioPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {allPositions.map((p, index) => (
-                    <tr key={`${p.account_id}-${p.market}-${index}`}>
-                      <td className="font-mono text-xs">{p.account_id}</td>
-                      <td className="font-mono text-xs text-ink-100">
-                        {p.market || "—"}
-                      </td>
-                      <td>
-                        <Pill
-                          tone={
-                            String(p.side || "").toLowerCase() === "short"
-                              ? "danger"
-                              : "ok"
+                  {allPositions.map((p, index) => {
+                    const isShort = String(p.side || "").toLowerCase() === "short";
+                    const sideLabel = p.side
+                      ? p.side[0].toUpperCase() + p.side.slice(1).toLowerCase()
+                      : "—";
+                    return (
+                      <tr key={`${p.account_id}-${p.market}-${index}`}>
+                        <td className="font-mono text-[12px]">{p.account_id}</td>
+                        <td className="font-mono text-[12px] text-[color:var(--text-base)]">
+                          {p.market || "—"}
+                        </td>
+                        <td>
+                          <Pill tone={isShort ? "danger" : "ok"}>{sideLabel}</Pill>
+                        </td>
+                        <td>{numberish(p.size)}</td>
+                        <td>{numberish(p.avg_entry_price)}</td>
+                        <td
+                          className={
+                            Number(p.unrealized_pnl_usd || 0) < 0
+                              ? "text-rose-500"
+                              : "text-emerald-500"
                           }
                         >
-                          {p.side || "—"}
-                        </Pill>
-                      </td>
-                      <td>{numberish(p.size)}</td>
-                      <td>{numberish(p.avg_entry_price)}</td>
-                      <td
-                        className={
-                          Number(p.unrealized_pnl_usd || 0) < 0
-                            ? "text-[#ef4560]"
-                            : "text-accent-300"
-                        }
-                      >
-                        {money(p.unrealized_pnl_usd)}
-                      </td>
-                      <td>{money(p.realized_pnl_usd)}</td>
-                    </tr>
-                  ))}
+                          {money(p.unrealized_pnl_usd)}
+                        </td>
+                        <td>{money(p.realized_pnl_usd)}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -626,7 +622,7 @@ export default function PortfolioPage() {
             description={t("advancedPayloadsDesc")}
           >
             <details>
-              <summary className="cursor-pointer text-xs text-ink-400 hover:text-ink-200">
+              <summary className="cursor-pointer text-[12px] text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]">
                 {t("portfolioSummary")}
               </summary>
               <div className="mt-2">
@@ -634,7 +630,7 @@ export default function PortfolioPage() {
               </div>
             </details>
             <details className="mt-2">
-              <summary className="cursor-pointer text-xs text-ink-400 hover:text-ink-200">
+              <summary className="cursor-pointer text-[12px] text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]">
                 {t("pnlPayload")}
               </summary>
               <div className="mt-2">
@@ -643,7 +639,7 @@ export default function PortfolioPage() {
             </details>
             {health ? (
               <details className="mt-2">
-                <summary className="cursor-pointer text-xs text-ink-400 hover:text-ink-200">
+                <summary className="cursor-pointer text-[12px] text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]">
                   {t("controlPlaneHealth")}
                 </summary>
                 <div className="mt-2">
@@ -675,10 +671,12 @@ function severityRank(severity?: string): number {
 
 function AccountHealthCard({
   entry,
+  tradeCount,
   onReconcile,
   busy,
 }: {
   entry: ControlPlaneAccountHealth & { status?: string };
+  tradeCount?: number;
   onReconcile: () => void;
   busy: boolean;
 }) {
@@ -689,16 +687,16 @@ function AccountHealthCard({
       ? Math.min(1, entry.reserved_usd / Math.max(1, Number(snapshot.total_usd)))
       : 0;
   return (
-    <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3.5 space-y-3">
+    <div className="rounded-lg border border-[color:var(--line)] p-3.5 space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
         <Link
           href={`/accounts/${encodeURIComponent(entry.account_id)}`}
-          className="font-mono text-sm text-brand-200 hover:text-brand-100"
+          className="font-mono text-[13px] text-brand-300 hover:text-brand-200"
         >
           {entry.account_id}
         </Link>
         <Pill tone={modePill(entry.mode)}>{entry.mode}</Pill>
-        <span className="text-[11px] text-ink-400">
+        <span className="text-[12px] text-[color:var(--text-muted)]">
           {entry.venue}/{entry.kind}
         </span>
         <span className="ml-auto">
@@ -712,53 +710,53 @@ function AccountHealthCard({
         </span>
       </div>
 
-      <div className="grid grid-cols-3 gap-2 text-xs">
+      <div className="grid grid-cols-3 gap-2 text-[12px]">
         <div>
-          <div className="text-ink-500">{t("totalLower")}</div>
-          <div className="text-ink-100">{money(snapshot?.total_usd)}</div>
+          <div className="text-[color:var(--text-muted)]">{t("totalLower")}</div>
+          <div className="text-[color:var(--text-base)]">{money(snapshot?.total_usd)}</div>
         </div>
         <div>
-          <div className="text-ink-500">{t("freeLower")}</div>
-          <div className="text-ink-100">
+          <div className="text-[color:var(--text-muted)]">{t("freeLower")}</div>
+          <div className="text-[color:var(--text-base)]">
             {money(snapshot?.free_usd ?? snapshot?.available_usd)}
           </div>
         </div>
         <div>
-          <div className="text-ink-500">{t("positionsLower")}</div>
-          <div className="text-brand-200">
+          <div className="text-[color:var(--text-muted)]">{t("positionsLower")}</div>
+          <div className="text-brand-300">
             {money(snapshot?.positions_value_usd)}
           </div>
         </div>
         <div>
-          <div className="text-ink-500">{t("reservedLower")}</div>
-          <div className={entry.reserved_usd > 0 ? "text-[#f5a524]" : "text-ink-100"}>
+          <div className="text-[color:var(--text-muted)]">{t("reservedLower")}</div>
+          <div className={entry.reserved_usd > 0 ? "text-amber-500" : "text-[color:var(--text-base)]"}>
             {money(entry.reserved_usd)}
           </div>
         </div>
         <div>
-          <div className="text-ink-500">{t("openPositionsLower")}</div>
-          <div className="text-ink-100">{entry.open_position_count}</div>
+          <div className="text-[color:var(--text-muted)]">{t("openPositionsLower")}</div>
+          <div className="text-[color:var(--text-base)]">{entry.open_position_count}</div>
         </div>
         <div>
-          <div className="text-ink-500">{t("protectionsLower")}</div>
-          <div className="text-ink-100">{entry.protection_count}</div>
+          <div className="text-[color:var(--text-muted)]">{t("protectionsLower")}</div>
+          <div className="text-[color:var(--text-base)]">{entry.protection_count}</div>
         </div>
       </div>
 
       {snapshot && Number(snapshot.total_usd) > 0 ? (
         <div>
-          <div className="flex justify-between text-[10px] text-ink-500">
+          <div className="flex justify-between text-[11px] text-[color:var(--text-muted)]">
             <span>{t("reservationUtilization")}</span>
             <span>{Math.round(reservedShare * 100)}%</span>
           </div>
-          <div className="h-1.5 mt-0.5 rounded-full bg-ink-700/60 overflow-hidden">
+          <div className="h-1 mt-0.5 rounded-full bg-[color:var(--line)] overflow-hidden">
             <div
               className={`h-full ${
                 reservedShare > 0.7
-                  ? "bg-[#ef4560]"
+                  ? "bg-rose-500"
                   : reservedShare > 0.4
-                    ? "bg-[#f5a524]"
-                    : "bg-accent-500"
+                    ? "bg-amber-500"
+                    : "bg-emerald-500"
               }`}
               style={{ width: `${Math.round(reservedShare * 100)}%` }}
             />
@@ -766,9 +764,12 @@ function AccountHealthCard({
         </div>
       ) : null}
 
-      <div className="flex items-center gap-2 text-[11px] text-ink-400">
+      <div className="flex items-center gap-2 text-[12px] text-[color:var(--text-muted)]">
         <span>
           {t("activeExecutorCount", { count: entry.active_executors.length })}
+          {typeof tradeCount === "number" ? (
+            <span className="ml-2">· {t("tradesLower")}: {tradeCount}</span>
+          ) : null}
         </span>
         <span className="ml-auto flex gap-1.5 flex-wrap">
           {entry.live_trading_enabled ? (
@@ -779,13 +780,13 @@ function AccountHealthCard({
           <button
             onClick={onReconcile}
             disabled={busy}
-            className="btn-ghost text-[11px] py-0.5"
+            className="btn-ghost text-[12px] py-0.5"
           >
             {busy ? t("running") : t("reconcile")}
           </button>
           <Link
             href={`/accounts/${encodeURIComponent(entry.account_id)}`}
-            className="btn-ghost text-[11px] py-0.5"
+            className="btn-ghost text-[12px] py-0.5"
           >
             {t("inspect")}
           </Link>
@@ -797,12 +798,12 @@ function AccountHealthCard({
           {entry.active_executors.map((exec) => (
             <div
               key={exec.executor_id}
-              className="flex items-center gap-2 text-[11px] font-mono text-ink-300 border border-brand-500/10 rounded px-2 py-1"
+              className="flex items-center gap-2 text-[12px] font-mono text-[color:var(--text-muted)] border border-[color:var(--line)] rounded px-2 py-1"
             >
-              <span className="text-ink-100 truncate">{exec.executor_id}</span>
+              <span className="text-[color:var(--text-base)] truncate">{exec.executor_id}</span>
               <Pill tone="brand">{exec.kind}</Pill>
               <span>{exec.state}</span>
-              <span className="ml-auto text-ink-500">{exec.market}</span>
+              <span className="ml-auto text-[color:var(--text-muted)]">{exec.market}</span>
             </div>
           ))}
         </div>

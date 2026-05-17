@@ -1,8 +1,7 @@
 """``Skill`` native tool — load a SKILL.md playbook into the conversation.
 
-Mirrors :file:`coding-agent/anthropic-ai-coding-agent-2.1.88-expanded/src/tools/SkillTool/SkillTool.ts`
-(``executeRemoteSkill`` + the inline branch). One single tool that the
-model invokes with ``{"skill": "<name>"}``; the handler:
+This single tool lets the model invoke ``{"skill": "<name>"}``; the
+handler:
 
 1. resolves ``<name>`` against the live :class:`SkillIndex`,
 2. reads the ``SKILL.md`` file,
@@ -26,9 +25,8 @@ Why a separate tool when ``skill_view`` already exists?
 -------------------------------------------------------
 ``skill_view`` returns the *raw* SKILL.md (frontmatter included) and
 takes ``skill_id`` as its arg name — that's useful for operator
-debugging and dashboards, but it's not the shape coding-agent's model
-expects. ``Skill`` takes the ``skill`` field name (matches the
-provider-side Anthropic prompt convention), strips the frontmatter,
+debugging and dashboards, but it's not the shape the model
+expects. ``Skill`` takes the ``skill`` field name, strips the frontmatter,
 and prepends the base-dir header. Keeping the two tools separate lets
 the model pick the right one for the right job: ``Skill`` to *invoke*
 a playbook, ``skill_view`` (and ``skill_index``) for discovery /
@@ -106,8 +104,7 @@ SKILL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
 def _strip_frontmatter(text: str) -> str:
     """Drop a leading YAML frontmatter block, if present.
 
-    Mirrors :file:`coding-agent/.../utils/frontmatterParser.ts` for the
-    common case. The listing already shows the description /
+    The listing already shows the description /
     when_to_use; including the YAML in the body is just noise.
     """
 
@@ -117,8 +114,7 @@ def _strip_frontmatter(text: str) -> str:
 def _normalise_dir(path: Path) -> str:
     """Render ``path`` with forward slashes so cross-OS skills work.
 
-    coding-agent does the same conversion on Windows (see
-    ``executeRemoteSkill`` line ~1075). Skills frequently contain
+    Skills frequently contain
     relative refs like ``./scripts/foo.py`` and the model is far more
     comfortable with POSIX-style paths.
     """
@@ -136,8 +132,7 @@ def _normalise_name(raw: Any) -> str:
 def _substitute_args(body: str, args: str) -> str:
     """Replace ``$ARGUMENTS`` markers with the caller-supplied string.
 
-    coding-agent's ``processPromptSlashCommand`` performs the same
-    interpolation. When ``args`` is empty the marker is dropped so a
+    When ``args`` is empty the marker is dropped so a
     skill written for an arg-less invocation reads cleanly.
     """
 
@@ -255,8 +250,8 @@ def register_skill_tool(
     )
     registry.register(descriptor, replace=replace)
 
-    # Lowercase alias. Some models (especially OpenAI-compat and a few
-    # Claude Code prompts) emit ``"skill"`` instead of ``"Skill"``. The
+    # Lowercase alias. Some models emit ``"skill"`` instead of
+    # ``"Skill"``. The
     # registry lookup is case-sensitive, so without this alias those
     # calls hit the ``unknown tool: 'skill'`` branch in the executor and
     # the agent loop records a hard error — the turn often recovers by

@@ -1,16 +1,16 @@
 """Strategy promotion gate.
 
-04-29 §11 P5 — Agent-generated strategies do not get to skip
+Agent-generated strategies do not get to skip
 straight from ``draft`` to ``live``. Every forward step on the lifecycle
 graph requires concrete evidence:
 
 | target          | required evidence                                  |
 |-----------------|----------------------------------------------------|
 | ``static_review`` | static-analysis pass (no connector / vault / net) |
-| ``backtested``    | accepted backtest report artifact                |
+| ``backtested``    | accepted backtest/custom replay/waiver evidence  |
 | ``paper``         | paper account binding + protection rule presence |
 | ``shadow``        | non-trivial paper PnL window (configurable)      |
-| ``canary``        | non-trivial shadow window + protection rule      |
+| ``canary``        | shadow window + protection + signoff if waived   |
 | ``live``          | clean canary window + operator approval          |
 
 The gate is *cooperative*: ``request_promotion`` returns a typed
@@ -42,7 +42,6 @@ from ..core.paths import WorkspacePaths
 from ..db.sqlite import connect
 from .strategies import Strategy, load_strategy
 from .strategy_lifecycle import (
-    PROMOTION_TARGETS,
     InvalidTransition,
     promotion_target,
     validate_transition,
@@ -59,6 +58,9 @@ log = logging.getLogger(__name__)
 EvidenceKind = Literal[
     "static_review",      # static analyzer verdict
     "backtest",           # backtest report
+    "custom_replay",      # market-specific replay for non-OHLCV domains
+    "event_replay",       # event/swap/holder replay for on-chain markets
+    "backtest_waiver",    # explicit operator waiver of standard backtest
     "paper_window",       # paper-mode performance window
     "shadow_window",      # shadow-mode performance window
     "canary_window",      # canary-mode performance window
@@ -317,6 +319,17 @@ REQUIRED_EVIDENCE: dict[str, tuple[EvidenceKind, ...]] = {
 }
 
 
+BACKTEST_EQUIVALENT_EVIDENCE: tuple[EvidenceKind, ...] = (
+    "backtest",
+    "custom_replay",
+    "event_replay",
+    "backtest_waiver",
+)
+
+
+WAIVER_OPERATOR_SIGNOFF_TARGETS = frozenset({"canary", "live"})
+
+
 def _evidence_passes(ev: StrategyEvidence | None) -> bool:
     if ev is None:
         return False
@@ -325,6 +338,31 @@ def _evidence_passes(ev: StrategyEvidence | None) -> bool:
     if ev.expires_at is not None and ev.expires_at < time.time():
         return False
     return True
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def _latest_passing(
+    store: EvidenceStore,
+    strategy_id: str,
+    kind: EvidenceKind,
+) -> StrategyEvidence | None:
+    ev = store.latest(strategy_id, kind)
+    return ev if _evidence_passes(ev) else None
+
+
+def _latest_backtest_equivalent(
+    store: EvidenceStore,
+    strategy_id: str,
+) -> StrategyEvidence | None:
+    for kind in BACKTEST_EQUIVALENT_EVIDENCE:
+        ev = _latest_passing(store, strategy_id, kind)
+        if ev is not None:
+            return ev
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -375,14 +413,35 @@ def evaluate_promotion(
     store = EvidenceStore(paths)
     seen: list[str] = []
     missing: list[str] = []
+    reasons: list[str] = []
+    waiver_used = False
     for kind in required:
-        ev = store.latest(strategy_id, kind)
-        if _evidence_passes(ev):
-            seen.append(kind)
+        if kind == "backtest":
+            ev = _latest_backtest_equivalent(store, strategy_id)
+            if ev is not None:
+                _append_unique(seen, ev.kind)
+                if ev.kind != "backtest":
+                    reasons.append(f"backtest_equivalent:{ev.kind}")
+                if ev.kind == "backtest_waiver":
+                    waiver_used = True
+            else:
+                missing.append("backtest_equivalent")
+            continue
+
+        ev = _latest_passing(store, strategy_id, kind)
+        if ev is not None:
+            _append_unique(seen, kind)
         else:
             missing.append(kind)
 
-    reasons: list[str] = []
+    if waiver_used and target_state in WAIVER_OPERATOR_SIGNOFF_TARGETS:
+        op = _latest_passing(store, strategy_id, "operator_signoff")
+        if op is not None:
+            _append_unique(seen, "operator_signoff")
+        else:
+            _append_unique(missing, "operator_signoff")
+            reasons.append("standard_backtest_waiver_requires_operator_signoff")
+
     if missing:
         reasons.append(f"missing_evidence:{','.join(missing)}")
         return PromotionDecision(
@@ -510,6 +569,7 @@ def apply_promotion(
 __all__ = [
     "EvidenceKind",
     "EvidenceStore",
+    "BACKTEST_EQUIVALENT_EVIDENCE",
     "PromotionDecision",
     "PromotionRecord",
     "PromotionState",

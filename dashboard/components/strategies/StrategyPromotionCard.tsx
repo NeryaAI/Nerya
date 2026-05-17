@@ -3,8 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
+import { Select } from "../Select";
 import { clientApi } from "../../lib/clientApi";
 import { formatTsShort } from "../../lib/format";
+import { confirm as confirmDialog } from "../../lib/dialogs";
 
 const PROMOTION_TARGETS = [
   "static_review",
@@ -18,6 +20,9 @@ const PROMOTION_TARGETS = [
 const EVIDENCE_KINDS = [
   "static_review",
   "backtest",
+  "custom_replay",
+  "event_replay",
+  "backtest_waiver",
   "paper_window",
   "shadow_window",
   "canary_window",
@@ -140,13 +145,14 @@ export function StrategyPromotionCard({
 
   async function applyPromotion(record: PromotionRecord) {
     if (!record.promotion_id) return;
-    if (
-      !confirm(
-        t("applyConfirm", { id: String(record.promotion_id), target: String(record.target) }),
-      )
-    ) {
-      return;
-    }
+    const ok = await confirmDialog({
+      message: t("applyConfirm", {
+        id: String(record.promotion_id),
+        target: String(record.target),
+      }),
+      tone: "warning",
+    });
+    if (!ok) return;
     setBusy(record.promotion_id);
     onError(null);
     try {
@@ -217,26 +223,23 @@ export function StrategyPromotionCard({
           </div>
 
           <div className="rounded-md border border-brand-500/10 p-3 space-y-2">
-            <div className="text-xs uppercase tracking-wider text-ink-400">
+            <div className="text-[12px] text-ink-400 font-medium">
               {t("requestPromotion")}
             </div>
             <div className="flex gap-2 items-center text-xs">
               <span className="text-ink-400">{t("target")}</span>
-              <select
-                value={target}
-                onChange={(e) =>
-                  setTarget(
-                    e.target.value as (typeof PROMOTION_TARGETS)[number],
-                  )
-                }
-                className="bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-ink-200"
-              >
-                {allowedTargets.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-[180px]">
+                <Select<(typeof PROMOTION_TARGETS)[number]>
+                  value={target}
+                  onChange={(value) => setTarget(value)}
+                  options={allowedTargets.map((tgt) => ({
+                    value: tgt,
+                    label: tgt,
+                  }))}
+                  size="sm"
+                  ariaLabel={t("target")}
+                />
+              </div>
               <button
                 onClick={requestPromotion}
                 disabled={busy === "request"}
@@ -255,26 +258,23 @@ export function StrategyPromotionCard({
           </div>
 
           <div className="rounded-md border border-brand-500/10 p-3 space-y-2">
-            <div className="text-xs uppercase tracking-wider text-ink-400">
+            <div className="text-[12px] text-ink-400 font-medium">
               {t("recordEvidence")}
             </div>
             <div className="flex gap-2 items-center text-xs flex-wrap">
               <span className="text-ink-400">{t("kind")}</span>
-              <select
-                value={evidenceKind}
-                onChange={(e) =>
-                  setEvidenceKind(
-                    e.target.value as (typeof EVIDENCE_KINDS)[number],
-                  )
-                }
-                className="bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-ink-200"
-              >
-                {EVIDENCE_KINDS.map((k) => (
-                  <option key={k} value={k}>
-                    {k}
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-[180px]">
+                <Select<(typeof EVIDENCE_KINDS)[number]>
+                  value={evidenceKind}
+                  onChange={(value) => setEvidenceKind(value)}
+                  options={EVIDENCE_KINDS.map((kind) => ({
+                    value: kind,
+                    label: kind,
+                  }))}
+                  size="sm"
+                  ariaLabel={t("kind")}
+                />
+              </div>
               <label className="flex items-center gap-1.5 text-ink-300">
                 <input
                   type="checkbox"
@@ -295,7 +295,7 @@ export function StrategyPromotionCard({
         </div>
 
         <div>
-          <div className="text-xs uppercase tracking-wider text-ink-400 mb-2">
+          <div className="text-[12px] text-ink-400 font-medium mb-2">
             {t("recentPromotions")}
           </div>
           {promotions.length === 0 ? (

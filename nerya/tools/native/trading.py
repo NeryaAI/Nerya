@@ -211,6 +211,72 @@ TRADE_INTENT_SUBMIT_SCHEMA: dict[str, Any] = {
         "source": {"type": "string"},
         "trigger_event_id": {"type": "string"},
         "market_snapshot": {"type": "object"},
+        # Optional bracket TP/SL. When present the order routes through
+        # the TradePlan pipeline (``TradingAPI.open_position``) and
+        # arms the protection at the exchange (live) or in-process
+        # protection executor (paper/shadow) in one atomic step.
+        # Agents SHOULD include this for every fresh entry on a CEX —
+        # bare market orders without a stop are a known way to leak
+        # capital during overnight gaps.
+        "protection": {
+            "type": "object",
+            "description": (
+                "Optional bracket TP/SL. Triggers the TradePlan pipeline "
+                "(open_position) when ``side='buy'`` — for SHORT entries "
+                "use ``plan_action='open_short'`` alongside. Each child "
+                "spec accepts ``type`` (pct|price|atr|pnl_usd|r_multiple) "
+                "and ``value``."
+            ),
+            "properties": {
+                "stop_loss": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["pct", "price", "atr", "pnl_usd"],
+                        },
+                        "value": {"type": "number"},
+                    },
+                    "required": ["type", "value"],
+                },
+                "take_profit": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["pct", "price", "r_multiple", "pnl_usd"],
+                        },
+                        "value": {"type": "number"},
+                    },
+                    "required": ["type", "value"],
+                },
+                "trailing_stop": {
+                    "type": "object",
+                    "properties": {
+                        "activation_pct": {"type": "number"},
+                        "trail_pct": {"type": "number"},
+                    },
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["hard_exchange", "soft_runtime", "hybrid"],
+                    "default": "hybrid",
+                },
+            },
+        },
+        # When provided alongside ``protection``, controls which
+        # TradePlan action is dispatched. Defaults to ``open_long`` for
+        # ``side='buy'`` and ``open_short`` for ``side='sell'``.
+        "plan_action": {
+            "type": "string",
+            "enum": [
+                "open_long",
+                "open_short",
+                "close_position",
+                "reduce_position",
+                "scale_in",
+            ],
+        },
     },
     "required": ["account_id", "market", "side", "size", "size_unit", "order_type"],
 }
@@ -406,10 +472,24 @@ def trade_intent_submit_handler(
     """Submit a trade intent through risk → approval → execution.
 
     Thin adapter — the canonical pipeline lives in
-    :func:`nerya.trading.submit.submit_trade_intent`. Approval-pending
-    and risk-rejected outcomes return successfully (the verdict is
-    inside ``risk_decision``); only true execution / validation errors
-    come back as a ``ToolError``.
+    :func:`nerya.trading.submit.submit_trade_intent` for bare intents,
+    and :class:`nerya.sdk.trading_api.TradingAPI` for plan-shaped
+    intents that ship a bracket protection block.
+
+    Routing
+    -------
+    * ``args["protection"]`` present →
+      :meth:`TradingAPI.open_position`/``close_position``/``reduce_position``
+      (depending on ``plan_action``). The TradePlan path arms the
+      bracket at the exchange (live) or the in-process executor
+      (paper/shadow) atomically with the entry order. This is the
+      preferred Agent path for fresh entries — bare market orders
+      without a stop are a known way to leak capital.
+    * Otherwise → legacy ``submit_trade_intent`` (bare order).
+
+    Approval-pending and risk-rejected outcomes return successfully
+    (the verdict is inside ``risk_decision``); only true execution /
+    validation errors come back as a ``ToolError``.
     """
 
     from ...trading.submit import submit_trade_intent as _submit
@@ -419,6 +499,23 @@ def trade_intent_submit_handler(
         return _usage_error(call, "intent fields required (account_id, market, side, ...)")
     spec = dict(args)
     snapshot_in = spec.pop("market_snapshot", None)
+    protection = spec.pop("protection", None)
+    plan_action = spec.pop("plan_action", None)
+
+    # --- Bracket-aware path: route through TradingAPI / TradePlan ---
+    if isinstance(protection, dict) and protection:
+        return _submit_with_protection(
+            call,
+            config=config,
+            spec=spec,
+            protection=protection,
+            plan_action=plan_action,
+            market_snapshot=snapshot_in if isinstance(snapshot_in, dict) else None,
+            default_strategy=default_strategy,
+            default_source=default_source,
+        )
+
+    # --- Legacy bare-intent path ---
     try:
         envelope = _submit(
             config,
@@ -429,6 +526,162 @@ def trade_intent_submit_handler(
         )
     except (TypeError, ValueError) as exc:
         return _usage_error(call, f"invalid intent: {type(exc).__name__}: {exc}")
+    except Exception as exc:
+        return ToolResult.from_error(
+            tool_use_id=call.id, name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.EXECUTION_ERROR,
+                message=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+    return ToolResult.from_json(
+        tool_use_id=call.id, name=call.name, data=envelope,
+    )
+
+
+def _submit_with_protection(
+    call: ToolCall,
+    *,
+    config: Config,
+    spec: dict[str, Any],
+    protection: dict[str, Any],
+    plan_action: str | None,
+    market_snapshot: dict[str, Any] | None,
+    default_strategy: str,
+    default_source: str,
+) -> ToolResult:
+    """Dispatch the protected intent through ``TradingAPI``.
+
+    Maps the Agent-facing flat ``(side, size, size_unit)`` shape onto
+    the structured ``(side: long|short, sizing: SizingPolicy)`` shape
+    the TradePlan pipeline expects, then delegates to the matching
+    ``TradingAPI`` method:
+
+    * ``plan_action="open_long"`` (default for ``side="buy"``) /
+      ``plan_action="open_short"`` (default for ``side="sell"``) →
+      :meth:`TradingAPI.open_position` — places the entry + arms the
+      bracket atomically.
+    * ``plan_action="close_position"`` →
+      :meth:`TradingAPI.close_position` — releases the bracket and
+      forces ``SizingPolicy(close_all)``. Sizing supplied by the
+      caller is ignored (close_all already determines size).
+    * ``plan_action="reduce_position"`` →
+      :meth:`TradingAPI.reduce_position` — trims by either
+      ``size`` (treated as ``fixed_base``) or by a fraction the
+      caller passes inside ``protection.reduce_pct``.
+
+    All other ``plan_action`` values fall back to ``open_position``
+    so an Agent that supplies a protection block always gets a
+    bracketed entry.
+    """
+
+    from ...sdk.trading_api import TradingAPI
+    from ...skills.kernel import SkillKernel
+
+    side_order = str(spec.get("side") or "").strip().lower()
+    if side_order not in ("buy", "sell"):
+        return _usage_error(
+            call,
+            f"side must be 'buy' or 'sell' when protection is set; got {side_order!r}",
+        )
+    # Derive the *position* side from the order side. ``plan_action``
+    # may override this when the Agent explicitly knows it's closing
+    # an existing position.
+    position_side = "long" if side_order == "buy" else "short"
+
+    size_raw = spec.get("size")
+    size_unit = str(spec.get("size_unit") or "usd").strip().lower()
+    try:
+        size_val = float(size_raw)
+    except (TypeError, ValueError):
+        return _usage_error(call, f"size must be numeric; got {size_raw!r}")
+    if size_val <= 0 and plan_action not in ("close_position",):
+        return _usage_error(call, "size must be positive for an open/reduce intent")
+
+    sizing: dict[str, Any]
+    if size_unit == "usd":
+        sizing = {"method": "fixed_usd", "fixed_usd": size_val}
+    elif size_unit in ("base", "quote"):
+        # The TradePlan SizingPolicy doesn't have a separate quote
+        # method — quote ≈ base for spot, BudgetChecker resolves
+        # final notional from the snapshot. Treat both as fixed_base
+        # at the policy layer.
+        sizing = {"method": "fixed_base", "fixed_base": size_val}
+    else:
+        return _usage_error(
+            call, f"size_unit must be one of base/quote/usd; got {size_unit!r}"
+        )
+
+    account_id = str(spec.get("account_id") or "").strip()
+    if not account_id:
+        return _usage_error(call, "account_id is required")
+    market = str(spec.get("market") or "").strip()
+    if not market:
+        return _usage_error(call, "market is required")
+
+    strategy_id = str(spec.get("strategy_id") or default_strategy)
+    confidence = float(spec.get("confidence") or 0.0)
+    reasoning_ref = str(spec.get("reasoning") or "")
+    trigger_event_id = spec.get("trigger_event_id")
+    source = str(spec.get("source") or default_source)
+
+    api = TradingAPI(config=config, skills=SkillKernel.boot(config))
+
+    try:
+        action = (plan_action or "").strip() or (
+            "open_long" if position_side == "long" else "open_short"
+        )
+        if action == "close_position":
+            envelope = api.close_position(
+                strategy_id=strategy_id,
+                account_id=account_id,
+                market=market,
+                side=position_side,  # type: ignore[arg-type]
+                confidence=confidence,
+                reasoning_ref=reasoning_ref,
+                source=source,  # type: ignore[arg-type]
+                market_snapshot=market_snapshot,
+            )
+        elif action == "reduce_position":
+            envelope = api.reduce_position(
+                strategy_id=strategy_id,
+                account_id=account_id,
+                market=market,
+                side=position_side,  # type: ignore[arg-type]
+                fixed_base=size_val if size_unit in ("base", "quote") else None,
+                reduce_pct=(
+                    float(protection.get("reduce_pct"))
+                    if protection.get("reduce_pct")
+                    else None
+                ),
+                confidence=confidence,
+                reasoning_ref=reasoning_ref,
+                source=source,  # type: ignore[arg-type]
+                market_snapshot=market_snapshot,
+            )
+        else:
+            # open_long / open_short / scale_in / fallback → open_position
+            # ``open_short`` flips position_side regardless of the
+            # caller-side ``side``.
+            if action == "open_short":
+                position_side = "short"
+            elif action == "open_long":
+                position_side = "long"
+            envelope = api.open_position(
+                strategy_id=strategy_id,
+                account_id=account_id,
+                market=market,
+                side=position_side,  # type: ignore[arg-type]
+                sizing=sizing,
+                protection=protection,
+                confidence=confidence,
+                reasoning_ref=reasoning_ref,
+                trigger_event_id=trigger_event_id,
+                source=source,  # type: ignore[arg-type]
+                market_snapshot=market_snapshot,
+            )
+    except (TypeError, ValueError) as exc:
+        return _usage_error(call, f"invalid plan: {type(exc).__name__}: {exc}")
     except Exception as exc:
         return ToolResult.from_error(
             tool_use_id=call.id, name=call.name,

@@ -2,17 +2,10 @@
 
 Implementation notes:
 
-* ``coding-agent/.../src/services/agents/AgentTool.ts`` — the
-  ``AgentTool`` surface in coding-agent can spawn either *foreground*
-  (block until result) or *background* sub-agents. Background runs
-  return a task handle, write their final output to a file the
-  coordinator can list/get/stop, and surface progress notifications
-  along the way.
-* The doc explicitly calls this out under
-  ``agent-harness-comparison-and-refactor-todo.md`` 支持 background async agent，产出 output file，但主 agent 不
-      自动读取全文。
-      支持 progress notification 与 completion notification。
-      支持 task list/get/output/stop/update 工具。
+* The same task store supports either *foreground* (block until result)
+  or *background* sub-agents. Background runs return a task handle,
+  write their final output to a file the coordinator can list/get/stop,
+  and surface progress notifications along the way.
 
 Why a separate task store
 -------------------------

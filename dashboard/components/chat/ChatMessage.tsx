@@ -2,7 +2,12 @@
 
 import { type ReactNode, useState } from "react";
 import { useTranslations } from "next-intl";
-import type { AssistantMessage, UserMessage } from "../../lib/chat";
+import type {
+  AssistantMessage,
+  ChatAttachment,
+  NativeBlockEnvelope,
+  UserMessage,
+} from "../../lib/chat";
 import { liveEventsToBlocks, topLevelDecisionText } from "../../lib/chat";
 import type { ApprovalCard } from "../../lib/clientApi";
 import { NativeBlocksTrack, TurnBlocks } from "./TurnBlocks";
@@ -12,9 +17,11 @@ import {
   CheckIcon,
   CopyIcon,
   EditIcon,
+  FileIcon,
   TrashIcon,
   XIcon,
 } from "../icons";
+import { NeryaAvatar } from "../NeryaLogo";
 
 function formatTime(ts: number): string {
   try {
@@ -40,7 +47,7 @@ function PendingTrail() {
       {steps.map((step, i) => (
         <div
           key={step}
-          className="rounded-md border border-white/5 bg-white/[0.02] px-2 py-1.5 text-[11px] text-ink-300 flex items-center gap-2"
+          className="rounded-md border border-brand-500/10 bg-brand-500/[0.04] px-2 py-1.5 text-[11px] text-ink-300 flex items-center gap-2"
         >
           <span
             className="typing-dot"
@@ -51,6 +58,31 @@ function PendingTrail() {
       ))}
     </div>
   );
+}
+
+function withoutTextBlocks(blocks: NativeBlockEnvelope[]): NativeBlockEnvelope[] {
+  return blocks.filter((env) => {
+    const block = env.block ?? (env as unknown as { kind?: string });
+    return String(block.kind || env.kind || "") !== "text";
+  });
+}
+
+function mergeActivityEvents(
+  persisted: AssistantMessage["live_events"] = [],
+  live: AssistantMessage["live_events"] = [],
+): NonNullable<AssistantMessage["live_events"]> {
+  const out: NonNullable<AssistantMessage["live_events"]> = [];
+  const seen = new Set<string>();
+  for (const ev of [...persisted, ...live]) {
+    const key = String(
+      ev.event_id ||
+        `${ev.kind}:${ev.seq || ""}:${ev.team_run_id || ""}:${ev.team_task_id || ""}:${ev.step_kind || ""}:${ev.iteration || ""}`,
+    );
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ev);
+  }
+  return out;
 }
 
 function classifyError(raw: string): {
@@ -145,7 +177,7 @@ function ErrorCard({ error }: { error: string }) {
       data-turn-section="error"
       role="alert"
     >
-      <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-rose-200/80">
+      <div className="flex items-center gap-2 text-[12px] text-rose-300 font-medium">
         <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.7)]" />
         Turn failed · {kind}
       </div>
@@ -159,7 +191,7 @@ function ErrorCard({ error }: { error: string }) {
         <div className="pt-1">
           <button
             onClick={() => setShowRaw((v) => !v)}
-            className="text-[10px] uppercase tracking-[0.18em] text-rose-200/60 hover:text-rose-100 cursor-pointer transition-colors"
+            className="text-[12px] text-rose-300/80 hover:text-rose-200 cursor-pointer transition-colors"
             data-turn-section="error-toggle"
           >
             {showRaw ? "▾ hide raw error" : "▸ show raw error / trace"}
@@ -203,7 +235,7 @@ function CopyButton({ text }: { text: string }) {
           // Clipboard can be blocked in non-secure contexts.
         }
       }}
-      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-ink-400 hover:text-white hover:border-white/20 transition-colors"
+      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-brand-500/20 text-ink-400 hover:text-white hover:border-brand-500/40 transition-colors"
       title={t("copyMessage")}
       aria-label={copied ? t("copied") : t("copyMessage")}
     >
@@ -232,13 +264,13 @@ function IconButton({
       ? "hover:text-[#ef5564] hover:border-[#ef5564]/40"
       : tone === "primary"
       ? "text-accent-300 border-accent-400/40 bg-accent-400/10 hover:bg-accent-400/20"
-      : "hover:text-white hover:border-white/20";
+      : "hover:text-white hover:border-brand-500/40";
   return (
     <button
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/10 text-ink-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${toneClass}`}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-brand-500/20 text-ink-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${toneClass}`}
       title={label}
       aria-label={label}
     >
@@ -311,7 +343,7 @@ function InlineEditor({
             if (canSave) onSave();
           }
         }}
-        className="min-h-[96px] w-full resize-y rounded-lg border border-white/15 bg-ink-950/45 px-3 py-2 text-sm leading-relaxed text-white placeholder:text-ink-500 focus:outline-none focus:border-brand-500/60"
+        className="min-h-[96px] w-full resize-y rounded-lg border border-brand-500/25 bg-ink-950/45 px-3 py-2 text-sm leading-relaxed text-white placeholder:text-ink-500 focus:outline-none focus:border-brand-500/60"
       />
       <div
         className={`flex items-center gap-1.5 ${
@@ -331,6 +363,54 @@ function InlineEditor({
         </IconButton>
       </div>
     </form>
+  );
+}
+
+function formatBytes(size: number | undefined): string {
+  if (!Number.isFinite(size) || !size) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function MessageAttachmentList({
+  attachments,
+}: {
+  attachments?: ChatAttachment[];
+}) {
+  if (!attachments?.length) return null;
+  return (
+    <div className="flex max-h-64 flex-wrap justify-end gap-1.5 overflow-y-auto pr-1">
+      {attachments.map((attachment, index) => {
+        const src = attachment.data_url || attachment.url || "";
+        const isImage =
+          attachment.kind === "image" ||
+          attachment.mime_type?.startsWith("image/") ||
+          src.startsWith("data:image/");
+        return (
+          <div
+            key={attachment.id || `${attachment.name}-${index}`}
+            className="max-w-full overflow-hidden rounded-md border border-white/15 bg-black/15"
+          >
+            {isImage && src ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={src}
+                alt={attachment.name || "attachment"}
+                className="block max-h-48 max-w-[260px] object-contain"
+              />
+            ) : null}
+            <div className="flex max-w-[260px] items-center gap-1.5 px-2 py-1.5 text-[11px] text-ink-100">
+              {!isImage || !src ? <FileIcon size={13} /> : null}
+              <span className="truncate">{attachment.name || "attachment"}</span>
+              <span className="shrink-0 text-ink-300">
+                {formatBytes(attachment.size)}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -356,7 +436,7 @@ export function UserBubble({
   return (
     <div className="flex justify-end" data-turn-role="user" data-turn-id={msg.id}>
       <div className="max-w-[85%]">
-        <div className="bubble-user whitespace-pre-wrap">
+        <div className="bubble-user space-y-2">
           {editing ? (
             <InlineEditor
               value={editValue}
@@ -365,13 +445,20 @@ export function UserBubble({
               onCancel={onCancelEdit ?? (() => {})}
               align="right"
             />
+          ) : msg.text ? (
+            <div className="whitespace-pre-wrap">{msg.text}</div>
           ) : (
-            msg.text
+            null
           )}
+          {!editing ? <MessageAttachmentList attachments={msg.attachments} /> : null}
         </div>
         {!editing ? (
           <div className="flex justify-end">
-            <MessageActions text={msg.text} onEdit={onEdit} onDelete={onDelete} />
+            <MessageActions
+              text={msg.text}
+              onEdit={msg.text ? onEdit : undefined}
+              onDelete={onDelete}
+            />
           </div>
         ) : null}
         <div className="text-[10px] text-ink-400 mt-1 text-right">
@@ -407,20 +494,16 @@ export function AssistantBubble({
   onSaveEdit?: () => void;
   onCancelEdit?: () => void;
 }) {
-  // Apr-27 2026 — chat transcript render order. Upstream renders an
-  // assistant turn chronologically: thinking → tool_use blocks (with
-  // their results) → final assistant text. The "summary" never sits
-  // on top of the tool trace; it lands at the bottom because that's
-  // when the model finishes summarising. Mirror that: while the turn
-  // is running show live activity first, then the audit trail (events
-  // / actions / tools / subagents), and finally the reply text at the
-  // very bottom — never above the tool calls. See
-  // ``src/components/Message.tsx`` AssistantMessageBlock loop:
-  // content blocks render in their original API order, which is
-  // always thinking → tool_use → text.
+  // Render each assistant turn in execution order: thinking, then tool
+  // use/results, and finally the reply text. While the turn is still
+  // running, keep the reply text at the bottom so live activity and audit
+  // details stay in the order the agent produced them.
   const reasoning = topLevelDecisionText(msg.turn);
   const showStreaming = msg.loading && !msg.error;
-  const liveEvents = msg.live_events ?? [];
+  const liveEvents = mergeActivityEvents(
+    msg.turn?.activity_events ?? [],
+    msg.live_events ?? [],
+  );
   const hasLive = liveEvents.length > 0;
   const hasTurnBody = !!msg.turn && (
     (msg.turn.actions?.length ?? 0) > 0
@@ -431,7 +514,7 @@ export function AssistantBubble({
   );
   // Source of truth for the chronological tool/thinking trace:
   //   - while ``loading`` we materialise the live event stream into
-  //     Anthropic-style block envelopes so the chat can render
+  //     block envelopes so the chat can render
   //     ``NativeBlocksTrack`` immediately, expanding the most recent
   //     pending tool_use card.
   //   - after the turn returns ``TurnBlocks`` owns the render (it
@@ -440,12 +523,14 @@ export function AssistantBubble({
   //     reconstructed live stream so the audit history isn't lost.
   const finalBlocks = msg.turn?.blocks ?? [];
   const liveBlocks = hasLive ? liveEventsToBlocks(liveEvents) : [];
+  const fallbackBlocks = reasoning ? withoutTextBlocks(liveBlocks) : liveBlocks;
   const approvalEvents = liveEvents.filter(
     (ev) => ev.kind === "approval.request" || ev.kind === "approval.resolved",
   );
   const activityEvents = liveEvents.filter(
     (ev) => ev.kind.startsWith("subagent.") || ev.kind.startsWith("team."),
   );
+  const replayEvents = liveEvents.filter((ev) => ev.kind === "tool.complete");
   return (
     <div
       className="flex justify-start"
@@ -455,15 +540,16 @@ export function AssistantBubble({
     >
       <div className="max-w-[92%] min-w-[200px] w-full">
         <div className="flex items-center gap-2 mb-1.5">
-          <div className="relative h-6 w-6 shrink-0">
+          <div className="relative h-8 w-8 shrink-0">
             {showStreaming ? (
-              <span className="absolute inset-0 rounded-md ring-ai opacity-80" />
+              <span className="absolute -inset-0.5 rounded-full ring-ai opacity-80 animate-spin" style={{ animationDuration: "8s" }} />
             ) : null}
-            <div className="relative h-6 w-6 rounded-md bg-brand-500/20 border border-brand-500/40 flex items-center justify-center text-[10px] font-mono text-brand-200">
-              N
+            <div className="relative h-8 w-8 rounded-full overflow-hidden ring-1 ring-brand-500/40 shadow-glow bg-black/20 flex items-center justify-center">
+              <NeryaAvatar size={32} />
             </div>
+            <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-accent-500 ring-2 ring-[var(--bg-deep)]" />
           </div>
-          <div className="text-[11px] text-ink-300 font-mono tracking-wide">nerya</div>
+          <div className="text-[12px] text-ink-200 font-semibold tracking-tight">Nerya</div>
           {showStreaming ? (
             <div className="flex items-center gap-1.5 text-[10px] text-fluid-400">
               <StreamingDots />
@@ -477,16 +563,10 @@ export function AssistantBubble({
           ) : null}
         </div>
         <div className="bubble-ai space-y-3">
-          {/* Apr-29 2026 — when a turn errors *before* the backend
-            * commits a ``msg.turn`` (e.g. provider 502 mid-iteration),
-            * the live event stream that already accumulated is the
-            * *only* surviving record of what the agent did. Render
-            * those partial blocks BEFORE the error card so the user
-            * sees the audit trail instead of a bare "Turn failed"
-            * with all 30 prior tool calls vanished. We mirror the
-            * same ``NativeBlocksTrack`` shape used by the streaming
-            * path so the visual story is identical to a successful
-            * turn that just stopped early. */}
+          {/* When a turn fails before the backend commits ``msg.turn``,
+            * the already-streamed live events may be the only surviving
+            * record of what happened. Render those partial blocks before
+            * the error card so the user still sees the audit trail. */}
           {msg.error && liveBlocks.length ? (
             <div data-turn-section="blocks-on-error">
               <NativeBlocksTrack
@@ -537,6 +617,7 @@ export function AssistantBubble({
                 onApprovalAction={onApprovalAction}
                 approvalEvents={approvalEvents}
                 activityEvents={activityEvents}
+                replayEvents={replayEvents}
                 resolvingApprovalIds={resolvingApprovalIds}
               />
             </div>
@@ -545,10 +626,10 @@ export function AssistantBubble({
           {/* Fallback: turn settled but the backend didn't return
             * native blocks — surface the converted live stream so the
             * chronological tool trace doesn't disappear. */}
-          {!msg.loading && msg.turn && !finalBlocks.length && liveBlocks.length ? (
+          {!msg.loading && msg.turn && !finalBlocks.length && fallbackBlocks.length ? (
             <div data-turn-section="blocks-fallback">
               <NativeBlocksTrack
-                envelopes={liveBlocks}
+                envelopes={fallbackBlocks}
                 label="reconstructed transcript"
                 pendingApprovals={pendingApprovals}
                 onApprovalAction={onApprovalAction}

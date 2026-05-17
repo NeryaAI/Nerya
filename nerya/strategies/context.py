@@ -31,7 +31,7 @@ The facade also injects strategy attribution everywhere:
 * a ``_caller="strategy:<id>"`` tag on every LLM call so per-strategy
   budgets can be observed in the telemetry journal.
 
-Sub-facades (mirrors §5.2 of the plan):
+Sub-facades:
 
 * :class:`StrategyConfig`     — read-only view of manifest fields.
 * :class:`StrategyPolicy`     — read-only typed policy + LLM policy.
@@ -72,6 +72,8 @@ from ..core.config import Config
 from ..core.errors import NeryaError, TradingError
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso as _real_now_iso
+from ..data.candles import fetch_candles, fetch_public_ticker, normalize_klines
+from ..data.features import compute_features
 from ..workspace.state_store import StateStore
 from .package import StrategyManifest, StrategyPackage
 from .backtest_bridge import backtest_replay as _strategy_backtest_replay
@@ -111,6 +113,20 @@ def _safe_news_id(value: str) -> str:
 
     s = _NEWS_ID_SAFE.sub("_", str(value or "")).strip("_")
     return s[:120] or uuid.uuid4().hex[:12]
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _market_key(value: str) -> str:
+    tail = str(value or "").strip().lower().split(":", 1)[-1]
+    return "".join(ch for ch in tail if ch.isalnum())
 
 
 # ---------------------------------------------------------------------------
@@ -215,12 +231,52 @@ class StrategyMarket:
     def ticker(self, market: str, *, account: Optional[str] = None) -> dict[str, Any]:
         """Latest ticker (bid/ask/mid) for ``market``."""
 
+        venue = market.split(":", 1)[0].upper() if ":" in market else ""
+        if venue and venue not in {"MOCK", "PAPER"}:
+            try:
+                snap = fetch_public_ticker(
+                    market,
+                    allow_mock=False,
+                )
+            except Exception as exc:
+                raise StrategyRuntimeError(f"ticker failed: {exc}") from exc
+            env = snap.get("_envelope") if isinstance(snap, dict) else None
+            price = float(
+                snap.get("last")
+                or snap.get("mid")
+                or snap.get("price")
+                or 0.0
+            )
+            if not price or not isinstance(env, dict) or env.get("mode") != "live":
+                err = str((env or {}).get("error") or "no_live_ticker")
+                raise StrategyRuntimeError(f"ticker failed: {err}")
+            bid = snap.get("bid")
+            ask = snap.get("ask")
+            mid = snap.get("mid") or price
+            return {
+                "market": market,
+                "bid": float(bid) if bid is not None else None,
+                "ask": float(ask) if ask is not None else None,
+                "mid": float(mid),
+                "last": price,
+                "spread_bps": float(snap.get("spread_bps") or 0.0),
+                "ts_ms": int(snap.get("ts_ms") or time.time() * 1000),
+                "venue": env.get("venue") or venue.lower(),
+                "source": snap.get("source") or env.get("source"),
+                "_envelope": env,
+            }
+
         conn = self._connector_for(market, account=account)
         try:
             t = conn.get_ticker(market)
         except Exception as exc:
             raise StrategyRuntimeError(f"ticker failed: {exc}") from exc
         return t.asdict() if hasattr(t, "asdict") else dict(t or {})
+
+    def get_ticker(self, market: str, *, account: Optional[str] = None) -> dict[str, Any]:
+        """Compatibility alias for generated strategies."""
+
+        return self.ticker(market, account=account)
 
     def mark_price(self, market: str, *, account: Optional[str] = None) -> float:
         conn = self._connector_for(market, account=account)
@@ -262,26 +318,59 @@ class StrategyMarket:
         ``c["close"]`` instead of indexing positionally.
         """
 
+        venue = market.split(":", 1)[0].upper() if ":" in market else ""
+        if venue and venue not in {"MOCK", "PAPER"}:
+            return fetch_candles(
+                market,
+                count=limit,
+                interval=timeframe,
+                allow_mock=False,
+            )
+
         conn = self._connector_for(market, account=account)
         try:
             rows = conn.get_klines(market, interval=timeframe, limit=limit)
         except Exception as exc:
             raise StrategyRuntimeError(f"candles failed: {exc}") from exc
-        out: list[dict[str, Any]] = []
-        for row in rows or ():
-            if isinstance(row, dict):
-                out.append(dict(row))
-                continue
-            if not isinstance(row, (list, tuple)):
-                continue
-            keys = ("ts_ms", "open", "high", "low", "close", "volume")
-            out.append(
-                {
-                    keys[i]: row[i]
-                    for i in range(min(len(keys), len(row)))
-                }
-            )
-        return out
+        venue_hint = getattr(conn, "venue", venue) or venue
+        return normalize_klines(str(venue_hint), list(rows or ()))
+
+    def get_candles(
+        self,
+        market: str,
+        *,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Compatibility alias matching common market-data wording."""
+
+        return self.candles(
+            market,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+        )
+
+    def klines(
+        self,
+        market: str,
+        *,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        account: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Compatibility alias for generated strategies that ask for klines."""
+
+        return self.candles(
+            market,
+            timeframe=interval or timeframe,
+            limit=limit,
+            account=account,
+        )
 
     def features(
         self,
@@ -291,16 +380,17 @@ class StrategyMarket:
         lookback: int = 100,
         account: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Convenience: minimal feature payload (last close, hi/lo, volume).
-
-        We deliberately keep this thin — full feature engineering should
-        live in strategy code, not in the facade. This method only
-        guarantees a stable shape for prototypes / templates.
-        """
+        """Convenience: latest OHLCV-derived feature + indicator payload."""
 
         rows = self.candles(market, timeframe=timeframe, limit=lookback, account=account)
+        indicator_features = compute_features(rows)
         if not rows:
-            return {"market": market, "timeframe": timeframe, "rows": 0}
+            return {
+                "market": market,
+                "timeframe": timeframe,
+                "rows": 0,
+                **indicator_features,
+            }
         closes = [float(r.get("close") or 0.0) for r in rows]
         highs = [float(r.get("high") or 0.0) for r in rows]
         lows = [float(r.get("low") or 0.0) for r in rows]
@@ -316,6 +406,7 @@ class StrategyMarket:
             "high_max": max(highs) if highs else 0.0,
             "low_min": min(lows) if lows else 0.0,
             "volume_sum": sum(volumes),
+            **indicator_features,
         }
 
 
@@ -772,6 +863,9 @@ class StrategyTrading:
         account: Optional[str] = None,
         market_snapshot: Optional[dict[str, Any]] = None,
         trigger_event_id: Optional[str] = None,
+        plan_action: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        **extra: Any,
     ) -> dict[str, Any]:
         """Submit a trade intent and return the canonical envelope.
 
@@ -779,6 +873,20 @@ class StrategyTrading:
         engine sees the same prices the strategy reasoned over;
         omitting it falls back to the default resolver in
         :func:`submit_trade_intent`.
+
+        ``plan_action`` (e.g. ``"close"``, ``"reduce_position"``,
+        ``"open_long"``) is forwarded to the risk gate via
+        :attr:`TradeIntent.meta`. The risk gate uses it to (a)
+        relax snapshot-freshness gates for risk-reducing intents and
+        (b) tell the reconciliation layer apart "operator opens fresh
+        position" from "operator flattens an existing one".
+
+        ``metadata`` and any other ``**extra`` kwargs are merged into
+        ``meta`` as well so the strategy can stamp evidence trails
+        (``signal_id``, ``feature_snapshot_ref``, …) that show up on
+        the dashboard. Unknown kwargs accepted here are forwarded as
+        meta entries — never silently dropped — so auto-generated
+        templates that emit advisory keys keep working.
         """
 
         if not self.policy.allow_direct_order:
@@ -807,6 +915,20 @@ class StrategyTrading:
                 f"< policy.min_confidence={self.policy.min_confidence}"
             )
 
+        # Merge plan_action + metadata + extra into a single ``meta``
+        # blob that downstream consumers (risk gate, reconciliation,
+        # dashboard) can read off the persisted intent row.
+        meta_payload: dict[str, Any] = {}
+        if isinstance(metadata, dict):
+            meta_payload.update(metadata)
+        for key, value in (extra or {}).items():
+            # Skip private double-underscore kwargs the runner pre-pops.
+            if key.startswith("_"):
+                continue
+            meta_payload[key] = value
+        if plan_action is not None:
+            meta_payload["plan_action"] = str(plan_action)
+
         spec: dict[str, Any] = {
             "account_id": account_id,
             "market": market,
@@ -825,6 +947,8 @@ class StrategyTrading:
             spec["reasoning"] = str(reasoning)
         if trigger_event_id is not None:
             spec["trigger_event_id"] = str(trigger_event_id)
+        if meta_payload:
+            spec["meta"] = meta_payload
 
         from ..trading.submit import submit_trade_intent as _submit
 
@@ -1170,6 +1294,240 @@ class StrategyClock:
         self._now_ms_fn = lambda: frozen_ms
 
 
+# ---- portfolio / pnl --------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StrategyPosition:
+    """Attribute-friendly read model for generated strategy code."""
+
+    account_id: str = ""
+    market: str = ""
+    size: float = 0.0
+    avg_price: float = 0.0
+    realized_pnl_usd: float = 0.0
+    unrealized_pnl_usd: float = 0.0
+    market_value_usd: float = 0.0
+
+    @property
+    def quantity(self) -> float:
+        return self.size
+
+    @property
+    def qty(self) -> float:
+        return self.size
+
+    @property
+    def notional_usd(self) -> float:
+        return self.market_value_usd
+
+    @property
+    def value_usd(self) -> float:
+        return self.market_value_usd
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "account_id": self.account_id,
+            "market": self.market,
+            "size": self.size,
+            "quantity": self.quantity,
+            "qty": self.qty,
+            "avg_price": self.avg_price,
+            "realized_pnl_usd": self.realized_pnl_usd,
+            "unrealized_pnl_usd": self.unrealized_pnl_usd,
+            "market_value_usd": self.market_value_usd,
+            "notional_usd": self.notional_usd,
+            "value_usd": self.value_usd,
+        }
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.asdict().get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return self.asdict()[key]
+
+
+def _position_from_row(row: dict[str, Any]) -> StrategyPosition:
+    size = _coerce_float(row.get("size") or row.get("quantity") or row.get("qty"))
+    avg_price = _coerce_float(
+        row.get("avg_price") or row.get("avg_entry_price") or row.get("entry_price")
+    )
+    market_value = _coerce_float(
+        row.get("market_value_usd")
+        or row.get("notional_usd")
+        or row.get("value_usd"),
+        default=abs(size) * avg_price,
+    )
+    return StrategyPosition(
+        account_id=str(row.get("account_id") or ""),
+        market=str(row.get("market") or ""),
+        size=size,
+        avg_price=avg_price,
+        realized_pnl_usd=_coerce_float(row.get("realized_pnl_usd")),
+        unrealized_pnl_usd=_coerce_float(row.get("unrealized_pnl_usd")),
+        market_value_usd=market_value,
+    )
+
+
+@dataclass
+class StrategyPortfolio:
+    """Read-only portfolio facade backed by the workspace ledger.
+
+    .. note::
+
+       Post-v6 the ``positions``/``position`` accessors return the
+       **strategy's own slice** of any merged ``(account, market)``
+       position, not the broker-truth merged total. A strategy
+       running alongside others on ``binance:BTCUSDT`` therefore sees
+       only the BTC it itself opened — preserving the pre-v6 contract
+       relied on by auto-generated scalping templates that compute
+       ``qty = abs(position.size)`` before issuing a flatten.
+
+       To inspect the merged broker-truth view of a market, callers
+       should hit ``ctx.account.positions()`` or the
+       ``/portfolio/summary`` HTTP endpoint instead.
+    """
+
+    paths: WorkspacePaths
+    strategy_id: str = ""
+
+    def summary(self) -> dict[str, Any]:
+        from ..trading.portfolio import get_portfolio_summary
+
+        return dict(get_portfolio_summary(self.paths) or {})
+
+    @property
+    def equity_usd(self) -> float:
+        totals = (self.summary().get("totals") or {})
+        return _coerce_float(totals.get("equity_usd"))
+
+    @property
+    def cash_usd(self) -> float:
+        totals = (self.summary().get("totals") or {})
+        return _coerce_float(totals.get("cash_usd"))
+
+    def positions(self, market: Optional[str] = None) -> list[StrategyPosition]:
+        """Return this strategy's per-share positions.
+
+        Before v6 each strategy owned its own ``positions`` row, so
+        the legacy fallback path (``get_positions(paths)``) was safe.
+        After v6 those rows are merged with a ``__merged__`` sentinel
+        strategy_id and the per-strategy sizing lives in
+        ``position_shares``. Reading the merged row from a strategy's
+        own ``ctx.portfolio.positions()`` would make every scalper
+        believe it owned the sum of all sibling strategies' exposure
+        — which caused runaway "close" loops in production.
+
+        We now scan ``position_shares`` filtered by this strategy_id
+        and return one ``StrategyPosition`` per open share. If the
+        portfolio facade was constructed without a strategy_id (e.g.
+        ad-hoc admin tooling) we fall back to the legacy merged-row
+        view so existing callers keep working.
+        """
+
+        wanted = _market_key(market or "")
+        if not self.strategy_id:
+            # Admin / sdk callers without strategy_id keep the legacy
+            # merged-row view. Strategies always have one set by
+            # ``build_strategy_context`` below.
+            from ..trading.portfolio import get_positions
+
+            out: list[StrategyPosition] = []
+            for row in get_positions(self.paths) or []:
+                if not isinstance(row, dict):
+                    continue
+                pos = _position_from_row(row)
+                if wanted and _market_key(pos.market) != wanted:
+                    continue
+                out.append(pos)
+            return out
+
+        try:
+            from ..trading.position_book import PositionBook
+        except Exception:
+            return []
+
+        try:
+            book = PositionBook(self.paths)
+            shares = book.list_shares_history(
+                strategy_id=self.strategy_id,
+                open_only=True,
+                limit=10_000,
+            )
+        except Exception:
+            return []
+
+        out: list[StrategyPosition] = []
+        for share in shares or []:
+            if wanted and _market_key(share.market) != wanted:
+                continue
+            # Pull the merged mark so unrealized PnL on the strategy's
+            # share is at least proxied off the broker-truth mark. We
+            # only need this for ``mark_price``/``market_value_usd`` —
+            # the absolute size is the share's own ``size_share_base``.
+            merged = book.get_open_merged(
+                account_id=share.account_id, market=share.market
+            )
+            mark = float((merged.mark_price if merged else 0.0) or share.avg_entry_share_price or 0.0)
+            size = float(share.size_share_base or 0.0)
+            avg = float(share.avg_entry_share_price or 0.0)
+            side_factor = 1.0 if size >= 0 else -1.0
+            unrealized = (
+                (mark - avg) * abs(size) * side_factor if avg and mark else 0.0
+            )
+            market_value = abs(size) * mark
+            out.append(
+                StrategyPosition(
+                    account_id=str(share.account_id or ""),
+                    market=str(share.market or ""),
+                    size=size,
+                    avg_price=avg,
+                    realized_pnl_usd=float(share.realized_pnl_share_usd or 0.0),
+                    unrealized_pnl_usd=float(unrealized),
+                    market_value_usd=market_value,
+                )
+            )
+        return out
+
+    def position(self, market: str) -> Optional[StrategyPosition]:
+        rows = self.positions(market)
+        return rows[0] if rows else None
+
+
+@dataclass
+class StrategyPnL:
+    """Read-only PnL facade for old generated strategy templates."""
+
+    paths: WorkspacePaths
+    strategy_id: str
+
+    def summary(self) -> dict[str, Any]:
+        from ..trading.portfolio import get_pnl
+
+        out = dict(get_pnl(self.paths) or {})
+        equity = _coerce_float(out.get("equity_usd"))
+        drawdown_usd = 0.0
+        try:
+            from .performance import build_snapshot
+
+            snap = build_snapshot(self.paths, self.strategy_id)
+            trade = snap.trade_metrics or {}
+            drawdown_usd = _coerce_float(trade.get("max_drawdown_usd"))
+            out.update(
+                {
+                    "pnl_total_usd": _coerce_float(trade.get("pnl_total_usd")),
+                    "wins": int(trade.get("wins") or 0),
+                    "losses": int(trade.get("losses") or 0),
+                    "win_rate": _coerce_float(trade.get("win_rate")),
+                }
+            )
+        except Exception:
+            drawdown_usd = 0.0
+        out["max_drawdown_usd"] = drawdown_usd
+        out["drawdown_pct"] = (abs(drawdown_usd) / equity * 100.0) if equity > 0 else 0.0
+        return out
+
+
 # ---- audit -----------------------------------------------------------------
 
 
@@ -1342,6 +1700,8 @@ class StrategyContext:
     llm: StrategyLLMFacade
     subagents: StrategySubAgents
     trading: StrategyTrading
+    portfolio: StrategyPortfolio
+    pnl: StrategyPnL
     messages: StrategyMessages
     state: StrategyState
     clock: StrategyClock
@@ -1356,6 +1716,21 @@ class StrategyContext:
     @property
     def runmode(self) -> str:
         return "live" if self.config.mode == "live" else self.config.mode
+
+    @property
+    def logger(self) -> logging.Logger:
+        return logging.getLogger(f"nerya.strategy.{self.strategy_id}")
+
+    @property
+    def log(self) -> logging.Logger:
+        return self.logger
+
+    @property
+    def market_data(self) -> StrategyMarket:
+        return self.market
+
+    def now(self) -> datetime:
+        return self.clock.now()
 
 
 # ---------------------------------------------------------------------------
@@ -1465,9 +1840,29 @@ def build_strategy_context(
     )
 
     news = StrategyNews(sources=manifest.news_sources)
+    # Operator-supplied fetchers override defaults (registered first so
+    # the loop below can detect already-registered sources).
     if news_fetchers:
         for src, fetcher in news_fetchers.items():
             news.register(src, fetcher)
+    # Auto-register defaults for built-in source names (``crypto`` /
+    # ``equity``) the v6 generator emits, so every code path that builds
+    # a context — script runner, agent-task executor, agent-team
+    # fallback, ad-hoc tests — gets live news for free.
+    try:
+        from .news_fetchers import default_fetchers_for
+
+        missing_sources = [
+            s for s in manifest.news_sources
+            if str(s).strip() and str(s).strip().lower() not in news._fetchers
+        ]
+        if missing_sources:
+            for src, fetcher in default_fetchers_for(
+                missing_sources, markets=manifest.markets
+            ).items():
+                news.register(src, fetcher)
+    except Exception:  # pragma: no cover - never block context build
+        pass
 
     state_path = package.state_dir / "state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1497,6 +1892,8 @@ def build_strategy_context(
         accounts=manifest.accounts,
         session_id=sid,
     )
+    portfolio = StrategyPortfolio(paths=paths, strategy_id=manifest.strategy_id)
+    pnl = StrategyPnL(paths=paths, strategy_id=manifest.strategy_id)
 
     messages = StrategyMessages(
         paths=paths,
@@ -1532,6 +1929,8 @@ def build_strategy_context(
         llm=llm,
         subagents=subagents,
         trading=trading,
+        portfolio=portfolio,
+        pnl=pnl,
         messages=messages,
         state=state,
         clock=clock or StrategyClock(),
@@ -1584,6 +1983,9 @@ __all__ = [
     "StrategyMarket",
     "StrategyMessages",
     "StrategyNews",
+    "StrategyPnL",
+    "StrategyPortfolio",
+    "StrategyPosition",
     "StrategyPolicyView",
     "StrategyResult",
     "StrategyRuntimeError",

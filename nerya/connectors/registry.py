@@ -114,9 +114,18 @@ def _resolve_cex_creds(
     creds_map = account_cfg.get("credentials")
     if not isinstance(creds_map, dict):
         creds_map = {}
+    provider_config = account_cfg.get("provider_config")
+    if not isinstance(provider_config, dict):
+        provider_config = {}
 
     def _pull(field: str, legacy_key: str) -> str:
-        ref = creds_map.get(field) or account_cfg.get(legacy_key) or ""
+        ref = (
+            creds_map.get(field)
+            or provider_config.get(field)
+            or account_cfg.get(field)
+            or account_cfg.get(legacy_key)
+            or ""
+        )
         if not isinstance(ref, str):
             return ""
         if ref.startswith("vault://"):
@@ -130,7 +139,34 @@ def _resolve_cex_creds(
     key = _pull("api_key", "api_key_ref")
     sec = _pull("api_secret", "api_secret_ref")
     pw = _pull("api_passphrase", "api_passphrase_ref") if with_passphrase else ""
-    return CEXCredentials(api_key=key, api_secret=sec, api_passphrase=pw)
+    extras = {
+        "uid": _pull("uid", "uid_ref"),
+        "accountId": _pull("account_id", "account_id_ref"),
+        "login": _pull("login", "login_ref"),
+        "privateKey": (
+            _pull("private_key", "private_key_ref")
+            or _pull("wallet_private_key", "wallet_private_key_ref")
+        ),
+        "walletAddress": (
+            _pull("wallet_address", "wallet_address_ref")
+            or _pull("address", "address_ref")
+        ),
+        "token": _pull("token", "token_ref"),
+    }
+    # Backward compatibility for older Hyperliquid rows that used the
+    # generic api_key/api_secret slots before the CCXT-specific wallet
+    # field names were exposed.
+    venue = str(account_cfg.get("venue") or account_cfg.get("exchange") or "").lower()
+    if venue in {"hyperliquid", "hyperliquid_perpetual", "hyperliquid_perp", "hl", "hl_perp"}:
+        extras["walletAddress"] = extras.get("walletAddress") or key
+        extras["privateKey"] = extras.get("privateKey") or sec
+    extras = {k: v for k, v in extras.items() if v}
+    return CEXCredentials(
+        api_key=key,
+        api_secret=sec,
+        api_passphrase=pw,
+        extras=extras,
+    )
 
 
 def _resolve_ref(

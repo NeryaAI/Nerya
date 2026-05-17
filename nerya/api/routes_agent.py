@@ -1,17 +1,97 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
+import threading
 import traceback
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from typing import Any
 
+from ..agent.attachments import upload_chat_attachments
 from ..agent.kernel import AgentKernel
 from ..agent.recovery import list_open_turns, load_turn_state
 from ..agent.session import SessionStore
 from ..core import jsonl
 from ..observability.trace import build_trace, explain_trace
 from .gateway_events import turn_events
+
+
+_RUN_TURN_LOCK_GUARD = threading.RLock()
+_RUN_TURN_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _run_turn_lock_key(client: Any, session_id: str | None) -> str:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return ""
+    try:
+        root = str(client.config.paths.root.resolve())
+    except Exception:
+        root = ""
+    return f"{root}:{sid}"
+
+
+@contextmanager
+def _claim_run_turn_session(client: Any, session_id: str | None):
+    key = _run_turn_lock_key(client, session_id)
+    if not key:
+        yield True
+        return
+    with _RUN_TURN_LOCK_GUARD:
+        lock = _RUN_TURN_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _RUN_TURN_LOCKS[key] = lock
+    acquired = lock.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            lock.release()
+            with _RUN_TURN_LOCK_GUARD:
+                if not lock.locked():
+                    _RUN_TURN_LOCKS.pop(key, None)
+
+
+def _payload_number(payload: dict[str, Any], key: str, *, minimum: float, maximum: float) -> float | None:
+    raw = payload.get(key)
+    if raw is None:
+        limits = payload.get("runtime_limits")
+        if isinstance(limits, dict):
+            raw = limits.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(raw)
+    except Exception:
+        return None
+    if not (minimum <= value <= maximum):
+        value = max(minimum, min(maximum, value))
+    return value
+
+
+def _with_turn_limit_overrides(config, payload: dict[str, Any]):
+    """Return a per-request config clone with safe agent-loop overrides."""
+
+    if not isinstance(payload, dict):
+        return config
+    max_iterations = _payload_number(payload, "max_iterations", minimum=1, maximum=240)
+    max_tool_calls = _payload_number(payload, "max_total_tool_calls", minimum=1, maximum=1000)
+    max_wall_seconds = _payload_number(payload, "max_wall_seconds", minimum=10, maximum=7200)
+    if max_iterations is None and max_tool_calls is None and max_wall_seconds is None:
+        return config
+
+    data = copy.deepcopy(getattr(config, "data", {}) or {})
+    native = data.setdefault("agent", {}).setdefault("native", {})
+    if max_iterations is not None:
+        native["max_iterations"] = int(max_iterations)
+    if max_tool_calls is not None:
+        native["max_total_tool_calls"] = int(max_tool_calls)
+    if max_wall_seconds is not None:
+        native["max_wall_seconds"] = float(max_wall_seconds)
+    return config.__class__(paths=config.paths, data=data)
 
 
 def _iso_from_db_ts(value: Any) -> str:
@@ -38,6 +118,10 @@ def _db_session_asdict(row: dict[str, Any]) -> dict[str, Any]:
     if title and not meta.get("title"):
         meta["title"] = title
         meta.setdefault("title_source", "db")
+    try:
+        message_count = int(row.get("message_count") or 0)
+    except Exception:
+        message_count = 0
     return {
         "session_id": str(row.get("session_id") or ""),
         "strategy_id": row.get("strategy_id"),
@@ -49,6 +133,7 @@ def _db_session_asdict(row: dict[str, Any]) -> dict[str, Any]:
         "last_action": None,
         "meta": meta,
         "source": row.get("source") or "",
+        "message_count": max(0, message_count),
     }
 
 
@@ -70,6 +155,10 @@ def _merge_session_dict(file_state: dict[str, Any], db_row: dict[str, Any] | Non
         merged["updated_at"] = db_state.get("updated_at") or merged.get("updated_at")
     if not merged.get("source"):
         merged["source"] = db_state.get("source") or ""
+    merged["message_count"] = max(
+        int(merged.get("message_count") or 0),
+        int(db_state.get("message_count") or 0),
+    )
     return merged
 
 
@@ -88,6 +177,144 @@ def _session_updated_ts(session: dict[str, Any]) -> float:
 
 def _truthy_query(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on", "full"}
+
+
+def _split_tool_name(tool: Any) -> tuple[str, str]:
+    text = str(tool or "").strip()
+    if "." in text:
+        skill, action = text.split(".", 1)
+        return skill or "native", action
+    return "native", text
+
+
+def _blocks_from_tool_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    for row in events:
+        phase = str(row.get("phase") or "").strip()
+        if phase not in {"tool_use", "tool_result"}:
+            continue
+        payload = _parse_meta_json(row.get("payload_json"))
+        skill_id, action = _split_tool_name(row.get("tool"))
+        block: dict[str, Any] = {
+            "kind": phase,
+            "call_id": row.get("call_id") or "",
+            "skill_id": skill_id,
+            "action": action,
+            "index": len(blocks),
+        }
+        if phase == "tool_use":
+            block["payload"] = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        else:
+            ok = row.get("ok")
+            block["ok"] = bool(ok) if ok is not None else not bool(payload.get("error"))
+            for key in ("result", "error", "error_kind", "elapsed_ms"):
+                if key in payload:
+                    block[key] = payload.get(key)
+        blocks.append(
+            {
+                "kind": phase,
+                "block": block,
+                "ts": row.get("ts"),
+                "index": len(blocks),
+            }
+        )
+    return blocks
+
+
+_ACTIVITY_EVENT_PHASES = {
+    "team.start",
+    "team.event",
+    "team.member.start",
+    "team.member.end",
+    "team.member.skip",
+    "team.member.timeout",
+    "team.end",
+    "team.duplicate",
+    "team.subagent_duplicate",
+    "subagent.start",
+    "subagent.step",
+    "subagent.end",
+}
+
+
+def _activity_events_from_tool_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in events:
+        phase = str(row.get("phase") or "").strip()
+        if phase not in _ACTIVITY_EVENT_PHASES:
+            continue
+        payload = _parse_meta_json(row.get("payload_json"))
+        event = payload.get("event") if isinstance(payload.get("event"), dict) else payload
+        if not isinstance(event, dict):
+            continue
+        item = dict(event)
+        item.setdefault("kind", phase)
+        item.setdefault("turn_id", row.get("turn_id"))
+        item.setdefault("session_id", row.get("session_id"))
+        item.setdefault("ts", row.get("ts"))
+        out.append(item)
+    return out
+
+
+def _project_tool_trace_from_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload_by_call_id: dict[str, Any] = {}
+    trace: list[dict[str, Any]] = []
+    for env in blocks:
+        block = env.get("block") if isinstance(env.get("block"), dict) else env
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("kind")
+        call_id = str(block.get("call_id") or "")
+        if kind == "tool_use":
+            payload_by_call_id[call_id] = block.get("payload") or {}
+        elif kind == "tool_result":
+            trace.append(
+                {
+                    "call_id": call_id,
+                    "skill_id": block.get("skill_id") or "native",
+                    "action": block.get("action") or "",
+                    "payload": payload_by_call_id.get(call_id, {}),
+                    "ok": bool(block.get("ok")),
+                    "result": block.get("result"),
+                    "error": block.get("error"),
+                    "error_kind": block.get("error_kind"),
+                    "elapsed_ms": block.get("elapsed_ms") or 0,
+                }
+            )
+    return trace
+
+
+def _rehydrate_turn_tool_events(
+    turn_payload: dict[str, Any] | None,
+    events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(turn_payload, dict) or not events:
+        return turn_payload
+    needs_blocks = not isinstance(turn_payload.get("blocks"), list) or not turn_payload.get("blocks")
+    needs_trace = (
+        not isinstance(turn_payload.get("tool_trace"), list)
+        or not turn_payload.get("tool_trace")
+    )
+    needs_activity = (
+        not isinstance(turn_payload.get("activity_events"), list)
+        or not turn_payload.get("activity_events")
+    )
+    if not needs_blocks and not needs_trace and not needs_activity:
+        return turn_payload
+    next_payload = dict(turn_payload)
+    blocks = _blocks_from_tool_events(events)
+    if blocks and needs_blocks:
+        next_payload["blocks"] = blocks
+        next_payload["blocks_rehydrated"] = True
+    if blocks and needs_trace:
+        next_payload["tool_trace"] = _project_tool_trace_from_blocks(blocks)
+        next_payload["tool_trace_rehydrated"] = True
+    if needs_activity:
+        activity_events = _activity_events_from_tool_events(events)
+        if activity_events:
+            next_payload["activity_events"] = activity_events
+            next_payload["activity_events_rehydrated"] = True
+    return next_payload
 
 
 def normalise_trigger_payload(payload):
@@ -360,7 +587,9 @@ def routes():
         # kernel into ``auto`` / ``yolo`` without round-tripping every
         # tool through the dashboard approval pane.
         import os as _os
+        import time as _time
         from ..tools.permissions import PermissionMode as _PM
+        _turn_started_at = _time.time()
         raw = (
             (payload.get("permission_mode") if isinstance(payload, dict) else None)
             or _os.environ.get("NERYA_PERMISSION_MODE")
@@ -390,38 +619,88 @@ def routes():
         llm_tier = _normalise_llm_tier(payload.get("model_tier"), client)
         model_provider = _normalise_model_provider(payload.get("model_provider"))
         model_id = _normalise_model_id(payload.get("model_id") or payload.get("model"))
-        kernel = AgentKernel(
-            config=client.config,
-            skills=client.skills,
-            permission_mode=pmode,
-            reasoning_effort=reasoning_effort,
-            reasoning_summary=reasoning_summary,
-            llm_tier=llm_tier,
-            model_provider=model_provider,
-            model_id=model_id,
-        )
+        run_config = _with_turn_limit_overrides(client.config, payload)
         trigger = normalise_trigger_payload(payload)
+        requested_session_id = payload.get("session_id")
+
+        # Auto-classify the incoming operator/user/channel text against the
+        # prompt-guard policy. ``review`` and ``block`` verdicts auto-enqueue
+        # into the review queue so the Action Inbox renders them; ``block``
+        # short-circuits the turn so the LLM never sees the hostile prompt.
+        _user_text = ""
+        _pg = None
         try:
-            result = kernel.run_turn(
-                trigger=trigger,
-                strategy_id=payload.get("strategy_id"),
-                session_id=payload.get("session_id"),
-                turn_id=payload.get("turn_id"),
+            from ..agent.prompt_firewall import classify_user_input, extract_user_text
+            _user_text = extract_user_text(trigger) or ""
+            if _user_text:
+                _channel = (
+                    (trigger.get("payload") or {}).get("channel")
+                    if isinstance(trigger.get("payload"), dict)
+                    else None
+                ) or trigger.get("source") or "chat"
+                _pg = classify_user_input(
+                    client,
+                    text=_user_text,
+                    source_route="POST /agent/run_turn",
+                    source_channel=str(_channel),
+                )
+                if _pg.get("verdict") == "block" and _pg.get("flag_enabled"):
+                    return {
+                        "_status": 403,
+                        "ok": False,
+                        "error": "prompt_guard_blocked",
+                        "blocked": True,
+                        "prompt_guard": _pg,
+                        "message": (
+                            "Prompt guard blocked this input. Review the matched "
+                            "patterns and resolve the queue item from the Action Inbox."
+                        ),
+                    }
+        except Exception:  # pragma: no cover - defensive, never block on guard error
+            _pg = None
+        with _claim_run_turn_session(client, requested_session_id) as claimed:
+            if not claimed:
+                return {
+                    "_status": 409,
+                    "ok": False,
+                    "error": "session_turn_in_progress",
+                    "session_id": requested_session_id,
+                    "message": (
+                        "Another agent turn is already running for this session. "
+                        "Wait for it to finish or interrupt it before sending a new turn."
+                    ),
+                }
+            kernel = AgentKernel(
+                config=run_config,
+                skills=client.skills,
+                permission_mode=pmode,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=reasoning_summary,
+                llm_tier=llm_tier,
+                model_provider=model_provider,
+                model_id=model_id,
             )
-        except Exception as exc:
-            tb = traceback.format_exc()
-            jsonl.append(client.config.paths.journal("errors"), {
-                "kind": "api.run_turn.error",
-                "trigger_event_id": trigger.get("id") or trigger.get("event_id"),
-                "error": f"{type(exc).__name__}: {exc}",
-                "trace": tb.splitlines()[-20:],
-            })
-            raise
+            try:
+                result = kernel.run_turn(
+                    trigger=trigger,
+                    strategy_id=payload.get("strategy_id"),
+                    session_id=requested_session_id,
+                    turn_id=payload.get("turn_id"),
+                )
+            except Exception as exc:
+                tb = traceback.format_exc()
+                jsonl.append(client.config.paths.journal("errors"), {
+                    "kind": "api.run_turn.error",
+                    "trigger_event_id": trigger.get("id") or trigger.get("event_id"),
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "trace": tb.splitlines()[-20:],
+                })
+                raise
         # The workspace-native loop emits :class:`BlockEnvelope`
         # transcripts; ``steps`` and ``blocks`` carry the same payload
         # so old clients pointed at ``steps`` keep working while the
         # canonical name is ``blocks``.
-        return {
+        response = {
             "trigger_event_id": result.trigger_event_id,
             "decision": result.decision,
             "actions": result.actions,
@@ -435,7 +714,74 @@ def routes():
             "iterations": getattr(result, "iterations", 0),
             "steps": list(result.steps or []),
             "blocks": list(result.blocks or []),
+            "activity_events": list(getattr(result, "activity_events", []) or []),
             "harness": getattr(result, "harness", "native"),
+            "attachments": list(getattr(result, "attachments", []) or []),
+        }
+        # Surface the prompt-guard verdict on review (block already short-
+        # circuited above). Operators see this in the dashboard turn detail.
+        if _pg and _pg.get("verdict") in ("review", "block"):
+            response["prompt_guard"] = _pg
+
+        # Operator profile self-learning capture — propose facts after
+        # stable patterns are observed. Never blocks the turn; failures
+        # are swallowed.
+        try:
+            from ..agent.profile_capture import observe_turn as _observe_turn
+            _channel_for_capture = (
+                (trigger.get("payload") or {}).get("channel")
+                if isinstance(trigger.get("payload"), dict)
+                else None
+            ) or trigger.get("source") or "chat"
+            _capture = _observe_turn(
+                client,
+                user_text=_user_text or "",
+                reply_text=response.get("reply_text") or "",
+                channel=str(_channel_for_capture),
+            )
+            if _capture and _capture.get("proposed"):
+                response["profile_capture"] = _capture
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        # E2E auto-capture — opt-in via NERYA_E2E_AUTO_CAPTURE_RUN_TURN=1.
+        # When enabled, each turn's request/response is captured as a
+        # one-shot artifact run so the operator has citeable evidence for
+        # the conversation.
+        try:
+            from ..ops.auto_capture import maybe_capture_run_turn
+            _capture_meta = maybe_capture_run_turn(
+                client,
+                request_payload=payload,
+                response=response,
+                started_at_ms=_turn_started_at,
+            )
+            if _capture_meta:
+                response["e2e_artifact"] = {
+                    "run_id": _capture_meta.get("run_id"),
+                    "status": _capture_meta.get("status"),
+                }
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        return response
+
+    def attachments_upload(client, payload):
+        upload_id = str(
+            payload.get("upload_id")
+            or payload.get("session_id")
+            or payload.get("turn_id")
+            or ""
+        )
+        attachments = upload_chat_attachments(
+            payload.get("attachments"),
+            paths=client.config.paths,
+            upload_id=upload_id,
+        )
+        return {
+            "ok": True,
+            "upload_id": upload_id,
+            "attachments": attachments,
         }
 
     def get_trace(client, payload):
@@ -551,21 +897,37 @@ def routes():
         q = dict(query or {})
         store = SessionStore(client.config.paths.root)
         strategy_id = q.get("strategy_id") or None
-        limit = int(q.get("limit") or 50)
+        try:
+            limit = max(1, min(int(q.get("limit") or 50), 100))
+        except Exception:
+            limit = 50
+        try:
+            offset = max(0, int(q.get("offset") or 0))
+        except Exception:
+            offset = 0
+        fetch_limit = min(max(limit + offset + 1, 250), 1000)
         # ``include=all`` bypasses the chat-only filter so the strategies /
         # observability surfaces can still see every session. Default path
         # (what the dashboard chat sidebar calls) drops strategy-scoped +
         # trigger-driven runs so one chat thread = one sidebar entry.
         include_mode = str(q.get("include") or "").strip().lower()
         chat_only = include_mode != "all" and not strategy_id
-        states = [s.asdict() for s in store.list(strategy_id=strategy_id, limit=limit)]
+        states = [
+            {
+                **s.asdict(),
+                "message_count": max(0, len(s.turn_ids) * 2),
+            }
+            for s in store.list(strategy_id=strategy_id, limit=fetch_limit)
+        ]
         by_id = {str(s.get("session_id") or ""): dict(s) for s in states}
         try:
             from ..db.repositories import AgentSessionRepository
             from ..db.sqlite import connect
 
             con = connect(client.config.paths.db)
-            rows = AgentSessionRepository(con).list_sessions(limit=max(limit * 2, limit))
+            rows = AgentSessionRepository(con).list_sessions(
+                limit=fetch_limit,
+            )
             con.close()
             for row in rows:
                 if strategy_id and row.get("strategy_id") != strategy_id:
@@ -586,7 +948,14 @@ def routes():
             key=_session_updated_ts,
             reverse=True,
         )
-        return {"sessions": sessions[:limit]}
+        page = sessions[offset:offset + limit]
+        return {
+            "sessions": page,
+            "limit": limit,
+            "offset": offset,
+            "next_offset": offset + len(page),
+            "has_more": len(sessions) > offset + len(page),
+        }
 
     def session_get(client, query):
         q = dict(query or {})
@@ -784,10 +1153,22 @@ def routes():
             from ..db.sqlite import connect
 
             con = connect(client.config.paths.db)
-            rows = AgentSessionRepository(con).transcript(
+            repo = AgentSessionRepository(con)
+            rows = repo.transcript(
                 str(sid),
                 limit=0 if full else max_pairs * 2,
             )
+            turn_ids = {
+                str(r.get("turn_id") or "")
+                for r in rows
+                if r.get("role") == "assistant" and r.get("turn_id")
+            }
+            tool_events_by_turn: dict[str, list[dict[str, Any]]] = {}
+            if turn_ids:
+                for ev in repo.tool_events(str(sid), turn_ids=turn_ids):
+                    tid = str(ev.get("turn_id") or "")
+                    if tid:
+                        tool_events_by_turn.setdefault(tid, []).append(ev)
             con.close()
             for r in rows:
                 if r.get("role") not in {"user", "assistant"}:
@@ -809,7 +1190,10 @@ def routes():
                 if r.get("role") == "assistant":
                     turn_candidate = meta.pop("turn", None)
                     if isinstance(turn_candidate, dict):
-                        turn_payload = turn_candidate
+                        turn_payload = _rehydrate_turn_tool_events(
+                            turn_candidate,
+                            tool_events_by_turn.get(str(r.get("turn_id") or ""), []),
+                        )
                 messages.append(
                     {
                         "message_id": r.get("message_id"),
@@ -1008,6 +1392,7 @@ def routes():
 
     return [
         ("POST", "/agent/run_turn", run_turn),
+        ("POST", "/agent/attachments/upload", attachments_upload),
         ("POST", "/agent/trace", get_trace),
         ("POST", "/agent/explain", explain),
         ("GET",  "/agent/open_turns", open_turns),

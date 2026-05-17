@@ -4,8 +4,8 @@ Where macro-compaction (``transcript_compact``) drops whole
 tool_use/tool_result pairs to keep the *message count* in budget,
 microcompact does the opposite: it keeps every pair but **truncates
 the body** of the bulkiest read/grep/glob/shell/web tool results so
-the per-message token bill goes down. Mirrors what coding-agent
-calls "low-value, high-volume" tool results.
+the per-message token bill goes down. This targets "low-value,
+high-volume" tool results.
 
 The function is called immediately *before* every model round so
 the assistant never sees a tool result it doesn't need verbatim.

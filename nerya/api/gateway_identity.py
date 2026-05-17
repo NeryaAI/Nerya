@@ -16,7 +16,7 @@ Design notes:
 - ``message_id`` includes a monotonic counter so two replies in the same
   millisecond get distinct ids on Windows (``time.time()`` resolution is
   16ms on some boxes).
-- All identifiers are sanitised to ``[A-Za-z0-9._:-]`` so they can be
+- All identifiers are sanitised to ``[A-Za-z0-9._-]`` so they can be
   embedded in filesystem paths and URLs without escape hazards.
 """
 
@@ -28,7 +28,7 @@ import time
 from typing import Iterable, Optional
 
 
-_SAFE_CHARS = re.compile(r"[^A-Za-z0-9._:-]+")
+_SAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _slug(value: str | int | None, *, default: str = "") -> str:

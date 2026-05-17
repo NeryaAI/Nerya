@@ -12,8 +12,10 @@ from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.sdk.trigger_api import TriggerAPI
 from nerya.sdk.strategy_api import StrategyAPI
+from nerya.strategies.package import load_package
+from nerya.strategies.scheduler_bridge import compile_trading_schedule
 from nerya.tools.native.bootstrap import build_native_tool_deps, _wrap_trade_intent_submit
-from nerya.tools.types import ToolCall, ToolErrorKind
+from nerya.tools.types import ToolCall, ToolErrorKind, ToolResult
 from nerya.triggers.runtime import TriggerRuntime
 from nerya.triggers.strategy_agent_task_executor import (
     TARGET,
@@ -134,6 +136,50 @@ def _write_agent_task_strategy(cfg: Config) -> None:
                 "        session_key={'market': 'mock:BTC/USDT', 'timeframe': '1m'},",
                 "        metadata={'market': 'mock:BTC/USDT', 'timeframe': '1m', 'signal': 'macd_golden_cross'},",
                 "    )",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_legacy_team_strategy(cfg: Config) -> None:
+    root = cfg.paths.strategy("amzn_daily_team_long")
+    yaml_io.dump(
+        root / "strategy.yml",
+        {
+            "version": 1,
+            "strategy_id": "amzn_daily_team_long",
+            "title": "AMZN daily Agent Team long",
+            "description": (
+                "Legacy generated team strategy with direct subagent calls "
+                "and fundamental analysis intent."
+            ),
+            "mode": "paper",
+            "entrypoint": "main.py:run",
+            "markets": ["mock:AMZN"],
+            "accounts": ["paper_main"],
+            "schedule": {"type": "cron", "cron": "0 14 * * 1-5"},
+            "policy": {
+                "max_single_order_usd": 120,
+                "max_daily_notional_usd": 500,
+                "max_open_positions": 1,
+                "min_confidence": 0.7,
+                "max_run_seconds": 5,
+            },
+            "llm_policy": {"default_tier": "medium", "allowed_tiers": ["medium"]},
+            "subagents": [
+                "technical_analyst",
+                "fundamentals_analyst",
+                "news_interpreter",
+                "risk_critic",
+            ],
+        },
+    )
+    (root / "main.py").write_text(
+        "\n".join(
+            [
+                "def run(ctx):",
+                "    raise RuntimeError('legacy direct tick path should not run')",
             ]
         ),
         encoding="utf-8",
@@ -270,6 +316,171 @@ def test_trigger_runtime_dispatches_strategy_built_prompt_to_stable_agent_sessio
     assert "custom_factor" in detail["prompt"]
     assert detail["session"]["profile"]["profile"]["title"] == "MACD execution agent"
     assert strategy_api.history("macd_agent")["ledgers"]["agent_tasks"]["count"] == 2
+
+
+def test_legacy_agent_team_schedule_targets_agent_task_and_builds_team_prompt(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = _config(tmp_path)
+    _write_legacy_team_strategy(cfg)
+    package = load_package(cfg.paths, "amzn_daily_team_long")
+    entry = compile_trading_schedule(package)
+    fake = _FakeKernel()
+    monkeypatch.setattr(
+        "nerya.tools.native.agents.team_run_handler",
+        lambda call, *, config, skills, tool_registry=None: ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "team_run_id": "team-default",
+                "roles_requested": ["technical_analyst", "fundamentals_analyst"],
+                "roles_succeeded": ["technical_analyst", "fundamentals_analyst"],
+                "roles_failed": [],
+                "results": [],
+                "aggregated": {},
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        StrategyAgentTaskExecutor,
+        "_team_context_payload",
+        lambda self, package, event, task, task_id: {
+            "strategy_id": package.strategy_id,
+            "markets": list(package.manifest.markets),
+            "timeframe": "1d",
+            "data_policy": "live only in test",
+        },
+    )
+
+    assert entry.target == TARGET
+    assert entry.payload["agent_task"] is True
+
+    runtime = TriggerRuntime(
+        config=cfg,
+        router=TriggerRuntime.boot(cfg).router,
+        agent_task_executor_factory=lambda config: StrategyAgentTaskExecutor(
+            config=config,
+            kernel_factory=lambda _config: fake,
+        ),
+    )
+    result = runtime.emit(
+        runtime.from_payload(
+            {
+                "source": "schedule",
+                "kind": "strategy.tick",
+                "payload": dict(entry.payload),
+                "target": entry.target,
+                "strategy_id": "amzn_daily_team_long",
+            }
+        )
+    )
+
+    assert result.status == "executed"
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["strategy_id"] == "amzn_daily_team_long"
+    assert call["attached_skills"] == [
+        "team",
+        "trading",
+        "market_research",
+        "research",
+        "market_data_routing",
+    ]
+    prompt = call["trigger"]["payload"]["text"]
+    assert "team_run" in prompt
+    assert "technical_analyst" in prompt
+    assert "fundamentals_analyst" in prompt
+    assert "Final response contract" in prompt
+    assert result.result["actions"][0]["action"] == "team_run"
+    profile = SessionStore(cfg.paths.root).load(call["session_id"]).meta[
+        "strategy_agent_profile"
+    ]["profile"]
+    assert "team_run" in profile["allowed_tools"]
+    assert "trade_intent_submit" in profile["allowed_tools"]
+
+
+def test_agent_team_task_executes_required_team_run_before_final_decision(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = _config(tmp_path)
+    _write_legacy_team_strategy(cfg)
+    package = load_package(cfg.paths, "amzn_daily_team_long")
+    entry = compile_trading_schedule(package)
+    fake = _FakeKernel()
+    team_calls: list[ToolCall] = []
+
+    def fake_team_run(call, *, config, skills, tool_registry=None):
+        team_calls.append(call)
+        assert call.arguments["strategy_id"] == "amzn_daily_team_long"
+        assert call.arguments["shared_payload"]["data_policy"] == "live only in test"
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "team_run_id": "team-test",
+                "roles_requested": ["technical_analyst", "risk_critic"],
+                "roles_succeeded": ["technical_analyst", "risk_critic"],
+                "roles_failed": [],
+                "results": [
+                    {
+                        "subagent": "technical_analyst",
+                        "ok": True,
+                        "tier": "medium",
+                        "steps": [{"prompt": "large raw trace should not be persisted"}],
+                        "output": {"recommendation": "hold", "confidence": 0.4},
+                    }
+                ],
+                "aggregated": {"recommendation": "hold"},
+            },
+        )
+
+    monkeypatch.setattr(
+        "nerya.tools.native.agents.team_run_handler",
+        fake_team_run,
+    )
+    monkeypatch.setattr(
+        StrategyAgentTaskExecutor,
+        "_team_context_payload",
+        lambda self, package, event, task, task_id: {
+            "strategy_id": package.strategy_id,
+            "markets": list(package.manifest.markets),
+            "timeframe": "1d",
+            "data_policy": "live only in test",
+        },
+    )
+
+    runtime = TriggerRuntime(
+        config=cfg,
+        router=TriggerRuntime.boot(cfg).router,
+        agent_task_executor_factory=lambda config: StrategyAgentTaskExecutor(
+            config=config,
+            kernel_factory=lambda _config: fake,
+        ),
+    )
+    result = runtime.emit(
+        runtime.from_payload(
+            {
+                "source": "schedule",
+                "kind": "strategy.tick",
+                "payload": dict(entry.payload),
+                "target": entry.target,
+                "strategy_id": "amzn_daily_team_long",
+            }
+        )
+    )
+
+    assert result.status == "executed"
+    assert len(team_calls) == 1
+    assert result.result["required_team_run"]["team_run_id"] == "team-test"
+    assert result.result["actions"][0]["action"] == "team_run"
+    assert result.result["actions"][0]["forced_by"] == "strategy_agent_task_executor"
+    assert "steps" not in result.result["actions"][0]["result"]["results"][0]
+    assert "shared_payload" in result.result["tool_trace"][0]["call"]["arguments"]
+    prompt = fake.calls[0]["trigger"]["payload"]["text"]
+    assert "runtime already executed the required `team_run`" in prompt
+    assert "team-test" in prompt
 
 
 def test_trigger_runtime_executes_strategy_run_tick_targets(tmp_path):

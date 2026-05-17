@@ -26,22 +26,17 @@ from ._base import (
 
 
 # =============================================================== default urls
-DEFAULT_BASE_URLS: dict[str, str] = {
-    "openai":     "https://api.openai.com/v1",
-    "anthropic":  "https://api.anthropic.com/v1",
-    "gemini":     "https://generativelanguage.googleapis.com/v1beta",
-    "ollama":     "http://127.0.0.1:11434",
-    "deepseek":   "https://api.deepseek.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-    "moonshot":   "https://api.moonshot.cn/v1",
-    "xai":        "https://api.x.ai/v1",
-    "mistral":    "https://api.mistral.ai/v1",
-    "together":   "https://api.together.xyz/v1",
-    "groq":       "https://api.groq.com/openai/v1",
-    "cerebras":   "https://api.cerebras.ai/v1",
-    "stepfun":    "https://api.stepfun.com/v1",
-    "compat":     "",
-}
+# The canonical map lives in :mod:`nerya.llm.provider_catalog`. We re-export
+# it here so legacy callers (tests, ops surfaces) that imported
+# ``DEFAULT_BASE_URLS`` directly from this module keep working without
+# triggering a circular import (the catalog file does not import this
+# module).
+def _load_default_base_urls() -> dict[str, str]:
+    from ..provider_catalog import DEFAULT_BASE_URLS as _cat
+    return dict(_cat)
+
+
+DEFAULT_BASE_URLS: dict[str, str] = _load_default_base_urls()
 
 
 @dataclass
@@ -237,6 +232,14 @@ _REASONING_MODEL_PREFIXES: tuple[str, ...] = (
     "gpt-5", "o1", "o3", "o4",
     "deepseek-r1", "deepseek-reasoner",
     "qwen-qwq", "qwen3-think", "qwen3-thinking",
+    # Stepfun (阶跃星辰) — step-3 / step-3.x / step-r1-* are reasoning models
+    # whose API counts internal reasoning against the completion budget. They
+    # MUST be called with ``max_completion_tokens`` and ``reasoning_effort``
+    # plumbed through so the model can pace itself; otherwise large prompts
+    # exhaust ``max_tokens`` on reasoning and emit zero visible content
+    # (observed empirically with step-3.6 + reasoning_effort=high on 44k
+    # char subagent prompts).
+    "step-3", "step-r1",
 )
 
 

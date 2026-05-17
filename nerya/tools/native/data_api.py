@@ -1,0 +1,176 @@
+"""Native tool wrapper for provider-specific read-only data APIs."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ...data_api import (
+    DataApiContext,
+    DataApiError,
+    DataApiRegistry,
+    build_data_api_registry,
+    compact_data_result,
+)
+from ..types import ToolCall, ToolError, ToolErrorKind, ToolResult
+
+
+DATA_API_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "op": {
+            "type": "string",
+            "enum": ["list", "schema", "call"],
+            "description": "Use list to discover actions, schema to inspect one action, call to execute a read-only action.",
+        },
+        "provider": {
+            "type": "string",
+            "description": "Provider namespace, e.g. akshare, wallet, onchainos.",
+        },
+        "action": {
+            "type": "string",
+            "description": "Provider action/function name. For AkShare this is the AkShare function name.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional search text for op=list.",
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional tag filter for op=list.",
+        },
+        "args": {
+            "type": "object",
+            "additionalProperties": True,
+            "description": "JSON arguments passed to provider.action for op=call.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 50,
+            "description": "Max actions for list or max rows returned for call.",
+        },
+        "columns": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional column projection for table-like call results.",
+        },
+    },
+    "required": ["op"],
+}
+
+
+def data_api_handler(
+    call: ToolCall,
+    *,
+    config_like: Any | None = None,
+    registry: DataApiRegistry | None = None,
+) -> ToolResult:
+    args = dict(call.arguments or {})
+    op = str(args.get("op") or "").strip().lower()
+    reg = registry or build_data_api_registry()
+    context = DataApiContext(config_like=config_like)
+    try:
+        if op == "list":
+            payload = reg.list(
+                provider=args.get("provider"),
+                query=str(args.get("query") or ""),
+                tags=args.get("tags") if isinstance(args.get("tags"), list) else (),
+                limit=_limit(args.get("limit"), default=20, maximum=100),
+            )
+            return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+        if op == "schema":
+            provider = _required(args, "provider")
+            action = _required(args, "action")
+            payload = reg.schema(provider, action)
+            return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+        if op == "call":
+            provider = _required(args, "provider")
+            action = _required(args, "action")
+            payload_args = args.get("args")
+            if payload_args is None:
+                payload_args = args.get("payload")
+            if not isinstance(payload_args, dict):
+                payload_args = {}
+            raw = reg.call(provider, action, payload_args, context=context)
+            payload = compact_data_result(
+                provider,
+                action,
+                raw,
+                limit=_limit(args.get("limit"), default=50, maximum=500),
+                columns=args.get("columns") if isinstance(args.get("columns"), list) else (),
+            )
+            return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+        return _error(
+            call,
+            ToolErrorKind.SCHEMA_VALIDATION,
+            "data_api op must be one of list, schema, call",
+            detail={"op": args.get("op")},
+            retryable=False,
+        )
+    except DataApiError as exc:
+        return _error(
+            call,
+            _tool_error_kind(exc.kind),
+            exc.message,
+            detail=exc.detail,
+            retryable=exc.retryable,
+        )
+    except Exception as exc:
+        return _error(
+            call,
+            ToolErrorKind.PROVIDER_ERROR,
+            str(exc),
+            detail={"op": op, "provider": args.get("provider"), "action": args.get("action")},
+            retryable=None,
+        )
+
+
+def _required(args: dict[str, Any], key: str) -> str:
+    value = args.get(key)
+    if value is None or str(value).strip() == "":
+        raise DataApiError(
+            f"missing required field: {key}",
+            kind="schema_validation",
+            detail={"field": key},
+            retryable=False,
+        )
+    return str(value)
+
+
+def _limit(value: Any, *, default: int, maximum: int) -> int:
+    try:
+        return max(1, min(int(value), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _tool_error_kind(kind: str) -> ToolErrorKind:
+    mapping = {
+        "schema_validation": ToolErrorKind.SCHEMA_VALIDATION,
+        "not_found": ToolErrorKind.NOT_FOUND,
+        "provider_error": ToolErrorKind.PROVIDER_ERROR,
+        "execution_error": ToolErrorKind.EXECUTION_ERROR,
+    }
+    return mapping.get(kind, ToolErrorKind.PROVIDER_ERROR)
+
+
+def _error(
+    call: ToolCall,
+    kind: ToolErrorKind,
+    message: str,
+    *,
+    detail: dict[str, Any] | None = None,
+    retryable: bool | None = None,
+) -> ToolResult:
+    return ToolResult.from_error(
+        tool_use_id=call.id,
+        name=call.name,
+        error=ToolError(
+            kind=kind,
+            message=message,
+            detail=dict(detail or {}),
+            retryable=retryable,
+        ),
+    )

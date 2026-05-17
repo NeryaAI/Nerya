@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslations } from "next-intl";
-import { Card, Empty, ErrorBanner, Json, PageBody, PageHeader, Pill } from "../../components/Page";
+import { Advanced, Card, Empty, ErrorBanner, Json, PageBody, PageHeader, Pill } from "../../components/Page";
 import { SwitchIndicator } from "../../components/SwitchControl";
 import {
   CheckIcon,
@@ -25,9 +25,10 @@ import type {
   EvolutionTimelineItem,
 } from "../../lib/evolutionTypes";
 
-type Tab = "timeline" | "assets" | "proposals" | "config" | "debug";
+type Tab = "timeline" | "assets" | "proposals";
 
-const TAB_IDS: Tab[] = ["timeline", "assets", "proposals", "config", "debug"];
+const TAB_IDS: Tab[] = ["timeline", "assets", "proposals"];
+const HISTORY_PAGE_SIZE = 10;
 
 function toneForStatus(status?: string): "neutral" | "ok" | "warn" | "danger" | "brand" {
   const s = String(status || "").toLowerCase();
@@ -55,6 +56,9 @@ export default function SelfEvolutionPage() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [dreamEnabled, setDreamEnabled] = useState(false);
+  const [dreamTime, setDreamTime] = useState("03:00");
+  const [dreamTimezone, setDreamTimezone] = useState("Asia/Shanghai");
 
   async function load(refreshSignals = false) {
     setBusy(refreshSignals ? "collect" : "load");
@@ -70,7 +74,7 @@ export default function SelfEvolutionPage() {
       const out = await clientApi.evolutionTimeline({
         strategy_id: strategy.trim() || undefined,
         query: query.trim() || undefined,
-        limit: 160,
+        limit: 80,
       });
       setEnvelope(out);
       setSelectedId((current) =>
@@ -89,6 +93,18 @@ export default function SelfEvolutionPage() {
     void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const schedule = envelope?.config.periodic_reflection;
+    if (!schedule) return;
+    setDreamEnabled(Boolean(schedule.enabled));
+    setDreamTime(schedule.time || "03:00");
+    setDreamTimezone(schedule.timezone || "Asia/Shanghai");
+  }, [
+    envelope?.config.periodic_reflection?.enabled,
+    envelope?.config.periodic_reflection?.time,
+    envelope?.config.periodic_reflection?.timezone,
+  ]);
 
   const timeline = envelope?.timeline ?? [];
   const summary = envelope?.summary;
@@ -110,6 +126,40 @@ export default function SelfEvolutionPage() {
     try {
       const out = await clientApi.evolutionReflect();
       setNotice(t("reflectionCompleted", { result: String(out.count ?? out.proposals ?? t("done")) }));
+      await load(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function saveDreamReflection() {
+    setBusy("dream-save");
+    setError(null);
+    try {
+      const out = await clientApi.evolutionReflectionScheduleUpdate({
+        enabled: dreamEnabled,
+        time: dreamTime,
+        timezone: dreamTimezone,
+      });
+      if (!out.ok) throw new Error(JSON.stringify(out));
+      setNotice(t("dreamSaved"));
+      await load(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runDreamReflectionNow() {
+    setBusy("dream-now");
+    setError(null);
+    try {
+      const out = await clientApi.evolutionReflectionRunNow();
+      const result = (out.result || {}) as Record<string, unknown>;
+      setNotice(t("dreamRunResult", { status: String(result.status || out.ok || t("done")) }));
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -197,8 +247,9 @@ export default function SelfEvolutionPage() {
         description={t("description")}
         actions={
           <>
-            <button className="btn btn-ghost" onClick={() => void load(false)} disabled={Boolean(busy)}>
-              {t("refresh")}
+            <button className="btn btn-ghost" onClick={() => void runReflection()} disabled={Boolean(busy)}>
+              <SparkIcon size={14} />
+              {busy === "reflect" ? t("reflecting") : t("runReflection")}
             </button>
             <button className="btn btn-primary" onClick={() => void load(true)} disabled={Boolean(busy)}>
               <EvolutionIcon size={14} />
@@ -222,16 +273,33 @@ export default function SelfEvolutionPage() {
           onStrategy={setStrategy}
           onQuery={setQuery}
           onFilter={() => void load(false)}
-          onReflect={runReflection}
           onTuning={runTuningDryRun}
         />
 
-        <SummaryStrip summary={summary} />
-        <LearningChain timeline={timeline} />
+        <Advanced
+          title={t("dreamPanelTitle")}
+          description={t("dreamPanelHint")}
+          storageKey="nerya.evolution.advanced.dream"
+        >
+          <DreamReflectionPanel
+            schedule={envelope?.config.periodic_reflection}
+            enabled={dreamEnabled}
+            time={dreamTime}
+            timezone={dreamTimezone}
+            busy={busy}
+            onEnabled={setDreamEnabled}
+            onTime={setDreamTime}
+            onTimezone={setDreamTimezone}
+            onSave={saveDreamReflection}
+            onRunNow={runDreamReflectionNow}
+          />
+        </Advanced>
 
-        <div className="overflow-x-auto border-b border-white/5">
+        <LearningChain timeline={timeline} summary={summary} />
+
+        <div className="overflow-x-auto border-b border-brand-500/10">
           {TAB_IDS.map((id) => {
-            const labelKey = id === "timeline" ? "tabHistory" : id === "assets" ? "tabAssets" : id === "proposals" ? "tabProposals" : id === "config" ? "tabConfig" : "tabDebug";
+            const labelKey = id === "timeline" ? "tabHistory" : id === "assets" ? "tabAssets" : "tabProposals";
             return (
               <button
                 key={id}
@@ -258,10 +326,7 @@ export default function SelfEvolutionPage() {
           ) : (
             <EmptyHistory
               busy={busy}
-              hasStrategy={Boolean(strategy.trim())}
               onCollect={() => void load(true)}
-              onReflect={runReflection}
-              onTuning={runTuningDryRun}
               onOpenProposals={() => setTab("proposals")}
             />
           )
@@ -285,8 +350,22 @@ export default function SelfEvolutionPage() {
           />
         ) : null}
 
-        {tab === "config" && envelope ? <ConfigPanel config={envelope.config} /> : null}
-        {tab === "debug" && envelope ? <DebugPanel envelope={envelope} /> : null}
+        {envelope ? (
+          <Advanced
+            title={t("tabConfig")}
+            storageKey="nerya.evolution.advanced.config"
+          >
+            <ConfigPanel config={envelope.config} />
+          </Advanced>
+        ) : null}
+        {envelope ? (
+          <Advanced
+            title={t("tabDebug")}
+            storageKey="nerya.evolution.advanced.debug"
+          >
+            <DebugPanel envelope={envelope} />
+          </Advanced>
+        ) : null}
       </PageBody>
     </div>
   );
@@ -299,7 +378,6 @@ function Filters({
   onStrategy,
   onQuery,
   onFilter,
-  onReflect,
   onTuning,
 }: {
   strategy: string;
@@ -308,14 +386,14 @@ function Filters({
   onStrategy: (value: string) => void;
   onQuery: (value: string) => void;
   onFilter: () => void;
-  onReflect: () => Promise<void>;
   onTuning: () => Promise<void>;
 }) {
   const t = useTranslations("selfEvolution");
+  const hasStrategy = Boolean(strategy.trim());
   return (
-    <Card>
-      <div className="grid gap-3 lg:grid-cols-[minmax(180px,260px)_1fr_auto] lg:items-end">
-        <label className="text-[12px] text-ink-300">
+    <div className="grid gap-3 border-b border-brand-500/10 pb-4 lg:grid-cols-[minmax(180px,260px)_1fr_auto] lg:items-end">
+      <div>
+        <label className="block text-[12px] text-ink-400">
           {t("strategy")}
           <input
             value={strategy}
@@ -324,45 +402,130 @@ function Filters({
             placeholder={t("strategyPlaceholder")}
           />
         </label>
-        <label className="text-[12px] text-ink-300">
-          {t("searchLabel")}
-          <input
-            value={query}
-            onChange={(e) => onQuery(e.target.value)}
-            className="input-dark mt-1"
-            placeholder={t("searchPlaceholder")}
-          />
-        </label>
-        <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
-          <button className="btn btn-ghost" onClick={onFilter} disabled={Boolean(busy)}>
-            <SearchIcon size={14} />
-            {t("filter")}
+        {hasStrategy ? (
+          <button
+            type="button"
+            onClick={() => void onTuning()}
+            disabled={Boolean(busy)}
+            className="mt-1.5 inline-flex items-center gap-1 text-[11px] text-brand-300 transition hover:text-brand-200 disabled:opacity-50"
+          >
+            <WrenchIcon size={12} />
+            {busy === "tuning" ? t("running") : t("tuningDryRun")} →
           </button>
-          <button className="btn btn-ghost" onClick={() => void onReflect()} disabled={Boolean(busy)}>
-            <SparkIcon size={14} />
-            {busy === "reflect" ? t("reflecting") : t("runReflection")}
-          </button>
-          <button className="btn btn-ghost" onClick={() => void onTuning()} disabled={Boolean(busy)}>
-            <WrenchIcon size={14} />
-            {busy === "tuning" ? t("running") : t("tuningDryRun")}
-          </button>
-        </div>
+        ) : null}
       </div>
-    </Card>
+      <label className="text-[12px] text-ink-400">
+        {t("searchLabel")}
+        <input
+          value={query}
+          onChange={(e) => onQuery(e.target.value)}
+          className="input-dark mt-1"
+          placeholder={t("searchPlaceholder")}
+        />
+      </label>
+      <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
+        <button className="btn btn-ghost" onClick={onFilter} disabled={Boolean(busy)}>
+          <SearchIcon size={14} />
+          {t("filter")}
+        </button>
+      </div>
+    </div>
   );
 }
 
-function SummaryStrip({ summary }: { summary?: EvolutionTimelineEnvelope["summary"] }) {
+function DreamReflectionPanel({
+  schedule,
+  enabled,
+  time,
+  timezone,
+  busy,
+  onEnabled,
+  onTime,
+  onTimezone,
+  onSave,
+  onRunNow,
+}: {
+  schedule?: EvolutionConfigSnapshot["periodic_reflection"];
+  enabled: boolean;
+  time: string;
+  timezone: string;
+  busy: string;
+  onEnabled: (value: boolean) => void;
+  onTime: (value: string) => void;
+  onTimezone: (value: string) => void;
+  onSave: () => Promise<void>;
+  onRunNow: () => Promise<void>;
+}) {
   const t = useTranslations("selfEvolution");
+  const disabled = Boolean(busy);
   return (
-    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-      <Stat label={t("signals")} value={summary?.signals ?? 0} />
-      <Stat label={t("openProposals")} value={summary?.open_proposals ?? 0} tone={summary?.open_proposals ? "warn" : "neutral"} />
-      <Stat label={t("validationPlans")} value={summary?.validation_plans ?? 0} />
-      <Stat label={t("reusableAssets")} value={summary?.assets ?? 0} tone="ok" />
-      <Stat label={t("blocked")} value={(summary?.blocked_candidates ?? 0) + (summary?.blocked_validation_plans ?? 0)} tone="danger" />
-      <Stat label={t("lastActivity")} value={summary?.last_activity_ts ? formatTime(summary.last_activity_ts) : t("none")} compact />
-    </div>
+    <details className="rounded-lg border border-[color:var(--line)]" open={enabled}>
+      <summary className="cursor-pointer px-4 py-3 text-[13px] font-medium text-ink-200 hover:text-ink-100 flex items-center gap-2">
+        <span>{t("dreamTitle")}</span>
+        <Pill tone={enabled ? "ok" : "neutral"}>{enabled ? t("enabledStatus") : t("disabledStatus")}</Pill>
+        <span className="ml-auto text-[12px] text-ink-500 font-mono">{schedule?.cron || ""}</span>
+      </summary>
+      <div className="border-t border-[color:var(--line)] px-4 py-3">
+      <div className="grid gap-3 lg:grid-cols-[minmax(170px,220px)_160px_minmax(180px,260px)_1fr_auto] lg:items-end">
+        <label className="flex min-h-[42px] items-center justify-between gap-3 rounded-lg border border-brand-500/10 bg-ink-950/30 px-3 py-2 text-sm text-ink-200">
+          <span>{t("dreamEnabled")}</span>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(event) => onEnabled(event.target.checked)}
+            className="sr-only"
+            disabled={disabled}
+          />
+          <SwitchIndicator
+            checked={enabled}
+            label={t("dreamEnabled")}
+            tone="accent"
+            size="sm"
+            toneWhenOff
+          />
+        </label>
+        <label className="text-[12px] text-ink-300">
+          {t("dreamTime")}
+          <input
+            type="time"
+            value={time}
+            onChange={(event) => onTime(event.target.value)}
+            className="input-dark mt-1 font-mono"
+            disabled={disabled}
+          />
+        </label>
+        <label className="text-[12px] text-ink-300">
+          {t("dreamTimezone")}
+          <input
+            value={timezone}
+            onChange={(event) => onTimezone(event.target.value)}
+            className="input-dark mt-1 font-mono"
+            placeholder="Asia/Shanghai"
+            disabled={disabled}
+          />
+        </label>
+        <div className="min-w-0 rounded-lg border border-brand-500/10 bg-ink-950/30 px-3 py-2 text-[12px] text-ink-400">
+          <div className="flex flex-wrap items-center gap-2">
+            <Pill tone={enabled ? "ok" : "neutral"}>{enabled ? t("enabledStatus") : t("disabledStatus")}</Pill>
+            <Pill tone={schedule?.configured ? "brand" : "neutral"}>
+              {schedule?.configured ? t("configuredStatus") : t("notConfiguredStatus")}
+            </Pill>
+          </div>
+          <div className="mt-2 truncate font-mono">{schedule?.cron || t("notScheduled")}</div>
+          <div className="mt-1 truncate font-mono">{schedule?.target || "skill:evolution.reflect"}</div>
+        </div>
+        <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
+          <button className="btn btn-ghost" onClick={() => void onRunNow()} disabled={disabled}>
+            <SparkIcon size={14} />
+            {busy === "dream-now" ? t("reflecting") : t("dreamRunNow")}
+          </button>
+          <button className="btn btn-primary" onClick={() => void onSave()} disabled={disabled}>
+            {busy === "dream-save" ? t("saving") : t("saveDream")}
+          </button>
+        </div>
+      </div>
+      </div>
+    </details>
   );
 }
 
@@ -386,13 +549,19 @@ function Stat({
   }[tone];
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-950/35 p-3">
-      <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{label}</div>
+      <div className="text-[11px] text-ink-500 font-medium">{label}</div>
       <div className={`mt-1 font-mono ${compact ? "text-sm" : "text-xl"} ${color}`}>{value}</div>
     </div>
   );
 }
 
-function LearningChain({ timeline }: { timeline: EvolutionTimelineItem[] }) {
+function LearningChain({
+  timeline,
+  summary,
+}: {
+  timeline: EvolutionTimelineItem[];
+  summary?: EvolutionTimelineEnvelope["summary"];
+}) {
   const t = useTranslations("selfEvolution");
   const stages = [
     { id: "signal", label: t("stageSignals"), hint: t("stageSignalsHint") },
@@ -401,63 +570,71 @@ function LearningChain({ timeline }: { timeline: EvolutionTimelineItem[] }) {
     { id: "validation", label: t("stageValidation"), hint: t("stageValidationHint") },
     { id: "asset", label: t("stageAsset"), hint: t("stageAssetHint") },
   ];
+  const blocked = (summary?.blocked_candidates ?? 0) + (summary?.blocked_validation_plans ?? 0);
+  const lastActivity = summary?.last_activity_ts ? formatTime(summary.last_activity_ts) : null;
   return (
-    <div className="grid gap-2 md:grid-cols-5">
-      {stages.map((stage, idx) => {
-        const count = timeline.filter((item) => item.stage === stage.id).length;
-        return (
-          <div key={stage.id} className="relative rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
-            {idx < stages.length - 1 ? (
-              <div className="pointer-events-none absolute right-[-10px] top-1/2 hidden h-px w-5 bg-brand-500/25 md:block" />
-            ) : null}
-            <div className="flex items-center justify-between gap-2">
-              <Pill tone={count ? stageTone(stage.id) : "neutral"}>{count}</Pill>
-              <span className="text-[10px] uppercase tracking-[0.14em] text-ink-500">{stage.hint}</span>
+    <div>
+      <div className="grid gap-2 md:grid-cols-5">
+        {stages.map((stage, idx) => {
+          const count = timeline.filter((item) => item.stage === stage.id).length;
+          return (
+            <div key={stage.id} className="relative rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
+              {idx < stages.length - 1 ? (
+                <div className="pointer-events-none absolute right-[-10px] top-1/2 hidden h-px w-5 bg-brand-500/25 md:block" />
+              ) : null}
+              <div className="flex items-center justify-between gap-2">
+                <Pill tone={count ? stageTone(stage.id) : "neutral"}>{count}</Pill>
+                <span className="text-[11px] text-ink-500 font-medium">{stage.hint}</span>
+              </div>
+              <div className="mt-2 text-sm font-medium text-ink-100">{stage.label}</div>
             </div>
-            <div className="mt-2 text-sm font-medium text-ink-100">{stage.label}</div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+      {(blocked || lastActivity) ? (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-ink-500">
+          {blocked ? (
+            <span>
+              {t("blocked")}: <span className="font-mono text-[#ef4560]">{blocked}</span>
+            </span>
+          ) : null}
+          {lastActivity ? (
+            <span>
+              {t("lastActivity")}: <span className="font-mono text-ink-300">{lastActivity}</span>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function EmptyHistory({
   busy,
-  hasStrategy,
   onCollect,
-  onReflect,
-  onTuning,
   onOpenProposals,
 }: {
   busy: string;
-  hasStrategy: boolean;
   onCollect: () => void;
-  onReflect: () => Promise<void>;
-  onTuning: () => Promise<void>;
   onOpenProposals: () => void;
 }) {
   const t = useTranslations("selfEvolution");
   return (
     <Card title={t("noHistoryTitle")}>
-      <div className="grid gap-4 lg:grid-cols-[1fr_360px] lg:items-center">
-        <Empty
-          title={t("noMatchTitle")}
-          subtitle={t("noMatchSubtitle")}
-        />
-        <div className="flex flex-wrap justify-center gap-2 lg:justify-end">
+      <div className="py-6 text-center">
+        <div className="text-sm text-ink-300">{t("noMatchTitle")}</div>
+        <div className="mt-1 text-[12px] text-ink-500">{t("noMatchSubtitle")}</div>
+        <div className="mt-5 flex flex-wrap justify-center gap-2">
           <button className="btn btn-primary" onClick={onCollect} disabled={Boolean(busy)}>
             <EvolutionIcon size={14} />
             {t("collectSignals")}
           </button>
-          <button className="btn btn-ghost" onClick={() => void onReflect()} disabled={Boolean(busy)}>
-            {t("runReflection")}
-          </button>
-          <button className="btn btn-ghost" onClick={() => void onTuning()} disabled={Boolean(busy) || !hasStrategy}>
-            {t("tuningDryRun")}
-          </button>
-          <button className="btn btn-ghost" onClick={onOpenProposals}>
-            {t("openProposalsBtn")}
+          <button
+            type="button"
+            onClick={onOpenProposals}
+            className="text-[12px] text-brand-300 transition hover:text-brand-200"
+          >
+            {t("openProposalsBtn")} →
           </button>
         </div>
       </div>
@@ -476,15 +653,62 @@ function TimelineConsole({
   selectedId: string | null;
   onSelect: (id: string) => void;
 }) {
-  const t = useTranslations("selfEvolution");
   return (
-    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(460px,560px)]">
-      <Card
-        title={t("historyTitle", { count: items.length })}
-        description={t("historyDesc")}
-      >
-        <div className="embedded-list-scroll-lg divide-y divide-brand-500/10">
-          {items.map((item) => (
+    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(460px,560px)] xl:items-stretch">
+      <TimelineHistoryPanel
+        items={items}
+        selectedId={selectedId}
+        onSelect={onSelect}
+      />
+      <div className="min-w-0" data-testid="timeline-detail-panel">
+        <TimelineDetail item={selected} />
+      </div>
+    </div>
+  );
+}
+
+function TimelineHistoryPanel({
+  items,
+  selectedId,
+  onSelect,
+}: {
+  items: EvolutionTimelineItem[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const t = useTranslations("selfEvolution");
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(items.length / HISTORY_PAGE_SIZE));
+  const safePage = Math.min(page, pageCount);
+  const startIndex = (safePage - 1) * HISTORY_PAGE_SIZE;
+  const pageItems = items.slice(startIndex, startIndex + HISTORY_PAGE_SIZE);
+  const endIndex = Math.min(items.length, startIndex + pageItems.length);
+
+  useEffect(() => {
+    setPage(1);
+  }, [items.length]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const selectedIndex = items.findIndex((item) => item.id === selectedId);
+    if (selectedIndex < 0) return;
+    setPage(Math.floor(selectedIndex / HISTORY_PAGE_SIZE) + 1);
+  }, [items, selectedId]);
+
+  return (
+    <section
+      className="card card-hover min-w-0 overflow-hidden xl:flex xl:h-full xl:min-h-0 xl:flex-col xl:self-stretch"
+      data-testid="timeline-history-panel"
+    >
+      <div className="card-head">
+        <div className="min-w-0">
+          <h3 className="card-title break-words">{t("historyTitle", { count: items.length })}</h3>
+          <p className="card-subtle mt-1 break-words">{t("historyDesc")}</p>
+        </div>
+      </div>
+      <div className="px-5 py-4 xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
+        <div className="embedded-list-scroll-lg divide-y divide-brand-500/10 xl:min-h-0 xl:flex-1 xl:max-h-none">
+          {pageItems.map((item) => (
             <TimelineRow
               key={item.id}
               item={item}
@@ -493,9 +717,34 @@ function TimelineConsole({
             />
           ))}
         </div>
-      </Card>
-      <TimelineDetail item={selected} />
-    </div>
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-brand-500/10 pt-3 text-[12px] text-ink-400">
+          <span className="font-mono">
+            {t("historyPageStatus", {
+              start: items.length ? startIndex + 1 : 0,
+              end: endIndex,
+              total: items.length,
+            })}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              className="btn btn-ghost px-3 py-1.5 text-[12px]"
+              onClick={() => setPage((value) => Math.max(1, value - 1))}
+              disabled={safePage <= 1}
+            >
+              {t("prevPage")}
+            </button>
+            <span className="font-mono text-ink-500">{safePage}/{pageCount}</span>
+            <button
+              className="btn btn-ghost px-3 py-1.5 text-[12px]"
+              onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
+              disabled={safePage >= pageCount}
+            >
+              {t("nextPage")}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -544,7 +793,6 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
     );
   }
   const process = item.process;
-  const sections = process?.sections ?? [];
   return (
     <Card
       title={t("timelineDetail")}
@@ -561,6 +809,7 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
         </div>
 
         <ProcessStatus process={process} />
+        <AgentLearningFlow item={item} process={process} />
         <DetailRow label={t("whyTriggered")}>{item.why || t("noTriggerExplanation")}</DetailRow>
         <DetailRow label={t("evidence")}>
           <TokenList values={item.evidence_refs ?? []} empty={t("noEvidence")} />
@@ -594,14 +843,6 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
         </DetailRow>
         <DetailRow label={t("nextStep")}>{item.next_step || t("reviewEvidence")}</DetailRow>
 
-        {sections.length ? (
-          <ProcessTrace sections={sections} />
-        ) : (
-          <DetailRow label="Process artifacts">
-            <span className="text-ink-500">No prompt, input, generated document, or output artifact is linked to this record yet.</span>
-          </DetailRow>
-        )}
-
         <details className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
           <summary className="cursor-pointer text-[12px] text-ink-300">{t("rawRecord")}</summary>
           <div className="mt-3">
@@ -613,21 +854,257 @@ function TimelineDetail({ item }: { item: EvolutionTimelineItem | null }) {
   );
 }
 
+type AgentFlowRole = "trigger" | "agent_input" | "agent_output" | "file_change" | "validation" | "learning";
+
+type AgentFlowEntry = {
+  id: string;
+  role: AgentFlowRole;
+  label: string;
+  title: string;
+  detail: string;
+  path?: string;
+  badges?: string[];
+  artifact?: EvolutionProcessArtifact;
+};
+
+type AgentFlowLabels = {
+  trigger: string;
+  agentInput: string;
+  agentOutput: string;
+  fileChange: string;
+  validation: string;
+  learning: string;
+  evidence: string;
+  promptTitle: string;
+  inputTitle: string;
+  outputTitle: string;
+  validationTitle: string;
+  fileTitle: string;
+  fileSkill: string;
+  fileMarkdown: string;
+  proposedWrite: (path: string) => string;
+};
+
+function AgentLearningFlow({
+  item,
+  process,
+}: {
+  item: EvolutionTimelineItem;
+  process?: EvolutionProcessTrace;
+}) {
+  const t = useTranslations("selfEvolution");
+  const labels: AgentFlowLabels = {
+    trigger: t("flowTrigger"),
+    agentInput: t("flowAgentInput"),
+    agentOutput: t("flowAgentOutput"),
+    fileChange: t("flowFileChange"),
+    validation: t("flowValidation"),
+    learning: t("flowLearning"),
+    evidence: t("flowEvidence"),
+    promptTitle: t("flowPromptTitle"),
+    inputTitle: t("flowInputTitle"),
+    outputTitle: t("flowOutputTitle"),
+    validationTitle: t("flowValidationTitle"),
+    fileTitle: t("flowFileTitle"),
+    fileSkill: t("flowFileSkill"),
+    fileMarkdown: t("flowFileMarkdown"),
+    proposedWrite: (path: string) => t("flowProposedWrite", { path }),
+  };
+  const sectionArtifacts = (process?.sections ?? []).flatMap((section) =>
+    section.artifacts.map((artifact, index) => ({ sectionId: section.id, sectionTitle: section.title, artifact, index })),
+  );
+  const fallbackArtifacts = sectionArtifacts.length
+    ? []
+    : (process?.artifacts ?? []).map((artifact, index) => ({ sectionId: "artifacts", sectionTitle: labels.evidence, artifact, index }));
+  const artifactRefs = [...sectionArtifacts, ...fallbackArtifacts].slice(0, 32);
+  const entries: AgentFlowEntry[] = [
+    {
+      id: `${item.id}:trigger`,
+      role: "trigger",
+      label: labels.trigger,
+      title: item.title || t("flowRecord"),
+      detail: item.why || item.summary || t("noTriggerExplanation"),
+      badges: [
+        item.strategy_id ? `strategy:${item.strategy_id}` : "",
+        item.proposal_id ? `proposal:${shortId(item.proposal_id)}` : "",
+        item.validation_plan_id ? `validation:${shortId(item.validation_plan_id)}` : "",
+      ].filter(Boolean),
+    },
+  ];
+
+  for (const { sectionId, sectionTitle, artifact, index } of artifactRefs) {
+    const role = flowRoleForArtifact(artifact, sectionId);
+    const path = displayPathForArtifact(artifact);
+    entries.push({
+      id: `${item.id}:${sectionId}:${artifact.id}:${index}`,
+      role,
+      label: flowLabel(role, labels),
+      title: flowTitle(role, artifact, sectionTitle, path, labels),
+      detail: String(artifact.preview || ""),
+      path,
+      badges: [
+        artifact.kind ? String(artifact.kind) : "",
+        artifact.language ? String(artifact.language) : "",
+        typeof artifact.size === "number" ? formatBytes(artifact.size) : "",
+        artifact.redacted ? "redacted" : "",
+        artifact.truncated ? "truncated" : "",
+      ].filter(Boolean),
+      artifact,
+    });
+  }
+
+  return (
+    <section className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3" data-testid="agent-learning-flow">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="text-[11px] text-ink-500 font-medium">{t("agentFlow")}</div>
+          <div className="mt-1 text-[12px] text-ink-400">{t("agentFlowDesc")}</div>
+        </div>
+        <Pill tone={artifactRefs.length ? "brand" : "neutral"}>{entries.length}</Pill>
+      </div>
+      <ol className="mt-4 space-y-3">
+        {entries.map((entry) => (
+          <AgentFlowBubble key={entry.id} entry={entry} />
+        ))}
+      </ol>
+      {!artifactRefs.length ? (
+        <div className="mt-3 text-sm text-ink-500">{t("flowNoArtifacts")}</div>
+      ) : null}
+    </section>
+  );
+}
+
+function AgentFlowBubble({ entry }: { entry: AgentFlowEntry }) {
+  const isAgentOutput = entry.role === "agent_output" || entry.role === "file_change";
+  return (
+    <li className={["flex", isAgentOutput ? "justify-end" : "justify-start"].join(" ")}>
+      <div
+        className={[
+          "min-w-0 max-w-full rounded-lg border px-3 py-2.5 text-sm",
+          isAgentOutput ? "w-[92%] border-accent-500/20 bg-accent-500/[0.06]" : "w-[92%] border-brand-500/15 bg-ink-900/45",
+        ].join(" ")}
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <Pill tone={flowTone(entry.role)}>{entry.label}</Pill>
+          <span className="min-w-0 break-words font-medium text-ink-100">{entry.title}</span>
+        </div>
+        {entry.path ? (
+          <div className="mt-1 break-all font-mono text-[11px] text-ink-500">{entry.path}</div>
+        ) : null}
+        {entry.badges?.length ? (
+          <div className="mt-2">
+            <TokenList values={entry.badges} empty="" />
+          </div>
+        ) : null}
+        {entry.detail ? (
+          <pre className="embedded-scroll mt-2 max-h-64 whitespace-pre-wrap break-words rounded-md border border-ink-700/70 bg-ink-950/70 p-2 text-[11px] leading-relaxed text-ink-200">
+            {entry.detail}
+          </pre>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+function flowRoleForArtifact(artifact: EvolutionProcessArtifact, sectionId: string): AgentFlowRole {
+  const kind = String(artifact.kind || "").toLowerCase();
+  if (isProposedChangeArtifact(artifact)) return "file_change";
+  if (kind === "prompt" || kind === "input" || sectionId === "prompt_inputs" || sectionId === "inputs") {
+    return "agent_input";
+  }
+  if (kind === "output" || sectionId === "subagent_output") return "agent_output";
+  if (kind === "validation" || sectionId === "validation") return "validation";
+  if (kind === "proposal" || kind === "document" || sectionId === "proposal_files" || sectionId === "generated_docs") {
+    return "file_change";
+  }
+  return "learning";
+}
+
+function flowLabel(
+  role: AgentFlowRole,
+  labels: AgentFlowLabels,
+) {
+  if (role === "trigger") return labels.trigger;
+  if (role === "agent_input") return labels.agentInput;
+  if (role === "agent_output") return labels.agentOutput;
+  if (role === "file_change") return labels.fileChange;
+  if (role === "validation") return labels.validation;
+  return labels.learning;
+}
+
+function flowTitle(
+  role: AgentFlowRole,
+  artifact: EvolutionProcessArtifact,
+  sectionTitle: string,
+  path: string | undefined,
+  labels: AgentFlowLabels,
+) {
+  if (role === "agent_input") {
+    return artifact.kind === "input" ? labels.inputTitle : labels.promptTitle;
+  }
+  if (role === "agent_output") return labels.outputTitle;
+  if (role === "validation") return labels.validationTitle;
+  if (role === "file_change") {
+    if (path) return labels.proposedWrite(path);
+    if (artifact.title === "SKILL.md") return labels.fileSkill;
+    if (String(artifact.title || "").toLowerCase().endsWith(".md")) return labels.fileMarkdown;
+    return labels.fileTitle;
+  }
+  return artifact.title || sectionTitle || labels.evidence;
+}
+
+function flowTone(role: AgentFlowRole): "neutral" | "ok" | "warn" | "danger" | "brand" {
+  if (role === "agent_input" || role === "trigger") return "brand";
+  if (role === "agent_output" || role === "file_change") return "ok";
+  if (role === "validation") return "warn";
+  return "neutral";
+}
+
+function isProposedChangeArtifact(artifact: EvolutionProcessArtifact) {
+  const meta = artifact.metadata ?? {};
+  if (String(meta.scope || "") === "after" || String(meta.operation || "") === "proposed_write") {
+    return true;
+  }
+  const normalized = String(artifact.path || "").replace(/\\/g, "/");
+  return /(^|\/)after\//.test(normalized);
+}
+
+function displayPathForArtifact(artifact: EvolutionProcessArtifact) {
+  const meta = artifact.metadata ?? {};
+  if (typeof meta.workspace_path === "string" && meta.workspace_path) {
+    return meta.workspace_path;
+  }
+  if (typeof meta.proposal_path === "string" && meta.proposal_path) {
+    return meta.proposal_path;
+  }
+  const raw = String(artifact.path || "");
+  if (!raw) return undefined;
+  const normalized = raw.replace(/\\/g, "/");
+  const match = normalized.match(/(?:^|\/)after\/(.+)$/);
+  if (match?.[1]) return match[1];
+  return raw;
+}
+
 function ProcessStatus({ process }: { process?: EvolutionProcessTrace }) {
+  const t = useTranslations("selfEvolution");
+  const hasChanges = Boolean(
+    process?.has_file_changes || (process?.artifacts ?? []).some((artifact) => isProposedChangeArtifact(artifact)),
+  );
   const flags = [
-    { label: "Prompt", active: Boolean(process?.has_prompt), tone: "brand" as const },
-    { label: "Inputs", active: Boolean(process?.has_inputs), tone: "brand" as const },
-    { label: "Docs", active: Boolean(process?.has_generated_docs), tone: "ok" as const },
-    { label: "Validation", active: Boolean(process?.has_validation), tone: "warn" as const },
-    { label: "Output", active: Boolean(process?.has_outputs), tone: "ok" as const },
+    { label: t("processPrompt"), active: Boolean(process?.has_prompt), tone: "brand" as const },
+    { label: t("processInputs"), active: Boolean(process?.has_inputs), tone: "brand" as const },
+    { label: t("processChanges"), active: hasChanges, tone: "ok" as const },
+    { label: t("processDocs"), active: Boolean(process?.has_generated_docs), tone: "ok" as const },
+    { label: t("processValidation"), active: Boolean(process?.has_validation), tone: "warn" as const },
+    { label: t("processOutput"), active: Boolean(process?.has_outputs), tone: "ok" as const },
   ];
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
       {flags.map((flag) => (
         <div key={flag.label} className="rounded-lg border border-brand-500/10 bg-ink-950/25 px-2 py-2">
-          <div className="text-[10px] uppercase tracking-[0.14em] text-ink-500">{flag.label}</div>
+          <div className="text-[11px] text-ink-500 font-medium">{flag.label}</div>
           <div className="mt-1">
-            <Pill tone={flag.active ? flag.tone : "neutral"}>{flag.active ? "linked" : "none"}</Pill>
+            <Pill tone={flag.active ? flag.tone : "neutral"}>{flag.active ? t("linked") : t("none")}</Pill>
           </div>
         </div>
       ))}
@@ -642,7 +1119,7 @@ function ProcessTrace({ sections }: { sections: EvolutionProcessTrace["sections"
         <section key={section.id} className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
-              <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{section.title}</div>
+              <div className="text-[11px] text-ink-500 font-medium">{section.title}</div>
               {section.summary ? <div className="mt-1 text-[12px] text-ink-400">{section.summary}</div> : null}
             </div>
             <Pill tone="neutral">{section.artifacts.length}</Pill>
@@ -661,7 +1138,7 @@ function ProcessTrace({ sections }: { sections: EvolutionProcessTrace["sections"
 function ArtifactPreview({ artifact }: { artifact: EvolutionProcessArtifact }) {
   const preview = String(artifact.preview || "");
   return (
-    <div className="rounded-md border border-white/10 bg-ink-900/50 p-2.5">
+    <div className="rounded-md border border-brand-500/15 bg-ink-900/50 p-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <Pill tone={artifactTone(artifact.kind)}>{artifact.kind || "artifact"}</Pill>
         <span className="font-medium text-ink-100">{artifact.title}</span>
@@ -684,7 +1161,7 @@ function artifactTone(kind?: string): "neutral" | "ok" | "warn" | "danger" | "br
   const k = String(kind || "").toLowerCase();
   if (k === "prompt" || k === "input") return "brand";
   if (k === "validation" || k === "proposal") return "warn";
-  if (k === "output" || k === "document") return "ok";
+  if (k === "output" || k === "document" || k === "change") return "ok";
   return "neutral";
 }
 
@@ -698,7 +1175,7 @@ function formatBytes(value: number) {
 function DetailRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
-      <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{label}</div>
+      <div className="text-[11px] text-ink-500 font-medium">{label}</div>
       <div className="mt-2 text-ink-300">{children}</div>
     </div>
   );
@@ -867,7 +1344,7 @@ function ProposalsPanel({
 function DetailMini({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded border border-brand-500/10 bg-ink-950/30 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-[0.14em] text-ink-500">{label}</div>
+      <div className="text-[11px] text-ink-500 font-medium">{label}</div>
       <div className="mt-1 truncate font-mono text-[12px] text-ink-300">{value}</div>
     </div>
   );
@@ -912,7 +1389,7 @@ function ConfigPanel({ config }: { config: EvolutionConfigSnapshot }) {
           />
         </div>
         <div className="mt-4 rounded-lg border border-brand-500/10 bg-ink-950/30 p-3 text-sm">
-          <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{t("allowedSteps")}</div>
+          <div className="text-[11px] text-ink-500 font-medium">{t("allowedSteps")}</div>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {config.validation.allowed_step_types.map((step) => (
               <Pill key={step} tone="neutral">{step}</Pill>

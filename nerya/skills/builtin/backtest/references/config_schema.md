@@ -8,7 +8,7 @@ points.
 | `initial_capital_usd` | number | 10000 | Starting cash. |
 | `warmup_bars` | integer | 50 | Bars available before decisions start. |
 | `min_backtest_days` | integer | 30 | Loader rejects windows below this. |
-| `window_days` | integer | 30 | Replay window. |
+| `window_days` | integer | 45 | Replay window. Default is longer than one month so provider lag or incomplete current-day data does not shrink the effective replay below 30 days. |
 | `tf` | string | `1h` | Candle interval. |
 | `markets` | string[] | [] | Filled from `strategy.yml` by CLI. |
 | `indicators` | map | SMA/EMA/RSI/ATR | Period lists by indicator name. |
@@ -30,7 +30,7 @@ points.
 
 ```yaml
 initial_capital_usd: 10000
-window_days: 30
+window_days: 45
 tf: "1h"
 markets: ["BINANCE:BTCUSDT"]
 stake_amount:
@@ -40,4 +40,3 @@ mock_surfaces:
   news: {mode: stub, payload: []}
   llm: {mode: error}
 ```
-

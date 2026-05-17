@@ -8,19 +8,23 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Ink 调色板 — 通过 CSS 变量驱动，深色/亮色模式切换时自动更新
+        // Ink palette — RGB-triple CSS variables so Tailwind's
+        // ``<alpha-value>`` placeholder works (``bg-ink-800/70`` etc.).
+        // Light/dark theming overrides the same ``--ink-XXX`` triples
+        // in :root vs html.light so opacity-modifier-aware classes
+        // continue to switch palette automatically.
         ink: {
-          50:  "var(--ink-50,  #f6f5fb)",
-          100: "var(--ink-100, #e7e5f2)",
-          200: "var(--ink-200, #c9c7db)",
-          300: "var(--ink-300, #9c98ba)",
-          400: "var(--ink-400, #6b6a85)",
-          500: "var(--ink-500, #454560)",
-          600: "var(--ink-600, #2a2a3e)",
-          700: "var(--ink-700, #1e1e30)",
-          800: "var(--ink-800, #131426)",
-          900: "var(--ink-900, #0a0b1a)",
-          950: "var(--ink-950, #04040d)",
+          50:  "rgb(var(--ink-50)  / <alpha-value>)",
+          100: "rgb(var(--ink-100) / <alpha-value>)",
+          200: "rgb(var(--ink-200) / <alpha-value>)",
+          300: "rgb(var(--ink-300) / <alpha-value>)",
+          400: "rgb(var(--ink-400) / <alpha-value>)",
+          500: "rgb(var(--ink-500) / <alpha-value>)",
+          600: "rgb(var(--ink-600) / <alpha-value>)",
+          700: "rgb(var(--ink-700) / <alpha-value>)",
+          800: "rgb(var(--ink-800) / <alpha-value>)",
+          900: "rgb(var(--ink-900) / <alpha-value>)",
+          950: "rgb(var(--ink-950) / <alpha-value>)",
         },
         // Violet / electric purple — the NERYA primary accent.
         brand: {
@@ -62,6 +66,7 @@ const config: Config = {
       },
       fontFamily: {
         sans: [
+          "Plus Jakarta Sans",
           "InterVariable",
           "Inter",
           "ui-sans-serif",
@@ -85,6 +90,7 @@ const config: Config = {
           "monospace",
         ],
         display: [
+          "Plus Jakarta Sans",
           "InterVariable",
           "Inter",
           "ui-sans-serif",
@@ -93,20 +99,25 @@ const config: Config = {
         ],
       },
       boxShadow: {
-        glow: "0 0 24px -6px rgba(139, 92, 246, 0.45)",
-        "glow-lg":
-          "0 0 48px -12px rgba(139, 92, 246, 0.55), 0 0 16px -2px rgba(34, 211, 238, 0.18)",
-        neon: "0 0 18px -2px rgba(16, 217, 147, 0.55)",
-        // Liquid glass — soft inner highlight + outer depth.
-        glass:
-          "inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.4), 0 24px 48px -24px rgba(0, 0, 0, 0.7)",
+        // 2026-05 airy redesign: collapse glow/neon/glass/airy into a
+        // single soft elevation. The class names are kept so existing
+        // call sites still compile; the visuals get a consistent, calm
+        // shadow instead of competing violet/cyan/green halos.
+        glow: "0 1px 2px rgba(2, 6, 23, 0.06)",
+        "glow-lg": "0 2px 4px rgba(2, 6, 23, 0.08)",
+        neon: "0 1px 2px rgba(2, 6, 23, 0.06)",
+        glass: "0 1px 2px rgba(2, 6, 23, 0.06)",
+        airy: "0 1px 2px rgba(2, 6, 23, 0.06)",
       },
       backdropBlur: {
         glass: "20px",
+        airy: "28px",
       },
       animation: {
+        // 2026-05 redesign: drop aurora background animation.
+        // Keep ai-pulse (typing indicator) and shimmer (skeleton loading)
+        // as they convey meaningful streaming/loading state.
         "ai-pulse": "ai-pulse 1.4s ease-in-out infinite",
-        "aurora-shift": "aurora-shift 18s ease-in-out infinite",
         shimmer: "shimmer 2.4s linear infinite",
       },
       keyframes: {
@@ -118,17 +129,6 @@ const config: Config = {
           "50%": {
             opacity: "1",
             transform: "scale(1)",
-          },
-        },
-        "aurora-shift": {
-          "0%, 100%": {
-            transform: "translate(0%, 0%) rotate(0deg)",
-          },
-          "33%": {
-            transform: "translate(2%, -1%) rotate(40deg)",
-          },
-          "66%": {
-            transform: "translate(-1%, 2%) rotate(-30deg)",
           },
         },
         shimmer: {

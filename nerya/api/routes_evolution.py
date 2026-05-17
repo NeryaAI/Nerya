@@ -4,6 +4,12 @@ from ..evolution import assets as evolution_assets
 from ..evolution.event_store import list_events, list_signals
 from ..evolution.runner import evolve
 from ..evolution.patch_proposal import list_proposals
+from ..evolution.periodic_reflection import (
+    PERIODIC_REFLECTION_SCHEDULE_ID,
+    configure_periodic_reflection,
+    ensure_periodic_reflection,
+    get_periodic_reflection,
+)
 from ..evolution.promotion import apply_proposal
 from ..evolution.ranking import (
     build_evidence, rank_proposals, write_ranking_snapshot,
@@ -12,6 +18,45 @@ from ..evolution.rollback import rollback_proposal
 from ..evolution.signals import collect_signals
 from ..evolution.timeline import build_timeline
 from ..evolution.validation_plan import run_validation_plan
+from ..evidence import autoingest as _evidence_autoingest
+
+
+def _apply_handler(client, payload):
+    """``POST /evolution/apply`` — apply a strategy proposal and emit
+    an evidence vault record for the promotion.
+    """
+
+    proposal_id = (payload or {}).get("proposal_id")
+    result = apply_proposal(client.config.paths, proposal_id)
+    # Best-effort vault ingest. Vault failures must never break the
+    # promotion call site, so we wrap defensively.
+    try:
+        if isinstance(result, dict) and result.get("ok"):
+            strategy_id = (
+                result.get("strategy_id")
+                or (result.get("proposal") or {}).get("strategy_id")
+                or "unknown"
+            )
+            title = (
+                result.get("title")
+                or f"Strategy proposal {proposal_id} applied"
+            )
+            summary = (
+                result.get("summary")
+                or f"Proposal {proposal_id} promoted on strategy {strategy_id}."
+            )
+            _evidence_autoingest.on_strategy_promote(
+                client,
+                strategy_id=str(strategy_id),
+                proposal_id=str(proposal_id),
+                title=str(title),
+                summary=str(summary),
+                body=str(summary),
+                tags=["promotion"],
+            )
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return result
 
 
 def routes():
@@ -171,14 +216,34 @@ def routes():
             limit=int(payload.get("limit") or 120),
         )
 
+    def reflection_schedule(client, payload):
+        payload = payload or {}
+        if not payload:
+            return {
+                "ok": True,
+                "schedule": get_periodic_reflection(client.config.paths),
+            }
+        return configure_periodic_reflection(
+            client.config.paths,
+            enabled=bool(payload.get("enabled", False)),
+            time=payload.get("time"),
+            cron=payload.get("cron"),
+            timezone=payload.get("timezone"),
+        )
+
+    def reflection_schedule_run_now(client, payload):
+        ensure_periodic_reflection(client.config.paths)
+        return client.triggers.run_schedule_now(
+            id=PERIODIC_REFLECTION_SCHEDULE_ID,
+            reason=str((payload or {}).get("reason") or "operator_dream_now"),
+        )
+
     return [
         ("POST", "/evolution/proposals",
          lambda client, payload: {
              "proposals": [p.asdict() for p in list_proposals(client.config.paths)],
          }),
-        ("POST", "/evolution/apply",
-         lambda client, payload: apply_proposal(client.config.paths,
-                                                payload["proposal_id"])),
+        ("POST", "/evolution/apply", _apply_handler),
         ("POST", "/evolution/rollback",
          lambda client, payload: rollback_proposal(client.config.paths,
                                                    payload["proposal_id"])),
@@ -191,6 +256,9 @@ def routes():
         ("POST", "/evolution/events", events),
         ("GET", "/evolution/timeline", timeline),
         ("POST", "/evolution/timeline", timeline),
+        ("GET", "/evolution/reflection_schedule", reflection_schedule),
+        ("POST", "/evolution/reflection_schedule", reflection_schedule),
+        ("POST", "/evolution/reflection_schedule/run_now", reflection_schedule_run_now),
         ("GET", "/evolution/assets", assets),
         ("POST", "/evolution/assets", assets),
         ("POST", "/evolution/assets/candidate", candidate),

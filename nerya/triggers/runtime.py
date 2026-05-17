@@ -12,6 +12,7 @@ from .router import RouterResult, TriggerRouter
 
 STRATEGY_RUN_TICK_TARGET = "skill:strategy.run_tick"
 STRATEGY_RUN_TUNING_TARGET = "skill:strategy.run_tuning"
+EVOLUTION_REFLECT_TARGET = "skill:evolution.reflect"
 
 
 @dataclass
@@ -61,6 +62,11 @@ class TriggerRuntime:
             in {STRATEGY_RUN_TICK_TARGET, STRATEGY_RUN_TUNING_TARGET}
         ):
             return self._execute_strategy_target(event, routed)
+        if (
+            routed.status == "routed"
+            and (routed.target or event.target) == EVOLUTION_REFLECT_TARGET
+        ):
+            return self._execute_evolution_reflection(event, routed)
         return routed
 
     def explain(self, event: TriggerEvent) -> dict[str, Any]:
@@ -82,6 +88,11 @@ class TriggerRuntime:
             in {STRATEGY_RUN_TICK_TARGET, STRATEGY_RUN_TUNING_TARGET}
         ):
             return self._execute_strategy_target(event, routed)
+        if (
+            routed.status == "routed"
+            and (routed.target or event.target) == EVOLUTION_REFLECT_TARGET
+        ):
+            return self._execute_evolution_reflection(event, routed)
         return routed
 
     def _agent_task_executor(self):
@@ -146,6 +157,42 @@ class TriggerRuntime:
             strategy_id=str(strategy_id),
             route_id=route_result.route_id,
             result=result,
+        )
+
+    def _execute_evolution_reflection(
+        self,
+        event: TriggerEvent,
+        route_result: RouterResult,
+    ) -> StrategyTriggerExecutionResult:
+        target = route_result.target or event.target
+        try:
+            from ..evolution.runner import evolve
+            out = evolve(self.config)
+        except Exception as exc:
+            return StrategyTriggerExecutionResult(
+                event_id=event.event_id,
+                target=target or "",
+                status="failed",
+                strategy_id=None,
+                route_id=route_result.route_id,
+                error={
+                    "code": "evolution_reflection_failed",
+                    "message": f"{type(exc).__name__}: {exc}",
+                },
+            )
+        proposal = out.get("proposal") if isinstance(out, dict) else {}
+        return StrategyTriggerExecutionResult(
+            event_id=event.event_id,
+            target=target or "",
+            status="executed",
+            strategy_id=None,
+            route_id=route_result.route_id,
+            result={
+                "proposal_id": (proposal or {}).get("id"),
+                "ranked_count": len(out.get("ranked") or []) if isinstance(out, dict) else 0,
+                "signal_count": len(out.get("signals") or []) if isinstance(out, dict) else 0,
+                "event_id": ((out.get("event") or {}).get("id") if isinstance(out, dict) else None),
+            },
         )
 
     def _run_strategy_tick(

@@ -1,7 +1,7 @@
 """LLMGateway — the only way Nerya reaches an LLM.
 
 Every call resolves a tier, enforces the caller's `LLMSession` (quota,
-allowed tiers/tasks), enforces the daily budget, dispatches through the
+allowed tiers/tasks), dispatches through the
 ModelRouter (which may resolve provider keys via the SecretVault), and
 records redacted usage into the llm/security journals.
 """
@@ -9,13 +9,39 @@ records redacted usage into the llm/security journals.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-_LOG = logging.getLogger(__name__)
+from ..core.config import Config
+from ..core.errors import LLMError
+from ..core.errors import PromptInjectionDetected
+from ..core.time import now_iso
+from ..core.truth import resolve_allow_mock
+from ..db import LLMUsageRepository
+from ..db.sqlite import connect
+from ..security.prompt_injection import flag_suspicious
+from .adapters.openai import DEFAULT_BASE_URLS as _OPENAI_DEFAULT_BASE_URLS
+from .messages import (
+    AnthropicMessagesBackend,
+    BedrockAnthropicMessagesBackend,
+    GeminiMessagesBackend,
+    MessagesBackend,
+    MessagesRequest,
+    MessagesResponse,
+    MockMessagesBackend,
+    OllamaMessagesBackend,
+    OpenAIMessagesBackend,
+    normalise_provider_native_web_search,
+)
+from .model_router import CallResult, ModelRouter
+from .provider_catalog import lookup as _provider_lookup
+from .redaction import scrub
+from .session import LLMSession
+from .structured_output import parse as parse_structured
+from .tier_policy import TierPolicy
+from .usage import LLMUsageJournal
 
+_LOG = logging.getLogger(__name__)
 
 def _messages_preview(messages: list[dict]) -> str:
     """Render a short preview of the latest user message for journal."""
@@ -41,33 +67,6 @@ def _messages_preview(messages: list[dict]) -> str:
                         parts.append(inner)
             return ("\n".join(parts))[:1000]
     return ""
-
-from ..core.config import Config
-from ..core.errors import LLMError
-from ..core.time import now_iso
-from ..db import LLMUsageRepository
-from ..db.sqlite import connect
-from ..security.prompt_injection import flag_suspicious
-from ..core.errors import PromptInjectionDetected
-from .budget import BudgetPolicy
-from .messages import (
-    AnthropicMessagesBackend,
-    BedrockAnthropicMessagesBackend,
-    GeminiMessagesBackend,
-    MessagesBackend,
-    MessagesRequest,
-    MessagesResponse,
-    MockMessagesBackend,
-    OllamaMessagesBackend,
-    OpenAIMessagesBackend,
-)
-from .adapters.openai import DEFAULT_BASE_URLS as _OPENAI_DEFAULT_BASE_URLS
-from .model_router import CallResult, ModelRouter
-from .redaction import scrub
-from .session import LLMSession
-from .structured_output import parse as parse_structured
-from .tier_policy import TierPolicy
-from .usage import LLMUsageJournal
 
 
 @dataclass
@@ -111,10 +110,6 @@ class LLMGateway:
             extra_class_map=extra_class_map or None,
         )
         self.router = ModelRouter(tiers=tiers, workspace=config.paths.root)
-        self.budget = BudgetPolicy(daily_budget_usd={
-            name: float(cfg.get("daily_budget_usd", 0) or 0)
-            for name, cfg in tiers.items()
-        })
         self.usage = LLMUsageJournal(
             journal_path=config.paths.journal("llm"),
             security_path=config.paths.journal("security"),
@@ -146,6 +141,31 @@ class LLMGateway:
             caller_allowed_tiers=caller_allowed_tiers,
         )
 
+        clean_prompt = scrub(prompt)
+
+        # prompt firewall: refuse hostile content before it reaches a real
+        # model. Classification-style tasks are still expected to run on
+        # text that might contain injection markers — we log but do not
+        # refuse for the ``classify`` and ``risk_screening`` tasks so the
+        # caller can explicitly score the headline as "risk".
+        hits = flag_suspicious(clean_prompt)
+        if hits:
+            from ..core import jsonl
+            jsonl.append(
+                self.config.paths.journal("security"),
+                {
+                    "kind": "prompt_firewall.flag",
+                    "caller": caller,
+                    "task": task,
+                    "tier": resolved_tier,
+                    "patterns": hits,
+                    "ts": now_iso(),
+                },
+            )
+            non_blocking_tasks = {"classify", "risk_screening", "compress"}
+            if task not in non_blocking_tasks:
+                raise PromptInjectionDetected(patterns=hits, caller=caller)
+
         # session-level gates
         if session is not None:
             session.check_tier(resolved_tier)
@@ -176,38 +196,6 @@ class LLMGateway:
                 "declares schema_json_mode != 'unsupported'"
             )
 
-        clean_prompt = scrub(prompt)
-
-        # prompt firewall: refuse hostile content before it reaches a real
-        # model. Classification-style tasks are still expected to run on
-        # text that might contain injection markers — we log but do not
-        # refuse for the ``classify`` and ``risk_screening`` tasks so the
-        # caller can explicitly score the headline as "risk".
-        hits = flag_suspicious(clean_prompt)
-        if hits:
-            from ..core import jsonl
-            jsonl.append(
-                self.config.paths.journal("security"),
-                {
-                    "kind": "prompt_firewall.flag",
-                    "caller": caller,
-                    "task": task,
-                    "tier": resolved_tier,
-                    "patterns": hits,
-                    "ts": now_iso(),
-                },
-            )
-            non_blocking_tasks = {"classify", "risk_screening", "compress"}
-            if task not in non_blocking_tasks:
-                raise PromptInjectionDetected(patterns=hits, caller=caller)
-
-        # budget pre-flight
-        con = self._con_lazy()
-        usage_repo = LLMUsageRepository(con)
-        spent = usage_repo.daily_spend(resolved_tier)
-        expected = max(0.0001, len(clean_prompt.split()) * 0.00005)
-        self.budget.check(resolved_tier, spent, expected)
-
         # dispatch
         try:
             result: CallResult = self.router.dispatch(
@@ -234,6 +222,7 @@ class LLMGateway:
                 parsed = {"raw": result.text}
 
         # persist usage
+        usage_repo = LLMUsageRepository(self._con_lazy())
         usage_repo.record(tier=resolved_tier, task=task, caller=caller,
                           tokens=result.tokens, usd=result.usd_cost)
         self.usage.record(
@@ -412,6 +401,17 @@ class LLMGateway:
             provider_override=model_provider,
             model_override=model_id,
         )
+        tier_cfg = self._effective_tier_cfg(
+            resolved_tier,
+            provider_override=model_provider,
+            model_override=model_id,
+        )
+        provider_native_web_search = normalise_provider_native_web_search(
+            tier_cfg.get(
+                "provider_native_web_search",
+                self.config.get("llm.provider_native_web_search"),
+            )
+        )
 
         request = MessagesRequest(
             system=system,
@@ -422,6 +422,9 @@ class LLMGateway:
             temperature=temperature,
             reasoning_effort=reasoning_effort,
             reasoning_summary=reasoning_summary,
+            metadata={
+                "provider_native_web_search": provider_native_web_search,
+            },
         )
 
         response = backend(request)
@@ -484,8 +487,14 @@ class LLMGateway:
                 else None
             ) or {}
             if isinstance(profile, dict):
-                for key in ("base_url", "provider_key_ref", "provider_key_env"):
-                    if not cfg.get(key) and profile.get(key):
+                for key in (
+                    "base_url", "provider_key_ref", "provider_key_env", "kind",
+                    "provider_native_web_search",
+                ):
+                    if key == "provider_native_web_search":
+                        if key not in cfg and profile.get(key) is not None:
+                            cfg[key] = profile[key]
+                    elif not cfg.get(key) and profile.get(key):
                         cfg[key] = profile[key]
         if provider:
             provider_cfg: dict | None = None
@@ -510,13 +519,83 @@ class LLMGateway:
                 else None
             ) or {}
             if isinstance(profile, dict):
-                for key in ("base_url", "provider_key_ref", "provider_key_env"):
-                    if not cfg.get(key) and profile.get(key):
+                for key in (
+                    "base_url", "provider_key_ref", "provider_key_env", "kind",
+                    "provider_native_web_search",
+                ):
+                    if key == "provider_native_web_search":
+                        if key not in cfg and profile.get(key) is not None:
+                            cfg[key] = profile[key]
+                    elif not cfg.get(key) and profile.get(key):
                         cfg[key] = profile[key]
             cfg["provider"] = provider
         if model_override:
             cfg["model"] = str(model_override).strip()
         return cfg
+
+    def _messages_api_mode(self, provider: str, cfg: dict) -> str:
+        kind = str(cfg.get("kind") or "").strip().lower()
+        if kind:
+            return kind
+        entry = _provider_lookup(provider)
+        if entry is not None:
+            return entry.api_mode
+        if cfg.get("base_url"):
+            return "chat_completions"
+        return ""
+
+    def effective_model_metadata(
+        self,
+        tier: str | None,
+        *,
+        provider_override: str | None = None,
+        model_override: str | None = None,
+    ) -> tuple[str, str, Any]:
+        """Return ``(provider, model, metadata)`` for a pending messages call.
+
+        Chat and gateway uploads use this before dispatch so they only
+        attach binary blocks when the selected model/provider can plausibly
+        accept them. The lookup mirrors the backend resolution path without
+        touching credentials or making a network call.
+        """
+
+        resolved_tier = self.tier_policy.resolve(
+            task="agent.loop",
+            requested_tier=tier,
+            caller_allowed_tiers=None,
+        )
+        cfg = self._effective_tier_cfg(
+            resolved_tier,
+            provider_override=provider_override,
+            model_override=model_override,
+        )
+        provider = str(cfg.get("provider") or "mock").strip().lower()
+        model = str(cfg.get("model") or "").strip()
+        from .model_registry import ModelRegistry
+
+        return provider, model, ModelRegistry(workspace=self.config.paths.root).lookup(
+            provider,
+            model,
+        )
+
+    def _mock_messages_or_raise(
+        self,
+        *,
+        tier: str,
+        provider: str,
+        model: str,
+        reason: str,
+    ) -> MessagesBackend:
+        if provider == "mock" or resolve_allow_mock(config_like=self.config):
+            return MockMessagesBackend(
+                model=model or "mock",
+                provider_name="mock" if provider != "mock" else provider,
+            )
+        raise LLMError(
+            f"LLM messages tier '{tier}' unavailable "
+            f"(provider={provider!r}, reason={reason}); configure a real "
+            "provider credential/base_url or explicitly enable mock mode"
+        )
 
     def _resolve_messages_backend(
         self,
@@ -531,18 +610,15 @@ class LLMGateway:
 
         * ``anthropic`` / ``claude``     — :class:`AnthropicMessagesBackend`
         * ``openai``                     — :class:`OpenAIMessagesBackend`
-        * ``deepseek`` / ``openrouter`` /
-          ``moonshot`` / ``xai`` /
-          ``mistral`` / ``together`` /
-          ``groq`` / ``cerebras`` /
-          ``compat``                     — :class:`OpenAIMessagesBackend` with
-                                           the provider-default base URL
+        * OpenAI-compatible providers and custom provider profiles with
+          ``kind: chat_completions``     — :class:`OpenAIMessagesBackend` with
+                                           the provider/profile base URL
         * ``gemini`` / ``google``        — :class:`GeminiMessagesBackend`
         * ``ollama``                     — :class:`OllamaMessagesBackend`
         * ``bedrock``                    — :class:`BedrockAnthropicMessagesBackend`
-        * anything else / missing key    — :class:`MockMessagesBackend`
-          (so an unconfigured workspace still renders a deterministic
-          response instead of crashing).
+        * explicit ``mock``              — :class:`MockMessagesBackend`
+        * real provider missing config   — raises :class:`LLMError`
+          unless mock mode is explicitly enabled.
         """
 
         cfg = self._effective_tier_cfg(
@@ -553,82 +629,79 @@ class LLMGateway:
         provider = (cfg.get("provider") or "mock").lower()
         model = str(cfg.get("model") or "")
         base_url = cfg.get("base_url") or _OPENAI_DEFAULT_BASE_URLS.get(provider) or ""
+        api_mode = self._messages_api_mode(provider, cfg)
 
-        if provider in {"anthropic", "claude"}:
+        if provider == "mock" or api_mode == "mock":
+            return MockMessagesBackend(
+                model=model or "mock",
+                provider_name="mock",
+            )
+
+        if provider in {"anthropic", "claude"} or api_mode == "anthropic_messages":
             api_key = self._resolve_provider_key(cfg)
             if not api_key:
                 _LOG.warning(
-                    "anthropic backend missing api key on tier %s; "
-                    "falling back to mock", tier,
+                    "%s backend missing api key on tier %s; "
+                    "LLM messages backend unavailable", provider or "anthropic", tier,
                 )
-                return MockMessagesBackend(
-                    model=model or "mock", provider_name="mock",
+                return self._mock_messages_or_raise(
+                    tier=tier,
+                    provider=provider or "anthropic",
+                    model=model,
+                    reason="missing_api_key",
                 )
             return AnthropicMessagesBackend(
                 api_key=api_key,
                 model=model or "claude-sonnet-4-5",
                 base_url=base_url or "https://api.anthropic.com/v1",
-                provider_name="anthropic",
+                provider_name="anthropic" if provider in {"anthropic", "claude"} else provider,
             )
 
-        if provider == "openai":
-            api_key = self._resolve_provider_key(cfg)
-            if not api_key:
-                _LOG.warning(
-                    "openai backend missing api key on tier %s; "
-                    "falling back to mock", tier,
-                )
-                return MockMessagesBackend(
-                    model=model or "mock", provider_name="mock",
-                )
-            return OpenAIMessagesBackend(
-                api_key=api_key,
-                model=model or "gpt-4o-mini",
-                base_url=base_url or "https://api.openai.com/v1",
-                provider_name="openai",
-                reasoning_effort=cfg.get("reasoning_effort"),
-                reasoning_summary=cfg.get("reasoning_summary"),
-            )
-
-        if provider in {
-            "deepseek", "openrouter", "moonshot", "xai", "mistral",
-            "together", "groq", "cerebras", "stepfun", "compat",
-        }:
+        if provider == "openai" or api_mode == "chat_completions":
             api_key = self._resolve_provider_key(cfg)
             if not api_key:
                 _LOG.warning(
                     "%s backend missing api key on tier %s; "
-                    "falling back to mock", provider, tier,
+                    "LLM messages backend unavailable", provider or "openai", tier,
                 )
-                return MockMessagesBackend(
-                    model=model or "mock", provider_name="mock",
+                return self._mock_messages_or_raise(
+                    tier=tier,
+                    provider=provider or "openai",
+                    model=model,
+                    reason="missing_api_key",
                 )
             if not base_url:
                 _LOG.warning(
                     "%s backend has no base_url and no default; "
-                    "falling back to mock", provider,
+                    "LLM messages backend unavailable", provider or "openai",
                 )
-                return MockMessagesBackend(
-                    model=model or "mock", provider_name=provider or "mock",
+                return self._mock_messages_or_raise(
+                    tier=tier,
+                    provider=provider or "openai",
+                    model=model,
+                    reason="missing_base_url",
                 )
             return OpenAIMessagesBackend(
                 api_key=api_key,
-                model=model,
+                model=model or "gpt-4o-mini",
                 base_url=base_url,
                 provider_name=provider,
                 reasoning_effort=cfg.get("reasoning_effort"),
                 reasoning_summary=cfg.get("reasoning_summary"),
             )
 
-        if provider in {"gemini", "google"}:
+        if provider in {"gemini", "google"} or api_mode == "gemini_v1beta":
             api_key = self._resolve_provider_key(cfg)
             if not api_key:
                 _LOG.warning(
                     "gemini backend missing api key on tier %s; "
-                    "falling back to mock", tier,
+                    "LLM messages backend unavailable", tier,
                 )
-                return MockMessagesBackend(
-                    model=model or "mock", provider_name="mock",
+                return self._mock_messages_or_raise(
+                    tier=tier,
+                    provider=provider or "gemini",
+                    model=model,
+                    reason="missing_api_key",
                 )
             return GeminiMessagesBackend(
                 api_key=api_key,
@@ -637,14 +710,14 @@ class LLMGateway:
                 provider_name=provider,
             )
 
-        if provider == "ollama":
+        if provider == "ollama" or api_mode == "ollama_native":
             return OllamaMessagesBackend(
                 model=model or "llama3.1",
                 base_url=base_url or "http://127.0.0.1:11434",
                 provider_name="ollama",
             )
 
-        if provider == "bedrock":
+        if provider == "bedrock" or api_mode == "bedrock":
             region = str(cfg.get("region") or cfg.get("aws_region") or "us-east-1")
             try:
                 return BedrockAnthropicMessagesBackend(
@@ -655,14 +728,20 @@ class LLMGateway:
             except Exception as exc:
                 _LOG.warning(
                     "bedrock backend init failed on tier %s (%s); "
-                    "falling back to mock", tier, exc,
+                    "LLM messages backend unavailable", tier, exc,
                 )
-                return MockMessagesBackend(
-                    model=model or "mock", provider_name="mock",
+                return self._mock_messages_or_raise(
+                    tier=tier,
+                    provider=provider or "bedrock",
+                    model=model,
+                    reason="backend_init_failed",
                 )
 
-        return MockMessagesBackend(
-            model=model or "mock", provider_name=provider or "mock",
+        return self._mock_messages_or_raise(
+            tier=tier,
+            provider=provider or "unknown",
+            model=model,
+            reason="unsupported_provider",
         )
 
     def _resolve_provider_key(self, tier_cfg: dict) -> str:

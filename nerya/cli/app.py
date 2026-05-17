@@ -14,6 +14,8 @@ grep for ``cmd_<name>`` in ``nerya/cli/commands/``.
 Subcommand topic map:
 
 * :mod:`commands.core`       — init, run, serve, dashboard, doctor, service
+* :mod:`commands.setup`      — unified onboarding wizard (TUI or web)
+* :mod:`commands.quickstart` — one-command "I just installed, get me going"
 * :mod:`commands.skills`     — skill, trigger, trading, strategy, review, portfolio, messages
 * :mod:`commands.evolution`  — reflect, evolve, proposals, scripts
 * :mod:`commands.runtime`    — vault, llm, mcp, acp, cron, dev
@@ -28,8 +30,16 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .commands import core, evolution, runtime, skills, strategy, wallet
-from .commands import anet as anet_cmd
+from .commands import (
+    core,
+    evolution,
+    quickstart,
+    runtime,
+    setup,
+    skills,
+    strategy,
+    wallet,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,12 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     core.register(sub)
+    setup.register(sub)
+    quickstart.register(sub)
     skills.register(sub)
     strategy.register(sub)
     evolution.register(sub)
     runtime.register(sub)
     wallet.register(sub)
-    anet_cmd.register(sub)
 
     return parser
 

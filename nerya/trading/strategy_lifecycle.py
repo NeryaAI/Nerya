@@ -1,6 +1,6 @@
 """Strategy lifecycle graph.
 
-04-29 §3.1 / §11 P5 — strategies are first-class runtime
+Strategies are first-class runtime
 entities with an explicit promotion graph. The previous shape only
 had ``draft / paper / canary / live / paused / archived``; the
 control-plane refactor adds a richer ramp:

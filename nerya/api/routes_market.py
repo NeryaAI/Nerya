@@ -16,10 +16,13 @@ from ..core.market_defaults import resolve_market_defaults
 from ..core.truth import (
     degraded_envelope,
     live_envelope,
-    mock_envelope,
     resolve_allow_mock,
 )
-from ..data.candles import fetch_candles
+from ..data.candles import (
+    discover_market_data_sources,
+    fetch_candles,
+    fetch_public_ticker,
+)
 
 
 # Mock/paper venues exposed only when runtime authorises mock mode.
@@ -79,6 +82,34 @@ def _public_venues(config_like=None) -> list[dict]:
             "instrument_types": info.get("instrument_types") or [],
             "aliases": info.get("aliases") or [],
         })
+    for source in discover_market_data_sources(config_like):
+        name = str(source.get("venue") or "").strip().lower()
+        if not name or name in seen:
+            continue
+        if source.get("origin") != "built_in_onchain_geckoterminal" and not str(
+            source.get("origin") or ""
+        ).startswith("wallet.providers"):
+            continue
+        seen.add(name)
+        out.append({
+            "name": name,
+            "label": source.get("label") or (
+                "On-chain DEX" if name == "onchain" else name.replace("_", " ").title()
+            ),
+            "public": True,
+            "mode": "live",
+            "kind": "data_source",
+            "runtime": "http",
+            "instrument_types": [
+                "onchain" if source.get("market_format") == "chain:token" or name == "onchain"
+                else "spot"
+            ],
+            "aliases": [],
+            "origin": source.get("origin"),
+            "market_format": source.get("market_format"),
+            "wallet_id": source.get("wallet_id"),
+            "provider": source.get("provider"),
+        })
     out.sort(key=lambda v: v["name"])
     if resolve_allow_mock(None, config_like):
         out.extend(_PAPER_VENUES)
@@ -87,9 +118,42 @@ def _public_venues(config_like=None) -> list[dict]:
 
 def _normalize_market(venue: str, market: str) -> str:
     """Return a ``VENUE:SYMBOL`` market id that fetch_candles understands."""
+    venue_l = (venue or "").strip().lower()
+    wallet_prefixes = {
+        "okx_onchain": "OKX_ONCHAIN",
+        "okx_os": "OKX_ONCHAIN",
+        "bitget_onchain": "BITGET_ONCHAIN",
+        "bitget_wallet": "BITGET_ONCHAIN",
+        "binance_alpha": "BINANCE_ALPHA",
+        "binance_web3": "BINANCE_ALPHA",
+        "coinbase_wallet": "COINBASE_WALLET",
+        "coinbase_exchange_wallet": "COINBASE_WALLET",
+        "xagt": "XAGT_ONCHAIN",
+        "xagt_onchain": "XAGT_ONCHAIN",
+        "xagt_agent_plugin": "XAGT_ONCHAIN",
+        "xagt_okx": "XAGT_ONCHAIN",
+        "onchain": "ONCHAIN",
+    }
+    if venue_l in wallet_prefixes:
+        prefix = wallet_prefixes[venue_l]
+        if market.upper().startswith(f"{prefix}:"):
+            return market
+        return f"{prefix}:{market}"
     if ":" in market:
         return market
     return f"{venue.upper()}:{market.upper()}"
+
+
+def _resolve_venue_and_market(payload: dict[str, Any], defaults: dict[str, Any]) -> tuple[str, str]:
+    market = str(payload.get("market") or payload.get("symbol") or defaults["symbol"])
+    raw_venue = payload.get("venue") or payload.get("source")
+    if raw_venue:
+        venue = str(raw_venue)
+    elif ":" in market:
+        venue = market.split(":", 1)[0]
+    else:
+        venue = str(defaults["venue"])
+    return venue, _normalize_market(venue, market)
 
 
 def _public_connector(venue: str, *, config_like=None):
@@ -123,26 +187,17 @@ def routes():
     def candles(_client, payload):
         cfg = getattr(_client, "config", None) if _client is not None else None
         d = resolve_market_defaults(cfg)
-        venue = str(payload.get("venue") or payload.get("source") or d["venue"])
-        market = str(payload.get("market") or payload.get("symbol") or d["symbol"])
         count = int(payload.get("count") or payload.get("limit") or 96)
         interval = str(payload.get("interval") or "1m")
 
-        market_id = _normalize_market(venue, market)
-        connector = _public_connector(venue, config_like=cfg)
-        if connector is None:
-            env = degraded_envelope("candles",
-                                    error="venue_unavailable",
-                                    venue=venue.lower()).as_dict()
-            return {
-                "venue": venue, "market": market_id, "interval": interval,
-                "count": 0, "candles": [],
-                "_envelope": env,
-            }
+        venue, market_id = _resolve_venue_and_market(payload, d)
         try:
             rows = fetch_candles(
-                market_id, count=count, interval=interval,
-                connector=connector, config_like=cfg,
+                market_id,
+                count=count,
+                interval=interval,
+                allow_mock=None,
+                config_like=cfg,
             )
         except Exception as exc:  # pragma: no cover
             return {
@@ -157,6 +212,12 @@ def routes():
         # Surface the envelope of the underlying rows at the top level too.
         if rows and isinstance(rows[0], dict) and rows[0].get("_envelope"):
             envelope = rows[0]["_envelope"]
+        elif not rows:
+            envelope = degraded_envelope(
+                "candles",
+                error="no_rows",
+                venue=venue.lower(),
+            ).as_dict()
         else:
             envelope = live_envelope(source=venue.lower(),
                                      venue=venue.lower()).as_dict()
@@ -172,28 +233,27 @@ def routes():
     def ticker(_client, payload):
         cfg = getattr(_client, "config", None) if _client is not None else None
         d = resolve_market_defaults(cfg)
-        venue = str(payload.get("venue") or d["venue"])
-        market = str(payload.get("market") or d["symbol"])
-        market_id = _normalize_market(venue, market)
-        connector = _public_connector(venue, config_like=cfg)
-        if connector is None:
-            return {
-                "venue": venue, "market": market_id,
-                "error": "venue_unavailable",
-                "_envelope": degraded_envelope(
-                    "ticker", error="venue_unavailable",
-                    venue=venue.lower(),
-                ).as_dict(),
-            }
+        venue, market_id = _resolve_venue_and_market(payload, d)
         try:
-            t = connector.get_ticker(market_id)
+            t = fetch_public_ticker(market_id, allow_mock=None, config_like=cfg)
+            env = t.get("_envelope") or {}
+            price = float(t.get("price") or 0.0)
+            if not price or env.get("mode") != "live":
+                return {
+                    "venue": venue,
+                    "market": market_id,
+                    "error": (env.get("error") or "ticker_unavailable"),
+                    "_envelope": env,
+                }
             return {
-                "venue": getattr(t, "venue", venue),
+                "venue": env.get("venue") or venue,
                 "market": market_id,
-                "bid": t.bid, "ask": t.ask, "mid": t.mid, "last": t.last,
-                "ts_ms": getattr(t, "ts_ms", 0),
-                "_envelope": live_envelope(source=venue.lower(),
-                                           venue=venue.lower()).as_dict(),
+                "bid": None,
+                "ask": None,
+                "mid": price,
+                "last": price,
+                "age_s": t.get("age_s", 0),
+                "_envelope": env,
             }
         except Exception as exc:  # pragma: no cover
             return {

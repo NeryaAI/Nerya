@@ -26,6 +26,7 @@ from .account_snapshots import (
     latest_snapshot,
     latest_snapshots,
 )
+from .account_refresh import account_refresh_interval_seconds, refresh_account_marks
 from .approval import ApprovalGate, ApprovalRecord
 from .capital import (
     BudgetChecker,
@@ -69,6 +70,7 @@ from .reconciliation import (
 )
 from .risk import RiskDecision, RiskGate
 from .promotion import (
+    BACKTEST_EQUIVALENT_EVIDENCE,
     EvidenceStore,
     PromotionDecision,
     PromotionRecord,
@@ -115,6 +117,7 @@ __all__ = [
     # Promotion gate
     "PromotionDecision", "PromotionRecord", "PromotionStore",
     "EvidenceStore", "StrategyEvidence", "REQUIRED_EVIDENCE",
+    "BACKTEST_EQUIVALENT_EVIDENCE",
     "evaluate_promotion", "request_promotion", "apply_promotion",
     # Accounts
     "Account", "AccountLimits", "AccountPermissions", "AccountProfile",
@@ -122,6 +125,7 @@ __all__ = [
     # Snapshots
     "AccountSnapshot", "capture_snapshot", "capture_all",
     "latest_snapshot", "latest_snapshots", "fresh_snapshot",
+    "account_refresh_interval_seconds", "refresh_account_marks",
     # Capital / budget
     "BudgetChecker", "BudgetDecision",
     "CapitalReservation", "CapitalReservationStore",

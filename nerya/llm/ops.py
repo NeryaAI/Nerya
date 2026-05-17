@@ -23,13 +23,22 @@ stand up a separate LLM stack just for the operator surface.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from ..core import yaml_io
 from ..core.config import Config
 from ..llm.adapters import builtin_providers
+from ..llm.messages import normalise_provider_native_web_search
 from ..llm.model_catalog import ModelCatalog
+from ..llm.provider_catalog import (
+    REASONING_EFFORT_LEVELS,
+    catalog_for_dashboard,
+    default_base_url as _catalog_default_base_url,
+    lookup as _catalog_lookup,
+)
 from ..llm.providers import DEFAULT_BASE_URLS, ModelInfo
 from ..llm.provider_routing import load as routing_load
 from ..llm.provider_routing import save as routing_save
@@ -79,13 +88,23 @@ def provider_readiness(config: Config) -> dict[str, Any]:
     for name in sorted(set(adapters.keys()).union(profiles.keys())):
         info = used.get(name) or {"tiers": [], "has_key_ref": False,
                                     "base_url": None}
+        catalog_entry = _catalog_lookup(name)
         out.append({
             "provider": name,
             "adapter_present": True,
-            "base_url": info.get("base_url") or DEFAULT_BASE_URLS.get(name),
+            "base_url": info.get("base_url")
+                        or _catalog_default_base_url(name)
+                        or DEFAULT_BASE_URLS.get(name),
             "configured_tiers": info.get("tiers") or [],
             "has_key_ref": bool(info.get("has_key_ref")),
-            "ready": name == "ollama" or bool(info.get("has_key_ref")),
+            "ready": (
+                name == "ollama"
+                or bool(info.get("has_key_ref"))
+                or bool(catalog_entry and catalog_entry.extra.get("key_optional"))
+            ),
+            "auth_type": catalog_entry.auth_type if catalog_entry else "api_key",
+            "api_mode": catalog_entry.api_mode if catalog_entry else "chat_completions",
+            "display_name": catalog_entry.name if catalog_entry else name,
         })
     return {"count": len(out), "providers": out}
 
@@ -100,12 +119,48 @@ def tier_list(config: Config) -> dict[str, Any]:
             "model": tier_cfg.get("model"),
             "base_url": tier_cfg.get("base_url"),
             "has_key_ref": bool(tier_cfg.get("provider_key_ref")),
+            "reasoning_effort": tier_cfg.get("reasoning_effort") or "",
+            "provider_native_web_search": normalise_provider_native_web_search(
+                tier_cfg.get("provider_native_web_search")
+            ),
         })
     return {"count": len(rows), "tiers": rows}
 
 
+def catalog(config: Config) -> dict[str, Any]:  # noqa: ARG001 — keep client signature
+    """Return the operator-facing provider catalogue.
+
+    The dashboard pulls this so it can render a provider dropdown
+    without hardcoding the list. ``reasoning_levels`` is the canonical
+    set of effort rungs the UI should expose.
+    """
+    return {
+        "providers": catalog_for_dashboard(),
+        "reasoning_levels": list(REASONING_EFFORT_LEVELS),
+    }
+
+
 _TIER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,48}$")
 _PROVIDER_RE = re.compile(r"^[a-z0-9_.-]{1,64}$")
+
+
+def _looks_like_local_url(raw: str) -> bool:
+    """Return True only for loopback model endpoints that may omit API keys."""
+    try:
+        parsed = urlparse(str(raw or ""))
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in {"localhost", "ip6-localhost", "ip6-loopback"}:
+        return True
+    if host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _safe_secret_part(value: str) -> str:
@@ -209,6 +264,24 @@ def _normalise_provider_profile(
         out["base_url"] = base_url
     if key_ref:
         out["provider_key_ref"] = key_ref
+    # Custom providers can override the API shape: ``chat_completions``
+    # routes through OpenAI-compat, ``anthropic_messages`` routes through
+    # Anthropic Messages. When omitted we infer from the catalog.
+    raw_kind = str(raw.get("kind") or "").strip().lower()
+    if raw_kind:
+        if raw_kind not in {"chat_completions", "anthropic_messages"}:
+            raise ValueError(
+                f"{provider}: kind must be 'chat_completions' or "
+                f"'anthropic_messages', got {raw_kind!r}"
+            )
+        out["kind"] = raw_kind
+    raw_name = str(raw.get("name") or raw.get("display_name") or "").strip()
+    if raw_name:
+        out["name"] = raw_name[:80]
+    if "provider_native_web_search" in raw:
+        out["provider_native_web_search"] = normalise_provider_native_web_search(
+            raw.get("provider_native_web_search")
+        )
     return provider, out
 
 
@@ -218,7 +291,6 @@ def _tier_policy_defaults(tier: str) -> dict[str, Any]:
             "max_tokens": 2048,
             "temperature": 0.0,
             "timeout_s": 30,
-            "daily_budget_usd": 3,
             "allowed_tasks": [
                 "classify",
                 "intent_classification",
@@ -246,8 +318,14 @@ def effective_tiers(config: Config) -> dict[str, dict[str, Any]]:
         cfg = dict(raw_cfg or {})
         provider = str(cfg.get("provider") or "").strip().lower()
         profile = profiles.get(provider) or {}
-        for key in ("base_url", "provider_key_ref", "provider_key_env"):
-            if not cfg.get(key) and profile.get(key):
+        for key in (
+            "base_url", "provider_key_ref", "provider_key_env", "kind",
+            "provider_native_web_search",
+        ):
+            if key == "provider_native_web_search":
+                if key not in cfg and profile.get(key) is not None:
+                    cfg[key] = profile[key]
+            elif not cfg.get(key) and profile.get(key):
                 cfg[key] = profile[key]
         out[str(tier)] = cfg
     return out
@@ -305,6 +383,23 @@ def _normalise_model_tier_row(
         out["base_url"] = base_url
     if provider_key_ref:
         out["provider_key_ref"] = provider_key_ref
+    # Reasoning effort is a per-tier knob, validated against the
+    # canonical level list so the UI and the router agree on
+    # vocabulary. Unknown values are rejected up-front to fail loud.
+    raw_effort = raw.get("reasoning_effort")
+    if raw_effort is not None:
+        eff = str(raw_effort).strip().lower().replace("-", "_")
+        if eff and eff not in REASONING_EFFORT_LEVELS:
+            raise ValueError(
+                f"{tier}: invalid reasoning_effort {raw_effort!r}; "
+                f"must be one of {list(REASONING_EFFORT_LEVELS)}"
+            )
+        if eff:
+            out["reasoning_effort"] = eff
+    if "provider_native_web_search" in raw:
+        out["provider_native_web_search"] = normalise_provider_native_web_search(
+            raw.get("provider_native_web_search")
+        )
     return tier, out
 
 
@@ -322,14 +417,33 @@ def llm_config(config: Config) -> dict[str, Any]:
             "base_url": tier_cfg.get("base_url") or inherited.get("base_url") or "",
             "provider_key_ref": tier_cfg.get("provider_key_ref") or inherited.get("provider_key_ref") or "",
             "has_key_ref": bool(tier_cfg.get("provider_key_ref") or inherited.get("provider_key_ref")),
+            "reasoning_effort": str(tier_cfg.get("reasoning_effort") or "").strip().lower(),
+            "provider_native_web_search": normalise_provider_native_web_search(
+                tier_cfg.get(
+                    "provider_native_web_search",
+                    inherited.get("provider_native_web_search"),
+                )
+            ),
         })
     profile_rows = []
     for provider, profile in sorted(profiles.items()):
+        catalog_entry = _catalog_lookup(provider)
         profile_rows.append({
             "provider": provider,
-            "base_url": profile.get("base_url") or DEFAULT_BASE_URLS.get(provider) or "",
+            "base_url": profile.get("base_url") or _catalog_default_base_url(provider) or DEFAULT_BASE_URLS.get(provider) or "",
             "provider_key_ref": profile.get("provider_key_ref") or "",
             "has_key_ref": bool(profile.get("provider_key_ref")),
+            # ``kind`` lets the dashboard mark a custom-created profile
+            # as Anthropic-shaped vs OpenAI-shaped without re-deriving
+            # it from the catalog every render.
+            "kind": str(
+                profile.get("kind")
+                or (catalog_entry.api_mode if catalog_entry else "chat_completions")
+            ),
+            "name": profile.get("name") or (catalog_entry.name if catalog_entry else provider),
+            "provider_native_web_search": normalise_provider_native_web_search(
+                profile.get("provider_native_web_search")
+            ),
         })
     return {
         "ok": True,
@@ -337,6 +451,7 @@ def llm_config(config: Config) -> dict[str, Any]:
         "intent_tier": _get_cfg(config, "llm.intent_tier", "light"),
         "provider_profiles": profile_rows,
         "tiers": rows,
+        "reasoning_levels": list(REASONING_EFFORT_LEVELS),
     }
 
 
@@ -383,7 +498,10 @@ def llm_config_set(
             )
             merged_profile = dict(current_profiles.get(provider) or {})
             merged_profile.update(dict(yaml_profiles.get(provider) or {}))
-            for key in ("base_url", "provider_key_ref"):
+            for key in (
+                "base_url", "provider_key_ref", "kind", "name",
+                "provider_native_web_search",
+            ):
                 if key in patch:
                     merged_profile[key] = patch[key]
             yaml_profiles[provider] = merged_profile
@@ -399,11 +517,18 @@ def llm_config_set(
             merged.update(dict(yaml_tiers.get(tier) or {}))
             for key, value in _tier_policy_defaults(tier).items():
                 merged.setdefault(key, value)
-            for key in ("provider", "model", "base_url", "provider_key_ref"):
+            for key in (
+                "provider", "model", "base_url", "provider_key_ref",
+                "reasoning_effort",
+            ):
                 if key in patch:
                     merged[key] = patch[key]
                 else:
                     merged.pop(key, None)
+            if "provider_native_web_search" in patch:
+                merged["provider_native_web_search"] = patch[
+                    "provider_native_web_search"
+                ]
             yaml_tiers[tier] = merged
         if default_tier and default_tier not in seen and default_tier not in current_tiers:
             raise ValueError(f"default_tier {default_tier!r} is not configured")
@@ -535,8 +660,18 @@ def models_discover(
     provider_key: str | None = None,
     provider_key_ref: str | None = None,
     vault_passphrase: str | None = None,
+    api_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Call one provider's live model-list endpoint for onboarding."""
+    """Call one provider's live model-list endpoint for onboarding.
+
+    ``api_mode`` is consulted only when ``provider`` is not in the
+    builtin / catalogue map — i.e. the operator typed a custom id.
+    Allowed values: ``"chat_completions"`` (OpenAI-compat) or
+    ``"anthropic_messages"`` (Anthropic-compat). The default falls
+    back to ``chat_completions`` because the vast majority of
+    self-hosted servers (Ollama, vLLM, llama.cpp, Together, Fireworks,
+    Groq, ...) speak OpenAI-compat.
+    """
 
     provider_id = (provider or "").strip().lower()
     if not provider_id or not _PROVIDER_RE.fullmatch(provider_id):
@@ -571,16 +706,30 @@ def models_discover(
         api_key = _resolve_llm_key(
             config, key_ref, vault_passphrase=vault_passphrase,
         )
-    if provider_id != "ollama" and not api_key:
+    # Ollama is the canonical no-key local server; for anything else
+    # (including a custom OpenAI-compat target) we still need a token.
+    is_local = provider_id == "ollama" or _looks_like_local_url(target_base_url)
+    if not is_local and not api_key:
         return {
             "ok": False,
             "error": "provider_key_required",
             "detail": "store or paste a provider API key before discovering models",
         }
 
-    adapter = builtin_providers().get(provider_id)
+    providers = builtin_providers()
+    adapter = providers.get(provider_id)
     if adapter is None or not hasattr(adapter, "list_models"):
-        return {"ok": False, "error": "no_adapter", "detail": provider_id}
+        # Custom provider id — pick a compat adapter from ``api_mode``.
+        # The "compat" entry is always an OpenAICompatAdapter; the
+        # anthropic compat is the same instance used for Anthropic
+        # itself. Both speak `list_models` against the supplied URL.
+        mode = (api_mode or "").strip().lower() or "chat_completions"
+        if mode == "anthropic_messages":
+            adapter = providers.get("anthropic-compat") or providers.get("anthropic")
+        else:
+            adapter = providers.get("compat")
+        if adapter is None or not hasattr(adapter, "list_models"):
+            return {"ok": False, "error": "no_adapter", "detail": provider_id}
 
     try:
         kwargs: dict[str, Any] = {

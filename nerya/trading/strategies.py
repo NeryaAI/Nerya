@@ -17,6 +17,12 @@ class StrategyLimits:
     allowed_markets: list[str] = field(default_factory=list)
     max_single_order_usd: float = 0.0
     max_total_exposure_usd: float = 0.0
+    # Per-(account, market) ceiling on **merged** position notional in
+    # USD. Defaults to 0 (== off) so existing strategies keep working,
+    # but a strategy that opts in protects the merged position against
+    # multi-share runup — ``A long 0.5 + B long 0.5`` together exceed
+    # the limit even though either alone fits.
+    max_position_size_usd: float = 0.0
     daily_loss_usd: float = 0.0
     max_drawdown_pct: float = 0.0
     min_confidence: float = 0.5
@@ -65,6 +71,7 @@ def load_strategy(paths: WorkspacePaths, strategy_id: str) -> Strategy:
         allowed_markets=list(limits_raw.get("allowed_markets") or []),
         max_single_order_usd=float(limits_raw.get("max_single_order_usd", 0)),
         max_total_exposure_usd=float(limits_raw.get("max_total_exposure_usd", 0)),
+        max_position_size_usd=float(limits_raw.get("max_position_size_usd", 0)),
         daily_loss_usd=float(limits_raw.get("daily_loss_usd", 0)),
         max_drawdown_pct=float(limits_raw.get("max_drawdown_pct", 0)),
         min_confidence=float(limits_raw.get("min_confidence", 0.5)),

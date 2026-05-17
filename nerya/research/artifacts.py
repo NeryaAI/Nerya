@@ -1,6 +1,6 @@
 """Artifact path helpers.
 
-research runtime spec §3.3 mandates this directory layout:
+This directory layout is required:
 
 ```
 workspace/strategies/<strategy_id>/candidates/<candidate_id>/

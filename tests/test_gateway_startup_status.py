@@ -42,6 +42,25 @@ def _write_telegram_channel(client) -> None:
     )
 
 
+def _write_mixed_gateway_channels(client) -> None:
+    yaml_io.dump(
+        client.config.paths.messages_channels,
+        {
+            "channels": {
+                "telegram_ops": {
+                    "kind": "telegram",
+                    "bot_token_ref": "vault://telegram_bot_token",
+                    "chat_id": "123456",
+                },
+                "discord_ops": {
+                    "kind": "discord",
+                    "webhook_url_ref": "vault://discord_webhook_url",
+                },
+            }
+        },
+    )
+
+
 def test_gateway_status_reports_unconfigured_runtime_without_secrets(tmp_path):
     client = _client(tmp_path)
     route_map = {(method, path): handler for method, path, handler in routes_gateway.routes()}
@@ -51,6 +70,7 @@ def test_gateway_status_reports_unconfigured_runtime_without_secrets(tmp_path):
     assert status["ok"] is True
     assert status["channels_file_exists"] is False
     assert status["configured_gateway_count"] == 0
+    assert status["gateways"]["channels"] == []
     assert status["telegram"]["channels"] == []
     assert required_scope("GET", "/gateway/status") == "read:runtime"
 
@@ -105,3 +125,33 @@ def test_gateway_startup_respects_telegram_poller_disable_env(tmp_path, monkeypa
     assert status["configured_gateway_count"] == 1
     assert status["telegram"]["polling_disabled_by_env"] is True
     assert status["telegram"]["channels"][0]["poller_alive"] is False
+
+
+def test_gateway_startup_reports_send_only_gateways_without_secret_values(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+    _write_mixed_gateway_channels(client)
+    monkeypatch.setattr(
+        routes_gateway,
+        "sync_configured_gateways_on_start",
+        lambda _client: {"ok": True, "results": []},
+    )
+    monkeypatch.setattr(
+        routes_gateway,
+        "_poll_loop",
+        lambda _client, _channel, stop: stop.wait(30),
+    )
+
+    result = routes_gateway.launch_configured_gateways_on_start(client)
+    status = routes_gateway.gateway_runtime_status(client)
+
+    assert result["scheduled"] is True
+    assert {g["channel"] for g in result["gateways"]} == {"telegram_ops", "discord_ops"}
+    assert status["configured_gateway_count"] == 2
+    by_channel = {g["channel"]: g for g in status["gateways"]["channels"]}
+    assert by_channel["telegram_ops"]["kind"] == "telegram"
+    assert by_channel["discord_ops"]["kind"] == "discord"
+    assert by_channel["discord_ops"]["outbound_ready"] is True
+    assert by_channel["discord_ops"]["mode"] == "send_only"
+    assert "vault://telegram_bot_token" not in str(status)
+    assert "vault://discord_webhook_url" not in str(status)
+    assert "123456" not in str(status)

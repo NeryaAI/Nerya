@@ -35,7 +35,6 @@ from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
 from ..strategies.package import (
     StrategyPackage,
-    StrategyTuningConfig,
     load_package,
 )
 from .patch_proposal import Proposal, create_proposal
@@ -190,7 +189,7 @@ def _render_tuning_block(request: StrategyTuningGenerationRequest) -> dict[str, 
         "subagent": {
             "name": "strategy_tuner",
             "prompt_file": "subagents/strategy_tuner.agent.md",
-            "tier": "high",
+            "tier": "medium",
         },
         "objectives": list(request.objectives),
         "guardrails": {
@@ -237,6 +236,10 @@ def _default_tuner_prompt(
         "* Never directly mutate the strategy. You only propose patches.\n"
         "* Stay within `allowed_targets` and never touch `forbidden_targets`.\n"
         "* Cite evidence drawn from the performance snapshot you receive.\n"
+        "* The snapshot includes `market_context` (recent K-line tail plus "
+        "computed indicators) and `news_context` (recent matched news when "
+        "available); cite them when they affect the proposed change and "
+        "flag degraded or missing data explicitly.\n"
     )
 
 

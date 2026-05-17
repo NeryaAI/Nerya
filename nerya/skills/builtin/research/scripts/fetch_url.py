@@ -35,9 +35,21 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
+import os
+from pathlib import Path
+
 from nerya.security.web_safety import evaluate_url
 
 from ._http import DEFAULT_TIMEOUT, HARD_FETCH_BYTES, http_get
+from . import _scrapling
+
+
+def _workspace_root() -> Path:
+    """Mirror the ``NERYA_WORKSPACE`` resolution used by ``_engine_config``."""
+    workspace = os.environ.get("NERYA_WORKSPACE")
+    if not workspace:
+        workspace = str(Path.home() / ".nerya")
+    return Path(workspace).expanduser()
 
 
 _DEFAULT_FETCH_BYTES = 200_000
@@ -261,6 +273,134 @@ def _fetch_jina_reader(
     }, None
 
 
+def _try_browser_engine(
+    *,
+    safe_url: str,
+    timeout_s: float,
+    min_content_chars: int,
+    fallback_errors: list[str],
+    safety_dict: dict[str, Any],
+    started_at: float,
+) -> dict[str, Any] | None:
+    """Try the operator-selected headless-browser engine.
+
+    Sits between Jina Reader and Scrapling in the fallback chain. Returns
+    ``None`` when no engine is selected, the engine isn't installed, or
+    its output looks low-quality.
+    """
+    try:
+        from nerya.integrations import browser_engines as _be
+    except Exception as exc:  # noqa: BLE001
+        fallback_errors.append(f"browser_engine: import failed: {exc}")
+        return None
+    try:
+        result = _be.fetch(_workspace_root(), url=safe_url,
+                           timeout_s=timeout_s)
+    except Exception as exc:  # noqa: BLE001
+        fallback_errors.append(f"browser_engine: {type(exc).__name__}: {exc}")
+        return None
+
+    if not result.get("ok"):
+        err = result.get("error") or ""
+        if err and err not in {"no_engine_selected", "engine_not_installed"}:
+            fallback_errors.append(
+                f"browser:{result.get('name') or '?'}: {err} "
+                f"{result.get('detail') or ''}".strip()
+            )
+        return None
+
+    body = (result.get("markdown") or result.get("text")
+            or result.get("html") or "")
+    if not body:
+        fallback_errors.append(f"browser:{result.get('name')}: empty output")
+        return None
+    # If the engine returned raw HTML, strip it to plaintext before quality check.
+    if result.get("html") and not result.get("markdown"):
+        extracted = _extract_html(
+            body, url=safe_url, min_content_chars=min_content_chars,
+        )
+        body = extracted.text or body
+
+    if _looks_low_quality(body, min_chars=min_content_chars):
+        fallback_errors.append(
+            f"browser:{result.get('name')}: low-quality content "
+            f"({len(body)} chars)"
+        )
+        return None
+
+    return {
+        "ok": True,
+        "status": 200,
+        "url": safe_url,
+        "title": "",
+        "content_type": "text/markdown",
+        "bytes": result.get("bytes") or len(body),
+        "truncated": False,
+        "fetch_method": result.get("fetch_method") or f"browser:{result.get('name')}",
+        "fallback_errors": fallback_errors,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "markdown": body,
+        "text": body,
+        "safety": safety_dict,
+    }
+
+
+def _try_scrapling(
+    *,
+    safe_url: str,
+    timeout_s: float,
+    min_content_chars: int,
+    fallback_errors: list[str],
+    safety_dict: dict[str, Any],
+    started_at: float,
+) -> dict[str, Any] | None:
+    """Last-resort: try Scrapling (StealthyFetcher → Dynamic → plain).
+
+    Returns a fully-formed response dict on success, ``None`` if Scrapling
+    is not installed or every tier failed. Failure reasons are appended
+    to ``fallback_errors`` so the caller can surface them.
+    """
+    try:
+        scr = _scrapling.fetch(
+            url=safe_url,
+            timeout_s=timeout_s,
+            prefer="auto",
+        )
+    except Exception as exc:  # noqa: BLE001
+        fallback_errors.append(f"scrapling: {type(exc).__name__}: {exc}")
+        return None
+
+    if not scr.ok:
+        if scr.error:
+            fallback_errors.append(scr.error)
+        for err in (scr.fallback_errors or []):
+            fallback_errors.append(err)
+        return None
+
+    if _looks_low_quality(scr.markdown, min_chars=min_content_chars):
+        fallback_errors.append(
+            f"{scr.fetch_method}: low-quality content "
+            f"({len(scr.markdown)} chars)"
+        )
+        return None
+
+    return {
+        "ok": True,
+        "status": scr.status,
+        "url": scr.url,
+        "title": scr.title,
+        "content_type": "text/html",
+        "bytes": scr.bytes,
+        "truncated": False,
+        "fetch_method": scr.fetch_method,
+        "fallback_errors": fallback_errors,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "markdown": scr.markdown,
+        "text": scr.markdown,
+        "safety": safety_dict,
+    }
+
+
 def run(
     *,
     url: str,
@@ -269,6 +409,8 @@ def run(
     timeout_s: float = DEFAULT_TIMEOUT,
     use_jina_fallback: bool = True,
     prefer_jina: bool = False,
+    use_browser_fallback: bool = True,
+    use_scrapling_fallback: bool = True,
     min_content_chars: int = _MIN_USEFUL_CHARS,
 ) -> dict[str, Any]:
     if not url:
@@ -320,6 +462,28 @@ def run(
                 return jina
             if err:
                 fallback_errors.append(err)
+        if use_browser_fallback:
+            br_result = _try_browser_engine(
+                safe_url=safety.url,
+                timeout_s=timeout_s,
+                min_content_chars=min_content_chars,
+                fallback_errors=fallback_errors,
+                safety_dict=safety.to_dict(),
+                started_at=started,
+            )
+            if br_result is not None:
+                return br_result
+        if use_scrapling_fallback:
+            scr_result = _try_scrapling(
+                safe_url=safety.url,
+                timeout_s=timeout_s,
+                min_content_chars=min_content_chars,
+                fallback_errors=fallback_errors,
+                safety_dict=safety.to_dict(),
+                started_at=started,
+            )
+            if scr_result is not None:
+                return scr_result
         return {
             "ok": False,
             "url": safety.url,
@@ -383,6 +547,48 @@ def run(
         if err:
             fallback_errors.append(err)
 
+    # Browser engine tier — only kicks in when Jina also failed or returned
+    # low-quality content. Cheap to skip if no engine is selected.
+    needs_browser = (
+        use_browser_fallback
+        and strip_html
+        and (status >= 400 or _looks_low_quality(markdown, min_chars=min_content_chars))
+    )
+    if needs_browser:
+        br_result = _try_browser_engine(
+            safe_url=safety.url,
+            timeout_s=timeout_s,
+            min_content_chars=min_content_chars,
+            fallback_errors=fallback_errors,
+            safety_dict=safety.to_dict(),
+            started_at=started,
+        )
+        if br_result is not None:
+            br_result["direct_status"] = status
+            br_result["direct_fetch_method"] = fetch_method
+            return br_result
+
+    # Last-resort fallback: Scrapling (Camoufox / Playwright stealth).
+    # Only trigger when direct + Jina both produced nothing usable.
+    needs_scrapling = (
+        use_scrapling_fallback
+        and strip_html
+        and (status >= 400 or _looks_low_quality(markdown, min_chars=min_content_chars))
+    )
+    if needs_scrapling:
+        scr_result = _try_scrapling(
+            safe_url=safety.url,
+            timeout_s=timeout_s,
+            min_content_chars=min_content_chars,
+            fallback_errors=fallback_errors,
+            safety_dict=safety.to_dict(),
+            started_at=started,
+        )
+        if scr_result is not None:
+            scr_result["direct_status"] = status
+            scr_result["direct_fetch_method"] = fetch_method
+            return scr_result
+
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {
         "ok": 200 <= status < 400,
@@ -445,6 +651,8 @@ def main() -> None:
             timeout_s=float(payload.get("timeout_s") or DEFAULT_TIMEOUT),
             use_jina_fallback=_payload_bool(payload, "use_jina_fallback", True),
             prefer_jina=_payload_bool(payload, "prefer_jina", False),
+            use_browser_fallback=_payload_bool(payload, "use_browser_fallback", True),
+            use_scrapling_fallback=_payload_bool(payload, "use_scrapling_fallback", True),
             min_content_chars=int(payload.get("min_content_chars") or _MIN_USEFUL_CHARS),
         )
     except Exception as exc:

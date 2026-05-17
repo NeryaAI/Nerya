@@ -10,7 +10,8 @@
  */
 
 export type StrategyMode = "paper" | "shadow" | "live";
-export type StrategyClass = "scalping" | "trend" | "news";
+export type StrategyClass = "scalping" | "trend" | "news" | "agent" | "agent_team";
+export type StrategyExecutionMode = "script" | "agent" | "agent_task" | "agent_team" | "team";
 
 export interface StrategyScheduleManifest {
   type: "cron" | "interval";
@@ -237,6 +238,7 @@ export interface StrategyGenerationRequest {
   description?: string;
   prompt?: string;
   strategy_class?: StrategyClass;
+  execution_mode?: StrategyExecutionMode;
   mode?: StrategyMode;
   markets: string[];
   accounts: string[];
@@ -251,6 +253,7 @@ export interface StrategyGenerationRequest {
   tuning_cron?: string;
   tuning_objectives?: string[];
   extra_subagent_prompts?: Record<string, string>;
+  files?: Record<string, string>;
   validate?: boolean;
 }
 

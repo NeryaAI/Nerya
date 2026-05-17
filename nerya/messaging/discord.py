@@ -35,6 +35,9 @@ def send(outbox_messages: Path, message: dict[str, Any], *,
 
     tx = transport or UrllibMessagingTransport()
     body: dict[str, Any] = {"content": message.get("text") or ""}
+    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+    if attachments:
+        body["attachments"] = attachments
     if "username" in cfg:
         body["username"] = cfg["username"]
     if "avatar_url" in cfg:

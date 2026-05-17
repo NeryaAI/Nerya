@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
+import { Select } from "../Select";
+import { EndpointMapEditor } from "../EndpointMapEditor";
 import { clientApi } from "../../lib/clientApi";
 
 type Step = 1 | 2 | 3 | 4;
@@ -37,15 +39,11 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
   const [baseUrl, setBaseUrl] = useState("");
   const [docsUrl, setDocsUrl] = useState("");
   const [installHint, setInstallHint] = useState("");
-  const [endpointsRaw, setEndpointsRaw] = useState(
-    JSON.stringify(
-      {
-        markets: { method: "GET", path: "/api/markets" },
-      },
-      null,
-      2,
-    ),
-  );
+  const [endpoints, setEndpoints] = useState<
+    Record<string, Record<string, unknown>>
+  >({
+    markets: { method: "GET", path: "/api/markets" },
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderCatalogEntry[]>([]);
@@ -80,10 +78,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
         });
         setScaffold(res as ScaffoldResult);
       } else {
-        let endpoints: Record<string, Record<string, unknown>> | undefined;
-        try {
-          endpoints = JSON.parse(endpointsRaw || "{}");
-        } catch {
+        if (Object.keys(endpoints).length === 0) {
           throw new Error(t("endpointsInvalid"));
         }
         const res = await clientApi.exchangeAuthorScaffoldHttp({
@@ -209,35 +204,33 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
 
           {mode === "ccxt" ? (
             <Field label={t("ccxtIdLabel")}>
-              <select
+              <Select
                 value={ccxtId}
-                onChange={(e) => setCcxtId(e.target.value)}
-                className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
-              >
-                <option value="">{t("selectPlaceholder")}</option>
-                {ccxtSupported.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => setCcxtId(value)}
+                options={[
+                  { value: "", label: t("selectPlaceholder") },
+                  ...ccxtSupported.map((id) => ({ value: id, label: id })),
+                ]}
+                size="sm"
+                ariaLabel={t("ccxtIdLabel")}
+              />
             </Field>
           ) : (
             <>
               <div className="grid grid-cols-2 gap-2">
                 <Field label={t("kindLabel")}>
-                  <select
+                  <Select<typeof kind>
                     value={kind}
-                    onChange={(e) =>
-                      setKind(e.target.value as typeof kind)
-                    }
-                    className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
-                  >
-                    <option value="cex">cex</option>
-                    <option value="dex">dex</option>
-                    <option value="prediction_market">prediction_market</option>
-                    <option value="chain">chain</option>
-                  </select>
+                    onChange={(value) => setKind(value)}
+                    options={[
+                      { value: "cex", label: "cex" },
+                      { value: "dex", label: "dex" },
+                      { value: "prediction_market", label: "prediction_market" },
+                      { value: "chain", label: "chain" },
+                    ]}
+                    size="sm"
+                    ariaLabel={t("kindLabel")}
+                  />
                 </Field>
                 <Field label={t("installHintLabel")}>
                   <input
@@ -267,11 +260,9 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                 </Field>
               </div>
               <Field label={t("endpointsLabel")}>
-                <textarea
-                  value={endpointsRaw}
-                  onChange={(e) => setEndpointsRaw(e.target.value)}
-                  rows={6}
-                  className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono text-[11px]"
+                <EndpointMapEditor
+                  value={endpoints}
+                  onChange={setEndpoints}
                 />
               </Field>
             </>

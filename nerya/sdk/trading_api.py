@@ -1,6 +1,6 @@
 """Trading SDK surface.
 
-04-29 §11 P6 — Agents and strategies should express trading
+Agents and strategies should express trading
 intent in *typed plans*, not bespoke order dicts. This module is the
 canonical SDK contract: every helper here translates the caller's
 intent into a :class:`TradePlan` (or related schema) and forwards it
@@ -463,7 +463,23 @@ class TradingAPI:
             entry=entry if isinstance(entry, TradeEntry) else (
                 TradeEntry(**dict(entry)) if entry else TradeEntry()
             ),
-            protection=_coerce_protection(protection),
+            # ``_coerce_protection`` previously defaulted ``side`` to
+            # ``"buy"`` which fails the ``ProtectionRule`` validator
+            # (``side`` must be ``long``/``short``). When the caller
+            # doesn't supply ``protection.side``, inherit it from the
+            # plan's position side, which IS in the right vocabulary.
+            # Same applies to ``account_id`` / ``market`` / ``strategy_id``
+            # — the SDK was already filling them on the plan above so
+            # the protection rule should reflect the same context.
+            protection=_coerce_protection(
+                protection,
+                defaults={
+                    "side": side,
+                    "account_id": account_id,
+                    "market": market,
+                    "strategy_id": strategy_id,
+                },
+            ),
             confidence=float(confidence),
             reasoning_ref=str(reasoning_ref or ""),
             trigger_event_id=trigger_event_id,
@@ -478,17 +494,55 @@ class TradingAPI:
 # ---------------------------------------------------------------------------
 
 
-def _coerce_protection(p: ProtectionRule | dict[str, Any] | None) -> ProtectionRule | None:
+def _coerce_protection(
+    p: ProtectionRule | dict[str, Any] | None,
+    *,
+    defaults: dict[str, Any] | None = None,
+) -> ProtectionRule | None:
+    """Build a ``ProtectionRule`` from a dict, inheriting plan defaults.
+
+    ``defaults`` carries the surrounding plan's context (side, account,
+    market, strategy) so a minimal caller payload (``{"stop_loss":
+    {...}, "take_profit": {...}}``) becomes a valid rule. Without
+    this, callers had to repeat side/account/market on every
+    protection dict and ``side`` defaulting to ``"buy"`` would fail
+    the ``ProtectionRule`` validator.
+
+    Also normalises the ``mode`` enum: ``ProtectionRule.mode`` accepts
+    ``hard_exchange|soft_runtime|hybrid``; callers commonly say
+    ``soft`` / ``hard`` so we translate those.
+    """
+
     if p is None or isinstance(p, ProtectionRule):
         return p
     d = dict(p)
+    base = dict(defaults or {})
+
+    raw_mode = str(d.get("mode") or "").strip()
+    if raw_mode == "soft":
+        mode = "soft_runtime"
+    elif raw_mode == "hard":
+        mode = "hard_exchange"
+    elif raw_mode in ("hard_exchange", "soft_runtime", "hybrid"):
+        mode = raw_mode
+    else:
+        mode = "soft_runtime"
+
+    raw_side = str(d.get("side") or base.get("side") or "long").strip().lower()
+    if raw_side in ("buy", "long"):
+        side = "long"
+    elif raw_side in ("sell", "short"):
+        side = "short"
+    else:
+        side = "long"
+
     return ProtectionRule(
         position_id=str(d.get("position_id") or ""),
-        strategy_id=str(d.get("strategy_id") or ""),
-        account_id=str(d.get("account_id") or ""),
-        market=str(d.get("market") or ""),
-        side=d.get("side") or "buy",  # type: ignore[arg-type]
-        mode=d.get("mode") or "soft",  # type: ignore[arg-type]
+        strategy_id=str(d.get("strategy_id") or base.get("strategy_id") or ""),
+        account_id=str(d.get("account_id") or base.get("account_id") or ""),
+        market=str(d.get("market") or base.get("market") or ""),
+        side=side,  # type: ignore[arg-type]
+        mode=mode,  # type: ignore[arg-type]
         stop_loss=_coerce_stop_loss(d.get("stop_loss")),
         take_profit=_coerce_take_profit(d.get("take_profit")),
         trailing_stop=_coerce_trailing_stop(d.get("trailing_stop")),

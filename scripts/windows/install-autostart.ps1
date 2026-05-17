@@ -2,7 +2,7 @@ param(
     [string]$ShortcutName = "NeryaLocal.cmd",
     [string]$Workspace = "$HOME\.nerya",
     [int]$ApiPort = 18317,
-    [int]$DashboardPort = 3001,
+    [int]$DashboardPort = 18380,
     [switch]$Remove
 )
 

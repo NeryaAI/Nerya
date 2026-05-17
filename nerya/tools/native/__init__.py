@@ -1,7 +1,7 @@
 """Native workspace-primitive tools for the workspace-native agent loop.
 
 These are the *first-class coding tools* that every coding-capable
-agent (IDE, coding-agent, coding agent, coding CLI) ships with. They are
+agent ships with. They are
 deliberately decoupled from the legacy ``operator_skill`` so the agent
 can use them without going through the legacy planner / skill selector
 allowlist.
@@ -18,19 +18,23 @@ Modules:
   ``exit_plan_mode``.
 * :mod:`skill`         — ``skill_index`` / ``skill_view`` /
   ``script_inspect`` / ``script_run``.
-* :mod:`skill_tool`    — ``Skill`` (coding-agent-style playbook loader).
+* :mod:`skill_tool`    — ``Skill`` (playbook loader).
 * :mod:`memory`        — ``memory_recall`` / ``memory_remember`` /
   ``journal_search`` (compatibility for long-term recall).
 * :mod:`agents`        — ``subagent_list`` / ``subagent_run`` (parent
   kernel summons child runtimes).
-* :mod:`evolve`        — ``evolve_reflect`` / ``evolve_proposals``
-  (self-improvement reflection cycle).
+* :mod:`evolve`        — ``evolve_reflect`` / ``evolve_skill_proposal`` /
+  ``evolve_proposals`` (self-improvement reflection and workflow-to-skill
+  proposals).
 * :mod:`recipes`       — ``recipe_list`` / ``recipe_view`` (operator-curated
   named runbooks, complement to the SKILL.md index).
 * :mod:`connectors`    — ``connector_list`` / ``connector_view``: enumerate
   the in-process ``ExchangeProviderRegistry`` so the agent can authoritatively
   answer "is venue X integrated?" before claiming a venue is missing /
   authoring a placeholder strategy.
+* :mod:`data_api`      — ``data_api``: discover schemas and call bounded
+  read-only provider-specific data actions beyond standard ticker / OHLCV
+  reads (AkShare tables, wallet provider data, allowlisted OnchainOS reads).
 * :mod:`trading`       — ``portfolio_summary`` / ``portfolio_positions`` /
   ``portfolio_pnl`` / ``virtual_ledger`` / ``risk_check`` /
   ``strategy_list`` / ``strategy_view`` / ``strategy_history`` /

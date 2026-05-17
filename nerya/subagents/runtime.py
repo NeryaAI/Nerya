@@ -20,6 +20,7 @@ only place a live-trading surface can be reached.
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,32 +46,31 @@ CHILD_SKILL_DENYLIST: frozenset[str] = frozenset({
     "trading", "trading_write", "wallet", "script_runtime",
 })
 
-# Apr-27 2026 — operator directive: read-only "self-control" skills must
-# be available to every subagent regardless of whether the registry
-# allowlist remembered to include them. Mirrors
-# ``nerya.agent.skill_selector._CORE_SELF_CONTROL_SKILLS`` so a subagent
-# can always:
+# Always expose a small read-only "self-control" skill set to every
+# subagent so it can inspect the workspace, load skill docs, and fetch
+# live web evidence even if the preferred skill list omitted them.
+# A subagent can always:
 #   * introspect the workspace (``workspace`` — list strategies / scripts
 #     / triggers / accounts so it knows what already exists before
 #     authoring new artifacts),
 #   * fetch the full SKILL.md for any tool (``skill_index`` — the
 #     documented escape hatch when the model needs the precise schema),
 #   * pull live web evidence to ground a claim before reporting back
-#     (``websearch`` — DuckDuckGo by default, no API key required).
+#     (``web_search`` / ``web_search_fetch`` — current native web tools).
 # These are all read-only, so they're safe to grant universally. The
 # operator can still blacklist them via ``skills.disabled`` or per-spec
 # ``allowed_skills`` overrides if they need a hard-locked subagent.
 CHILD_CORE_SELF_CONTROL_SKILLS: tuple[str, ...] = (
-    "workspace", "skill_index", "websearch",
+    "workspace", "skill_index", "web_search", "web_search_fetch",
 )
 
 
-# Apr-30 2026 — operator directive: subagents must inherit the *full*
-# native-tool surface the parent has so e.g. ``market_analyst`` and
-# ``risk_critic`` can call ``connector_list`` / ``connector_view`` /
-# ``memory_*`` / ``recipe_view`` mid-investigation. Without this the
-# child was forced to assume a venue was missing because the only
-# bridge into the registry lived on the parent kernel's tool list.
+# Subagents inherit the parent's full native-tool surface so roles such
+# as ``market_analyst`` and ``risk_critic`` can call
+# ``connector_list`` / ``connector_view`` / ``memory_*`` /
+# ``recipe_view`` mid-investigation. Without this, the child would have
+# to assume a venue or data source was missing because the registry only
+# existed on the parent.
 #
 # The denylist keeps the destructive surface off-limits regardless of
 # parent permissions: live trading writes (``trading_open_*``,
@@ -89,6 +89,29 @@ CHILD_NATIVE_TOOL_DENYLIST_PREFIXES: tuple[str, ...] = (
 # Risk levels the child may invoke directly. Anything DANGEROUS is
 # always denied, no matter how the parent classified it.
 CHILD_NATIVE_TOOL_DENY_RISK: tuple[str, ...] = ("dangerous",)
+
+STOCK_RESEARCH_SUBAGENTS: frozenset[str] = frozenset({
+    "technical_analyst",
+    "fundamentals_analyst",
+    "sentiment_analyst",
+    "bull_researcher",
+    "bear_researcher",
+    "risk_critic",
+    "research_manager",
+    "research_editor",
+})
+
+LEGACY_TOOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "websearch": ("web_search", "web_search_fetch"),
+    "news_social": ("web_search_fetch",),
+    "portfolio": ("portfolio_summary",),
+    "risk": ("risk_check",),
+    "trading_read": ("portfolio_summary",),
+}
+
+
+class SubAgentLLMError(RuntimeError):
+    """Raised when a child runtime cannot produce any model output."""
 
 
 @dataclass
@@ -122,30 +145,27 @@ class SubAgentRuntime:
     config: Config
     skills: SkillKernel
     llm: LLMGateway
-    # Apr-30 2026 — passed in by the parent kernel via ``SubAgentDispatcher``
-    # so the child can invoke native tools (connector_list / connector_view /
-    # memory_* / recipe_view / search / read / glob / grep …) directly
-    # instead of having to find a skill that wraps them. Optional so the
-    # legacy callsites (``SubAgentRuntime(config=..., skills=..., llm=...)``)
-    # keep working — when ``None`` the runtime simply has no native-tool
-    # fallthrough and the child is restricted to the skill kernel.
+    # Passed in by the parent kernel so the child can invoke native tools
+    # (connector_list / connector_view / memory_* / recipe_view / search /
+    # read / glob / grep …) directly instead of relying on skill wrappers.
+    # Optional so legacy callsites keep working — when ``None`` the runtime
+    # simply has no native-tool fallthrough and the child is restricted to
+    # the skill kernel.
     tool_registry: Any = None
 
     # ---------------------------------------------------------------- config
-    def _max_iterations(self) -> int:
-        # Apr-27 2026 (third bump) — coding-agent's ``forkSubagent``
-        # (src/tools/AgentTool/forkSubagent.ts:65) ships ``maxTurns: 200``
-        # and the runtime never auto-terminates a subagent below that ceiling.
-        # When we asked Nerya to run a "deep research on $TICKER" team plan
-        # the subagent kept stopping mid-investigation because 20 was still
-        # too tight: it spent its first few turns picking sources, then needed
-        # 1–2 turns per source to fetch + cross-check, then 1–2 turns to
-        # summarise. 60 gives the LLM enough headroom to author a small
-        # script in workspace, run it, scan results, retry on failures, and
-        # produce a structured report — without becoming truly unbounded.
-        return max(1, int(self.config.get(
-            "agent.subagents.max_iterations", 60,
-        ) or 60))
+    def _max_iterations(self, spec: SubAgentSpec | None = None) -> int:
+        # Keep the default ceiling high enough for research-oriented
+        # subagents to inspect sources, run small scripts, retry failures,
+        # and still produce a structured report without stopping mid-run.
+        explicit = self.config.get("agent.subagents.max_iterations", None)
+        if explicit is not None:
+            return max(1, int(explicit or 1))
+        if spec is not None and spec.name in STOCK_RESEARCH_SUBAGENTS:
+            return max(1, int(self.config.get(
+                "agent.subagents.stock_research_max_iterations", 8,
+            ) or 8))
+        return max(1, int(60))
 
     def _max_skill_calls(self) -> int:
         # Aligned with the iteration bump: a research subagent now has room
@@ -157,6 +177,22 @@ class SubAgentRuntime:
             "agent.subagents.max_skill_calls", 120,
         ) or 120))
 
+    def _max_wall_seconds(self, spec: SubAgentSpec | None = None) -> float:
+        explicit = self.config.get("agent.subagents.max_wall_seconds", None)
+        if explicit is not None:
+            try:
+                return max(5.0, float(explicit or 5))
+            except Exception:
+                return 120.0
+        if spec is not None and spec.name in STOCK_RESEARCH_SUBAGENTS:
+            try:
+                return max(5.0, float(self.config.get(
+                    "agent.subagents.stock_research_max_wall_seconds", 240,
+                ) or 240))
+            except Exception:
+                return 240.0
+        return max(5.0, float(600))
+
     # ---------------------------------------------------------------- core
     def run(
         self,
@@ -166,17 +202,15 @@ class SubAgentRuntime:
         payload: dict[str, Any],
         strategy_id: str | None = None,
         session_id: str | None = None,
+        turn_id: str | None = None,
+        parent_call_id: str | None = None,
     ) -> dict[str, Any]:
         t_start = time.monotonic()
         steps: list[_StepRecord] = []
-        # Apr-29 2026 — operator directive: ``spec.allowed_skills`` is now
-        # a *preload / preference* list, not a hard allowlist. The
-        # subagent (and team members that funnel through this runtime)
-        # gets the *full* skill catalogue minus :data:`CHILD_SKILL_DENYLIST`,
-        # so authoring a persona no longer requires guessing which
-        # skills it might need. The list still drives the prompt copy
-        # so the model can be nudged toward the operator's preferred
-        # tools without being locked out of the long tail.
+        # Treat ``spec.allowed_skills`` as a preload / preference list, not
+        # a hard allowlist. The subagent gets the full callable catalogue
+        # minus :data:`CHILD_SKILL_DENYLIST`; the preferred list only nudges
+        # prompt-time tool selection.
         preloaded = [s for s in spec.allowed_skills if s not in CHILD_SKILL_DENYLIST]
         for sid in CHILD_CORE_SELF_CONTROL_SKILLS:
             if sid in CHILD_SKILL_DENYLIST:
@@ -197,26 +231,27 @@ class SubAgentRuntime:
             sid for sid in registry_ids
             if sid and sid not in CHILD_SKILL_DENYLIST
         })
-        # Apr-30 2026 — also surface the native-tool surface the parent
-        # passed in. The child can invoke any of these via the same
-        # ``skill_calls`` JSON envelope (the dispatcher decides whether
-        # the name resolves to a skill or a native tool). We compute
-        # the visible set once per run so the prompt copy is stable
+        # Also surface the native-tool set inherited from the parent. The
+        # child uses the same ``skill_calls`` JSON envelope; the dispatcher
+        # decides whether each name resolves to a skill or a native tool.
+        # Compute the visible set once per run so the prompt copy is stable
         # across iterations.
         callable_native_tools = self._allowed_native_tool_names()
+        preloaded = _normalise_preloaded_tools(
+            preloaded,
+            callable_skills=callable_skills,
+            native_tools=callable_native_tools,
+        )
         skill_calls: list[dict[str, Any]] = []
         rejected_actions: list[dict[str, Any]] = []
         signals_used: list[str] = []
         evidence: list[dict[str, Any]] = []
         uncertainty: float = 0.0
 
-        # Apr-27 2026 — emit subagent lifecycle events on the same
-        # process-wide streaming bus the parent kernel uses, so the
-        # dashboard / gateway / TUI can display the subagent's *own*
-        # think → act → observe loop live (chat transcript order).
-        # Without this the subagent appeared as one opaque
-        # "subagent X ran" badge regardless of how many internal
-        # iterations it ran. We never let a streaming-bus failure
+        # Emit subagent lifecycle events on the same process-wide
+        # streaming bus the parent kernel uses so the dashboard /
+        # gateway / TUI can display the subagent's own think → act →
+        # observe loop live. We never let a streaming-bus failure
         # break a subagent run: every publish call is wrapped.
         try:
             from ..agent.streaming import get_default_bus
@@ -224,9 +259,10 @@ class SubAgentRuntime:
         except Exception:
             _bus = None  # type: ignore[assignment]
         team_event_fields = {
+            "turn_id": turn_id,
             "team_run_id": payload.get("team_run_id"),
             "team_template": payload.get("team_template"),
-            "team_call_id": payload.get("team_call_id"),
+            "team_call_id": payload.get("team_call_id") or parent_call_id,
             "team_task_id": payload.get("task_id"),
             "team_task_owner": payload.get("task_owner"),
             "team_task_subject": payload.get("task_subject"),
@@ -259,10 +295,14 @@ class SubAgentRuntime:
             payload=payload, strategy_id=strategy_id,
         )
 
-        max_iter = self._max_iterations()
+        max_iter = self._max_iterations(spec)
         max_calls = self._max_skill_calls()
+        max_wall_seconds = self._max_wall_seconds(spec)
+        consecutive_unproductive_batches = 0
         last_parsed: dict[str, Any] = {}
         last_raw: str = ""
+        fatal_llm_error: str | None = None
+        close_reason: str | None = None
         total_tokens = 0
         total_usd = 0.0
         audit_prompts: list[dict[str, Any]] = []
@@ -294,6 +334,17 @@ class SubAgentRuntime:
 
         accumulated_obs: list[dict[str, Any]] = []
         for i in range(max_iter):
+            if time.monotonic() - t_start >= max_wall_seconds:
+                close_reason = "subagent_wall_time_exceeded"
+                steps.append(_StepRecord(
+                    kind="close",
+                    iteration=i,
+                    status="error",
+                    error="subagent_wall_time_exceeded",
+                    wall_ms=int((time.monotonic() - t_start) * 1000),
+                    detail={"max_wall_seconds": max_wall_seconds},
+                ))
+                break
             prompt = self._render_prompt(
                 spec, payload, base_context, accumulated_obs,
                 allowed=preloaded,
@@ -328,6 +379,7 @@ class SubAgentRuntime:
                 )
             except Exception as exc:
                 err_msg = f"{type(exc).__name__}: {exc}"
+                fatal_llm_error = err_msg
                 steps.append(_StepRecord(
                     kind="think", iteration=i, status="error",
                     error=err_msg,
@@ -344,6 +396,12 @@ class SubAgentRuntime:
             total_tokens += int(result.tokens or 0)
             total_usd += float(result.usd or 0.0)
             parsed = result.parsed if isinstance(result.parsed, dict) else {}
+            legacy_tool_calls = _extract_legacy_tool_calls(result.raw)
+            if legacy_tool_calls and _should_use_legacy_tool_calls(parsed):
+                parsed = {
+                    "skill_calls": legacy_tool_calls,
+                    "replan": True,
+                }
             last_parsed = parsed
             last_raw = result.raw
             think_wall = int((time.monotonic() - t0) * 1000)
@@ -400,6 +458,7 @@ class SubAgentRuntime:
             # skill_call entry or as a rejected_actions entry.
             actions = _coerce_list(parsed.get("skill_calls") or parsed.get("tool_calls"))
             batch_obs: list[dict[str, Any]] = []
+            batch_success = False
             for entry in actions:
                 if len(skill_calls) >= max_calls:
                     rejected_actions.append({
@@ -415,6 +474,7 @@ class SubAgentRuntime:
                 if record is None:
                     continue
                 if record.get("ok"):
+                    batch_success = True
                     skill_calls.append(record)
                     batch_obs.append({
                         "iteration": i,
@@ -448,16 +508,33 @@ class SubAgentRuntime:
             if batch_obs:
                 steps.append(_StepRecord(
                     kind="act", iteration=i, status="ok",
-                    detail={"observations_count": len(batch_obs)},
+                    detail={
+                        "observations_count": len(batch_obs),
+                        "successful": batch_success,
+                    },
                 ))
                 accumulated_obs.extend(batch_obs)
 
             # Respect an explicit "done" signal; otherwise continue only if
-            # the subagent explicitly asked for another pass.
+            # the subagent explicitly asked for another pass. When the model
+            # requested tool/skill calls we always give it one more turn with
+            # those observations, even if it forgot to set replan=true.
             if parsed.get("done") is True or parsed.get("final") is True:
                 break
+            if batch_obs:
+                if batch_success:
+                    consecutive_unproductive_batches = 0
+                else:
+                    consecutive_unproductive_batches += 1
+                    if consecutive_unproductive_batches >= 2:
+                        close_reason = "repeated_failed_tool_batches"
+                        break
+                continue
             if not (parsed.get("continue") or parsed.get("replan")):
                 break
+        if close_reason is None:
+            if sum(1 for s in steps if s.kind == "think") >= max_iter:
+                close_reason = "max_iterations"
 
         steps.append(_StepRecord(
             kind="close", iteration=len(steps),
@@ -466,8 +543,19 @@ class SubAgentRuntime:
                 "iterations": sum(1 for s in steps if s.kind == "think"),
                 "skill_calls": len(skill_calls),
                 "rejected_actions": len(rejected_actions),
+                "close_reason": close_reason,
             },
         ))
+        final_output = _final_subagent_output(last_parsed, last_raw)
+        if final_output.get("degraded") and skill_calls:
+            final_output = _tool_observation_fallback_output(
+                spec_name=spec.name,
+                payload=payload,
+                observations=accumulated_obs,
+                skill_calls=skill_calls,
+                rejected_actions=rejected_actions,
+                close_reason=close_reason,
+            )
         _publish(
             "subagent.step",
             step_kind="close",
@@ -478,6 +566,8 @@ class SubAgentRuntime:
             rejected_actions_n=len(rejected_actions),
             tokens=total_tokens,
             usd=total_usd,
+            error=fatal_llm_error,
+            close_reason=close_reason,
         )
         _publish(
             "subagent.end",
@@ -486,8 +576,9 @@ class SubAgentRuntime:
             rejected=len(rejected_actions),
             tokens=total_tokens,
             usd=total_usd,
+            error=fatal_llm_error,
             wall_ms=int((time.monotonic() - t_start) * 1000),
-            output=redact_display_dict(last_parsed or {"raw": last_raw}),
+            output=redact_display_dict(final_output),
             metrics=redact_display_dict({
                 "signals_used": signals_used,
                 "skill_calls": skill_calls,
@@ -497,10 +588,16 @@ class SubAgentRuntime:
             }),
         )
 
+        if fatal_llm_error and not last_parsed and not last_raw:
+            raise SubAgentLLMError(
+                f"subagent {spec.name} LLM call failed before producing output: "
+                f"{fatal_llm_error}"
+            )
+
         return {
             "subagent": spec.name,
             "tier": spec.tier,
-            "output": last_parsed or {"raw": last_raw},
+            "output": final_output,
             "tokens": total_tokens,
             "usd": total_usd,
             "metrics": {
@@ -537,11 +634,10 @@ class SubAgentRuntime:
                 + json.dumps(observations[-6:], ensure_ascii=False, default=str)
                 + "\n"
             )
-        # Apr-30 2026 — surface the native-tool surface inherited from
-        # the parent kernel so the child can self-discover venues
-        # (connector_list/connector_view), read memory, browse recipes,
-        # run shell, glob/grep, etc., without us having to ship a
-        # skill wrapper for every native tool.
+        # Surface the native-tool set inherited from the parent kernel so
+        # the child can self-discover venues, read memory, browse recipes,
+        # run shell, and use file primitives without a skill wrapper for
+        # every native tool.
         nt_block = ""
         if native_tools:
             preview = ", ".join(native_tools[:48])
@@ -558,24 +654,52 @@ class SubAgentRuntime:
                 "exchanges / data sources before claiming something is "
                 "missing."
             )
+            hints = _native_tool_usage_hints(native_tools)
+            if hints:
+                nt_block += "\n" + hints
+        output_language = str(
+            payload.get("output_language")
+            or payload.get("target_language")
+            or payload.get("response_language")
+            or ""
+        ).strip()
+        language_block = ""
+        if output_language:
+            language_block = (
+                "=== output language ===\n"
+                f"Target user-visible language: {output_language}\n"
+                "Write natural-language JSON values, evidence summaries, "
+                "rationales, and role conclusions in this language. Preserve "
+                "JSON keys, required enum values, proper nouns, tickers, "
+                "source names, code identifiers, URLs, and numeric metrics.\n\n"
+            )
         allow_note = (
             "\nYou may request skill calls via JSON "
             "``{\"skill_calls\": [{\"skill\": <id>, \"action\": <name>, "
             "\"payload\": {...}}]}``. "
-            f"Preloaded skills (the operator preloaded these for this role; "
-            f"prefer them when relevant): {allowed or 'none'}. "
-            "You can call any other workspace skill too — the runtime only "
-            "blocks trading_write / wallet / script_runtime — so reach for "
-            "the long tail when the task needs it. "
+            f"Preferred callable tools for this role: {allowed or 'none'}. "
+            "Use exact tool names and fields; do not invent legacy names "
+            "such as ``websearch`` / ``news_social`` or guessed actions "
+            "such as ``market_data.get_quote``. If a workspace skill only "
+            "describes a playbook, use it as context and call the native "
+            "tools below rather than guessing action names. "
             f"{nt_block}"
             "\nIf you are done, include ``\"done\": true``; to re-plan after "
             "these calls, include ``\"replan\": true``."
         )
+        if observations:
+            allow_note += (
+                "\nYou already have tool observations. Prefer producing the "
+                "final role analysis now with ``\"done\": true``. Do not "
+                "request the same data again; if a field is missing, state "
+                "the evidence gap instead of looping on more tools."
+            )
         return (
             f"You are the {spec.name} subagent.\n"
             f"{spec.prompt or ''}\n\n"
             f"=== task payload ===\n"
             f"{wrap_untrusted('payload', json.dumps(payload, ensure_ascii=False, default=str))}\n\n"
+            f"{language_block}"
             f"=== context ===\n{context}\n"
             f"{obs_block}{allow_note}\n"
         )
@@ -584,12 +708,12 @@ class SubAgentRuntime:
     def _allowed_native_tool_names(self) -> list[str]:
         """Return the subset of parent native tools children may invoke.
 
-        Apr-30 2026 — the child inherits the parent's native-tool
-        surface (connector_list / connector_view / memory_* /
-        recipe_view / read / glob / grep / search / shell …) so it
-        can self-discover venues mid-run. The destructive surface
-        (live trading writes, evolve_promote, subagent_run) and any
-        DANGEROUS-tier tool stays parent-only — the dispatcher itself
+        The child inherits the parent's native-tool surface
+        (connector_list / connector_view / memory_* / recipe_view /
+        read / glob / grep / search / shell …) so it can self-discover
+        venues mid-run. The destructive surface (live trading writes,
+        evolve_promote, subagent_run) and any DANGEROUS-tier tool stays
+        parent-only — the dispatcher itself
         plus :data:`CHILD_NATIVE_TOOL_DENYLIST_PREFIXES` enforce that.
         """
 
@@ -644,16 +768,18 @@ class SubAgentRuntime:
                 "ok": False, "skill": skill, "action": action,
                 "error": "skill is in child denylist", "entry": entry,
             }
-        # Native-tool fallthrough — Apr-30 2026 operator directive:
-        # subagents inherit the parent's native-tool surface so e.g.
-        # ``market_analyst`` can call ``connector_list`` mid-run. The
-        # child speaks the same ``skill_calls`` envelope; we resolve
-        # to the tool registry first and fall back to the skill kernel
-        # only when the name is unknown to the native registry.
+        # Native-tool fallthrough: subagents inherit the parent's
+        # native-tool surface, so ``market_analyst`` can call
+        # ``connector_list`` mid-run. Resolve against the tool registry
+        # first and fall back to the skill kernel only when the name is
+        # unknown to the native registry.
         native_names = allowed_native_tools or []
         if skill in native_names:
+            native_payload = dict(payload or {})
+            if action and "action" not in native_payload:
+                native_payload["action"] = action
             return self._dispatch_native(
-                skill, payload=payload or {}, entry=entry,
+                skill, payload=native_payload, entry=entry,
                 spec_name=spec_name,
                 strategy_id=strategy_id, session_id=session_id,
                 trigger_event_id=trigger_event_id,
@@ -738,6 +864,7 @@ class SubAgentRuntime:
             }
         from ..tools.types import ToolCall  # local import to avoid cycles
 
+        payload = _normalise_native_payload(tool_name, payload)
         call = ToolCall(
             name=tool_name,
             arguments=dict(payload or {}),
@@ -844,6 +971,272 @@ def _tool_result_to_dict(result: Any) -> dict[str, Any]:
     return out
 
 
+def _normalise_preloaded_tools(
+    values: list[str],
+    *,
+    callable_skills: list[str],
+    native_tools: list[str],
+) -> list[str]:
+    """Keep role hints on the real callable surface.
+
+    Several older default role specs still say ``websearch`` /
+    ``news_social`` / ``portfolio`` even though the current native tool
+    surface exposes ``web_search`` / ``web_search_fetch`` /
+    ``portfolio_summary``. Showing stale names in the child prompt trains the
+    model to call tools that cannot exist, so normalize aliases and drop
+    non-callable leftovers before rendering the prompt.
+    """
+
+    callable_set = set(callable_skills) | set(native_tools)
+    out: list[str] = []
+    for raw in values:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        candidates = LEGACY_TOOL_ALIASES.get(name, (name,))
+        for candidate in candidates:
+            if candidate not in callable_set:
+                continue
+            if candidate not in out:
+                out.append(candidate)
+    return out
+
+
+def _native_tool_usage_hints(native_tools: list[str]) -> str:
+    available = set(native_tools or [])
+    lines: list[str] = [
+        "Common native-tool examples for research roles:",
+    ]
+    if "market_data" in available:
+        lines.append(
+            "- market_data: "
+            '{"skill":"market_data","payload":{"action":"get_candles",'
+            '"venue":"yahoo","market":"NVDA","interval":"1d","count":90}}; '
+            "actions are get_ticker, get_mark_price, get_candles, "
+            "calculate_features, summarize_market, compress_context."
+        )
+    if "data_api" in available:
+        lines.append(
+            "- data_api: for non-OHLC provider-specific data. For "
+            "on-chain/meme/DEX wallet sources first inspect "
+            '{"skill":"data_api","payload":{"op":"list","provider":"wallet"}} '
+            "and "
+            '{"skill":"data_api","payload":{"op":"list","provider":"onchainos"}}; '
+            "aliases include xagt_agent_plugin, xagent, okx_os, okx_onchain. "
+            "For wallet-backed meme strategies, first call "
+            'data_api wallet.capability_catalog with {"topic":"meme"} or '
+            "wallet.meme_strategy_guide so you use the selected route for the "
+            "installed/logged-in wallet; when none is ready, follow the "
+            "GOAT/self_custody fallback and wallet install recommendations."
+        )
+    if "web_search_fetch" in available:
+        lines.append(
+            "- web_search_fetch: "
+            '{"skill":"web_search_fetch","payload":{"query":"NVIDIA NVDA '
+            'latest earnings data center revenue guidance","max_results":5,'
+            '"fetch_top_n":3}}.'
+        )
+    elif "web_search" in available:
+        lines.append(
+            "- web_search: "
+            '{"skill":"web_search","payload":{"query":"NVIDIA NVDA latest '
+            'earnings data center revenue guidance","max_results":5}}.'
+        )
+    if "mcp__yahoo__get_stock_info" in available:
+        lines.append(
+            "- Yahoo MCP direct tools use ticker, not symbol: "
+            '{"skill":"mcp__yahoo__get_stock_info","payload":{"ticker":"NVDA"}}.'
+        )
+    if "mcp__yahoo__get_financial_statement" in available:
+        lines.append(
+            "- Yahoo statements: "
+            '{"skill":"mcp__yahoo__get_financial_statement","payload":'
+            '{"ticker":"NVDA","financial_type":"income_stmt"}}; also use '
+            "balance_sheet or cashflow_stmt."
+        )
+    if any(t.startswith("mcp__edgar__") for t in available):
+        lines.append(
+            "- Edgar MCP direct tools use identifier, not ticker/cik: "
+            '{"skill":"mcp__edgar__get_company_info","payload":{"identifier":"NVDA"}}.'
+        )
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def _normalise_native_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Repair common LLM-emitted aliases before native schema validation."""
+
+    out = dict(payload or {})
+    name = str(tool_name or "")
+
+    if name == "market_data":
+        action = str(out.get("action") or "").strip()
+        action_aliases = {
+            "get_quote": "get_ticker",
+            "get_price": "get_ticker",
+            "quote": "get_ticker",
+            "price": "get_ticker",
+            "get_history": "get_candles",
+            "get_historical_data": "get_candles",
+            "historical_data": "get_candles",
+            "get_klines": "get_candles",
+            "klines": "get_candles",
+            "history": "get_candles",
+            "get_features": "calculate_features",
+            "technical_indicators": "calculate_features",
+        }
+        if action in action_aliases:
+            out["action"] = action_aliases[action]
+        elif not action:
+            out["action"] = (
+                "get_candles"
+                if any(k in out for k in ("interval", "count", "limit", "period", "range"))
+                else "get_ticker"
+            )
+        if "market" not in out:
+            if out.get("symbol"):
+                out["market"] = out.get("symbol")
+            elif out.get("ticker"):
+                out["market"] = out.get("ticker")
+        period = str(out.get("period") or out.get("range") or "").lower()
+        if period and "count" not in out and "limit" not in out:
+            if "6mo" in period or "6m" in period:
+                out["count"] = 180
+            elif "3mo" in period or "3m" in period:
+                out["count"] = 90
+            elif "1y" in period or "12mo" in period:
+                out["count"] = 252
+        return out
+
+    if name.startswith("mcp__"):
+        out.pop("action", None)
+
+    if name.startswith("mcp__yahoo__"):
+        if "ticker" not in out and out.get("symbol"):
+            out["ticker"] = out.get("symbol")
+        if name.endswith("__get_financial_statement"):
+            raw = str(
+                out.get("financial_type")
+                or out.get("statement_type")
+                or out.get("statement")
+                or ""
+            ).strip().lower()
+            statement_aliases = {
+                "income": "income_stmt",
+                "income_statement": "income_stmt",
+                "income statement": "income_stmt",
+                "balance": "balance_sheet",
+                "balance_sheet": "balance_sheet",
+                "balance sheet": "balance_sheet",
+                "cashflow": "cashflow_stmt",
+                "cash_flow": "cashflow_stmt",
+                "cash flow": "cashflow_stmt",
+                "cashflow_statement": "cashflow_stmt",
+            }
+            if raw:
+                out["financial_type"] = statement_aliases.get(raw, raw)
+        if name.endswith("__get_holder_info") and not out.get("holder_type"):
+            out["holder_type"] = "institutional_holders"
+        if name.endswith("__get_recommendations") and not out.get("recommendation_type"):
+            out["recommendation_type"] = "recommendations"
+
+    if name.startswith("mcp__edgar__"):
+        if "identifier" not in out:
+            if out.get("ticker"):
+                out["identifier"] = out.get("ticker")
+            elif out.get("symbol"):
+                out["identifier"] = out.get("symbol")
+            elif out.get("cik"):
+                out["identifier"] = out.get("cik")
+
+    return out
+
+
+def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
+    if isinstance(parsed, dict) and parsed:
+        analytical_keys = {
+            "summary", "recommendation", "confidence", "thesis",
+            "invalidation", "risk_flags", "evidence", "done", "final",
+        }
+        if not (set(parsed) & analytical_keys) and (
+            parsed.get("skill_calls") or parsed.get("tool_calls")
+        ):
+            return {
+                "raw": str(raw or ""),
+                "degraded": True,
+                "error_kind": "unfinished_tool_request",
+                "summary": (
+                    "subagent requested tool calls but did not produce a "
+                    "final analysis"
+                ),
+                "requested_tools": parsed.get("skill_calls") or parsed.get("tool_calls"),
+            }
+        return parsed
+    text = str(raw or "")
+    if text.strip():
+        return {"raw": text}
+    return {
+        "raw": "",
+        "degraded": True,
+        "error_kind": "empty_model_output",
+        "summary": "subagent finished without visible final output",
+    }
+
+
+def _tool_observation_fallback_output(
+    *,
+    spec_name: str,
+    payload: dict[str, Any],
+    observations: list[dict[str, Any]],
+    skill_calls: list[dict[str, Any]],
+    rejected_actions: list[dict[str, Any]],
+    close_reason: str | None,
+) -> dict[str, Any]:
+    subject = (
+        payload.get("ticker")
+        or payload.get("market")
+        or payload.get("company")
+        or payload.get("task_subject")
+        or payload.get("__team_task")
+        or ""
+    )
+    successful_tools = [
+        {
+            "skill": rec.get("skill"),
+            "action": rec.get("action"),
+            "summary": _summarise(rec.get("result")),
+        }
+        for rec in skill_calls[-12:]
+        if rec.get("ok")
+    ]
+    failed_tools = [
+        {
+            "skill": rec.get("skill"),
+            "action": rec.get("action"),
+            "error": str(rec.get("error") or "")[:500],
+        }
+        for rec in rejected_actions[-6:]
+    ]
+    return {
+        "summary": (
+            f"{spec_name} collected tool observations for {subject or 'the task'} "
+            "but did not emit a final narrative before its budget ended. "
+            "Use the observations below as evidence-backed partial findings "
+            "and state any remaining gap explicitly."
+        ),
+        "done": True,
+        "partial": True,
+        "quality": "tool_observation_fallback",
+        "role": spec_name,
+        "subject": subject,
+        "close_reason": close_reason or "unfinished_tool_request",
+        "observations": observations[-12:],
+        "tools_used": successful_tools,
+        "tool_errors": failed_tools,
+    }
+
+
 def _coerce_list(v: Any) -> list[Any]:
     if v is None:
         return []
@@ -856,19 +1249,114 @@ def _coerce_list(v: Any) -> list[Any]:
     return []
 
 
+_LEGACY_TOOL_CALL_RE = re.compile(
+    r"<tool_call>\s*<function=([A-Za-z0-9_.:-]+)>(.*?)</function>\s*</tool_call>",
+    re.DOTALL,
+)
+_LEGACY_SKILL_CALLS_RE = re.compile(
+    r"<skill_calls>\s*(.*?)\s*</skill_calls>",
+    re.DOTALL,
+)
+_LEGACY_TOOL_PARAM_RE = re.compile(
+    r"<parameter=([A-Za-z0-9_.:-]+)>(.*?)</parameter>",
+    re.DOTALL,
+)
+
+
+def _extract_legacy_tool_calls(raw: str) -> list[dict[str, Any]]:
+    """Translate XML-ish model tool-call text into the child JSON envelope.
+
+    Some providers occasionally emit a Claude/OpenAI-looking textual block
+    instead of the subagent runtime's documented ``skill_calls`` JSON. Treating
+    that raw text as final output makes Agent Team roles look successful even
+    though they only asked to use a tool. This compatibility shim keeps the
+    execution loop moving through the normal dispatcher and observation path.
+    """
+
+    text = str(raw or "")
+    if "<tool_call>" not in text and "<skill_calls>" not in text:
+        return []
+    out: list[dict[str, Any]] = []
+    for block in _LEGACY_SKILL_CALLS_RE.finditer(text):
+        parsed = _parse_legacy_skill_calls_block(block.group(1))
+        for entry in parsed:
+            if isinstance(entry, dict):
+                out.append(entry)
+    for match in _LEGACY_TOOL_CALL_RE.finditer(text):
+        skill = match.group(1).strip()
+        body = match.group(2)
+        if not skill:
+            continue
+        payload: dict[str, Any] = {}
+        action = ""
+        for param in _LEGACY_TOOL_PARAM_RE.finditer(body):
+            key = param.group(1).strip()
+            if not key:
+                continue
+            value = _parse_legacy_tool_param(param.group(2))
+            if key == "action":
+                action = str(value or "").strip()
+            else:
+                payload[key] = value
+        call: dict[str, Any] = {"skill": skill, "payload": payload}
+        if action:
+            call["action"] = action
+        out.append(call)
+    return out
+
+
+def _parse_legacy_skill_calls_block(raw: str) -> list[Any]:
+    text = str(raw or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return []
+    if isinstance(parsed, dict):
+        return _coerce_list(parsed.get("skill_calls") or parsed.get("tool_calls"))
+    if isinstance(parsed, list):
+        return parsed
+    return []
+
+
+def _should_use_legacy_tool_calls(parsed: dict[str, Any]) -> bool:
+    """Return true when parsed content is only a raw-text wrapper.
+
+    Some provider adapters preserve non-JSON assistant text as
+    ``{"raw": "..."}`` instead of leaving ``parsed`` empty. If that raw
+    text contains XML-ish tool calls, treating it as final output makes a
+    role look complete even though it only asked to use tools.
+    """
+
+    if not parsed:
+        return True
+    if parsed.get("skill_calls") or parsed.get("tool_calls"):
+        return False
+    if parsed.get("done") is True or parsed.get("final") is True:
+        return False
+    raw_only_keys = {"raw", "text", "message", "content"}
+    return set(parsed).issubset(raw_only_keys)
+
+
+def _parse_legacy_tool_param(raw: str) -> Any:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
 def _summarise(result: Any, *, limit: int = 4000) -> str:
     """Render a tool-call result for the subagent's next-iteration prompt.
 
-    Apr-27 2026: bumped from 200 → 4000 chars. The 200-char limit was a
-    silent killer for the code-driven research lane: when the
-    ``market_analyst`` subagent ran ``operator.terminal`` to execute a
-    Python fetcher, the ``stdout`` field (which holds the actual JSON
-    payload — top-5 symbols, ticker quotes, headlines, …) routinely runs
-    1-3 KB. Truncating to 200 chars meant the subagent's LLM literally
-    couldn't see what its own script printed, so it would either reply
-    "no data" or rerun the script in another loop — exactly what we saw
-    on Hyperliquid. 4000 is enough for ~5 ticker rows / a small RSS
-    digest while still bounding context growth.
+    The preview budget is large enough to preserve payload-bearing
+    ``stdout`` / ``data`` for script-driven research without dumping
+    unbounded output into the next prompt. 4000 chars is usually enough
+    for a small table, quote set, or RSS digest while still bounding
+    context growth.
 
     For dict results we pull payload-bearing keys (``stdout``, ``data``,
     ``items``, ``rows``, ``snapshot``) out first so they're never the

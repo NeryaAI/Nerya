@@ -98,6 +98,9 @@ class CcxtConnector(CEXConnectorBase):
             params["secret"] = self.credentials.api_secret
         if self.credentials.api_passphrase:
             params["password"] = self.credentials.api_passphrase
+        for key, value in (self.credentials.extras or {}).items():
+            if value:
+                params[str(key)] = value
         if self.options:
             params["options"] = dict(self.options)
         return klass(params)
@@ -127,6 +130,11 @@ class CcxtConnector(CEXConnectorBase):
                 f"(set accounts.live=true + runtime.live_trading_enabled=true)"
             )
         if not self.credentials.api_key or not self.credentials.api_secret:
+            if self.exchange_id == "hyperliquid" and (
+                self.credentials.extras.get("walletAddress")
+                and self.credentials.extras.get("privateKey")
+            ):
+                return
             raise TradingError(
                 f"{self.venue}: api credentials not resolved from vault"
             )
@@ -221,6 +229,9 @@ class CcxtConnector(CEXConnectorBase):
             )
         except Exception as exc:
             raise TradingError(f"{self.venue} place_order failed: {exc}") from exc
+        fee_usd, fee_breakdown = self._extract_fee_usd(
+            raw, market=market, avg_price=float(raw.get("average") or 0) or None,
+        )
         return OrderAck(
             order_id=str(raw.get("id") or ""),
             client_order_id=str(raw.get("clientOrderId") or client_order_id or ""),
@@ -230,6 +241,8 @@ class CcxtConnector(CEXConnectorBase):
             size=float(raw.get("amount") or size or 0) or None,
             filled=float(raw.get("filled") or 0) or None,
             avg_price=float(raw.get("average") or 0) or None,
+            fee_usd=fee_usd,
+            fee_breakdown=fee_breakdown,
             raw=dict(raw),
         )
 
@@ -255,6 +268,10 @@ class CcxtConnector(CEXConnectorBase):
             raw = self.client.fetch_order(order_id, sym)
         except Exception as exc:
             raise TradingError(f"{self.venue} fetch_order failed: {exc}") from exc
+        avg = float(raw.get("average") or 0) or None
+        fee_usd, fee_breakdown = self._extract_fee_usd(
+            raw, market=market, avg_price=avg,
+        )
         return OrderAck(
             order_id=str(raw.get("id") or order_id),
             client_order_id=str(raw.get("clientOrderId") or ""),
@@ -263,9 +280,104 @@ class CcxtConnector(CEXConnectorBase):
             price=float(raw.get("price") or 0) or None,
             size=float(raw.get("amount") or 0) or None,
             filled=float(raw.get("filled") or 0) or None,
-            avg_price=float(raw.get("average") or 0) or None,
+            avg_price=avg,
+            fee_usd=fee_usd,
+            fee_breakdown=fee_breakdown,
             raw=dict(raw),
         )
+
+    # ------------------------------------------------------------------
+    # Fee extraction
+    # ------------------------------------------------------------------
+    def _extract_fee_usd(
+        self,
+        raw: dict[str, Any],
+        *,
+        market: str,
+        avg_price: float | None,
+    ) -> tuple[float | None, dict[str, float]]:
+        """Pull the fee from a ccxt order/fetch response into USD.
+
+        ccxt normalises fees into two shapes:
+
+        * ``raw["fee"]``  → single ``{"currency": "BNB", "cost": 0.001}``
+        * ``raw["fees"]`` → list of those dicts (some exchanges return
+          maker + taker + funding fees separately)
+
+        We aggregate every entry, converting non-USD costs to USD via
+        ``avg_price`` when the fee asset matches the quote currency, or
+        a public ticker fallback otherwise. Returns ``(None, {})`` when
+        the broker didn't report a fee at all so callers can tell
+        "swallowed" from "0".
+        """
+        entries: list[dict[str, Any]] = []
+        single = raw.get("fee")
+        if isinstance(single, dict) and single:
+            entries.append(single)
+        plural = raw.get("fees")
+        if isinstance(plural, list):
+            for f in plural:
+                if isinstance(f, dict) and f:
+                    entries.append(f)
+        if not entries:
+            return None, {}
+
+        # symbol = "BASE/QUOTE" — quote currency is what we'd call USD
+        # for ".../USDT" pairs etc.
+        base_quote = self._normalise_symbol(market).split("/", 1)
+        quote_ccy = base_quote[1].upper() if len(base_quote) == 2 else ""
+        usd_total = 0.0
+        breakdown: dict[str, float] = {}
+        for f in entries:
+            cost = float(f.get("cost") or 0.0)
+            ccy = str(f.get("currency") or "").upper()
+            if cost == 0.0:
+                continue
+            breakdown[ccy] = breakdown.get(ccy, 0.0) + cost
+            usd = self._fee_cost_to_usd(
+                cost=cost, ccy=ccy, quote_ccy=quote_ccy,
+                avg_price=avg_price, base_market=market,
+            )
+            if usd is None:
+                # Couldn't resolve a conversion — return what we know
+                # in the breakdown but leave fee_usd as None so the
+                # caller knows it's incomplete rather than zero.
+                return None, breakdown
+            usd_total += usd
+        return usd_total, breakdown
+
+    _USD_STABLES = frozenset({"USDT", "USDC", "BUSD", "FDUSD", "USD", "TUSD", "DAI"})
+
+    def _fee_cost_to_usd(
+        self,
+        *,
+        cost: float,
+        ccy: str,
+        quote_ccy: str,
+        avg_price: float | None,
+        base_market: str,
+    ) -> float | None:
+        if ccy in self._USD_STABLES:
+            return cost
+        # Fee paid in the quote currency — same dollar.
+        if quote_ccy and ccy == quote_ccy and quote_ccy in self._USD_STABLES:
+            return cost
+        # Fee paid in the base currency of the same market — use avg_price.
+        base_quote = self._normalise_symbol(base_market).split("/", 1)
+        base_ccy = base_quote[0].upper() if len(base_quote) == 2 else ""
+        if ccy == base_ccy and avg_price and avg_price > 0:
+            return cost * float(avg_price)
+        # Last resort — try a public ticker for ``ccy/USDT``.
+        for stable in ("USDT", "USDC", "USD"):
+            try:
+                price = float(
+                    self.client.fetch_ticker(f"{ccy}/{stable}").get("last") or 0.0
+                )
+            except Exception:
+                price = 0.0
+            if price > 0:
+                return cost * price
+        return None
 
 
 def _map_order_status(raw: str | None) -> str:

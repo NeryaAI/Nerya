@@ -206,8 +206,8 @@ _TRADING_V1 = RouteManifest(
             "tier": "high",
         },
         "user_chat": {
-            # Bug-fix Apr-26 2026: ``manual.*`` chat triggers used to fall
-            # through to the bare ``generic`` lane (only market_data /
+            # ``manual.*`` chat triggers should not fall through to the bare
+            # ``generic`` lane (only market_data /
             # trading / message), which silently filtered out
             # ``create_strategy`` etc. and let the LLM hallucinate success.
             # Match the full set of chat-shaped triggers so a free-form
@@ -249,9 +249,8 @@ _TRADING_V1 = RouteManifest(
                     # the medium tier the LLM tends to merely *list* team
                     # templates instead of actually launching one.
                     "team", "agents team", "agent team", "deep research",
-                    # Apr-27 2026 — also escalate when the operator wants
-                    # the agent to look something up live (websearch) so
-                    # the higher tier can chain research → script author
+                    # Also escalate live-research requests so the higher
+                    # tier has enough room to chain lookup → script author
                     # → run script → summarise without running out of
                     # iteration budget mid-investigation.
                     "research", "web search", "google", "duckduckgo",

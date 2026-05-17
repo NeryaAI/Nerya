@@ -25,7 +25,7 @@ def okx_sign(
     *,
     method: str,
     path: str,
-    body: dict[str, Any] | None = None,
+    body: Any | None = None,
     now_iso: str | None = None,
 ) -> tuple[dict[str, str], str | None]:
     """Sign OKX REST request.

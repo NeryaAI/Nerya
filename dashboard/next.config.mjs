@@ -6,7 +6,6 @@ const nextConfig = {
   },
   experimental: {
     typedRoutes: false,
-    serverComponentsExternalPackages: ["undici"],
   },
 };
 

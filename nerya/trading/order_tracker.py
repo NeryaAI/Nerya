@@ -1,4 +1,4 @@
-"""Durable order tracker (04-29 §6).
+"""Durable order tracker.
 
 the connector framework's ``ClientOrderTracker`` is the model: every order has a
 client-side id we generate before we hit the exchange, every
@@ -417,6 +417,7 @@ class OrderTracker:
             "fee_usd": fee_usd,
             "source": source,
         })
+        self._notify_fill(order, fill, new_state)
         return fill
 
     # -- exchange feedback ------------------------------------------------------
@@ -523,6 +524,41 @@ class OrderTracker:
             "INSERT INTO order_events(event_id, order_id, kind, ts, payload_json) VALUES (?, ?, ?, ?, ?)",
             (_new_event_id(), order_id, kind, time.time(), json.dumps(payload)),
         )
+
+    def _notify_fill(self, order: TrackedOrder, fill: TrackedFill, state: OrderState) -> None:
+        if bool(fill.meta.get("suppress_trade_notification")):
+            return
+        try:
+            from ..core.config import load_config
+            from ..core.time import now_iso
+            from ..messaging.trade_notifications import broadcast_trade_event
+
+            config = load_config(self.paths.root)
+            broadcast_trade_event(
+                config,
+                {
+                    "kind": "trade.execution",
+                    "status": "filled" if state == "filled" else "partial",
+                    "strategy_id": fill.strategy_id,
+                    "account_id": fill.account_id,
+                    "market": fill.market,
+                    "side": fill.side,
+                    "source": fill.source,
+                    "intent_id": fill.intent_id,
+                    "plan_id": order.plan_id,
+                    "executor_id": fill.executor_id,
+                    "order_id": fill.order_id,
+                    "session_id": fill.meta.get("session_id") or order.meta.get("session_id"),
+                    "avg_price": fill.price,
+                    "filled_size": fill.size_base,
+                    "notional_usd": fill.notional_usd,
+                    "fee_usd": fill.fee_usd,
+                    "fill_id": fill.fill_id,
+                    "ts": now_iso(),
+                },
+            )
+        except Exception:  # pragma: no cover - notifications are best effort
+            log.exception("trade fill notification failed for order %s", fill.order_id)
 
 
 # ---------------------------------------------------------------------------

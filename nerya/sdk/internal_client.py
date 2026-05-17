@@ -43,8 +43,13 @@ class InternalClient:
         return cls.from_config(config)
 
     @classmethod
-    def from_config(cls, config: Config) -> "InternalClient":
-        skills = SkillKernel.boot(config)
+    def from_config(
+        cls,
+        config: Config,
+        *,
+        skills: SkillKernel | None = None,
+    ) -> "InternalClient":
+        skills = skills or SkillKernel.boot(config)
         triggers_runtime = TriggerRuntime.boot(config)
         return cls(
             config=config,

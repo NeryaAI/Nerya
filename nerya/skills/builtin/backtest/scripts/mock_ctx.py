@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -46,6 +47,30 @@ class MockMarket:
         del account
         close = self.mark_price(market)
         return {"bid": close * 0.9999, "ask": close * 1.0001, "mid": close}
+
+    def get_ticker(self, market: str, *, account: str | None = None) -> dict[str, Any]:
+        """Compatibility alias for generated strategy code."""
+
+        return self.ticker(market, account=account)
+
+    def get_candles(
+        self,
+        market: str,
+        *,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Compatibility alias matching common market-data wording."""
+
+        return self.candles(
+            market,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+        )
 
     def mark_price(self, market: str, *, account: str | None = None) -> float:
         del account
@@ -110,6 +135,175 @@ class MockTrading:
             "reason": payload.get("reason") or payload.get("reasoning") or payload.get("reasoning_ref") or "",
             "confidence": payload.get("confidence"),
             "raw": dict(payload),
+        }
+        self.pending_orders.append(record)
+        return {
+            "ok": True,
+            "status": "submitted",
+            "intent_id": intent_id,
+            "intent": dict(record),
+            "risk_decision": {"ok": True, "mode": "backtest"},
+        }
+
+    def open_position(
+        self,
+        *,
+        market: str,
+        side: str,
+        sizing: Any = None,
+        entry: Any = None,
+        protection: Any = None,
+        confidence: float = 0.0,
+        reasoning_ref: str = "",
+        source: str = "script",
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Backtest-mode equivalent of ``TradingAPI.open_position``.
+
+        Translates the v6 control-plane signature (``side='long' | 'short'``
+        + structured ``sizing`` + ``protection``) into the legacy
+        intent record the backtest engine's :func:`settle` consumes via
+        :attr:`pending_orders`. Returns a dict with ``ok``,
+        ``status``, ``intent_id``, ``protection`` and ``bracket_id`` so
+        the strategy entrypoint can return us as a ``StrategyResult``-
+        shaped object.
+        """
+
+        intent_id = f"bt_{uuid.uuid4().hex[:12]}"
+        # Map control-plane "long" / "short" onto the executor's
+        # buy/sell (long entries are buys, short entries are sells).
+        cp_side = str(side or "long").lower()
+        legacy_side = "buy" if cp_side in ("long", "buy") else "sell"
+        sizing_d = dict(sizing) if isinstance(sizing, dict) else {}
+        method = str(sizing_d.get("method") or "fixed_usd")
+        if method == "fixed_usd":
+            size = float(sizing_d.get("fixed_usd") or 0.0)
+            size_unit = "usd"
+        elif method == "fixed_base":
+            size = float(sizing_d.get("fixed_base") or 0.0)
+            size_unit = "base"
+        else:
+            # close_all / reduce_pct / pct_nav / risk_to_stop:
+            # Backtest harness sees these only in close_position which
+            # has its own placeholder; for unfamiliar open methods,
+            # fall back to the policy's default order USD.
+            size = float(sizing_d.get("fixed_usd") or 0.0)
+            size_unit = "usd"
+        record = {
+            "intent_id": intent_id,
+            "strategy_id": self.strategy_id,
+            "market": market,
+            "side": legacy_side,
+            "size": size,
+            "size_unit": size_unit,
+            "order_type": "market",
+            "reason": reasoning_ref or "open_position",
+            "confidence": float(confidence or 0.0),
+            "plan_action": "open_position",
+            "protection": dict(protection) if isinstance(protection, dict) else None,
+            "raw": {
+                "method": "open_position",
+                "side": cp_side,
+                "sizing": sizing_d or None,
+                "entry": dict(entry) if isinstance(entry, dict) else entry,
+                "protection": dict(protection) if isinstance(protection, dict) else protection,
+                **extra,
+            },
+        }
+        self.pending_orders.append(record)
+        bracket_id = f"bkt_{uuid.uuid4().hex[:10]}" if record["protection"] else None
+        return {
+            "ok": True,
+            "status": "submitted",
+            "intent_id": intent_id,
+            "intent": dict(record),
+            "bracket_id": bracket_id,
+            "protection": record["protection"],
+            "risk_decision": {"ok": True, "mode": "backtest"},
+        }
+
+    def close_position(
+        self,
+        *,
+        market: str,
+        side: str,
+        entry: Any = None,
+        confidence: float = 0.0,
+        reasoning_ref: str = "",
+        source: str = "script",
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Backtest-mode equivalent of ``TradingAPI.close_position``.
+
+        ``side`` is the *existing* position direction (``long`` / ``short``);
+        we emit the inverse leg into :attr:`pending_orders`. Sizing is
+        forced to ``close_all`` upstream — for the in-process backtest
+        we simply tag the record and let :func:`settle` figure out the
+        remaining position size via the portfolio book.
+        """
+
+        intent_id = f"bt_{uuid.uuid4().hex[:12]}"
+        position_side = str(side or "long").lower()
+        legacy_side = "sell" if position_side == "long" else "buy"
+        record = {
+            "intent_id": intent_id,
+            "strategy_id": self.strategy_id,
+            "market": market,
+            "side": legacy_side,
+            # close_all sentinel — the backtest portfolio settle
+            # interprets size==0 as "flatten the position".
+            "size": 0.0,
+            "size_unit": "base",
+            "order_type": "market",
+            "reason": reasoning_ref or "close_position",
+            "confidence": float(confidence or 0.0),
+            "plan_action": "close_position",
+            "close_all": True,
+            "raw": {
+                "method": "close_position",
+                "side": position_side,
+                "entry": dict(entry) if isinstance(entry, dict) else entry,
+                **extra,
+            },
+        }
+        self.pending_orders.append(record)
+        return {
+            "ok": True,
+            "status": "submitted",
+            "intent_id": intent_id,
+            "intent": dict(record),
+            "risk_decision": {"ok": True, "mode": "backtest"},
+        }
+
+    def reduce_position(
+        self,
+        *,
+        market: str,
+        side: str,
+        reduce_pct: float = 1.0,
+        confidence: float = 0.0,
+        reasoning_ref: str = "",
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Backtest-mode equivalent of ``TradingAPI.reduce_position``."""
+
+        intent_id = f"bt_{uuid.uuid4().hex[:12]}"
+        position_side = str(side or "long").lower()
+        legacy_side = "sell" if position_side == "long" else "buy"
+        pct = max(0.0, min(1.0, float(reduce_pct or 1.0)))
+        record = {
+            "intent_id": intent_id,
+            "strategy_id": self.strategy_id,
+            "market": market,
+            "side": legacy_side,
+            "size": 0.0,  # resolved against current position by settle
+            "size_unit": "base",
+            "order_type": "market",
+            "reason": reasoning_ref or "reduce_position",
+            "confidence": float(confidence or 0.0),
+            "plan_action": "reduce_position",
+            "reduce_pct": pct,
+            "raw": {"method": "reduce_position", "side": position_side, "reduce_pct": pct, **extra},
         }
         self.pending_orders.append(record)
         return {
@@ -370,6 +564,21 @@ class MockCtx:
     def mode(self) -> str:
         return "backtest"
 
+    @property
+    def market_data(self) -> MockMarket:
+        return self.market
+
+    @property
+    def logger(self) -> logging.Logger:
+        return logging.getLogger(f"nerya.strategy.{self.strategy_id}.backtest")
+
+    @property
+    def log(self) -> logging.Logger:
+        return self.logger
+
+    def now(self) -> datetime:
+        return self.clock.now()
+
 
 def append_jsonl(path: Any) -> Callable[[dict[str, Any]], None]:
     def _write(record: dict[str, Any]) -> None:
@@ -382,4 +591,3 @@ def append_jsonl(path: Any) -> Callable[[dict[str, Any]], None]:
 def _result_builder() -> Any:
     from .....strategies.result import ResultBuilder
     return ResultBuilder()
-

@@ -46,6 +46,7 @@ from ..core import yaml_io
 from ..core.errors import TradingError
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
+from ..strategies.scheduler_bridge import remove_strategy_schedules
 from .strategies import (
     Strategy,
     list_strategies as _list_strategies,
@@ -266,12 +267,16 @@ def create(paths: WorkspacePaths, req: CreateRequest) -> dict[str, Any]:
     })
     if req.main_prompt:
         _write_prompts(root / "prompts", {"main": req.main_prompt})
-    return {
+    warning = _account_share_warning(paths, manifest["account_id"], self_id=sid)
+    result = {
         "ok": True,
         "strategy_id": sid,
         "state": req.status,
         "path": str(root),
     }
+    if warning is not None:
+        result["warning"] = warning
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +345,66 @@ _PATCHABLE_FIELDS = {
 }
 
 
+def strategies_using_account(
+    paths: WorkspacePaths,
+    account_id: str,
+    *,
+    exclude_strategy: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return non-archived strategies currently bound to ``account_id``.
+
+    Used by ``create`` / ``update`` / ``bind_account`` to surface a
+    soft warning when a second strategy wants the same account. The
+    operator can ignore the warning and proceed; we recommend they
+    register an exchange sub-account instead so PnL, capital
+    reservations and snapshots stay separable between strategies.
+    """
+
+    aid = str(account_id or "").strip()
+    if not aid:
+        return []
+    rows: list[dict[str, Any]] = []
+    for s in _list_strategies(paths):
+        if exclude_strategy and s.id == exclude_strategy:
+            continue
+        if s.status == "archived":
+            continue
+        if str(s.account_id or "") != aid:
+            continue
+        rows.append({
+            "strategy_id": s.id,
+            "title": s.title,
+            "status": s.status,
+        })
+    return rows
+
+
+def _account_share_warning(
+    paths: WorkspacePaths,
+    account_id: str,
+    *,
+    self_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Render a soft-warning payload when ``account_id`` is already used."""
+
+    others = strategies_using_account(
+        paths, account_id, exclude_strategy=self_id,
+    )
+    if not others:
+        return None
+    return {
+        "code": "account_already_bound",
+        "account_id": account_id,
+        "strategies": others,
+        "recommendation": (
+            "an account can host multiple strategies, but PnL / capital "
+            "reservations / snapshots are shared. Prefer registering an "
+            "exchange sub-account (or a separate wallet) for each "
+            "strategy when you want isolated risk attribution."
+        ),
+    }
+
+
 def update(
     paths: WorkspacePaths,
     strategy_id: str,
@@ -400,12 +465,21 @@ def update(
         if any(f in _PATCHABLE_FIELDS for f in changed):
             _write_yaml(s.path / "strategy.yml", yml)
 
-    return {
+    out: dict[str, Any] = {
         "ok": True,
         "strategy_id": strategy_id,
         "changed": changed,
         "version_id": version_id,
     }
+    if "account_id" in changed:
+        warning = _account_share_warning(
+            paths,
+            str(yml.get("account_id") or ""),
+            self_id=strategy_id,
+        )
+        if warning is not None:
+            out["warning"] = warning
+    return out
 
 
 def set_status(
@@ -481,9 +555,59 @@ def bind_account(
         yml = {}
     yml["account_id"] = str(account_id)
     _write_yaml(s.path / "strategy.yml", yml)
-    return {
+    out: dict[str, Any] = {
         "ok": True, "strategy_id": strategy_id,
         "account_id": str(account_id),
+    }
+    warning = _account_share_warning(
+        paths, str(account_id), self_id=strategy_id,
+    )
+    if warning is not None:
+        out["warning"] = warning
+    return out
+
+
+def delete(
+    paths: WorkspacePaths,
+    strategy_id: str,
+    *,
+    force: bool = False,
+    blocking_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Delete ``strategies/<id>/`` after optional active-state checks."""
+
+    s = _load_strategy(paths, strategy_id)
+    state = dict(blocking_state or {})
+    if not force and any(int(state.get(key) or 0) > 0 for key in (
+        "open_positions",
+        "active_executors",
+        "active_orders",
+    )):
+        return {
+            "ok": False,
+            "strategy_id": strategy_id,
+            "deleted": False,
+            "error": "strategy_has_active_state",
+            "state": {
+                "open_positions": int(state.get("open_positions") or 0),
+                "active_executors": int(state.get("active_executors") or 0),
+                "active_orders": int(state.get("active_orders") or 0),
+            },
+        }
+
+    root = s.path.resolve()
+    strategies_root = paths.strategies.resolve()
+    if root.parent != strategies_root:
+        raise TradingError(f"refusing to delete outside strategies root: {root}")
+
+    removed_schedules = remove_strategy_schedules(paths, strategy_id)
+    shutil.rmtree(root)
+    return {
+        "ok": True,
+        "strategy_id": strategy_id,
+        "deleted": True,
+        "path": str(root),
+        "removed_schedules": removed_schedules,
     }
 
 
@@ -658,6 +782,7 @@ __all__ = [
     "bind_account",
     "bind_wallet",
     "create",
+    "delete",
     "get_detail",
     "list_files",
     "list_records",

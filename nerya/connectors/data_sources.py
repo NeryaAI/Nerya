@@ -44,6 +44,26 @@ def _strip_prefix(market: str) -> str:
     return market.split(":", 1)[-1] if ":" in market else market
 
 
+def _env_fallback_api_key(env_names: tuple[str, ...]) -> str:
+    """Return the first non-empty env var from ``env_names``, else ``""``.
+
+    Gives operators a one-line route to enable a data-source connector
+    without having to register a full account row + vault entry.
+    Used by Tushare / Polygon / etc.'s ``_client()`` when the credential
+    bundle came in empty (e.g. agent's ``market_data`` tool builds with
+    no operator-supplied credentials).
+
+    Order matters: the canonical name is listed first, legacy synonyms
+    come after.
+    """
+    import os as _os
+    for name in env_names:
+        val = (_os.environ.get(name) or "").strip()
+        if val:
+            return val
+    return ""
+
+
 def _resolve_extra_headers(creds: "DataSourceCredentials") -> dict[str, str]:
     """Pull operator-supplied auth headers off the credential bundle.
 
@@ -99,11 +119,17 @@ class TushareConnector(_ReadOnlyMixin, CEXConnectorBase):
             raise RuntimeError(
                 "Tushare connector needs `pip install tushare`."
             ) from exc
-        if not self.credentials.api_key:
+        token = self.credentials.api_key or _env_fallback_api_key(
+            ("TUSHARE_TOKEN", "TUSHARE_API_KEY", "NERYA_TUSHARE_TOKEN"),
+        )
+        if not token:
             raise RuntimeError(
-                "Tushare requires an API token (https://tushare.pro/user/token)."
+                "Tushare requires an API token. Either register an account "
+                "row in accounts.yml with a vault credential ref, or set the "
+                "TUSHARE_TOKEN env var. Free tokens at "
+                "https://tushare.pro/user/token."
             )
-        ts.set_token(self.credentials.api_key)
+        ts.set_token(token)
         self._pro = ts.pro_api()
         return self._pro
 
@@ -213,9 +239,17 @@ class PolygonConnector(_ReadOnlyMixin, CEXConnectorBase):
             raise RuntimeError(
                 "Polygon connector needs `pip install polygon-api-client`."
             ) from exc
-        if not self.credentials.api_key:
-            raise RuntimeError("Polygon.io requires an API key.")
-        self._client_ = RESTClient(api_key=self.credentials.api_key)
+        api_key = self.credentials.api_key or _env_fallback_api_key(
+            ("POLYGON_API_KEY", "POLYGONIO_API_KEY", "NERYA_POLYGON_API_KEY"),
+        )
+        if not api_key:
+            raise RuntimeError(
+                "Polygon.io requires an API key. Either register an account "
+                "row in accounts.yml with a vault credential ref, or set the "
+                "POLYGON_API_KEY env var. Free keys at "
+                "https://polygon.io/dashboard/api-keys."
+            )
+        self._client_ = RESTClient(api_key=api_key)
         return self._client_
 
     def get_ticker(self, market: str) -> Ticker:

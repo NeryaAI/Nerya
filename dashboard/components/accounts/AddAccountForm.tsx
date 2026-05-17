@@ -3,12 +3,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, Empty } from "../Page";
+import { Select } from "../Select";
 import { clientApi } from "../../lib/clientApi";
 import type {
   AccountCredentialField,
   AccountSummary,
   SecretRef,
   WalletBinding,
+  WalletProviderInfo,
 } from "../../lib/clientApi";
 
 const MODE_OPTIONS = ["paper", "shadow", "canary", "live"] as const;
@@ -127,9 +129,11 @@ export function AddAccountForm({
   const [vaultRefs, setVaultRefs] = useState<SecretRef[]>([]);
   const [bindings, setBindings] = useState<WalletBinding[]>([]);
   const [busy, setBusy] = useState(false);
+  const [balanceBusy, setBalanceBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // 04-29 §11 P9 — operators can stage the change as a
+  const [balanceNotice, setBalanceNotice] = useState<string | null>(null);
+  // Operators can stage the change as a
   // proposal that another approver clicks through. Defaults to
   // "Save now" for the legacy direct-write behaviour.
   const [submitMode, setSubmitMode] = useState<"apply" | "propose">("apply");
@@ -139,13 +143,30 @@ export function AddAccountForm({
     Promise.all([
       clientApi.secretsList().catch(() => ({ refs: [] })),
       clientApi.walletConfigured().catch(() => ({ bindings: [], count: 0 })),
+      clientApi.walletProviders().catch(() => ({ providers: [] as WalletProviderInfo[] })),
       clientApi.marketVenues().catch(() => ({ venues: [] })),
       clientApi.exchangeProviders().catch(() => ({ providers: [] })),
-    ]).then(([secrets, wallets, marketVenues, exchangeProviders]) => {
+    ]).then(([secrets, wallets, walletProviders, marketVenues, exchangeProviders]) => {
       if (!mounted) return;
       setVaultRefs(secrets.refs || []);
       setBindings(wallets.bindings || []);
       const byId = new Map<string, { id: string; label: string; kind?: string }>();
+      for (const row of walletProviders.providers || []) {
+        const id = String(row.id || "").trim().toLowerCase();
+        if (id) byId.set(id, {
+          id,
+          label: row.label || id,
+          kind: "chain",
+        });
+        for (const source of row.market_data_sources || []) {
+          const alias = String(source.venue || "").trim().toLowerCase();
+          if (alias && !byId.has(alias)) byId.set(alias, {
+            id: alias,
+            label: `${source.label || alias} → ${id}`,
+            kind: "chain",
+          });
+        }
+      }
       for (const row of marketVenues.venues || []) {
         const id = String(row.name || "").trim().toLowerCase();
         if (id) byId.set(id, { id, label: row.label || id });
@@ -208,7 +229,9 @@ export function AddAccountForm({
     };
   }, [kind, venue, initial?.credentials]);
 
-  const requiresCredentials = mode === "live" || mode === "canary";
+  const walletBacked = Boolean(walletId.trim()) || kind === "chain" || kind === "dex";
+  const requiresCredentials = mode !== "paper" && permissions.read_balances && !walletBacked;
+  const usesRealBalances = mode !== "paper";
   const editing = !!initial?.id;
 
   const credentialsRecord = useMemo(() => {
@@ -256,7 +279,7 @@ export function AddAccountForm({
         live_trading_enabled: liveTradingEnabled,
         base_currency: baseCurrency.trim() || "USDT",
         subaccount: subaccount.trim(),
-        initial_balance_usd: Number(initialBalance) || 0,
+        initial_balance_usd: mode === "paper" ? Number(initialBalance) || 0 : 0,
         wallet_id: walletId.trim() || undefined,
         permissions,
         limits,
@@ -294,29 +317,77 @@ export function AddAccountForm({
     }
   }
 
+  async function testBalances() {
+    setBalanceBusy(true);
+    setError(null);
+    setBalanceNotice(null);
+    try {
+      const res = await clientApi.accountsTestBalance({
+        id: id.trim() || undefined,
+        venue: venue.trim(),
+        kind,
+        mode,
+        live_trading_enabled: liveTradingEnabled,
+        base_currency: baseCurrency.trim() || "USDT",
+        wallet_id: walletId.trim() || undefined,
+        permissions,
+        limits,
+        provider_config: providerConfigRecord,
+        credentials: credentialsRecord,
+        initial_balance_usd: mode === "paper" ? Number(initialBalance) || 0 : 0,
+      });
+      if (!res.ok || !res.snapshot) {
+        throw new Error(res.detail || res.error || "balance_test_failed");
+      }
+      const snap = res.snapshot;
+      const nav = Number(snap.total_usd ?? snap.nav_usd ?? 0);
+      const health = String(snap.health || "unknown");
+      setBalanceNotice(t("balanceTestOk", {
+        health,
+        nav: nav.toFixed(2),
+      }));
+    } catch (e) {
+      setBalanceNotice(
+        t("balanceTestFailed", {
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    } finally {
+      setBalanceBusy(false);
+    }
+  }
+
   return (
     <Card
       title={editing ? t("editTitle", { id: initial?.id ?? "" }) : t("addTitle")}
       description={t("description")}
       actions={
         <div className="flex gap-2 items-center">
-          <select
-            value={submitMode}
-            onChange={(e) =>
-              setSubmitMode(e.target.value as "apply" | "propose")
-            }
-            disabled={busy}
-            className="bg-ink-900 border border-brand-500/20 rounded px-1.5 py-1 text-[11px] text-ink-200"
-            title={t("submitModeTitle")}
-          >
-            <option value="apply">{t("applyNow")}</option>
-            <option value="propose">{t("proposeForReview")}</option>
-          </select>
+          <div className="min-w-[160px]">
+            <Select<"apply" | "propose">
+              value={submitMode}
+              onChange={(value) => setSubmitMode(value)}
+              disabled={busy}
+              options={[
+                { value: "apply", label: t("applyNow") },
+                { value: "propose", label: t("proposeForReview") },
+              ]}
+              size="sm"
+              ariaLabel={t("submitModeTitle")}
+            />
+          </div>
           {onCancel ? (
             <button onClick={onCancel} className="btn-ghost text-xs">
               {t("cancel")}
             </button>
           ) : null}
+          <button
+            onClick={testBalances}
+            disabled={balanceBusy || !venue || (!id && !walletId)}
+            className="btn-ghost text-xs"
+          >
+            {balanceBusy ? t("testingBalance") : t("testBalance")}
+          </button>
           <button
             onClick={submit}
             disabled={busy || !id || !venue}
@@ -347,47 +418,42 @@ export function AddAccountForm({
             />
           </Field>
           <Field label={t("fieldVenue")}>
-            <select
+            <Select
               value={venue}
-              onChange={(e) => setVenue(e.target.value)}
-              className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100"
-            >
-              <option value="">{t("selectVenue")}</option>
-              {venueOptions.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label} ({option.id})
-                </option>
-              ))}
-            </select>
+              onChange={(value) => {
+                setVenue(value);
+                const option = venueOptions.find((row) => row.id === value);
+                if (option?.kind === "chain") setKind("chain");
+              }}
+              options={[
+                { value: "", label: t("selectVenue") },
+                ...venueOptions.map((option) => ({
+                  value: option.id,
+                  label: `${option.label} (${option.id})`,
+                })),
+              ]}
+              size="sm"
+              ariaLabel={t("fieldVenue")}
+            />
           </Field>
           <div className="grid grid-cols-2 gap-2">
             <Field label={t("fieldKind")}>
-              <select
+              <Select
                 value={kind}
-                onChange={(e) => setKind(e.target.value)}
-                className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
-              >
-                {KIND_OPTIONS.map((k) => (
-                  <option key={k} value={k}>
-                    {k}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => setKind(value)}
+                options={KIND_OPTIONS.map((k) => ({ value: k, label: k }))}
+                size="sm"
+                ariaLabel={t("fieldKind")}
+              />
             </Field>
             <Field label={t("fieldMode")}>
-              <select
+              <Select<(typeof MODE_OPTIONS)[number]>
                 value={mode}
-                onChange={(e) =>
-                  setMode(e.target.value as (typeof MODE_OPTIONS)[number])
-                }
-                className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
-              >
-                {MODE_OPTIONS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+                onChange={(value) => setMode(value)}
+                options={MODE_OPTIONS.map((m) => ({ value: m, label: m }))}
+                size="sm"
+                ariaLabel={t("fieldMode")}
+              />
             </Field>
           </div>
           <div className="grid grid-cols-2 gap-2">
@@ -425,14 +491,22 @@ export function AddAccountForm({
             </Field>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <Field label={t("fieldInitialBalance")}>
-              <input
-                type="number"
-                value={initialBalance}
-                onChange={(e) => setInitialBalance(Number(e.target.value))}
-                className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
-              />
-            </Field>
+            {usesRealBalances ? (
+              <Field label={t("fieldBalanceSource")}>
+                <div className="rounded border border-brand-500/15 bg-ink-950/30 px-2 py-1.5 text-[11px] text-ink-400">
+                  {t("realBalanceHint")}
+                </div>
+              </Field>
+            ) : (
+              <Field label={t("fieldInitialBalance")}>
+                <input
+                  type="number"
+                  value={initialBalance}
+                  onChange={(e) => setInitialBalance(Number(e.target.value))}
+                  className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+                />
+              </Field>
+            )}
             <Field label={t("fieldLiveTrading")}>
               <label className="flex items-center gap-2 mt-1.5 text-xs text-ink-300">
                 <input
@@ -453,19 +527,21 @@ export function AddAccountForm({
           </div>
 
           <Field label={t("fieldWalletBinding")}>
-            <select
+            <Select
               value={walletId}
-              onChange={(e) => setWalletId(e.target.value)}
-              className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
-            >
-              <option value="">{t("noneUseDefault")}</option>
-              {bindings.map((b) => (
-                <option key={b.wallet_id} value={b.wallet_id}>
-                  {b.wallet_id} · {b.provider}
-                  {b.source === "legacy" ? ` (${t("defaultTag")})` : ""}
-                </option>
-              ))}
-            </select>
+              onChange={(value) => setWalletId(value)}
+              options={[
+                { value: "", label: t("noneUseDefault") },
+                ...bindings.map((b) => ({
+                  value: b.wallet_id,
+                  label:
+                    `${b.wallet_id} · ${b.provider}` +
+                    (b.source === "legacy" ? ` (${t("defaultTag")})` : ""),
+                })),
+              ]}
+              size="sm"
+              ariaLabel={t("fieldWalletBinding")}
+            />
           </Field>
         </div>
 
@@ -473,24 +549,25 @@ export function AddAccountForm({
           <div>
             <div className="mb-1 flex items-center justify-between gap-2">
               <div className="text-ink-400 text-xs">{t("permissions")}</div>
-              <select
-                className="bg-ink-900 border border-brand-500/20 rounded px-1.5 py-1 text-[11px] text-ink-200"
-                onChange={(e) => {
-                  const preset = PERMISSION_PRESETS.find((p) => p.id === e.target.value);
-                  if (preset) setPermissions(preset.permissions);
-                }}
-                value={
-                  permissions.place_order || permissions.cancel_order
-                    ? "trade"
-                    : "read_only"
-                }
-              >
-                {PERMISSION_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.label}
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-[160px]">
+                <Select
+                  value={
+                    permissions.place_order || permissions.cancel_order
+                      ? "trade"
+                      : "read_only"
+                  }
+                  onChange={(value) => {
+                    const preset = PERMISSION_PRESETS.find((p) => p.id === value);
+                    if (preset) setPermissions(preset.permissions);
+                  }}
+                  options={PERMISSION_PRESETS.map((preset) => ({
+                    value: preset.id,
+                    label: preset.label,
+                  }))}
+                  size="sm"
+                  ariaLabel={t("permissions")}
+                />
+              </div>
             </div>
             <div className="space-y-1 text-xs">
               {(
@@ -644,6 +721,9 @@ export function AddAccountForm({
       ) : null}
       {notice ? (
         <div className="mt-3 text-accent-300 text-xs">{notice}</div>
+      ) : null}
+      {balanceNotice ? (
+        <div className="mt-3 text-ink-300 text-xs font-mono">{balanceNotice}</div>
       ) : null}
     </Card>
   );

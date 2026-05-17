@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
@@ -16,9 +17,11 @@ import { SectionTabs } from "../../components/SectionTabs";
 import { AccountProposalsCard } from "../../components/accounts/AccountProposalsCard";
 import { AddAccountForm } from "../../components/accounts/AddAccountForm";
 import { ExchangeAuthorWizard } from "../../components/accounts/ExchangeAuthorWizard";
+import { WalletProviderPanel } from "../../components/accounts/WalletProviderPanel";
 import { clientApi } from "../../lib/clientApi";
 import type { AccountSummary } from "../../lib/clientApi";
 import { formatBalance } from "../../lib/currentAccount";
+import { confirm as confirmDialog, prompt as promptDialog } from "../../lib/dialogs";
 
 function money(value: unknown, currency: string = "USDT"): string {
   return formatBalance(value, currency);
@@ -93,7 +96,10 @@ export default function AccountsPage() {
     try {
       const reason =
         next !== "active"
-          ? window.prompt(t("reasonPrompt", { id: account_id, status: next }), t("manual"))
+          ? await promptDialog({
+              message: t("reasonPrompt", { id: account_id, status: next }),
+              defaultValue: t("manual"),
+            })
           : undefined;
       if (next !== "active" && reason == null) {
         setBusy(null);
@@ -124,10 +130,10 @@ export default function AccountsPage() {
     const aid = acc.profile.id;
     if (acc.profile.mode !== "paper") return;
     const currentBalance = Number(acc.profile.initial_balance_usd) || 0;
-    const raw = window.prompt(
-      t("resetPrompt", { id: aid }),
-      String(currentBalance || ""),
-    );
+    const raw = await promptDialog({
+      message: t("resetPrompt", { id: aid }),
+      defaultValue: String(currentBalance || ""),
+    });
     if (raw == null) return;
     const trimmed = raw.trim();
     let initial: number | undefined;
@@ -147,14 +153,15 @@ export default function AccountsPage() {
         operator: "dashboard",
       });
       if (!res.ok && res.error === "account_busy" && res.state) {
-        const proceed = window.confirm(
-          t("accountBusy", {
+        const proceed = await confirmDialog({
+          message: t("accountBusy", {
             id: aid,
             orders: res.state.active_orders,
             positions: res.state.open_positions,
             executors: res.state.active_executors,
           }),
-        );
+          tone: "danger",
+        });
         if (!proceed) {
           setBusy(null);
           return;
@@ -236,20 +243,23 @@ export default function AccountsPage() {
       <PageBody>
         {error && <ErrorBanner error={error} />}
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Kpi label={t("accountsKpi")} value={`${totals.total}`} tone="brand" />
+        <div className="flex flex-wrap items-end gap-x-8 gap-y-3 px-1">
+          <Kpi inline label={t("accountsKpi")} value={`${totals.total}`} tone="brand" />
           <Kpi
+            inline
             label={t("live")}
             value={`${totals.live}`}
             tone={totals.live > 0 ? "warn" : "neutral"}
             delta={t("quarantined", { count: totals.quarantined })}
           />
           <Kpi
+            inline
             label={t("openPositions")}
             value={`${totals.positions}`}
             delta={t("protectionRules", { count: totals.protections })}
           />
           <Kpi
+            inline
             label={t("reservedUsd")}
             value={money(totals.reserved, "USDT")}
             delta={
@@ -267,6 +277,14 @@ export default function AccountsPage() {
             }}
           />
         ) : null}
+
+        <Advanced
+          title={t("walletPanelTitle")}
+          description={t("walletPanelDesc")}
+          storageKey="nerya.accounts.advanced.wallet"
+        >
+          <WalletProviderPanel bare onChanged={() => void load()} />
+        </Advanced>
 
         {showAdd ? (
           <AddAccountForm

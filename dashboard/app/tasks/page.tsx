@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
@@ -15,6 +16,7 @@ import {
 import { SectionTabs } from "../../components/SectionTabs";
 import { PlusIcon, SendIcon, WrenchIcon, XIcon } from "../../components/icons";
 import { clientApi } from "../../lib/clientApi";
+import { authHeaders } from "../../lib/auth";
 import { formatTime } from "../../lib/format";
 import type {
   AgentTaskArtifactsEnvelope,
@@ -132,7 +134,7 @@ export default function AgentTasksPage() {
       if (result.primary_action?.method === "POST" && result.primary_action.href) {
         await fetch(`/api/proxy${result.primary_action.href}`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: authHeaders({ "content-type": "application/json" }),
           body: JSON.stringify(result.primary_action.body || {}),
         });
       }
@@ -236,23 +238,21 @@ export default function AgentTasksPage() {
           </div>
         ) : null}
 
-        <Card title={t("filter")} padded>
-          <div className="flex flex-wrap items-center gap-2">
-            {STATUS_FILTERS.map((opt) => (
-              <button
-                key={opt.id}
-                onClick={() => setFilter(opt.id)}
-                className={`text-[11px] px-2 py-1 rounded-md border ${
-                  filter === opt.id
-                    ? "bg-brand-500 text-white border-brand-500"
-                    : "text-ink-300 border-brand-500/25 hover:bg-brand-500/10"
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </Card>
+        <div className="flex flex-wrap items-center gap-2 border-b border-brand-500/10 pb-3">
+          {STATUS_FILTERS.map((opt) => (
+            <button
+              key={opt.id}
+              onClick={() => setFilter(opt.id)}
+              className={`text-[12px] px-2.5 py-1 rounded-md border transition ${
+                filter === opt.id
+                  ? "bg-brand-500/15 text-brand-100 border-brand-500/40"
+                  : "text-ink-400 border-transparent hover:text-ink-200 hover:border-brand-500/20"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
           <Card
@@ -316,7 +316,7 @@ export default function AgentTasksPage() {
                   actions={
                     <div className="flex items-center gap-2">
                       <Pill tone={STATUS_TONE[selected.status]}>
-                        {selected.status.replace("_", " ").toUpperCase()}
+                        {selected.status.replace("_", " ")}
                       </Pill>
                       {selected.status === "in_progress" ? (
                         <button
@@ -413,7 +413,7 @@ export default function AgentTasksPage() {
                         <ArtifactGroup
                           label={t("artifactCreated")}
                           rows={artifacts.data.artifacts.created.map(
-                            (c) => `${c.action} · ${JSON.stringify(c.result || {}).slice(0, 80)}`,
+                            (c) => `${c.action} · ${summarizeArtifactResult(c.result)}`,
                           )}
                         />
                       ) : null}
@@ -471,9 +471,12 @@ export default function AgentTasksPage() {
                   )}
                 </Card>
 
-                <Card title={t("rawTask")}>
+                <Advanced
+                  title={t("rawTask")}
+                  storageKey="nerya.tasks.advanced.raw"
+                >
                   <Json value={selected} />
-                </Card>
+                </Advanced>
               </>
             ) : (
               <Card title={t("selectTask")}>
@@ -492,7 +495,7 @@ export default function AgentTasksPage() {
               if (e.target === e.currentTarget) setCreating(false);
             }}
           >
-            <div className="w-[680px] max-w-full rounded-xl border border-white/10 bg-bg-card shadow-glow">
+            <div className="w-[680px] max-w-full rounded-xl border border-brand-500/20 bg-bg-card shadow-glow">
               <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-5 py-4">
                 <div className="min-w-0">
                   <h3 className="text-lg font-semibold text-ink-100">{t("createDialogTitle")}</h3>
@@ -560,7 +563,7 @@ function Stat({
 }) {
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 px-3 py-2">
-      <div className="text-[9.5px] uppercase tracking-[0.14em] text-ink-500">
+      <div className="text-[11px] text-ink-500 font-medium">
         {label}
       </div>
       <div className={`truncate ${mono ? "font-mono text-[11px]" : ""} text-ink-100`}>
@@ -573,7 +576,7 @@ function Stat({
 function ArtifactGroup({ label, rows }: { label: string; rows: string[] }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-widest text-ink-500 mb-1">
+      <div className="text-[11px] text-ink-500 font-medium mb-1">
         {label}
       </div>
       <ul className="embedded-list-scroll-sm space-y-1">
@@ -602,7 +605,30 @@ function previewRecord(record: Record<string, unknown>): string {
     }
   }
   if (parts.length) return parts.join(" · ");
-  return JSON.stringify(record).slice(0, 100);
+  return summarizeArtifactResult(record);
+}
+
+function summarizeArtifactResult(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "string") return value.slice(0, 80);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return `[${value.length} item${value.length === 1 ? "" : "s"}]`;
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj);
+    if (keys.length === 0) return "{} (empty)";
+    const head = keys
+      .slice(0, 3)
+      .map((k) => {
+        const v = obj[k];
+        if (typeof v === "string") return `${k}=${v.slice(0, 24)}`;
+        if (typeof v === "number" || typeof v === "boolean") return `${k}=${v}`;
+        return k;
+      })
+      .join(" · ");
+    return keys.length > 3 ? `${head} · +${keys.length - 3} more` : head;
+  }
+  return String(value);
 }
 
 function dotForSeverity(severity: EnvelopeSeverity) {

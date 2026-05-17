@@ -25,6 +25,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # silently fabricating results. See :mod:`nerya.core.truth`.
         "mock_mode": False,
     },
+    "network": {
+        "proxy": {
+            "enabled": False,
+            "mode": "direct",
+            "preset": "custom",
+            "http_url": "",
+            "https_url": "",
+            "all_url": "",
+            "pool_url": "",
+            "pool_format": "auto",
+            "no_proxy": "127.0.0.1,localhost,::1",
+        },
+        "tunnels": {
+            "providers": {},
+        },
+    },
+    "dashboard": {
+        "host": "127.0.0.1",
+        "port": 18380,
+    },
     "llm": {
         "default_tier": "medium",
         # Classification / intent-recognition calls use this tier when a
@@ -35,6 +55,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # an operator adds a provider key once, imports models, then assigns
         # provider+model pairs without pasting the same secret into every tier.
         "providers": {},
+        # Opt-in provider-owned web search. Local Nerya tools
+        # web_search/web_fetch/web_search_fetch remain available by default.
+        # Operators can set this globally, per provider profile, or per tier:
+        #   provider_native_web_search: true
+        #   provider_native_web_search:
+        #     enabled: true
+        #     max_uses: 5
+        #     search_context_size: medium
+        "provider_native_web_search": {"enabled": False},
         "tiers": {
             "light": {
                 "provider": "mock",
@@ -42,7 +71,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "max_tokens": 2048,
                 "temperature": 0.1,
                 "timeout_s": 30,
-                "daily_budget_usd": 3,
                 "allowed_tasks": [
                     "news_filtering", "compress", "classify",
                     "trigger_triage", "extract_json",
@@ -64,7 +92,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "max_tokens": 8192,
                 "temperature": 0.2,
                 "timeout_s": 90,
-                "daily_budget_usd": 15,
                 "allowed_tasks": [
                     "normal_agent_loop",
                     "subagent_analysis",
@@ -83,7 +110,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "max_tokens": 32768,
                 "temperature": 0.2,
                 "timeout_s": 240,
-                "daily_budget_usd": 50,
                 # Reasoning controls.
                 # ``reasoning_effort``: minimal | low | medium | high — opt-in;
                 # only honoured when the configured model is reasoning-
@@ -112,6 +138,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_stale_seconds": 30,
     },
     "memory": {
+        "external": {
+            "enabled": False,
+            "provider": "",
+            "agentmemory": {
+                "base_url": "http://127.0.0.1:3111",
+                "secret_ref": "",
+                "secret_env": "AGENTMEMORY_SECRET",
+                "project": "",
+                "session_id": "",
+                "context_budget": 2000,
+                "timeout_s": 1.5,
+                "install_command": "npx @agentmemory/agentmemory",
+                "mcp_command": "npx -y @agentmemory/mcp",
+                "viewer_url": "http://127.0.0.1:3113",
+            },
+        },
         "vector_search": {
             "enabled": False,
             "backend": "memsearch",
@@ -322,8 +364,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "tier": "medium",
                 },
                 "user_chat": {
-                    # Bug-fix Apr-26 2026: ``manual.*`` chat triggers used to fall
-                    # through to the bare ``generic`` lane (only market_data /
+                    # ``manual.*`` chat triggers should not fall through to the
+                    # bare ``generic`` lane (only market_data /
                     # trading / message), which silently filtered out
                     # ``create_strategy`` etc. and let the LLM hallucinate
                     # success. Match the full set of chat-shaped trigger kinds
@@ -459,7 +501,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 7878,
     },
-    # research promotion workflow §5 Task 7 — promotion gate
+    # Promotion gate for the research promotion workflow.
     # consumes validation reports + shadow runs (where present) to
     # decide whether ``paper -> canary -> live`` promotions can land.
     # Defaults are intentionally safe: validation is required to
@@ -482,60 +524,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Optional third-party integrations. Every block below is OFF by
     # default; turning one on is the *only* way its code path gets
     # imported, its routes get mounted, or its skill becomes visible to
-    # the agent. Nothing in :mod:`nerya.integrations` is loaded at
-    # ``local_server`` start unless ``integrations.<name>.enabled: true``.
+    # the agent.
     #
     # ``NERYA_DISABLE_INTEGRATIONS=1`` short-circuits every block back
     # to the default (disabled) regardless of what the workspace yaml
     # says.
-    "integrations": {
-        # AgentNetwork P2P (anet-p2p-starter-kit). Registers selected
-        # read-only Nerya endpoints with a local ``anet daemon`` so
-        # other peers on the network can discover and call them. The
-        # optional ``anet`` pip extra must be installed, and the
-        # daemon binary itself (Linux / macOS / WSL2 only) comes from
-        # ``curl -fsSL https://agentnetwork.org.cn/install.sh | sh``.
-        "anet": {
-            "enabled": False,
-            "daemon_url": "http://127.0.0.1:3998",
-            # ``secret:anet/api_token`` once the operator has stored
-            # the bearer token issued by ``anet daemon`` / self-register.
-            "token_ref": "",
-            # Leave empty to derive from the machine hostname.
-            "service_name": "",
-            "description": "Nerya strategy production line",
-            "tags": ["trading", "strategy-review", "nerya"],
-            # Endpoints exposed to the P2P network. Empty list means
-            # "use the built-in read-only whitelist"
-            # (:mod:`nerya.integrations.anet.whitelist`). Operators can
-            # add extra paths here, but the whitelist still filters out
-            # anything that touches signer / wallet / approvals.
-            "expose_paths": [],
-            "modes": ["rr", "server-stream"],
-            "cost_model": {
-                "free": True,
-                "per_call": None,
-                "per_kb": None,
-                "deposit": None,
-            },
-            # Seconds between background re-registrations. ``anet``
-            # does not persist registrations across daemon restarts
-            # (v1.1 limitation), so the loop re-registers every minute.
-            "heartbeat_seconds": 60,
-            # Outbound surface: lets Nerya's agent discover and call
-            # services on the ANET network. Kept separate from the
-            # inbound (register) surface so an operator can publish a
-            # read-only service without granting the agent the ability
-            # to spend shells calling other peers.
-            "outbound": {
-                "skill_enabled": False,
-                # Any priced call above this many micro-credits goes
-                # through the Approval Gate before funds leave the
-                # wallet. Zero = require approval for every priced call.
-                "require_approval_above_credits": 0,
-            },
-        },
-    },
+    "integrations": {},
     # manifest-driven MCP tool surface. The legacy
     # ``NeryaTools`` registry stays on by default; the dynamic layer
     # generates a tool per manifest action that passes the policy
@@ -597,7 +591,7 @@ class Config:
         """True iff ``integrations.<name>.enabled`` is set AND the
         ``NERYA_DISABLE_INTEGRATIONS`` kill-switch is not active.
 
-        Every optional third-party integration (anet, future additions)
+        Every optional third-party integration
         must be gated by this helper so a single env flag can disable
         all of them during CI, audits, or incident response.
         """
@@ -636,11 +630,23 @@ def load_config(
     if os.environ.get("NERYA_LIVE_TRADING", "").lower() in ("true", "1", "yes"):
         merged.setdefault("runtime", {})["live_trading_enabled"] = True
 
+    config = Config(paths=paths, data=merged)
+
+    # Workspace proxy settings are process-wide because urllib, requests,
+    # httpx, ccxt, subprocess tools, and skill scripts all honor the standard
+    # proxy environment variables. Keep failures non-fatal so a stale pool
+    # endpoint never prevents the API from booting.
+    try:
+        from .proxy import apply_network_proxy
+        apply_network_proxy(config)
+    except Exception:
+        pass
+
     # Dev mode toggle — activate the recorder so every downstream HTTP / tool
     # call is captured. Env var wins over yaml so operators can flip it on
     # for a single process without editing config.
     _activate_dev_mode(merged, paths)
-    return Config(paths=paths, data=merged)
+    return config
 
 
 def _activate_dev_mode(merged: dict[str, Any], paths: WorkspacePaths) -> None:

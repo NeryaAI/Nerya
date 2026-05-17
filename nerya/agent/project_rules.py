@@ -7,10 +7,10 @@ IDE integrations and coding agents all converge on the same idea:
 a project ships a small set of plain-text "agent rules" that the
 runtime injects into the system prompt every turn. Examples:
 
-* ``AGENTS.md`` (Anthropic / coding-agent) — top-level conventions
+* ``AGENTS.md`` — top-level conventions
 * ``.cursor/rules/*.md`` — IDE-style rule snippets, optionally
   scoped to glob patterns
-* ``CLAUDE.md`` — coding-agent legacy filename
+* ``CLAUDE.md`` — legacy alternate filename
 * ``.claude/skills/*/SKILL.md`` — auto-loaded skill instructions
 
 This module discovers and merges all of those into one ordered list

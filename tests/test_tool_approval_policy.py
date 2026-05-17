@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from nerya.agent.kernel import AgentKernel as _AgentKernel  # noqa: F401
+from nerya.tools.native.bootstrap import build_native_tool_deps, register_native_tools
 from nerya.tools.native.file_ops import classify_file_mutation_risk
 from nerya.tools.native.shell import classify_shell_risk
+from nerya.tools.native.skill import is_browser_skill_script_run
 from nerya.tools.native.task import TaskState, exit_plan_mode_handler
 from nerya.tools.permissions import (
     PermissionContext,
@@ -12,6 +14,7 @@ from nerya.tools.permissions import (
     PermissionMode,
     PermissionRequest,
 )
+from nerya.tools.registry import ToolRegistry
 from nerya.tools.types import PermissionScope, RiskLevel, ToolCall, ToolDescriptor
 
 
@@ -25,6 +28,7 @@ def _descriptor(
     scope: PermissionScope = PermissionScope.WORKSPACE,
     risk_classifier=None,
     auto_approve: bool = False,
+    auto_approve_when=None,
 ) -> ToolDescriptor:
     return ToolDescriptor(
         name=name,
@@ -35,6 +39,7 @@ def _descriptor(
         permission_scope=scope,
         risk_classifier=risk_classifier,
         auto_approve=auto_approve,
+        auto_approve_when=auto_approve_when,
     )
 
 
@@ -132,6 +137,77 @@ def test_plan_mode_allows_auto_approved_research_exec_tools():
     decision = _decision(descriptor, {"text": "classify this"}, PermissionMode.PLAN)
 
     assert decision.is_allow()
+
+
+def test_browser_skill_scripts_auto_approve_without_prompt():
+    descriptor = _descriptor(
+        name="script_run",
+        risk=RiskLevel.EXEC,
+        scope=PermissionScope.WORKSPACE,
+        auto_approve_when=is_browser_skill_script_run,
+    )
+
+    browser_payload = {"skill_id": "browser", "name": "browser_session.py"}
+
+    default_decision = _decision(
+        descriptor,
+        browser_payload,
+        PermissionMode.DEFAULT,
+    )
+    assert default_decision.is_allow()
+    assert default_decision.requires_approval is False
+    assert default_decision.risk is RiskLevel.EXEC
+
+    plan_decision = _decision(
+        descriptor,
+        browser_payload,
+        PermissionMode.PLAN,
+    )
+    assert plan_decision.is_allow()
+    assert plan_decision.requires_approval is False
+
+    other_skill_decision = _decision(
+        descriptor,
+        {"skill_id": "research", "name": "fetch_url.py"},
+        PermissionMode.DEFAULT,
+    )
+    assert other_skill_decision.is_ask()
+    assert other_skill_decision.requires_approval is True
+
+
+def test_registered_script_run_auto_approves_browser_skill_scripts(tmp_path):
+    registry = ToolRegistry()
+    deps = build_native_tool_deps(workspace_root=tmp_path, skill_roots=[tmp_path])
+    register_native_tools(registry, deps)
+    descriptor = registry.get("script_run")
+
+    decision = _decision(
+        descriptor,
+        {"skill_id": "browser", "name": "browser_session.py"},
+        PermissionMode.DEFAULT,
+    )
+
+    assert decision.is_allow()
+    assert decision.requires_approval is False
+    assert decision.reason == "auto_approve predicate"
+
+
+def test_registered_wallet_install_requires_exec_approval_by_default(tmp_path):
+    registry = ToolRegistry()
+    deps = build_native_tool_deps(workspace_root=tmp_path, skill_roots=[tmp_path])
+    register_native_tools(registry, deps)
+    descriptor = registry.get("wallet_install")
+
+    decision = _decision(
+        descriptor,
+        {"provider": "self_custody", "mode": "goat"},
+        PermissionMode.DEFAULT,
+    )
+
+    assert descriptor.permission_scope is PermissionScope.NETWORK
+    assert decision.is_ask()
+    assert decision.requires_approval is True
+    assert decision.risk is RiskLevel.EXEC
 
 
 def test_exit_plan_mode_auto_approves_inside_yolo_mode():

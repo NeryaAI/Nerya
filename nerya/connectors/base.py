@@ -57,6 +57,13 @@ class OrderAck:
     size: float | None = None
     filled: float | None = None
     avg_price: float | None = None
+    # USD-equivalent fee for the filled portion (sum across multi-asset
+    # fees). ``None`` distinguishes "fee field unavailable from broker"
+    # from "fee == 0".
+    fee_usd: float | None = None
+    # Fee breakdown keyed by asset code, preserved verbatim from the
+    # broker for audit. ``{"BNB": 0.001}`` etc.
+    fee_breakdown: dict[str, float] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def asdict(self) -> dict[str, Any]:
@@ -70,6 +77,8 @@ class OrderAck:
             "size": self.size,
             "filled": self.filled,
             "avg_price": self.avg_price,
+            "fee_usd": self.fee_usd,
+            "fee_breakdown": dict(self.fee_breakdown),
         }
 
 

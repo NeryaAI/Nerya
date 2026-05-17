@@ -11,7 +11,7 @@ orchestrator implements the same fan-out semantics:
   deterministically.
 * **Mixed batch**           — the orchestrator splits the batch:
   read-only group first (parallel), then mutating group (serial),
-  which mirrors coding-agent's two-phase behaviour.
+  which keeps conflicting writes out of the parallel lane.
 * **Context modifier replay** — modifiers are applied *after* the
   whole batch resolves, in tool-call order. This keeps the post-state
   consistent regardless of the parallel scheduling decisions made by

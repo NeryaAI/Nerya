@@ -23,8 +23,7 @@ Public surface:
 - :func:`search` — full text search over turn-step journal entries.
 - :func:`recent_events` — most-recent N events for a session/strategy.
 
-P0 §5,
-P0 §2.
+Session search and recent-event helpers.
 """
 
 from __future__ import annotations

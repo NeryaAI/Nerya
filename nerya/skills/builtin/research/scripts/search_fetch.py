@@ -52,11 +52,16 @@ def run(
     fetch_top_n: int = _DEFAULT_FETCH_TOP_N,
     region: str = "wt-wt",
     safesearch: str = "moderate",
-    engine: str = "duckduckgo",
+    engine: str | None = None,
+    engines: list[str] | None = None,
+    keys: dict[str, list[str]] | None = None,
+    base_urls: dict[str, str] | None = None,
     max_bytes: int = 200_000,
     timeout_s: float = DEFAULT_TIMEOUT,
     use_jina_fallback: bool = True,
     prefer_jina: bool = False,
+    use_browser_fallback: bool = True,
+    use_scrapling_fallback: bool = True,
     min_content_chars: int = 160,
 ) -> dict[str, Any]:
     if not query:
@@ -70,6 +75,9 @@ def run(
         region=region,
         safesearch=safesearch,
         engine=engine,
+        engines=engines,
+        keys=keys,
+        base_urls=base_urls,
     )
     if not search.get("ok"):
         search["elapsed_ms_total"] = int((time.monotonic() - started) * 1000)
@@ -100,6 +108,8 @@ def run(
             timeout_s=timeout_s,
             use_jina_fallback=use_jina_fallback,
             prefer_jina=prefer_jina,
+            use_browser_fallback=use_browser_fallback,
+            use_scrapling_fallback=use_scrapling_fallback,
             min_content_chars=min_content_chars,
         )
         doc = {

@@ -11,10 +11,12 @@ setting one of:
 * ``NERYA_ALLOW_AUTO_INSTALL=1`` in the environment
 * the route caller passes ``approve=True`` (interactive operator click)
 
-Three install kinds are supported:
+Install kinds are supported:
 
 * **pip** — ``pip install <pkg>`` for a Python package (e.g. ``ccxt``,
   ``cdp-sdk``, ``py-clob-client``).
+* **git-repo** — ``git clone <repo> <skills-dir>/<name>`` without running
+  package install. Used for official non-node skill/script repositories.
 * **node-skill** — ``git clone <repo> <skills-dir>/<name>`` followed by
   ``npm install`` inside the resulting directory. Used for
   Bitget/Binance-Web3/Coinbase-TS wallet skills. The repo URL may
@@ -25,6 +27,9 @@ Three install kinds are supported:
   for wallet SDKs published on npm, e.g. ``npm:@coinbase/cdp-sdk`` or
   ``npm:@bitget/wallet-sdk``. A ``#version=<tag>`` fragment pins a
   specific release.
+* **github-release-bin** — download a checksum-verified release binary
+  into ``<workspace>/skills/_bin/<binary>/``. Used for CLIs that are
+  published as GitHub release assets instead of npm packages.
 
 Every step is journaled and the resulting subprocess output is captured
 into ``dev_logs/dep_installer.jsonl`` so the operator can audit what
@@ -35,8 +40,10 @@ the active interpreter via ``sys.executable -m pip ...``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -47,6 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from ..core import jsonl
 from ..core.errors import NeryaError
@@ -60,7 +68,7 @@ class DependencyInstallError(NeryaError):
 @dataclass
 class InstallResult:
     ok: bool
-    kind: str  # "pip" | "node-skill"
+    kind: str  # "pip" | "git-repo" | "node-skill" | "npm" | "github-release-bin"
     target: str
     command: str
     duration_s: float
@@ -276,6 +284,82 @@ def _parse_node_skill_target(spec: str) -> tuple[str, str, str]:
     return repo, sub, entry
 
 
+def _parse_git_repo_target(spec: str) -> tuple[str, str, str]:
+    """Parse ``git-repo:<repo>[#path=<sub>][&entry=<file>]``."""
+
+    if spec.startswith("git-repo:"):
+        spec = spec[len("git-repo:"):]
+    return _parse_node_skill_target(f"node-skill:{spec}")
+
+
+def install_git_repo(
+    paths: WorkspacePaths,
+    command: str,
+    *,
+    timeout_s: float = 600.0,
+) -> InstallResult:
+    """Clone/update an official repository without running package install."""
+
+    if not _git_available():
+        raise DependencyInstallError("git binary not found on PATH")
+
+    repo, sub, entry = _parse_git_repo_target(command)
+    name = Path(urlparse(repo).path.rstrip("/")).name.removesuffix(".git") or "repo"
+    repo_root = _node_skills_root(paths) / name
+    install_dir = repo_root / sub if sub else repo_root
+    started = time.time()
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def _run(cmd: list[str], cwd: Path) -> int:
+        proc = subprocess.run(
+            cmd, capture_output=True, cwd=str(cwd),
+            timeout=timeout_s, check=False,
+        )
+        stdout_chunks.append((proc.stdout or b"").decode("utf-8", "replace"))
+        stderr_chunks.append((proc.stderr or b"").decode("utf-8", "replace"))
+        return int(proc.returncode)
+
+    try:
+        if not repo_root.exists():
+            repo_root.parent.mkdir(parents=True, exist_ok=True)
+            rc = _run(["git", "clone", "--depth", "1", repo, str(repo_root)],
+                      cwd=repo_root.parent)
+            if rc != 0:
+                return _wrap_node_skill_failure(
+                    paths, repo, started, stdout_chunks, stderr_chunks,
+                    str(install_dir),
+                )
+        else:
+            _run(["git", "pull", "--ff-only"], cwd=repo_root)
+        if not install_dir.exists():
+            return _wrap_node_skill_failure(
+                paths, repo, started, stdout_chunks, stderr_chunks,
+                str(install_dir),
+                extra_err=f"subpath {sub!r} not found inside {repo_root}",
+            )
+    except subprocess.TimeoutExpired:
+        return InstallResult(
+            ok=False, kind="git-repo", target=repo,
+            command=f"git clone {repo}",
+            duration_s=time.time() - started,
+            stderr_tail=f"timed out after {timeout_s}s",
+            install_path=str(install_dir),
+        )
+
+    result = InstallResult(
+        ok=True, kind="git-repo", target=repo,
+        command=f"git clone {repo}",
+        duration_s=time.time() - started,
+        stdout_tail="\n".join(stdout_chunks)[-1500:],
+        stderr_tail="\n".join(stderr_chunks)[-1500:],
+        install_path=str(install_dir),
+        extra={"entry": entry},
+    )
+    _journal(paths, result)
+    return result
+
+
 def install_node_skill(
     paths: WorkspacePaths,
     command: str,
@@ -468,6 +552,146 @@ def install_npm_package(
 
 
 # ---------------------------------------------------------------------------
+# GitHub release binary install
+# ---------------------------------------------------------------------------
+
+
+_GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_BINARY_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _parse_github_release_bin_target(spec: str) -> tuple[str, str]:
+    """Parse ``github-release-bin:<owner/repo>#binary=<name>``."""
+
+    if spec.startswith("github-release-bin:"):
+        spec = spec[len("github-release-bin:"):]
+    repo = spec
+    binary = ""
+    if "#" in spec:
+        repo, _, frag = spec.partition("#")
+        for chunk in frag.split("&"):
+            if "=" not in chunk:
+                continue
+            k, v = chunk.split("=", 1)
+            if k == "binary":
+                binary = v.strip()
+    repo = repo.strip()
+    binary = (binary or Path(repo).name).strip()
+    if not _GITHUB_REPO_RE.match(repo):
+        raise DependencyInstallError(
+            f"refusing GitHub release repo {repo!r}: expected owner/repo"
+        )
+    if not _BINARY_NAME_RE.match(binary):
+        raise DependencyInstallError(
+            f"refusing GitHub release binary {binary!r}: invalid name"
+        )
+    return repo, binary
+
+
+def _release_target_triple() -> tuple[str, str]:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "windows":
+        if machine in ("amd64", "x86_64"):
+            return "x86_64-pc-windows-msvc", ".exe"
+        if machine in ("x86", "i386", "i686"):
+            return "i686-pc-windows-msvc", ".exe"
+        if machine in ("arm64", "aarch64"):
+            return "aarch64-pc-windows-msvc", ".exe"
+    if system == "darwin":
+        if machine == "x86_64":
+            return "x86_64-apple-darwin", ""
+        if machine in ("arm64", "aarch64"):
+            return "aarch64-apple-darwin", ""
+    if system == "linux":
+        if machine == "x86_64":
+            return "x86_64-unknown-linux-gnu", ""
+        if machine in ("i386", "i686"):
+            return "i686-unknown-linux-gnu", ""
+        if machine in ("arm64", "aarch64"):
+            return "aarch64-unknown-linux-gnu", ""
+        if machine == "armv7l":
+            return "armv7-unknown-linux-gnueabihf", ""
+    raise DependencyInstallError(
+        f"unsupported platform for GitHub binary install: {platform.system()} {platform.machine()}"
+    )
+
+
+def _http_get_bytes(url: str, *, timeout_s: float = 60.0) -> bytes:
+    req = Request(url, headers={"User-Agent": "nerya-dep-installer"})
+    with urlopen(req, timeout=timeout_s) as resp:
+        return resp.read()
+
+
+def install_github_release_binary(
+    paths: WorkspacePaths,
+    command: str,
+    *,
+    timeout_s: float = 600.0,
+) -> InstallResult:
+    """Download a checksum-verified GitHub release binary into the workspace."""
+
+    repo, binary = _parse_github_release_bin_target(command)
+    started = time.time()
+    target, suffix = _release_target_triple()
+    asset_name = f"{binary}-{target}{suffix}"
+    api_url = f"https://api.github.com/repos/{repo}/releases/latest"
+    try:
+        release = json.loads(_http_get_bytes(api_url, timeout_s=30.0).decode("utf-8"))
+        tag = str(release.get("tag_name") or "").strip()
+        assets = release.get("assets") if isinstance(release, dict) else []
+        asset_url = ""
+        checksums_url = ""
+        for asset in assets if isinstance(assets, list) else []:
+            if not isinstance(asset, dict):
+                continue
+            name = str(asset.get("name") or "")
+            url = str(asset.get("browser_download_url") or "")
+            if name == asset_name:
+                asset_url = url
+            elif name == "checksums.txt":
+                checksums_url = url
+        if not tag or not asset_url or not checksums_url:
+            raise DependencyInstallError(
+                f"release asset {asset_name!r} or checksums.txt not found for {repo}"
+            )
+        blob = _http_get_bytes(asset_url, timeout_s=timeout_s)
+        checksums = _http_get_bytes(checksums_url, timeout_s=60.0).decode("utf-8", "replace")
+        expected = ""
+        for line in checksums.splitlines():
+            if asset_name in line:
+                expected = line.split()[0].strip().lower()
+                break
+        actual = hashlib.sha256(blob).hexdigest().lower()
+        if not expected or actual != expected:
+            raise DependencyInstallError(
+                f"checksum mismatch for {asset_name}: expected {expected or '<missing>'}, got {actual}"
+            )
+        install_dir = paths.root / "skills" / "_bin" / binary
+        install_dir.mkdir(parents=True, exist_ok=True)
+        dest = install_dir / (f"{binary}.exe" if suffix else binary)
+        dest.write_bytes(blob)
+        if not suffix:
+            dest.chmod(0o755)
+    except DependencyInstallError:
+        raise
+    except Exception as exc:
+        raise DependencyInstallError(
+            f"failed to install GitHub release binary {repo}: {exc}"
+        ) from exc
+
+    result = InstallResult(
+        ok=True, kind="github-release-bin", target=f"{repo}@{tag}",
+        command=f"download {asset_name} from {repo}",
+        duration_s=time.time() - started,
+        install_path=str(dest),
+        extra={"repo": repo, "binary": binary, "tag": tag, "asset": asset_name},
+    )
+    _journal(paths, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Listing / uninstall — manage already-installed wallet skills
 # ---------------------------------------------------------------------------
 
@@ -578,8 +802,10 @@ def install(
     Recognised forms:
 
     * ``"pip install ccxt"`` / ``"pip install py-clob-client"``
+    * ``"git-repo:<repo>[#path=<sub>][&entry=<file>]"``
     * ``"node-skill:<repo>[#path=<sub>][&entry=<file>]"``
     * ``"npm:<package>[#version=<tag>][&entry=<file>]"``
+    * ``"github-release-bin:<owner/repo>#binary=<name>"``
 
     Empty / unrecognised commands return a ``skipped`` result.
     """
@@ -601,10 +827,14 @@ def install(
         return result
     if cmd.lower().startswith("pip install ") or cmd.lower().startswith("pip3 install "):
         return install_pip_package(paths, cmd)
+    if cmd.startswith("git-repo:"):
+        return install_git_repo(paths, cmd)
     if cmd.startswith("node-skill:"):
         return install_node_skill(paths, cmd)
     if cmd.startswith("npm:"):
         return install_npm_package(paths, cmd)
+    if cmd.startswith("github-release-bin:"):
+        return install_github_release_binary(paths, cmd)
     raise DependencyInstallError(
         f"unrecognised install command: {command!r}"
     )
@@ -629,8 +859,10 @@ __all__ = [
     "InstallResult",
     "install",
     "install_pip_package",
+    "install_git_repo",
     "install_node_skill",
     "install_npm_package",
+    "install_github_release_binary",
     "is_auto_install_allowed",
     "list_node_skills",
     "uninstall_node_skill",

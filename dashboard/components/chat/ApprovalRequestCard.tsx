@@ -125,7 +125,7 @@ export function ApprovalRequestCard({
   return (
     <div className={`rounded-lg border px-3 py-2.5 space-y-2 ${statusTone}`}>
       <div className="flex items-center justify-between gap-2">
-        <div className="text-[10px] uppercase tracking-[0.18em]">
+        <div className="text-[12px] font-medium">
           {state === "approved"
             ? t("approved")
             : state === "rejected"
@@ -154,7 +154,7 @@ export function ApprovalRequestCard({
               return (
                 <div
                   key={`${callId || toolName}-${idx}`}
-                  className="rounded-md border border-white/10 bg-black/15 px-2 py-1.5"
+                  className="rounded-md border border-brand-500/20 bg-black/15 px-2 py-1.5"
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-mono text-[11px] text-ink-100 truncate">
@@ -190,7 +190,7 @@ export function ApprovalRequestCard({
                 ? "border-[#ef5564]/50 bg-[#ef5564]/10 text-[#ffb3bd] hover:bg-[#ef5564]/20"
                 : style === "primary"
                 ? "border-accent-400/50 bg-accent-400/10 text-accent-400 hover:bg-accent-400/20"
-                : "border-white/10 bg-white/[0.04] text-ink-200 hover:bg-white/[0.08]";
+                : "border-brand-500/20 bg-white/[0.04] text-ink-200 hover:bg-white/[0.08]";
             const lower = button.callback_data.toLowerCase();
             const Icon =
               style === "danger" || lower.startsWith("reject:")

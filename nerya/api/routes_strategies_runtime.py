@@ -48,6 +48,7 @@ def _request_from_payload(payload: dict[str, Any]) -> StrategyGenerationRequest:
         description=str(payload.get("description") or ""),
         prompt=str(payload.get("prompt") or ""),
         strategy_class=str(payload.get("strategy_class") or "scalping").strip().lower(),
+        execution_mode=str(payload.get("execution_mode") or "").strip().lower(),
         mode=str(payload.get("mode") or "paper").strip().lower(),
         markets=tuple(str(m) for m in (payload.get("markets") or ())),
         accounts=tuple(str(a) for a in (payload.get("accounts") or ())),
@@ -61,13 +62,14 @@ def _request_from_payload(payload: dict[str, Any]) -> StrategyGenerationRequest:
         subagents=tuple(str(s) for s in (payload.get("subagents") or ())),
         policy_overrides=dict(payload.get("policy_overrides") or {}),
         llm_policy_overrides=dict(payload.get("llm_policy_overrides") or {}),
-        create_tuning=bool(payload.get("create_tuning", False)),
+        create_tuning=bool(payload.get("create_tuning", True)),
         tuning_prompt=str(payload.get("tuning_prompt") or ""),
         tuning_cron=str(payload.get("tuning_cron") or "0 */6 * * *"),
         tuning_objectives=tuple(
             str(o) for o in (payload.get("tuning_objectives") or ())
         ),
         extra_subagent_prompts=dict(payload.get("extra_subagent_prompts") or {}),
+        files=dict(payload.get("files") or {}),
     )
 
 

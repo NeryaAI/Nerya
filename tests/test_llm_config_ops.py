@@ -86,6 +86,49 @@ def test_models_import_persists_selected_catalog_rows(tmp_path):
     assert ids == ["gpt-test-a", "gpt-test-b"]
 
 
+def test_models_discover_custom_openai_compat_uses_vaulted_key(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    calls = []
+
+    class FakeCompatAdapter:
+        def list_models(self, *, api_key, base_url=None, provider_name="compat"):
+            calls.append({
+                "api_key": api_key,
+                "base_url": base_url,
+                "provider_name": provider_name,
+            })
+            return [{"id": "cliproxy-model", "owned_by": "cliproxy"}]
+
+    monkeypatch.setattr(
+        ops,
+        "builtin_providers",
+        lambda: {"compat": FakeCompatAdapter()},
+    )
+
+    out = ops.models_discover(
+        cfg,
+        provider="cliproxy",
+        base_url="http://3.112.67.22:8317/v1",
+        provider_key="sk-custom-test",
+        api_mode="chat_completions",
+    )
+
+    assert out["ok"] is True
+    assert out["count"] == 1
+    assert out["models"][0]["id"] == "cliproxy-model"
+    assert out["provider_key_ref"].startswith("vault://")
+    assert calls == [{
+        "api_key": "sk-custom-test",
+        "base_url": "http://3.112.67.22:8317/v1",
+        "provider_name": "cliproxy",
+    }]
+    saved = yaml_io.load(tmp_path / "nerya.yml", default={})
+    profile = saved["llm"]["providers"]["cliproxy"]
+    assert profile["base_url"] == "http://3.112.67.22:8317/v1"
+    assert profile["provider_key_ref"] == out["provider_key_ref"]
+    assert "sk-custom-test" not in str(saved)
+
+
 def test_llm_provider_profile_is_vaulted_and_inherited_by_tier(tmp_path):
     cfg = _config(tmp_path)
 
@@ -98,6 +141,10 @@ def test_llm_provider_profile_is_vaulted_and_inherited_by_tier(tmp_path):
                 "provider": "openrouter",
                 "base_url": "https://openrouter.ai/api/v1",
                 "provider_key": "sk-provider-level",
+                "provider_native_web_search": {
+                    "enabled": True,
+                    "search_context_size": "low",
+                },
             }
         ],
         tiers=[
@@ -116,6 +163,16 @@ def test_llm_provider_profile_is_vaulted_and_inherited_by_tier(tmp_path):
     effective = ops.effective_tiers(cfg)
     assert effective["medium"]["provider_key_ref"] == profile_ref
     assert effective["intent"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert effective["medium"]["provider_native_web_search"] == {
+        "enabled": True,
+        "search_context_size": "low",
+    }
+    cfg.data["llm"]["tiers"]["medium"]["provider_native_web_search"] = {
+        "enabled": False,
+    }
+    assert ops.effective_tiers(cfg)["medium"]["provider_native_web_search"] == {
+        "enabled": False,
+    }
     assert "classify" in cfg.get("llm.tiers")["intent"]["allowed_tasks"]
 
 
@@ -127,7 +184,6 @@ def test_classify_defaults_to_configured_intent_tier(tmp_path):
         "model": "intent-model",
         "allowed_tasks": ["classify"],
         "allowed_classes": ["classification"],
-        "daily_budget_usd": 1,
     }
 
     result = LLMGateway(cfg).classify(

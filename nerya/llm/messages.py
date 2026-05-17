@@ -85,7 +85,7 @@ _LOG = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Rich error helpers (Apr-30 2026 — surface request_id / raw body)
+# Rich error helpers that preserve request ids and raw provider bodies.
 # ---------------------------------------------------------------------------
 #
 # Before this change, every backend below collapsed an HTTP-error response
@@ -265,6 +265,135 @@ MessagesBackend = Callable[[MessagesRequest], MessagesResponse]
 
 
 # ---------------------------------------------------------------------------
+# Provider-native web search configuration
+# ---------------------------------------------------------------------------
+
+
+_WEB_SEARCH_TRUE_VALUES = {"1", "true", "yes", "y", "on", "enabled", "auto", "force"}
+_WEB_SEARCH_FALSE_VALUES = {"0", "false", "no", "n", "off", "disabled", "none"}
+_OPENAI_SEARCH_CONTEXT_SIZES = {"low", "medium", "high"}
+
+
+def normalise_provider_native_web_search(value: Any) -> dict[str, Any]:
+    """Return a provider-native web search settings dict.
+
+    Accepted config shapes:
+    * ``true`` / ``false``
+    * ``"on"`` / ``"off"``
+    * ``{"enabled": true, ...options}``
+
+    Unknown keys are preserved so provider-specific future knobs can flow
+    through without another config migration.
+    """
+
+    if value is None:
+        return {"enabled": False}
+    if isinstance(value, bool):
+        return {"enabled": bool(value)}
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if not raw:
+            return {"enabled": False}
+        if raw in _WEB_SEARCH_TRUE_VALUES:
+            return {"enabled": True}
+        if raw in _WEB_SEARCH_FALSE_VALUES:
+            return {"enabled": False}
+        return {"enabled": False}
+    if not isinstance(value, dict):
+        return {"enabled": False}
+
+    out: dict[str, Any] = dict(value)
+    enabled_raw = out.get("enabled")
+    if enabled_raw is None:
+        enabled = True
+    elif isinstance(enabled_raw, bool):
+        enabled = enabled_raw
+    elif isinstance(enabled_raw, str):
+        enabled = enabled_raw.strip().lower() in _WEB_SEARCH_TRUE_VALUES
+    else:
+        enabled = bool(enabled_raw)
+    out["enabled"] = enabled
+    return out
+
+
+def _provider_native_web_search_settings(request: MessagesRequest) -> dict[str, Any]:
+    return normalise_provider_native_web_search(
+        (request.metadata or {}).get("provider_native_web_search")
+    )
+
+
+def _clean_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, Iterable):
+        values = list(value)
+    else:
+        values = []
+    out: list[str] = []
+    for item in values:
+        text = str(item or "").strip()
+        if text:
+            out.append(text)
+    return out
+
+
+def _anthropic_web_search_tool(settings: dict[str, Any]) -> dict[str, Any]:
+    tool: dict[str, Any] = {
+        "type": str(
+            settings.get("anthropic_tool_type")
+            or settings.get("tool_type")
+            or "web_search_20250305"
+        ),
+        "name": "web_search",
+    }
+    try:
+        max_uses = int(settings.get("max_uses") or 0)
+    except (TypeError, ValueError):
+        max_uses = 0
+    if max_uses > 0:
+        tool["max_uses"] = max_uses
+    allowed_domains = _clean_string_list(settings.get("allowed_domains"))
+    blocked_domains = _clean_string_list(settings.get("blocked_domains"))
+    if allowed_domains:
+        tool["allowed_domains"] = allowed_domains
+    if blocked_domains:
+        tool["blocked_domains"] = blocked_domains
+    user_location = settings.get("user_location")
+    if isinstance(user_location, dict) and user_location:
+        tool["user_location"] = dict(user_location)
+    return tool
+
+
+def _anthropic_messages_url(base_url: str) -> str:
+    base = (base_url or "https://api.anthropic.com/v1").rstrip("/")
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    return f"{base}/messages"
+
+
+def _openai_web_search_options(settings: dict[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    size = str(settings.get("search_context_size") or "").strip().lower()
+    if size in _OPENAI_SEARCH_CONTEXT_SIZES:
+        options["search_context_size"] = size
+    user_location = settings.get("user_location")
+    if isinstance(user_location, dict) and user_location:
+        options["user_location"] = dict(user_location)
+    return options
+
+
+def _gemini_web_search_tool(settings: dict[str, Any]) -> dict[str, Any]:
+    tool_type = str(
+        settings.get("gemini_tool_type")
+        or settings.get("tool_type")
+        or "google_search"
+    ).strip()
+    if tool_type in {"google_search_retrieval", "googleSearchRetrieval"}:
+        return {"google_search_retrieval": {}}
+    return {"google_search": {}}
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -297,6 +426,124 @@ def _coerce_text(content: Any) -> str:
     return ""
 
 
+def _source_to_data_url(source: dict[str, Any]) -> str:
+    stype = str(source.get("type") or "")
+    if stype == "url":
+        return str(source.get("url") or "")
+    media_type = str(source.get("media_type") or "application/octet-stream")
+    data = str(source.get("data") or "")
+    if not data:
+        return ""
+    return f"data:{media_type};base64,{data}"
+
+
+def _document_text_fallback(block: dict[str, Any]) -> str:
+    name = str(block.get("title") or block.get("name") or "attachment")
+    source = block.get("source") if isinstance(block.get("source"), dict) else {}
+    media_type = str(
+        block.get("media_type")
+        or source.get("media_type")
+        or "application/octet-stream"
+    )
+    text = str(block.get("text") or "")
+    if not text and media_type.startswith("text/"):
+        try:
+            text = base64.b64decode(str(source.get("data") or "")).decode(
+                "utf-8",
+                errors="replace",
+            )
+        except Exception:
+            text = ""
+    if text:
+        return (
+            f"<attached_document name=\"{name}\" mime=\"{media_type}\">\n"
+            f"{text[:256_000]}\n</attached_document>"
+        )
+    return (
+        f"[Attached file: {name} ({media_type}). This provider adapter cannot "
+        "send this file type through chat-completions; use an Anthropic or "
+        "Gemini-capable model for native document input.]"
+    )
+
+
+def _openai_user_part(block: dict[str, Any]) -> dict[str, Any] | None:
+    btype = block.get("type")
+    if btype == "text":
+        return {"type": "text", "text": str(block.get("text") or "")}
+    if btype == "image":
+        source = block.get("source") if isinstance(block.get("source"), dict) else {}
+        url = _source_to_data_url(source)
+        if not url:
+            return None
+        return {"type": "image_url", "image_url": {"url": url}}
+    if btype in {"document", "file", "attachment"}:
+        return {"type": "text", "text": _document_text_fallback(block)}
+    return None
+
+
+def _content_parts_to_text(parts: Any) -> str:
+    if isinstance(parts, str):
+        return parts
+    chunks: list[str] = []
+    if isinstance(parts, list):
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            if ptype == "text":
+                chunks.append(str(part.get("text") or ""))
+            elif ptype in {"image", "document", "file", "attachment"}:
+                chunks.append(_document_text_fallback(part))
+    return "\n".join(c for c in chunks if c)
+
+
+def _gemini_part_from_block(block: dict[str, Any]) -> dict[str, Any] | None:
+    btype = block.get("type")
+    if btype == "text":
+        return {"text": str(block.get("text") or "")}
+    if btype not in {"image", "document", "file", "attachment"}:
+        return None
+    source = block.get("source") if isinstance(block.get("source"), dict) else {}
+    mime = str(
+        block.get("mime_type")
+        or block.get("media_type")
+        or source.get("media_type")
+        or "application/octet-stream"
+    )
+    if source.get("type") == "url" and source.get("url"):
+        return {"fileData": {"mimeType": mime, "fileUri": str(source.get("url"))}}
+    data = str(source.get("data") or block.get("data") or "")
+    if not data and str(block.get("data_url") or "").startswith("data:"):
+        header, _, encoded = str(block.get("data_url")).partition(",")
+        data = encoded
+        if ":" in header and ";" in header:
+            mime = header.split(":", 1)[1].split(";", 1)[0] or mime
+    if not data:
+        text = _document_text_fallback(block)
+        return {"text": text} if text else None
+    return {"inlineData": {"mimeType": mime, "data": data}}
+
+
+def _attachment_from_inline_data(part: dict[str, Any]) -> dict[str, Any] | None:
+    inline = part.get("inlineData") or part.get("inline_data")
+    if not isinstance(inline, dict):
+        return None
+    mime = str(inline.get("mimeType") or inline.get("mime_type") or "")
+    data = str(inline.get("data") or "")
+    if not mime or not data:
+        return None
+    kind = "image" if mime.startswith("image/") else "file"
+    return {
+        "type": "attachment",
+        "attachment_kind": kind,
+        "name": f"model-output.{mime.split('/')[-1] if '/' in mime else 'bin'}",
+        "mime_type": mime,
+        "data": data,
+        "data_url": f"data:{mime};base64,{data}",
+        "source_kind": "model",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Anthropic backend
 # ---------------------------------------------------------------------------
@@ -325,10 +572,28 @@ class AnthropicMessagesBackend:
             "system": request.system,
             "messages": request.messages,
         }
-        if request.tools:
-            body["tools"] = list(request.tools)
+        tools = list(request.tools)
+        native_web_search = _provider_native_web_search_settings(request)
+        if native_web_search.get("enabled"):
+            # Anthropic's server tool is named ``web_search``. Drop Nerya's
+            # local client tool with the same name to avoid duplicate tool
+            # names while leaving web_fetch / web_search_fetch available.
+            tools = [
+                t for t in tools
+                if str((t or {}).get("name") or "") != "web_search"
+            ]
+            tools.insert(0, _anthropic_web_search_tool(native_web_search))
+        if tools:
+            body["tools"] = tools
         if request.tool_choice is not None:
-            body["tool_choice"] = request.tool_choice
+            choice = request.tool_choice
+            if (
+                native_web_search.get("enabled")
+                and str(choice.get("type") or "").lower() == "tool"
+                and str(choice.get("name") or "") == "web_search"
+            ):
+                choice = {"type": "auto"}
+            body["tool_choice"] = choice
         effort = (request.reasoning_effort or "").strip().lower()
         if effort and effort != "none":
             adaptive_effort = _anthropic_adaptive_effort_for(self.model, effort)
@@ -341,7 +606,7 @@ class AnthropicMessagesBackend:
                     "type": "enabled",
                     "budget_tokens": thinking_budget,
                 }
-        url = self.base_url.rstrip("/") + "/messages"
+        url = _anthropic_messages_url(self.base_url)
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self.api_key,
@@ -463,36 +728,37 @@ def _openai_render_messages(
                 continue
             if not isinstance(content, list):
                 continue
-            user_text_parts: list[str] = []
+            user_parts: list[dict[str, Any]] = []
             for block in content:
                 if not isinstance(block, dict):
                     continue
                 btype = block.get("type")
-                if btype == "text":
-                    user_text_parts.append(str(block.get("text") or ""))
-                elif btype == "tool_result":
-                    flushed = "\n".join(p for p in user_text_parts if p)
-                    if flushed:
-                        out.append({"role": "user", "content": flushed})
-                        user_text_parts = []
+                if btype == "tool_result":
+                    if user_parts:
+                        out.append({"role": "user", "content": user_parts})
+                        user_parts = []
                     inner = block.get("content")
-                    if isinstance(inner, list):
-                        text_chunks: list[str] = []
-                        for p in inner:
-                            if isinstance(p, dict) and p.get("type") == "text":
-                                text_chunks.append(str(p.get("text") or ""))
-                        result_text = "\n".join(text_chunks)
-                    elif isinstance(inner, str):
-                        result_text = inner
-                    else:
-                        result_text = ""
+                    result_text = _content_parts_to_text(inner)
                     out.append({
                         "role": "tool",
                         "tool_call_id": str(block.get("tool_use_id") or ""),
                         "content": result_text,
                     })
-            if user_text_parts:
-                out.append({"role": "user", "content": "\n".join(user_text_parts)})
+                    continue
+                part = _openai_user_part(block)
+                if part is not None:
+                    user_parts.append(part)
+            if user_parts:
+                text_only = all(part.get("type") == "text" for part in user_parts)
+                if text_only:
+                    out.append({
+                        "role": "user",
+                        "content": "\n".join(
+                            str(part.get("text") or "") for part in user_parts
+                        ),
+                    })
+                else:
+                    out.append({"role": "user", "content": user_parts})
         elif role == "assistant":
             text_chunks: list[str] = []
             tool_calls: list[dict[str, Any]] = []
@@ -505,6 +771,8 @@ def _openai_render_messages(
                     btype = block.get("type")
                     if btype == "text":
                         text_chunks.append(str(block.get("text") or ""))
+                    elif btype in {"image", "document", "file", "attachment"}:
+                        text_chunks.append(_document_text_fallback(block))
                     elif btype == "tool_use":
                         tool_calls.append({
                             "id": str(block.get("id") or _new_tool_use_id()),
@@ -591,6 +859,19 @@ def _openai_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
                     content_blocks.append({
                         "type": "text",
                         "text": str(p.get("text") or ""),
+                    })
+                elif ptype in {"image_url", "output_image", "input_image"}:
+                    image_url = p.get("image_url") or p.get("url") or ""
+                    if isinstance(image_url, dict):
+                        image_url = image_url.get("url") or ""
+                    content_blocks.append({
+                        "type": "attachment",
+                        "attachment_kind": "image",
+                        "name": str(p.get("name") or "model-output-image"),
+                        "mime_type": str(p.get("mime_type") or "image/png"),
+                        "url": str(image_url or ""),
+                        "data_url": str(image_url or "") if str(image_url or "").startswith("data:") else "",
+                        "source_kind": "model",
                     })
 
     reasoning_blob = msg.get("reasoning") or msg.get("reasoning_content")
@@ -682,6 +963,7 @@ class OpenAIMessagesBackend:
             "model": self.model,
             "messages": rendered_messages,
         }
+        native_web_search = _provider_native_web_search_settings(request)
         if _is_reasoning_model_id(self.model):
             body["max_completion_tokens"] = request.max_tokens
             eff = (
@@ -708,6 +990,10 @@ class OpenAIMessagesBackend:
             body["tools"] = _openai_render_tools(request.tools)
             choice = _openai_tool_choice(request.tool_choice) or "auto"
             body["tool_choice"] = choice
+        if native_web_search.get("enabled"):
+            body["web_search_options"] = _openai_web_search_options(
+                native_web_search
+            )
 
         headers = {
             "Content-Type": "application/json",
@@ -781,20 +1067,9 @@ def _gemini_render_contents(
                     if not isinstance(block, dict):
                         continue
                     btype = block.get("type")
-                    if btype == "text":
-                        parts.append({"text": str(block.get("text") or "")})
-                    elif btype == "tool_result":
+                    if btype == "tool_result":
                         inner = block.get("content")
-                        if isinstance(inner, list):
-                            text_chunks: list[str] = []
-                            for p in inner:
-                                if isinstance(p, dict) and p.get("type") == "text":
-                                    text_chunks.append(str(p.get("text") or ""))
-                            result_text = "\n".join(text_chunks)
-                        elif isinstance(inner, str):
-                            result_text = inner
-                        else:
-                            result_text = ""
+                        result_text = _content_parts_to_text(inner)
                         parts.append({
                             "functionResponse": {
                                 "name": str(block.get("name") or ""),
@@ -804,6 +1079,10 @@ def _gemini_render_contents(
                                 },
                             },
                         })
+                    else:
+                        part = _gemini_part_from_block(block)
+                        if part is not None:
+                            parts.append(part)
             if parts:
                 out.append({"role": "user", "parts": parts})
         elif role == "assistant":
@@ -817,6 +1096,10 @@ def _gemini_render_contents(
                     btype = block.get("type")
                     if btype == "text":
                         parts.append({"text": str(block.get("text") or "")})
+                    elif btype in {"image", "document", "file", "attachment"}:
+                        text = _document_text_fallback(block)
+                        if text:
+                            parts.append({"text": text})
                     elif btype == "tool_use":
                         parts.append({
                             "functionCall": {
@@ -902,6 +1185,10 @@ def _gemini_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
         if p.get("text"):
             blocks.append({"type": "text", "text": str(p.get("text") or "")})
             continue
+        attachment = _attachment_from_inline_data(p)
+        if attachment is not None:
+            blocks.append(attachment)
+            continue
         fc = p.get("functionCall")
         if fc:
             saw_tool = True
@@ -952,7 +1239,10 @@ class GeminiMessagesBackend:
         thinking_cfg = _gemini_thinking_config(self.model, request.reasoning_effort)
         if thinking_cfg:
             body["generationConfig"]["thinkingConfig"] = thinking_cfg
+        native_web_search = _provider_native_web_search_settings(request)
         rendered_tools = _gemini_render_tools(request.tools)
+        if native_web_search.get("enabled"):
+            rendered_tools.insert(0, _gemini_web_search_tool(native_web_search))
         if rendered_tools:
             body["tools"] = rendered_tools
             if request.tool_choice:
@@ -1217,7 +1507,7 @@ class MockMessagesBackend:
         if marker in last_user:
             head = last_user.split(marker, 1)[1]
             close = head.find("]]")
-            spec = head[:close] if close >= 0 else head
+            spec = (head[:close] if close >= 0 else head).strip()
             name = spec.split(" ", 1)[0].strip()
             args: dict[str, Any] = {}
             if " args=" in spec:
@@ -1295,4 +1585,5 @@ __all__ = [
     "OllamaMessagesBackend",
     "OpenAIMessagesBackend",
     "descriptors_to_provider_tools",
+    "normalise_provider_native_web_search",
 ]

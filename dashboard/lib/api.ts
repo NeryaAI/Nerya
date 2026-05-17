@@ -143,7 +143,7 @@ export const api = {
   portfolioPositions: () =>
     request<{ positions: PortfolioPosition[] }>("/portfolio/positions", { method: "POST", body: {} }),
   portfolioPnl: () =>
-    request<{ realized_usd: number; equity_usd: number }>("/portfolio/pnl", { method: "POST", body: {} }),
+    request<PortfolioPnl>("/portfolio/pnl", { method: "POST", body: {} }),
   portfolioEquityCurve: (limit = 120) =>
     request<{ points: EquityPoint[]; equity_usd: number }>(
       "/portfolio/equity_curve", { method: "POST", body: { limit } },
@@ -186,10 +186,17 @@ export type Candle = {
 export type EquityPoint = { ts: string; equity_usd: number };
 
 export type PortfolioPosition = {
+  position_id?: string;
   account_id: string;
+  strategy_id?: string;
   market?: string;
   size?: number;
+  size_base?: number;
   avg_entry_price?: number;
+  avg_price?: number;
+  mark_price?: number;
+  market_value_usd?: number;
+  notional_usd?: number;
   unrealized_pnl_usd?: number;
   realized_pnl_usd?: number;
   side?: string;
@@ -209,6 +216,18 @@ export type PortfolioSummary = {
   totals: { cash_usd: number; equity_usd: number };
 };
 
+export type PortfolioPnl = {
+  initial_equity_usd?: number;
+  equity_usd: number;
+  realized_usd: number;
+  realized_net_usd?: number;
+  realized_gross_usd?: number;
+  unrealized_usd?: number;
+  fees_usd?: number;
+  funding_usd?: number;
+  total_pnl_usd?: number;
+};
+
 export type StrategyCard = {
   id: string;
   title: string;
@@ -221,6 +240,9 @@ export type StrategyCard = {
   fills_count: number;
   intents_count: number;
   realized_pnl_usd: number;
+  unrealized_pnl_usd: number;
+  total_pnl_usd: number;
+  open_positions_count: number;
   fees_usd: number;
   wins: number;
   losses: number;

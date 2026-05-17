@@ -74,7 +74,7 @@ class BacktestConfig:
     initial_capital_usd: float = 10000.0
     warmup_bars: int = 50
     min_backtest_days: int = 30
-    window_days: int = 30
+    window_days: int = 45
     tf: str = "1h"
     timeframes: list[str] = field(default_factory=list)
     markets: list[str] = field(default_factory=list)
@@ -128,7 +128,7 @@ class BacktestConfig:
             initial_capital_usd=float(raw.get("initial_capital_usd", 10000.0)),
             warmup_bars=int(raw.get("warmup_bars", 50)),
             min_backtest_days=int(raw.get("min_backtest_days", 30)),
-            window_days=int(raw.get("window_days", 30)),
+            window_days=int(raw.get("window_days", 45)),
             tf=str(raw.get("tf", "1h")),
             timeframes=_str_list(raw.get("timeframes")),
             markets=[str(m) for m in (raw.get("markets") or [])],
@@ -270,4 +270,3 @@ def _float_map(raw: Any, defaults: dict[str, float]) -> dict[str, float]:
     for key, value in raw.items():
         out[str(key).upper()] = float(value)
     return out
-

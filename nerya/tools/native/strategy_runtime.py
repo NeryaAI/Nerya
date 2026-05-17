@@ -34,12 +34,11 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import Any, Optional
 
 from ...core.config import Config
 from ...core.errors import NeryaError, TradingError
-from ...evolution.patch_proposal import set_state
+from ...evolution.patch_proposal import list_proposals, set_state
 from ...evolution.promotion import apply_proposal
 from ...evolution.strategy_code_generator import (
     StrategyCodeGenerator,
@@ -54,7 +53,15 @@ from ...strategies.package import load_package
 from ...strategies.proposal_files import read_proposal_strategy_files
 from ...strategies.scheduler_bridge import apply_strategy_schedules
 from ...strategies.performance import build_snapshot
-from ...strategies.runner import StrategyRunner
+# NOTE: ``StrategyRunner`` is imported lazily inside the handlers below
+# to break a transitive import cycle introduced when the agent kernel
+# loads via ``nerya.charting`` (the kernel imports
+# ``nerya.tools.native``, which used to pull in ``StrategyRunner`` →
+# ``nerya.strategies.context`` while ``context`` was still being
+# initialised by the strategies package init). Keeping the import lazy
+# means the cycle only resolves when the tool is actually invoked, by
+# which point ``nerya.strategies.context`` has finished loading.
+# from ...strategies.runner import StrategyRunner  # noqa: ERA001 (lazy import)
 from ...strategies.state import StrategyKillSwitch, StrategyRunStore
 from ...strategies.validator import (
     validate_proposal_files,
@@ -86,8 +93,17 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
         },
         "strategy_class": {
             "type": "string",
-            "enum": ["scalping", "trend", "news"],
+            "enum": ["scalping", "trend", "news", "agent", "agent_team"],
             "default": "scalping",
+        },
+        "execution_mode": {
+            "type": "string",
+            "enum": ["script", "agent", "agent_task", "agent_team", "team"],
+            "description": (
+                "Explicit runtime mode. `script` runs main.py directly; "
+                "`agent` lets main.py build a StrategyAgentTask prompt; "
+                "`agent_team` schedules the Agent Team research/trade path."
+            ),
         },
         "mode": {
             "type": "string",
@@ -143,9 +159,14 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
                 "Optional inline file overrides keyed by package-relative "
                 "path (e.g. 'main.py', 'tests/test_main.py', "
                 "'strategy.md'). Values fully replace the default "
-                "template for that path. Use this to inject the actual "
-                "strategy logic and tests rather than relying on the "
-                "stock scaffold."
+                "template for that path. Use this only when you can keep "
+                "main.py inside the StrategyContext contract: read candles "
+                "through ctx.market.candles/features, read positions through "
+                "ctx.portfolio.positions, place orders through ctx.trading, "
+                "and return ctx.result/StrategyResult. Do not use native "
+                "market_data tool shapes such as get_candles, legacy "
+                "portfolio.get_positions/get_account, ctx.account_id, or raw "
+                "order-list returns."
             ),
             "additionalProperties": {"type": "string"},
         },
@@ -170,11 +191,76 @@ STRATEGY_VALIDATE_SCHEMA: dict[str, Any] = {
 }
 
 
+STRATEGY_BACKTEST_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "strategy_id": {
+            "type": "string",
+            "description": "Backtest an already-promoted strategy package.",
+        },
+        "proposal_id": {
+            "type": "string",
+            "description": (
+                "Backtest an in-flight strategy proposal's after/ files "
+                "before promotion."
+            ),
+        },
+        "preset": {"type": "string", "default": "default"},
+        "config_path": {"type": "string"},
+        "allow_mock": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Allow mock candles when no real historical data is "
+                "available. Use only for smoke/proposal verification."
+            ),
+        },
+    },
+}
+
+
 STRATEGY_PROMOTE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "proposal_id": {"type": "string"},
         "note": {"type": "string"},
+        "require_backtest": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Refuse promotion unless the proposal already has a "
+                "strategy_backtest artifact or an approved flexible "
+                "meme/on-chain replay policy."
+            ),
+        },
+        "backtest_policy": {
+            "type": "string",
+            "enum": ["standard_required", "flexible_meme", "operator_waiver"],
+            "default": "standard_required",
+            "description": (
+                "standard_required accepts only normal strategy_backtest "
+                "artifacts. flexible_meme accepts custom/event replay for "
+                "meme or on-chain markets and otherwise requires explicit "
+                "operator approval. operator_waiver requires explicit "
+                "operator approval and records the standard-backtest waiver."
+            ),
+        },
+        "operator_approved": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "True only when the operator explicitly approves promoting "
+                "without a standard backtest."
+            ),
+        },
+        "approval_note": {
+            "type": "string",
+            "description": (
+                "Required when operator_approved is true; state why the "
+                "standard backtest is unsuitable or unavailable."
+            ),
+        },
+        "operator": {"type": "string"},
     },
     "required": ["proposal_id"],
 }
@@ -295,6 +381,7 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
         description=str(args.get("description") or ""),
         prompt=str(args.get("prompt") or ""),
         strategy_class=str(args.get("strategy_class") or "scalping").strip().lower(),
+        execution_mode=str(args.get("execution_mode") or "").strip().lower(),
         mode=str(args.get("mode") or "paper").strip().lower(),
         markets=tuple(str(m) for m in (args.get("markets") or ())),
         accounts=tuple(str(a) for a in (args.get("accounts") or ())),
@@ -337,6 +424,225 @@ def _read_proposal_files(
     return read_proposal_strategy_files(paths, proposal_id)
 
 
+def _proposal_backtest_artifacts(paths, proposal_id: str, strategy_id: str | None) -> list[dict[str, Any]]:
+    if not proposal_id or not strategy_id:
+        return []
+    root = paths.evolution / "proposals" / proposal_id / "after" / "strategies" / strategy_id / "backtests"
+    if not root.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for metrics_path in sorted(root.glob("*/metrics.json")):
+        try:
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except Exception:
+            metrics = {}
+        out.append({
+            "out_dir": str(metrics_path.parent),
+            "metrics_path": str(metrics_path),
+            "report_path": str(metrics_path.parent / "report.md"),
+            "verdict": metrics.get("verdict"),
+            "total_return_pct": metrics.get("total_return_pct"),
+            "max_drawdown_pct": metrics.get("max_drawdown_pct"),
+            "sharpe_ratio": metrics.get("sharpe_ratio"),
+            "total_trades": metrics.get("total_trades"),
+            "backtest_days": metrics.get("backtest_days"),
+            "coverage_ok": metrics.get("coverage_ok"),
+            "coverage_message": metrics.get("coverage_message"),
+        })
+    return out
+
+
+_MEME_OR_ONCHAIN_MARKERS = (
+    "meme",
+    "memecoin",
+    "pump.fun",
+    "pumpfun",
+    "smart money",
+    "smart_money",
+    "top_trader",
+    "token_top_trader",
+    "onchain",
+    "on-chain",
+    "onchainos",
+    "okx_onchain",
+    "xagent",
+    "x_agent",
+    "goat",
+    "dex",
+    "swap",
+    "solana:",
+    "base:",
+    "ethereum:",
+)
+
+
+def _proposal_is_meme_or_onchain(
+    strategy_id: str | None,
+    files: dict[str, str],
+) -> bool:
+    body = "\n".join(
+        str(part)
+        for part in (
+            strategy_id or "",
+            files.get("strategy.yml", ""),
+            files.get("strategy.md", ""),
+            files.get("config.yml", ""),
+            files.get("main.py", ""),
+        )
+    ).lower()
+    return any(marker in body for marker in _MEME_OR_ONCHAIN_MARKERS)
+
+
+def _read_json_file(path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _proposal_nonstandard_backtest_artifacts(
+    paths,
+    proposal_id: str,
+    strategy_id: str | None,
+) -> list[dict[str, Any]]:
+    if not proposal_id or not strategy_id:
+        return []
+    root = (
+        paths.evolution
+        / "proposals"
+        / proposal_id
+        / "after"
+        / "strategies"
+        / strategy_id
+    )
+    if not root.exists():
+        return []
+
+    out: list[dict[str, Any]] = []
+    patterns = (
+        ("custom_replay", "custom_replay_result.json", "custom_replay_report.md"),
+        ("event_replay", "event_replay_result.json", "event_replay_report.md"),
+    )
+    for kind, result_name, report_name in patterns:
+        seen: set[str] = set()
+        for result_path in sorted(root.rglob(result_name)):
+            key = str(result_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            result = _read_json_file(result_path)
+            report_path = result_path.with_name(report_name)
+            out.append(
+                {
+                    "kind": kind,
+                    "result_path": str(result_path),
+                    "report_path": str(report_path) if report_path.exists() else None,
+                    "ok": bool(result.get("ok")),
+                    "replay_kind": result.get("replay_kind"),
+                    "window": result.get("window"),
+                    "events_seen": result.get("events_seen"),
+                    "signals": result.get("signals"),
+                    "simulated_trades": result.get("simulated_trades"),
+                    "limitations": result.get("limitations") or [],
+                }
+            )
+    return out
+
+
+def _qualifying_standard_backtests(backtests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [bt for bt in backtests if bt.get("coverage_ok") is not False]
+
+
+def _qualifying_nonstandard_backtests(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [artifact for artifact in artifacts if bool(artifact.get("ok"))]
+
+
+def _proposal_backtest_status(
+    *,
+    policy: str,
+    is_meme_or_onchain: bool,
+    standard_backtests: list[dict[str, Any]],
+    nonstandard_backtests: list[dict[str, Any]],
+    waiver_approved: bool,
+    waiver_note: str,
+) -> dict[str, Any]:
+    standard_ok = bool(_qualifying_standard_backtests(standard_backtests))
+    nonstandard_ok = bool(_qualifying_nonstandard_backtests(nonstandard_backtests))
+    waiver_ok = bool(waiver_approved and waiver_note.strip())
+    if standard_ok:
+        accepted_kind = "backtest"
+    elif nonstandard_ok:
+        accepted_kind = _qualifying_nonstandard_backtests(nonstandard_backtests)[0]["kind"]
+    elif waiver_ok:
+        accepted_kind = "backtest_waiver"
+    else:
+        accepted_kind = None
+    return {
+        "policy": policy,
+        "is_meme_or_onchain": is_meme_or_onchain,
+        "standard_ok": standard_ok,
+        "nonstandard_ok": nonstandard_ok,
+        "waiver_ok": waiver_ok,
+        "accepted_kind": accepted_kind,
+        "standard_backtests": standard_backtests,
+        "nonstandard_backtests": nonstandard_backtests,
+        "approval_required": not bool(accepted_kind),
+        "approval_note": waiver_note if waiver_ok else "",
+        "risk": (
+            "standard_backtest_missing"
+            if accepted_kind in {"custom_replay", "event_replay", "backtest_waiver"}
+            else None
+        ),
+    }
+
+
+def _operator_backtest_approval_next_action(
+    proposal_id: str,
+    *,
+    policy: str = "flexible_meme",
+) -> dict[str, Any]:
+    return {
+        "tool": "strategy_promote",
+        "arguments": {
+            "proposal_id": proposal_id,
+            "backtest_policy": policy,
+            "operator_approved": True,
+            "approval_note": "<operator-approved reason>",
+        },
+        "message": (
+            "Use only after the operator explicitly approves promoting this "
+            "meme/on-chain strategy without a standard OHLCV backtest. Prefer "
+            "a custom/event replay artifact when one can be built from real "
+            "historical data."
+        ),
+    }
+
+
+def _proposal_strategy_paths(paths, proposal_id: str | None, strategy_id: str | None) -> dict[str, str]:
+    if not proposal_id or not strategy_id:
+        return {}
+    root = paths.evolution / "proposals" / proposal_id / "after" / "strategies" / strategy_id
+    return {
+        "strategy_root": str(root),
+        "strategy_yml_path": str(root / "strategy.yml"),
+        "strategy_md_path": str(root / "strategy.md"),
+        "main_path": str(root / "main.py"),
+        "tests_path": str(root / "tests"),
+    }
+
+
+def _proposal_backtest_next_action(proposal_id: str) -> dict[str, Any]:
+    return {
+        "tool": "strategy_backtest",
+        "arguments": {
+            "proposal_id": proposal_id,
+            "preset": "default",
+            "allow_mock": False,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -374,6 +680,15 @@ def strategy_generate_proposal_handler(
         ),
         "files": list(result.files.keys()),
     }
+    if result.proposal:
+        payload["proposal_paths"] = _proposal_strategy_paths(
+            config.paths,
+            result.proposal.id,
+            request.strategy_id,
+        )
+    if result.proposal and result.validation is not None and result.validation.ok:
+        payload["backtest_required"] = True
+        payload["next_required_action"] = _proposal_backtest_next_action(result.proposal.id)
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
 
 
@@ -406,6 +721,118 @@ def strategy_validate_handler(call: ToolCall, *, config: Config) -> ToolResult:
     return ToolResult.from_json(
         tool_use_id=call.id, name=call.name, data=validation.asdict()
     )
+
+
+def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
+    args = call.arguments or {}
+    strategy_id = (args.get("strategy_id") or "").strip() or None
+    proposal_id = (args.get("proposal_id") or "").strip() or None
+    try:
+        from ...skills.builtin.backtest.scripts.backtest_run import (
+            run_strategy_backtest,
+        )
+        from ...skills.builtin.backtest.scripts.data_cache import (
+            NoHistoricalDataError,
+        )
+
+        result = run_strategy_backtest(
+            strategy_id=strategy_id,
+            proposal_id=proposal_id,
+            preset=str(args.get("preset") or "default"),
+            config_path=(args.get("config_path") or None),
+            workspace=config.paths.root,
+            allow_mock=bool(args.get("allow_mock", False)),
+        )
+    except NoHistoricalDataError as exc:
+        next_required_action: dict[str, Any] = {
+            "type": "report_data_gap",
+            "message": (
+                "No durable historical candles were available for the "
+                "requested market/timeframe. Do not retry with mock, "
+                "synthetic, random, or placeholder data; either choose "
+                "a market with real historical candles or ask the "
+                "operator for a data source."
+            ),
+        }
+        if proposal_id:
+            try:
+                sid, files = _read_proposal_files(config.paths, proposal_id)
+                if _proposal_is_meme_or_onchain(sid or strategy_id, files):
+                    next_required_action = {
+                        "type": "custom_replay_or_operator_approval",
+                        "message": (
+                            "Standard OHLCV history is unavailable or not "
+                            "representative for this meme/on-chain strategy. "
+                            "Build a custom/event replay from real wallet, "
+                            "DEX, holder, or trade history when possible. If "
+                            "no durable replay source exists, promotion "
+                            "requires explicit operator approval and must be "
+                            "reported as a standard-backtest waiver."
+                        ),
+                        "custom_replay_template": (
+                            "nerya/skills/builtin/backtest/references/"
+                            "custom_replay_template.md"
+                        ),
+                        "approval_action": _operator_backtest_approval_next_action(
+                            proposal_id
+                        ),
+                    }
+            except Exception:
+                pass
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "ok": False,
+                "reason": "no_historical_data",
+                "strategy_id": strategy_id,
+                "proposal_id": proposal_id,
+                "coverage_ok": False,
+                "coverage_message": str(exc),
+                "next_required_action": next_required_action,
+            },
+        )
+    except (NeryaError, TradingError, ValueError) as exc:
+        return _usage_error(call, str(exc))
+    except Exception as exc:
+        return _execution_error(
+            call, f"backtest failed: {type(exc).__name__}: {exc}"
+        )
+    return ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data=_model_facing_backtest_result(result),
+    )
+
+
+def _model_facing_backtest_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Return a backtest payload that is hard for the model to misread.
+
+    Raw percentage metrics remain available in ``metrics.json`` for
+    machine consumers. The LLM-facing tool result intentionally exposes
+    display strings first and removes duplicate top-level numeric pct
+    fields because models repeatedly converted values such as ``0.0274``
+    into ``2.74%`` despite explicit unit warnings.
+    """
+
+    out = dict(result)
+    display = result.get("metrics_display")
+    if isinstance(display, dict):
+        out["metrics"] = dict(display)
+    for key in (
+        "total_return_pct",
+        "max_drawdown_pct",
+        "benchmark_buy_hold_return_pct",
+        "alpha_vs_benchmark_pct",
+    ):
+        out.pop(key, None)
+    out["raw_metrics_file"] = result.get("metrics_path")
+    out["metrics_are_display_strings"] = True
+    out["metrics_note"] = (
+        "Use metrics/operator_summary strings exactly in the final answer. "
+        "Raw numeric metrics are only in raw_metrics_file."
+    )
+    return out
 
 
 def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
@@ -447,6 +874,134 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
             },
         )
 
+    backtests = _proposal_backtest_artifacts(paths, pid, sid)
+    nonstandard_backtests = _proposal_nonstandard_backtest_artifacts(paths, pid, sid)
+    requested_policy = str(args.get("backtest_policy") or "standard_required")
+    require_backtest = bool(args.get("require_backtest", True))
+    if not require_backtest and requested_policy == "standard_required":
+        requested_policy = "operator_waiver"
+    if requested_policy not in {"standard_required", "flexible_meme", "operator_waiver"}:
+        return _usage_error(call, f"invalid backtest_policy: {requested_policy!r}")
+    approval_note = str(args.get("approval_note") or note or "").strip()
+    operator_approved = bool(args.get("operator_approved", False))
+    is_meme_or_onchain = _proposal_is_meme_or_onchain(sid, files)
+    backtest_status = _proposal_backtest_status(
+        policy=requested_policy,
+        is_meme_or_onchain=is_meme_or_onchain,
+        standard_backtests=backtests,
+        nonstandard_backtests=nonstandard_backtests,
+        waiver_approved=operator_approved,
+        waiver_note=approval_note,
+    )
+    accepted_kind = backtest_status.get("accepted_kind")
+    if accepted_kind != "backtest":
+        if requested_policy == "standard_required":
+            if require_backtest:
+                return ToolResult.from_json(
+                    tool_use_id=call.id,
+                    name=call.name,
+                    data={
+                        "ok": False,
+                        "proposal_id": pid,
+                        "strategy_id": sid,
+                        "reason": "backtest_required",
+                        "message": (
+                            "Run strategy_backtest on this proposal before "
+                            "promotion. For meme/on-chain strategies with no "
+                            "representative OHLCV history, use "
+                            "backtest_policy=flexible_meme and provide a real "
+                            "custom/event replay artifact or explicit "
+                            "operator approval."
+                        ),
+                        "validation": validation.asdict(),
+                        "backtest_status": backtest_status,
+                        "next_required_action": _proposal_backtest_next_action(pid),
+                    },
+                )
+        elif requested_policy == "flexible_meme":
+            if not is_meme_or_onchain:
+                return ToolResult.from_json(
+                    tool_use_id=call.id,
+                    name=call.name,
+                    data={
+                        "ok": False,
+                        "proposal_id": pid,
+                        "strategy_id": sid,
+                        "reason": "flexible_meme_policy_not_applicable",
+                        "message": (
+                            "flexible_meme is reserved for meme, DEX, wallet, "
+                            "or other on-chain strategies. Use "
+                            "operator_waiver with explicit operator approval "
+                            "for other non-standard markets."
+                        ),
+                        "validation": validation.asdict(),
+                        "backtest_status": backtest_status,
+                    },
+                )
+            if accepted_kind is None:
+                return ToolResult.from_json(
+                    tool_use_id=call.id,
+                    name=call.name,
+                    data={
+                        "ok": False,
+                        "proposal_id": pid,
+                        "strategy_id": sid,
+                        "reason": "operator_approval_required_for_backtest_waiver",
+                        "message": (
+                            "No qualifying standard backtest or custom/event "
+                            "replay artifact was found. The strategy can still "
+                            "be promoted only after the operator explicitly "
+                            "approves a standard-backtest waiver."
+                        ),
+                        "validation": validation.asdict(),
+                        "backtest_status": backtest_status,
+                        "next_required_action": _operator_backtest_approval_next_action(
+                            pid
+                        ),
+                    },
+                )
+        elif requested_policy == "operator_waiver" and accepted_kind is None:
+            return ToolResult.from_json(
+                tool_use_id=call.id,
+                name=call.name,
+                data={
+                    "ok": False,
+                    "proposal_id": pid,
+                    "strategy_id": sid,
+                    "reason": "operator_approval_required_for_backtest_waiver",
+                    "message": (
+                        "operator_waiver requires operator_approved=true and "
+                        "a non-empty approval_note. The final report must say "
+                        "this did not pass a standard backtest."
+                    ),
+                    "validation": validation.asdict(),
+                    "backtest_status": backtest_status,
+                    "next_required_action": _operator_backtest_approval_next_action(
+                        pid, policy="operator_waiver"
+                    ),
+                },
+            )
+
+    if bool(args.get("require_backtest", True)) and not accepted_kind:
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "ok": False,
+                "proposal_id": pid,
+                "strategy_id": sid,
+                "reason": "backtest_required",
+                "message": (
+                    "Run strategy_backtest on this proposal before promotion, "
+                    "or pass require_backtest=false only when the operator "
+                    "explicitly skips the backtest."
+                ),
+                "validation": validation.asdict(),
+                "backtest_status": backtest_status,
+                "next_required_action": _proposal_backtest_next_action(pid),
+            },
+        )
+
     set_state(paths, pid, "approved", note=note or "approved by agent native tool")
     try:
         outcome = apply_proposal(paths, pid)
@@ -478,6 +1033,43 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
                 f"{type(exc).__name__}: {exc}"
             )
 
+    evidence_record: dict[str, Any] | None = None
+    if bool(outcome.get("ok")) and sid and accepted_kind in {
+        "custom_replay",
+        "event_replay",
+        "backtest_waiver",
+    }:
+        try:
+            from ...trading.promotion import EvidenceStore
+
+            artifact_ref = None
+            payload: dict[str, Any] = {
+                "source": "strategy_promote",
+                "proposal_id": pid,
+                "policy": requested_policy,
+                "standard_backtest_missing": True,
+                "is_meme_or_onchain": is_meme_or_onchain,
+                "approval_note": approval_note if accepted_kind == "backtest_waiver" else "",
+            }
+            if accepted_kind in {"custom_replay", "event_replay"}:
+                replay = _qualifying_nonstandard_backtests(nonstandard_backtests)[0]
+                artifact_ref = replay.get("result_path")
+                payload["replay"] = replay
+            evidence = EvidenceStore(paths).record(
+                strategy_id=sid,
+                kind=accepted_kind,  # type: ignore[arg-type]
+                passed=True,
+                payload=payload,
+                artifact_ref=artifact_ref,
+                operator=str(args.get("operator") or "operator"),
+            )
+            evidence_record = evidence.asdict()
+        except Exception as exc:
+            evidence_record = {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
@@ -486,6 +1078,10 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
             "proposal_id": pid,
             "strategy_id": sid,
             "validation": validation.asdict(),
+            "backtests": backtests,
+            "nonstandard_backtests": nonstandard_backtests,
+            "backtest_status": backtest_status,
+            "evidence_record": evidence_record,
             "promotion": outcome,
             "schedules": schedule_outcome,
         },
@@ -502,6 +1098,7 @@ def strategy_run_tick_handler(
     sid = (args.get("strategy_id") or "").strip()
     if not sid:
         return _usage_error(call, "strategy_id is required")
+    from ...strategies.runner import StrategyRunner  # lazy: see top-of-file note
     runner = StrategyRunner(config=config, skills=skills)
     try:
         record = runner.run_tick(
@@ -666,7 +1263,11 @@ def strategy_tuning_status_handler(
     except TradingError as exc:
         return _usage_error(call, str(exc))
     snapshot = build_snapshot(
-        config.paths, sid, lookback_runs=lookback, package=pkg
+        config.paths,
+        sid,
+        lookback_runs=lookback,
+        package=pkg,
+        config_like=config,
     )
     pending = [
         {
@@ -700,7 +1301,12 @@ def strategy_tuning_snapshot_handler(
     if not sid:
         return _usage_error(call, "strategy_id is required")
     lookback = max(1, int(args.get("lookback_runs") or 200))
-    snap = build_snapshot(config.paths, sid, lookback_runs=lookback)
+    snap = build_snapshot(
+        config.paths,
+        sid,
+        lookback_runs=lookback,
+        config_like=config,
+    )
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
@@ -709,6 +1315,7 @@ def strategy_tuning_snapshot_handler(
 
 
 __all__ = [
+    "STRATEGY_BACKTEST_SCHEMA",
     "STRATEGY_GENERATE_PROPOSAL_SCHEMA",
     "STRATEGY_KILL_SWITCH_SCHEMA",
     "STRATEGY_PROMOTE_SCHEMA",
@@ -719,6 +1326,7 @@ __all__ = [
     "STRATEGY_TUNING_SNAPSHOT_SCHEMA",
     "STRATEGY_TUNING_STATUS_SCHEMA",
     "STRATEGY_VALIDATE_SCHEMA",
+    "strategy_backtest_handler",
     "strategy_generate_proposal_handler",
     "strategy_kill_switch_handler",
     "strategy_promote_handler",

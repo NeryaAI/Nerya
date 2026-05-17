@@ -43,6 +43,7 @@ def routes():
             target=payload.get("target", "main"),
             strategy_id=payload.get("strategy_id"),
             payload=payload.get("payload") or {},
+            timezone=payload.get("timezone"),
             session_kind=payload.get("session_kind"),
             attached_skills=payload.get("attached_skills"),
             delivery_targets=payload.get("delivery_targets"),

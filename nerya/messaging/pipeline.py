@@ -39,7 +39,8 @@ class MessagePipeline:
     def send(self, *, channel: str, text: str,
              strategy_id: str | None = None,
              template: str | None = None,
-             context: dict[str, Any] | None = None) -> dict[str, Any]:
+             context: dict[str, Any] | None = None,
+             attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         channels_doc = yaml_io.load(self.config.paths.messages_channels, default={}) or {}
         channel_cfg = (channels_doc.get("channels") or {}).get(channel) or {}
         kind = channel_cfg.get("kind", channel)
@@ -53,10 +54,13 @@ class MessagePipeline:
             "ts": now_iso(),
             "delivered": False,
             "rate_limited": not allowed,
+            "attachments": list(attachments or []),
         }
         if not allowed:
-            jsonl.append(self.config.paths.journal("messages"),
-                         {"kind": "message.rate_limited", **msg})
+            jsonl.append(
+                self.config.paths.journal("messages"),
+                _journal_record("message.rate_limited", msg),
+            )
             return msg
         sender = _CHANNEL_SENDERS.get(kind, dashboard.send)
         resolver = self.resolve_secret or self._default_resolver
@@ -70,8 +74,10 @@ class MessagePipeline:
         )
         msg["delivered"] = bool(msg.get("delivered", True))
         msg["outbox_path"] = str(out_path)
-        jsonl.append(self.config.paths.journal("messages"),
-                     {"kind": "message.sent", **msg})
+        jsonl.append(
+            self.config.paths.journal("messages"),
+            _journal_record("message.sent", msg),
+        )
         return msg
 
     def _default_resolver(self, ref: str) -> str | None:
@@ -100,3 +106,10 @@ def _invoke_sender(*, sender, outbox, message, channel_cfg, resolver, transport)
     except TypeError:
         # dashboard.send has the legacy signature
         return sender(outbox, message)
+
+
+def _journal_record(event_kind: str, message: dict[str, Any]) -> dict[str, Any]:
+    row = dict(message)
+    row["channel_kind"] = row.get("kind")
+    row["kind"] = event_kind
+    return row

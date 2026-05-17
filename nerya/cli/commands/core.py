@@ -21,6 +21,15 @@ def cmd_init(args) -> int:
         target = args.workspace
     mgr = WorkspaceManager.init(target)
     print(f"[nerya] initialized workspace at {mgr.paths.root}")
+    # Post-init nudge: encourage the operator to run the unified
+    # onboarding wizard. Cheaply skipped when --no-hint is passed by
+    # scripts/CI that just want a quiet ``init``.
+    if not getattr(args, "no_hint", False):
+        print()
+        print("[nerya] next step: run the setup wizard")
+        print("        nerya setup          # asks TUI or Web")
+        print("        nerya setup --tui    # terminal wizard")
+        print("        nerya setup --web    # opens dashboard /setup")
     return 0
 
 
@@ -70,9 +79,8 @@ def cmd_profile_init(args) -> int:
 def cmd_run(args) -> int:
     """Boot the local Nerya service.
 
-    Default behaviour is "everything" (compatibility / Apr-26 2026
-    operator directive — "启动服务的时候需要同时把前端和配置好的 gateway
-    都一起启动"):
+    Default behaviour is "everything" so startup brings up the backend,
+    frontend, and configured gateways together:
 
     - API server on the configured host/port,
     - configured gateways (Telegram long-poll, etc.) auto-attached by
@@ -86,14 +94,17 @@ def cmd_run(args) -> int:
     backward compat — they used to be required to enable the dashboard.
     """
     from ...api.local_server import serve
+    from ...core.dashboard import dashboard_port as configured_dashboard_port
     client = _client(args.workspace, getattr(args, "profile", None))
 
     no_dashboard = bool(getattr(args, "no_dashboard", False))
     spawn_dashboard = not no_dashboard
     dashboard_proc = None
     if spawn_dashboard:
+        requested_dashboard_port = getattr(args, "dashboard_port", None)
+        dash_port = requested_dashboard_port or configured_dashboard_port(client.config)
         dashboard_proc = _spawn_dashboard(
-            getattr(args, "dashboard_port", 3001),
+            dash_port,
             api_host=args.host,
             api_port=args.port,
         )
@@ -305,6 +316,12 @@ def cmd_service_status(args) -> int:
 def register(sub) -> None:
     p = sub.add_parser("init")
     _add_ws(p)
+    p.add_argument(
+        "--no-hint",
+        action="store_true",
+        dest="no_hint",
+        help="Skip the post-init suggestion to run `nerya setup`.",
+    )
     p.set_defaults(func=cmd_init)
 
     # ``run`` and ``serve`` are aliases — installer docs use ``serve``.
@@ -329,9 +346,9 @@ def register(sub) -> None:
                        help="(deprecated) Dashboard now spawns by "
                             "default; this flag is a no-op kept for "
                             "scripts that still pass it.")
-        p.add_argument("--dashboard-port", type=int, default=3001,
+        p.add_argument("--dashboard-port", type=int, default=None,
                        dest="dashboard_port",
-                       help="Port for the dashboard (default: 3001).")
+                       help="Port for the dashboard (default: dashboard.port or 18380).")
         p.add_argument("--all", action="store_true",
                        help="(deprecated) ``run`` is now ``all`` by "
                             "default. Kept for backward compatibility.")

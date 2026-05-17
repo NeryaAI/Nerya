@@ -66,8 +66,8 @@ PostHook = Callable[[ToolCall, ToolResult], None]
 redact secrets / append breadcrumbs. Setting
 ``result.context_modifiers`` or ``result.metadata['block_continuation']
 = True`` lets the loop know it must surface the hook output to the
-operator before continuing the next round (mirrors coding-agent's
-``executePostToolHooks`` blocking error path).
+operator before continuing the next round, rather than silently moving
+past a blocking post-tool hook.
 """
 
 PermissionDeniedHook = Callable[
@@ -121,8 +121,7 @@ def _validate_against_schema(payload: dict[str, Any], schema: dict[str, Any]) ->
 def _repair_arguments_before_validation(call: ToolCall) -> None:
     """Normalize narrow, recoverable provider argument mistakes.
 
-    Claude Code mirrors this with ``backfillObservableInput``
-    (src/services/tools/toolExecution.ts:783). The principle: a call
+    The same principle applies here: a call
     that *could* be rescued without lying about the user's intent
     should be rescued in place so the model avoids a round-trip.
 

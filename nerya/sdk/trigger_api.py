@@ -106,6 +106,7 @@ class TriggerAPI:
                      target: str = "main",
                      strategy_id: str | None = None,
                      payload: dict[str, Any] | None = None,
+                     timezone: str | None = None,
                      session_kind: str | None = None,
                      attached_skills: list[str] | None = None,
                      delivery_targets: list[dict[str, Any]] | None = None,
@@ -146,6 +147,8 @@ class TriggerAPI:
             kwargs["ends_at"] = ends_at
         if enabled is not None:
             kwargs["enabled"] = enabled
+        if timezone is not None:
+            kwargs["timezone"] = timezone
         if session_kind is not None:
             kwargs["session_kind"] = session_kind
         if attached_skills is not None:
@@ -204,6 +207,7 @@ class TriggerAPI:
         for key in (
             "kind", "every_seconds", "cron", "starts_at", "ends_at",
             "enabled", "target", "strategy_id", "payload",
+            "timezone",
             # compatibility extension:
             "session_kind", "attached_skills", "delivery_targets",
             "session_ttl_seconds",
@@ -307,6 +311,7 @@ class TriggerAPI:
             "target": entry.target,
             "strategy_id": entry.strategy_id,
             "payload": dict(entry.payload or {}),
+            "timezone": entry.timezone,
             "session_kind": entry.session_kind,
             "attached_skills": list(entry.attached_skills or []),
             "delivery_targets": [dict(t) for t in (entry.delivery_targets or [])],

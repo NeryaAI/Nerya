@@ -20,6 +20,7 @@ import {
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
 import { formatTsShort } from "../../lib/format";
+import { confirm as confirmDialog } from "../../lib/dialogs";
 
 function severityTone(
   severity?: string,
@@ -96,15 +97,13 @@ export default function IncidentsPage() {
   async function toggleKillSwitch() {
     if (!killSwitch) return;
     const next = !killSwitch.kill_switch;
-    if (
-      !confirm(
-        next
-          ? t("killSwitchEngageConfirm")
-          : t("killSwitchReleaseConfirm"),
-      )
-    ) {
-      return;
-    }
+    const ok = await confirmDialog({
+      message: next
+        ? t("killSwitchEngageConfirm")
+        : t("killSwitchReleaseConfirm"),
+      tone: next ? "danger" : "warning",
+    });
+    if (!ok) return;
     setBusy("kill");
     try {
       const res = await clientApi.controlKillSwitchSet(next, "dashboard");
@@ -224,23 +223,22 @@ export default function IncidentsPage() {
           />
         </div>
 
-        <Card title={t("timeWindowTitle")}>
-          <div className="flex flex-wrap gap-2 items-center text-xs">
-            {WINDOW_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => setWindowS(opt.value)}
-                className={`px-2 py-1 rounded-md border ${
-                  windowS === opt.value
-                    ? "border-brand-400 bg-brand-500/20 text-brand-100"
-                    : "border-brand-500/20 text-ink-300 hover:bg-brand-500/10"
-                }`}
-              >
-                {t("lastWindow", { label: opt.label })}
-              </button>
-            ))}
-          </div>
-        </Card>
+        <div className="flex flex-wrap gap-2 items-center text-[12px] border-b border-brand-500/10 pb-3">
+          <span className="text-ink-500">{t("timeWindowTitle")}</span>
+          {WINDOW_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setWindowS(opt.value)}
+              className={`px-2.5 py-1 rounded-md border transition ${
+                windowS === opt.value
+                  ? "bg-brand-500/15 text-brand-100 border-brand-500/40"
+                  : "text-ink-400 border-transparent hover:text-ink-200 hover:border-brand-500/20"
+              }`}
+            >
+              {t("lastWindow", { label: opt.label })}
+            </button>
+          ))}
+        </div>
 
         <Card
           title={t("incidentsTitle", { count: incidents.length })}

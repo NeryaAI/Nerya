@@ -1,7 +1,7 @@
 """Shadow runtime — drive a candidate's signal engine against fixture
 data without ever writing to paper/live ledgers.
 
-research promotion workflow §5 Task 8.
+This runtime supports shadow-run validation before promotion.
 
 The runtime intentionally **reuses** the research signal/compiler stack
 that the backtest runner uses, then captures the per-bar decisions as

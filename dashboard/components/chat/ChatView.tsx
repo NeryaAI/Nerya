@@ -3,16 +3,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { callApi, clientApi, type ApprovalCard } from "../../lib/clientApi";
 import {
+  callApi,
+  clientApi,
+  type AgentSession,
+  type ApprovalCard,
+} from "../../lib/clientApi";
+import { confirm as confirmDialog } from "../../lib/dialogs";
+import {
+  ChatAttachment,
   ChatMessage,
   ChatModelOption,
   ChatRunSettings,
   ChatThread,
   DEFAULT_CHAT_RUN_SETTINGS,
+  cacheThreadTranscript,
   LiveEvent,
   TurnPayload,
   deriveTitle,
+  loadCachedThreadTranscript,
   loadRunSettings,
   loadThreads,
   newThread,
@@ -24,6 +33,7 @@ import {
 import { AssistantBubble, UserBubble } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { ChatSidebar } from "./ChatSidebar";
+import { WorkspaceCanvas, hasWorkspaceCanvas } from "./WorkspaceCanvas";
 
 function parseTs(ts: string | undefined | null): number | null {
   if (!ts) return null;
@@ -32,6 +42,34 @@ function parseTs(ts: string | undefined | null): number | null {
 }
 
 const DELETED_SESSIONS_KEY = "nerya.chat.deletedSessions.v1";
+const SESSION_PAGE_SIZE = 20;
+const CANVAS_PANEL_KEY = "nerya.chat.canvasPanel.open.v1";
+
+type PendingFirstMessage = {
+  threadId: string;
+  text: string;
+  attachments?: ChatAttachment[];
+};
+
+const pendingFirstMessages = new Map<string, PendingFirstMessage>();
+
+function loadCanvasPanelOpen(): boolean {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return true;
+  }
+  return localStorage.getItem(CANVAS_PANEL_KEY) !== "0";
+}
+
+function saveCanvasPanelOpen(open: boolean): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(CANVAS_PANEL_KEY, open ? "1" : "0");
+  } catch {
+    // Non-essential UI preference.
+  }
+}
 
 function loadDeletedSessionIds(): Set<string> {
   if (typeof window === "undefined" || typeof localStorage === "undefined") {
@@ -65,10 +103,137 @@ function rememberDeletedSession(id: string): Set<string> {
   return next;
 }
 
+function threadHasUnpersistedMessages(thread: ChatThread | null | undefined): boolean {
+  return Boolean(
+    thread?.messages.some((m) => {
+      if (m.role === "assistant") return Boolean(m.loading) || !m.backend_message_id;
+      return !m.backend_message_id;
+    }),
+  );
+}
+
+function sortThreadsByUpdated(threads: ChatThread[]): ChatThread[] {
+  return threads
+    .slice()
+    .sort((a, b) => (Number(b.updated_ts) || 0) - (Number(a.updated_ts) || 0));
+}
+
+function selectInitialThreads(
+  threads: ChatThread[],
+  opts: { keepId?: string; limit: number },
+): ChatThread[] {
+  const sorted = sortThreadsByUpdated(threads);
+  const pinnedIds = new Set<string>();
+  if (opts.keepId) pinnedIds.add(opts.keepId);
+  for (const thread of sorted) {
+    if (threadHasUnpersistedMessages(thread)) pinnedIds.add(thread.id);
+  }
+  const selected: ChatThread[] = [];
+  const seen = new Set<string>();
+  for (const thread of sorted) {
+    if (selected.length >= opts.limit && !pinnedIds.has(thread.id)) continue;
+    if (seen.has(thread.id)) continue;
+    selected.push(thread);
+    seen.add(thread.id);
+  }
+  return selected;
+}
+
+function isoFromMs(ts: number | undefined): string | undefined {
+  return typeof ts === "number" && Number.isFinite(ts) && ts > 0
+    ? new Date(ts).toISOString()
+    : undefined;
+}
+
+function sessionTitle(session: AgentSession, sid: string): string {
+  const title =
+    typeof session.meta?.title === "string"
+      ? session.meta.title
+      : String(session.meta?.title || "");
+  return deriveTitle(title || `Session ${sid.slice(0, 8)}`);
+}
+
+function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
+  const sid = String(session.session_id || "").trim();
+  if (!sid) return null;
+  const created = parseTs(session.created_at) ?? Date.now();
+  const updated = parseTs(session.updated_at) ?? created;
+  const cached = loadCachedThreadTranscript(sid, updated);
+  if (cached) {
+    return {
+      ...cached,
+      title: cached.title || sessionTitle(session, sid),
+      created_ts: created || cached.created_ts,
+      updated_ts: Math.max(updated, cached.updated_ts),
+      message_count: Math.max(
+        cached.message_count ?? 0,
+        Number(session.message_count || 0),
+        cached.messages.length,
+      ),
+    };
+  }
+  return {
+    id: sid,
+    title: sessionTitle(session, sid),
+    created_ts: created,
+    updated_ts: updated,
+    messages: [],
+    message_count: Number(session.message_count || 0),
+    imported: true,
+    imported_at: Date.now(),
+    transcript_loaded: false,
+    backend_updated_ts: updated,
+  };
+}
+
+function chatMessageTextForMerge(message: ChatMessage): string {
+  return message.role === "user"
+    ? message.text
+    : message.turn?.reply_text || message.turn?.final_text || "";
+}
+
+function mergeAuthoritativeThread(
+  current: ChatThread | null | undefined,
+  authoritative: ChatThread,
+): ChatThread {
+  if (!current) return authoritative;
+  const backendMessageIds = new Set(
+    authoritative.messages
+      .map((m) => m.backend_message_id)
+      .filter((id): id is string => typeof id === "string" && !!id),
+  );
+  const pending = current.messages.filter((message) => {
+    if (message.backend_message_id) {
+      return !backendMessageIds.has(message.backend_message_id) && message.ts > authoritative.updated_ts + 1000;
+    }
+    if (message.ts <= authoritative.updated_ts + 1000) return false;
+    const text = chatMessageTextForMerge(message).trim();
+    if (!text) return true;
+    return !authoritative.messages.some(
+      (candidate) =>
+        candidate.role === message.role &&
+        chatMessageTextForMerge(candidate).trim() === text,
+    );
+  });
+  if (!pending.length) return authoritative;
+  return {
+    ...authoritative,
+    updated_ts: Math.max(authoritative.updated_ts, ...pending.map((m) => m.ts)),
+    messages: [...authoritative.messages, ...pending],
+    imported: false,
+  };
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object"
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function attachmentForRequest(attachment: ChatAttachment): ChatAttachment {
+  if (!attachment.artifact_uri) return attachment;
+  const { data_url: _dataUrl, text: _text, ...rest } = attachment;
+  return rest;
 }
 
 function approvalState(value: unknown): string {
@@ -161,46 +326,42 @@ function pendingApprovalIdsForThread(
 }
 
 function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
+  const t = useTranslations("chat");
   const suggestions: { title: string; body: string; prompt: string }[] = [
     {
-      title: "Write a monitoring script",
-      body: "Monitor BTCUSDT 5m bars for a MACD cross and propose an approval-gated script.",
-      prompt:
-        "Write me a Python script (paper mode only, using the Nerya script sandbox) that monitors BTCUSDT 5-minute bars on Binance. On a MACD golden cross (12,26,9) open a small long, on a death cross close it. Include a 1% trailing stop. Save it as btc_macd_5m.py and propose it as a script for approval.",
+      title: t("starterBtcScalpTitle"),
+      body: t("starterBtcScalpBody"),
+      prompt: t("starterBtcScalpPrompt"),
     },
     {
-      title: "Create a subagent",
-      body: "Spawn a narrative_watcher subagent that tracks news + social sentiment.",
-      prompt:
-        "Create a new subagent called narrative_watcher that tracks crypto news and social sentiment, and writes a daily brief. Generate its .agent.md with a clear system prompt.",
+      title: t("starterNvdaTeamTitle"),
+      body: t("starterNvdaTeamBody"),
+      prompt: t("starterNvdaTeamPrompt"),
     },
     {
-      title: "Schedule a heartbeat",
-      body: "Every 60s, have the main agent review the portfolio and flag risk.",
-      prompt:
-        "Schedule a recurring portfolio heartbeat every 60 seconds. The main agent should review open positions, unrealized P&L, and flag any risk breaches via the message skill.",
+      title: t("starterCryptoStrategyTitle"),
+      body: t("starterCryptoStrategyBody"),
+      prompt: t("starterCryptoStrategyPrompt"),
     },
     {
-      title: "Run a postmortem",
-      body: "Orchestrate strategy_reviewer + risk_critic on a losing strategy.",
-      prompt:
-        "The btc_momentum strategy took a sharp loss today. Orchestrate strategy_reviewer + risk_critic to run a postmortem — root cause, execution quality, and one concrete proposal. Write the proposal into evolution/.",
+      title: t("starterMacroNewsTitle"),
+      body: t("starterMacroNewsBody"),
+      prompt: t("starterMacroNewsPrompt"),
     },
   ];
   return (
     <div className="max-w-3xl mx-auto px-6 py-16">
       <div className="text-center mb-10">
-        <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.22em] text-brand-300 mb-3">
+        <div className="inline-flex items-center gap-2 text-[12px] text-brand-300 font-medium mb-3">
           <span className="w-1 h-1 rounded-full bg-fluid-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]" />
-          Nerya Chat
+          {t("emptyEyebrow")}
           <span className="w-1 h-1 rounded-full bg-fluid-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]" />
         </div>
         <h1 className="text-[34px] leading-[1.1] font-semibold tracking-tight text-gradient-brand">
-          Talk to your trading runtime
+          {t("emptyHeadline")}
         </h1>
         <p className="mt-4 text-ink-300 text-sm max-w-xl mx-auto leading-relaxed">
-          Every message drives one real agent turn — route selection, tool
-          calls, and on-disk artifacts. Suggestions below are working examples.
+          {t("emptySubheadline")}
         </p>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -231,6 +392,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const t = useTranslations("chat");
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [missingSession, setMissingSession] = useState(false);
@@ -247,6 +409,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     () => new Set(),
   );
   const abortRef = useRef<AbortController | null>(null);
+  const turnInFlightRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Live-event poller handle. We track it so ``cancel`` and unmount
   // can stop the timer; without this guard a fast click-and-cancel
@@ -257,6 +420,13 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     stop: boolean;
   }>({ timer: null, stop: false });
   const deletedSessionIdsRef = useRef<Set<string>>(new Set());
+  const [sessionHasMore, setSessionHasMore] = useState(false);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionNextOffset, setSessionNextOffset] = useState(0);
+  const [loadingTranscriptIds, setLoadingTranscriptIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [canvasPanelOpen, setCanvasPanelOpen] = useState(true);
 
   useEffect(() => {
     return () => {
@@ -272,10 +442,14 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   }, []);
 
   useEffect(() => {
-    const loaded = loadThreads();
+    const loaded = selectInitialThreads(loadThreads(), {
+      keepId: sessionId,
+      limit: SESSION_PAGE_SIZE,
+    });
     const savedSettings = loadRunSettings();
     deletedSessionIdsRef.current = loadDeletedSessionIds();
     setSettings(savedSettings);
+    setCanvasPanelOpen(loadCanvasPanelOpen());
     setThreads(loaded);
     setHydrated(true);
     void hydrateModelOptions();
@@ -568,58 +742,102 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       }
     }
     const titleSeed = t.title || sessionMeta.title || firstUser || `Session ${sid.slice(0, 8)}`;
-    return {
+    const thread: ChatThread = {
       id: sid,
       title: deriveTitle(titleSeed),
       created_ts: created,
       updated_ts: updated,
+      message_count: msgs.length,
       messages: msgs,
       imported: true,
       imported_at: Date.now(),
+      transcript_loaded: true,
+      backend_updated_ts: updated,
     };
+    return cacheThreadTranscript(thread);
   }
 
-  async function hydrateBackendSessions(localThreads: ChatThread[]) {
+  async function hydrateBackendSessions(
+    localThreads: ChatThread[],
+    opts: { offset?: number; append?: boolean } = {},
+  ) {
+    const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+    setSessionLoading(true);
     try {
-      const resp = await clientApi.sessionList(undefined, 50);
+      const resp = await clientApi.sessionList(undefined, SESSION_PAGE_SIZE, { offset });
       const sessions = Array.isArray(resp?.sessions) ? resp.sessions : [];
+      setSessionHasMore(Boolean(resp?.has_more));
+      setSessionNextOffset(
+        typeof resp?.next_offset === "number"
+          ? resp.next_offset
+          : offset + sessions.length,
+      );
       if (sessions.length === 0) return;
       const localById = new Map(localThreads.map((t) => [t.id, t]));
       const refreshed: ChatThread[] = [];
       for (const s of sessions) {
-        const sid = s.session_id;
+        const sid = String(s.session_id || "");
         if (!sid) continue;
         if (deletedSessionIdsRef.current.has(sid)) continue;
         const existing = localById.get(sid);
+        if (threadHasUnpersistedMessages(existing)) continue;
         // Skip locally-grown threads (i.e. created in this browser) —
         // they may be richer than the journal-reconstructed transcript
         // (e.g. carry live_events, blocks, errors). Only import
         // sessions that are entirely new, or refresh ones we
         // previously imported.
         if (existing && !existing.imported) continue;
-        try {
-          const built = await buildImportedThread(sid, {
-            created_at: s.created_at,
-            updated_at: s.updated_at,
-            title:
-              typeof s.meta?.title === "string" ? s.meta.title : undefined,
-          });
-          if (built) refreshed.push(built);
-        } catch {
-          // ignore single-session failures
-        }
+        const metaThread = threadFromSessionMetadata(s);
+        if (metaThread) refreshed.push(metaThread);
       }
       if (refreshed.length === 0) return;
       setThreads((prev) => {
         const byId = new Map(prev.map((t) => [t.id, t]));
-        for (const t of refreshed) byId.set(t.id, t);
+        for (const t of refreshed) {
+          const current = byId.get(t.id);
+          if (
+            current &&
+            current.messages.length > 0 &&
+            current.updated_ts >= t.updated_ts &&
+            (current.transcript_loaded || !t.transcript_loaded)
+          ) {
+            byId.set(t.id, {
+              ...current,
+              title: current.title || t.title,
+              message_count: Math.max(
+                current.message_count ?? 0,
+                t.message_count ?? 0,
+                current.messages.length,
+              ),
+              backend_updated_ts: Math.max(
+                current.backend_updated_ts ?? 0,
+                t.backend_updated_ts ?? 0,
+              ),
+            });
+          } else {
+            byId.set(t.id, t);
+          }
+        }
         const merged = Array.from(byId.values());
         merged.sort((a, b) => b.updated_ts - a.updated_ts);
         return merged;
       });
     } catch {
       // Backend unreachable — local threads still render.
+    } finally {
+      setSessionLoading(false);
     }
+  }
+
+  function loadMoreBackendSessions() {
+    if (sessionLoading || !sessionHasMore) return;
+    setThreads((prev) => {
+      void hydrateBackendSessions(prev, {
+        offset: sessionNextOffset,
+        append: true,
+      });
+      return prev;
+    });
   }
 
   useEffect(() => {
@@ -631,6 +849,11 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     if (!hydrated) return;
     saveRunSettings(settings);
   }, [settings, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveCanvasPanelOpen(canvasPanelOpen);
+  }, [canvasPanelOpen, hydrated]);
 
   const active = useMemo(
     () => (sessionId ? threads.find((t) => t.id === sessionId) || null : null),
@@ -651,7 +874,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     [active],
   );
   const awaitingApproval = activeApprovalIds.length > 0;
-
+  const activeTranscriptLoading = Boolean(
+    sessionId && loadingTranscriptIds.has(sessionId),
+  );
+  const activeHasCanvas = useMemo(() => hasWorkspaceCanvas(active), [active]);
   function pendingFirstMessageThreadId(): string {
     try {
       const raw = sessionStorage.getItem("nerya.chat.pendingFirstMessage");
@@ -679,23 +905,62 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       setMissingSession(true);
       return;
     }
+    const minUpdated = active?.backend_updated_ts || active?.updated_ts || 0;
+    if (active?.transcript_loaded && active.messages.length > 0) {
+      setMissingSession(false);
+      return;
+    }
+    const cached = loadCachedThreadTranscript(sessionId, minUpdated);
+    if (cached) {
+      setThreads((prev) => {
+        const current = prev.find((t) => t.id === sessionId);
+        return upsertThread(prev, mergeAuthoritativeThread(current, cached));
+      });
+      setMissingSession(false);
+      return;
+    }
     let cancelled = false;
+    setLoadingTranscriptIds((prev) => new Set(prev).add(sessionId));
     (async () => {
       try {
-        const built = await buildImportedThread(sessionId, {}, { full: true });
+        const built = await buildImportedThread(
+          sessionId,
+          {
+            created_at: isoFromMs(active?.created_ts),
+            updated_at: isoFromMs(active?.updated_ts),
+            title: active?.title,
+          },
+          { full: true },
+        );
         if (cancelled) return;
         if (built) {
-          setThreads((prev) => upsertThread(prev, built));
+          setThreads((prev) => {
+            const current = prev.find((t) => t.id === sessionId);
+            return upsertThread(prev, mergeAuthoritativeThread(current, built));
+          });
           setMissingSession(false);
         } else {
           setMissingSession(true);
         }
       } catch {
         if (!cancelled) setMissingSession(true);
+      } finally {
+        if (!cancelled) {
+          setLoadingTranscriptIds((prev) => {
+            const next = new Set(prev);
+            next.delete(sessionId);
+            return next;
+          });
+        }
       }
     })();
     return () => {
       cancelled = true;
+      setLoadingTranscriptIds((prev) => {
+        const next = new Set(prev);
+        next.delete(sessionId);
+        return next;
+      });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, sessionId]);
@@ -705,16 +970,23 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   // the unmount/remount caused by navigation.
   useEffect(() => {
     if (!hydrated || !sessionId) return;
-    let pending: { threadId: string; text: string } | null = null;
+    let pending: PendingFirstMessage | null =
+      pendingFirstMessages.get(sessionId) ?? null;
+    if (pending) {
+      pendingFirstMessages.delete(sessionId);
+    }
     try {
       const raw = sessionStorage.getItem("nerya.chat.pendingFirstMessage");
-      if (raw) pending = JSON.parse(raw);
+      if (!pending && raw) pending = JSON.parse(raw);
     } catch {
-      pending = null;
+      if (!pending) pending = null;
     }
     if (!pending || pending.threadId !== sessionId) return;
     sessionStorage.removeItem("nerya.chat.pendingFirstMessage");
-    void runAgentTurn(pending.text, { visibleUser: true });
+    void runAgentTurn(pending.text, {
+      visibleUser: true,
+      attachments: pending.attachments ?? [],
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, sessionId]);
 
@@ -822,7 +1094,12 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     if (!thread) return;
     const message = thread.messages.find((m) => m.id === messageId);
     if (!message) return;
-    if (!window.confirm(t("confirmDeleteMessage"))) return;
+    const okDelete = await confirmDialog({
+      title: t("deleteMessage"),
+      message: t("confirmDeleteMessage"),
+      tone: "danger",
+    });
+    if (!okDelete) return;
     if (editingMessageId === messageId) {
       setEditingMessageId(null);
       setEditDraft("");
@@ -899,6 +1176,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     text: string,
     options: {
       visibleUser?: boolean;
+      attachments?: ChatAttachment[];
       source?: string;
       kind?: string;
       channel?: string;
@@ -906,16 +1184,22 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     } = {},
   ) {
     const clean = text.trim();
-    if (!clean) return;
+    const outgoingAttachments = options.attachments ?? [];
+    const requestAttachments = outgoingAttachments.map(attachmentForRequest);
+    if (!clean && !outgoingAttachments.length) return;
     const approvalContinue =
       options.source === "approval_continue" ||
       options.kind === "approval.continue";
     if (awaitingApproval && !approvalContinue) return;
+    if (turnInFlightRef.current) return;
     const visibleUser = options.visibleUser !== false;
 
     let thread = active;
     if (!thread) {
-      thread = createThread(clean, sessionId);
+      thread = createThread(
+        clean || outgoingAttachments[0]?.name || "Attached file",
+        sessionId,
+      );
     }
     const threadId = thread.id;
 
@@ -925,19 +1209,33 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     // ChatView continues the turn, because Next App Router unmounts this
     // component on route change.
     if (!sessionId && visibleUser) {
+      pendingFirstMessages.set(threadId, {
+        threadId,
+        text: clean,
+        attachments: outgoingAttachments,
+      });
+      let staged = false;
       try {
         sessionStorage.setItem(
           "nerya.chat.pendingFirstMessage",
-          JSON.stringify({ threadId, text: clean }),
+          JSON.stringify({
+            threadId,
+            text: clean,
+            attachments: outgoingAttachments,
+          }),
         );
+        staged = true;
       } catch {
         // sessionStorage may be disabled; fall back to in-place send.
       }
-      // Persist the freshly-created thread now so the next mount sees it.
-      saveThreads(upsertThread(loadThreads(), thread));
-      router.replace(`/chat/${threadId}`);
-      return;
+      if (staged) {
+        // Persist the freshly-created thread now so the next mount sees it.
+        saveThreads(upsertThread(loadThreads(), thread));
+        router.replace(`/chat/${threadId}`);
+        return;
+      }
     }
+    turnInFlightRef.current = true;
 
     const userMsgId = uuid();
     const assistantId = uuid();
@@ -947,6 +1245,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       role: "user" as const,
       ts: Date.now(),
       text: clean,
+      attachments: outgoingAttachments,
     };
     const assistantMessage = {
       id: assistantId,
@@ -958,14 +1257,20 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
 
     updateThread(threadId, (t) => ({
       ...t,
+      imported: false,
       title:
-        t.messages.length === 0 && visibleUser ? deriveTitle(clean) : t.title,
+        t.messages.length === 0 && visibleUser
+          ? deriveTitle(clean || outgoingAttachments[0]?.name || "Attached file")
+          : t.title,
       messages: visibleUser
         ? [...t.messages, userMessage, assistantMessage]
         : [...t.messages, assistantMessage],
     }));
 
-    if (visibleUser) setInput("");
+    if (visibleUser) {
+      setInput("");
+      setAttachments([]);
+    }
     setSending(true);
 
     const ctrl = new AbortController();
@@ -978,7 +1283,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     // five turns ago and look perpetually pending).
     let cursor = 0;
     try {
-      const head = await clientApi.streamEvents(undefined, { limit: 1 });
+      const head = await clientApi.streamEvents(undefined, {
+        limit: 1,
+        session_id: threadId,
+      });
       cursor =
         typeof head?.latest_seq === "number"
           ? head.latest_seq
@@ -1002,7 +1310,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     async function pollOnce(): Promise<void> {
       if (handle.stop) return;
       try {
-        const resp = await clientApi.streamEvents(cursor, { limit: 500 });
+        const resp = await clientApi.streamEvents(cursor, {
+          limit: 500,
+          session_id: threadId,
+        });
         const fresh: LiveEvent[] = Array.isArray(resp?.events)
           ? (resp.events as LiveEvent[])
           : [];
@@ -1060,8 +1371,9 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           kind: options.kind || "user.chat",
           target: "main",
           payload: {
-            text: clean,
+            text: clean || "Please review the attached file(s).",
             channel: options.channel || "dashboard",
+            attachments: requestAttachments,
             ...(options.payloadExtra ?? {}),
           },
           // Reuse the thread id as the session id so every turn in
@@ -1081,6 +1393,9 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           model_tier: settings.model_tier || undefined,
           model_provider: settings.model_provider || undefined,
           model_id: settings.model_id || undefined,
+          max_iterations: settings.max_iterations,
+          max_total_tool_calls: settings.max_total_tool_calls,
+          max_wall_seconds: settings.max_wall_seconds,
         },
       });
       // One last poll to drain the tail of events that fired
@@ -1099,11 +1414,12 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       }
       updateThread(threadId, (t) => ({
         ...t,
-          title: backendTitle || t.title,
-          messages: t.messages.map((m) =>
-            visibleUser && m.id === userMsgId && m.role === "user" && turnId
-              ? { ...m, backend_message_id: `${turnId}:user` }
-              : m.id === assistantId && m.role === "assistant"
+        imported: false,
+        title: backendTitle || t.title,
+        messages: t.messages.map((m) =>
+          visibleUser && m.id === userMsgId && m.role === "user" && turnId
+            ? { ...m, backend_message_id: `${turnId}:user` }
+            : m.id === assistantId && m.role === "assistant"
             ? {
                 ...m,
                 loading: false,
@@ -1114,6 +1430,27 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
             : m
         ),
       }));
+      try {
+        const fullThread = await buildImportedThread(
+          threadId,
+          { title: backendTitle },
+          { full: true },
+        );
+        if (fullThread) {
+          setThreads((prev) =>
+            upsertThread(
+              prev,
+              mergeAuthoritativeThread(
+                prev.find((t) => t.id === threadId),
+                fullThread,
+              ),
+            ),
+          );
+        }
+      } catch {
+        // The live turn is already visible; a later route refresh will
+        // retry the authoritative transcript hydrate.
+      }
     } catch (e) {
       // Drain whatever the bus already produced so the failure card
       // shows the events that *did* fire before the crash.
@@ -1131,6 +1468,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           : String(e);
       updateThread(threadId, (t) => ({
         ...t,
+        imported: false,
         messages: t.messages.map((m) =>
           m.id === assistantId && m.role === "assistant"
             ? {
@@ -1145,12 +1483,13 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     } finally {
       stopPoller();
       setSending(false);
+      turnInFlightRef.current = false;
       abortRef.current = null;
     }
   }
 
   async function send(text: string) {
-    await runAgentTurn(text, { visibleUser: true });
+    await runAgentTurn(text, { visibleUser: true, attachments });
   }
 
   function cancel() {
@@ -1174,15 +1513,18 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   }
 
   return (
-    <div className="h-[calc(100vh-0px)] flex">
+    <div className="flex h-full min-h-0 flex-col md:flex-row">
       <ChatSidebar
         threads={threads}
         activeId={sessionId ?? null}
+        hasMore={sessionHasMore}
+        loadingMore={sessionLoading}
         onPick={(id) => router.push(`/chat/${id}`)}
         onNew={() => router.push("/chat")}
         onDelete={deleteThread}
+        onLoadMore={loadMoreBackendSessions}
       />
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex min-h-0 flex-1 flex-col min-w-0">
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           {sessionId && missingSession ? (
             <div className="max-w-xl mx-auto px-6 py-16 text-center">
@@ -1202,7 +1544,13 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
               </button>
             </div>
           ) : !active || active.messages.length === 0 ? (
-            <EmptyState onPrompt={(p) => setInput(p)} />
+            activeTranscriptLoading ? (
+              <div className="h-full flex items-center justify-center text-ink-500 text-sm">
+                Loading conversation…
+              </div>
+            ) : (
+              <EmptyState onPrompt={(p) => setInput(p)} />
+            )
           ) : (
             <div className="max-w-4xl mx-auto px-4 py-6 space-y-5">
               {active.messages.map((m) =>
@@ -1262,8 +1610,17 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           settings={settings}
           onSettingsChange={setSettings}
           modelOptions={modelOptions}
+          attachments={attachments}
+          onAttachmentsChange={setAttachments}
         />
       </div>
+      {activeHasCanvas ? (
+        <WorkspaceCanvas
+          thread={active}
+          open={canvasPanelOpen}
+          onToggle={() => setCanvasPanelOpen((v) => !v)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -23,18 +23,28 @@ with a redacted payload so operators have an audit trail even in dev mode.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
+import json
 import os
+import secrets
+import time
 from dataclasses import dataclass
 from typing import Any
 
-from ..core import jsonl
+from ..core import jsonl, yaml_io
 from ..core.config import Config
 from ..core.time import now_iso
 from . import route_scopes
 
 
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_PASSWORD_HASH_ALG = "pbkdf2_sha256"
+_PASSWORD_HASH_ITERATIONS = 260_000
+_JWT_ALG = "HS256"
+_JWT_ISSUER = "nerya.local_api"
+_JWT_DEFAULT_TTL_SECONDS = 24 * 60 * 60
 
 
 @dataclass
@@ -58,6 +68,254 @@ class AuthResult:
     scope: str = "local:all"
     reason: str = ""
     scopes: frozenset[str] = frozenset()
+
+
+def _normalise_host(value: str) -> str:
+    host = (value or "").strip().lower()
+    if not host:
+        return ""
+    # X-Forwarded-For may be a comma-separated chain.
+    host = host.split(",", 1)[0].strip()
+    if host.startswith("[") and "]" in host:
+        return host[1:host.index("]")]
+    if host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    return host
+
+
+def _is_local_host(host: str) -> bool:
+    host = _normalise_host(host)
+    if host in _LOCAL_HOSTS or host == "":
+        return True
+    if host.startswith("127."):
+        return True
+    return False
+
+
+def _effective_client_host(client_addr: str, headers: dict[str, str]) -> str:
+    peer = _normalise_host(client_addr)
+    if not _is_local_host(peer):
+        return peer
+    # When the local API sits behind the dashboard proxy or a reverse proxy,
+    # the socket peer is loopback. Trust forwarded client headers only in
+    # that loopback case so remote direct callers cannot spoof themselves
+    # into the local trust lane.
+    for key in ("x-forwarded-for", "X-Forwarded-For", "x-real-ip", "X-Real-IP"):
+        forwarded = _normalise_host(headers.get(key) or "")
+        if forwarded:
+            return forwarded
+    return peer
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(raw: str) -> bytes:
+    padded = raw + "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _set_dotted(doc: dict[str, Any], dotted: str, value: Any) -> None:
+    cur = doc
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cur[part] = nxt
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def _persist_config_values(config: Config, values: dict[str, Any]) -> None:
+    doc = yaml_io.load(config.paths.config, default={}) or {}
+    if not isinstance(doc, dict):
+        doc = {}
+    for dotted, value in values.items():
+        _set_dotted(doc, dotted, value)
+        _set_dotted(config.data, dotted, value)
+    yaml_io.dump(config.paths.config, doc)
+
+
+def _password_hash_value(config: Config) -> str:
+    return str(config.get("runtime.auth.admin_password_hash") or "").strip()
+
+
+def has_admin_password(config: Config) -> bool:
+    return bool(_password_hash_value(config))
+
+
+def _hash_password(password: str, *, salt: str | None = None) -> str:
+    salt = salt or secrets.token_urlsafe(18)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        _PASSWORD_HASH_ITERATIONS,
+    )
+    return (
+        f"{_PASSWORD_HASH_ALG}${_PASSWORD_HASH_ITERATIONS}"
+        f"${salt}${_b64url_encode(digest)}"
+    )
+
+
+def verify_admin_password(config: Config, password: str) -> bool:
+    encoded = _password_hash_value(config)
+    if not encoded or not isinstance(password, str):
+        return False
+    try:
+        alg, iterations_raw, salt, digest = encoded.split("$", 3)
+        if alg != _PASSWORD_HASH_ALG:
+            return False
+        iterations = int(iterations_raw)
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            iterations,
+        )
+        return hmac.compare_digest(_b64url_encode(candidate), digest)
+    except Exception:
+        return False
+
+
+def _jwt_ttl_seconds(config: Config) -> int:
+    env = (os.environ.get("NERYA_AUTH_JWT_TTL_SECONDS") or "").strip()
+    raw = env or config.get("runtime.auth.jwt_ttl_seconds")
+    try:
+        ttl = int(raw)
+    except Exception:
+        ttl = _JWT_DEFAULT_TTL_SECONDS
+    return max(300, min(ttl, 30 * 24 * 60 * 60))
+
+
+def _jwt_secret(config: Config) -> str:
+    return str(
+        os.environ.get("NERYA_AUTH_JWT_SECRET")
+        or config.get("runtime.auth.jwt_secret")
+        or ""
+    ).strip()
+
+
+def _ensure_jwt_secret(config: Config) -> str:
+    secret = _jwt_secret(config)
+    if secret:
+        return secret
+    secret = secrets.token_urlsafe(48)
+    _persist_config_values(config, {"runtime.auth.jwt_secret": secret})
+    return secret
+
+
+def set_admin_password(config: Config, password: str) -> None:
+    password = password or ""
+    if len(password) < 8:
+        raise ValueError("password_too_short")
+    values = {"runtime.auth.admin_password_hash": _hash_password(password)}
+    if not _jwt_secret(config):
+        values["runtime.auth.jwt_secret"] = secrets.token_urlsafe(48)
+    _persist_config_values(config, values)
+
+
+def issue_admin_jwt(config: Config, *, actor: str = "admin:password") -> dict[str, Any]:
+    secret = _ensure_jwt_secret(config)
+    now = int(time.time())
+    ttl = _jwt_ttl_seconds(config)
+    payload = {
+        "iss": _JWT_ISSUER,
+        "sub": actor,
+        "actor": actor,
+        "scope": route_scopes.WILDCARD_SCOPE,
+        "scopes": [route_scopes.WILDCARD_SCOPE],
+        "iat": now,
+        "exp": now + ttl,
+        "jti": secrets.token_urlsafe(12),
+    }
+    header = {"typ": "JWT", "alg": _JWT_ALG}
+    signing_input = ".".join([
+        _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8")),
+        _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
+    ])
+    sig = hmac.new(
+        secret.encode("utf-8"),
+        signing_input.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    token = f"{signing_input}.{_b64url_encode(sig)}"
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "expires_at": payload["exp"],
+        "expires_in": ttl,
+        "actor": actor,
+        "scope": route_scopes.WILDCARD_SCOPE,
+    }
+
+
+def _verify_jwt(config: Config, token: str) -> tuple[dict[str, Any] | None, str]:
+    secret = _jwt_secret(config)
+    if not secret:
+        return None, "jwt_not_configured"
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None, "not_jwt"
+    signing_input = ".".join(parts[:2])
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        signing_input.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    try:
+        provided = _b64url_decode(parts[2])
+    except Exception:
+        return None, "invalid_token"
+    if not hmac.compare_digest(expected, provided):
+        return None, "invalid_token"
+    try:
+        header = json.loads(_b64url_decode(parts[0]).decode("utf-8"))
+        payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+    except Exception:
+        return None, "invalid_token"
+    if header.get("alg") != _JWT_ALG:
+        return None, "invalid_token"
+    if payload.get("iss") != _JWT_ISSUER:
+        return None, "invalid_token"
+    try:
+        exp = int(payload.get("exp") or 0)
+    except Exception:
+        exp = 0
+    if exp < int(time.time()):
+        return None, "expired_token"
+    scopes = route_scopes.parse_scopes(payload.get("scopes") or payload.get("scope"))
+    if not scopes:
+        return None, "invalid_token"
+    actor = str(payload.get("actor") or payload.get("sub") or "admin:password")
+    return {
+        "actor": actor,
+        "scope": str(payload.get("scope") or " ".join(sorted(scopes))),
+        "scopes": scopes,
+    }, ""
+
+
+def _authenticate_token(config: Config, token: str) -> tuple[dict[str, Any] | None, str]:
+    tokens = _config_tokens(config)
+    for known, meta in tokens.items():
+        if hmac.compare_digest(known, token):
+            return meta, ""
+    if "." in token:
+        return _verify_jwt(config, token)
+    return None, "invalid_token"
+
+
+def admin_auth_status(config: Config) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "mode": _resolve_mode(config),
+        "password_configured": has_admin_password(config),
+        "jwt_configured": bool(_jwt_secret(config)),
+        "jwt_ttl_seconds": _jwt_ttl_seconds(config),
+        "static_token_configured": bool(_config_tokens(config)),
+    }
 
 
 def _config_tokens(config: Config) -> dict[str, dict[str, Any]]:
@@ -135,9 +393,9 @@ def check_request(
     """Return an :class:`AuthResult` describing whether the caller may
     proceed. The HTTP handler must honour ``ok``/``status``/``actor``."""
     mode = _resolve_mode(config)
-    client_host = (client_addr or "").split(":")[0].lower()
+    client_host = _effective_client_host(client_addr, headers)
 
-    if path == "/health":
+    if path in route_scopes.ANONYMOUS_PATHS:
         return AuthResult(
             ok=True, actor="public:health", scope="read:runtime",
             scopes=frozenset({"read:runtime"}),
@@ -158,7 +416,6 @@ def check_request(
     token = _extract_token(headers)
 
     if mode == "token":
-        tokens = _config_tokens(config)
         if not token:
             _emit(
                 config, kind="auth.rejected",
@@ -170,30 +427,32 @@ def check_request(
                 ok=False, status=401, actor="unknown",
                 reason="missing_token",
             )
-        for known, meta in tokens.items():
-            if hmac.compare_digest(known, token):
-                _emit(
-                    config, kind="auth.accepted",
-                    actor=meta["actor"], scope=meta["scope"],
-                    method=method, path=path, client=client_host,
-                )
-                return AuthResult(
-                    ok=True, actor=meta["actor"], scope=meta["scope"],
-                    scopes=meta.get("scopes") or frozenset(),
-                )
+        meta, token_reason = _authenticate_token(config, token)
+        if meta is not None:
+            _emit(
+                config, kind="auth.accepted",
+                actor=meta["actor"], scope=meta["scope"],
+                method=method, path=path, client=client_host,
+            )
+            return AuthResult(
+                ok=True, actor=meta["actor"], scope=meta["scope"],
+                scopes=meta.get("scopes") or frozenset(),
+            )
         _emit(
             config, kind="auth.rejected",
             actor="unknown",
-            reason="invalid_token",
+            reason=token_reason or "invalid_token",
             method=method, path=path, client=client_host,
         )
         return AuthResult(
-            ok=False, status=403, actor="unknown",
-            reason="invalid_token",
+            ok=False,
+            status=401 if token_reason == "expired_token" else 403,
+            actor="unknown",
+            reason=token_reason or "invalid_token",
         )
 
     # mode == "local"
-    if client_host in _LOCAL_HOSTS or client_host == "":
+    if _is_local_host(client_host):
         _emit(
             config, kind="auth.accepted",
             actor="local:loopback", scope="api:all",
@@ -205,28 +464,41 @@ def check_request(
         )
 
     if token:
-        tokens = _config_tokens(config)
-        for known, meta in tokens.items():
-            if hmac.compare_digest(known, token):
-                _emit(
-                    config, kind="auth.accepted",
-                    actor=meta["actor"], scope=meta["scope"],
-                    method=method, path=path, client=client_host,
-                )
-                return AuthResult(
-                    ok=True, actor=meta["actor"], scope=meta["scope"],
-                    scopes=meta.get("scopes") or frozenset(),
-                )
+        meta, token_reason = _authenticate_token(config, token)
+        if meta is not None:
+            _emit(
+                config, kind="auth.accepted",
+                actor=meta["actor"], scope=meta["scope"],
+                method=method, path=path, client=client_host,
+            )
+            return AuthResult(
+                ok=True, actor=meta["actor"], scope=meta["scope"],
+                scopes=meta.get("scopes") or frozenset(),
+            )
+        _emit(
+            config, kind="auth.rejected",
+            actor="unknown",
+            reason=token_reason or "invalid_token",
+            method=method, path=path, client=client_host,
+        )
+        return AuthResult(
+            ok=False,
+            status=401 if token_reason == "expired_token" else 403,
+            actor="unknown",
+            reason=token_reason or "invalid_token",
+        )
 
     _emit(
         config, kind="auth.rejected",
         actor="unknown",
-        reason="remote_without_token",
+        reason="missing_token" if has_admin_password(config) else "remote_without_token",
         method=method, path=path, client=client_host,
     )
     return AuthResult(
-        ok=False, status=403, actor="unknown",
-        reason="remote_without_token",
+        ok=False,
+        status=401 if has_admin_password(config) else 403,
+        actor="unknown",
+        reason="missing_token" if has_admin_password(config) else "remote_without_token",
     )
 
 

@@ -147,6 +147,26 @@ class ToolDescriptor:
     risk would normally require approval. Used for ``todo_write`` and
     other zero-side-effect helpers."""
 
+    auto_approve_when: Optional[Callable[[dict[str, Any]], bool]] = None
+    """Optional per-call auto-approval predicate.
+
+    This keeps broad tools such as ``script_run`` conservative by
+    default while allowing a tightly scoped safe lane for a known skill
+    script family.
+    """
+
+    lazy: bool = False
+    """If true, the tool stays in the registry (so it can still be
+    dispatched programmatically) but the agent loop's prompt-time
+    rendering hides it until the namespace it belongs to has been
+    explicitly described in the current session.
+
+    Lazy MCP loading: a server with ``always_eager=False`` in
+    ``mcp_servers.yml`` registers all of its tools with ``lazy=True``,
+    so 32 MCP tool descriptions don't pollute the model's context until
+    the model actively calls ``mcp_describe`` for that namespace.
+    """
+
     # ----- helpers ---------------------------------------------------
 
     def to_provider_tool(self) -> dict[str, Any]:
@@ -180,6 +200,18 @@ class ToolDescriptor:
             return RiskLevel(str(level))
         except Exception:
             return self.risk
+
+    def per_call_auto_approve(self, payload: dict[str, Any]) -> bool:
+        """Return whether this exact call should bypass approval prompts."""
+
+        if self.auto_approve:
+            return True
+        if self.auto_approve_when is None:
+            return False
+        try:
+            return bool(self.auto_approve_when(payload))
+        except Exception:
+            return False
 
 
 # ---------------------------------------------------------------------------

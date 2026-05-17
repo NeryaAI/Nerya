@@ -74,10 +74,13 @@ def _resolve(ref: str | None, resolver: Callable[[str], str | None] | None) -> s
 def _body_for(platform: str, message: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
     text = message.get("text") or ""
     buttons = message.get("buttons") if isinstance(message.get("buttons"), list) else []
+    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
     event = message.get("event") if isinstance(message.get("event"), dict) else None
     normalized = platform.lower()
     if normalized in {"slack", "mattermost"}:
         body: dict[str, Any] = {"text": text}
+        if attachments:
+            body["attachments"] = attachments
         if buttons:
             body["buttons"] = buttons
         if message.get("approval_id"):
@@ -85,6 +88,8 @@ def _body_for(platform: str, message: dict[str, Any], cfg: dict[str, Any]) -> di
         return body
     if normalized in {"discord"}:
         body: dict[str, Any] = {"content": text}
+        if attachments:
+            body["attachments"] = attachments
         if buttons:
             body["buttons"] = buttons
         if message.get("approval_id"):
@@ -97,7 +102,10 @@ def _body_for(platform: str, message: dict[str, Any], cfg: dict[str, Any]) -> di
     if normalized in {"dingtalk"}:
         return {"msgtype": "text", "text": {"content": text}}
     if normalized in {"feishu", "wecom", "weixin", "qqbot"}:
-        return {"msg_type": "text", "content": {"text": text}}
+        body = {"msg_type": "text", "content": {"text": text}}
+        if attachments:
+            body["attachments"] = attachments
+        return body
     return {
         "message_id": message.get("message_id"),
         "platform": platform,
@@ -105,6 +113,7 @@ def _body_for(platform: str, message: dict[str, Any], cfg: dict[str, Any]) -> di
         "strategy_id": message.get("strategy_id"),
         "ts": message.get("ts"),
         "text": text,
+        "attachments": attachments,
         "approval_id": message.get("approval_id"),
         "buttons": buttons,
         "event": message.get("event"),

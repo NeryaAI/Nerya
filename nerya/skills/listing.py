@@ -2,10 +2,7 @@
 
 A skill is a ``SKILL.md`` (YAML frontmatter + markdown body) — a
 *prompt template*, not a bundle of typed actions. The native agent
-loop discovers skills the same way coding-agent does
-(:file:`coding-agent/src/skills/loadSkillsDir.ts`,
-:file:`coding-agent/src/tools/SkillTool/prompt.ts`) and the runtime does
-(:file:`agent-runtime/agent/skill_utils.py`):
+loop discovers skills by reading SKILL.md frontmatter + body:
 
 * List skills as ``name: description - when_to_use`` lines, truncated
   to a per-entry character cap and overall token budget.
@@ -31,9 +28,8 @@ from typing import Any
 from .kernel import SkillKernel
 
 
-# Per-entry character cap for the listing — matches coding-agent's
-# ``MAX_LISTING_DESC_CHARS`` (250). Wide descriptions waste turn-1
-# cache_creation tokens without improving match rate.
+# Per-entry character cap for the listing. Wide descriptions waste
+# turn-1 cache-creation tokens without improving match rate.
 MAX_LISTING_DESC_CHARS = 250
 
 
@@ -56,7 +52,7 @@ def _when_to_use(manifest: Any) -> str:
 
 
 def build_skill_listing(skills: SkillKernel | None) -> list[dict[str, Any]]:
-    """Return a coding-agent-style listing of installed skills.
+    """Return a compact listing of installed skills.
 
     Each row carries only what the model needs to decide whether to
     invoke a skill: ``name``, ``description`` (truncated), and
@@ -92,10 +88,8 @@ def build_skill_listing(skills: SkillKernel | None) -> list[dict[str, Any]]:
 def format_skill_listing(skills: SkillKernel | None) -> str:
     """Format the listing as ``- name: description - when_to_use`` lines.
 
-    Mirrors :func:`coding-agent/src/tools/SkillTool/prompt.ts:formatCommandsWithinBudget`
-    minus the global token-budget pass — that lives on the caller (the
-    native loop's prompt assembler) which knows the model's context
-    window.
+    The caller owns the global token-budget pass because it knows the
+    model's current context window.
     """
 
     rows = build_skill_listing(skills)

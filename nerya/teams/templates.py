@@ -200,7 +200,6 @@ def _market_analysis_team() -> TeamTemplate:
         gates=gates,
         max_rounds=1,
         max_parallel=4,
-        usd_budget=None,
         output_schema={
             "signal": "bullish|bearish|neutral|none",
             "confidence": "0..1",
@@ -328,7 +327,6 @@ def _investment_committee_team() -> TeamTemplate:
         gates=gates,
         max_rounds=1,
         max_parallel=2,
-        usd_budget=None,
         output_schema={
             "rating": "Buy|Overweight|Hold|Underweight|Sell",
             "thesis": "string",
@@ -476,7 +474,6 @@ def _strategy_design_team() -> TeamTemplate:
         gates=gates,
         max_rounds=1,
         max_parallel=3,
-        usd_budget=None,
         output_schema={
             "name": "string",
             "thesis": "string",

@@ -1,60 +1,38 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: markets
-description: "Use whenever the agent needs current or historical market data, exchange order-book / fee / symbol metadata, on-chain balances, wallet info, or token transfers \u2014 basically any *read* of the outside financial world. Triggers on phrases like \"what's the price of\", \"show me the order book\", \"exchange fees\", \"list my wallets\", \"check this address\", \"transfer USDC\", or any question about market state, on-chain activity, or venue capabilities. Use this skill *before* trading; the trading playbook depends on these reads being current."
+description: "Use for current or historical market data, order books, symbol metadata, wallet balances, on-chain activity, and venue capability reads."
 version: 0.1.0
 license: MIT
 author: Nerya
 ---
 <!-- nerya-skill-frontmatter-end -->
 
-# Markets playbook
+# Markets
 
-The markets skill wraps every read against external venues and
-chains. It splits cleanly into two sub-domains:
+Use for factual reads from markets, exchanges, and chains. Load this
+before trading decisions.
 
-- **Centralised exchanges (CEX)** — quotes, books, fees, symbol
-  metadata, recent fills.
-- **On-chain** — token balances, transaction history, transfers,
-  wallet management.
+## Flow
 
-Both share a single rule: the data is *snapshots*. Treat anything
-older than a few seconds as stale for trading decisions, and always
-note the timestamp the runtime returns.
+NORMALIZE market as `VENUE:SYMBOL` when possible.
+READ quote/book/candles/symbols/wallet state through a script.
+FOR provider-specific tables or analytics beyond quote/OHLCV, use native
+`data_api`: list, inspect schema, then call with bounded `limit`/`columns`.
+FOR charts, prefer `get_candles` so raw series stay out of context.
+CHECK timestamp, venue, and fallback method.
+PASS fresh results to `trading`, `backtest`, or `market_research`.
 
-## Choosing a data source
+## Scripts
 
-For prices and books, prefer the venue you'd execute on. Pulling a
-quote from a different exchange than where you'd place the order
-introduces a basis you'll forget about by the time you size the
-trade.
+- `scripts/get_quote.py`
+- `scripts/get_candles.py`
+- `scripts/get_book.py`
+- `scripts/list_symbols.py`
+- `scripts/wallet_balances.py`
+- `scripts/onchain_history.py`
 
-For chain reads, prefer:
+## Lazy References
 
-1. The native node/indexer when the network has one (Solana RPC,
-   Hyperliquid info endpoint).
-2. A trusted third-party indexer second (Etherscan-class).
-3. Cached/last-known state only as a tie-breaker, never authoritative.
-
-## Bundled scripts
-
-| Script | Purpose |
-|---|---|
-| `scripts/get_quote.py` | Single-symbol quote on a named venue. |
-| `scripts/get_book.py` | Top-of-book / depth snapshot. |
-| `scripts/list_symbols.py` | Trade-able universe + min size / tick. |
-| `scripts/wallet_balances.py` | Per-wallet token balances. |
-| `scripts/onchain_history.py` | Recent transfers for an address. |
-
-All scripts read JSON payload from `--json` / `--payload-file` /
-stdin and emit JSON on stdout. Invoke them from `run_shell` and
-parse the result.
-
-## Common failure modes
-
-- **Mixing testnet and mainnet symbols.** Always confirm the chain /
-  network field in the response before you trust a balance.
-- **Rate-limit clusters.** If you call `get_quote` in a tight loop,
-  use `list_symbols` once and cache locally for the loop's lifetime.
-- **Treating a 404 as zero.** Missing data is missing, not zero.
-  Surface the absence; do not pretend the symbol is empty.
+- `references/full-playbook.md` for detailed read rules and chart behavior.
+- `references/libraries.md` for market data libraries.

@@ -185,14 +185,26 @@ export type InboxItemsData = {
 export type InboxItemsEnvelope = OperatorEnvelope<InboxItemsData>;
 
 export type InboxResolveRequest = {
-  id: string;
+  id?: string;
+  ids?: string[];
   decision?: "approve" | "reject" | "apply" | "rollback" | "dismiss";
   actor_id?: string;
 };
 
 export type InboxResolveEnvelope = OperatorEnvelope<{
-  id: string;
+  id?: string;
+  ids?: string[];
   outcome?: Record<string, unknown>;
+  results?: Array<{
+    id: string;
+    ok: boolean;
+    status?: string;
+    severity?: EnvelopeSeverity;
+    summary?: string;
+    outcome?: Record<string, unknown>;
+  }>;
+  resolved_count?: number;
+  failed_count?: number;
 }>;
 
 // ---------------------------------------------------------------------------
@@ -262,3 +274,222 @@ export type AgentTaskArtifactsData = {
 };
 
 export type AgentTaskArtifactsEnvelope = OperatorEnvelope<AgentTaskArtifactsData>;
+
+// ---------------------------------------------------------------------------
+// Runtime feature flags, capability catalog, data sources, evidence vault,
+// prompt guard review queue, operator profile,
+// E2E artifact capture.
+// ---------------------------------------------------------------------------
+
+export type RuntimeFlag = {
+  key: string;
+  phase: string;
+  summary: string;
+  default: boolean;
+  enabled: boolean;
+  env_override: string;
+};
+
+export type RuntimeFlagsData = {
+  flags: RuntimeFlag[];
+  counts: { total: number; enabled: number; disabled: number };
+  overrides_path: string;
+};
+
+export type RuntimeFlagsEnvelope = OperatorEnvelope<RuntimeFlagsData>;
+
+export type CapabilityStatus = "ready" | "degraded" | "blocked" | "unavailable";
+
+export type CapabilityEntry = {
+  id: string;
+  name: string;
+  domain: string;
+  kind: string;
+  status: CapabilityStatus;
+  source: string;
+  entrypoint?: string;
+  dashboard_path?: string;
+  required_config?: string[];
+  required_secrets?: string[];
+  permissions?: string[];
+  approval?: string;
+  live_trading_impact?: string;
+  data_boundary?: {
+    secrets_visible_to_agent?: boolean;
+    external_network?: boolean;
+    data_leaves_device?: boolean;
+  };
+  last_verified_at?: string | null;
+  last_error?: string | null;
+  operator_hint?: string;
+  tags?: string[];
+};
+
+export type CapabilityCatalogData = {
+  entries: CapabilityEntry[];
+  count: number;
+};
+
+export type CapabilityCatalogEnvelope = OperatorEnvelope<CapabilityCatalogData>;
+
+export type CapabilityReadinessData = {
+  total: number;
+  counts: Record<CapabilityStatus, number>;
+  blocked: CapabilityEntry[];
+  degraded: CapabilityEntry[];
+};
+
+export type CapabilityReadinessEnvelope = OperatorEnvelope<CapabilityReadinessData>;
+
+export type DataSourceRow = {
+  source_id: string;
+  kind: string;
+  provider?: string;
+  account_id?: string | null;
+  enabled: boolean;
+  last_success_at?: string | null;
+  last_attempt_at?: string | null;
+  next_due_at?: string | null;
+  cursor?: string | null;
+  freshness_sla_seconds?: number;
+  budget?: { daily_limit?: number; used_today?: number };
+  last_error?: string | null;
+  stale: boolean;
+};
+
+export type DataSourceStatusData = {
+  sources: DataSourceRow[];
+  total: number;
+  stale_count: number;
+  enabled_count: number;
+  generated_at: string;
+};
+
+export type DataSourceStatusEnvelope = OperatorEnvelope<DataSourceStatusData>;
+
+export type DataSourceEvent = {
+  ts: string;
+  source_id: string;
+  event: string;
+  detail?: string;
+};
+
+export type DataSourceEventsEnvelope = OperatorEnvelope<{
+  events: DataSourceEvent[];
+  count: number;
+}>;
+
+export type EvidenceDoc = {
+  evidence_id: string;
+  source_type: string;
+  source_id: string;
+  title: string;
+  summary: string;
+  workspace_path?: string;
+  tags?: string[];
+  scope: "shared" | "strategy" | "session";
+  strategy_id?: string | null;
+  session_id?: string | null;
+  created_at: string;
+  provenance?: Record<string, unknown>;
+  security?: { contains_secret?: boolean; redaction_applied?: boolean };
+};
+
+export type EvidenceSearchEnvelope = OperatorEnvelope<{
+  results: EvidenceDoc[];
+  count: number;
+  query: string;
+}>;
+
+export type EvidenceSourcesEnvelope = OperatorEnvelope<{
+  sources: Array<{ source_type: string; source_id: string; count: number; last_at?: string }>;
+  count: number;
+}>;
+
+export type EvidenceTopicsEnvelope = OperatorEnvelope<{
+  topics: Array<{ topic: string; count: number }>;
+  count: number;
+}>;
+
+export type ProfileFact = {
+  id: string;
+  ts: string;
+  facet: string;
+  key: string;
+  value: unknown;
+  scope: string;
+  pinned: boolean;
+  forgotten: boolean;
+  source: string;
+  operator_id?: string;
+};
+
+export type ProfileEnvelope = {
+  ok: boolean;
+  facts: ProfileFact[];
+  stats: {
+    total: number;
+    forgotten: number;
+    pinned: number;
+    by_facet: Record<string, number>;
+    by_scope: Record<string, number>;
+  };
+  error?: string;
+  flag?: string;
+  detail?: string;
+};
+
+export type PromptGuardItem = {
+  id: string;
+  ts: string;
+  verdict: "review" | "block";
+  policy: string;
+  matched: string[];
+  excerpt: string;
+  source_route?: string;
+  source_channel?: string;
+  affected_action?: string;
+  state: "pending" | "approved" | "rejected" | "escalated";
+  decision?: string;
+  decided_by?: string;
+  decided_at?: string;
+  note?: string;
+};
+
+export type PromptGuardListEnvelope = {
+  ok: boolean;
+  items: PromptGuardItem[];
+  count: number;
+  stats: {
+    total: number;
+    by_state: Record<string, number>;
+    by_verdict: Record<string, number>;
+  };
+  error?: string;
+  flag?: string;
+  detail?: string;
+};
+
+export type PromptGuardClassifyEnvelope = {
+  ok: boolean;
+  verdict: "allow" | "review" | "block";
+  policy: string;
+  matched: string[];
+  enqueued?: PromptGuardItem | null;
+  error?: string;
+  flag?: string;
+};
+
+export type E2eRunMeta = {
+  run_id: string;
+  started_at: string;
+  ended_at?: string | null;
+  label: string;
+  base_url?: string;
+  env?: Record<string, unknown>;
+  status?: string;
+  artifacts?: Array<{ name: string; path: string; size: number }>;
+};
+
+export type E2eRunsEnvelope = OperatorEnvelope<{ runs: E2eRunMeta[]; count: number }>;
+export type E2eRunEnvelope = OperatorEnvelope<{ run: E2eRunMeta }>;

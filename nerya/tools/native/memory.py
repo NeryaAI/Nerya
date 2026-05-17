@@ -20,12 +20,14 @@ write whitelist + compaction stay authoritative.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from ...agent.memory import Memory
 from ...core import jsonl
 from ...core.paths import WorkspacePaths
+from ...core.config import Config
 from ...evolution.events import EvolutionSignal
 from ...evolution.event_store import append_signal
 from ...evolution.quality import evaluate_learning_candidate
@@ -326,6 +328,8 @@ def journal_search_handler(call: ToolCall, *, paths: WorkspacePaths) -> ToolResu
 def build_system_prompt_block(
     paths: WorkspacePaths,
     *,
+    config: Config | None = None,
+    session_id: str | None = None,
     strategy_id: str | None = None,
     max_chars: int = 1200,
 ) -> str:
@@ -346,6 +350,22 @@ def build_system_prompt_block(
         s = mem.strategy_preview(strategy_id, max_chars=max_chars)
         if s:
             parts.append(s)
+    if config is not None:
+        try:
+            from ...memory.agentmemory_provider import (
+                AgentMemoryProvider,
+                selected_external_provider,
+            )
+
+            if selected_external_provider(config) == "agentmemory":
+                provider = AgentMemoryProvider(config)
+                if session_id:
+                    provider.settings = replace(provider.settings, session_id=session_id)
+                block = provider.system_prompt_block()
+                if block:
+                    parts.append(block)
+        except Exception:
+            pass
     try:
         budget = max(0, int(max_chars * 0.35))
         if budget:

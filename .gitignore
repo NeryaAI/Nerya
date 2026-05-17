@@ -3,6 +3,14 @@ __pycache__/
 *.egg-info/
 .venv/
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.pub
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -15,8 +23,13 @@ build/
 
 # Local agent/runtime tooling and generated runs.
 .omx/
+.cache/
+.tmp/
+.hackathon_demo_runs/
 .nl_e2e_runs/
 .smoke_runs/
+test-results/
+submission-*.md
 %SystemDrive%/
 /state/
 /tmp/

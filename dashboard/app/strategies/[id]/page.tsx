@@ -44,18 +44,26 @@ import {
   Pill,
 } from "../../../components/Page";
 import { SectionTabs } from "../../../components/SectionTabs";
+import { EditIcon, PauseIcon, TrashIcon } from "../../../components/icons";
 import {
   clientApi,
   type StrategyDetail,
 } from "../../../lib/clientApi";
+import {
+  confirm as confirmDialog,
+  prompt as promptDialog,
+} from "../../../lib/dialogs";
 import type {
   StrategyRunRecord,
   StrategyTuningStatusEnvelope,
   StrategyWorkspaceEnvelope,
 } from "../../../lib/strategyTypes";
+import { KeyValueEditor } from "../../../components/KeyValueEditor";
 import { StrategyBindCard } from "../../../components/strategies/StrategyBindCard";
 import { StrategyHistoryCard } from "../../../components/strategies/StrategyHistoryCard";
+import { StrategyPerformanceCard } from "../../../components/strategies/StrategyPerformanceCard";
 import { StrategyEvolutionCard } from "../../../components/strategies/StrategyEvolutionCard";
+import { StrategyAgentSessionsCard } from "../../../components/strategies/StrategyAgentSessionsCard";
 import { StrategyPromotionCard } from "../../../components/strategies/StrategyPromotionCard";
 import { StrategyRiskDecisionsCard } from "../../../components/strategies/StrategyRiskDecisionsCard";
 import { StrategyRunsCard } from "../../../components/strategies/StrategyRunsCard";
@@ -77,12 +85,64 @@ interface FilesEnvelope {
   files: PackageFile[];
 }
 
+type StrategyDetailTab =
+  | "overview"
+  | "performance"
+  | "agent_sessions"
+  | "automation"
+  | "files"
+  | "history"
+  | "debug";
+
+const STRATEGY_DETAIL_TABS: Array<{
+  id: StrategyDetailTab;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "overview",
+    label: "Overview",
+    description: "Status, definition, binding, and risk posture",
+  },
+  {
+    id: "performance",
+    label: "Performance",
+    description: "Open positions, recent orders, fills, equity curve",
+  },
+  {
+    id: "agent_sessions",
+    label: "Agent Sessions",
+    description: "Read-only Agent Workspace transcript and trace",
+  },
+  {
+    id: "automation",
+    label: "Automation",
+    description: "Schedules, tuning, runs, and proposals",
+  },
+  {
+    id: "files",
+    label: "Files & Prompts",
+    description: "Subagents, source files, and package text",
+  },
+  {
+    id: "history",
+    label: "History",
+    description: "Strategy ledgers and runtime records",
+  },
+  {
+    id: "debug",
+    label: "Raw",
+    description: "Manifest and config fallback editors",
+  },
+];
+
 export default function StrategyDetailPage({
   params,
 }: {
   params: { id: string };
 }) {
   const t = useTranslations("strategyDetail");
+  const tStrategies = useTranslations("strategies");
   const tCommon = useTranslations("common");
   const strategyId = decodeURIComponent(params.id);
   const [detail, setDetail] = useState<StrategyDetail | null>(null);
@@ -96,6 +156,8 @@ export default function StrategyDetailPage({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [activeTab, setActiveTab] =
+    useState<StrategyDetailTab>("overview");
 
   async function refresh() {
     setLoading(true);
@@ -145,6 +207,171 @@ export default function StrategyDetailPage({
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategyId]);
+
+  async function renameStrategy() {
+    if (!detail) return;
+    const nextTitle = await promptDialog({
+      title: tStrategies("editName"),
+      message: tStrategies("renamePrompt", { id: detail.strategy.id }),
+      defaultValue: detail.strategy.title || detail.strategy.id,
+      placeholder: tStrategies("fieldTitle"),
+      okLabel: tCommon("save"),
+    });
+    if (nextTitle === null) return;
+    const trimmed = nextTitle.trim();
+    if (!trimmed) {
+      setError(tStrategies("nameRequired"));
+      return;
+    }
+    if (trimmed === (detail.strategy.title || detail.strategy.id)) return;
+    setBusy("rename");
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await clientApi.strategyUpdate(detail.strategy.id, {
+        title: trimmed,
+        reason: "dashboard_rename_strategy",
+      });
+      if (!res.ok) throw new Error("strategy_rename_failed");
+      setNotice(tStrategies("nameUpdated", {
+        id: detail.strategy.id,
+        title: trimmed,
+      }));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deleteStrategy(force = false) {
+    if (!detail) return;
+    const ok = await confirmDialog({
+      message: force
+        ? tStrategies("forceDeleteConfirm", { id: detail.strategy.id })
+        : tStrategies("deleteConfirm", { id: detail.strategy.id }),
+      tone: "danger",
+      okLabel: force ? tStrategies("forceDelete") : tCommon("delete"),
+    });
+    if (!ok) return;
+    setBusy("delete");
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await clientApi.strategyDelete({
+        strategy_id: detail.strategy.id,
+        force,
+      });
+      if (!res.ok) {
+        if (res.state && !force) {
+          const closeFirst = res.state.open_positions > 0
+            ? await confirmDialog({
+                title: tStrategies("cannotDeleteTitle"),
+                message: tStrategies("cannotDelete", {
+                  positions: res.state.open_positions,
+                  executors: res.state.active_executors,
+                  orders: res.state.active_orders,
+                }),
+                okLabel: tStrategies("closePositions"),
+                cancelLabel: tStrategies("pauseInstead"),
+                tone: "warning",
+              })
+            : false;
+          if (closeFirst) {
+            await closeStrategyPositions();
+          } else {
+            await pauseStrategy();
+          }
+          return;
+        }
+        throw new Error(res.error || "strategy_delete_failed");
+      }
+      window.location.href = "/strategies";
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function closeStrategyPositions() {
+    if (!detail) return;
+    setBusy("close");
+    setError(null);
+    setNotice(null);
+    try {
+      const preview = await clientApi.strategyClosePositions({
+        strategy_id: detail.strategy.id,
+        dry_run: true,
+      });
+      if (!preview.ok) throw new Error(preview.error || "strategy_close_preview_failed");
+      if (preview.count <= 0) {
+        setNotice(tStrategies("noPositionsToClose", { id: detail.strategy.id }));
+        await refresh();
+        return;
+      }
+      const ok = await confirmDialog({
+        title: tStrategies("closePositionsTitle"),
+        message: tStrategies("closePositionsConfirm", {
+          id: detail.strategy.id,
+          count: preview.count,
+          notional: preview.positions
+            .reduce((sum, row) => sum + (Number(row.notional_usd) || 0), 0)
+            .toFixed(2),
+        }),
+        okLabel: tStrategies("closePositions"),
+        tone: "warning",
+      });
+      if (!ok) return;
+      const res = await clientApi.strategyClosePositions({
+        strategy_id: detail.strategy.id,
+        operator: "dashboard",
+        reason: "strategy_delete_prepare",
+      });
+      if (!res.ok) throw new Error(res.error || "strategy_close_positions_failed");
+      setNotice(tStrategies("closeSubmitted", {
+        id: detail.strategy.id,
+        count: res.submitted?.length ?? res.count,
+      }));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function pauseStrategy() {
+    if (!detail) return;
+    if (detail.strategy.status === "paused") {
+      setNotice(tStrategies("pausedInfo", { id: detail.strategy.id }));
+      return;
+    }
+    const ok = await confirmDialog({
+      message: tStrategies("pauseConfirm", { id: detail.strategy.id }),
+      okLabel: tStrategies("pauseStrategy"),
+      tone: "warning",
+    });
+    if (!ok) return;
+    setBusy("pause");
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await clientApi.strategySetStatus(
+        detail.strategy.id,
+        "paused",
+        "dashboard_pause",
+      );
+      if (!res.ok) throw new Error("strategy_pause_failed");
+      setNotice(tStrategies("pausedInfo", { id: detail.strategy.id }));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   const pnl = useMemo(() => summarisePnl(workspace), [workspace]);
   const runs = workspace?.runs?.runs ?? [];
@@ -201,6 +428,36 @@ export default function StrategyDetailPage({
             >
               {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
+            <button
+              onClick={() => void renameStrategy()}
+              disabled={!detail || busy !== null}
+              className="btn-ghost text-xs"
+            >
+              <EditIcon size={13} />
+              {busy === "rename" ? tStrategies("renaming") : tStrategies("editName")}
+            </button>
+            {detail && !["paused", "archived", "draft", "static_review", "backtested"].includes(detail.strategy.status) ? (
+              <button
+                onClick={() => void pauseStrategy()}
+                disabled={!detail || busy !== null}
+                className="btn-ghost text-xs text-amber-200"
+              >
+                <PauseIcon size={13} />
+                {busy === "pause" ? tStrategies("pausing") : tStrategies("pauseStrategy")}
+              </button>
+            ) : null}
+            <button
+              onClick={() => void deleteStrategy()}
+              disabled={!detail || busy !== null}
+              className="btn-ghost text-xs text-rose-300"
+            >
+              <TrashIcon size={13} />
+              {busy === "close"
+                ? tStrategies("closingPositions")
+                : busy === "delete"
+                  ? tStrategies("deleting")
+                  : tCommon("delete")}
+            </button>
           </div>
         }
       />
@@ -225,123 +482,212 @@ export default function StrategyDetailPage({
           </Card>
         ) : (
           <>
-            <KpiRow
-              detail={detail}
-              workspace={workspace}
-              pnl={pnl}
-              lastRun={lastRun}
+            <StrategyDetailTabBar
+              active={activeTab}
+              onChange={setActiveTab}
+              counts={{
+                runs: workspace?.runs?.count ?? (lastRun ? 1 : 0),
+                ledgers: Object.keys(workspace?.history?.ledgers ?? {}).length,
+              }}
             />
 
-            <StrategyDefinitionCard detail={detail} />
+            {activeTab === "overview" ? (
+              <div className="space-y-4">
+                <KpiRow
+                  detail={detail}
+                  workspace={workspace}
+                  pnl={pnl}
+                  lastRun={lastRun}
+                />
 
-            {workspace?.ok && (
-              <StrategyStatusBar
-                envelope={workspace}
-                busy={busy}
-                disabled={loading}
-                onSetBusy={setBusy}
-                onRefresh={refresh}
+                <StrategyDefinitionCard detail={detail} />
+
+                {workspace?.ok && (
+                  <StrategyStatusBar
+                    envelope={workspace}
+                    busy={busy}
+                    disabled={loading}
+                    onSetBusy={setBusy}
+                    onRefresh={refresh}
+                    onError={setError}
+                    onNotice={setNotice}
+                  />
+                )}
+
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <StrategyPromotionCard
+                    strategyId={strategyId}
+                    status={
+                      detail?.strategy?.status ??
+                      (workspace?.manifest as Record<string, unknown> | undefined)?.[
+                        "status"
+                      ] as string | undefined
+                    }
+                    onError={setError}
+                    onNotice={setNotice}
+                    onRefresh={refresh}
+                  />
+
+                  <StrategyBindCard
+                    strategyId={strategyId}
+                    currentAccountId={detail?.strategy?.account_id ?? null}
+                    currentWalletId={detail?.strategy?.wallet_id ?? null}
+                    onError={setError}
+                    onNotice={setNotice}
+                    onRefresh={refresh}
+                  />
+                </div>
+
+                <StrategyRiskDecisionsCard strategyId={strategyId} />
+              </div>
+            ) : null}
+
+            {activeTab === "performance" ? (
+              <StrategyPerformanceCard strategyId={strategyId} />
+            ) : null}
+
+            {activeTab === "agent_sessions" ? (
+              <StrategyAgentSessionsCard
+                strategyId={strategyId}
+                workspace={workspace}
+              />
+            ) : null}
+
+            {activeTab === "automation" ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <StrategyScheduleCard
+                    strategyId={strategyId}
+                    status={workspace?.schedules ?? null}
+                    busy={busy}
+                    onSetBusy={setBusy}
+                    onRefresh={refresh}
+                    onError={setError}
+                    onNotice={setNotice}
+                  />
+                  <StrategyTuningCard
+                    strategyId={strategyId}
+                    tuning={tuning}
+                    busy={busy}
+                    onSetBusy={setBusy}
+                    onRefresh={refresh}
+                    onError={setError}
+                    onNotice={setNotice}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <StrategyRunsCard
+                    runs={runs}
+                    total={workspace?.runs?.count ?? (lastRun ? 1 : 0)}
+                  />
+                  <StrategyEvolutionCard
+                    strategyId={strategyId}
+                    proposals={tuning?.pending_proposals ?? []}
+                    dropped={[]}
+                    onRefresh={refresh}
+                  />
+                </div>
+              </div>
+            ) : null}
+
+            {activeTab === "files" ? (
+              <div className="space-y-4">
+                <SubagentPromptsCard
+                  strategyId={strategyId}
+                  listed={subagents}
+                  detail={detail}
+                  files={subagentFiles}
+                  onAfterSave={async () => {
+                    await refresh();
+                  }}
+                  onError={setError}
+                  onNotice={setNotice}
+                />
+
+                <StrategyFilesCard
+                  strategyId={strategyId}
+                  files={editableFiles}
+                  onAfterSave={async () => {
+                    await refresh();
+                  }}
+                  onError={setError}
+                  onNotice={setNotice}
+                />
+              </div>
+            ) : null}
+
+            {activeTab === "history" ? (
+              <StrategyHistoryCard
+                strategyId={strategyId}
+                history={workspace?.history ?? null}
+              />
+            ) : null}
+
+            {activeTab === "debug" ? (
+              <ManifestEditorCard
+                detail={detail}
+                onAfterSave={async () => {
+                  await refresh();
+                }}
                 onError={setError}
                 onNotice={setNotice}
               />
-            )}
-
-            <StrategyPromotionCard
-              strategyId={strategyId}
-              status={
-                detail?.strategy?.status ??
-                (workspace?.manifest as Record<string, unknown> | undefined)?.[
-                  "status"
-                ] as string | undefined
-              }
-              onError={setError}
-              onNotice={setNotice}
-              onRefresh={refresh}
-            />
-
-            <StrategyBindCard
-              strategyId={strategyId}
-              currentAccountId={detail?.strategy?.account_id ?? null}
-              currentWalletId={detail?.strategy?.wallet_id ?? null}
-              onError={setError}
-              onNotice={setNotice}
-              onRefresh={refresh}
-            />
-
-            <StrategyRiskDecisionsCard strategyId={strategyId} />
-
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              <StrategyScheduleCard
-                strategyId={strategyId}
-                status={workspace?.schedules ?? null}
-                busy={busy}
-                onSetBusy={setBusy}
-                onRefresh={refresh}
-                onError={setError}
-                onNotice={setNotice}
-              />
-              <StrategyTuningCard
-                strategyId={strategyId}
-                tuning={tuning}
-                busy={busy}
-                onSetBusy={setBusy}
-                onRefresh={refresh}
-                onError={setError}
-                onNotice={setNotice}
-              />
-            </div>
-
-            <SubagentPromptsCard
-              strategyId={strategyId}
-              listed={subagents}
-              detail={detail}
-              files={subagentFiles}
-              onAfterSave={async () => {
-                await refresh();
-              }}
-              onError={setError}
-              onNotice={setNotice}
-            />
-
-            <StrategyFilesCard
-              strategyId={strategyId}
-              files={editableFiles}
-              onAfterSave={async () => {
-                await refresh();
-              }}
-              onError={setError}
-              onNotice={setNotice}
-            />
-
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              <StrategyRunsCard
-                runs={runs}
-                total={workspace?.runs?.count ?? (lastRun ? 1 : 0)}
-              />
-              <StrategyEvolutionCard
-                strategyId={strategyId}
-                proposals={tuning?.pending_proposals ?? []}
-                dropped={[]}
-                onRefresh={refresh}
-              />
-            </div>
-
-            <StrategyHistoryCard
-              strategyId={strategyId}
-              history={workspace?.history ?? null}
-            />
-
-            <ManifestEditorCard
-              detail={detail}
-              onAfterSave={async () => {
-                await refresh();
-              }}
-              onError={setError}
-              onNotice={setNotice}
-            />
+            ) : null}
           </>
         )}
       </PageBody>
+    </div>
+  );
+}
+
+function StrategyDetailTabBar({
+  active,
+  onChange,
+  counts,
+}: {
+  active: StrategyDetailTab;
+  onChange: (tab: StrategyDetailTab) => void;
+  counts: { runs: number; ledgers: number };
+}) {
+  return (
+    <div className="rounded-lg border border-brand-500/10 bg-ink-950/25 p-2">
+      <div className="flex gap-1 overflow-x-auto pb-1">
+        {STRATEGY_DETAIL_TABS.map((tab) => {
+          const selected = active === tab.id;
+          const badge =
+            tab.id === "automation"
+              ? counts.runs
+              : tab.id === "history"
+                ? counts.ledgers
+                : null;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onChange(tab.id)}
+              className={[
+                "group min-w-[150px] shrink-0 rounded-md border px-3 py-2 text-left transition-colors",
+                selected
+                  ? "border-brand-500/45 bg-brand-500/20 text-white"
+                  : "border-transparent text-ink-300 hover:border-brand-500/15 hover:bg-brand-500/10",
+              ].join(" ")}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[12px] font-semibold">{tab.label}</span>
+                {badge !== null ? (
+                  <span className="rounded-full border border-brand-500/20 px-1.5 py-0.5 text-[10px] text-ink-300">
+                    {badge}
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-1 line-clamp-2 text-[10.5px] leading-snug text-ink-500 group-hover:text-ink-400">
+                {tab.description}
+              </div>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -382,7 +728,7 @@ function DefinitionBlock({
 }) {
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
-      <div className="text-[10px] uppercase tracking-[0.16em] text-ink-500">
+      <div className="text-[11px] text-ink-500 font-medium">
         {label}
       </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
@@ -820,6 +1166,30 @@ function StrategyFilesCard({
 // Manifest / limits / config raw editors (always-present fallback)
 // ---------------------------------------------------------------------------
 
+// Common limit keys surfaced as quick-add suggestions inside the
+// graphical limits editor. Operators can still add arbitrary keys
+// with the "Add field" button, but the suggestions cover the >90%
+// case observed across active strategies.
+const LIMIT_SUGGESTIONS = [
+  "max_position_usd",
+  "max_daily_loss_usd",
+  "max_open_positions",
+  "max_orders_per_minute",
+  "max_drawdown_pct",
+  "max_leverage",
+  "min_balance_usd",
+  "kill_on_breach",
+];
+
+const CONFIG_SUGGESTIONS = [
+  "execution_mode",
+  "default_slippage_bps",
+  "default_size_usd",
+  "min_confidence",
+  "cooldown_seconds",
+  "rebalance_interval",
+];
+
 function ManifestEditorCard({
   detail,
   onAfterSave,
@@ -833,38 +1203,26 @@ function ManifestEditorCard({
 }) {
   const t = useTranslations("strategyDetail");
   const tCommon = useTranslations("common");
-  const [config, setConfig] = useState(JSON.stringify(detail.config ?? {}, null, 2));
-  const [limits, setLimits] = useState(JSON.stringify(detail.limits ?? {}, null, 2));
+  const [config, setConfig] = useState<Record<string, unknown>>(
+    () => (detail.config ?? {}) as Record<string, unknown>,
+  );
+  const [limits, setLimits] = useState<Record<string, unknown>>(
+    () => (detail.limits ?? {}) as Record<string, unknown>,
+  );
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
-    setConfig(JSON.stringify(detail.config ?? {}, null, 2));
-    setLimits(JSON.stringify(detail.limits ?? {}, null, 2));
+    setConfig((detail.config ?? {}) as Record<string, unknown>);
+    setLimits((detail.limits ?? {}) as Record<string, unknown>);
   }, [detail.config, detail.limits]);
-
-  function parseObj(label: string, text: string): Record<string, unknown> {
-    try {
-      const parsed = text.trim() ? JSON.parse(text) : {};
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error(`${label} must be a JSON object`);
-      }
-      return parsed as Record<string, unknown>;
-    } catch (e) {
-      throw new Error(
-        `${label} JSON invalid: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      );
-    }
-  }
 
   async function save() {
     setBusy("save");
     onError(null);
     try {
       await clientApi.strategyUpdate(detail.strategy.id, {
-        config: parseObj("config", config),
-        limits: parseObj("limits", limits),
+        config,
+        limits,
         reason: "dashboard_manifest_edit",
       });
       onNotice(t("configLimitsUpdated"));
@@ -884,38 +1242,71 @@ function ManifestEditorCard({
         <button
           onClick={() => void save()}
           disabled={busy !== null}
-          className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-40 text-white text-xs rounded px-3 py-1.5"
+          className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-40 text-white text-xs rounded px-3 py-1.5 cursor-pointer"
         >
           {busy === "save" ? tCommon("saving") : tCommon("save")}
         </button>
       }
     >
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-ink-500 mb-1">
-            limits.yml
-          </div>
-          <textarea
-            value={limits}
-            onChange={(e) => setLimits(e.target.value)}
-            className="input-dark font-mono w-full"
-            rows={16}
-            spellCheck={false}
-          />
-        </div>
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-ink-500 mb-1">
-            config.yml
-          </div>
-          <textarea
-            value={config}
-            onChange={(e) => setConfig(e.target.value)}
-            className="input-dark font-mono w-full"
-            rows={16}
-            spellCheck={false}
-          />
-        </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ManifestSection
+          label="limits.yml"
+          description={t("limitsHint")}
+          value={limits}
+          onChange={setLimits}
+          suggestions={LIMIT_SUGGESTIONS}
+          emptyLabel={t("manifestEmpty")}
+        />
+        <ManifestSection
+          label="config.yml"
+          description={t("configHint")}
+          value={config}
+          onChange={setConfig}
+          suggestions={CONFIG_SUGGESTIONS}
+          emptyLabel={t("manifestEmpty")}
+        />
       </div>
     </Card>
+  );
+}
+
+function ManifestSection({
+  label,
+  description,
+  value,
+  onChange,
+  suggestions,
+  emptyLabel,
+}: {
+  label: string;
+  description: string;
+  value: Record<string, unknown>;
+  onChange: (next: Record<string, unknown>) => void;
+  suggestions: string[];
+  emptyLabel: string;
+}) {
+  const count = Object.keys(value).length;
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <div>
+          <div className="text-[11px] text-ink-500 font-medium">
+            {label}
+          </div>
+          <div className="text-[11px] text-ink-400 mt-0.5 max-w-md">
+            {description}
+          </div>
+        </div>
+        <span className="text-[10px] font-mono text-ink-500">
+          {count} field{count === 1 ? "" : "s"}
+        </span>
+      </div>
+      <KeyValueEditor
+        value={value}
+        onChange={onChange}
+        suggestedKeys={suggestions}
+        emptyLabel={emptyLabel}
+      />
+    </div>
   );
 }

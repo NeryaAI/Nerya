@@ -26,10 +26,8 @@ from ..core import yaml_io
 from ..core.errors import SkillManifestError
 
 
-# Action-name prefixes that imply a pure-read operation. Mirrors how
-# coding-agent labels Read/Glob/Grep/etc. as read-only based on their
-# semantic role. Still used by the dynamic MCP bridge and by some
-# operator-side preset utilities.
+# Action-name prefixes that imply a pure-read operation. Still used by
+# the dynamic MCP bridge and by some operator-side preset utilities.
 _READ_PREFIXES: tuple[str, ...] = (
     "list_",
     "get_",
@@ -157,7 +155,7 @@ class SkillManifest:
 
     @classmethod
     def from_skill_md(cls, md_path: Path) -> "SkillManifest":
-        """Load a SKILL.md as coding-agent does — frontmatter + body, period.
+        """Load a SKILL.md by parsing frontmatter + body only.
 
         The loader is deliberately minimal: it parses the YAML
         frontmatter, captures the markdown body, and stops. It does

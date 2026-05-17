@@ -74,8 +74,9 @@ class SkillRegistry:
 
         Order of discovery:
 
-        1. ``nerya/skills/builtin/<id>/SKILL.md`` — the Anthropic-spec
-           builtins shipped with the runtime.
+        1. ``nerya/skills/builtin/**/SKILL.md`` — the Anthropic-spec
+           builtins shipped with the runtime, including grouped
+           namespaces such as ``builtin/finance/<vertical>/<skill>/``.
         2. ``workspace/skills/installed/<id>/SKILL.md`` — user-installed
            skills (managed by :mod:`nerya.skills.installer`).
         3. ``workspace/skills/<id>/SKILL.md`` and ``~/.nerya/skills/<id>/
@@ -93,7 +94,7 @@ class SkillRegistry:
         A skill whose frontmatter declares ``requires_integration:
         <name>`` is skipped entirely unless
         ``config.integration_enabled(<name>)`` is true. This keeps
-        optional third-party surfaces (``anet``, future additions)
+        optional third-party surfaces
         invisible to the agent when the operator has not opted in.
         When ``config`` is ``None`` the guard defaults to "no
         integration enabled" — safe for any caller that boots the
@@ -122,12 +123,7 @@ class SkillRegistry:
 
         # 1. Shipped Anthropic-spec builtins.
         if builtin_root.exists():
-            for d in sorted(builtin_root.iterdir()):
-                if not d.is_dir() or d.name.startswith("_") or d.name == "__pycache__":
-                    continue
-                md = d / "SKILL.md"
-                if not md.exists():
-                    continue
+            for _d, md in _walk_skill_dirs(builtin_root):
                 try:
                     manifest = SkillManifest.from_skill_md(md)
                 except Exception:
@@ -183,13 +179,13 @@ class SkillRegistry:
                             "workspace" if extra_root == workspace_paths.skills else "user_home"
                         ),
                     )
-            # Each subfolder carries SKILL.md.
-            for d in sorted(extra_root.iterdir()):
-                if not d.is_dir() or d.name == "installed":
-                    continue
-                md = d / "SKILL.md"
-                if not md.exists():
-                    continue
+            # Each subfolder may carry SKILL.md at *any* nesting depth, so
+            # operators can group skills in namespaces such as
+            # ``workspace/skills/finance/private_equity/ic_memo/SKILL.md``.
+            # ``_walk_skill_dirs`` yields one ``(skill_dir, SKILL.md)`` per
+            # discovered skill and never descends into a skill's own asset
+            # subtree (``references/``, ``scripts/``, ``tests/``, …).
+            for _d, md in _walk_skill_dirs(extra_root):
                 try:
                     manifest = SkillManifest.from_skill_md(md)
                 except Exception:
@@ -198,6 +194,12 @@ class SkillRegistry:
                     manifest.source = (
                         "workspace" if extra_root == workspace_paths.skills else "user_home"
                     )
+                    if (
+                        manifest.source == "user_home"
+                        and manifest.id in reg.by_id
+                        and reg.by_id[manifest.id].manifest.source == "workspace"
+                    ):
+                        continue
                     if enabled is None or manifest.id in enabled:
                         if _integration_ok(manifest):
                             reg.register(SkillEntry(
@@ -234,6 +236,47 @@ def _user_skill_roots(workspace_paths) -> list[Path]:
     return out
 
 
+# Directories that, when found *inside* a skill folder, are the skill's own
+# asset subtree and must NOT be re-scanned for nested skills. Keeping the
+# walker conservative here is what stops a SKILL.md under
+# ``references/``/``scripts/`` from being mis-registered as its own skill.
+_SKILL_ASSET_DIRS: frozenset[str] = frozenset(
+    {"references", "scripts", "tests", "templates", "__pycache__"}
+)
+
+
+def _walk_skill_dirs(root: Path):
+    """Yield ``(skill_dir, SKILL.md path)`` for every skill below *root*.
+
+    The walker treats *any* directory whose direct child is ``SKILL.md``
+    as a skill and stops descending into it — that subtree is the
+    skill's own assets (``scripts/``, ``references/``, …). When a
+    directory has no ``SKILL.md`` of its own and is not an asset
+    directory, the walker recurses into it so namespaces like
+    ``finance/private_equity/ic_memo/SKILL.md`` are picked up.
+
+    Hidden directories (``.something``), the ``installed`` subtree
+    (handled separately by :meth:`SkillRegistry.load_builtin`), and
+    ``__pycache__`` are always skipped.
+    """
+
+    if not root.is_dir():
+        return
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith(".") or entry.name == "installed":
+            continue
+        if entry.name in _SKILL_ASSET_DIRS:
+            continue
+        md = entry / "SKILL.md"
+        if md.exists():
+            yield entry, md
+            continue
+        # No SKILL.md here — keep recursing.
+        yield from _walk_skill_dirs(entry)
+
+
 def _register_procedural(
     reg: "SkillRegistry",
     md_path: Path,
@@ -251,6 +294,12 @@ def _register_procedural(
     if enabled is not None and skill.manifest.id not in enabled:
         return
     skill.manifest.source = source
+    if (
+        source == "user_home"
+        and skill.manifest.id in reg.by_id
+        and reg.by_id[skill.manifest.id].manifest.source == "workspace"
+    ):
+        return
     handler = make_run_handler(
         skill.body,
         skill.manifest.id,

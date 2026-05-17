@@ -68,12 +68,10 @@ class ApprovalGate:
         repo.insert(id=aid, kind="trade_intent", expires_s=expires_s, payload=payload)
         record = self._record_payload(aid, intent, decision)
         jsonl.append(self.config.paths.approvals_pending, record)
-        # Apr-29 2026 — fan the new approval out to every configured
-        # messaging channel that opted into the approvals topic so
-        # operators can resolve it from wherever they got pinged
-        # (Telegram inline keyboard, Slack buttons, dashboard inbox).
-        # Best-effort: a delivery hiccup must never break the trading
-        # path itself.
+        # Fan the new approval out to every configured messaging channel
+        # that opted into the approvals topic so operators can resolve it
+        # from wherever they were notified. Best-effort: a delivery
+        # hiccup must never break the trading path itself.
         try:
             _broadcast_approval(self.config, record)
         except Exception:
@@ -196,10 +194,8 @@ def _broadcast_approval(config: Config, record: dict[str, Any]) -> None:
         topics = cfg.get("topics")
         if isinstance(topics, list) and topics:
             return "approvals" in topics
-        # Apr-29 2026 — make approval fan-out opt-out so a freshly
-        # bound Telegram channel just works. The user explicitly asked
-        # for "support approval confirmation in the bound bot with
-        # buttons"; an opt-in flag would silently strand them.
+        # Treat approval fan-out as opt-out so a newly bound channel
+        # receives approval prompts without extra configuration.
         return True
 
     prompt = build_prompt(record, actor_id=str(record.get("actor_id") or ""))

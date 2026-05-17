@@ -382,7 +382,7 @@ class StrategyTuningLookback:
 class StrategyTuningSubagent:
     name: str = "strategy_tuner"
     prompt_file: str = "subagents/strategy_tuner.agent.md"
-    tier: str = "high"
+    tier: str = "medium"
 
 
 @dataclass(frozen=True)
@@ -444,7 +444,7 @@ class StrategyTuningConfig:
             max_age_hours=int((lb_raw or {}).get("max_age_hours", 168) or 168),
         )
         sa_raw = raw.get("subagent") or {}
-        sa_tier = str((sa_raw or {}).get("tier", "high") or "high").strip().lower()
+        sa_tier = str((sa_raw or {}).get("tier", "medium") or "medium").strip().lower()
         if sa_tier not in _VALID_LLM_TIERS:
             raise TradingError(
                 f"{where}: tuning.subagent.tier must be one of "
@@ -667,6 +667,15 @@ def load_package(paths: WorkspacePaths, strategy_id: str) -> StrategyPackage:
     return _load_from_dir(root)
 
 
+def load_package_from_dir(root: str | Path) -> StrategyPackage:
+    """Load a strategy package from an explicit package directory."""
+
+    path = Path(root)
+    if not path.exists() or not path.is_dir():
+        raise TradingError(f"unknown strategy package directory: {str(path)!r}")
+    return _load_from_dir(path)
+
+
 def load_packages(paths: WorkspacePaths) -> list[StrategyPackage]:
     """Load every package under ``workspace/strategies/<id>/``."""
 
@@ -841,5 +850,6 @@ __all__ = [
     "StrategyTuningLookback",
     "StrategyTuningSubagent",
     "load_package",
+    "load_package_from_dir",
     "load_packages",
 ]

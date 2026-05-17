@@ -69,8 +69,7 @@ class SkillRuntime:
                 f"{skill_id}.{action_name} requires subagent caller"
             )
 
-        # Apr-27 2026: alias common LLM-emitted keys before validation.
-        # Subagent LLMs (and Claude-/Gemini-shaped main agents) frequently
+        # Alias common LLM-emitted keys before validation. Models frequently
         # emit ``command`` instead of ``cmd`` for shell-style actions and
         # ``timeout_sec`` instead of ``timeout_s``. Without this
         # normalisation every such call hits the schema validator,

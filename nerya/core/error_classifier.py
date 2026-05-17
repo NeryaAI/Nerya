@@ -95,7 +95,7 @@ def classify(exc: BaseException, *, status: int | None = None) -> Classification
         return Classification(CATEGORY_SECURITY, False, False, str(exc))
     if isinstance(exc, (_e.ScriptSandboxViolation, _e.SecurityError)):
         return Classification(CATEGORY_SECURITY, False, False, str(exc))
-    if isinstance(exc, (_e.LLMBudgetExceeded, _e.LLMScriptQuotaExceeded)):
+    if isinstance(exc, _e.LLMScriptQuotaExceeded):
         return Classification(CATEGORY_BUDGET, False, False, str(exc))
     if isinstance(exc, _e.LLMApprovalRequired):
         return Classification(CATEGORY_APPROVAL, False, False, str(exc))

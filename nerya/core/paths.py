@@ -188,6 +188,15 @@ class WorkspacePaths:
     @property
     def providers_pending(self) -> Path: return self.providers_dir / "_pending"
 
+    # MCP connectors (workspace/connectors/mcp_servers.yml + token cache).
+    # Distinct from providers_dir which holds *trading* venue adapters.
+    @property
+    def connectors_dir(self) -> Path: return self.root / "connectors"
+    @property
+    def connectors_mcp_servers(self) -> Path: return self.connectors_dir / "mcp_servers.yml"
+    @property
+    def connectors_oauth_cache(self) -> Path: return self.connectors_dir / ".oauth_cache.json"
+
     # artifacts
     @property
     def artifacts(self) -> Path: return self.root / "artifacts"

@@ -1,11 +1,9 @@
 """Tool input-validation error rendering.
 
-Mirrors Claude Code's ``formatZodValidationError``
-(src/utils/toolErrors.ts:66) because — as the Anthropic team noted in
-that same file — "surprisingly, the model is not great at generating
-valid input." A Python-dict dump of the JSON schema is unreadable to
-non-Claude models; one-sentence-per-issue English renders reliably
-across Claude, DeepSeek, Qwen, OpenAI, and Gemini alike.
+Render schema-validation failures as short plain-English issue lists.
+A Python-dict dump of the JSON schema is unreadable to most models;
+one-sentence-per-issue prose renders reliably across Claude, DeepSeek,
+Qwen, OpenAI, and Gemini alike.
 
 The output is intentionally plain prose that lands inside a
 ``<tool_use_error>`` wrapper in the resulting ``tool_result`` block,
@@ -207,7 +205,7 @@ def format_schema_validation_error(
         The required parameter `markets` is missing
 
     A single-issue list uses the singular "issue"; multi-issue lists
-    use the plural "issues", matching Claude Code's phrasing.
+    use the plural "issues".
     """
 
     if not issues:

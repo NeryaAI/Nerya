@@ -1,4 +1,4 @@
-"""Signal engine contract — research runtime spec §5 Task 3-4.
+"""Signal engine contract.
 
 A signal engine is an agent-authored Python module under a candidate
 directory.  It MUST expose a class named ``SignalEngine`` with a

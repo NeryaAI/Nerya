@@ -416,7 +416,7 @@ class BudgetChecker:
         # 2. Apply per-account hard caps.
         original_notional = notional
         max_order = float(self.profile.limits.max_order_notional_usd or 0.0)
-        if max_order > 0 and notional > max_order:
+        if not reduce_only and max_order > 0 and notional > max_order:
             notional = max_order
             verdict = "resize"
             reasons.append(f"resized_to_max_order_notional:{max_order:.2f}")
@@ -424,7 +424,7 @@ class BudgetChecker:
         # 3. Apply max account NAV cap (don't open more than the
         # account is allowed to manage in total).
         max_nav = float(self.profile.limits.max_account_nav_usd or 0.0)
-        if max_nav > 0 and self.snapshot.nav_usd > max_nav:
+        if not reduce_only and max_nav > 0 and self.snapshot.nav_usd > max_nav:
             reasons.append(
                 f"account_nav_above_cap:{self.snapshot.nav_usd:.2f}>{max_nav:.2f}"
             )
@@ -466,7 +466,7 @@ class BudgetChecker:
 
         # 7. Min free balance pct constraint.
         min_pct = float(self.profile.limits.min_free_balance_pct or 0.0)
-        if min_pct > 0:
+        if not reduce_only and min_pct > 0:
             min_free_after = self.snapshot.nav_usd * min_pct
             projected_free = available - (estimated_margin + estimated_fee)
             if projected_free < min_free_after:

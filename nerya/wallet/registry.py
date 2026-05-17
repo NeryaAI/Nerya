@@ -27,6 +27,7 @@ from .providers import (
     CoinbaseWallet,
     OkxOsWallet,
     SelfCustodyWallet,
+    XagtAgentPluginWallet,
 )
 
 
@@ -61,6 +62,48 @@ def _field(
     }
 
 
+def _market_source(
+    venue: str,
+    canonical: str,
+    label: str,
+    *,
+    market_format: str,
+    fetch_method: str,
+    description: str = "",
+) -> dict[str, Any]:
+    return {
+        "venue": venue,
+        "canonical": canonical,
+        "label": label,
+        "market_format": market_format,
+        "fetch_method": fetch_method,
+        "description": description,
+    }
+
+
+def _auth_flow(
+    flow_id: str,
+    kind: str,
+    label: str,
+    description: str,
+    *,
+    docs_url: str = "",
+    commands: list[str] | tuple[str, ...] = (),
+    stores: list[str] | tuple[str, ...] = (),
+    notes: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "id": flow_id,
+        "kind": kind,
+        "label": label,
+        "description": description,
+        "docs_url": docs_url,
+        "commands": list(commands),
+        "stores": list(stores),
+        "notes": list(notes),
+    }
+
+
 PROVIDERS: dict[str, dict[str, Any]] = {
     "self_custody": {
         "id": "self_custody",
@@ -70,10 +113,31 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             "/ solders fallback. Chain coverage tracks the installed SDK."
         ),
         "install_hint": (
-            "pip install eth-account web3 solders solana  "
-            "# or follow https://github.com/goat-sdk/goat for goat."
+            "Install GOAT packages with npm:@goat-sdk/core and "
+            "npm:@goat-sdk/wallet-viem, then install Python fallbacks with "
+            "pip install eth-account web3 solders solana."
         ),
         "install_command": "pip install eth-account web3 solders solana",
+        "install_alternatives": [
+            {
+                "label": "GOAT SDK core",
+                "command": "npm:@goat-sdk/core",
+                "kind": "npm",
+                "note": "Installs the GOAT core package in the workspace node-skill area.",
+            },
+            {
+                "label": "GOAT viem wallet adapter",
+                "command": "npm:@goat-sdk/wallet-viem",
+                "kind": "npm",
+                "note": "Installs the GOAT EVM viem wallet adapter for self-custody routing.",
+            },
+            {
+                "label": "Python EVM/Solana fallback",
+                "command": "pip install eth-account web3 solders solana",
+                "kind": "pip",
+                "note": "Keeps the current Python self_custody provider dependency-ready.",
+            },
+        ],
         "links": {
             "docs": "https://github.com/goat-sdk/goat",
             "config": "wallet.self_custody.{signer_ref, rpc_urls, chains}",
@@ -103,80 +167,220 @@ PROVIDERS: dict[str, dict[str, Any]] = {
     },
     "okx_os": {
         "id": "okx_os",
-        "label": "OKX On-Chain OS (Web3 DEX API)",
+        "label": "OKX Agentic Wallet / Onchain OS",
         "description": (
-            "Fetch quotes and broadcast swaps through OKX's DEX Aggregator "
-            "API. Requires an OKX Developer API key + secret + passphrase."
+            "Install the OKX OnchainOS CLI, log in to Agentic Wallet with "
+            "email + verification code, then use the local login session "
+            "for wallet commands and OnchainOS market data."
         ),
         "install_hint": (
-            "no pip/npm required. Create an API credential at "
-            "https://www.okx.com/web3/build/dev-portal and store it via "
-            "`nerya vault create-secret`."
+            "Install the checksum-verified OnchainOS release binary, run `onchainos wallet login "
+            "<email>` and `onchainos wallet verify <code>`, then store the "
+            "local session. Advanced OKX Open API keys are optional and "
+            "only used for direct signed API fallback."
         ),
-        "install_command": "",
+        "install_command": "github-release-bin:okx/onchainos-skills#binary=onchainos",
+        "install_alternatives": [
+            {
+                "label": "OnchainOS CLI release binary",
+                "command": "github-release-bin:okx/onchainos-skills#binary=onchainos",
+                "kind": "github-release-bin",
+                "note": "Downloads the latest official onchainos release asset and verifies checksums.txt.",
+            },
+            {
+                "label": "OnchainOS skills repository",
+                "command": "git-repo:https://github.com/okx/onchainos-skills#entry=.codex/INSTALL.md",
+                "kind": "git-repo",
+                "note": "Installs the official skills/workflows source tree; the release binary is still required for wallet login.",
+            },
+        ],
         "links": {
-            "docs": "https://www.okx.com/web3/build/docs/waas/introduction",
-            "config": "wallet.okx_os.{api_key_ref, api_secret_ref, api_passphrase_ref, api_project_id}",
+            "docs": "https://web3.okx.com/zh-hans/onchainos/dev-docs/home/install-your-agentic-wallet",
+            "api_access": "https://web3.okx.com/zh-hans/onchainos/dev-docs/home/api-access-and-usage",
+            "skills": "https://github.com/okx/onchainos-skills",
+            "config": "wallet.okx_os.{account_id, api_project_id, api_key_ref, api_secret_ref, api_passphrase_ref}",
         },
         "runtime": "http",
+        "auth_cli": {
+            "kind": "binary",
+            "binary": "onchainos",
+            "install_command": "github-release-bin:okx/onchainos-skills#binary=onchainos",
+        },
+        "auth_flows": [
+            _auth_flow(
+                "okx_email_otp",
+                "email_otp",
+                "OKX Agentic Wallet email verification",
+                (
+                    "Official quick-start login uses an email address and "
+                    "verification code through the OnchainOS CLI. Use the "
+                    "returned account id for Agentic Wallet skills."
+                ),
+                docs_url="https://web3.okx.com/zh-hans/onchainos/dev-docs/home/install-your-agentic-wallet",
+                commands=[
+                    "install OnchainOS CLI release from okx/onchainos-skills",
+                    "onchainos wallet login <email>",
+                    "onchainos wallet verify <code>",
+                    "onchainos wallet status",
+                    "onchainos wallet balance",
+                ],
+                stores=["account_id", "api_project_id"],
+                notes=[
+                    "For Chinese Mainland email login, OKX documents the +86 locale flow.",
+                    "Advanced Open API keys are not part of the default login flow.",
+                ],
+            ),
+        ],
+        "market_data_sources": [
+            _market_source(
+                "okx_onchain",
+                "OKX_ONCHAIN",
+                "OKX Onchain OS",
+                market_format="chain:token",
+                fetch_method="get_token_klines",
+                description=(
+                    "OKX OnchainOS token OHLCV via the installed CLI/login "
+                    "session; direct signed API credentials are only an "
+                    "advanced fallback."
+                ),
+            ),
+        ],
         "credential_fields": [
-            _field("api_key", "OKX API Key", kind="secret"),
-            _field("api_secret", "OKX API Secret", kind="secret"),
-            _field("api_passphrase", "OKX API Passphrase", kind="secret"),
+            _field(
+                "account_id", "OKX Agentic Wallet Account ID", kind="public",
+                sensitive=False, required=False,
+                description="Account id returned by `onchainos wallet account`.",
+                placeholder="0x... or OKX account id",
+            ),
             _field(
                 "api_project_id", "OKX Project ID", kind="public",
-                sensitive=False, required=True,
-                description="Project ID issued in the OKX dev portal.",
+                sensitive=False, required=False,
+                description="Project ID used by OKX Agentic Wallet skills and Open API.",
+            ),
+        ],
+        "advanced_credential_fields": [
+            _field(
+                "api_key", "OKX Open API Key", kind="secret", required=False,
+                description="Advanced: only needed for signed OKX Web3 Open API calls.",
+            ),
+            _field(
+                "api_secret", "OKX Open API Secret", kind="secret", required=False,
+                description="Advanced: only needed for signed OKX Web3 Open API calls.",
+            ),
+            _field(
+                "api_passphrase", "OKX Open API Passphrase", kind="secret", required=False,
+                description="Advanced: only needed for signed OKX Web3 Open API calls.",
             ),
         ],
     },
     "bitget": {
         "id": "bitget",
-        "label": "Bitget Wallet Skill (Node subprocess)",
+        "label": "Bitget Wallet Skill / Market API",
         "description": (
-            "Wrap the upstream bitget-wallet-skill Node module. Nerya invokes "
-            "`node dist/nerya.js` with JSON commands on stdin/stdout."
+            "Use Bitget Wallet's official agent skill for keyless token "
+            "actions, with an optional Bitget Wallet Market API key only "
+            "when direct signed market-data endpoints are required."
         ),
         "install_hint": (
-            "1) install node 20+, 2) `git clone https://github.com/bitget-wallet/bitget-wallet-skill`, "
-            "3) run `npm install` inside it, 4) set `wallet.bitget.skill_path`."
+            "Clone https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill "
+            "and follow its README. The official skill path uses built-in "
+            "token authentication and does not require a user API key; "
+            "developer Market API keys are only for direct K-line calls."
         ),
         "install_command": (
-            # The wallet install endpoint understands "git clone <repo> "
-            # "<dest> && (cd <dest> && npm install)" as a structured
-            # node-skill bootstrap; see nerya.install.dep_installer.
-            "node-skill:https://github.com/bitget-wallet/bitget-wallet-skill"
+            "git-repo:https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill"
+            "#entry=scripts/bitget-wallet-agent-api.py"
         ),
         "install_alternatives": [
             {
-                "label": "git clone (default)",
-                "command": "node-skill:https://github.com/bitget-wallet/bitget-wallet-skill",
-                "kind": "node-skill",
+                "label": "Official skill repository",
+                "command": (
+                    "git-repo:https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill"
+                    "#entry=scripts/bitget-wallet-agent-api.py"
+                ),
+                "kind": "git-repo",
+                "note": "Clone/update the official Bitget Wallet Skill scripts into the workspace.",
             },
             {
-                "label": "npm package (@bitget-wallet/sdk)",
-                "command": "npm:@bitget-wallet/sdk",
-                "kind": "npm",
-                "note": "Lighter install, requires an npm-published Bitget SDK.",
+                "label": "Developer Market API",
+                "command": "",
+                "kind": "manual",
+                "note": "Create x-api-key credentials in the Bitget Wallet Web3 portal for signed market endpoints.",
             },
         ],
         "links": {
-            "docs": "https://github.com/bitget-wallet/bitget-wallet-skill",
-            "config": "wallet.bitget.{skill_path, entry}",
+            "docs": "https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill",
+            "skill_docs": "https://web3.bitget.com/bitget-wallet-skill-dist/bitget-wallet-skill.html?lang=en",
+            "market_api": "https://web3.bitget.com/en/docs/market/market-price",
+            "auth": "https://web3.bitget.com/en/docs/authentication/",
+            "config": "wallet.bitget.{skill_path, entry, bitget_token_ref, market_api_key_ref, market_api_secret_ref}",
         },
         "runtime": "node",
+        "auth_flows": [
+            _auth_flow(
+                "bitget_wallet_skill",
+                "skill_builtin_token",
+                "Bitget Wallet Skill built-in token",
+                (
+                    "The official Bitget Wallet Skill README says the "
+                    "included scripts use built-in token authentication and "
+                    "do not require an API key for the default actions."
+                ),
+                docs_url="https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill",
+                commands=[
+                    "git clone https://github.com/bitget-wallet-ai-lab/bitget-wallet-skill",
+                    "python scripts/bitget-wallet-agent-api.py --action token-price --chain eth --contract <token>",
+                    "export BITGET_TOKEN=<optional_custom_token>",
+                ],
+                stores=["skill_path", "bitget_token_ref"],
+                notes=[
+                    "BITGET_TOKEN is optional when the built-in token is sufficient.",
+                    "Direct Market API K-line calls use the separate x-api-key signature flow.",
+                ],
+            ),
+        ],
+        "market_data_sources": [
+            _market_source(
+                "bitget_onchain",
+                "BITGET_ONCHAIN",
+                "Bitget Wallet Markets",
+                market_format="chain:token",
+                fetch_method="get_token_klines",
+                description="Bitget Wallet Markets token OHLCV; direct API mode requires x-api-key credentials.",
+            ),
+        ],
         "credential_fields": [
             _field(
                 "skill_path", "Skill Directory", kind="public",
                 sensitive=False,
-                description="Absolute path to the cloned bitget-wallet-skill checkout.",
+                required=False,
+                description="Absolute path to the cloned Bitget Wallet Skill checkout.",
                 placeholder="/Users/me/skills/bitget-wallet-skill",
             ),
             _field(
                 "entry", "Entry file", kind="public",
                 sensitive=False, required=False,
-                description="Relative path inside the skill dir (defaults to dist/nerya.js).",
-                placeholder="dist/nerya.js",
+                description="Relative path inside the skill dir (defaults to scripts/bitget-wallet-agent-api.py).",
+                placeholder="scripts/bitget-wallet-agent-api.py",
+            ),
+            _field(
+                "bitget_token", "Optional Bitget Skill Token",
+                kind="secret", required=False,
+                description="Optional BITGET_TOKEN override; leave blank for the official built-in token path.",
+            ),
+            _field(
+                "bitget_api_url", "Optional Bitget Skill API URL",
+                kind="url", sensitive=False, required=False,
+                placeholder="https://copenapi.bitgetapp.com/v1/wallet/agent-api/swap",
+            ),
+        ],
+        "advanced_credential_fields": [
+            _field("market_api_key", "Bitget Wallet Market API Key", kind="secret", required=False),
+            _field("market_api_secret", "Bitget Wallet Market API Secret", kind="secret", required=False),
+            _field(
+                "market_base_url", "Bitget Wallet Market Base URL",
+                kind="url", sensitive=False, required=False,
+                placeholder="https://bopenapi.bgwapi.io",
             ),
         ],
     },
@@ -185,22 +389,73 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "label": "Binance Agentic Wallet (binance-web3 skill)",
         "description": (
             "Wrap the binance-web3 agentic wallet skill from "
-            "binance-skills-hub. Same stdin/stdout protocol as Bitget."
+            "binance-skills-hub. Login is performed by Binance App "
+            "QR/link approval, not by API keys."
         ),
         "install_hint": (
-            "1) install node 20+, 2) `git clone https://github.com/binance/binance-skills-hub`, "
-            "3) `cd skills/binance-web3/binance-agentic-wallet && npm install`, "
-            "4) set `wallet.binance_agentic.skill_path` to that directory."
+            "Install `@binance/agentic-wallet@1.0.9`, run `baw auth signin --json`, "
+            "approve in Binance App, then verify with "
+            "`baw auth verify --qrCodeId <id> --json`."
         ),
-        "install_command": (
-            "node-skill:https://github.com/binance/binance-skills-hub"
-            "#path=skills/binance-web3/binance-agentic-wallet"
-        ),
+        "install_command": "npm:@binance/agentic-wallet#version=1.0.9&entry=dist/index.js",
+        "install_alternatives": [
+            {
+                "label": "Binance Agentic Wallet npm CLI",
+                "command": "npm:@binance/agentic-wallet#version=1.0.9&entry=dist/index.js",
+                "kind": "npm",
+            },
+            {
+                "label": "Binance skills hub source",
+                "command": (
+                    "node-skill:https://github.com/binance/binance-skills-hub"
+                    "#path=skills/binance-web3/binance-agentic-wallet&entry=dist/index.js"
+                ),
+                "kind": "node-skill",
+            },
+        ],
         "links": {
             "docs": "https://github.com/binance/binance-skills-hub/tree/main/skills/binance-web3/binance-agentic-wallet",
+            "auth": "https://github.com/binance/binance-skills-hub/tree/main/skills/binance-web3/binance-agentic-wallet/references/authentication.md",
+            "skill_detail": "https://www.binance.com/en/skills/detail/binance-web3/binance-agentic-wallet",
             "config": "wallet.binance_agentic.{skill_path, entry}",
         },
         "runtime": "node",
+        "auth_cli": {
+            "kind": "npm",
+            "package": "@binance/agentic-wallet",
+            "version": "1.0.9",
+            "bin": "baw",
+            "install_command": "npm:@binance/agentic-wallet#version=1.0.9&entry=dist/index.js",
+        },
+        "auth_flows": [
+            _auth_flow(
+                "binance_app_qr",
+                "app_qr",
+                "Binance App QR/link approval",
+                (
+                    "The official Binance Agentic Wallet auth flow creates "
+                    "a QR/link login request, then the user approves it in "
+                    "the Binance App before Nerya uses the local session."
+                ),
+                docs_url="https://github.com/binance/binance-skills-hub/tree/main/skills/binance-web3/binance-agentic-wallet/references/authentication.md",
+                commands=[
+                    "baw auth signin --json",
+                    "baw auth verify --qrCodeId <qrCodeId> --json",
+                    "baw wallet status --json",
+                ],
+                stores=["sessionPath", "skill_path"],
+            ),
+        ],
+        "market_data_sources": [
+            _market_source(
+                "binance_alpha",
+                "BINANCE_ALPHA",
+                "Binance Alpha Market Data",
+                market_format="symbol",
+                fetch_method="get_market_klines",
+                description="Public Binance Alpha token candlesticks.",
+            ),
+        ],
         "credential_fields": [
             _field(
                 "skill_path", "Skill Directory", kind="public",
@@ -218,22 +473,25 @@ PROVIDERS: dict[str, dict[str, Any]] = {
     },
     "coinbase": {
         "id": "coinbase",
-        "label": "Coinbase CDP Wallet (cdp-sdk / coinbase-agentkit or Node skill)",
+        "label": "Coinbase Agentic Wallet / CDP Wallet",
         "description": (
-            "Use Coinbase's Developer Platform wallet. Prefers the Python "
-            "cdp-sdk / coinbase-agentkit package; falls back to a Node TS "
-            "skill (@coinbase/cdp-sdk) using the same stdin/stdout protocol "
-            "as the other Node-backed providers."
+            "Use Coinbase Agentic Wallet email OTP login for end-user wallet "
+            "sessions, or CDP SDK credentials for developer/API-backed wallet "
+            "operations."
         ),
         "install_hint": (
-            "pip install cdp-sdk  # or: pip install coinbase-agentkit. "
-            "Create an API key at https://portal.cdp.coinbase.com/ and set "
-            "wallet.coinbase.{api_key_name_ref, api_private_key_ref} via "
-            "`nerya vault create-secret`. TS-only users can instead clone "
-            "@coinbase/cdp-sdk and point wallet.coinbase.skill_path at it."
+            "For Agentic Wallet login, install/run the official AWAL CLI and "
+            "use `npx awal@2.10.0 auth login <email> --json`, then verify the "
+            "email OTP. For CDP SDK operations, install cdp-sdk and store "
+            "api_key_name/api_private_key as vault:// refs."
         ),
-        "install_command": "pip install cdp-sdk",
+        "install_command": "npm:awal#version=2.10.0&entry=dist/index.js",
         "install_alternatives": [
+            {
+                "label": "Agentic Wallet CLI (awal)",
+                "command": "npm:awal#version=2.10.0&entry=dist/index.js",
+                "kind": "npm",
+            },
             {
                 "label": "Python SDK (cdp-sdk)",
                 "command": "pip install cdp-sdk",
@@ -257,26 +515,204 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             },
         ],
         "links": {
-            "docs": "https://docs.cdp.coinbase.com/",
+            "docs": "https://github.com/coinbase/agentic-wallet-skills",
+            "auth_skill": "https://github.com/coinbase/agentic-wallet-skills/blob/main/skills/authenticate-wallet/SKILL.md",
+            "cdp_docs": "https://docs.cdp.coinbase.com/",
             "agentkit": "https://github.com/coinbase/coinbase-agentkit",
             "ts_sdk": "https://github.com/coinbase/cdp-sdk",
-            "config": "wallet.coinbase.{api_key_name_ref, api_private_key_ref, network_id, skill_path}",
+            "market_data": "https://docs.cdp.coinbase.com/exchange/reference/exchangerestapi_getproductcandles",
+            "config": "wallet.coinbase.{agentic_session_path, wallet_address, api_key_name_ref, api_private_key_ref, network_id, skill_path}",
         },
         "runtime": "python_or_node",
+        "auth_cli": {
+            "kind": "npm",
+            "package": "awal",
+            "version": "2.10.0",
+            "bin": "awal",
+            "install_command": "npm:awal#version=2.10.0&entry=dist/index.js",
+        },
+        "auth_flows": [
+            _auth_flow(
+                "coinbase_email_otp",
+                "email_otp",
+                "Coinbase Agentic Wallet email OTP",
+                (
+                    "The official authenticate-wallet skill uses the AWAL "
+                    "CLI: start login with an email address, then verify the "
+                    "six-digit OTP from email."
+                ),
+                docs_url="https://github.com/coinbase/agentic-wallet-skills/blob/main/skills/authenticate-wallet/SKILL.md",
+                commands=[
+                    "npm install awal@2.10.0",
+                    "npx awal@2.10.0 auth login <email> --json",
+                    "npx awal@2.10.0 auth verify <otp> --json",
+                    "npx awal@2.10.0 status --json",
+                ],
+                stores=["agentic_session_path", "wallet_address", "network_id"],
+            ),
+        ],
+        "market_data_sources": [
+            _market_source(
+                "coinbase_wallet",
+                "COINBASE_WALLET",
+                "Coinbase Public Product Candles",
+                market_format="product",
+                fetch_method="get_market_klines",
+                description="Coinbase public product candles for wallet operators.",
+            ),
+        ],
         "credential_fields": [
             _field(
-                "api_key_name", "CDP API Key Name", kind="secret",
-                description="The named API key string from CDP (organizations/...).",
+                "agentic_session_path", "Agentic Wallet Session Path", kind="public",
+                sensitive=False, required=False,
+                description="Local session path returned by `awal auth verify` / `awal auth status`.",
             ),
             _field(
-                "api_private_key", "CDP Private Key", kind="secret",
-                description="PEM-encoded private key generated alongside the API key name.",
+                "wallet_address", "Agentic Wallet Address", kind="public",
+                sensitive=False, required=False,
+                description="Wallet address returned by `awal auth verify`.",
             ),
             _field(
                 "network_id", "Network ID", kind="public",
                 sensitive=False, required=False,
                 description="Default network the wallet operates on.",
                 placeholder="base-mainnet",
+            ),
+        ],
+        "advanced_credential_fields": [
+            _field(
+                "api_key_name", "CDP API Key Name", kind="secret", required=False,
+                description="Advanced CDP SDK path: the named API key string from CDP (organizations/...).",
+            ),
+            _field(
+                "api_private_key", "CDP Private Key", kind="secret", required=False,
+                description="Advanced CDP SDK path: PEM-encoded private key generated alongside the API key name.",
+            ),
+            _field(
+                "skill_path", "Node Skill Directory", kind="public",
+                sensitive=False, required=False,
+                description="Optional checkout/package path for the Node CDP skill fallback.",
+                placeholder="/Users/me/skills/cdp-sdk",
+            ),
+        ],
+    },
+    "xagt_agent_plugin": {
+        "id": "xagt_agent_plugin",
+        "label": "XAgent x OKX Agent Plugin",
+        "description": (
+            "Install @xagt/agent-plugin, use the XAgent browser/device login "
+            "flow, then expose the OKX OnchainOS-backed token K-line source "
+            "inside Nerya's market-data routing."
+        ),
+        "install_hint": (
+            "Install `@xagt/agent-plugin@0.4.0`, open the returned XAgent "
+            "login URL, approve the user code, then click verify so Nerya "
+            "stores the XAgent session as vault:// refs."
+        ),
+        "install_command": "npm:@xagt/agent-plugin#version=0.4.0&entry=dist/cli.js",
+        "install_alternatives": [
+            {
+                "label": "XAgent agent plugin npm package",
+                "command": "npm:@xagt/agent-plugin#version=0.4.0&entry=dist/cli.js",
+                "kind": "npm",
+                "note": "Installs the official xagt-plugin CLI package into the workspace.",
+            },
+        ],
+        "links": {
+            "npm": "https://www.npmjs.com/package/@xagt/agent-plugin",
+            "config": (
+                "wallet.xagt_agent_plugin.{plugin_path, user_id, "
+                "access_token_ref, refresh_token_ref, api_base_url, frontend_base_url}"
+            ),
+        },
+        "runtime": "node",
+        "auth_cli": {
+            "kind": "npm",
+            "package": "@xagt/agent-plugin",
+            "version": "0.4.0",
+            "bin": "xagt-plugin",
+            "install_command": "npm:@xagt/agent-plugin#version=0.4.0&entry=dist/cli.js",
+        },
+        "auth_flows": [
+            _auth_flow(
+                "xagt_device_login",
+                "device_code",
+                "XAgent browser/device login",
+                (
+                    "Nerya starts the same device auth flow used by "
+                    "@xagt/agent-plugin, returns a browser login URL and "
+                    "user code, then verifies the device code after approval."
+                ),
+                docs_url="https://www.npmjs.com/package/@xagt/agent-plugin",
+                commands=[
+                    "npm install @xagt/agent-plugin@0.4.0",
+                    "xagt-plugin login --no-browser",
+                    "xagt-plugin setup --target all",
+                    "xagt-plugin doctor",
+                ],
+                stores=[
+                    "user_id",
+                    "access_token_ref",
+                    "refresh_token_ref",
+                    "plugin_path",
+                ],
+                notes=[
+                    "XAgent tokens are never returned to the browser; Nerya persists only vault:// refs.",
+                    "Token K-lines are routed through the OKX OnchainOS provider/fallback.",
+                ],
+            ),
+        ],
+        "market_data_sources": [
+            _market_source(
+                "xagt_onchain",
+                "XAGT_ONCHAIN",
+                "XAgent x OKX Onchain Data",
+                market_format="chain:token",
+                fetch_method="get_token_klines",
+                description=(
+                    "Token OHLCV through the XAgent/OKX plugin binding. "
+                    "Uses OKX OnchainOS first and Nerya's real public "
+                    "on-chain K-line fallback if the local OKX CLI is unavailable."
+                ),
+            ),
+        ],
+        "credential_fields": [
+            _field(
+                "plugin_path", "Plugin install path", kind="public",
+                sensitive=False, required=False,
+                description="Workspace install path for @xagt/agent-plugin.",
+            ),
+            _field(
+                "user_id", "XAgent user id", kind="public",
+                sensitive=False, required=False,
+                description="User id returned by the XAgent device login flow.",
+            ),
+            _field(
+                "api_base_url", "XAgent API base URL", kind="url",
+                sensitive=False, required=False,
+                placeholder="https://api.xerpaai.com",
+            ),
+            _field(
+                "frontend_base_url", "XAgent frontend base URL", kind="url",
+                sensitive=False, required=False,
+                placeholder="https://www.xerpaai.com",
+            ),
+        ],
+        "advanced_credential_fields": [
+            _field(
+                "access_token", "XAgent access token", kind="secret",
+                required=False,
+                description="Normally filled by device login and stored as access_token_ref.",
+            ),
+            _field(
+                "refresh_token", "XAgent refresh token", kind="secret",
+                required=False,
+                description="Normally filled by device login and stored as refresh_token_ref.",
+            ),
+            _field(
+                "credentials_path", "XAgent credentials path", kind="public",
+                sensitive=False, required=False,
+                description="Optional path to an existing xagt credentials.json for status/import.",
             ),
         ],
     },
@@ -322,6 +758,59 @@ def list_providers() -> list[dict[str, Any]]:
     return out
 
 
+def market_data_sources_for_provider(name: str) -> list[dict[str, Any]]:
+    """Return static wallet market-data sources declared by a provider."""
+
+    entry = PROVIDERS.get((name or "").strip().lower()) or {}
+    return [dict(row) for row in (entry.get("market_data_sources") or [])]
+
+
+def list_wallet_market_data_sources() -> list[dict[str, Any]]:
+    """Return every wallet-provider-backed market-data source."""
+
+    out: list[dict[str, Any]] = []
+    for provider, entry in PROVIDERS.items():
+        for row in entry.get("market_data_sources") or []:
+            item = dict(row)
+            item["provider"] = provider
+            out.append(item)
+    return out
+
+
+def resolve_provider_name(name: str) -> str | None:
+    """Resolve a wallet provider id or one of its market-source aliases.
+
+    Operator surfaces sometimes show wallet-backed market sources such
+    as ``xagt_onchain`` next to normal exchange venues. Those are valid
+    candle sources, but account management needs the owning wallet
+    provider id (``xagt_agent_plugin``) so credential schemas and
+    wallet bindings route through the wallet registry.
+    """
+
+    candidate = (name or "").strip().lower()
+    if not candidate:
+        return None
+    if candidate in PROVIDERS:
+        return candidate
+    for provider, entry in PROVIDERS.items():
+        for row in entry.get("market_data_sources") or []:
+            aliases = {
+                str(row.get("venue") or "").strip().lower(),
+                str(row.get("canonical") or "").strip().lower(),
+            }
+            if candidate in aliases:
+                return provider
+    return None
+
+
+def _npm_install_root(workspace: Path | None, package: str) -> Path | None:
+    if workspace is None:
+        return None
+    safe = package.replace("@", "").replace("/", "__")
+    root = Path(workspace) / "skills" / "_node" / safe
+    return root if root.exists() else None
+
+
 def build_provider(
     name: str,
     cfg: dict[str, Any] | None = None,
@@ -347,24 +836,49 @@ def build_provider(
         api_pass = _resolve(cfg.get("api_passphrase_ref") or cfg.get("api_passphrase"),
                             workspace, vault_passphrase)
         return OkxOsWallet(
+            account_id=str(cfg.get("account_id") or ""),
             api_key=api_key or "",
             api_secret=api_secret or "",
             api_passphrase=api_pass or "",
             api_project_id=str(cfg.get("api_project_id") or ""),
             base_url=str(cfg.get("base_url") or OkxOsWallet.base_url),
+            workspace=str(workspace or ""),
             config=cfg,
         )
     if name_l == "bitget":
+        market_api_key = _resolve(
+            cfg.get("market_api_key_ref") or cfg.get("market_api_key"),
+            workspace,
+            vault_passphrase,
+        )
+        market_api_secret = _resolve(
+            cfg.get("market_api_secret_ref") or cfg.get("market_api_secret"),
+            workspace,
+            vault_passphrase,
+        )
         return BitgetWalletSkill(
             skill_path=str(cfg.get("skill_path") or ""),
             entry=str(cfg.get("entry") or BitgetWalletSkill.entry),
             repo=str(cfg.get("repo") or BitgetWalletSkill.repo),
+            market_api_key=market_api_key or "",
+            market_api_secret=market_api_secret or "",
+            market_base_url=str(cfg.get("market_base_url") or BitgetWalletSkill.market_base_url),
             config=cfg,
         )
     if name_l == "binance_agentic":
+        skill_path = str(cfg.get("skill_path") or "")
+        entry = str(cfg.get("entry") or BinanceAgenticWallet.entry)
+        if not skill_path:
+            install_root = _npm_install_root(workspace, "@binance/agentic-wallet")
+            package_entry = (
+                Path("node_modules") / "@binance" / "agentic-wallet" / "dist" / "index.js"
+            )
+            if install_root and (install_root / package_entry).exists():
+                skill_path = str(install_root)
+                entry = str(package_entry)
         return BinanceAgenticWallet(
-            skill_path=str(cfg.get("skill_path") or ""),
-            entry=str(cfg.get("entry") or BinanceAgenticWallet.entry),
+            skill_path=skill_path,
+            entry=entry,
             repo=str(cfg.get("repo") or BinanceAgenticWallet.repo),
             config=cfg,
         )
@@ -380,6 +894,35 @@ def build_provider(
             skill_path=str(cfg.get("skill_path") or ""),
             entry=str(cfg.get("entry") or CoinbaseWallet.entry),
             repo=str(cfg.get("repo") or CoinbaseWallet.repo),
+            config=cfg,
+        )
+    if name_l == "xagt_agent_plugin":
+        access_token = _resolve(
+            cfg.get("access_token_ref") or cfg.get("access_token"),
+            workspace,
+            vault_passphrase,
+        )
+        refresh_token = _resolve(
+            cfg.get("refresh_token_ref") or cfg.get("refresh_token"),
+            workspace,
+            vault_passphrase,
+        )
+        plugin_path = str(cfg.get("plugin_path") or "")
+        if not plugin_path:
+            install_root = _npm_install_root(workspace, "@xagt/agent-plugin")
+            if install_root:
+                pkg_root = install_root / "node_modules" / "@xagt" / "agent-plugin"
+                plugin_path = str(pkg_root if pkg_root.exists() else install_root)
+        return XagtAgentPluginWallet(
+            plugin_path=plugin_path,
+            workspace=str(workspace or ""),
+            user_id=str(cfg.get("user_id") or ""),
+            access_token=access_token or "",
+            refresh_token=refresh_token or "",
+            access_expire=str(cfg.get("access_expire") or ""),
+            scope=str(cfg.get("scope") or ""),
+            api_base_url=str(cfg.get("api_base_url") or "https://api.xerpaai.com"),
+            frontend_base_url=str(cfg.get("frontend_base_url") or "https://www.xerpaai.com"),
             config=cfg,
         )
     raise WalletProviderNotFound(
@@ -409,7 +952,7 @@ def list_configured_providers(
 ) -> list[dict[str, Any]]:
     """Return every wallet binding declared in ``nerya.yml``.
 
-    04-29 §11 P8 — Nerya now lets operators run *multiple*
+    Nerya now lets operators run *multiple*
     wallet providers in parallel by declaring them under
     ``wallet.providers.<wallet_id>`` (each entry carries a provider id
     and a per-id config). The legacy ``wallet.provider`` key still works
@@ -554,16 +1097,27 @@ def resolve_for_strategy(
         except Exception:
             strategy_wallet_id = None
 
+    selected: dict[str, Any] | None = None
     if strategy_wallet_id:
-        name = strategy_wallet_id
-        source = "strategy"
+        for binding in list_configured_providers(config):
+            if binding["wallet_id"] == strategy_wallet_id:
+                selected = binding
+                break
+        if selected is None:
+            name = strategy_wallet_id
+            provider_cfg = dict((wallet_cfg.get(name) or {}))
+            source = "strategy"
+        else:
+            name = str(selected["provider"])
+            provider_cfg = dict(selected.get("config") or {})
+            source = "strategy"
     else:
         name = str(wallet_cfg.get("provider") or "").strip().lower()
+        provider_cfg = dict((wallet_cfg.get(name) or {}))
         source = "global" if name else "none"
     if not name:
         return "", None, "none"
 
-    provider_cfg = dict((wallet_cfg.get(name) or {}))
     per_strategy = (
         dict((provider_cfg.pop("strategies", None) or {}).get(sid) or {})
         if sid else {}
@@ -576,6 +1130,27 @@ def resolve_for_strategy(
         workspace=workspace, vault_passphrase=vault_passphrase,
     )
     return name, provider, source
+
+
+def _meaningful_wallet_config(cfg: dict[str, Any]) -> bool:
+    """Return True when a legacy provider block contains real config.
+
+    Default ``nerya.yml`` includes placeholder blocks such as
+    ``wallet.bitget.entry: dist/nerya.js``. Those placeholders should not
+    mask a real ``wallet.providers.<wallet_id>`` binding.
+    """
+
+    for key, value in (cfg or {}).items():
+        if value in (None, "", [], {}):
+            continue
+        if key == "entry" and value in {
+            "dist/nerya.js",
+            "dist/index.js",
+            "scripts/bitget-wallet-agent-api.py",
+        }:
+            continue
+        return True
+    return False
 
 
 def readiness_report(
@@ -599,10 +1174,22 @@ def readiness_report(
       UIs can render a single truthful pill per provider.
     """
     out: list[dict[str, Any]] = []
+    bindings = list_configured_providers(config)
     for name in PROVIDERS:
         static = dict(PROVIDERS[name])
         static.setdefault("installed", True)
-        cfg = dict((((config or {}).get("wallet") or {}).get(name) or {}))
+        wallet_cfg = ((config or {}).get("wallet") or {})
+        cfg = dict((wallet_cfg.get(name) or {}))
+        binding_cfg: dict[str, Any] | None = None
+        for binding in bindings:
+            if binding.get("provider") == name:
+                binding_cfg = dict(binding.get("config") or {})
+                static["configured_wallet_id"] = binding.get("wallet_id")
+                break
+        if binding_cfg is not None:
+            cfg = binding_cfg
+        elif not _meaningful_wallet_config(cfg):
+            cfg = {}
         caps: WalletCapabilities | None = None
         try:
             p = build_provider(name, cfg, workspace=workspace,
@@ -677,5 +1264,6 @@ __all__ = [
     "PROVIDERS", "WalletRegistry", "build_provider",
     "list_providers", "readiness_report", "resolve_active",
     "resolve_for_strategy", "resolve_for_account",
-    "list_configured_providers",
+    "list_configured_providers", "market_data_sources_for_provider",
+    "list_wallet_market_data_sources", "resolve_provider_name",
 ]

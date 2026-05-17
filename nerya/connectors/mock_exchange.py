@@ -39,3 +39,51 @@ class MockExchange(Connector):
             spread_bps=10.0, ts_ms=int(time.time() * 1000),
             venue=self.venue,
         )
+
+    def get_klines(
+        self,
+        market: str,
+        *,
+        interval: str = "1m",
+        limit: int = 100,
+    ) -> list[list[float]]:
+        from ..data.candles import mock_candles
+
+        interval_s = _interval_seconds(interval)
+        rows = mock_candles(
+            market,
+            count=max(1, int(limit or 100)),
+            interval_s=interval_s,
+            seed_price=self.get_mark_price(market),
+        )
+        return [
+            [
+                int(row["ts"]) * 1000,
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                float(row["volume"]),
+            ]
+            for row in rows
+        ]
+
+
+def _interval_seconds(interval: str) -> int:
+    raw = str(interval or "1m").strip().lower()
+    if len(raw) < 2:
+        return 60
+    try:
+        n = max(1, int(raw[:-1]))
+    except ValueError:
+        return 60
+    unit = raw[-1]
+    if unit == "s":
+        return n
+    if unit == "m":
+        return n * 60
+    if unit == "h":
+        return n * 3600
+    if unit == "d":
+        return n * 86400
+    return 60

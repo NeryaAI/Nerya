@@ -1,8 +1,7 @@
 """Transcript-aware compaction with tool_use / tool_result invariants.
 
-Audit finding 4.7 called out that Nerya had TTL-based markdown memory
-compaction but not the coding-agent-style *transcript-aware* compaction
-that respects tool-use/tool-result pairs. This module closes that gap.
+Nerya already had TTL-based markdown memory compaction. This module adds
+transcript-aware compaction that respects tool-use/tool-result pairs.
 
 Design goals (kept small and dependency-free on purpose):
 
@@ -24,8 +23,7 @@ Design goals (kept small and dependency-free on purpose):
     even when free-form chatter is pruned.
 - We always evict in pairs (tool_use + tool_result together).
 - When we evict a chunk, we leave a single summary message in its
-  place so downstream readers know something was compacted (similar
-  to coding-agent's session compact breadcrumbs).
+  place so downstream readers know something was compacted.
 
 This module is pure-python and does not touch disk by itself; the
 agent kernel / session store decides when to run it and where to
@@ -34,6 +32,7 @@ persist the result. That keeps the test surface tight.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -108,6 +107,108 @@ def _is_pinned(msg: dict[str, Any]) -> bool:
 
 def _is_system(msg: dict[str, Any]) -> bool:
     return msg.get("role") == "system"
+
+
+_FILE_REF_RE = re.compile(
+    r"`(?P<bt>[^`\r\n]{1,180}\.(?:py|ts|tsx|js|jsx|md|json|yml|yaml|toml|rs|go|sh|ps1|sql|html|css))`"
+    r"|(?P<path>(?:[A-Za-z]:\\[^\s`'\"<>]+|(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z0-9_+-]+))"
+)
+
+
+def _text_from_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+            elif item.get("type") == "tool_use":
+                name = item.get("name") or "tool"
+                parts.append(f"tool_use:{name}")
+            elif item.get("type") == "tool_result":
+                inner = item.get("content")
+                if isinstance(inner, str):
+                    parts.append(inner)
+                elif isinstance(inner, list):
+                    for part in inner:
+                        if isinstance(part, dict) and isinstance(part.get("text"), str):
+                            parts.append(str(part["text"]))
+        return "\n".join(parts)
+    return ""
+
+
+def _compact_line(text: str, *, limit: int = 220) -> str:
+    for line in str(text or "").splitlines():
+        clean = re.sub(r"\s+", " ", line).strip(" -*#>")
+        if clean:
+            return clean[: max(1, limit - 3)].rstrip() + "..." if len(clean) > limit else clean
+    return ""
+
+
+def _extract_file_refs(text: str) -> list[str]:
+    refs: list[str] = []
+    for match in _FILE_REF_RE.finditer(text):
+        ref = (match.group("bt") or match.group("path") or "").strip("`.,;:)(")
+        if ref and ref not in refs:
+            refs.append(ref)
+        if len(refs) >= 8:
+            break
+    return refs
+
+
+def _summarize_evicted_run(
+    messages: list[dict[str, Any]],
+    indices: list[int],
+    *,
+    summary_prefix: str,
+) -> str:
+    selected = [messages[i] for i in indices if 0 <= i < len(messages)]
+    roles: dict[str, int] = {}
+    tools: list[str] = []
+    user_lines: list[str] = []
+    assistant_lines: list[str] = []
+    file_refs: list[str] = []
+    for msg in selected:
+        role = str(msg.get("role") or "unknown")
+        roles[role] = roles.get(role, 0) + 1
+        content = msg.get("content")
+        text = _text_from_content(content)
+        if role == "user":
+            line = _compact_line(text)
+            if line and line not in user_lines:
+                user_lines.append(line)
+        elif role == "assistant":
+            line = _compact_line(text)
+            if line and line not in assistant_lines:
+                assistant_lines.append(line)
+        for entry in _content_entries(msg):
+            if entry.get("type") == "tool_use":
+                name = str(entry.get("name") or "")
+                if name and name not in tools:
+                    tools.append(name)
+        for ref in _extract_file_refs(text):
+            if ref not in file_refs:
+                file_refs.append(ref)
+
+    lines = [
+        f"{summary_prefix} dropped {len(indices)} message(s) between positions {indices[0]} and {indices[-1]}.",
+        "Preserved summary of the dropped span:",
+    ]
+    if roles:
+        lines.append("- roles: " + ", ".join(f"{k}={v}" for k, v in sorted(roles.items())))
+    if user_lines:
+        lines.append("- user signals: " + " | ".join(user_lines[:3]))
+    if assistant_lines:
+        lines.append("- assistant signals: " + " | ".join(assistant_lines[:3]))
+    if tools:
+        lines.append("- tools: " + ", ".join(tools[:8]))
+    if file_refs:
+        lines.append("- files/artifacts: " + ", ".join(file_refs[:8]))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -250,9 +351,10 @@ def compact_transcript(
         breadcrumb: dict[str, Any] = {
             "role": "system",
             "kind": "transcript.compact.breadcrumb",
-            "content": (
-                f"{summary_prefix} dropped {len(evicted_run)} message(s) "
-                f"between positions {evicted_run[0]} and {evicted_run[-1]}"
+            "content": _summarize_evicted_run(
+                messages,
+                evicted_run,
+                summary_prefix=summary_prefix,
             ),
             "meta": {"dropped_indices": list(evicted_run)},
         }

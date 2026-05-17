@@ -36,19 +36,29 @@ or CLI.
 
 from __future__ import annotations
 
+import html
 import logging
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional
+from urllib.parse import quote as url_quote
 
+from ..connectors.http import UrllibHttp
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
+from ..core.truth import live_envelope, mock_envelope, resolve_allow_mock
+from ..data.candles import fetch_candles, mock_candles
+from ..data.equities import EquitiesClient
+from ..data.features import compute_features
+from ..data.news import fetch_news, mock_news
 from ..strategy_history import store as history_store
 from .package import StrategyPackage, load_package
 from .state import StrategyRunRecord, StrategyRunStore
 
 
 _LOG = logging.getLogger(__name__)
+_RSS_ITEM_RE = re.compile(r"<item\b.*?</item>", re.DOTALL | re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +79,8 @@ class StrategyPerformanceSnapshot:
     trade_metrics: dict[str, Any] = field(default_factory=dict)
     cost_metrics: dict[str, Any] = field(default_factory=dict)
     risk_metrics: dict[str, Any] = field(default_factory=dict)
+    market_context: dict[str, Any] = field(default_factory=dict)
+    news_context: dict[str, Any] = field(default_factory=dict)
     last_run_at: Optional[str] = None
     last_review_at: Optional[str] = None
     notes: list[str] = field(default_factory=list)
@@ -88,6 +100,7 @@ def build_snapshot(
     *,
     lookback_runs: int = 200,
     package: Optional[StrategyPackage] = None,
+    config_like: Any | None = None,
 ) -> StrategyPerformanceSnapshot:
     """Compose a :class:`StrategyPerformanceSnapshot` from on-disk data."""
 
@@ -116,6 +129,8 @@ def build_snapshot(
     trade_metrics = _summarise_trades(intents, orders, fills, pnls)
     risk_metrics = _summarise_risk(risk_rows, decisions)
     cost_metrics = _summarise_costs(subagent_rows)
+    market_context = _build_market_context(pkg, config_like=config_like)
+    news_context = _build_news_context(pkg, config_like=config_like)
 
     last_review_at = None
     if reviews:
@@ -138,6 +153,8 @@ def build_snapshot(
         trade_metrics=trade_metrics,
         cost_metrics=cost_metrics,
         risk_metrics=risk_metrics,
+        market_context=market_context,
+        news_context=news_context,
         last_run_at=last_run_at,
         last_review_at=last_review_at,
         notes=notes,
@@ -157,6 +174,434 @@ def _read(
     except Exception:
         _LOG.exception("read_ledger %s failed for %s", name, strategy_id)
         return []
+
+
+def _build_market_context(
+    package: StrategyPackage | None,
+    *,
+    config_like: Any | None,
+) -> dict[str, Any]:
+    if package is None:
+        return {"markets": [], "timeframe": "", "items": [], "notes": ["package unavailable"]}
+    timeframe = _review_timeframe(package)
+    items: list[dict[str, Any]] = []
+    for market in list(package.manifest.markets)[:12]:
+        rows = _fetch_review_candles(
+            str(market),
+            timeframe=timeframe,
+            config_like=config_like,
+        )
+        envelope = _first_envelope(rows)
+        features = compute_features(rows)
+        items.append(
+            {
+                "market": market,
+                "timeframe": timeframe,
+                "candles_count": len(rows),
+                "recent_candles": _compact_candles(rows[-24:]),
+                "features": features,
+                "_envelope": envelope,
+            }
+        )
+    return {
+        "timeframe": timeframe,
+        "markets": list(package.manifest.markets),
+        "items": items,
+        "notes": [
+            "recent_candles are the K-line tail used for strategy tuning review",
+            "features are computed from the same recent candle window",
+        ],
+    }
+
+
+def _build_news_context(
+    package: StrategyPackage | None,
+    *,
+    config_like: Any | None,
+) -> dict[str, Any]:
+    if package is None:
+        return {"items": [], "count": 0, "notes": ["package unavailable"]}
+    equity_symbols = sorted(_equity_symbols(package.manifest.markets))
+    if equity_symbols:
+        return _build_equity_news_context(equity_symbols, config_like=config_like)
+    try:
+        if resolve_allow_mock(config_like=config_like):
+            rows = mock_news()
+        else:
+            rows = fetch_news(limit=12, allow_mock=False, config_like=config_like)
+    except Exception as exc:
+        return {
+            "items": [],
+            "count": 0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    tickers = _market_symbols(package.manifest.markets)
+    filtered = []
+    for row in rows[:24]:
+        if not isinstance(row, dict):
+            continue
+        symbols = {
+            str(t).upper()
+            for t in (row.get("tickers") or [])
+            if str(t).strip()
+        }
+        text = " ".join([
+            str(row.get("title") or ""),
+            str(row.get("body") or ""),
+            str(row.get("summary") or ""),
+        ]).upper()
+        matched = sorted((symbols | {t for t in tickers if t and t in text}) & tickers)
+        if tickers and not matched:
+            continue
+        filtered.append(
+            {
+                "source": row.get("source"),
+                "title": row.get("title"),
+                "summary": row.get("summary") or row.get("body"),
+                "published_at": row.get("published_at") or row.get("ts"),
+                "link": row.get("link"),
+                "tickers": list(row.get("tickers") or []),
+                "matched_tickers": matched,
+                "_envelope": row.get("_envelope") if isinstance(row.get("_envelope"), dict) else None,
+            }
+        )
+        if len(filtered) >= 12:
+            break
+    if not filtered:
+        filtered = [
+            {
+                "source": row.get("source"),
+                "title": row.get("title"),
+                "summary": row.get("summary") or row.get("body"),
+                "published_at": row.get("published_at") or row.get("ts"),
+                "link": row.get("link"),
+                "tickers": list(row.get("tickers") or []),
+                "_envelope": row.get("_envelope") if isinstance(row.get("_envelope"), dict) else None,
+            }
+            for row in rows[:8]
+            if isinstance(row, dict)
+        ]
+    return {
+        "count": len(filtered),
+        "symbols": sorted(tickers),
+        "items": filtered,
+        "notes": [
+            "news is best-effort and envelope-marked; absence of matching news is evidence, not an error",
+        ],
+    }
+
+
+def _build_equity_news_context(
+    tickers: list[str],
+    *,
+    config_like: Any | None,
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+    if resolve_allow_mock(config_like=config_like):
+        env = mock_envelope(
+            "financial_datasets",
+            provider="financialdatasets.ai",
+        ).as_dict()
+        for ticker in tickers[:12]:
+            items.extend(_mock_equity_news(ticker, env=env))
+        return {
+            "count": len(items),
+            "symbols": tickers,
+            "items": items,
+            "notes": [
+                "equity news is ticker-matched for strategy tuning review",
+                "mock equity news was used because mock mode is explicitly enabled",
+            ],
+        }
+
+    client = EquitiesClient()
+    for ticker in tickers[:12]:
+        try:
+            payload = client.news(ticker, limit=12)
+        except Exception as exc:
+            errors.append(f"{ticker}:{type(exc).__name__}: {exc}")
+            continue
+        env = payload.get("_envelope") if isinstance(payload, dict) else None
+        rows = _extract_equity_news_rows(payload)
+        if not rows:
+            err = ""
+            if isinstance(env, dict):
+                err = str(env.get("error") or "")
+            errors.append(f"{ticker}:{err or 'no_items'}")
+            continue
+        for row in rows[:12]:
+            if not isinstance(row, dict):
+                continue
+            items.append(
+                {
+                    "source": row.get("source") or "financial_datasets",
+                    "title": row.get("title") or row.get("headline"),
+                    "summary": (
+                        row.get("summary")
+                        or row.get("description")
+                        or row.get("body")
+                        or row.get("content")
+                    ),
+                    "published_at": (
+                        row.get("published_at")
+                        or row.get("published_date")
+                        or row.get("date")
+                        or row.get("created_at")
+                    ),
+                    "link": row.get("link") or row.get("url"),
+                    "tickers": list(row.get("tickers") or [ticker]),
+                    "matched_tickers": [ticker],
+                    "_envelope": env if isinstance(env, dict) else None,
+                }
+            )
+            if len(items) >= 24:
+                break
+        if len(items) >= 24:
+            break
+    if not items:
+        fallback = _fetch_yahoo_equity_news(
+            tickers,
+            limit=24,
+        )
+        items.extend(fallback["items"])
+        errors.extend(fallback["errors"])
+    notes = [
+        "equity news is sourced per ticker via Financial Datasets when keys are configured, then Yahoo Finance RSS as a no-key fallback",
+        "absence of matching equity news is evidence, not an error",
+    ]
+    if errors:
+        notes.append("degraded equity news: " + "; ".join(errors[:8]))
+    return {
+        "count": len(items),
+        "symbols": tickers,
+        "items": items,
+        "errors": errors,
+        "notes": notes,
+    }
+
+
+def _fetch_yahoo_equity_news(tickers: list[str], *, limit: int) -> dict[str, Any]:
+    if limit <= 0:
+        return {"items": [], "errors": []}
+    http = UrllibHttp(rate_limit_per_sec=4.0)
+    env = live_envelope(
+        "yahoo_finance_rss",
+        provider="finance.yahoo.com",
+    ).as_dict()
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for ticker in tickers[:12]:
+        url = (
+            "https://feeds.finance.yahoo.com/rss/2.0/headline"
+            f"?s={url_quote(ticker)}&region=US&lang=en-US"
+        )
+        try:
+            status, body = http.request("GET", url, timeout=15.0)
+        except Exception as exc:
+            errors.append(f"{ticker}:yahoo_rss:{type(exc).__name__}")
+            continue
+        if status >= 400:
+            errors.append(f"{ticker}:yahoo_rss:http_{status}")
+            continue
+        xml = body.get("raw") if isinstance(body, dict) else ""
+        rows = _parse_equity_rss(xml, ticker=ticker, env=env)
+        if not rows:
+            errors.append(f"{ticker}:yahoo_rss:no_items")
+            continue
+        items.extend(rows)
+        if len(items) >= limit:
+            break
+    if not items and not errors:
+        errors.append("yahoo_rss:no_items")
+    return {"items": items[:limit], "errors": errors}
+
+
+def _parse_equity_rss(
+    xml: str,
+    *,
+    ticker: str,
+    env: dict[str, Any],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for raw_item in _RSS_ITEM_RE.findall(xml or ""):
+        title = _rss_tag(raw_item, "title")
+        if not title:
+            continue
+        out.append(
+            {
+                "source": "yahoo_finance_rss",
+                "title": title,
+                "summary": _rss_tag(raw_item, "description"),
+                "published_at": _rss_tag(raw_item, "pubDate"),
+                "link": _rss_tag(raw_item, "link"),
+                "tickers": [ticker],
+                "matched_tickers": [ticker],
+                "_envelope": env,
+            }
+        )
+    return out
+
+
+def _rss_tag(raw_item: str, tag: str) -> str:
+    match = re.search(
+        rf"<{tag}[^>]*>(.*?)</{tag}>",
+        raw_item or "",
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    raw = match.group(1).strip()
+    if raw.startswith("<![CDATA["):
+        raw = raw[9:]
+        if raw.endswith("]]>"):
+            raw = raw[:-3]
+    return html.unescape(re.sub(r"<[^>]+>", "", raw).strip())
+
+
+def _extract_equity_news_rows(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data")
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("news", "items", "articles", "results", "data"):
+        rows = data.get(key)
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _mock_equity_news(ticker: str, *, env: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": "financial_datasets",
+            "title": f"{ticker} earnings and guidance remain the key review catalyst",
+            "summary": (
+                f"Mock equity headline for {ticker}; use live Financial "
+                "Datasets keys for production news evidence."
+            ),
+            "published_at": "",
+            "link": "",
+            "tickers": [ticker],
+            "matched_tickers": [ticker],
+            "_envelope": env,
+        }
+    ]
+
+
+def _review_timeframe(package: StrategyPackage) -> str:
+    markets = [m.lower() for m in package.manifest.markets]
+    if any(m.startswith(("yahoo:", "tushare:", "polygon_io:")) for m in markets):
+        return "1d"
+    sched = package.manifest.schedule
+    if sched.every_seconds and sched.every_seconds <= 300:
+        return "1m"
+    if sched.every_seconds and sched.every_seconds <= 3600:
+        return "15m"
+    cron = str(sched.cron or "")
+    if cron.startswith("*/1") or cron.startswith("* "):
+        return "1m"
+    if cron.startswith("*/5") or cron.startswith("*/15"):
+        return "15m"
+    return "1d"
+
+
+def _fetch_review_candles(
+    market: str,
+    *,
+    timeframe: str,
+    config_like: Any | None,
+) -> list[dict[str, Any]]:
+    venue = market.split(":", 1)[0].upper() if ":" in market else ""
+    if venue in {"MOCK", "PAPER"}:
+        return mock_candles(market, count=96, interval_s=_timeframe_seconds(timeframe))
+    try:
+        return fetch_candles(
+            market,
+            count=96,
+            interval=timeframe,
+            allow_mock=None,
+            config_like=config_like,
+        )
+    except Exception:
+        return []
+
+
+def _compact_candles(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            {
+                "ts": row.get("ts"),
+                "open": row.get("open"),
+                "high": row.get("high"),
+                "low": row.get("low"),
+                "close": row.get("close"),
+                "volume": row.get("volume"),
+                "_envelope": row.get("_envelope") if isinstance(row.get("_envelope"), dict) else None,
+            }
+        )
+    return out
+
+
+def _first_envelope(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for row in rows:
+        env = row.get("_envelope") if isinstance(row, dict) else None
+        if isinstance(env, dict):
+            return env
+    return None
+
+
+def _market_symbols(markets: Iterable[str]) -> set[str]:
+    symbols: set[str] = set()
+    for market in markets:
+        text = str(market or "").split(":", 1)[-1].upper()
+        for sep in ("/", "-", "_"):
+            text = text.split(sep, 1)[0]
+        for quote in ("USDT", "USDC", "USD", "BUSD"):
+            if text.endswith(quote) and len(text) > len(quote):
+                text = text[: -len(quote)]
+                break
+        if text:
+            symbols.add(text)
+    return symbols
+
+
+def _equity_symbols(markets: Iterable[str]) -> set[str]:
+    symbols: set[str] = set()
+    for market in markets:
+        text = str(market or "").strip()
+        low = text.lower()
+        if ":" in text:
+            venue, tail = text.split(":", 1)
+            if venue.lower() not in {"yahoo", "nasdaq", "nyse", "amex", "arca", "bats", "otc"}:
+                continue
+            text = tail
+        elif not low.startswith("^") and any(sep in text for sep in ("/", "-")):
+            continue
+        symbol = text.strip().replace(".", "-").upper()
+        if symbol and not symbol.endswith(("=X", "-USD")):
+            symbols.add(symbol)
+    return symbols
+
+
+def _timeframe_seconds(timeframe: str) -> int:
+    raw = str(timeframe or "1m").strip().lower()
+    try:
+        if raw.endswith("m"):
+            return max(1, int(raw[:-1] or "1")) * 60
+        if raw.endswith("h"):
+            return max(1, int(raw[:-1] or "1")) * 3600
+        if raw.endswith("d"):
+            return max(1, int(raw[:-1] or "1")) * 86400
+    except ValueError:
+        pass
+    return 60
 
 
 def _summarise_runs(runs: Iterable[StrategyRunRecord]) -> dict[str, Any]:

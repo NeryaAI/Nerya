@@ -8,17 +8,20 @@ import type {
   ControlPlaneOrder,
 } from "../../lib/clientApi";
 import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
-  Json,
   Kpi,
   PageBody,
   PageHeader,
   Pill,
 } from "../../components/Page";
+import { JsonView } from "../../components/JsonView";
 import { SectionTabs } from "../../components/SectionTabs";
+import { Select } from "../../components/Select";
 import { formatTsShort } from "../../lib/format";
+import { confirm as confirmDialog } from "../../lib/dialogs";
 
 type OrderState = "active" | "cached" | "lost" | "recent";
 
@@ -116,16 +119,15 @@ export default function OrdersPage() {
   }, [stateFilter, accountFilter]);
 
   async function cancelOrder(order: ControlPlaneOrder) {
-    if (
-      !confirm(
-        t("cancelOrderConfirm", {
-          orderId: order.order_id,
-          market: order.market,
-          side: order.side,
-        }),
-      )
-    )
-      return;
+    const ok = await confirmDialog({
+      message: t("cancelOrderConfirm", {
+        orderId: order.order_id,
+        market: order.market,
+        side: order.side,
+      }),
+      tone: "warning",
+    });
+    if (!ok) return;
     setBusy(order.order_id);
     try {
       await clientApi.controlOrderCancel({
@@ -142,15 +144,14 @@ export default function OrdersPage() {
   }
 
   async function cancelExecutor(exec: ControlPlaneExecutor) {
-    if (
-      !confirm(
-        t("cancelExecutorConfirm", {
-          executorId: exec.executor_id,
-          market: exec.market,
-        }),
-      )
-    )
-      return;
+    const ok = await confirmDialog({
+      message: t("cancelExecutorConfirm", {
+        executorId: exec.executor_id,
+        market: exec.market,
+      }),
+      tone: "warning",
+    });
+    if (!ok) return;
     setBusy(exec.executor_id);
     try {
       await clientApi.controlExecutorCancel({
@@ -198,60 +199,62 @@ export default function OrdersPage() {
       <PageBody>
         {error && <ErrorBanner error={error} />}
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="flex flex-wrap items-end gap-x-8 gap-y-3 px-1">
           <Kpi
+            inline
             label={t("kpiActiveOrders")}
             value={`${(totals.open || 0) + (totals.submitted || 0) + (totals.partially_filled || 0)}`}
             tone="brand"
           />
           <Kpi
+            inline
             label={t("kpiFilled")}
             value={`${totals.filled || 0}`}
             tone="ok"
           />
           <Kpi
+            inline
             label={t("kpiLostCanceled")}
             value={`${(totals.lost || 0) + (totals.canceled || 0)}`}
             tone={(totals.lost || 0) > 0 ? "danger" : "neutral"}
           />
           <Kpi
+            inline
             label={t("kpiActiveExecutors")}
             value={`${executors.filter((e) => e.state === "running" || e.state === "pending" || e.state === "submitted").length}`}
             tone="warn"
           />
         </div>
 
-        <Card title={t("filtersTitle")}>
-          <div className="flex flex-wrap gap-2 items-center text-xs">
-            <span className="text-ink-400">{t("stateLabel")}</span>
-            {STATE_LABELS.map((s) => (
-              <button
-                key={s.value}
-                onClick={() => setStateFilter(s.value)}
-                className={`px-2 py-1 rounded-md border ${
-                  stateFilter === s.value
-                    ? "border-brand-400 bg-brand-500/20 text-brand-100"
-                    : "border-brand-500/20 text-ink-300 hover:bg-brand-500/10"
-                }`}
-              >
-                {s.label}
-              </button>
-            ))}
-            <span className="ml-4 text-ink-400">{t("accountLabel")}</span>
-            <select
-              value={accountFilter}
-              onChange={(e) => setAccountFilter(e.target.value)}
-              className="bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-ink-200"
+        <div className="flex flex-wrap gap-2 items-center text-[12px] border-b border-brand-500/10 pb-3">
+          <span className="text-ink-500">{t("stateLabel")}</span>
+          {STATE_LABELS.map((s) => (
+            <button
+              key={s.value}
+              onClick={() => setStateFilter(s.value)}
+              className={`px-2.5 py-1 rounded-md border transition ${
+                stateFilter === s.value
+                  ? "bg-brand-500/15 text-brand-100 border-brand-500/40"
+                  : "text-ink-400 border-transparent hover:text-ink-200 hover:border-brand-500/20"
+              }`}
             >
-              <option value="">{t("accountAll")}</option>
-              {accountIds.map((id) => (
-                <option key={id} value={id}>
-                  {id}
-                </option>
-              ))}
-            </select>
+              {s.label}
+            </button>
+          ))}
+          <span className="ml-4 text-ink-500">{t("accountLabel")}</span>
+          <div className="min-w-[180px]">
+            <Select
+              value={accountFilter || ""}
+              onChange={(value) => setAccountFilter(value)}
+              options={[
+                { value: "", label: t("accountAll") },
+                ...accountIds.map((id) => ({ value: id, label: id })),
+              ]}
+              size="sm"
+              ariaLabel={t("accountLabel")}
+            />
           </div>
-        </Card>
+        </div>
 
         <Card
           title={t("ordersTitle", { count: orders.length })}
@@ -349,9 +352,11 @@ export default function OrdersPage() {
           )}
         </Card>
 
-        <Card
+        <Advanced
           title={t("executorsTitle", { count: executors.length })}
           description={t("executorsDescription")}
+          count={executors.length || undefined}
+          storageKey="nerya.orders.advanced.executors"
         >
           {executors.length === 0 ? (
             <Empty label={t("noExecutors")} />
@@ -415,7 +420,7 @@ export default function OrdersPage() {
               </table>
             </div>
           )}
-        </Card>
+        </Advanced>
 
         {selected ? (
           <Card
@@ -430,10 +435,145 @@ export default function OrdersPage() {
               </button>
             }
           >
-            <Json value={selected} />
+            <OrderDetail order={selected} />
           </Card>
         ) : null}
       </PageBody>
+    </div>
+  );
+}
+
+function OrderDetail({ order }: { order: ControlPlaneOrder }) {
+  const t = useTranslations("orders");
+  const filled = Number(order.filled_size || 0);
+  const size = Number(order.size_base || 0);
+  const remaining = Math.max(0, size - filled);
+  const fillPct = size > 0 ? Math.min(100, (filled / size) * 100) : 0;
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <DetailStat
+          label={t("detailStateLabel")}
+          value={<Pill tone={orderStateTone(order.state)}>{order.state}</Pill>}
+        />
+        <DetailStat
+          label={t("detailSideTypeLabel")}
+          value={
+            <span className="font-mono text-ink-100 text-[12px]">
+              {order.side} · {order.order_type}
+            </span>
+          }
+        />
+        <DetailStat
+          label={t("detailAvgPriceLabel")}
+          value={<span className="font-mono text-ink-100 text-[12px]">{num(order.avg_price, 4)}</span>}
+        />
+        <DetailStat
+          label={t("detailFillLabel")}
+          value={
+            <div className="space-y-1">
+              <div className="font-mono text-ink-100 text-[12px]">
+                {num(filled)} <span className="text-ink-500">/ {num(size)}</span>
+              </div>
+              <div className="h-1.5 rounded-full bg-ink-900 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-brand-500/70 transition-[width] duration-300"
+                  style={{ width: `${fillPct.toFixed(1)}%` }}
+                />
+              </div>
+              {remaining > 0 ? (
+                <div className="text-[10px] text-ink-500 font-mono">
+                  {t("detailRemaining", { value: num(remaining) })}
+                </div>
+              ) : null}
+            </div>
+          }
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <DetailGroup title={t("detailIdentity")}>
+          <DetailRow label={t("detailRowOrderId")} value={order.order_id} mono />
+          {order.client_order_id ? (
+            <DetailRow label={t("detailRowClientOrderId")} value={order.client_order_id} mono />
+          ) : null}
+          {order.exchange_order_id ? (
+            <DetailRow label={t("detailRowExchangeOrderId")} value={order.exchange_order_id} mono />
+          ) : null}
+          <DetailRow label={t("detailRowAccount")} value={order.account_id} mono />
+          <DetailRow label={t("detailRowMarket")} value={order.market} mono />
+          {order.strategy_id ? (
+            <DetailRow label={t("detailRowStrategy")} value={order.strategy_id} mono />
+          ) : null}
+          {order.executor_id ? (
+            <DetailRow label={t("detailRowExecutor")} value={order.executor_id} mono />
+          ) : null}
+          {order.intent_id ? (
+            <DetailRow label={t("detailRowIntent")} value={order.intent_id} mono />
+          ) : null}
+          {order.plan_id ? (
+            <DetailRow label={t("detailRowPlan")} value={order.plan_id} mono />
+          ) : null}
+        </DetailGroup>
+
+        <DetailGroup title={t("detailTimeline")}>
+          <DetailRow label={t("detailRowCreated")} value={fmtTs(order.created_at)} mono />
+          {order.submitted_at ? (
+            <DetailRow label={t("detailRowSubmitted")} value={fmtTs(order.submitted_at)} mono />
+          ) : null}
+          {order.last_seen_at ? (
+            <DetailRow label={t("detailRowLastSeen")} value={fmtTs(order.last_seen_at)} mono />
+          ) : null}
+          {order.terminal_at ? (
+            <DetailRow label={t("detailRowTerminal")} value={fmtTs(order.terminal_at)} mono />
+          ) : null}
+          <DetailRow label={t("detailRowAge")} value={ageMs(order.created_at)} mono />
+        </DetailGroup>
+      </div>
+
+      <details>
+        <summary className="cursor-pointer text-[12px] text-ink-500 font-medium hover:text-ink-300">
+          {t("detailRawEnvelope")}
+        </summary>
+        <div className="mt-2">
+          <JsonView value={order} initialCollapsed showRawToggle />
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function DetailStat({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 px-3 py-2">
+      <div className="text-[11px] text-ink-500 font-medium">{label}</div>
+      <div className="mt-1.5">{value}</div>
+    </div>
+  );
+}
+
+function DetailGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 px-3 py-2">
+      <div className="text-[11px] text-ink-500 font-medium mb-2">{title}</div>
+      <dl className="space-y-1">{children}</dl>
+    </div>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: React.ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-[110px_minmax(0,1fr)] items-baseline gap-2 text-[11px]">
+      <dt className="text-ink-500">{label}</dt>
+      <dd className={`min-w-0 truncate text-ink-100 ${mono ? "font-mono" : ""}`}>{value}</dd>
     </div>
   );
 }

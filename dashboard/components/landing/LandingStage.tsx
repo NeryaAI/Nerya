@@ -3,8 +3,8 @@
 import { motion } from "framer-motion";
 
 /**
- * Landing 中央"舞台" — 参考 Valorant / GlobalLaunch / Payment 等
- * 顶级 Web3 landing 的构图：
+ * Landing 中央“舞台”，用大弧形光晕、向上发散的弧线、中央
+ * dashboard 卡片和扫光/光束，把产品放进一个发光的展示空间里：
  *
  *   - 大弧形光晕（底部径向 + 两侧收束）
  *   - SVG 弧线辐射（从中心底部向上发散）

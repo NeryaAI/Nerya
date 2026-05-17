@@ -189,6 +189,28 @@ class AgentSessionRepository:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def update_session_meta(
+        self,
+        session_id: str,
+        meta: dict[str, Any],
+        *,
+        ts: float | None = None,
+    ) -> bool:
+        now = float(ts or time.time())
+        cur = self.con.execute(
+            """
+            UPDATE agent_sessions
+            SET meta_json=?, updated_at=?
+            WHERE session_id=?
+            """,
+            (
+                json.dumps(meta or {}, default=str, ensure_ascii=False),
+                now,
+                session_id,
+            ),
+        )
+        return bool(cur.rowcount or 0)
+
     def record_message(
         self,
         *,
@@ -333,7 +355,13 @@ class AgentSessionRepository:
         rows = self.con.execute(
             """
             SELECT session_id, strategy_id, title, source,
-                   created_at, updated_at, meta_json
+                   created_at, updated_at, meta_json,
+                   (
+                       SELECT COUNT(*)
+                       FROM agent_messages m
+                       WHERE m.session_id = agent_sessions.session_id
+                         AND m.deleted = 0
+                   ) AS message_count
             FROM agent_sessions
             ORDER BY updated_at DESC
             LIMIT ?
@@ -390,4 +418,31 @@ class AgentSessionRepository:
                 """,
                 (session_id,),
             ).fetchall()
+        return [dict(r) for r in rows]
+
+    def tool_events(
+        self,
+        session_id: str,
+        *,
+        turn_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [session_id]
+        where = "session_id=?"
+        if turn_ids:
+            clean_turn_ids = [str(t) for t in turn_ids if str(t or "").strip()]
+            if not clean_turn_ids:
+                return []
+            placeholders = ",".join("?" for _ in clean_turn_ids)
+            where += f" AND turn_id IN ({placeholders})"
+            params.extend(clean_turn_ids)
+        rows = self.con.execute(
+            f"""
+            SELECT rowid, event_id, session_id, turn_id, call_id,
+                   tool, phase, ok, ts, payload_json
+            FROM agent_tool_events
+            WHERE {where}
+            ORDER BY ts ASC, rowid ASC
+            """,
+            params,
+        ).fetchall()
         return [dict(r) for r in rows]

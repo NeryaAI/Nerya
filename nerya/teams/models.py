@@ -75,7 +75,6 @@ class TeamTemplate:
     gates: list[TeamGateSpec] = field(default_factory=list)
     max_rounds: int = 2
     max_parallel: int = 3
-    usd_budget: Optional[float] = None
     output_schema: dict[str, Any] = field(default_factory=dict)
 
     def asdict(self) -> dict[str, Any]:
@@ -88,7 +87,6 @@ class TeamTemplate:
             "gates": [g.asdict() for g in self.gates],
             "max_rounds": self.max_rounds,
             "max_parallel": self.max_parallel,
-            "usd_budget": self.usd_budget,
             "output_schema": dict(self.output_schema),
         }
 

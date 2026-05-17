@@ -1,9 +1,8 @@
 """Error taxonomy + recovery hints for the workspace-native agent loop.
 
-- Mirrors coding-agent's principle that *every* error the model sees
-  must be (a) classified and (b) accompanied by an actionable next
-  step. Without this, models loop on the same error forever; with it,
-  they self-recover ~80% of the time.
+- Every error the model sees should be (a) classified and (b)
+  accompanied by an actionable next step. Without this, models tend to
+  loop on the same error forever; with it, they can often self-recover.
 
 Why
 ---

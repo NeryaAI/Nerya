@@ -7,10 +7,9 @@ only renders a strict HTML subset (``<b>``, ``<i>``, ``<s>``, ``<u>``,
 is set, and outright rejects markdown that contains unescaped special
 characters when ``parse_mode=MarkdownV2``.
 
-Apr-27 2026 — user feedback called out that the gateway was sending the
-raw markdown source verbatim, which made code blocks and lists look
-broken in the Telegram client. We now run every Telegram body through
-this helper before posting:
+Without conversion, sending raw markdown source verbatim makes code
+blocks and lists look broken in the Telegram client. Every Telegram
+body now runs through this helper before posting:
 
   >>> render_markdown_for_telegram("**bold** and `code`\n- one\n- two")
   '<b>bold</b> and <code>code</code>\n• one\n• two'
@@ -26,7 +25,6 @@ from __future__ import annotations
 
 import html
 import re
-from typing import Iterable
 
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -148,7 +146,9 @@ def render_markdown_for_telegram(text: str) -> str:
 
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*|__([^_\n]+)__")
-_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)")
+_ITALIC_RE = re.compile(
+    r"(?<!\*)\*([^*\n]+)\*(?!\*)|(?<![\w_])_([^_\n]+)_(?![\w_])"
+)
 _STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
 _LINK_RE = re.compile(r"\[([^\]]+)\]\(([^\s)]+)\)")
 _BARE_URL_RE = re.compile(r"(?<![\"'>])\bhttps?://[^\s<>\")]+", re.IGNORECASE)
@@ -161,9 +161,9 @@ def _render_inline(text: str) -> str:
       1. Pull out fenced inline code (``\`code\``) into placeholders so
          the bold/italic regexes can't dive into them.
       2. Escape the raw HTML.
-      3. Re-emit code as ``<code>…</code>``.
-      4. Apply bold/italic/strike + link conversions on the escaped
+      3. Apply bold/italic/strike + link conversions on the escaped
          shell.
+      4. Re-emit code as ``<code>…</code>``.
     """
 
     code_slots: list[str] = []
@@ -175,13 +175,6 @@ def _render_inline(text: str) -> str:
 
     masked = _INLINE_CODE_RE.sub(_stash_code, text)
     escaped = html.escape(masked, quote=False)
-
-    def _restore_code(m: re.Match[str]) -> str:
-        idx = int(m.group(1))
-        body = html.escape(code_slots[idx], quote=False)
-        return f"<code>{body}</code>"
-
-    escaped = re.sub(r"\x00CODE(\d+)\x00", _restore_code, escaped)
 
     escaped = _BOLD_RE.sub(
         lambda m: f"<b>{m.group(1) or m.group(2)}</b>", escaped,
@@ -195,6 +188,13 @@ def _render_inline(text: str) -> str:
                   f"{m.group(1)}</a>",
         escaped,
     )
+
+    def _restore_code(m: re.Match[str]) -> str:
+        idx = int(m.group(1))
+        body = html.escape(code_slots[idx], quote=False)
+        return f"<code>{body}</code>"
+
+    escaped = re.sub(r"\x00CODE(\d+)\x00", _restore_code, escaped)
     return escaped
 
 

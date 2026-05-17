@@ -1,6 +1,6 @@
 """Context budget + microcompact + autocompact for long coding sessions.
 
-- Mirrors coding-agent's three-layer compaction stack:
+- Uses a three-layer compaction stack:
   1. ``tool_result_budget``  — bound any single observation;
   2. ``microcompact``        — collapse contiguous low-value tool calls;
   3. ``autocompact``         — when the running window crosses a

@@ -77,10 +77,27 @@ class StrategySubAgentRegistry:
         pkg = self._load_package()
         if pkg is None:
             return None
+        tuning = pkg.manifest.tuning
+        if tuning.enabled and name == tuning.subagent.name:
+            path = pkg.root / tuning.subagent.prompt_file
+            return path if path.exists() else None
         if name not in pkg.manifest.subagents:
             return None
         path = pkg.subagents_dir / f"{name}.agent.md"
         return path if path.exists() else None
+
+    def _strategy_tier(self, name: str) -> str:
+        pkg = self._load_package()
+        if pkg is not None:
+            tuning = pkg.manifest.tuning
+            if tuning.enabled and name == tuning.subagent.name:
+                tier = str(tuning.subagent.tier or "").strip()
+                if tier:
+                    return tier
+            tier = str(pkg.manifest.llm_policy.default_tier or "").strip()
+            if tier:
+                return tier
+        return DEFAULT_TIERS.get(name, "medium")
 
     def get(self, name: str) -> SubAgentSpec:
         path = self._strategy_prompt_path(name)
@@ -89,25 +106,22 @@ class StrategySubAgentRegistry:
                 path,
                 name=name,
                 allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(name, [])),
-                tier=DEFAULT_TIERS.get(name, "medium"),
+                tier=self._strategy_tier(name),
             )
         spec = self._load_global().get(name)
         if spec is not None:
-            # Apr-30 2026 — Cunzi fix: even when the workspace ships a
-            # ``<name>.agent.md`` we may have read an empty file (the
-            # operator created it but didn't fill it in). Fall back to
-            # the default body in that case so the model never runs
-            # with a blank role prompt.
+            # Even when ``<name>.agent.md`` exists it may be blank. Fall back
+            # to the default body in that case so the model never runs with
+            # an empty role prompt.
             if not (spec.prompt or "").strip():
                 spec.prompt = DEFAULT_SUBAGENT_PROMPTS.get(name, spec.prompt)
             return spec
         return SubAgentSpec(
             name=name,
             prompt_path=self.paths.subagents / f"{name}.agent.md",
-            # Apr-30 2026 — ship the default prompt body so the role
-            # has personality / scope / output contract even when no
-            # file exists on disk. The operator can override by
-            # writing ``workspace/subagents/<name>.agent.md``.
+            # Ship a default prompt body so the role still has scope and an
+            # output contract even when no file exists on disk. Operators can
+            # override it by writing ``workspace/subagents/<name>.agent.md``.
             prompt=DEFAULT_SUBAGENT_PROMPTS.get(name, ""),
             allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(name, [])),
             tier=DEFAULT_TIERS.get(name, "medium"),
@@ -118,6 +132,8 @@ class StrategySubAgentRegistry:
         pkg = self._load_package()
         if pkg is not None:
             names.update(pkg.manifest.subagents)
+            if pkg.manifest.tuning.enabled:
+                names.add(pkg.manifest.tuning.subagent.name)
         return sorted(names)
 
 

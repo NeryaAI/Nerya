@@ -265,6 +265,15 @@ export function BellIcon(props: IconProps) {
   );
 }
 
+export function PowerIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 3v8" />
+      <path d="M7.2 5.8a8 8 0 1 0 9.6 0" />
+    </svg>
+  );
+}
+
 export function StarIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
@@ -334,6 +343,15 @@ export function StopIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
       <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
+  );
+}
+
+export function PauseIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M8 5v14" />
+      <path d="M16 5v14" />
     </svg>
   );
 }
@@ -426,6 +444,95 @@ export function ScriptRunIcon(props: IconProps) {
   );
 }
 
+export function ChartIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M3 3v18h18" />
+      <path d="M7 14l3-4 4 3 5-7" />
+    </svg>
+  );
+}
+
+export function GlobeIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3a14 14 0 0 1 0 18" />
+      <path d="M12 3a14 14 0 0 0 0 18" />
+    </svg>
+  );
+}
+
+export function FolderIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+    </svg>
+  );
+}
+
+export function FileIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+      <path d="M14 3v6h6" />
+    </svg>
+  );
+}
+
+export function ImageIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8.5" cy="10" r="1.5" />
+      <path d="M21 16l-5.2-5.2a1.4 1.4 0 0 0-2 0L6 18" />
+    </svg>
+  );
+}
+
+export function FilePlusIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+      <path d="M14 3v6h6" />
+      <path d="M12 12v6M9 15h6" />
+    </svg>
+  );
+}
+
+export function FolderPlusIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+      <path d="M12 11v6M9 14h6" />
+    </svg>
+  );
+}
+
+export function SaveIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+      <path d="M17 21v-8H7v8" />
+      <path d="M7 3v5h8" />
+    </svg>
+  );
+}
+
+export function LanguagesIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M5 4h7" />
+      <path d="M9 3v2" />
+      <path d="M11 5C9.5 11 6.5 13 4 14" />
+      <path d="M5 9c0 3 2.5 6 6 7" />
+      <path d="M13 21l4-9 4 9" />
+      <path d="M14.5 18h5" />
+    </svg>
+  );
+}
+
 export const NAV_ICONS: Record<string, (props: IconProps) => JSX.Element> = {
   "/dashboard": OverviewIcon,
   "/chat": ChatIcon,
@@ -441,6 +548,10 @@ export const NAV_ICONS: Record<string, (props: IconProps) => JSX.Element> = {
   "/tasks": AgentsIcon,
   "/self-evolution": EvolutionIcon,
   "/settings": SettingsIcon,
+  "/gateway": MessagesIcon,
+  "/web-search": SearchIcon,
+  "/browsers": GlobeIcon,
+  "/env-vault": SecurityIcon,
 };
 
 /**
@@ -471,4 +582,9 @@ export const NAV_ICON_BY_NAME: Record<string, (props: IconProps) => JSX.Element>
   memory: MemoryIcon,
   evolution: EvolutionIcon,
   security: SecurityIcon,
+  globe: GlobeIcon,
+  shield: ShieldCheckIcon,
+  search: SearchIcon,
+  browsers: GlobeIcon,
+  vault: SecurityIcon,
 };

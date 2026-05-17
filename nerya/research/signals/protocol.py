@@ -55,7 +55,7 @@ def coerce_signal_frame(
 ) -> SignalFrame:
     """Validate and normalise a single emitted signal.
 
-    The plan requires (§4.2):
+    The runtime requires:
     * ``target_weight`` finite and within strategy bounds,
     * ``confidence`` in ``[0, 1]``,
     * ``reason`` required for non-zero target deltas.

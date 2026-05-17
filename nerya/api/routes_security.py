@@ -13,6 +13,11 @@ import re
 from typing import Any
 
 from ..security.secret_buffer import get_default_buffer, reset_default_buffer
+from ..security.runtime_env import (
+    delete_runtime_env,
+    list_runtime_env,
+    put_runtime_env,
+)
 from ..security.secrets import SecretVault
 from ..security.web_safety import (
     WebPolicy,
@@ -65,6 +70,42 @@ def routes():
         except Exception as exc:
             return {"ok": False, "error": "delete_failed", "detail": str(exc)}
         return {"ok": True, "name": name}
+
+    def list_env(client, _payload):
+        rows = list_runtime_env(client.config.paths)
+        return {"ok": True, "env": rows, "count": len(rows)}
+
+    def put_env(client, payload):
+        name = str(payload.get("name") or "").strip()
+        value = payload.get("value")
+        if not name:
+            return {"ok": False, "error": "name_required"}
+        if not isinstance(value, str):
+            return {"ok": False, "error": "value_required"}
+        try:
+            row = put_runtime_env(
+                client.config.paths,
+                name=name,
+                value=value,
+                owner="dashboard",
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": "invalid_name", "detail": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": "env_put_failed", "detail": str(exc)}
+        return {"ok": True, "env": row}
+
+    def delete_env(client, payload):
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return {"ok": False, "error": "name_required"}
+        try:
+            deleted = delete_runtime_env(client.config.paths, name=name)
+        except ValueError as exc:
+            return {"ok": False, "error": "invalid_name", "detail": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": "env_delete_failed", "detail": str(exc)}
+        return {"ok": True, "name": deleted}
 
     def _resolve_policy(client) -> WebPolicy:
         # read web policy from workspace if present so the
@@ -130,6 +171,9 @@ def routes():
         ("POST", "/security/secrets/list", list_secrets),
         ("POST", "/security/secrets/put", put_secret),
         ("POST", "/security/secrets/delete", delete_secret),
+        ("POST", "/security/env/list", list_env),
+        ("POST", "/security/env/put", put_env),
+        ("POST", "/security/env/delete", delete_env),
         ("GET", "/security/secrets/buffer", buffer_list),
         ("POST", "/security/secrets/buffer", buffer_list),
         ("POST", "/security/secrets/buffer/clear", buffer_clear),

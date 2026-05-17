@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable, Optional
 
-from ._envelope import action, debug_ref, ok, source_ref
+from ._envelope import action, debug_ref, error, ok, source_ref, warn
 
 
 # ---------------------------------------------------------------------------
@@ -365,9 +365,9 @@ def _collect_items(
 
     items.sort(
         key=lambda i: (
-            _SEV_RANK.get(i["severity"], 9),
-            0 if i["requires_action"] else 1,
             -(_to_epoch(i.get("created_at"))),
+            0 if i["requires_action"] else 1,
+            _SEV_RANK.get(i["severity"], 9),
         )
     )
     return items[:limit]
@@ -448,37 +448,26 @@ def _items_handler(client, query):
     return env
 
 
-def _resolve_handler(client, payload):
-    """Resolve an inbox item.
-
-    The actual mutation lives in the underlying subsystem (approvals,
-    evolution, agent recovery). This handler dispatches to the right
-    one based on the ``id`` prefix and returns a unified envelope.
-    """
-
-    pid = str((payload or {}).get("id") or "").strip()
-    decision = str((payload or {}).get("decision") or "").strip().lower()
+def _resolve_one(client, pid: str, decision: str, actor_id: str) -> dict[str, Any]:
+    pid = str(pid or "").strip()
+    decision = str(decision or "").strip().lower()
     if not pid:
-        return {"ok": False, "error": "id required"}
+        return error("id required")
     kind, _, raw = pid.partition(":")
     if not raw:
-        return {"ok": False, "error": "id must be 'type:raw_id'"}
+        return error("id must be 'type:raw_id'")
 
     try:
         if kind == "approval":
-            # Apr-29 2026 — earlier this branch tried to call a 4-arg
-            # ``resolve_callback(paths, approval_id=, decision=, actor_id=)``
-            # which never existed. Reuse the same plumbing the
-            # ``/approvals/callback`` HTTP surface and Telegram callback
-            # path use so the dashboard, gateways, and the operator
-            # inbox stay in lockstep.
+            # Reuse the same callback resolver as the HTTP and Telegram
+            # approval paths so the dashboard, gateways, and operator
+            # inbox all apply the same approval logic.
             from . import routes_approvals as _ra
 
             decision = decision or "approve"
             normalised = "approve" if decision in {"approve", "applied"} else (
                 "reject" if decision in {"reject", "rejected"} else decision
             )
-            actor_id = str((payload or {}).get("actor_id") or "operator")
             if normalised in {"approve", "reject"}:
                 callback_data = f"{normalised}:{raw}"
                 outcome = _ra._callback(
@@ -535,9 +524,70 @@ def _resolve_handler(client, payload):
                 ),
             )
 
-        return {"ok": False, "error": f"unknown inbox kind {kind!r}"}
+        return error(f"unknown inbox kind {kind!r}")
     except Exception as exc:  # pragma: no cover - defensive
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return error(f"{type(exc).__name__}: {exc}")
+
+
+def _resolve_handler(client, payload):
+    """Resolve one or many inbox items.
+
+    The actual mutation lives in the underlying subsystem (approvals,
+    evolution, agent recovery). This handler dispatches to the right
+    one based on the ``id`` prefix and returns a unified envelope.
+    """
+
+    body = payload or {}
+    decision = str(body.get("decision") or "").strip().lower()
+    actor_id = str(body.get("actor_id") or "operator")
+    ids = [
+        str(v).strip()
+        for v in (body.get("ids") or [])
+        if str(v).strip()
+    ]
+    pid = str(body.get("id") or "").strip()
+    if pid:
+        ids = [pid, *[v for v in ids if v != pid]]
+    if not ids:
+        return error("id or ids required", data={"results": [], "resolved_count": 0, "failed_count": 0})
+    if len(ids) == 1:
+        return _resolve_one(client, ids[0], decision, actor_id)
+
+    results: list[dict[str, Any]] = []
+    resolved_count = 0
+    failed_count = 0
+    for item_id in ids:
+        outcome = _resolve_one(client, item_id, decision, actor_id)
+        ok_flag = bool(outcome.get("ok"))
+        if ok_flag:
+            resolved_count += 1
+        else:
+            failed_count += 1
+        results.append(
+            {
+                "id": item_id,
+                "ok": ok_flag,
+                "status": outcome.get("status"),
+                "severity": outcome.get("severity"),
+                "summary": outcome.get("summary") or outcome.get("error") or "",
+                "outcome": (outcome.get("data") or {}).get("outcome"),
+            }
+        )
+
+    data = {
+        "ids": ids,
+        "results": results,
+        "resolved_count": resolved_count,
+        "failed_count": failed_count,
+    }
+    if failed_count == 0:
+        return ok(f"resolved {resolved_count} inbox item(s)", data=data)
+    if resolved_count == 0:
+        return error(f"failed to resolve {failed_count} inbox item(s)", data=data)
+    return warn(
+        f"resolved {resolved_count} of {len(ids)} inbox item(s)",
+        data=data,
+    )
 
 
 def routes():

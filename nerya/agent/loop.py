@@ -31,6 +31,7 @@ get the next assistant turn" lives elsewhere:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -39,7 +40,6 @@ from typing import Any, Callable, Optional
 
 from ..core.errors import (
     LLMApprovalRequired,
-    LLMBudgetExceeded,
     LLMError,
     LLMScriptQuotaExceeded,
     LLMStructuredOutputError,
@@ -49,10 +49,12 @@ from ..core.errors import (
 from ..harness.cancellation import CancelToken
 from ..llm.gateway import LLMGateway
 from ..llm.messages import MessagesResponse
+from ..llm import tool_compaction as _tool_compaction
 from ..tools.orchestrator import ToolOrchestrator
 from ..tools.registry import ToolRegistry
 from ..tools.types import ToolCall, ToolResult
 from .artifact_index import summarize_batch
+from .attachments import assistant_attachment_block
 from .transcript_blocks import (
     BlockEnvelope,
     TextBlock,
@@ -68,6 +70,306 @@ _LOG = logging.getLogger(__name__)
 
 
 EventSink = Callable[[BlockEnvelope], None]
+
+
+def _team_result_data(result: ToolResult) -> dict[str, Any] | None:
+    if result.name != "team_run" or result.is_error:
+        return None
+    for part in result.content:
+        if part.type == "json" and isinstance(part.data, dict):
+            return part.data
+    try:
+        parsed = json.loads(result.text())
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+_REPORT_FIELD_ORDER = (
+    "summary",
+    "thesis",
+    "recommendation",
+    "verdict",
+    "direction",
+    "bias",
+    "urgency",
+    "quality",
+    "growth",
+    "valuation",
+    "volatility_regime",
+    "invalidation",
+    "recommended_size_pct",
+    "confidence",
+    "avg_confidence",
+)
+
+_SKIP_REPORT_KEYS = {"done", "ok", "truncated"}
+
+
+def _parse_jsonish(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 6:
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text[0] not in "{[":
+            return value
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return value
+        return _parse_jsonish(parsed, depth=depth + 1)
+    if isinstance(value, list):
+        return [_parse_jsonish(item, depth=depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _parse_jsonish(v, depth=depth + 1) for k, v in value.items()}
+    return value
+
+
+def _report_label(key: str) -> str:
+    return key.replace("_", " ")
+
+
+def _role_label(role: str) -> str:
+    return role.replace("_", " ")
+
+
+def _clip_report_text(text: str, *, limit: int) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n\n_Content truncated for fallback rendering._"
+
+
+def _format_scalar(value: Any, *, key: str = "") -> str:
+    value = _parse_jsonish(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        if key.endswith("_pct") and 0 <= float(value) <= 1:
+            return f"{float(value) * 100:.1f}%"
+        if isinstance(value, float):
+            return f"{value:.4g}"
+        return str(value)
+    if value is None:
+        return "n/a"
+    return str(value).strip()
+
+
+def _one_line(value: Any, *, key: str = "", limit: int = 700) -> str:
+    value = _parse_jsonish(value)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for child_key, child_value in value.items():
+            if child_key in _SKIP_REPORT_KEYS:
+                continue
+            rendered = _one_line(child_value, key=child_key, limit=220)
+            if rendered:
+                parts.append(f"{_report_label(child_key)}: {rendered}")
+            if len(parts) >= 6:
+                break
+        text = "; ".join(parts)
+    elif isinstance(value, list):
+        parts = [_one_line(item, limit=220) for item in value[:8]]
+        text = "; ".join(part for part in parts if part)
+        if len(value) > 8:
+            text += f"; plus {len(value) - 8} more item(s)"
+    else:
+        text = _format_scalar(value, key=key)
+    return text[:limit].rstrip() + ("..." if len(text) > limit else "")
+
+
+def _record_primary(record: dict[str, Any]) -> tuple[str, str] | None:
+    for key in (
+        "claim",
+        "event",
+        "theme",
+        "input",
+        "risk",
+        "name",
+        "source",
+        "symbol",
+        "title",
+    ):
+        value = record.get(key)
+        if value is None:
+            continue
+        text = _one_line(value, key=key, limit=260)
+        if text:
+            return key, text
+    return None
+
+
+def _format_record_bullet(record: dict[str, Any]) -> str:
+    record = _parse_jsonish(record)
+    if not isinstance(record, dict):
+        return f"- {_one_line(record)}"
+    primary = _record_primary(record)
+    used: set[str] = set()
+    if primary:
+        primary_key, primary_text = primary
+        used.add(primary_key)
+        line = f"- **{primary_text}**"
+    else:
+        return "- " + _one_line(record, limit=900)
+
+    details: list[str] = []
+    detail_order = (
+        "evidence",
+        "reason",
+        "severity",
+        "confidence",
+        "crowdedness",
+        "purpose",
+        "stop",
+        "url",
+    )
+    ordered_keys = [
+        key for key in detail_order if key in record and key not in used
+    ] + [
+        key
+        for key in record
+        if key not in used and key not in detail_order and key not in _SKIP_REPORT_KEYS
+    ]
+    for key in ordered_keys[:8]:
+        value = record.get(key)
+        rendered = _one_line(value, key=key, limit=420)
+        if rendered:
+            details.append(f"{_report_label(key)}: {rendered}")
+    if details:
+        line += ": " + "; ".join(details)
+    return line
+
+
+def _render_list_section(items: list[Any]) -> list[str]:
+    lines: list[str] = []
+    for item in items[:20]:
+        item = _parse_jsonish(item)
+        if isinstance(item, dict):
+            lines.append(_format_record_bullet(item))
+        else:
+            lines.append(f"- {_one_line(item, limit=700)}")
+    if len(items) > 20:
+        lines.append(f"- {len(items) - 20} additional item(s) omitted.")
+    return lines
+
+
+def _render_dict_markdown(data: dict[str, Any]) -> str:
+    data = _parse_jsonish(data)
+    if not isinstance(data, dict):
+        return _render_report_markdown(data)
+    lines: list[str] = []
+    keys = [
+        key for key in _REPORT_FIELD_ORDER if key in data and key not in _SKIP_REPORT_KEYS
+    ] + [
+        key
+        for key in data
+        if key not in _REPORT_FIELD_ORDER and key not in _SKIP_REPORT_KEYS
+    ]
+    for key in keys:
+        value = _parse_jsonish(data.get(key))
+        if value in ("", None, [], {}):
+            continue
+        label = _report_label(key)
+        if isinstance(value, list):
+            lines.extend(["", f"#### {label}", *_render_list_section(value)])
+        elif isinstance(value, dict):
+            rendered = _one_line(value, key=key, limit=1200)
+            if rendered:
+                lines.append(f"- **{label}**: {rendered}")
+        else:
+            rendered = _format_scalar(value, key=key)
+            if rendered:
+                if key == "summary" and len(rendered) > 120:
+                    lines.append(rendered)
+                else:
+                    lines.append(f"- **{label}**: {rendered}")
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def _render_report_markdown(output: Any, *, limit: int = 4200) -> str:
+    output = _parse_jsonish(output)
+    if isinstance(output, dict):
+        text = _render_dict_markdown(output)
+    elif isinstance(output, list):
+        text = "\n".join(_render_list_section(output))
+    else:
+        text = str(output or "").strip()
+    return _clip_report_text(text, limit=limit)
+
+
+def _synthesis_output(results: list[Any], aggregated: Any) -> Any:
+    for preferred in ("research_manager", "lead_analyst", "portfolio_manager"):
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("subagent") or "") == preferred:
+                output = entry.get("output")
+                if output not in (None, "", {}, []):
+                    return output
+    return aggregated
+
+
+def _build_team_run_final_report(data: dict[str, Any]) -> str:
+    task = str(data.get("task") or "AgentTeam analysis")
+    status = str(data.get("status") or "")
+    roles_succeeded = list(data.get("roles_succeeded") or [])
+    roles_failed = list(data.get("roles_failed") or [])
+    lines = [
+        "# AgentTeam report",
+        "",
+        f"Task: {task}",
+        f"Status: {status or 'completed'}",
+        (
+            "Team: "
+            f"{len(roles_succeeded)} role(s) succeeded"
+            + (f", {len(roles_failed)} role(s) failed/degraded" if roles_failed else "")
+        ),
+        "",
+        "## Synthesis",
+    ]
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    synthesis_text = _render_report_markdown(
+        _synthesis_output(results, data.get("aggregated")),
+        limit=3600,
+    )
+    if synthesis_text:
+        lines.append(synthesis_text)
+    if len(lines) <= 7:
+        lines.append("The team returned role-level results; details follow by role.")
+
+    if results:
+        lines.extend(["", "## Role findings"])
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("subagent") or "subagent")
+            output = entry.get("output") or {}
+            lines.extend([
+                "",
+                f"### {role} ({_role_label(role)})",
+                _render_report_markdown(output),
+            ])
+
+    failures = data.get("failures") if isinstance(data.get("failures"), list) else []
+    if failures:
+        lines.extend(["", "## Gaps"])
+        for entry in failures:
+            if not isinstance(entry, dict):
+                continue
+            role = str(entry.get("subagent") or "subagent")
+            err = str(entry.get("error") or entry.get("error_kind") or "unknown")
+            lines.append(f"- {role}: {err[:600]}")
+
+    lines.extend([
+        "",
+        "## Execution evidence",
+        f"- team_run_id: {data.get('team_run_id')}",
+        f"- roles_succeeded: {', '.join(map(str, roles_succeeded)) or 'none'}",
+        f"- roles_failed: {', '.join(map(str, roles_failed)) or 'none'}",
+        f"- tokens_total: {data.get('tokens_total', 0)}",
+        f"- usd_total: {data.get('usd_total', 0.0)}",
+    ])
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -126,16 +428,14 @@ class LoopConfig:
     multi-minute turn whose tool history (reads/writes/etc.) is
     already on disk. Set to ``1`` to disable the loop-level retry.
 
-    Apr-30 2026 — bumped 8 → 10 to match coding-agent's
-    ``invokeWithRetries`` shape (coding-agent/agent.ts: ``maxRetries: 10``)
-    so a sustained provider 5xx storm does not silently drop a turn."""
+    The default is high enough to ride out sustained provider 5xx bursts
+    without silently dropping a long-running turn."""
 
     llm_retry_base_delay: float = 3.0
     """Base seconds for exponential backoff between iteration-level
     LLM retries. Effective wait is ``base * 2^(attempt-1)`` capped at
-    ``llm_retry_max_delay`` and then *full-jittered* (uniform(0, x)) —
-    matching coding-agent's exponential-backoff-with-full-jitter strategy
-    so a herd of concurrent agents doesn't synchronise their retries.
+    ``llm_retry_max_delay`` and then *full-jittered* (uniform(0, x)) so a
+    herd of concurrent agents does not synchronise its retries.
     With 10 attempts this gives a worst-case timeline of roughly
     3 + 6 + 12 + 24 + 48 + 60 + 60 + 60 + 60 = 333s (~5.5min), with
     the actual delays averaging ~half that under uniform jitter. Slow
@@ -149,9 +449,9 @@ class LoopConfig:
 
     llm_retry_full_jitter: bool = True
     """If true, each retry sleeps ``uniform(0, computed_delay)`` instead
-    of the bare exponential delay. Apr-30 2026 — runtime retry behavior:
-    full jitter prevents thundering-herd retries when many agents share
-    a provider account. Disable only for deterministic test runs."""
+    of the bare exponential delay. Full jitter prevents thundering-herd
+    retries when many agents share a provider account. Disable only for
+    deterministic test runs."""
 
     enable_microcompact: bool = True
     """Run the per-tool-result token cap before every model round.
@@ -197,11 +497,10 @@ class LoopOutcome:
 
 
 # These ``LLMError`` subclasses are *permanent* — retrying them buys
-# nothing and just burns latency. Auth, tier policy, budget, schema, and
+# nothing and just burns latency. Auth, tier policy, quota, schema, and
 # explicit approval-required errors all fall in this bucket.
 _NON_RETRYABLE_LLM_ERRORS: tuple[type[Exception], ...] = (
     LLMTierDenied,
-    LLMBudgetExceeded,
     LLMTaskNotAllowed,
     LLMScriptQuotaExceeded,
     LLMStructuredOutputError,
@@ -286,6 +585,74 @@ def _build_deterministic_final_summary(
     return "\n".join(lines)
 
 
+def _stringify_user_message(message: str | list[dict[str, Any]]) -> str:
+    if isinstance(message, str):
+        return message.strip()
+    parts: list[str] = []
+    for item in message:
+        if not isinstance(item, dict):
+            parts.append(str(item))
+            continue
+        if item.get("type") == "text":
+            text = str(item.get("text") or "").strip()
+            if text:
+                parts.append(text)
+            continue
+        parts.append(json.dumps(item, ensure_ascii=False, default=str))
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _clip_prompt_payload(text: str, *, limit: int = 50000) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n\n[truncated for final synthesis]"
+
+
+def _build_team_run_final_synthesis_prompt(
+    *,
+    user_message: str | list[dict[str, Any]],
+    team_results: list[dict[str, Any]],
+) -> str:
+    original_prompt = _stringify_user_message(user_message)
+    conclusions = _clip_prompt_payload(
+        json.dumps(team_results, ensure_ascii=False, indent=2, default=str)
+    )
+    return (
+        "Produce the final answer for the completed AgentTeam run.\n\n"
+        "Original user prompt:\n"
+        f"{original_prompt or '[empty prompt]'}\n\n"
+        "AgentTeam conclusions (all roles, failures, and aggregate data):\n"
+        "```json\n"
+        f"{conclusions}\n"
+        "```\n\n"
+        "Instructions:\n"
+        "- Answer the original user prompt directly using the AgentTeam "
+        "conclusions above.\n"
+        "- Use the same natural language as the original user prompt for all "
+        "user-visible prose. Infer it from the prompt itself; do not rely on "
+        "fixed language-name mappings.\n"
+        "- Synthesize and translate member outputs, headings, labels, and "
+        "natural-language schema fields as needed so the final report is not "
+        "mixed-language just because the tool data used another language.\n"
+        "- Preserve tickers, proper nouns, source names, URLs, code identifiers, "
+        "and numeric metrics in their original form.\n"
+        "- Do not dump raw JSON or expose internal schema keys unless the user "
+        "explicitly asked for raw tool data."
+    )
+
+
+def _messages_response_text(response: MessagesResponse) -> str:
+    parts: list[str] = []
+    for block in response.content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = str(block.get("text") or "").strip()
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts).strip()
+
+
 # ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
@@ -308,6 +675,33 @@ class WorkspaceNativeAgentLoop:
         self.orchestrator = orchestrator
         self.config = config or LoopConfig()
         self.event_sink = event_sink
+
+    def _synthesize_team_run_final_answer(
+        self,
+        *,
+        system: str,
+        user_message: str | list[dict[str, Any]],
+        team_results: list[dict[str, Any]],
+    ) -> str:
+        prompt = _build_team_run_final_synthesis_prompt(
+            user_message=user_message,
+            team_results=team_results,
+        )
+        response = self.gateway.call_messages(
+            task=self.config.task,
+            caller=self.config.caller,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
+            max_tokens=self.config.max_tokens,
+            temperature=self.config.temperature,
+            tier=self.config.tier,
+            reasoning_effort=self.config.reasoning_effort,
+            reasoning_summary=self.config.reasoning_summary,
+            model_provider=self.config.model_provider,
+            model_id=self.config.model_id,
+        )
+        return _messages_response_text(response)
 
     # ------------------------------------------------------------------ run
 
@@ -418,9 +812,9 @@ class WorkspaceNativeAgentLoop:
             # token cap operates on the same set of messages the model
             # is about to see. The two are independent: macro drops
             # whole tool_use/tool_result pairs to keep the message
-            # count in budget; micro keeps every pair but truncates
-            # bulky bodies (read/grep/glob/shell). Together they
-            # mirror coding-agent's two-tier compaction.
+            # Count in budget; micro keeps every pair but truncates
+            # bulky bodies (read/grep/glob/shell). Together they form a
+            # two-tier compaction pass.
             if self.config.enable_microcompact:
                 transcript, _mc_report = microcompact(
                     transcript,
@@ -491,10 +885,9 @@ class WorkspaceNativeAgentLoop:
                         llm_base * (2 ** (llm_attempt - 1)),
                     )
                     if bool(self.config.llm_retry_full_jitter):
-                        # Apr-30 2026 — full jitter (coding-agent retry behavior):
-                        # uniform(0, raw_delay). Avoids synchronised
-                        # retries across concurrent agents sharing a
-                        # provider account.
+                        # Full jitter = uniform(0, raw_delay). This avoids
+                        # synchronised retries across concurrent agents
+                        # sharing a provider account.
                         import random as _rnd
                         delay = _rnd.uniform(0.0, raw_delay)
                     else:
@@ -508,16 +901,11 @@ class WorkspaceNativeAgentLoop:
                             # so the kernel can log a clean failure.
                             raise
                         delay = min(delay, max(0.0, remaining - 0.1))
-                    # Apr-30 2026 — instrument the retry so the operator
-                    # can tell *why* a provider is 502'ing. The two
-                    # main suspects are (a) upstream gateway flap
-                    # (visible only as the bare HTTP code) and (b)
-                    # request-too-large (visible as messages count +
-                    # rough payload size). We surface both in the
-                    # backend log and the frontend ThinkingBlock so a
-                    # quick eyeball tells the difference: if every
-                    # retry attempt sits at e.g. ~330k chars we're
-                    # blowing the context, otherwise it's the gateway.
+                    # Instrument retries so operators can distinguish
+                    # provider-side gateway failures from oversized request
+                    # payloads. Message count plus rough payload size makes
+                    # it obvious whether the turn is blowing the context or
+                    # the upstream is simply failing.
                     try:
                         _msg_count = len(transcript)
                         _payload_chars = sum(
@@ -533,12 +921,10 @@ class WorkspaceNativeAgentLoop:
                         if v:
                             _request_id = str(v)
                             break
-                    # Apr-30 2026 — pull the upstream body excerpt the
-                    # provider attached to the LLMError (see
-                    # ``nerya.llm.messages._make_llm_error``). On a 502
-                    # this is usually a tiny HTML page from Cloudflare /
-                    # nginx — the smoking-gun for "upstream gateway
-                    # flap" vs "context-overflow".
+                    # Pull the provider's body excerpt from the LLMError.
+                    # On a 502 this is often the only concrete clue about
+                    # whether the failure came from a gateway page or from
+                    # request-size pressure deeper in the stack.
                     _raw_body = ""
                     rb = getattr(exc, "raw_body", "") or ""
                     if rb:
@@ -620,6 +1006,8 @@ class WorkspaceNativeAgentLoop:
                         started_at=time.time(),
                     )
                     emit("assistant", tu.as_dict())
+                elif btype in {"attachment", "image", "document", "file", "video", "audio"}:
+                    emit("assistant", assistant_attachment_block(dict(block)))
 
             tool_uses = [b for b in assistant_blocks if b.get("type") == "tool_use"]
             if not tool_uses:
@@ -680,6 +1068,7 @@ class WorkspaceNativeAgentLoop:
                         "session_id": self.config.session_id,
                         "strategy_id": self.config.strategy_id,
                         "trigger_event_id": self.config.trigger_event_id,
+                        "original_user_prompt": _stringify_user_message(user_message),
                     },
                 )
                 for tu in tool_uses
@@ -717,8 +1106,64 @@ class WorkspaceNativeAgentLoop:
                     completed_at=r.completed_at,
                 )
                 emit("tool", trb.as_dict())
+                for part in r.content:
+                    if part.type not in {"image", "document", "file", "attachment", "video", "audio"}:
+                        continue
+                    payload = part.data if isinstance(part.data, dict) else {}
+                    emit(
+                        "tool",
+                        assistant_attachment_block(
+                            {
+                                "type": part.type,
+                                "source": payload.get("source") or payload,
+                                "name": payload.get("name")
+                                or part.metadata.get("name")
+                                or r.name
+                                or "tool-attachment",
+                                "mime_type": part.media_type
+                                or payload.get("mime_type")
+                                or payload.get("media_type"),
+                                "text": part.text,
+                                "source_kind": "tool",
+                            }
+                        ),
+                    )
 
             transcript.append({"role": "user", "content": tool_result_blocks})
+
+            team_results = [
+                data
+                for data in (
+                    _team_result_data(r)
+                    for r in batch.results
+                )
+                if data is not None
+            ]
+            if team_results:
+                try:
+                    final_text = self._synthesize_team_run_final_answer(
+                        system=system,
+                        user_message=user_message,
+                        team_results=team_results,
+                    )
+                except Exception:
+                    _LOG.warning(
+                        "team_run final synthesis failed; using deterministic fallback",
+                        exc_info=True,
+                    )
+                    final_text = ""
+                if not final_text:
+                    final_text = "\n\n".join(
+                        _build_team_run_final_report(data)
+                        for data in team_results
+                    )
+                transcript.append({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": final_text}],
+                })
+                emit("assistant", TextBlock(text=final_text).as_dict())
+                stop_reason = "end_turn"
+                break
 
             # If any call in this batch landed on a permission-pending
             # gate, stop the turn here. The dashboard now shows an
@@ -816,6 +1261,17 @@ class WorkspaceNativeAgentLoop:
         self, tool_filter: Optional[Callable[[Any], bool]]
     ) -> list[dict[str, Any]]:
         tools = self.registry.list_tools()
+        # If the registry has a LazyMcpState attached, hide every tool
+        # whose ``lazy=True`` until its namespace is described in this
+        # session or marked always-eager.
+        #
+        # The state is duck-typed so the loop has zero compile-time
+        # dep on nerya.mcp.lazy.
+        lazy_state = getattr(self.registry, "lazy_mcp_state", None)
+        if lazy_state is not None:
+            is_visible = getattr(lazy_state, "is_visible", None)
+            if callable(is_visible):
+                tools = [t for t in tools if is_visible(t)]
         if tool_filter is not None:
             tools = [t for t in tools if tool_filter(t)]
         return [t.to_provider_tool() for t in tools]
@@ -824,8 +1280,8 @@ class WorkspaceNativeAgentLoop:
         """Render a :class:`ToolResult` into an Anthropic ``tool_result`` block.
 
         On error we wrap the text in ``<tool_use_error>`` tags and
-        append a one-line retry directive, mirroring Claude Code's
-        ``toolExecution.ts:400`` / ``buildSchemaNotSentHint`` pattern.
+        append a one-line retry directive so the model knows to retry
+        after fixing the tool-call shape.
         The tag shape is familiar across the Anthropic training
         distribution, which helps non-Claude models decode the
         recovery intent too. The long schema dump that used to leak
@@ -860,6 +1316,23 @@ class WorkspaceNativeAgentLoop:
                     + (f"\n## stderr\n{stderr}\n" if stderr else "")
                 )
                 content.append({"type": "text", "text": shell_text})
+            elif part.type in {"image", "document", "file", "attachment", "video", "audio"}:
+                payload = part.data if isinstance(part.data, dict) else {}
+                content.append(
+                    {
+                        "type": part.type if part.type != "attachment" else "file",
+                        "source": payload.get("source") or payload,
+                        "name": (
+                            payload.get("name")
+                            or part.metadata.get("name")
+                            or "tool-attachment"
+                        ),
+                        "mime_type": part.media_type
+                        or payload.get("mime_type")
+                        or payload.get("media_type"),
+                        "text": part.text,
+                    }
+                )
         if not content:
             content.append({"type": "text", "text": result.text() or ""})
 
@@ -869,7 +1342,7 @@ class WorkspaceNativeAgentLoop:
             "content": content,
         }
         if not result.is_error:
-            return block
+            return self._maybe_compact_tool_block(block, result)
 
         # Replace the user-visible content with a ``<tool_use_error>``
         # wrapped string + retry directive. Keeps the raw telemetry on
@@ -883,6 +1356,110 @@ class WorkspaceNativeAgentLoop:
             wrapped += f"\n{retry_line}"
         block["content"] = [{"type": "text", "text": wrapped}]
         block["is_error"] = True
+        return block
+
+    def _maybe_compact_tool_block(
+        self,
+        block: dict[str, Any],
+        result: ToolResult,
+    ) -> dict[str, Any]:
+        """Apply tool-result compaction at the LLM-injection boundary.
+
+        Runs once per tool result before the block is appended to the
+        transcript. Honors the ``runtime.tool_result_compaction`` flag so
+        operators can disable compaction without redeploying. Audit-
+        critical fields (see
+        :data:`nerya.llm.tool_compaction.AUDIT_FIELDS`) are always
+        preserved in the kept dict so trade ids, error codes, and risk
+        reasons survive the reduction.
+        """
+
+        try:
+            from ..runtime import feature_flags as ff
+            if not ff.is_enabled(None, "runtime.tool_result_compaction"):
+                return block
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        content = block.get("content") or []
+        # Estimate the byte size that will reach the LLM by re-serializing
+        # only the text payloads (image/file blobs are passed through;
+        # their references stay intact).
+        text_chars = 0
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text_chars += len(str(part.get("text") or ""))
+        if text_chars < _tool_compaction._DEFAULT_SIZE_THRESHOLD:
+            return block
+
+        # Prefer the structured payload from the original tool result when
+        # available — the reducers know how to extract metrics, status
+        # counts, etc. from the raw dict/list shape. Fall back to the
+        # concatenated text representation.
+        structured: Any = None
+        for part in result.content:
+            if part.type == "json" and part.data is not None:
+                structured = part.data
+                break
+            if part.type == "shell" and part.data is not None:
+                structured = part.data
+                break
+        if structured is None:
+            structured = result.text() or ""
+
+        # Durably persist the raw payload BEFORE we swap in the compacted
+        # summary so the operator (and downstream skills / SDK callers)
+        # can always recover the original output via ``raw_ref`` — even
+        # after the LLM transcript is rewritten. The store is gated
+        # silently: any persistence failure falls back to the legacy
+        # ``call:<tool_use_id>`` shape and the loop continues, while the
+        # durable raw-result path stays best-effort.
+        try:
+            from ..llm.tool_raw_store import write_default as _raw_write
+            durable_ref = _raw_write(
+                tool_use_id=result.tool_use_id or "",
+                tool_name=result.name or "tool",
+                payload=structured,
+            )
+        except Exception:  # pragma: no cover - defensive
+            durable_ref = ""
+        raw_ref = durable_ref or f"call:{result.tool_use_id}"
+
+        compacted = _tool_compaction.compact_tool_result(
+            result.name or "tool",
+            structured,
+            raw_ref=raw_ref,
+        )
+        if compacted.skipped:
+            return block
+
+        # Replace the text payloads with the compacted summary + kept
+        # audit fields, but leave image/file/other binary parts intact.
+        summary_text = compacted.summary
+        if compacted.kept:
+            try:
+                summary_text += "\n[compacted_kept]\n" + json.dumps(
+                    compacted.kept, ensure_ascii=False, default=str
+                )
+            except Exception:  # pragma: no cover - defensive
+                summary_text += "\n[compacted_kept] " + repr(compacted.kept)
+        new_content: list[dict[str, Any]] = [
+            {"type": "text", "text": summary_text}
+        ]
+        # Preserve non-text parts (images, files) — only text/json was the
+        # bloat we wanted to reduce.
+        for part in content:
+            if isinstance(part, dict) and part.get("type") not in ("text",):
+                new_content.append(part)
+
+        block = dict(block)
+        block["content"] = new_content
+        block["compaction"] = {
+            "rule_id": compacted.rule_id,
+            "original_bytes": compacted.original_bytes,
+            "compacted_bytes": compacted.compacted_bytes,
+            "raw_ref": compacted.raw_ref,
+        }
         return block
 
     def _retry_directive_for(self, kind: str, result: ToolResult) -> str:

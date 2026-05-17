@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -12,13 +12,11 @@ import { useUiSettings } from "../lib/settings";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
-  MoonIcon,
   NAV_ICONS,
   NAV_ICON_BY_NAME,
 } from "./icons";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { NeryaLogo } from "./NeryaLogo";
-import { SwitchIndicator } from "./SwitchControl";
 
 const COLLAPSE_KEY = "nerya.sidebar.collapsed";
 const ADVANCED_OPEN_KEY = "nerya.sidebar.advanced-open";
@@ -92,7 +90,7 @@ function NavList({
                     {translated}
                   </motion.span>
                   {typeof badge === "number" && badge > 0 ? (
-                    <span className="ml-auto inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-rose-500/20 text-rose-200 text-[10px] font-mono">
+                    <span className="ml-auto inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-rose-500/15 text-rose-400 text-[11px]">
                       {badge > 99 ? "99+" : badge}
                     </span>
                   ) : active ? (
@@ -126,11 +124,12 @@ function safeNavTranslate(t: (k: string) => string, href: string, fallback: stri
 }
 
 export function Sidebar() {
-  const pathname = usePathname();
+  const pathname = usePathname() || "/dashboard";
   const [collapsed, setCollapsed] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [inboxCount, setInboxCount] = useState<number | null>(null);
+  const [browserSessionCount, setBrowserSessionCount] = useState<number | null>(null);
   const [settings, patchSettings] = useUiSettings();
   const t = useTranslations("sidebar");
   const tNav = useTranslations("nav");
@@ -188,10 +187,33 @@ export function Sidebar() {
     };
   }, []);
 
+  // Poll the live browser-session count so the Advanced → Browser session
+  // entry can show how many sessions are currently held by the engine.
+  useEffect(() => {
+    let mounted = true;
+    async function tick() {
+      try {
+        const res = await clientApi.browserSessionList();
+        if (mounted) setBrowserSessionCount(res.count ?? 0);
+      } catch {
+        if (mounted) setBrowserSessionCount(null);
+      }
+    }
+    tick();
+    const t = setInterval(tick, 15_000);
+    return () => {
+      mounted = false;
+      clearInterval(t);
+    };
+  }, []);
+
   const data: OperatorNavData = nav.data;
   const badges = useMemo(
-    () => ({ inbox: inboxCount ?? undefined }),
-    [inboxCount],
+    () => ({
+      inbox: inboxCount ?? undefined,
+      browser_session: browserSessionCount ?? undefined,
+    }),
+    [inboxCount, browserSessionCount],
   );
 
   const width = collapsed ? "w-[72px]" : "w-64";
@@ -201,85 +223,30 @@ export function Sidebar() {
       className={`${width} embedded-scroll shrink-0 border-r backdrop-blur-xl h-screen sticky top-0 overflow-x-hidden flex flex-col transition-[width] duration-200`}
       style={{ background: "var(--panel-bg, rgba(4,4,13,0.6))", borderColor: "var(--line)", color: "var(--text-muted)" }}
     >
-      <div className="px-4 py-5 border-b flex items-center gap-3" style={{ borderColor: "var(--line)" }}>
-        <div className="relative w-10 h-10 rounded-xl overflow-hidden ring-1 ring-brand-500/40 flex items-center justify-center shadow-glow bg-black/30">
-          <NeryaLogo size={40} />
-          <span className="absolute -inset-px rounded-xl ring-1 ring-white/10 pointer-events-none" />
-        </div>
-        {!collapsed ? (
-          <div className="leading-none">
-            <div className="text-white text-[17px] font-semibold tracking-[0.22em]">
-              NERYA
-            </div>
-            <div className="mt-1 text-[9px] uppercase tracking-[0.28em] text-fluid-400/80">
-              Evolutionary Brain
-            </div>
+      <div
+        className="px-4 py-4 border-b flex items-center gap-3"
+        style={{ borderColor: "var(--line)" }}
+      >
+        <Link
+          href="/dashboard"
+          className="flex items-center gap-3 min-w-0 group"
+          aria-label="Nerya"
+        >
+          <div className="relative w-9 h-9 rounded-lg overflow-hidden bg-black/30 flex items-center justify-center">
+            <NeryaLogo size={36} />
           </div>
-        ) : null}
+          {!collapsed ? (
+            <span className="text-[16px] font-medium text-[color:var(--text-base)] group-hover:text-brand-300 transition-colors">
+              {t("brandName")}
+            </span>
+          ) : null}
+        </Link>
       </div>
 
-      <AnimatePresence initial={false} mode="wait">
-        {!collapsed ? (
-          <motion.div
-            key="agent-expanded"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="mx-3 mt-4 glass px-3 py-3"
-          >
-          <div className="flex items-center gap-3">
-            <div className="relative shrink-0">
-              <div className="absolute inset-0 rounded-full ring-ai animate-spin-slow opacity-70" style={{ animation: "aurora-shift 8s linear infinite" }} />
-              <div className="relative w-10 h-10 rounded-full overflow-hidden shadow-glow ring-1 ring-brand-500/40 bg-black/30 flex items-center justify-center">
-                <NeryaLogo size={40} />
-              </div>
-              <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-accent-500 ring-2 ring-[#04040d]" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[12px] font-semibold text-white tracking-wider">
-                  NERYA AGENT
-                </span>
-                <span className="text-[9px] font-mono text-brand-200 bg-brand-500/20 border border-brand-500/30 rounded px-1 py-[1px]">
-                  v0.1.0
-                </span>
-              </div>
-              <div className="text-[10px] text-ink-400 mt-0.5 truncate">
-                Self-evolving runtime
-              </div>
-              <div className="flex items-center gap-1 mt-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-accent-500 shadow-neon animate-pulse" />
-                <span className="text-[9px] text-accent-400 tracking-widest font-mono uppercase">
-                  ONLINE
-                </span>
-              </div>
-            </div>
-          </div>
-          </motion.div>
-        ) : (
-          <motion.div
-            key="agent-collapsed"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            className="flex justify-center mt-4"
-          >
-          <div className="relative">
-            <div className="w-9 h-9 rounded-full overflow-hidden shadow-glow ring-1 ring-brand-500/40 bg-black/30 flex items-center justify-center">
-              <NeryaLogo size={36} />
-            </div>
-            <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-accent-500 ring-2 ring-[#0a0b1a]" />
-          </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <nav className="px-3 py-5 space-y-5 flex-1">
+      <nav className="px-3 py-4 space-y-5 flex-1">
         <div>
           {!collapsed ? (
-            <div className="px-2 mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-ink-500">
+            <div className="px-2 mb-1.5 text-[12px] font-medium text-[color:var(--text-muted)]">
               {t("sectionOperate")}
             </div>
           ) : (
@@ -300,10 +267,10 @@ export function Sidebar() {
               <button
                 type="button"
                 onClick={() => setAdvancedOpen((v) => !v)}
-                className="w-full flex items-center justify-between px-2 mb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-ink-500 hover:text-ink-200"
+                className="w-full flex items-center justify-between px-2 mb-1.5 text-[12px] font-medium text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]"
               >
                 <span>{t("sectionAdvanced")}</span>
-                <span className="text-[10px]">{advancedOpen ? "−" : "+"}</span>
+                <span className="text-[12px]">{advancedOpen ? "−" : "+"}</span>
               </button>
             ) : (
               <div className="mx-3 h-px bg-brand-500/10 mb-3" />
@@ -313,6 +280,7 @@ export function Sidebar() {
                 items={data.advanced}
                 pathname={pathname}
                 collapsed={collapsed}
+                badges={badges}
                 tNav={tNav}
               />
             )}
@@ -320,19 +288,19 @@ export function Sidebar() {
         ) : null}
 
         {!collapsed && data.hidden.length > 0 ? (
-          <div className="px-2 text-[10px] text-ink-500/70">
-            <div className="font-semibold uppercase tracking-[0.2em] text-ink-500 mb-1">
+          <div className="px-2">
+            <div className="mb-1.5 text-[12px] font-medium text-[color:var(--text-muted)]">
               {t("sectionHidden")}
             </div>
             <ul className="space-y-1">
               {data.hidden.slice(0, 5).map((h) => (
                 <li
                   key={h.id}
-                  className="text-[10px] leading-snug"
+                  className="text-[12px] leading-snug text-[color:var(--text-muted)]"
                   title={h.reason}
                 >
-                  <span className="text-ink-400">{h.label}</span>
-                  <span className="text-ink-500"> · {h.reason}</span>
+                  <span>{h.label}</span>
+                  <span className="opacity-70"> · {h.reason}</span>
                   {h.fix_action?.href ? (
                     <Link
                       href={h.fix_action.href}
@@ -348,30 +316,28 @@ export function Sidebar() {
         ) : null}
       </nav>
 
-      <div className="border-t border-brand-500/10 p-3 space-y-2">
+      <div className="border-t border-brand-500/10 p-3 space-y-1">
         {!collapsed ? (
           <LanguageSwitcher />
         ) : (
           <LanguageSwitcher collapsed />
         )}
-        <button
-          onClick={() => patchSettings({ darkMode: !settings.darkMode })}
-          className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-ink-300 hover:bg-brand-500/10 hover:text-white transition-colors ${
-            collapsed ? "justify-center px-0" : ""
-          }`}
-          title={collapsed ? (settings.darkMode ? t("lightMode") : t("darkMode")) : undefined}
+        <select
+          value={settings.darkMode}
+          onChange={(e) => {
+            const mode = e.currentTarget.value;
+            patchSettings({ darkMode: mode as "light" | "dark" | "system" });
+          }}
+          className={`w-full rounded-lg px-3 py-2 text-[13px] text-[color:var(--text-muted)] bg-transparent border-0 outline-none hover:bg-brand-500/10 hover:text-[color:var(--text-base)] transition-colors`}
+          aria-label={t("systemMode")}
         >
-          <MoonIcon size={18} />
-          {!collapsed ? <span>{settings.darkMode ? t("darkMode") : t("lightMode")}</span> : null}
-          {!collapsed ? (
-            <span className="ml-auto">
-              <SwitchIndicator checked={settings.darkMode} label="Dark mode" tone="brand" size="sm" />
-            </span>
-          ) : null}
-        </button>
+          <option value="system">{t("systemMode")}</option>
+          <option value="light">{t("lightMode")}</option>
+          <option value="dark">{t("darkMode")}</option>
+        </select>
         <button
           onClick={() => setCollapsed((v) => !v)}
-          className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-ink-300 hover:bg-brand-500/10 hover:text-white transition-colors ${
+          className={`w-full flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-[color:var(--text-muted)] hover:bg-brand-500/10 hover:text-[color:var(--text-base)] transition-colors ${
             collapsed ? "justify-center px-0" : ""
           }`}
           title={collapsed ? t("expand") : t("collapse")}

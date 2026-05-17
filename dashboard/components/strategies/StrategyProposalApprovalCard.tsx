@@ -395,7 +395,7 @@ function IssueList({
       : "border-[#f5a524]/30 bg-[#f5a524]/10 text-[#f5a524]";
   return (
     <div className={`rounded-md border px-3 py-2 ${cls}`}>
-      <div className="text-[10px] uppercase tracking-[0.18em]">{title}</div>
+      <div className="text-[11px] font-medium">{title}</div>
       <ul className="mt-1 space-y-1 text-[11px] leading-relaxed">
         {items.slice(0, 4).map((item, index) => (
           <li key={`${item}-${index}`} className="break-words">

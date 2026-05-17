@@ -29,6 +29,15 @@ def test_local_server_function_defaults_match_cli_port():
     assert inspect.signature(local_server.serve).parameters["port"].default == 18317
 
 
+def test_local_server_result_status_marker_is_not_returned_in_body():
+    status, body = local_server._status_body_from_result(
+        {"_status": 409, "ok": False, "error": "session_turn_in_progress"}
+    )
+
+    assert status == 409
+    assert body == {"ok": False, "error": "session_turn_in_progress"}
+
+
 def test_local_server_request_clients_are_thread_local(tmp_path):
     cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
     main_client = local_server._client_for_current_thread(cfg)
@@ -46,6 +55,7 @@ def test_local_server_request_clients_are_thread_local(tmp_path):
     def run_in_worker() -> None:
         worker_client = local_server._client_for_current_thread(cfg)
         result["same_client"] = worker_client is main_client
+        result["same_skills"] = worker_client.skills is main_client.skills
         result["emit"] = worker_client.triggers.emit(
             source="test",
             kind="thread.check",
@@ -60,4 +70,5 @@ def test_local_server_request_clients_are_thread_local(tmp_path):
 
     assert worker.is_alive() is False
     assert result["same_client"] is False
+    assert result["same_skills"] is True
     assert result["emit"]["status"] == "routed"  # type: ignore[index]

@@ -14,7 +14,7 @@ export function Sparkline({
   fill?: boolean;
 }) {
   if (!values.length) {
-    return <div style={{ width, height }} className="opacity-40" />;
+    return <div style={{ width, maxWidth: "100%", height }} className="opacity-40" />;
   }
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -47,6 +47,7 @@ export function Sparkline({
     <svg
       width={width}
       height={height}
+      style={{ maxWidth: "100%" }}
       viewBox={`0 0 ${width} ${height}`}
       preserveAspectRatio="none"
     >

@@ -215,6 +215,7 @@ class PermissionEngine:
 
         risk = descriptor.per_call_risk(payload)
         scope = descriptor.permission_scope
+        auto_approve = descriptor.per_call_auto_approve(payload)
 
         if context.mode is PermissionMode.YOLO:
             for rule in context.deny_rules:
@@ -248,9 +249,9 @@ class PermissionEngine:
                 risk is RiskLevel.DANGEROUS
                 or (
                     (risk is RiskLevel.WRITE or descriptor.mutates_paths)
-                    and not descriptor.auto_approve
+                    and not auto_approve
                 )
-                or (risk is RiskLevel.EXEC and not descriptor.auto_approve)
+                or (risk is RiskLevel.EXEC and not auto_approve)
             ):
                 return PermissionDecision(
                     kind=PermissionDecisionKind.DENY,
@@ -259,10 +260,14 @@ class PermissionEngine:
                     scope=scope,
                 )
 
-        if descriptor.auto_approve:
+        if auto_approve:
             return PermissionDecision(
                 kind=PermissionDecisionKind.ALLOW,
-                reason="auto_approve descriptor",
+                reason=(
+                    "auto_approve descriptor"
+                    if descriptor.auto_approve
+                    else "auto_approve predicate"
+                ),
                 risk=risk,
                 scope=scope,
             )

@@ -19,6 +19,11 @@ const STATUS_TONE: Record<
   blocked: "danger",
 };
 
+function titleCase(value: string): string {
+  if (!value) return "";
+  return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+}
+
 /**
  * Setup readiness card — first-run checklist.
  *
@@ -88,7 +93,7 @@ export function SetupReadinessCard({ collapsed = false }: { collapsed?: boolean 
       description={env.summary}
       actions={
         <div className="flex items-center gap-2">
-          <Pill tone={tone}>{env.status.toUpperCase()}</Pill>
+          <Pill tone={tone}>{titleCase(env.status)}</Pill>
           {!collapsed ? null : (
             <button
               onClick={() => setOpen((v) => !v)}
@@ -119,7 +124,7 @@ export function SetupReadinessCard({ collapsed = false }: { collapsed?: boolean 
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <Pill tone={STATUS_TONE[check.status]}>
-                    {check.status.toUpperCase()}
+                    {titleCase(check.status)}
                   </Pill>
                   <span className="text-[12.5px] text-ink-100 truncate">
                     {check.name}
