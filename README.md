@@ -173,7 +173,7 @@ channel config.
 </tr>
 </table>
 
-> The dashboard ships under `dashboard/` (Next.js 14, App Router, `:3001`). Run it
+> The dashboard ships under `dashboard/` (Next.js 14, App Router, `:18380`). Run it
 > locally with the one-liner below. No cloud account, no telemetry phone-home.
 
 ---
@@ -337,11 +337,14 @@ await nerya.trading.submitIntent({
 
 ```bash
 # macOS / Linux
-curl -LsSf https://example.com/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.sh | sh
 
 # Windows PowerShell
-iwr https://example.com/install.ps1 -UseBasicParsing | iex
+iwr https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.ps1 -UseBasicParsing | iex
 ```
+
+If the repo is still private, anonymous `raw.githubusercontent.com` requests will
+return `404`. The commands above are the canonical public-launch URLs.
 
 The installer is idempotent. It:
 
@@ -396,7 +399,7 @@ pwsh -File .\scripts\windows\start-local.ps1 -OpenDashboard
 ```
 
 The launcher is idempotent. Re-run it whenever. API on `:18317`, dashboard on
-`:3001`, logs in `~/.nerya/logs/`.
+`:18380`, logs in `~/.nerya/logs/`.
 
 ---
 

@@ -6,7 +6,7 @@
 # workspace ($NERYA_WORKSPACE) is preserved — data is sacred.
 #
 # Usage:
-#   curl -LsSf https://example.com/uninstall.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/uninstall.sh | sh
 #   # or, with options:
 #   sh uninstall.sh --purge            # also wipe $NERYA_WORKSPACE and $NERYA_HOME
 #   sh uninstall.sh --keep-shim        # keep ~/.local/bin/nerya in place

@@ -2,7 +2,7 @@
 # Nerya one-liner installer (macOS / Linux).
 #
 # Usage:
-#   curl -LsSf https://example.com/install.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.sh | sh
 #   NERYA_HOME=$HOME/.nerya NERYA_SERVICE=1 sh install.sh
 #
 # Steps:
@@ -96,7 +96,7 @@ install_nerya() {
     if [ ! -d "$src_dir" ]; then
       say "cloning nerya source into $src_dir"
       git clone --depth 1 --branch "$NERYA_REF" \
-        https://github.com/nerya-project/nerya.git "$src_dir" \
+        https://github.com/NeryaAI/Nerya.git "$src_dir" \
         || die "clone failed — set NERYA_SRC=<local path> to install from a local checkout"
     else
       say "updating existing nerya source"

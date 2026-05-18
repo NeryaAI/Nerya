@@ -1,7 +1,7 @@
 # Nerya one-liner installer for Windows 10/11 (PowerShell 5.1+).
 #
 # Usage (one-liner):
-#   iwr https://example.com/install.ps1 -UseBasicParsing | iex
+#   iwr https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.ps1 -UseBasicParsing | iex
 #
 # Optional env vars:
 #   $env:NERYA_HOME       default %USERPROFILE%\.nerya
@@ -87,7 +87,7 @@ function Install-Nerya {
     $src = Join-Path $NeryaHome "src"
     if (-not (Test-Path $src)) {
       Say "cloning nerya source into $src"
-      git clone --depth 1 --branch $NeryaRef https://github.com/nerya-project/nerya.git $src
+      git clone --depth 1 --branch $NeryaRef https://github.com/NeryaAI/Nerya.git $src
     } else {
       Say "updating existing nerya source"
       try {

@@ -144,7 +144,7 @@ Tab 分页：笔记本、活动日志、写入规则、Provider、证据、操�
 </tr>
 </table>
 
-> Dashboard 就在 `dashboard/`（Next.js 14、App Router，`:3001`）。下面一行命令跑起来，
+> Dashboard 就在 `dashboard/`（Next.js 14、App Router，`:18380`）。下面一行命令跑起来，
 > 没云账号，没遥测，全程本地。
 
 ---
@@ -301,11 +301,14 @@ await nerya.trading.submitIntent({
 
 ```bash
 # macOS / Linux
-curl -LsSf https://example.com/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.sh | sh
 
 # Windows PowerShell
-iwr https://example.com/install.ps1 -UseBasicParsing | iex
+iwr https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.ps1 -UseBasicParsing | iex
 ```
+
+仓库还是私有时，匿名访问 `raw.githubusercontent.com` 会直接返回 `404`。
+上面这组命令就是以后公开仓库时的正式入口。
 
 安装脚本是幂等的，跑几次都没事。它会：
 
@@ -364,7 +367,7 @@ python -m nerya.cli.app proposals list --workspace ~/.nerya
 pwsh -File .\scripts\windows\start-local.ps1 -OpenDashboard
 ```
 
-脚本幂等，点几次都没事。API 在 `:18317`，Dashboard 在 `:3001`，日志在 `~/.nerya/logs/`。
+脚本幂等，点几次都没事。API 在 `:18317`，Dashboard 在 `:18380`，日志在 `~/.nerya/logs/`。
 
 ---
 

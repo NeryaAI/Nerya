@@ -5,7 +5,7 @@
 # workspace ($NeryaWorkspace) is preserved.
 #
 # Usage:
-#   iwr https://example.com/uninstall.ps1 -UseBasicParsing | iex
+#   iwr https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/uninstall.ps1 -UseBasicParsing | iex
 #   # or, with options:
 #   .\uninstall.ps1 -Purge          # also wipe $NeryaWorkspace and $NeryaHome
 #   .\uninstall.ps1 -KeepShim       # keep %USERPROFILE%\.local\bin\nerya.cmd
