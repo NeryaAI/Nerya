@@ -23,8 +23,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
-import signal
 import subprocess
 import time
 from pathlib import Path
@@ -81,6 +79,30 @@ _NETWORK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bgit\s+push\b"),
 )
 
+_NATIVE_STRATEGY_DISCOVERY_TERMS = (
+    "capability_catalog",
+    "meme_strategy_guide",
+    "data_api",
+    "connector_list",
+    "connector_view",
+    "market_data",
+    "onchainos",
+    "okx_onchain",
+    "xagt",
+    "wallet provider",
+    "wallet capability",
+    "token_hot_tokens",
+    "memepump",
+)
+_SHELL_TEST_OR_BUILD_RE = re.compile(
+    r"\b(pytest|ruff|mypy|pyright|npm\s+test|pnpm\s+test|yarn\s+test)\b",
+    re.IGNORECASE,
+)
+_WORKSPACE_ENUM_RE = re.compile(
+    r"(?i)(list\s+workspace|workspace\s+files|workspace\s+root|os\.walk|"
+    r"get-childitem|dir\s+.*[/\\]s|ls\s+-la|find\s+.+-name)"
+)
+
 _SHELL_SEGMENT_RE = re.compile(r"(?:^|[;&|]\s*)([A-Za-z0-9_.\\/-]+)")
 _DELETE_HEADS = {
     "rm", "del", "erase", "rmdir", "rd", "remove-item", "ri",
@@ -135,6 +157,46 @@ def _looks_like_config_write(cmd: str, heads: list[str]) -> bool:
     return False
 
 
+def _looks_like_native_strategy_discovery(cmd: str, description: str) -> bool:
+    haystack = f"{description}\n{cmd}".lower()
+    heads = _command_heads(cmd)
+    if any(head in _DELETE_HEADS for head in heads):
+        return False
+    if re.search(r"\bfind\b.*\s-delete\b", cmd, re.IGNORECASE):
+        return False
+    if _WORKSPACE_ENUM_RE.search(haystack) and any(
+        head in _READ_HEADS or head in {"python", "python3", "py"} for head in heads
+    ):
+        return True
+    if not any(term in haystack for term in _NATIVE_STRATEGY_DISCOVERY_TERMS):
+        return False
+    if _SHELL_TEST_OR_BUILD_RE.search(cmd):
+        return False
+
+    uses_python_probe = any(head in {"python", "python3", "py"} for head in heads) and (
+        re.search(r"\s-c\b", cmd)
+        or "from nerya.data" in haystack
+        or "data_api(" in haystack
+    )
+    if uses_python_probe:
+        return True
+
+    searches_workspace_for_native_sources = any(
+        head in _READ_HEADS for head in heads
+    ) and any(
+        term in haystack
+        for term in (
+            "connector",
+            "data source",
+            "wallet provider",
+            "onchainos",
+            "meme_strategy_guide",
+            "capability_catalog",
+        )
+    )
+    return searches_workspace_for_native_sources
+
+
 def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     """Map ``run_shell`` arguments -> :class:`RiskLevel`.
 
@@ -142,10 +204,16 @@ def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     hard-block destructive commands without explicit approval.
     """
 
-    cmd = str((arguments or {}).get("command") or "")
+    arguments = arguments or {}
+    cmd = str(arguments.get("command") or "")
     if not cmd:
         return RiskLevel.READ
     cmd = cmd.strip()
+    if _looks_like_native_strategy_discovery(
+        cmd,
+        str(arguments.get("description") or ""),
+    ):
+        return RiskLevel.READ
     heads = _command_heads(cmd)
     if any(head in _DELETE_HEADS for head in heads):
         return RiskLevel.DANGEROUS
@@ -213,6 +281,27 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
             error=ToolError(
                 kind=ToolErrorKind.SCHEMA_VALIDATION,
                 message="run_shell requires a non-empty 'command' string",
+            ),
+        )
+    if _looks_like_native_strategy_discovery(cmd, str(description)):
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.PERMISSION_DENIED,
+                message=(
+                    "run_shell was not executed: this command is trying to "
+                    "rediscover strategy, connector, wallet, or on-chain data "
+                    "that native tools already expose. Read "
+                    "strategy_author with skill_view, use connector_list / "
+                    "connector_view / data_api / market_data for bounded "
+                    "evidence, then call strategy_generate_proposal with "
+                    "`files` containing Nerya SDK code when custom strategy "
+                    "logic is needed. For workspace file listing use glob, "
+                    "list_dir, or read_file. Reserve run_shell for explicit "
+                    "operator commands, tests, builds, or cases with no "
+                    "native tool."
+                ),
             ),
         )
     try:

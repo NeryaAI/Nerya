@@ -52,6 +52,7 @@ def test_system_prompt_surfaces_session_market_context_as_advisory(tmp_path) -> 
     assert "coverage_ok is false" in prompt
     assert "Do not fabricate synthetic/random/placeholder replay data" in prompt
     assert "do not stop to ask for missing market" in prompt
+    assert "Read it with skill_view before connector_list" in prompt
     assert "pick a liquid market with real historical candles" in prompt
     assert "do not override files.main.py" in prompt
     assert "custom strategy-authoring tasks" in prompt
@@ -64,6 +65,9 @@ def test_system_prompt_surfaces_session_market_context_as_advisory(tmp_path) -> 
     assert "market_data/backtest attempt" in prompt
     assert "stop discovery and write the SDK" in prompt
     assert "Do not call shell, glob, or raw file reads" in prompt
+    assert "the efficient evidence boundary is wallet capability" in prompt
+    assert "generate the SDK strategy" in prompt
+    assert "until strategy_generate_proposal with SDK files has been" in prompt
     assert "do not satisfy that request with CEX symbols" in prompt
     assert "silently substituting CEX candles" in prompt
 
@@ -76,6 +80,10 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     )
 
     assert "Market context inheritance" in text
+    assert "Use to author SDK strategy code" in text
+    assert "- meme" in text
+    assert "- wallet" in text
+    assert "- onchain" in text
     assert "advisory context for your judgment, not a hard router" in text
     assert "Preserve the market scope that the session has already established" in text
     assert "Examples are examples, not defaults" in text
@@ -101,6 +109,9 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "do not request shell just to" in text
     assert "stop discovery and write the SDK proposal" in text
     assert "Do not call shell, glob, or raw file reads" in text
+    assert "the efficient evidence boundary is" in text
+    assert "generate the SDK strategy package immediately" in text
+    assert "until a `strategy_generate_proposal` call with SDK `files`" in text
     assert "do not satisfy\nthat request with CEX proxies" in text
     assert "not a valid on-chain\nbacktest" in text
 
@@ -127,6 +138,46 @@ def test_strategy_generate_proposal_description_reminds_market_context(tmp_path)
     assert "unrelated example market" in desc
     assert "draft the SDK package files first" in desc
     assert "not invent the core strategy logic" in desc
+
+
+def test_run_shell_description_defers_strategy_authoring_to_native_tools(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    registry = ToolRegistry()
+    deps = build_native_tool_deps(
+        workspace_root=cfg.paths.root,
+        skill_roots=[],
+        paths=cfg.paths,
+        config=cfg,
+        skills=None,
+    )
+    register_native_tools(registry, deps)
+
+    desc = registry.get("run_shell").description
+    assert "Do not use this for strategy authoring" in desc
+    assert "connector/data-source discovery" in desc
+    assert "wallet/on-chain provider inspection" in desc
+    assert "strategy_generate_proposal with `files`" in desc
+    assert "SDK code when custom logic is needed" in desc
+    assert "reserve shell for explicit operator commands" in desc
+
+
+def test_data_api_description_routes_meme_guide_to_sdk_authoring(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    registry = ToolRegistry()
+    deps = build_native_tool_deps(
+        workspace_root=cfg.paths.root,
+        skill_roots=[],
+        paths=cfg.paths,
+        config=cfg,
+        skills=None,
+    )
+    register_native_tools(registry, deps)
+
+    desc = registry.get("data_api").description
+    assert "meme_strategy_guide returns next_required_action" in desc
+    assert "bounded_sequence" in desc
+    assert "SDK strategy package authoring" in desc
+    assert "do not use shell or public web search" in desc
 
 
 def test_strategy_backtest_tool_supports_proposal_targets(tmp_path) -> None:

@@ -99,8 +99,18 @@ CONNECTOR_VIEW_SCHEMA: dict[str, Any] = {
             "minimum": 0,
             "default": 24000,
             "description": (
-                "Cap on how many bytes of the connector source to inline. "
-                "Set to 0 to skip the source body and only get metadata."
+                "Cap on how many bytes of the connector source to inline "
+                "when include_source is true. Set to 0 to skip the source "
+                "body and only get metadata."
+            ),
+        },
+        "include_source": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Include connector source code. Leave false for strategy/data "
+                "routing; source reads are only for connector implementation "
+                "or debugging."
             ),
         },
     },
@@ -624,6 +634,16 @@ def connector_view_handler(call: ToolCall) -> ToolResult:
 
     info = _spec_to_dict(spec, include_source_path=True)
     info["found"] = True
+    include_source = bool(args.get("include_source", False))
+    if not include_source and max_bytes > 0:
+        info["source_omitted"] = True
+        info["source_hint"] = (
+            "Source omitted by default. For strategy authoring, use connector "
+            "metadata plus wallet/onchain data_api routes and move to "
+            "strategy_generate_proposal; request include_source=true only when "
+            "implementing or debugging connector code."
+        )
+        max_bytes = 0
 
     src_path = _factory_module_path(spec)
     if max_bytes > 0 and src_path is not None and src_path.exists():

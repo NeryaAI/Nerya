@@ -1188,6 +1188,212 @@ def test_subagent_runtime_falls_back_to_tool_observations_after_tool_only_budget
     assert result["metrics"]["skill_calls"][0]["skill"] == "market_data"
 
 
+def test_subagent_runtime_falls_back_after_raw_tool_request_followup(
+    tmp_path,
+) -> None:
+    class FakeRegistry:
+        def list(self):  # noqa: ANN201
+            return []
+
+    class FakeSkills:
+        registry = FakeRegistry()
+
+    malformed_tool_request = (
+        '<tool_call>\n<{"skill_calls": [{"skill": "market_data", '
+        '"payload": {"market": "NVDA"}}]}'
+    )
+
+    class ToolThenRawLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def call(self, **kwargs):  # noqa: ANN201, ARG002
+            self.calls += 1
+            if self.calls == 1:
+                return LLMCall(
+                    tier="medium",
+                    task="subagent_analysis",
+                    caller="subagent:fundamentals_analyst",
+                    tokens=3,
+                    usd=0.001,
+                    raw='{"skill_calls":[{"skill":"market_data","payload":{"market":"NVDA"}}]}',
+                    parsed={
+                        "skill_calls": [
+                            {"skill": "market_data", "payload": {"market": "NVDA"}}
+                        ]
+                    },
+                    provider="fake",
+                    model="fake-model",
+                )
+            return LLMCall(
+                tier="medium",
+                task="subagent_analysis",
+                caller="subagent:fundamentals_analyst",
+                tokens=3,
+                usd=0.001,
+                raw=malformed_tool_request,
+                parsed={"raw": malformed_tool_request},
+                provider="fake",
+                model="fake-model",
+            )
+
+    def fake_market_data(call):  # noqa: ANN001, ANN202
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={"market": call.arguments["market"], "last": 225.32},
+        )
+
+    registry = ToolRegistry()
+    registry.register(
+        make_native_descriptor(
+            name="market_data",
+            description="test market data",
+            input_schema={},
+            handler=fake_market_data,
+            risk=RiskLevel.READ,
+            permission_scope=PermissionScope.NETWORK,
+            read_only=True,
+            auto_approve=True,
+        )
+    )
+    runtime = SubAgentRuntime(
+        config=Config(
+            paths=WorkspacePaths(root=tmp_path),
+            data={"agent": {"subagents": {"max_iterations": 2}}},
+        ),
+        skills=FakeSkills(),
+        llm=ToolThenRawLLM(),
+        tool_registry=registry,
+    )
+    spec = SubAgentSpec(
+        name="fundamentals_analyst",
+        prompt_path=tmp_path / "fundamentals_analyst.agent.md",
+        prompt="Analyze fundamentals.",
+        allowed_skills=["market_data"],
+        tier="medium",
+    )
+
+    result = runtime.run(
+        spec,
+        trigger_event_id="trigger-1",
+        session_id="sess-1",
+        payload={"ticker": "NVDA"},
+    )
+
+    assert result["output"]["quality"] == "tool_observation_fallback"
+    assert result["output"]["observations"]
+    assert result["metrics"]["skill_calls"][0]["skill"] == "market_data"
+
+
+def test_subagent_runtime_prefetches_required_fundamental_data(tmp_path) -> None:
+    class FakeRegistry:
+        def list(self):  # noqa: ANN201
+            return []
+
+    class FakeSkills:
+        registry = FakeRegistry()
+
+    class FinalOnlyLLM:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def call(self, **kwargs):  # noqa: ANN201
+            self.prompts.append(kwargs["prompt"])
+            return LLMCall(
+                tier="medium",
+                task="subagent_analysis",
+                caller="subagent:fundamentals_analyst",
+                tokens=3,
+                usd=0.001,
+                raw='{"quality":"ok","growth":"ok","valuation":"ok","confidence":0.8,"done":true}',
+                parsed={
+                    "quality": "ok",
+                    "growth": "ok",
+                    "valuation": "ok",
+                    "confidence": 0.8,
+                    "done": True,
+                },
+                provider="fake",
+                model="fake-model",
+            )
+
+    native_calls: list[tuple[str, dict]] = []
+
+    def fake_tool(call):  # noqa: ANN001, ANN202
+        native_calls.append((call.name, dict(call.arguments or {})))
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={"ok": True, "tool": call.name, "args": call.arguments},
+        )
+
+    registry = ToolRegistry()
+    for name in (
+        "market_data",
+        "mcp__yahoo__get_stock_info",
+        "mcp__yahoo__get_financial_statement",
+    ):
+        registry.register(
+            make_native_descriptor(
+                name=name,
+                description=f"test {name}",
+                input_schema={},
+                handler=fake_tool,
+                risk=RiskLevel.READ,
+                permission_scope=PermissionScope.NETWORK,
+                read_only=True,
+                auto_approve=True,
+            )
+        )
+    llm = FinalOnlyLLM()
+    runtime = SubAgentRuntime(
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+        skills=FakeSkills(),
+        llm=llm,
+        tool_registry=registry,
+    )
+    spec = SubAgentSpec(
+        name="fundamentals_analyst",
+        prompt_path=tmp_path / "fundamentals_analyst.agent.md",
+        prompt="Analyze fundamentals.",
+        allowed_skills=["market_data"],
+        tier="medium",
+    )
+
+    result = runtime.run(
+        spec,
+        trigger_event_id="trigger-1",
+        session_id="sess-1",
+        payload={"ticker": "NVDA"},
+    )
+
+    assert (
+        "market_data",
+        {"market": "NVDA", "action": "get_ticker", "venue": "yahoo"},
+    ) in native_calls
+    assert (
+        "mcp__yahoo__get_stock_info",
+        {"ticker": "NVDA"},
+    ) in native_calls
+    statement_types = [
+        payload.get("financial_type")
+        for name, payload in native_calls
+        if name == "mcp__yahoo__get_financial_statement"
+    ]
+    assert statement_types == ["income_stmt", "balance_sheet", "cashflow"]
+    assert "prior observations" in llm.prompts[0]
+    assert [call["skill"] for call in result["metrics"]["skill_calls"][:5]] == [
+        "market_data",
+        "mcp__yahoo__get_stock_info",
+        "mcp__yahoo__get_financial_statement",
+        "mcp__yahoo__get_financial_statement",
+        "mcp__yahoo__get_financial_statement",
+    ]
+    assert result["output"]["data_coverage"]["has_market_data"] is True
+    assert result["output"]["data_coverage"]["has_financial_statement"] is True
+
+
 def test_subagent_runtime_marks_unfinished_tool_request_degraded(tmp_path) -> None:
     class FakeRegistry:
         def list(self):  # noqa: ANN201

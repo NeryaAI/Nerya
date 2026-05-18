@@ -220,7 +220,10 @@ def compact_data_result(
     cols = [str(c) for c in (columns or []) if str(c)]
     rows = _records(raw)
     if rows is not None:
-        json_rows = [_jsonable(row) for row in rows]
+        json_rows = [
+            _with_common_aliases(_jsonable(row))
+            for row in rows
+        ]
         if cols:
             json_rows = [
                 {key: row.get(key) for key in cols if isinstance(row, dict) and key in row}
@@ -243,6 +246,45 @@ def compact_data_result(
         "kind": "object",
         "data": _jsonable(raw),
     }
+
+
+def _with_common_aliases(row: Any) -> Any:
+    if not isinstance(row, dict):
+        return row
+    out = dict(row)
+
+    def set_alias(name: str, *sources: str) -> None:
+        if out.get(name) not in (None, ""):
+            return
+        for source in sources:
+            value = out.get(source)
+            if value not in (None, ""):
+                out[name] = value
+                return
+
+    tags = out.get("tags") if isinstance(out.get("tags"), dict) else {}
+    market = out.get("market") if isinstance(out.get("market"), dict) else {}
+    set_alias("address", "address", "tokenContractAddress", "tokenAddress", "contractAddress")
+    set_alias("symbol", "symbol", "tokenSymbol")
+    set_alias("market_cap", "marketCap", "marketCapUsd", "market_cap")
+    set_alias("volume_24h", "volume", "volume24h", "volumeUsd24h", "volume_usd_24h")
+    set_alias("liquidity_usd", "liquidity", "liquidityUsd", "liquidity_usd")
+    set_alias("created_at", "created_at", "firstTradeTime", "createdTimestamp")
+    if out.get("holders") in (None, "") and tags.get("totalHolders") not in (None, ""):
+        out["holders"] = tags.get("totalHolders")
+    if out.get("top_holder_pct") in (None, ""):
+        for source in ("top10HoldPercent", "top10HoldingsPercent"):
+            value = out.get(source)
+            if value not in (None, ""):
+                out["top_holder_pct"] = value
+                break
+        else:
+            value = tags.get("top10HoldingsPercent")
+            if value not in (None, ""):
+                out["top_holder_pct"] = value
+    if out.get("volume_1h") in (None, "") and market.get("volumeUsd1h") not in (None, ""):
+        out["volume_1h"] = market.get("volumeUsd1h")
+    return out
 
 
 def _norm(value: Any) -> str:

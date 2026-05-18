@@ -54,6 +54,13 @@ def test_shell_research_commands_are_read_risk():
     assert classify_shell_risk({"command": "rg -n approval nerya"}) is RiskLevel.READ
     assert classify_shell_risk({"command": "find . -name '*.py'"}) is RiskLevel.READ
     assert (
+        classify_shell_risk({
+            "command": "python -c \"from nerya.data import data_api; data_api()\"",
+            "description": "Check wallet capability catalog structure",
+        })
+        is RiskLevel.READ
+    )
+    assert (
         classify_shell_risk({"command": "git diff -- nerya/tools/permissions.py"})
         is RiskLevel.READ
     )

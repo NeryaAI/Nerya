@@ -1403,7 +1403,16 @@ def register_native_tools(
             name="run_shell",
             description=(
                 "Run a shell command. Risk is classified per-call: rm -rf, sudo, "
-                "git push --force, etc. are flagged as DANGEROUS."
+                "git push --force, etc. are flagged as DANGEROUS. Do not use "
+                "this for strategy authoring, connector/data-source discovery, "
+                "wallet/on-chain provider inspection, or strategy package file "
+                "creation when native tools cover the task. For strategy work, "
+                "use connector_list / connector_view / data_api / market_data "
+                "for provider evidence, then call strategy_generate_proposal "
+                "with `files` containing SDK code when custom logic is needed. "
+                "Use read_file/glob for narrow artifact inspection and reserve "
+                "shell for explicit operator commands, tests, builds, or cases "
+                "where no native tool exists."
             ),
             input_schema=_RUN_SHELL_SCHEMA,
             handler=_wrap_run_shell(deps),
@@ -1701,6 +1710,10 @@ def register_native_tools(
                 "wallet functions, selected_data_route, GOAT/self_custody "
                 "fallback wallet_install plan, OnchainOS read actions, "
                 "market_data venue formats, and guarded execution paths. "
+                "When meme_strategy_guide returns next_required_action or "
+                "bounded_sequence, follow that sequence and move to SDK "
+                "strategy package authoring; do not use shell or public web "
+                "search to rediscover the returned routes. "
                 "CoinGecko is an MCP namespace, not a data_api provider. "
                 "Flow: data_api(op='list', provider='onchainos') -> "
                 "data_api(op='schema', provider='onchainos', action='...') -> "

@@ -88,6 +88,24 @@ def data_api_handler(
         if op == "call":
             provider = _required(args, "provider")
             action = _required(args, "action")
+            if (
+                provider.lower() == "wallet"
+                and action.lower() in {"capability_catalog", "meme_strategy_guide"}
+                and "limit" in args
+            ):
+                return _error(
+                    call,
+                    ToolErrorKind.SCHEMA_VALIDATION,
+                    (
+                        "limit does not expand wallet catalog/guide object results. "
+                        "Use the compact next_required_action and bounded_sequence "
+                        "already returned: read strategy_author with skill_view and "
+                        "move to strategy_generate_proposal with SDK files instead "
+                        "of repeating catalog discovery."
+                    ),
+                    detail={"provider": provider, "action": action},
+                    retryable=False,
+                )
             payload_args = args.get("args")
             if payload_args is None:
                 payload_args = args.get("payload")

@@ -196,6 +196,9 @@ def test_team_run_tool_result_final_synthesis_receives_original_prompt() -> None
     assert "AgentTeam conclusions" in synthesis_prompt
     assert "NVDA report synthesis" in synthesis_prompt
     assert "Revenue and margin analysis complete" in synthesis_prompt
+    assert "Do not claim that all required data was obtained" in synthesis_prompt
+    assert "data gaps" in synthesis_prompt
+    assert "data_coverage" in synthesis_prompt
 
 
 def test_team_run_final_report_renders_structured_role_outputs_as_markdown() -> None:

@@ -333,6 +333,63 @@ class SubAgentRuntime:
         )
 
         accumulated_obs: list[dict[str, Any]] = []
+        for entry in _stock_research_data_prefetch_calls(
+            spec.name,
+            payload,
+            native_tools=callable_native_tools,
+        ):
+            if len(skill_calls) >= max_calls:
+                rejected_actions.append({
+                    "entry": entry,
+                    "reason": "skill_call_budget_exhausted",
+                })
+                break
+            record = self._dispatch_one(
+                entry,
+                spec_name=spec.name,
+                allowed=callable_skills,
+                allowed_native_tools=callable_native_tools,
+                strategy_id=strategy_id,
+                session_id=session_id,
+                trigger_event_id=trigger_event_id,
+            )
+            if record is None:
+                continue
+            if record.get("ok"):
+                skill_calls.append(record)
+                accumulated_obs.append({
+                    "iteration": "prefetch",
+                    "skill": record.get("skill"),
+                    "action": record.get("action"),
+                    "ok": True,
+                    "summary": _summarise(record.get("result")),
+                })
+                _publish(
+                    "subagent.step",
+                    step_kind="act",
+                    iteration=-1,
+                    status="ok",
+                    skill=record.get("skill"),
+                    action=record.get("action"),
+                )
+            else:
+                rejected_actions.append(record)
+                accumulated_obs.append({
+                    "iteration": "prefetch",
+                    "skill": record.get("skill"),
+                    "action": record.get("action"),
+                    "ok": False,
+                    "error": record.get("error"),
+                })
+                _publish(
+                    "subagent.step",
+                    step_kind="act",
+                    iteration=-1,
+                    status="error",
+                    skill=record.get("skill"),
+                    action=record.get("action"),
+                    error=str(record.get("error") or ""),
+                )
         for i in range(max_iter):
             if time.monotonic() - t_start >= max_wall_seconds:
                 close_reason = "subagent_wall_time_exceeded"
@@ -556,6 +613,11 @@ class SubAgentRuntime:
                 rejected_actions=rejected_actions,
                 close_reason=close_reason,
             )
+        final_output = _attach_data_coverage(
+            final_output,
+            skill_calls=skill_calls,
+            rejected_actions=rejected_actions,
+        )
         _publish(
             "subagent.step",
             step_kind="close",
@@ -1052,7 +1114,7 @@ def _native_tool_usage_hints(native_tools: list[str]) -> str:
             "- Yahoo statements: "
             '{"skill":"mcp__yahoo__get_financial_statement","payload":'
             '{"ticker":"NVDA","financial_type":"income_stmt"}}; also use '
-            "balance_sheet or cashflow_stmt."
+            "balance_sheet or cashflow."
         )
     if any(t.startswith("mcp__edgar__") for t in available):
         lines.append(
@@ -1062,6 +1124,59 @@ def _native_tool_usage_hints(native_tools: list[str]) -> str:
     if len(lines) == 1:
         return ""
     return "\n".join(lines)
+
+
+def _prefetch_symbol(payload: dict[str, Any]) -> str:
+    for key in ("ticker", "symbol", "identifier"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _stock_research_data_prefetch_calls(
+    spec_name: str,
+    payload: dict[str, Any],
+    *,
+    native_tools: list[str],
+) -> list[dict[str, Any]]:
+    if spec_name not in {"fundamentals_analyst", "risk_critic"}:
+        return []
+    symbol = _prefetch_symbol(payload)
+    if not symbol:
+        return []
+    available = set(native_tools or [])
+    venue = str(payload.get("venue") or "yahoo")
+    calls: list[dict[str, Any]] = []
+
+    def add(skill: str, payload: dict[str, Any]) -> None:
+        if skill not in available:
+            return
+        calls.append({"skill": skill, "payload": payload})
+
+    add("market_data", {"action": "get_ticker", "venue": venue, "market": symbol})
+
+    if spec_name in {"risk_critic", "technical_analyst"}:
+        add(
+            "market_data",
+            {
+                "action": "get_candles",
+                "venue": venue,
+                "market": symbol,
+                "interval": "1d",
+                "count": 90,
+            },
+        )
+
+    if spec_name == "fundamentals_analyst":
+        add("mcp__yahoo__get_stock_info", {"ticker": symbol})
+        for financial_type in ("income_stmt", "balance_sheet", "cashflow"):
+            add(
+                "mcp__yahoo__get_financial_statement",
+                {"ticker": symbol, "financial_type": financial_type},
+            )
+
+    return calls
 
 
 def _normalise_native_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1129,10 +1244,11 @@ def _normalise_native_payload(tool_name: str, payload: dict[str, Any]) -> dict[s
                 "balance": "balance_sheet",
                 "balance_sheet": "balance_sheet",
                 "balance sheet": "balance_sheet",
-                "cashflow": "cashflow_stmt",
-                "cash_flow": "cashflow_stmt",
-                "cash flow": "cashflow_stmt",
-                "cashflow_statement": "cashflow_stmt",
+                "cashflow": "cashflow",
+                "cash_flow": "cashflow",
+                "cash flow": "cashflow",
+                "cashflow_statement": "cashflow",
+                "cashflow_stmt": "cashflow",
             }
             if raw:
                 out["financial_type"] = statement_aliases.get(raw, raw)
@@ -1159,8 +1275,15 @@ def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
             "summary", "recommendation", "confidence", "thesis",
             "invalidation", "risk_flags", "evidence", "done", "final",
         }
+        raw_text = " ".join(
+            str(parsed.get(key) or "")
+            for key in ("raw", "text", "message", "content")
+        )
         if not (set(parsed) & analytical_keys) and (
             parsed.get("skill_calls") or parsed.get("tool_calls")
+            or "<tool_call" in raw_text
+            or '"skill_calls"' in raw_text
+            or '"tool_calls"' in raw_text
         ):
             return {
                 "raw": str(raw or ""),
@@ -1235,6 +1358,50 @@ def _tool_observation_fallback_output(
         "tools_used": successful_tools,
         "tool_errors": failed_tools,
     }
+
+
+def _attach_data_coverage(
+    output: dict[str, Any],
+    *,
+    skill_calls: list[dict[str, Any]],
+    rejected_actions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(output, dict):
+        return output
+    tools_used = [
+        {
+            "skill": rec.get("skill"),
+            "action": rec.get("action"),
+            "ok": True,
+        }
+        for rec in skill_calls[-16:]
+        if rec.get("ok")
+    ]
+    tool_errors = [
+        {
+            "skill": rec.get("skill"),
+            "action": rec.get("action"),
+            "error": str(rec.get("error") or "")[:500],
+        }
+        for rec in rejected_actions[-8:]
+    ]
+    skills = {
+        str(rec.get("skill") or "")
+        for rec in skill_calls
+        if rec.get("ok")
+    }
+    coverage = {
+        "tools_used": tools_used,
+        "tool_errors": tool_errors,
+        "has_market_data": "market_data" in skills,
+        "has_financial_statement": (
+            "mcp__yahoo__get_financial_statement" in skills
+        ),
+        "has_stock_info": "mcp__yahoo__get_stock_info" in skills,
+    }
+    merged = dict(output)
+    merged["data_coverage"] = coverage
+    return merged
 
 
 def _coerce_list(v: Any) -> list[Any]:

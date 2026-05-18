@@ -9,11 +9,12 @@ import pytest
 from nerya.agent.kernel import AgentKernel as _AgentKernel  # noqa: F401
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
+from nerya.data_api.registry import compact_data_result
 from nerya.tools.native.bootstrap import build_native_tool_deps, register_native_tools
-from nerya.tools.native.connectors import connector_list_handler
+from nerya.tools.native.connectors import connector_list_handler, connector_view_handler
 from nerya.tools.native.data_api import data_api_handler
 from nerya.tools.registry import ToolRegistry
-from nerya.tools.types import ToolCall
+from nerya.tools.types import ToolCall, ToolErrorKind
 
 
 pytestmark = pytest.mark.smoke
@@ -95,6 +96,42 @@ def test_data_api_calls_akshare_function_with_bounded_table_result(tmp_path, mon
     assert payload["rows"] == [{"date": "2026-01-01", "close": 10.0}]
 
 
+def test_data_api_common_aliases_survive_column_projection() -> None:
+    payload = compact_data_result(
+        "onchainos",
+        "token_hot_tokens",
+        [
+            {
+                "tokenContractAddress": "ENRAEN9assGLHU2QQCo4cAv818mDrMkb6f6pG8hHpump",
+                "tokenSymbol": "hausdorff",
+                "marketCap": "80510.36",
+                "volume": "11574.50",
+                "liquidity": "31391.90",
+                "top10HoldPercent": "19.26",
+            }
+        ],
+        columns=[
+            "symbol",
+            "address",
+            "market_cap",
+            "volume_24h",
+            "liquidity_usd",
+            "top_holder_pct",
+        ],
+    )
+
+    assert payload["rows"] == [
+        {
+            "symbol": "hausdorff",
+            "address": "ENRAEN9assGLHU2QQCo4cAv818mDrMkb6f6pG8hHpump",
+            "market_cap": "80510.36",
+            "volume_24h": "11574.50",
+            "liquidity_usd": "31391.90",
+            "top_holder_pct": "19.26",
+        }
+    ]
+
+
 def test_data_api_wallet_sources_do_not_expose_config_values(tmp_path) -> None:
     cfg = _config(tmp_path)
     cfg.data["wallet"] = {
@@ -154,6 +191,27 @@ def test_data_api_provider_aliases_route_to_wallet_and_onchainos(tmp_path) -> No
     assert any(row["action"] == "wallet_status" for row in onchainos["actions"])
 
 
+def test_connector_view_omits_source_by_default_for_token_efficiency() -> None:
+    payload = _json_payload(
+        connector_list_handler(ToolCall(name="connector_list", arguments={"query": "solana"}))
+    )
+    assert payload["count"] >= 1
+
+    viewed = _json_payload(
+        connector_view_handler(
+            ToolCall(
+                name="connector_view",
+                arguments={"id": "solana", "max_source_bytes": 20000},
+            )
+        )
+    )
+
+    assert viewed["found"] is True
+    assert viewed["source_omitted"] is True
+    assert "source" not in viewed
+    assert "strategy_generate_proposal" in viewed["source_hint"]
+
+
 def test_data_api_onchainos_exposes_meme_and_signal_sources(tmp_path) -> None:
     cfg = _config(tmp_path)
 
@@ -203,7 +261,11 @@ def test_data_api_wallet_capability_catalog_surfaces_logged_in_usage(tmp_path) -
                     "op": "call",
                     "provider": "wallet",
                     "action": "capability_catalog",
-                    "args": {"topic": "meme", "include_live_status": False},
+                    "args": {
+                        "topic": "meme",
+                        "include_live_status": False,
+                        "include_details": True,
+                    },
                 },
             ),
             config_like=cfg,
@@ -211,6 +273,10 @@ def test_data_api_wallet_capability_catalog_surfaces_logged_in_usage(tmp_path) -
     )
 
     data = payload["data"]
+    assert "meme_strategy_guide" in data["next_required_action"]
+    assert "Do not repeat" in str(data["rules"])
+    assert data["available_route_count"] >= 1
+    assert any(row["provider"] == "okx_os" for row in data["provider_summary"])
     assert {row["wallet_id"] for row in data["bindings"]} == {"okx_main", "xagt_main"}
     assert "vault://wallet/okx/key" not in str(payload)
     onchain_actions = {row["action"] for row in data["callable_read_actions"]["onchainos"]}
@@ -243,10 +309,38 @@ def test_data_api_wallet_meme_strategy_guide_is_actionable(tmp_path) -> None:
     )
 
     text = str(payload["data"])
+    assert payload["data"]["authoring_contract"]["skill"] == "strategy_author"
+    assert "strategy_generate_proposal" in payload["data"]["next_required_action"]
+    assert payload["data"]["bounded_sequence"][0]["call"]["skill_id"] == "strategy_author"
     assert "token_hot_tokens" in text
     assert "security_token_scan" in text
     assert "market_data" in text
+    assert "StrategyAgentTask" in text
+    assert "Do not use run_shell" in text
     assert "trade_intent_submit" in text
+
+
+def test_data_api_wallet_catalog_rejects_limit_expansion(tmp_path) -> None:
+    cfg = _config(tmp_path)
+
+    result = data_api_handler(
+        ToolCall(
+            name="data_api",
+            arguments={
+                "op": "call",
+                "provider": "wallet",
+                "action": "capability_catalog",
+                "args": {"topic": "meme"},
+                "limit": 500,
+            },
+        ),
+        config_like=cfg,
+    )
+
+    assert result.is_error is True
+    assert result.error is not None
+    assert result.error.kind == ToolErrorKind.SCHEMA_VALIDATION
+    assert "strategy_generate_proposal" in result.text()
 
 
 def test_data_api_wallet_capability_catalog_falls_back_to_goat_without_wallet(tmp_path) -> None:
@@ -330,6 +424,9 @@ def test_data_api_wallet_meme_strategy_guide_uses_ready_wallet_route(tmp_path, m
     )
 
     selection = payload["data"]["selection"]
+    assert payload["data"]["selected_route"]["canonical"] == "BITGET_ONCHAIN"
+    assert payload["data"]["available_route_count"] == 1
+    assert "do not call wallet_install" in payload["data"]["next_required_action"]
     assert selection["mode"] == "wallet_binding"
     assert selection["selected_route"]["canonical"] == "BITGET_ONCHAIN"
     assert selection["selected_route"]["market"] == "BITGET_ONCHAIN:base:0xtoken"

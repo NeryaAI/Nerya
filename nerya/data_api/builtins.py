@@ -468,6 +468,7 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
     )
 
     topic = str(args.get("topic") or "all").strip().lower()
+    include_details = bool(args.get("include_details") or args.get("detail"))
     include_live_status = bool(args.get("include_live_status", True))
     timeout_s = _float_arg(args, "timeout_s", default=8.0, minimum=1.0, maximum=30.0)
     bindings = [_safe_binding(row) for row in list_configured_providers(context.config_data)]
@@ -521,19 +522,45 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
         token=token,
         live_status=live_status,
     )
-
-    return {
-        "bindings": binding_catalog,
-        "providers": readiness_rows,
-        "market_data_sources": list_wallet_market_data_sources(),
-        "selection": selection,
+    workflow = _meme_strategy_workflow(chain=chain, token=token, selection=selection)
+    available_routes = selection.get("available_routes") if isinstance(selection, dict) else []
+    fallback = selection.get("fallback") if isinstance(selection, dict) else {}
+    fallback_active = bool(fallback.get("active")) if isinstance(fallback, dict) else False
+    wallet_route_note = (
+        "No ready wallet route is available; request operator approval before "
+        "using wallet_install for GOAT/self-custody fallback."
+        if fallback_active
+        else "A wallet-backed route is already ready; do not call wallet_install "
+        "or install GOAT for this task."
+    )
+    compact_selection = _compact_wallet_selection(selection)
+    response: dict[str, Any] = {
+        "next_required_action": (
+            "If this is a meme/on-chain strategy task, call "
+            "wallet.meme_strategy_guide once for the bounded evidence "
+            "sequence, read strategy_author with skill_view, then author the "
+            "SDK strategy package. Do not repeat capability_catalog with "
+            "larger limits and do not use shell or web search to rediscover "
+            f"the same routes. {wallet_route_note}"
+        ),
+        "selected_route": selection.get("selected_route") if isinstance(selection, dict) else {},
+        "available_route_count": len(available_routes) if isinstance(available_routes, list) else 0,
+        "provider_summary": [
+            {
+                "wallet_id": row.get("wallet_id"),
+                "provider": row.get("provider"),
+                "label": row.get("label"),
+                "ready": row.get("ready"),
+                "chains": row.get("chains") or [],
+            }
+            for row in binding_catalog
+        ],
+        "selection": compact_selection,
+        "meme_strategy_workflow": workflow,
         "callable_read_actions": {
             "wallet": _wallet_global_actions(),
-            "onchainos": _onchainos_read_catalog(topic=topic),
+            "onchainos": _compact_action_catalog(_onchainos_read_catalog(topic=topic)),
         },
-        "gated_execution_actions": _gated_wallet_actions(),
-        "live_status": live_status,
-        "meme_strategy_workflow": _meme_strategy_workflow(chain=chain, token=token, selection=selection),
         "rules": [
             "Do not infer wallet-backed on-chain data from connector_list; use data_api wallet/onchainos first.",
             "Choose the data route from installed/logged-in wallet bindings; do not hardcode OKX/XAgent/GOAT.",
@@ -541,7 +568,56 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
             "Use data_api for discovery/enrichment, market_data for OHLCV, and trade_intent_submit/strategy runtime for execution.",
             "data_api is read-only; transfers, swaps, signing, bridge, and calldata-building stay behind RiskGate/ApprovalGate/live flags.",
             "For an on-chain meme backtest, CEX pairs such as DOGEUSDT are proxies only, not valid chain-native evidence.",
+            "Do not repeat this catalog call with larger limits; use wallet.meme_strategy_guide for the compact next-step sequence.",
+            wallet_route_note,
         ],
+        "detail_hint": (
+            "Compact by default for agent context. Call with "
+            "args.include_details=true only when debugging provider wiring; "
+            "do not use larger limit values to expand this result."
+        ),
+    }
+    if include_details:
+        response.update({
+            "bindings": binding_catalog,
+            "providers": readiness_rows,
+            "market_data_sources": list_wallet_market_data_sources(),
+            "selection_full": selection,
+            "callable_read_actions_full": {
+                "wallet": _wallet_global_actions(),
+                "onchainos": _onchainos_read_catalog(topic=topic),
+            },
+            "gated_execution_actions": _gated_wallet_actions(),
+            "live_status": live_status,
+        })
+    return response
+
+
+def _compact_action_catalog(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "provider": row.get("provider"),
+            "action": row.get("action"),
+            "title": row.get("title"),
+            "required": row.get("required") or [],
+            "schema_call": row.get("schema_call"),
+        }
+        for row in rows
+    ]
+
+
+def _compact_wallet_selection(selection: dict[str, Any]) -> dict[str, Any]:
+    fallback = selection.get("fallback") if isinstance(selection.get("fallback"), dict) else {}
+    routes = selection.get("available_routes") if isinstance(selection.get("available_routes"), list) else []
+    return {
+        "mode": selection.get("mode"),
+        "installed_logged_in_wallets": selection.get("installed_logged_in_wallets") or [],
+        "onchainos_logged_in": selection.get("onchainos_logged_in"),
+        "selected_route": selection.get("selected_route") or {},
+        "available_route_count": len(routes),
+        "fallback": fallback,
+        "install_recommendations": selection.get("install_recommendations") or [],
+        "routing_rules": selection.get("routing_rules") or [],
     }
 
 
@@ -849,9 +925,93 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
         },
     )
     selection = catalog.get("selection") if isinstance(catalog, dict) else {}
+    workflow = _meme_strategy_workflow(chain=chain, token=token, selection=selection)
+    find_candidates = next(
+        (step for step in workflow if step.get("step") == "find_candidates"),
+        {},
+    )
+    enrich_and_filter = next(
+        (step for step in workflow if step.get("step") == "enrich_and_filter"),
+        {},
+    )
+    historical_ohlcv = next(
+        (step for step in workflow if step.get("step") == "fetch_historical_ohlcv"),
+        {},
+    )
+    selected_route = selection.get("selected_route") if isinstance(selection, dict) else {}
+    available_routes = selection.get("available_routes") if isinstance(selection, dict) else []
+    available_route_count = (
+        int(selection.get("available_route_count") or 0)
+        if isinstance(selection, dict)
+        else 0
+    )
+    if available_route_count <= 0 and isinstance(available_routes, list):
+        available_route_count = len(available_routes)
+    install_recommendations = (
+        selection.get("install_recommendations") if isinstance(selection, dict) else []
+    )
+    fallback = selection.get("fallback") if isinstance(selection, dict) else {}
+    fallback_active = bool(fallback.get("active")) if isinstance(fallback, dict) else False
+    wallet_route_note = (
+        "No ready wallet route is available; ask for operator approval before "
+        "using wallet_install for GOAT/self-custody fallback."
+        if fallback_active
+        else "A wallet-backed route is already ready; do not call wallet_install "
+        "or install GOAT for this task."
+    )
+    compact_selection = _compact_wallet_selection(selection)
     return {
-        "selection": selection,
-        "workflow": _meme_strategy_workflow(chain=chain, token=token, selection=selection),
+        "next_required_action": (
+            "Read strategy_author via skill_view, execute only the bounded "
+            "native evidence sequence below, then call "
+            "strategy_generate_proposal with files containing Nerya SDK "
+            "strategy code. Do not use shell or public web search to "
+            f"rediscover sources already listed here. {wallet_route_note}"
+        ),
+        "authoring_contract": {
+            "skill": "strategy_author",
+            "implementation": "write package-relative files such as main.py and strategy.md",
+            "sdk": ["StrategyContext", "StrategyResult", "StrategyAgentTask"],
+            "proposal_tool_role": "package and validate the supplied files, not generate the core strategy",
+            "live_guardrail": "paper/shadow/live progression needs operator approval when standard replay is insufficient",
+        },
+        "bounded_sequence": [
+            {
+                "step": "read_strategy_author_skill",
+                "tool": "skill_view",
+                "call": {"skill_id": "strategy_author"},
+            },
+            {
+                "step": "candidate_discovery",
+                "tool": "data_api",
+                "calls": find_candidates.get("calls", []),
+            },
+            {
+                "step": "candidate_enrichment",
+                "tool": "data_api",
+                "calls": enrich_and_filter.get("calls", []),
+            },
+            {
+                "step": "historical_replay_or_ohlcv",
+                "tool": "market_data",
+                "call": historical_ohlcv.get("call", {}),
+            },
+            {
+                "step": "author_sdk_strategy_package",
+                "tool": "strategy_generate_proposal",
+                "call_shape": {
+                    "files": {
+                        "main.py": "Nerya SDK strategy using StrategyContext/StrategyAgentTask",
+                        "strategy.md": "evidence, replay gap, and operator approval notes",
+                    }
+                },
+            },
+        ],
+        "selected_route": selected_route,
+        "available_route_count": available_route_count,
+        "install_recommendations": install_recommendations,
+        "selection": compact_selection,
+        "workflow": workflow,
         "minimum_evidence": [
             "wallet.capability_catalog is called first and its selection.selected_route is used instead of hardcoding a wallet.",
             "If selection.mode is goat_self_custody_fallback, install/approve GOAT/self_custody first and treat generic ONCHAIN candles as fallback evidence.",
@@ -869,6 +1029,8 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
             "Do not stop after connector_list returns no meme connector; wallet and onchainos data live in data_api.",
             "Do not use provider='coingecko' with data_api; CoinGecko is an MCP namespace.",
             "Do not claim an honest on-chain backtest if only Binance/Coinbase CEX candles were used.",
+            "Do not use run_shell, web_search, or web_fetch to rediscover the data routes returned by this guide.",
+            wallet_route_note,
             "Do not execute wallet swap/send/sign commands directly from a research turn.",
         ],
     }

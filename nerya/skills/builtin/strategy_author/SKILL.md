@@ -1,10 +1,19 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: strategy_author
-description: "Use to author, scaffold, validate, refactor, or backtest a Nerya strategy package before proposal promotion."
+description: "Use to author SDK strategy code, scaffold, validate, refactor, or backtest a Nerya strategy package before proposal promotion, including meme, wallet, on-chain, and custom-data strategies."
 version: 0.1.0
 license: MIT
 author: Nerya
+tags:
+  - strategy
+  - trading
+  - backtest
+  - sdk
+  - meme
+  - wallet
+  - onchain
+  - custom-data
 ---
 <!-- nerya-skill-frontmatter-end -->
 
@@ -110,6 +119,17 @@ Do not call shell, glob, or raw file reads to enumerate local connector source
 or workspace files just to learn data-source names; the provider catalog and
 tool schemas are the source of truth. After proposal generation, read only the
 returned `proposal_paths` / artifact paths needed for validation or repair.
+For meme/wallet-flow strategies, the efficient evidence boundary is:
+wallet capability catalog, meme strategy guide, one candidate-discovery call,
+one candidate enrichment/risk call, and one historical replay/OHLCV attempt.
+After those are present, generate the SDK strategy package immediately. Do not
+keep browsing token lists, fetching unrelated pages, or expanding discovery
+just because more data may exist; report remaining data gaps in `strategy.md`
+and the final answer. Do not send a final summary or continue discovery after
+that boundary until a `strategy_generate_proposal` call with SDK `files` has
+been attempted at least once. If the evidence is imperfect, put the gap and
+required operator approval into `strategy.md` instead of delaying proposal
+authoring.
 For wallet-backed on-chain meme strategies, do not stop at `connector_list`.
 First call `data_api(op="call", provider="wallet",
 action="capability_catalog", args={"topic":"meme"})` or
