@@ -113,7 +113,7 @@ export function formatBalance(
   digits = 2,
 ): string {
   const n = Number(value);
-  if (!Number.isFinite(n)) return "—";
+  if (!Number.isFinite(n)) return "–";
   const symbol = currencySymbol(currency);
   const formatted = n.toLocaleString(undefined, {
     minimumFractionDigits: 0,

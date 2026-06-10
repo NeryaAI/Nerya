@@ -59,7 +59,7 @@ function stateTone(state?: string): "ok" | "warn" | "danger" | "neutral" | "bran
 }
 
 function fmtTs(ts: unknown): string {
-  if (ts == null) return "—";
+  if (ts == null) return "–";
   if (typeof ts === "string") return formatTsShort(ts);
   const seconds = Number(ts);
   if (!Number.isFinite(seconds)) return String(ts);
@@ -211,7 +211,7 @@ export function StrategyPromotionCard({
           <div className="space-y-1.5 text-xs">
             <div className="text-ink-400">{t("currentState")}</div>
             <div className="flex items-center gap-2">
-              <Pill tone="brand">{status || "—"}</Pill>
+              <Pill tone="brand">{status || "–"}</Pill>
               {latest ? (
                 <span className="text-ink-400">
                   {t("lastDecisionPrefix")}{" "}

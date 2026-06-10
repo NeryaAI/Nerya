@@ -73,7 +73,7 @@ html.light {
   --grid: rgba(139, 92, 246, 0.05);
   --bg-deep: #ebe8ff;
   --bg: #f3f0ff;
-  --card: #ffffff;
+  --card: #fcfbff;
   --card-hi: #f0ecff;
   --line: rgba(109, 40, 217, 0.18);
   --line-hi: rgba(109, 40, 217, 0.36);
@@ -152,6 +152,15 @@ body::after {
   .card-hover:hover {
     border-color: var(--line-hi);
   }
+  /* Featured card — replaces the previous 2px violet side-stripe rail
+     (banned by impeccable) with a full-perimeter brand border. The
+     section is marked by a leading dot glyph in the title instead. */
+  .card-featured {
+    border-color: var(--line-hi);
+  }
+  html.light .card-featured {
+    border-color: rgba(109, 40, 217, 0.22);
+  }
   /* Glass surfaces collapsed into the same look as .card.
      Kept as aliases so the 50+ existing call sites still compile. */
   .glass {
@@ -229,7 +238,7 @@ body::after {
     letter-spacing: 0;
   }
   html.light .chip {
-    background: rgba(255, 255, 255, 0.7);
+    background: rgba(252, 251, 255, 0.7);
   }
   .divider { @apply border-t border-brand-500/10; }
 
@@ -279,6 +288,7 @@ body::after {
 
   .btn {
     @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-ink-950;
     letter-spacing: 0;
   }
   .btn-ghost {
@@ -294,7 +304,7 @@ body::after {
 
   .input-dark {
     @apply w-full bg-ink-900 border border-brand-500/20 rounded-md px-3 py-1.5 text-[13px]
-           text-ink-100 placeholder:text-ink-500 focus:outline-none focus:border-brand-500/60;
+           text-ink-100 placeholder:text-ink-300 focus:outline-none focus:border-brand-500/60;
   }
   textarea.input-dark { @apply font-mono; }
 
@@ -340,9 +350,11 @@ body::after {
     color: var(--text-base);
     background: rgba(139, 92, 246, 0.08);
   }
+  /* Active sidebar item — replaces the previous 2px inset rail
+     (impeccable side-stripe ban) with a full background tint + bolder
+     weight contrast. Same affordance, no decorative stripe. */
   .sidebar-item-active {
-    @apply bg-brand-500/15 text-white
-           shadow-[inset_2px_0_0_#b48bff,0_0_18px_-8px_rgba(139,92,246,0.35)];
+    @apply bg-brand-500/15 text-white font-semibold;
   }
 
   /* ── Top-nav pills ─────────────────────────────────────────────
@@ -395,13 +407,13 @@ body::after {
   html.light .nerya-app-shell [class~="bg-brand-500/80"].text-white,
   html.light .nerya-app-shell [class~="bg-rose-500"].text-white,
   html.light .nerya-app-shell [class~="bg-amber-500"].text-white,
-  html.light .nerya-app-shell [class~="bg-[#ef4560]"].text-white {
+  html.light .nerya-app-shell [class~="bg-danger"].text-white {
     color: #ffffff;
   }
   html.light .nerya-app-shell .sidebar-item-active {
     color: var(--text-base);
-    background: rgba(139, 92, 246, 0.10);
-    box-shadow: inset 2px 0 0 #7c3aed, 0 10px 24px -18px rgba(109, 40, 217, 0.24);
+    background: rgba(139, 92, 246, 0.12);
+    font-weight: 600;
   }
   html.light .nerya-app-shell .mode-toggle-idle {
     color: var(--text-muted);
@@ -432,9 +444,8 @@ body::after {
   }
   html.light .nerya-app-shell .text-amber-100,
   html.light .nerya-app-shell .text-amber-200,
-  html.light .nerya-app-shell .text-\[\#f5a524\],
-  html.light .nerya-app-shell .text-\[\#ffd58a\],
-  html.light .nerya-app-shell .text-\[\#f5a524\]\/80 {
+  html.light .nerya-app-shell .text-warn,
+  html.light .nerya-app-shell .text-warn\/80 {
     color: #92400e;
   }
   html.light .nerya-app-shell .text-rose-100,
@@ -442,9 +453,7 @@ body::after {
   html.light .nerya-app-shell .text-rose-200,
   html.light .nerya-app-shell .text-rose-200\/60,
   html.light .nerya-app-shell .text-rose-300,
-  html.light .nerya-app-shell .text-\[\#ffb3bd\],
-  html.light .nerya-app-shell .text-\[\#ef4560\],
-  html.light .nerya-app-shell .text-\[\#ef5564\] {
+  html.light .nerya-app-shell .text-danger {
     color: #be123c;
   }
   html.light .nerya-app-shell .text-emerald-100,
@@ -462,42 +471,6 @@ body::after {
   .topnav-pill-icon:hover {
     color: var(--text-base);
     background: rgba(139, 92, 246, 0.10);
-  }
-
-  /* Gradient text — softer, single-tone violet wash for hero titles
-     and brand wordmarks. Cyan accents removed to keep the chrome
-     monochromatic instead of constantly competing with the AI palette. */
-  .text-gradient-brand {
-    @apply bg-clip-text text-transparent;
-    background-image: linear-gradient(
-      120deg,
-      #f5f1ff 0%,
-      #c9a8ff 60%,
-      #f5f1ff 100%
-    );
-  }
-  html.light .text-gradient-brand {
-    background-image: linear-gradient(
-      120deg,
-      #1a1830 0%,
-      #7c3aed 60%,
-      #1a1830 100%
-    );
-  }
-  .text-gradient-ai {
-    @apply bg-clip-text text-transparent;
-    background-image: linear-gradient(
-      90deg,
-      #d6c2ff 0%,
-      #a87cff 100%
-    );
-  }
-  html.light .text-gradient-ai {
-    background-image: linear-gradient(
-      90deg,
-      #5b21b6 0%,
-      #7c3aed 100%
-    );
   }
 
   /* Chat bubbles — single thin shadow, keeps boundary feel for

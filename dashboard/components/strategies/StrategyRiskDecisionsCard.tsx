@@ -11,7 +11,7 @@ interface Props {
 }
 
 function fmtTs(ts: number): string {
-  if (!ts) return "—";
+  if (!ts) return "–";
   try {
     return new Date(ts * 1000).toLocaleString();
   } catch {

@@ -96,7 +96,7 @@ type WalletPortfolioRow = {
 };
 
 function fmtTs(ts: unknown): string {
-  if (ts == null) return "—";
+  if (ts == null) return "–";
   if (typeof ts === "string") return formatTsShort(ts);
   const seconds = Number(ts);
   if (!Number.isFinite(seconds)) return String(ts);
@@ -117,7 +117,7 @@ function asNum(v: unknown): number | null {
 
 function fmtNum(v: unknown, digits = 6): string {
   const n = asNum(v);
-  if (n === null) return "—";
+  if (n === null) return "–";
   return n.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
@@ -157,8 +157,8 @@ type PositionShareRow = {
 function PositionRow({ pos }: { pos: Record<string, unknown> }) {
   const t = useTranslations("accountDetail.positions");
   const [expanded, setExpanded] = useState(false);
-  const market = asStr(pos.market) || "—";
-  const side = asStr(pos.side) || "—";
+  const market = asStr(pos.market) || "–";
+  const side = asStr(pos.side) || "–";
   const size = asNum(pos.size_base);
   const avg = asNum(pos.avg_entry_price);
   const mark = asNum(pos.mark_price);
@@ -195,7 +195,7 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
         <span className="font-mono text-ink-100 min-w-[110px]">{market}</span>
         <Pill tone={positionSideTone(side)}>{side}</Pill>
         <span className="font-mono text-ink-300">
-          {size !== null ? fmtNum(Math.abs(size)) : "—"}
+          {size !== null ? fmtNum(Math.abs(size)) : "–"}
           {avg !== null ? (
             <span className="text-ink-500"> @ {fmtNum(avg, 4)}</span>
           ) : null}
@@ -213,7 +213,7 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
         <span className={`font-mono ${pnlTone(unreal)} ml-auto`}>
           {unreal !== null
             ? (unreal >= 0 ? "+" : "") + fmtNum(unreal, 2)
-            : "—"}
+            : "–"}
         </span>
         {strategy && !isMerged ? (
           <span className="font-mono text-ink-500 text-[11px] w-full truncate">
@@ -235,10 +235,10 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
                 className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]"
               >
                 <span className="font-mono text-ink-200 min-w-[110px] truncate">
-                  {share.strategy_id || "—"}
+                  {share.strategy_id || "–"}
                 </span>
                 <span className="font-mono text-ink-300">
-                  {shareSize !== null ? fmtNum(Math.abs(shareSize)) : "—"}
+                  {shareSize !== null ? fmtNum(Math.abs(shareSize)) : "–"}
                   {shareAvg !== null ? (
                     <span className="text-ink-500">
                       {" "}
@@ -260,7 +260,7 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
                 <span className={`font-mono ml-auto ${pnlTone(shareUnreal)}`}>
                   {shareUnreal !== null
                     ? (shareUnreal >= 0 ? "+" : "") + fmtNum(shareUnreal, 2)
-                    : "—"}
+                    : "–"}
                 </span>
               </li>
             );
@@ -272,9 +272,9 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
 }
 
 function ProtectionRow({ rule }: { rule: Record<string, unknown> }) {
-  const market = asStr(rule.market) || "—";
-  const side = asStr(rule.side) || "—";
-  const status = asStr(rule.status) || "—";
+  const market = asStr(rule.market) || "–";
+  const side = asStr(rule.side) || "–";
+  const status = asStr(rule.status) || "–";
   const mode = asStr(rule.mode);
   const sl = rule.stop_loss as Record<string, unknown> | undefined;
   const tp = rule.take_profit as Record<string, unknown> | undefined;
@@ -606,7 +606,7 @@ export default function AccountDetailPage({
         title={t("accountPrefix", { id: accountId })}
         description={
           profile
-            ? t("profileOn", { mode: profile.mode.toUpperCase(), venue: profile.venue, kind: profile.kind, wallet: profile.wallet_id || "—" })
+            ? t("profileOn", { mode: profile.mode.toUpperCase(), venue: profile.venue, kind: profile.kind, wallet: profile.wallet_id || "–" })
             : t("accountDetail")
         }
         actions={
@@ -657,14 +657,14 @@ export default function AccountDetailPage({
                     <button
                       onClick={() => setStatus("read_only")}
                       disabled={busy?.startsWith("status:")}
-                      className="btn-ghost text-xs text-[#f5a524]"
+                      className="btn-ghost text-xs text-warn"
                     >
                       {t("setReadOnly")}
                     </button>
                     <button
                       onClick={() => setStatus("quarantined")}
                       disabled={busy?.startsWith("status:")}
-                      className="btn-ghost text-xs text-[#ef4560]"
+                      className="btn-ghost text-xs text-danger"
                     >
                       {t("quarantine")}
                     </button>
@@ -698,7 +698,7 @@ export default function AccountDetailPage({
                 <button
                   onClick={() => deleteAccount(false)}
                   disabled={busy === "delete"}
-                  className="btn-ghost text-xs text-[#ef4560]"
+                  className="btn-ghost text-xs text-danger"
                 >
                   {t("delete")}
                 </button>
@@ -725,7 +725,7 @@ export default function AccountDetailPage({
               />
               <Kpi
                 label={t("snapshot")}
-                value={snapshot?.health || "—"}
+                value={snapshot?.health || "–"}
                 tone={
                   snapshot?.health === "ok"
                     ? "ok"
@@ -846,7 +846,7 @@ export default function AccountDetailPage({
                       <button
                         onClick={() => void removeHeader(h.key)}
                         disabled={busy === "headers"}
-                        className="btn-ghost text-[11px] text-[#ef4560]"
+                        className="btn-ghost text-[11px] text-danger"
                       >
                         {t("remove")}
                       </button>
@@ -1061,9 +1061,9 @@ export default function AccountDetailPage({
                           <td>{o.side}</td>
                           <td>{o.size_base}</td>
                           <td>{o.filled_size}</td>
-                          <td>{o.avg_price ?? "—"}</td>
+                          <td>{o.avg_price ?? "–"}</td>
                           <td className="font-mono text-ink-400">
-                            {o.strategy_id || "—"}
+                            {o.strategy_id || "–"}
                           </td>
                           <td className="text-ink-400 font-mono">
                             {fmtTs(o.created_at)}

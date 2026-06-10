@@ -360,7 +360,7 @@ export default function AccountsPage() {
                         </td>
                         <td className="font-mono">{p.venue}</td>
                         <td className="font-mono text-ink-400">
-                          {p.wallet_id || "—"}
+                          {p.wallet_id || "–"}
                         </td>
                         <td className="font-mono text-ink-300">
                           {p.base_currency || "USDT"}
@@ -368,7 +368,7 @@ export default function AccountsPage() {
                         <td>{money(acc.snapshot?.total_usd, p.base_currency)}</td>
                         <td
                           className={
-                            acc.reserved_usd > 0 ? "text-[#f5a524]" : ""
+                            acc.reserved_usd > 0 ? "text-warn" : ""
                           }
                         >
                           {money(acc.reserved_usd, p.base_currency)}
@@ -381,14 +381,14 @@ export default function AccountsPage() {
                               <button
                                 onClick={() => quarantine(p.id, "quarantined")}
                                 disabled={busy === `${p.id}:quarantined`}
-                                className="btn-ghost text-[11px] py-0.5 text-[#ef4560]"
+                                className="btn-ghost text-[11px] py-0.5 text-danger"
                               >
                                 {t("quarantineBtn")}
                               </button>
                               <button
                                 onClick={() => quarantine(p.id, "read_only")}
                                 disabled={busy === `${p.id}:read_only`}
-                                className="btn-ghost text-[11px] py-0.5 text-[#f5a524]"
+                                className="btn-ghost text-[11px] py-0.5 text-warn"
                               >
                                 {t("readOnlyBtn")}
                               </button>

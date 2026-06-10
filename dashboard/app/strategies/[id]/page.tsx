@@ -845,7 +845,7 @@ function KpiRow({
             : t("notInstalled")
         }
         tone={trading?.enabled ? "ok" : "warn"}
-        delta={trading?.target ?? "—"}
+        delta={trading?.target ?? "–"}
       />
       <Kpi
         label={t("kpiReflectionCron")}

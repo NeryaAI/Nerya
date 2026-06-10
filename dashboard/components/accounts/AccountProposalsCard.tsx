@@ -15,7 +15,7 @@ interface Props {
 }
 
 function formatTs(ts: string): string {
-  if (!ts) return "—";
+  if (!ts) return "–";
   try {
     const d = new Date(ts);
     if (!Number.isFinite(d.getTime())) return ts;
@@ -26,7 +26,7 @@ function formatTs(ts: string): string {
 }
 
 function formatValue(value: unknown): string {
-  if (value === undefined || value === null) return "—";
+  if (value === undefined || value === null) return "–";
   return String(value);
 }
 
@@ -194,7 +194,7 @@ export function AccountProposalsCard({ onApplied }: Props) {
                     <button
                       onClick={() => void reject(p)}
                       disabled={busy === `${p.id}:reject`}
-                      className="btn-ghost text-[11px] py-0.5 text-[#ef4560]"
+                      className="btn-ghost text-[11px] py-0.5 text-danger"
                     >
                       {busy === `${p.id}:reject` ? "…" : t("reject")}
                     </button>

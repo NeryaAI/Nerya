@@ -70,7 +70,7 @@ const components: Components = {
     </a>
   ),
   blockquote: ({ children }) => (
-    <blockquote className="border-l-2 border-brand-500/40 pl-3 italic text-ink-200 my-2">
+    <blockquote className="rounded-md border border-brand-500/20 bg-brand-500/5 px-3 py-2 italic text-ink-200 my-2">
       {children}
     </blockquote>
   ),

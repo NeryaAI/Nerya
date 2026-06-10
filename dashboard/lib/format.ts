@@ -13,6 +13,55 @@ export function truncate(text: string, n = 120): string {
   return text.length > n ? text.slice(0, n - 1) + "\u2026" : text;
 }
 
+/**
+ * Human-readable schedule cadence. Raw cron strings (`*\/5 * * * *`)
+ * mean nothing to most users, so the common shapes get a translation
+ * key + params the caller feeds into next-intl. Anything fancier
+ * (day-of-week, lists, ranges) returns null and the caller falls back
+ * to the raw expression.
+ */
+export type CadenceDescription = {
+  key:
+    | "everyMinute"
+    | "everyNMinutes"
+    | "everyNHours"
+    | "everyNDays"
+    | "everyNSeconds"
+    | "dailyAt";
+  params?: Record<string, string | number>;
+};
+
+export function describeCron(cron: string): CadenceDescription | null {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [min, hour, dom, mon, dow] = parts;
+  if (dom !== "*" || mon !== "*" || dow !== "*") return null;
+  if (min === "*" && hour === "*") return { key: "everyMinute" };
+  const stepMin = /^\*\/(\d+)$/.exec(min);
+  if (stepMin && hour === "*") {
+    return { key: "everyNMinutes", params: { n: Number(stepMin[1]) } };
+  }
+  const stepHour = /^\*\/(\d+)$/.exec(hour);
+  if (/^\d+$/.test(min) && stepHour) {
+    return { key: "everyNHours", params: { n: Number(stepHour[1]) } };
+  }
+  if (/^\d+$/.test(min) && /^\d+$/.test(hour)) {
+    const time = `${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+    return { key: "dailyAt", params: { time } };
+  }
+  return null;
+}
+
+export function describeIntervalSeconds(
+  seconds: number,
+): CadenceDescription | null {
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  if (seconds % 86400 === 0) return { key: "everyNDays", params: { n: seconds / 86400 } };
+  if (seconds % 3600 === 0) return { key: "everyNHours", params: { n: seconds / 3600 } };
+  if (seconds % 60 === 0) return { key: "everyNMinutes", params: { n: seconds / 60 } };
+  return { key: "everyNSeconds", params: { n: seconds } };
+}
+
 const TZ_OFFSET_MINUTES: Record<Exclude<TimezonePreference, "auto">, number> = {
   "utc+0": 0,
   "utc+8": 8 * 60,
@@ -57,7 +106,7 @@ export function formatTs(
   ts: string | number | undefined,
   override?: TimezonePreference,
 ): string {
-  if (!ts) return "—";
+  if (!ts) return "–";
   const d = parseDate(ts);
   if (Number.isNaN(d.getTime())) return String(ts);
 
@@ -89,7 +138,7 @@ export function formatTime(
   ts: string | number | undefined,
   override?: TimezonePreference,
 ): string {
-  if (!ts) return "—";
+  if (!ts) return "–";
   const d = parseDate(ts);
   if (Number.isNaN(d.getTime())) return String(ts);
   const tz = override ?? currentTimezone();

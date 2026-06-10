@@ -94,7 +94,7 @@ export function StrategyEvolutionCard({
                 </button>
                 <button
                   onClick={() => void rollback(p.id)}
-                  className="text-[11px] px-2 py-1 rounded border border-[#ef4560]/40 text-[#ef4560] hover:bg-[#ef4560]/10"
+                  className="text-[11px] px-2 py-1 rounded border border-danger/40 text-danger hover:bg-danger/10"
                 >
                   {t("rollback")}
                 </button>
@@ -113,10 +113,10 @@ export function StrategyEvolutionCard({
             {dropped.map((d, idx) => (
               <li
                 key={idx}
-                className="rounded border border-[#f5a524]/30 bg-[#f5a524]/10 px-2 py-1 text-[#f5a524]"
+                className="rounded border border-warn/30 bg-warn/10 px-2 py-1 text-warn"
               >
-                <span className="font-mono">{String(d.entry?.target ?? "—")}</span>{" "}
-                — {d.reason}
+                <span className="font-mono">{String(d.entry?.target ?? "–")}</span>{" "}
+                <span className="text-[color:var(--text-muted)]">·</span> {d.reason}
               </li>
             ))}
           </ul>

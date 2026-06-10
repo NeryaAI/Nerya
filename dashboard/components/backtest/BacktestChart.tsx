@@ -11,6 +11,7 @@ import { Card, Empty, ErrorBanner } from "../Page";
 import { JsonView } from "../JsonView";
 import { SummaryCards } from "./SummaryCards";
 import { BacktestTables } from "./BacktestTables";
+import { useChartTheme } from "../../lib/chartTheme";
 
 export function BacktestChart({
   strategyId,
@@ -63,6 +64,7 @@ export function BacktestChart({
 
 function ChartPanel({ panel }: { panel: BacktestPanel }) {
   const [node, setNode] = useState<HTMLDivElement | null>(null);
+  const chartTheme = useChartTheme();
 
   useEffect(() => {
     if (!node) return;
@@ -70,12 +72,12 @@ function ChartPanel({ panel }: { panel: BacktestPanel }) {
       height: panel.id === "price" ? 340 : 220,
       layout: {
         background: { color: "transparent" },
-        textColor: "#cbd5e1",
+        textColor: chartTheme.text,
         attributionLogo: false,
       },
-      grid: { vertLines: { color: "rgba(148,163,184,.12)" }, horzLines: { color: "rgba(148,163,184,.12)" } },
-      rightPriceScale: { borderColor: "rgba(148,163,184,.2)" },
-      timeScale: { borderColor: "rgba(148,163,184,.2)", timeVisible: true },
+      grid: { vertLines: { color: chartTheme.grid }, horzLines: { color: chartTheme.grid } },
+      rightPriceScale: { borderColor: chartTheme.grid },
+      timeScale: { borderColor: chartTheme.grid, timeVisible: true },
     });
     renderSeries(api, panel);
     const ro = new ResizeObserver(() => {
@@ -87,7 +89,7 @@ function ChartPanel({ panel }: { panel: BacktestPanel }) {
       ro.disconnect();
       api.remove();
     };
-  }, [node, panel]);
+  }, [chartTheme, node, panel]);
 
   if (panel.type === "overlay_spans") {
     return (

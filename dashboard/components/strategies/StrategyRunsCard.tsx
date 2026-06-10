@@ -80,7 +80,7 @@ export function StrategyRunsCard({ runs, total }: Props) {
                   </details>
                 )}
                 {run.error && (
-                  <div className="rounded border border-[#ef4560]/40 bg-[#ef4560]/10 px-2 py-1 text-[11px] text-[#ef4560]">
+                  <div className="rounded border border-danger/40 bg-danger/10 px-2 py-1 text-[11px] text-danger">
                     {run.error.kind ? `${run.error.kind}: ` : ""}
                     {run.error.message ?? t("error")}
                   </div>

@@ -43,7 +43,7 @@ function executorStateTone(state: string): "neutral" | "ok" | "warn" | "danger" 
 }
 
 function ageMs(ts?: number | null): string {
-  if (!ts) return "—";
+  if (!ts) return "–";
   const ms = Date.now() - Number(ts) * (Number(ts) < 1e12 ? 1000 : 1);
   if (ms < 0) return "now";
   const seconds = Math.floor(ms / 1000);
@@ -56,14 +56,14 @@ function ageMs(ts?: number | null): string {
 }
 
 function fmtTs(ts?: number | null): string {
-  if (!ts) return "—";
+  if (!ts) return "–";
   const seconds = Number(ts) > 1e12 ? Number(ts) / 1000 : Number(ts);
   return formatTsShort(new Date(seconds * 1000).toISOString());
 }
 
 function num(v: unknown, digits = 6): string {
   const n = Number(v);
-  if (!Number.isFinite(n)) return "—";
+  if (!Number.isFinite(n)) return "–";
   return n.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
@@ -319,10 +319,10 @@ export default function OrdersPage() {
                           {ageMs(o.created_at)}
                         </td>
                         <td className="font-mono text-ink-400">
-                          {o.strategy_id || "—"}
+                          {o.strategy_id || "–"}
                         </td>
                         <td className="font-mono text-ink-400 truncate max-w-[120px]">
-                          {o.executor_id || "—"}
+                          {o.executor_id || "–"}
                         </td>
                         <td className="flex gap-1">
                           <button
@@ -337,7 +337,7 @@ export default function OrdersPage() {
                             <button
                               onClick={() => cancelOrder(o)}
                               disabled={busy === o.order_id}
-                              className="btn-ghost text-[11px] py-0.5 text-[#ef4560]"
+                              className="btn-ghost text-[11px] py-0.5 text-danger"
                             >
                               {busy === o.order_id ? "…" : t("cancel")}
                             </button>
@@ -408,7 +408,7 @@ export default function OrdersPage() {
                           <button
                             onClick={() => cancelExecutor(e)}
                             disabled={busy === e.executor_id}
-                            className="btn-ghost text-[11px] py-0.5 text-[#ef4560]"
+                            className="btn-ghost text-[11px] py-0.5 text-danger"
                           >
                             {busy === e.executor_id ? "…" : t("cancel")}
                           </button>

@@ -202,7 +202,7 @@ export function ChatInput({
   return (
     <div className="border-t backdrop-blur-glass" style={{ background: "var(--panel-bg)", borderColor: "var(--line)" }}>
       <div className="max-w-4xl mx-auto px-4 py-3">
-        <div className="rounded-lg border border-brand-500/15 bg-brand-500/[0.04] backdrop-blur-glass focus-within:border-brand-500/50 focus-within:shadow-[0_0_0_4px_rgba(139,92,246,0.08)] transition-all px-3 py-2">
+        <div className="rounded-lg border border-[color:var(--line)] bg-[color:var(--card)] focus-within:border-brand-500/55 transition-colors px-3 py-2">
           {attachments.length ? (
             <div className="mb-2 flex max-h-24 flex-wrap gap-1.5 overflow-y-auto pr-1">
               {attachments.map((attachment) => (
@@ -268,7 +268,7 @@ export function ChatInput({
               disabled={locked}
               rows={1}
               placeholder={locked ? lockMessage : placeholder ?? t("inputPlaceholder")}
-              className="flex-1 bg-transparent resize-none text-sm text-ink-100 placeholder:text-ink-500 focus:outline-none py-1.5 min-h-[28px] max-h-[240px] disabled:cursor-not-allowed disabled:opacity-70"
+              className="flex-1 bg-transparent resize-none text-sm text-ink-100 placeholder:text-ink-300 focus:outline-none py-1.5 min-h-[28px] max-h-[240px] disabled:cursor-not-allowed disabled:opacity-70"
             />
             {sending && onCancel ? (
             <button
@@ -394,7 +394,10 @@ export function ChatInput({
                   />
                 </div>
               </div>
-              <label className="inline-flex items-center gap-1.5 rounded-md border border-brand-500/20 bg-brand-500/[0.06] px-2 py-1 text-ink-300 shrink-0">
+              <label
+                className="inline-flex items-center gap-1.5 rounded-md border border-brand-500/20 bg-brand-500/[0.06] px-2 py-1 text-ink-300 shrink-0"
+                title={t("yoloHint")}
+              >
               <input
                 type="checkbox"
                 checked={settings.permission_mode === "yolo"}

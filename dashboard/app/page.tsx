@@ -1,19 +1,5 @@
-import { LandingHero } from "../components/landing/LandingHero";
-import { LandingFeatures } from "../components/landing/LandingFeatures";
-import { LandingManifesto } from "../components/landing/LandingManifesto";
-import { LandingArchitecture } from "../components/landing/LandingArchitecture";
-import { LandingFooter } from "../components/landing/LandingFooter";
-import { CustomCursor } from "../components/landing/CustomCursor";
+import { redirect } from "next/navigation";
 
-export default function LandingPage() {
-  return (
-    <div className="relative min-h-screen">
-      <CustomCursor />
-      <LandingHero />
-      <LandingFeatures />
-      <LandingManifesto />
-      <LandingArchitecture />
-      <LandingFooter />
-    </div>
-  );
+export default function RootPage(): never {
+  redirect("/dashboard");
 }

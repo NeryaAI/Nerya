@@ -91,15 +91,15 @@ function Collapsible({
   const border = chrome?.border ?? {
     neutral: "border-ink-700/70",
     ok: "border-brand-500/40",
-    warn: "border-[#f5a524]/40",
-    err: "border-[#ef5564]/40",
+    warn: "border-warn/40",
+    err: "border-danger/40",
     brand: "border-brand-500/40",
   }[tone];
   const bg = chrome?.bg ?? {
     neutral: "bg-ink-800/50",
     ok: "bg-brand-500/5",
-    warn: "bg-[#f5a524]/5",
-    err: "bg-[#ef5564]/5",
+    warn: "bg-warn/5",
+    err: "bg-danger/5",
     brand: "bg-brand-500/5",
   }[tone];
   return (
@@ -160,7 +160,7 @@ function ActionBlock({ action }: { action: ActionRecord }) {
         </div>
       ) : (
         <div className="space-y-2">
-          <div className="text-xs text-[#ef5564]">{action.error}</div>
+          <div className="text-xs text-danger">{action.error}</div>
           <JsonBlock value={action} />
         </div>
       )}
@@ -275,7 +275,7 @@ function ToolBlock({ t }: { t: ToolTraceEntry }) {
     >
       <div className="space-y-2">
         {t.error ? (
-          <div className="text-xs text-[#ef5564]">{t.error}</div>
+          <div className="text-xs text-danger">{t.error}</div>
         ) : null}
         <OutputPanel label="result" value={t.result ?? t.error} />
         {strategyProposal ? (
@@ -530,6 +530,43 @@ function hasToolResultOutput(block: NativeBlock): boolean {
   return true;
 }
 
+function mergeToolUsePayloadsIntoResults(
+  envelopes: NativeBlockEnvelope[],
+): NativeBlockEnvelope[] {
+  const payloadByCallId = new Map<string, Record<string, unknown>>();
+  for (const env of envelopes) {
+    const block = unwrapBlock(env);
+    if (blockKind(env) !== "tool_use") continue;
+    const callId = toolCallId(block);
+    if (!callId) continue;
+    const payload = block.payload;
+    if (payload && typeof payload === "object") {
+      payloadByCallId.set(callId, recordOf(payload));
+    }
+  }
+  if (!payloadByCallId.size) return envelopes;
+
+  let changed = false;
+  const merged = envelopes.map((env) => {
+    const block = unwrapBlock(env);
+    if (blockKind(env) !== "tool_result") return env;
+    const callId = toolCallId(block);
+    if (!callId || !payloadByCallId.has(callId)) return env;
+    if (Object.keys(recordOf(block.payload)).length > 0) return env;
+    changed = true;
+    return {
+      ...env,
+      kind: "tool_result",
+      block: {
+        ...block,
+        kind: "tool_result",
+        payload: payloadByCallId.get(callId),
+      },
+    };
+  });
+  return changed ? merged : envelopes;
+}
+
 function mergeLiveToolResultsIntoBlocks(
   committedBlocks: NativeBlockEnvelope[],
   liveBlocks: NativeBlockEnvelope[] = [],
@@ -596,7 +633,13 @@ function dropDuplicateReplyTextBlocks(
   return blocks.filter((env) => {
     if (blockKind(env) !== "text") return true;
     const block = unwrapBlock(env);
-    return normalizedBlockText(block.text) !== normalizedReply;
+    const normalizedText = normalizedBlockText(block.text);
+    if (!normalizedText) return false;
+    if (normalizedText === normalizedReply) return false;
+    return !(
+      normalizedText.length >= 48 &&
+      normalizedReply.includes(normalizedText)
+    );
   });
 }
 
@@ -1169,7 +1212,7 @@ function AgentStepCard({
             </div>
           ) : null}
           {step.error ? (
-            <div className="text-[11px] text-[#ef5564] break-words">
+            <div className="text-[11px] text-danger break-words">
               {String(step.error)}
             </div>
           ) : null}
@@ -1349,7 +1392,7 @@ function AgentToolResultCard({ block }: { block: NativeBlock }) {
       >
         <div className="space-y-3">
           {block.error ? (
-            <div className="text-xs text-[#ef5564]">{String(block.error)}</div>
+            <div className="text-xs text-danger">{String(block.error)}</div>
           ) : null}
           <div className="flex items-center gap-1 flex-wrap">
             {rolesSucceeded.map((role, i) => (
@@ -1384,7 +1427,7 @@ function AgentToolResultCard({ block }: { block: NativeBlock }) {
                       ) : null}
                     </div>
                     {row.error ? (
-                      <div className="text-[11px] text-[#ef5564] break-words">
+                      <div className="text-[11px] text-danger break-words">
                         {String(row.error)}
                       </div>
                     ) : null}
@@ -1405,13 +1448,13 @@ function AgentToolResultCard({ block }: { block: NativeBlock }) {
                 return (
                   <div
                     key={`${name}-${i}`}
-                    className="rounded-md border border-[#ef5564]/35 bg-[#ef5564]/[0.06] px-3 py-2"
+                    className="rounded-md border border-danger/35 bg-danger/[0.06] px-3 py-2"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <Tag tone="err">{name}</Tag>
                       <Tag tone="err">failed</Tag>
                     </div>
-                    <div className="mt-1.5 text-[11px] text-[#ef5564] break-words">
+                    <div className="mt-1.5 text-[11px] text-danger break-words">
                       {String(row.error || row.message || "unknown error")}
                     </div>
                   </div>
@@ -1449,7 +1492,7 @@ function AgentToolResultCard({ block }: { block: NativeBlock }) {
       >
         <div className="space-y-3">
           {block.error ? (
-            <div className="text-xs text-[#ef5564]">{String(block.error)}</div>
+            <div className="text-xs text-danger">{String(block.error)}</div>
           ) : null}
           <div className="flex items-center gap-1 flex-wrap">
             <AgentChip accent={accent}>{name}</AgentChip>
@@ -1558,13 +1601,13 @@ function NativeTeamTraceBlock({
               return (
                 <div
                   key={`${name}-${i}`}
-                  className="rounded-md border border-[#ef5564]/35 bg-[#ef5564]/[0.06] px-3 py-2"
+                  className="rounded-md border border-danger/35 bg-danger/[0.06] px-3 py-2"
                 >
                   <div className="flex items-center justify-between gap-2">
                     <Tag tone="err">{name}</Tag>
                     <Tag tone="err">failed</Tag>
                   </div>
-                  <div className="mt-1.5 text-[11px] text-[#ef5564] break-words">
+                  <div className="mt-1.5 text-[11px] text-danger break-words">
                     {String(failure.error || failure.message || "unknown error")}
                   </div>
                 </div>
@@ -1650,7 +1693,7 @@ function NativeTeamTraceBlock({
                       </div>
                     ) : null}
                     {member.error ? (
-                      <div className="text-[11px] text-[#ef5564] break-words">
+                      <div className="text-[11px] text-danger break-words">
                         {String(member.error)}
                       </div>
                     ) : null}
@@ -1910,7 +1953,7 @@ function NativeToolResultBlock({
     >
       <div className="space-y-2">
         {block.error ? (
-          <div className="text-xs text-[#ef5564]">{String(block.error)}</div>
+          <div className="text-xs text-danger">{String(block.error)}</div>
         ) : null}
         <div className="text-[11px] text-ink-400 font-medium">
           output
@@ -1944,6 +1987,7 @@ export function NativeBlocksTrack({
   resolvingApprovalIds?: Set<string>;
 }) {
   if (!envelopes.length) return null;
+  const displayEnvelopes = mergeToolUsePayloadsIntoResults(envelopes);
   // Find the index of the last block that hasn't yet committed (a
   // tool_use that has no matching tool_result yet, or a partial text
   // block). That block stays expanded while we're streaming so the
@@ -1951,7 +1995,7 @@ export function NativeBlocksTrack({
   let pendingIdx = -1;
   if (live) {
     const openCalls = new Map<string, number>();
-    envelopes.forEach((env, i) => {
+    displayEnvelopes.forEach((env, i) => {
       const block = env.block ?? (env as unknown as NativeBlock);
       const k = (block.kind || env.kind || "").toString();
       if (k === "tool_use") {
@@ -1967,7 +2011,7 @@ export function NativeBlocksTrack({
     }
   }
   const teamRunIds = new Set<string>();
-  envelopes.forEach((env) => {
+  displayEnvelopes.forEach((env) => {
     const block = unwrapBlock(env);
     const kind = (block.kind || env.kind || "").toString();
     if (kind !== "team_trace") return;
@@ -1987,7 +2031,7 @@ export function NativeBlocksTrack({
           ) : null}
         </div>
       ) : null}
-      {envelopes.map((env, i) => {
+      {displayEnvelopes.map((env, i) => {
         const block = unwrapBlock(env);
         const kind = (block.kind || env.kind || "").toString();
         const auto = i === pendingIdx && live;
@@ -1997,10 +2041,12 @@ export function NativeBlocksTrack({
         if (kind === "tool_use") {
           // pending = no matching tool_result later in the envelope list
           let hasResult = false;
-          for (let j = i + 1; j < envelopes.length; j += 1) {
-            const next = envelopes[j].block ?? (envelopes[j] as unknown as NativeBlock);
+          for (let j = i + 1; j < displayEnvelopes.length; j += 1) {
+            const next =
+              displayEnvelopes[j].block ??
+              (displayEnvelopes[j] as unknown as NativeBlock);
             if (
-              (next.kind || envelopes[j].kind) === "tool_result" &&
+              (next.kind || displayEnvelopes[j].kind) === "tool_result" &&
               String(next.call_id || "") === String(block.call_id || "")
             ) {
               hasResult = true;

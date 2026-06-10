@@ -125,7 +125,7 @@ export function StrategyStatusBar({
             <button
               onClick={() => void setKillSwitch("set")}
               disabled={disabled || busy !== null}
-              className="text-xs rounded px-3 py-1.5 border border-[#ef4560]/50 text-[#ef4560] hover:bg-[#ef4560]/10"
+              className="text-xs rounded px-3 py-1.5 border border-danger/50 text-danger hover:bg-danger/10"
             >
               {busy === "kill:set" ? t("arming") : t("killSwitch")}
             </button>
@@ -136,7 +136,7 @@ export function StrategyStatusBar({
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Kpi
           label={t("mode")}
-          value={manifest?.mode ?? "—"}
+          value={manifest?.mode ?? "–"}
           tone={
             manifest?.mode === "live"
               ? "danger"
@@ -150,7 +150,7 @@ export function StrategyStatusBar({
           value={
             envelope.package_hash
               ? envelope.package_hash.slice(0, 12)
-              : "—"
+              : "–"
           }
         />
         <Kpi
@@ -177,9 +177,9 @@ export function StrategyStatusBar({
         />
       </div>
       {kill?.asserted && (
-        <div className="mt-3 rounded-lg border border-[#ef4560]/30 bg-[#ef4560]/10 px-3 py-2 text-xs text-[#ef4560]">
+        <div className="mt-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
           {t("armedBy")} <span className="font-mono">{kill.by || "?"}</span> {t("at")}{" "}
-          {kill.at ? new Date(kill.at).toLocaleString() : "?"} —{" "}
+          {kill.at ? new Date(kill.at).toLocaleString() : "?"}:{" "}
           {kill.reason || t("noReason")}
         </div>
       )}

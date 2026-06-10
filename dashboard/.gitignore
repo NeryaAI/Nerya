@@ -6,3 +6,15 @@ out
 .env*.local
 next-env.d.ts
 *.log
+
+# Playwright E2E
+test-results/
+test-results-archive/
+playwright-report/
+playwright/.cache/
+.nerya-test-workspace/
+.nerya-*-workspace/
+
+# Local audit / walkthrough output
+audit-out/
+screenshots-walkthrough/

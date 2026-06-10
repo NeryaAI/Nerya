@@ -244,7 +244,7 @@ export function TopHeader() {
             }
           >
             <span className="font-mono tabular-nums" suppressHydrationWarning>
-              {now ?? "—"}
+              {now ?? "–"}
             </span>
             <span aria-hidden className="opacity-50">·</span>
             <span className={online ? healthTextClass : "text-rose-500"}>

@@ -20,6 +20,7 @@ import type {
   OHLCV,
   TimeValue,
 } from "../../lib/chartBlock";
+import { useChartTheme } from "../../lib/chartTheme";
 
 // ---------------------------------------------------------------------------
 // Helpers — translate ChartBlock schema into lightweight-charts inputs.
@@ -249,6 +250,7 @@ export type ChartCanvasInnerProps = {
 export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInnerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const chartTheme = useChartTheme();
 
   useEffect(() => {
     const container = containerRef.current;
@@ -260,18 +262,18 @@ export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInn
       autoSize: false,
       layout: {
         background: { type: ColorType.Solid, color: THEME.background },
-        textColor: THEME.text,
+        textColor: chartTheme.text,
         fontSize: 11,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: THEME.grid },
-        horzLines: { color: THEME.grid },
+        vertLines: { color: chartTheme.grid },
+        horzLines: { color: chartTheme.grid },
       },
       crosshair: { mode: CrosshairMode.Magnet },
-      rightPriceScale: { borderColor: THEME.border },
+      rightPriceScale: { borderColor: chartTheme.grid },
       timeScale: {
-        borderColor: THEME.border,
+        borderColor: chartTheme.grid,
         timeVisible: block.time?.format !== "business_day",
         secondsVisible: false,
       },
@@ -314,7 +316,7 @@ export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInn
     // We re-run the effect when the block identity changes; series
     // mutation across renders is rare in v1 and a full re-create keeps
     // memory & overlay state predictable.
-  }, [block, height]);
+  }, [block, chartTheme, height]);
 
   return <div ref={containerRef} className="w-full" style={{ height }} />;
 }

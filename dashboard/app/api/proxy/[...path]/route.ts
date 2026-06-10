@@ -17,7 +17,15 @@ import https from "node:https";
 // The runtime' dashboard performs the same forwarding via its Next.js proxy;
 // without this, the Nerya dashboard would silently lose auth context.
 
-const BASE = process.env.NERYA_API || "http://127.0.0.1:18317";
+// Next.js inlines `process.env.X` at build time in server routes, which
+// means a stale value gets baked into the compiled bundle and survives
+// `next dev` restarts (the .next cache is reused).  Reading the env var
+// through a function defeats the static analysis so the value is always
+// resolved at request time.
+function _apiBase(): string {
+  return process.env.NERYA_API || "http://127.0.0.1:18318";
+}
+const BASE_DEFAULT = "http://127.0.0.1:18318";
 const SERVER_TOKEN = process.env.NERYA_API_TOKEN || "";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
 const DEFAULT_PROXY_TIMEOUT_MS = 120_000;
@@ -91,7 +99,12 @@ function isAnonymousProxyPath(joined: string): boolean {
 }
 
 function isLongRunningProxyPath(joined: string): boolean {
-  return joined.startsWith("agent/run_turn") || joined.startsWith("strategy/");
+  return (
+    joined.startsWith("agent/run_turn") ||
+    joined.startsWith("strategy/") ||
+    joined === "triggers/schedules/run_now" ||
+    joined === "triggers/schedules/tick"
+  );
 }
 
 function proxyTimeoutMs(joined: string): number {
@@ -298,7 +311,8 @@ function streamForward(
 }
 
 async function forward(req: NextRequest, path: string[], method: string) {
-  const url = `${BASE}/${path.join("/")}${req.nextUrl.search || ""}`;
+  const base = _apiBase();
+  const url = `${base}/${path.join("/")}${req.nextUrl.search || ""}`;
   const headers = buildForwardHeaders(req);
   const joined = path.join("/");
   if (
@@ -418,21 +432,48 @@ export const dynamic = "force-dynamic";
 // to 30 min so platforms like Vercel don't synthesise their own 502.
 export const maxDuration = 1800;
 
+// Defensive wrapper: anything `forward` throws unexpectedly (a bug in header
+// building, `req.text()`, a dev-mode module/HMR glitch, ...) would otherwise
+// bubble up as an opaque Next.js 500 with no JSON body — which the chat surface
+// can only render as a blank failure. Convert every throw into the same
+// structured 502 envelope the chat error card already knows how to parse
+// (`{error, target, detail, trace}`), so failures are always actionable.
+async function safeForward(
+  req: NextRequest,
+  path: string[],
+  method: string,
+): Promise<NextResponse> {
+  try {
+    return await forward(req, path, method);
+  } catch (err) {
+    const e = err as { message?: string; code?: string; stack?: string };
+    return NextResponse.json(
+      {
+        error: "proxy_handler_error",
+        target: `${_apiBase()}/${path.join("/")}`,
+        detail: [e?.code, e?.message ?? String(err)].filter(Boolean).join(" | "),
+        trace: e?.stack || undefined,
+      },
+      { status: 502 },
+    );
+  }
+}
+
 export async function GET(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return forward(req, ctx.params.path, "GET");
+  return safeForward(req, ctx.params.path, "GET");
 }
 export async function POST(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return forward(req, ctx.params.path, "POST");
+  return safeForward(req, ctx.params.path, "POST");
 }
 export async function PUT(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return forward(req, ctx.params.path, "PUT");
+  return safeForward(req, ctx.params.path, "PUT");
 }
 export async function PATCH(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return forward(req, ctx.params.path, "PATCH");
+  return safeForward(req, ctx.params.path, "PATCH");
 }
 export async function DELETE(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return forward(req, ctx.params.path, "DELETE");
+  return safeForward(req, ctx.params.path, "DELETE");
 }
 export async function HEAD(req: NextRequest, ctx: { params: { path: string[] } }) {
-  return forward(req, ctx.params.path, "HEAD");
+  return safeForward(req, ctx.params.path, "HEAD");
 }

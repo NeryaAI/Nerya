@@ -382,7 +382,7 @@ function PositionRow({
                   {t("mergedCoStrategiesLabel")}:
                 </span>{" "}
                 {pos.merged.co_strategies.length === 0
-                  ? "—"
+                  ? "–"
                   : pos.merged.co_strategies.join(", ")}
               </span>
             </>
@@ -492,7 +492,7 @@ function OrdersTable({
                 {o.price != null ? fmtUSD(o.price) : t("orderMarketPrice")}
               </td>
               <td className="py-1.5 pr-3">
-                <Pill tone={stateTone(o.state)}>{o.state ?? "—"}</Pill>
+                <Pill tone={stateTone(o.state)}>{o.state ?? "–"}</Pill>
               </td>
               <td className="py-1.5 pr-3 font-mono">
                 {fmtBase(o.filled_size)}
@@ -553,7 +553,7 @@ function FillsTable({
 // -------- formatting helpers ------------------------------------------
 
 function fmtUSD(value: number): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "–";
   const abs = Math.abs(value);
   const opts: Intl.NumberFormatOptions =
     abs >= 1000
@@ -563,13 +563,13 @@ function fmtUSD(value: number): string {
 }
 
 function fmtUSDSigned(value: number): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "–";
   if (value > 0) return `+${fmtUSD(value)}`;
   return fmtUSD(value);
 }
 
 function fmtBase(value: number): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "–";
   const abs = Math.abs(value);
   if (abs >= 1) {
     return value.toLocaleString("en-US", {
@@ -580,7 +580,7 @@ function fmtBase(value: number): string {
 }
 
 function fmtTimeAgo(ts: number, _locale: string): string {
-  if (!ts || !Number.isFinite(ts)) return "—";
+  if (!ts || !Number.isFinite(ts)) return "–";
   const now = Date.now() / 1000;
   const dt = now - ts;
   if (dt < 60) return `${Math.round(dt)}s`;
@@ -590,7 +590,7 @@ function fmtTimeAgo(ts: number, _locale: string): string {
 }
 
 function fmtDate(ts: number, locale: string): string {
-  if (!ts || !Number.isFinite(ts)) return "—";
+  if (!ts || !Number.isFinite(ts)) return "–";
   try {
     return new Date(ts * 1000).toLocaleDateString(locale);
   } catch {

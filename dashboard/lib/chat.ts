@@ -122,6 +122,7 @@ export type TurnPayload = {
   activity_events?: LiveEvent[];
   turn_id?: string;
   stopped_reason?: string | null;
+  transition_reason?: string | null;
   /** block envelopes emitted by the workspace-native agent
    * loop. Empty under the legacy JSON-decision harness; populated when
    * the backend feature flag ``agent.harness.native_loop`` is on.
@@ -129,6 +130,8 @@ export type TurnPayload = {
    * when this array is non-empty. */
   blocks?: NativeBlockEnvelope[];
   attachments?: ChatAttachment[];
+  artifact_index?: Record<string, unknown>;
+  final_report?: Record<string, unknown>;
   /** Identifies which agent harness produced this turn. Useful for
    * debug overlays (legacy vs native). */
   harness?: "legacy" | "native" | string;
@@ -228,6 +231,7 @@ export type ChatRunSettings = {
   max_iterations: number;
   max_total_tool_calls: number;
   max_wall_seconds: number;
+  evidence_contract?: Record<string, unknown>;
 };
 
 export type ChatModelOption = {
@@ -264,13 +268,15 @@ export type ChatThread = {
 const STORAGE_KEY = "nerya.chat.threads.v1";
 const ACTIVE_KEY = "nerya.chat.active";
 const SETTINGS_KEY = "nerya.chat.runSettings.v2";
-const TRANSCRIPT_CACHE_PREFIX = "nerya.chat.transcript.v1:";
-const TRANSCRIPT_CACHE_INDEX_KEY = "nerya.chat.transcriptIndex.v1";
+const TRANSCRIPT_CACHE_PREFIX = "nerya.chat.transcript.v2:";
+const TRANSCRIPT_CACHE_INDEX_KEY = "nerya.chat.transcriptIndex.v2";
 const MAX_TRANSCRIPT_CACHE_ENTRIES = 20;
+const DEFAULT_PERMISSION_MODE: PermissionMode =
+  process.env.NEXT_PUBLIC_NERYA_PERMISSION_MODE === "yolo" ? "yolo" : "default";
 
 export const DEFAULT_CHAT_RUN_SETTINGS: ChatRunSettings = {
   reasoning_effort: "off",
-  permission_mode: "default",
+  permission_mode: DEFAULT_PERMISSION_MODE,
   model_tier: "",
   model_provider: "",
   model_id: "",
@@ -564,6 +570,12 @@ export function loadRunSettings(): ChatRunSettings {
         10,
         7200,
       ),
+      evidence_contract:
+        parsed.evidence_contract &&
+        typeof parsed.evidence_contract === "object" &&
+        !Array.isArray(parsed.evidence_contract)
+          ? (parsed.evidence_contract as Record<string, unknown>)
+          : undefined,
     };
   } catch {
     return DEFAULT_CHAT_RUN_SETTINGS;
@@ -1099,6 +1111,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           call_id: callId,
           skill_id: ev.skill_id ?? "native",
           action: ev.action ?? "",
+          payload: (ev.payload as Record<string, unknown>) ?? {},
           ok: ev.ok ?? true,
           error: ev.error ?? null,
           error_kind: ev.error_kind ?? null,
@@ -1300,6 +1313,9 @@ export function topLevelDecisionText(turn: TurnPayload | undefined): string {
   if (!turn) return "";
   if (typeof turn.reply_text === "string" && turn.reply_text.trim()) {
     return turn.reply_text.trim();
+  }
+  if (typeof turn.final_text === "string" && turn.final_text.trim()) {
+    return turn.final_text.trim();
   }
   const d = turn.decision;
   if (!d) return "";

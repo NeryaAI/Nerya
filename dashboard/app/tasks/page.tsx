@@ -350,17 +350,17 @@ export default function AgentTasksPage() {
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
                     <Stat
                       label={t("statStrategy")}
-                      value={selected.strategy_id || "—"}
+                      value={selected.strategy_id || "–"}
                       mono
                     />
                     <Stat label={t("statTurns")} value={selected.turn_count} />
                     <Stat
                       label={t("statSkills")}
-                      value={selected.skills_invoked.slice(0, 3).join(", ") || "—"}
+                      value={selected.skills_invoked.slice(0, 3).join(", ") || "–"}
                     />
                     <Stat
                       label={t("statLastAction")}
-                      value={selected.last_action || "—"}
+                      value={selected.last_action || "–"}
                       mono
                     />
                     <Stat label={t("statCreated")} value={formatTime(selected.created_at)} />
@@ -609,7 +609,7 @@ function previewRecord(record: Record<string, unknown>): string {
 }
 
 function summarizeArtifactResult(value: unknown): string {
-  if (value === null || value === undefined) return "—";
+  if (value === null || value === undefined) return "–";
   if (typeof value === "string") return value.slice(0, 80);
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (Array.isArray(value)) return `[${value.length} item${value.length === 1 ? "" : "s"}]`;

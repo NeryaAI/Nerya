@@ -178,7 +178,7 @@ export function FileOpCard({
   const hasMore = lines.length > previewLineCount;
 
   return (
-    <div className="rounded-2xl border border-brand-500/15 bg-brand-500/[0.04] backdrop-blur-airy px-4 py-3 space-y-2.5">
+    <div className="rounded-2xl border border-brand-500/15 bg-brand-500/[0.04] px-4 py-3 space-y-2.5">
       <div className="flex items-center justify-between gap-3 min-w-0">
         <div className="flex items-center gap-2 min-w-0">
           <span className="inline-flex items-center justify-center w-7 h-7 rounded-xl bg-brand-500/10 border border-brand-500/25 text-brand-200">

@@ -61,7 +61,7 @@ export function SkillLoadCard({
   const preview = body.split("\n").slice(0, 6).join("\n");
   const hasMore = body.length > preview.length;
   return (
-    <div className="rounded-2xl border border-brand-400/15 bg-brand-500/[0.04] backdrop-blur-airy px-4 py-3.5 space-y-2.5">
+    <div className="rounded-2xl border border-brand-400/15 bg-brand-500/[0.04] px-4 py-3.5 space-y-2.5">
       <div className="flex items-center justify-between gap-3 min-w-0">
         <div className="flex items-center gap-2 min-w-0">
           <span className="inline-flex items-center justify-center w-7 h-7 rounded-xl bg-brand-500/15 border border-brand-400/30 text-brand-200">
@@ -145,7 +145,7 @@ export function SkillLoadCard({
       ) : null}
 
       {isResult && block.error ? (
-        <div className="text-[12px] text-[#ef5564]">{String(block.error)}</div>
+        <div className="text-[12px] text-danger">{String(block.error)}</div>
       ) : null}
     </div>
   );

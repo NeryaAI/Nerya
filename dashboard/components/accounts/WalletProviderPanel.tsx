@@ -588,7 +588,7 @@ export function WalletProviderPanel({
     <>
       <div className="space-y-3">
         {!dialogOpen && error ? (
-          <div className="rounded border border-[#ef4560]/35 bg-[#ef4560]/10 px-3 py-2 text-xs text-[#ff8a9a]">
+          <div className="rounded border border-danger/35 bg-danger/10 px-3 py-2 text-xs text-rose-300">
             {error}
           </div>
         ) : null}
@@ -719,7 +719,7 @@ export function WalletProviderPanel({
             </div>
 
             {error ? (
-              <div className="mb-3 rounded border border-[#ef4560]/35 bg-[#ef4560]/10 px-3 py-2 text-xs text-[#ff8a9a]">
+              <div className="mb-3 rounded border border-danger/35 bg-danger/10 px-3 py-2 text-xs text-rose-300">
                 {error}
               </div>
             ) : null}
@@ -912,7 +912,7 @@ export function WalletProviderPanel({
                 </div>
               ) : null}
               {autoCreateAccount && accountMode === "live" ? (
-                <div className="mt-2 rounded border border-[#f5a524]/30 bg-[#f5a524]/10 px-2 py-1 text-[11px] text-[#f5a524]">
+                <div className="mt-2 rounded border border-warn/30 bg-warn/10 px-2 py-1 text-[11px] text-warn">
                   {t("autoCreate.liveSafetyHint")}
                 </div>
               ) : null}

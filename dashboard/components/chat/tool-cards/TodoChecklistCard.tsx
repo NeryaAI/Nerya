@@ -104,7 +104,7 @@ export function TodoChecklistCard({
   const inProgress = todos.find((t) => t.status === "in_progress");
   const progress = total > 0 ? Math.round((completed / total) * 100) : 0;
   return (
-    <div className="rounded-md border border-brand-500/15 bg-brand-500/[0.05] backdrop-blur-airy px-4 py-3.5 space-y-3">
+    <div className="rounded-md border border-brand-500/15 bg-brand-500/[0.05] px-4 py-3.5 space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0">
           <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg bg-brand-500/15 border border-brand-500/30 text-brand-200">

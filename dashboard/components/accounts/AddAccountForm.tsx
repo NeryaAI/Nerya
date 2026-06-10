@@ -519,7 +519,7 @@ export function AddAccountForm({
                 live_trading_enabled
               </label>
               {requiresCredentials && !liveTradingEnabled ? (
-                <div className="text-[11px] text-[#f5a524] mt-0.5">
+                <div className="text-[11px] text-warn mt-0.5">
                   {t("canaryLiveNeeds")}
                 </div>
               ) : null}
@@ -639,7 +639,7 @@ export function AddAccountForm({
               </div>
             ) : null}
             {schemaError ? (
-              <div className="text-[11px] text-[#f5a524] mt-1">
+              <div className="text-[11px] text-warn mt-1">
                 {schemaError}. {t("canAddManualSlots")}
               </div>
             ) : null}
@@ -717,7 +717,7 @@ export function AddAccountForm({
       </div>
 
       {error ? (
-        <div className="mt-3 text-[#ef4560] text-xs font-mono">{error}</div>
+        <div className="mt-3 text-danger text-xs font-mono">{error}</div>
       ) : null}
       {notice ? (
         <div className="mt-3 text-accent-300 text-xs">{notice}</div>

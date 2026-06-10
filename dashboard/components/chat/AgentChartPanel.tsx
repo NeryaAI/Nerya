@@ -29,6 +29,7 @@ import {
   type NativeBlockEnvelope,
 } from "../../lib/chat";
 import { useChartData } from "../../lib/useChartData";
+import { useChartTheme, type ChartTheme } from "../../lib/chartTheme";
 import { BacktestChart } from "../backtest/BacktestChart";
 import {
   ChartIcon,
@@ -253,15 +254,15 @@ export function AgentChartPanel({
                 {t("backtestRun")}
               </div>
               <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
-                <span className="rounded border border-brand-500/20 bg-brand-500/[0.08] px-1.5 py-0.5 font-mono text-brand-100">
+                <span className="max-w-full break-all rounded border border-brand-500/20 bg-brand-500/[0.08] px-1.5 py-0.5 font-mono text-[color:var(--violet)]">
                   {activeBacktest.strategyId}
                 </span>
                 {activeBacktest.proposalId ? (
-                  <span className="rounded border border-sky-400/20 bg-sky-400/[0.08] px-1.5 py-0.5 font-mono text-sky-100">
+                  <span className="max-w-full break-all rounded border border-[color:var(--fluid)] bg-[color:var(--fluid-soft)] px-1.5 py-0.5 font-mono text-[color:var(--fluid)]">
                     {activeBacktest.proposalId}
                   </span>
                 ) : null}
-                <span className="rounded border border-ink-700 bg-ink-950/60 px-1.5 py-0.5 font-mono text-ink-300">
+                <span className="max-w-full break-all rounded border border-[color:var(--line)] bg-[color:var(--card-hi)] px-1.5 py-0.5 font-mono text-[color:var(--text-muted)]">
                   {activeBacktest.ts}
                 </span>
               </div>
@@ -487,7 +488,7 @@ function MarketChartWorkbench({ block }: { block: ChartBlockShape }) {
         </div>
 
         {error ? (
-          <div className="mt-2 rounded border border-[#ef4560]/25 bg-[#ef4560]/10 px-2 py-1 text-[11px] text-[#ff9aa8]">
+          <div className="mt-2 rounded border border-danger/25 bg-danger/10 px-2 py-1 text-[11px] text-rose-300">
             {error}
           </div>
         ) : null}
@@ -562,6 +563,7 @@ function AgentKlineCanvas({
   emptySubtitle: string;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const chartTheme = useChartTheme();
   const payload = useMemo(() => {
     const base = normalizeCandles(candles);
     return {
@@ -580,7 +582,7 @@ function AgentKlineCanvas({
     const chart = createBaseChart(node, height, {
       bottom: indicators.volume ? 0.24 : 0.08,
       timeVisible: true,
-    });
+    }, chartTheme);
     const candle = chart.addCandlestickSeries({
       upColor: THEME.up,
       downColor: THEME.down,
@@ -635,7 +637,7 @@ function AgentKlineCanvas({
       ro.disconnect();
       chart.remove();
     };
-  }, [height, indicators.volume, payload]);
+  }, [chartTheme, height, indicators.volume, payload]);
 
   if (!payload.candles.length) {
     return (
@@ -698,6 +700,7 @@ function MiniSeriesCanvas({
   height: number;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const chartTheme = useChartTheme();
 
   useEffect(() => {
     const node = ref.current;
@@ -705,7 +708,7 @@ function MiniSeriesCanvas({
     const chart = createBaseChart(node, height, {
       bottom: 0.1,
       timeVisible: false,
-    });
+    }, chartTheme);
     let host: ReturnType<IChartApi["addLineSeries"]> | null = null;
     for (const row of series) {
       if (row.histogram) {
@@ -748,7 +751,7 @@ function MiniSeriesCanvas({
       ro.disconnect();
       chart.remove();
     };
-  }, [height, priceLines, series]);
+  }, [chartTheme, height, priceLines, series]);
 
   return <div ref={ref} className="w-full" style={{ height }} />;
 }
@@ -800,7 +803,7 @@ function Insights({ block }: { block: ChartBlockShape }) {
   return (
     <div className="rounded-md border border-brand-500/15 bg-ink-900/25 px-3 py-2">
       {warnings.length ? (
-        <ul className="space-y-1 text-[11px] text-[#ffd58a]">
+        <ul className="space-y-1 text-[11px] text-amber-200">
           {warnings.map((line, i) => (
             <li key={`w-${i}`}>{line}</li>
           ))}
@@ -982,7 +985,23 @@ function extractBacktestRefs(value: unknown, seenAt: number): BacktestRef[] {
       const parsed = parseBacktestPath(outDir);
       if (parsed) add(parsed.strategyId, parsed.ts, undefined, parsed.proposalId || proposalId);
     }
-    for (const key of ["result", "payload", "output", "data", "chart", "metrics", "raw_metrics_file", "metrics_path", "report_path"]) {
+    for (const key of [
+      "result",
+      "payload",
+      "output",
+      "data",
+      "chart",
+      "metrics",
+      "raw_metrics_file",
+      "metrics_path",
+      "report_path",
+      "chart_path",
+      "out_dir",
+      "backtest_dir",
+      "equity_path",
+      "trades_path",
+      "result_path",
+    ]) {
       visit(rec[key], depth + 1);
     }
     if (Array.isArray(cur)) {
@@ -1039,7 +1058,7 @@ function parseJsonObject(raw: string): Record<string, unknown> | unknown[] | nul
 }
 
 function looksLikeBacktestTs(value: string): boolean {
-  return /^\d{8}_\d{6}$/.test(value.trim());
+  return /^(?:[A-Za-z][A-Za-z0-9-]*_)?\d{8}_\d{6}$/.test(value.trim());
 }
 
 function dedupeBacktests(rows: BacktestRef[]): BacktestRef[] {
@@ -1151,27 +1170,28 @@ function createBaseChart(
   node: HTMLDivElement,
   height: number,
   opts: { bottom: number; timeVisible: boolean },
+  theme: ChartTheme,
 ): IChartApi {
   return createChart(node, {
     width: Math.max(320, node.clientWidth),
     height,
     layout: {
       background: { type: ColorType.Solid, color: THEME.background },
-      textColor: THEME.text,
+      textColor: theme.text,
       fontSize: 11,
       attributionLogo: false,
     },
     grid: {
-      vertLines: { color: THEME.grid },
-      horzLines: { color: THEME.grid },
+      vertLines: { color: theme.grid },
+      horzLines: { color: theme.grid },
     },
     crosshair: { mode: CrosshairMode.Magnet },
     rightPriceScale: {
-      borderColor: THEME.border,
+      borderColor: theme.grid,
       scaleMargins: { top: 0.08, bottom: opts.bottom },
     },
     timeScale: {
-      borderColor: THEME.border,
+      borderColor: theme.grid,
       timeVisible: opts.timeVisible,
       secondsVisible: false,
     },

@@ -6,15 +6,15 @@ type SwitchTone = "brand" | "accent" | "danger";
 type SwitchSize = "sm" | "md";
 
 const toneClasses: Record<SwitchTone, string> = {
-  brand: "border-brand-400/45 bg-brand-500 shadow-[0_0_18px_-8px_rgba(139,92,246,0.85)]",
-  accent: "border-accent-400/45 bg-accent-500/80 shadow-[0_0_18px_-8px_rgba(16,217,147,0.85)]",
-  danger: "border-[#ef4560]/55 bg-[#ef4560] shadow-[0_0_18px_-8px_rgba(239,69,96,0.9)]",
+  brand: "border-brand-400/60 bg-brand-500",
+  accent: "border-accent-400/60 bg-accent-500/90",
+  danger: "border-danger/70 bg-danger",
 };
 
 const mutedToneClasses: Record<SwitchTone, string> = {
   brand: "border-brand-400/35 bg-brand-500/15",
   accent: "border-accent-400/35 bg-accent-500/15",
-  danger: "border-[#ef4560]/45 bg-[#ef4560]/15",
+  danger: "border-danger/45 bg-danger/15",
 };
 
 const sizeClasses: Record<SwitchSize, { root: string; thumb: string; checked: string }> = {

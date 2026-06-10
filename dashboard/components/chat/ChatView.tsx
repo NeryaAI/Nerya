@@ -352,15 +352,13 @@ function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
   return (
     <div className="max-w-3xl mx-auto px-6 py-16">
       <div className="text-center mb-10">
-        <div className="inline-flex items-center gap-2 text-[12px] text-brand-300 font-medium mb-3">
-          <span className="w-1 h-1 rounded-full bg-fluid-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]" />
+        <div className="text-[12px] tracking-[0.18em] uppercase text-brand-300 font-medium mb-3">
           {t("emptyEyebrow")}
-          <span className="w-1 h-1 rounded-full bg-fluid-400 shadow-[0_0_8px_rgba(34,211,238,0.7)]" />
         </div>
-        <h1 className="text-[34px] leading-[1.1] font-semibold tracking-tight text-gradient-brand">
+        <h1 className="text-[34px] leading-[1.1] font-semibold tracking-tight text-[color:var(--text-base)]">
           {t("emptyHeadline")}
         </h1>
-        <p className="mt-4 text-ink-300 text-sm max-w-xl mx-auto leading-relaxed">
+        <p className="mt-4 text-[color:var(--text-muted)] text-sm max-w-xl mx-auto leading-relaxed">
           {t("emptySubheadline")}
         </p>
       </div>
@@ -369,15 +367,17 @@ function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
           <button
             key={s.title}
             onClick={() => onPrompt(s.prompt)}
-            className="group text-left glass hover:bg-white/[0.05] hover:border-brand-500/30 px-4 py-3.5 transition-colors cursor-pointer"
+            className="card card-hover group text-left px-4 py-3.5 cursor-pointer"
           >
             <div className="flex items-start justify-between gap-2">
-              <div className="text-sm text-white font-medium">{s.title}</div>
+              <div className="text-sm font-medium text-[color:var(--text-base)]">
+                {s.title}
+              </div>
               <span className="text-brand-300/60 group-hover:text-brand-200 transition-colors text-xs leading-none">
                 →
               </span>
             </div>
-            <div className="text-xs text-ink-400 mt-1.5 leading-relaxed">
+            <div className="text-xs text-[color:var(--text-muted)] mt-1.5 leading-relaxed">
               {s.body}
             </div>
           </button>
@@ -390,6 +390,7 @@ function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
 export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const router = useRouter();
   const t = useTranslations("chat");
+  const cancelledReply = t("cancelNotice");
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -409,6 +410,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     () => new Set(),
   );
   const abortRef = useRef<AbortController | null>(null);
+  const inFlightSessionRef = useRef<string | null>(null);
   const turnInFlightRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Live-event poller handle. We track it so ``cancel`` and unmount
@@ -910,6 +912,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       setMissingSession(false);
       return;
     }
+    if (active && active.messages.length > 0 && !active.imported) {
+      setMissingSession(false);
+      return;
+    }
     const cached = loadCachedThreadTranscript(sessionId, minUpdated);
     if (cached) {
       setThreads((prev) => {
@@ -1200,6 +1206,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         clean || outgoingAttachments[0]?.name || "Attached file",
         sessionId,
       );
+      setMissingSession(false);
     }
     const threadId = thread.id;
 
@@ -1275,6 +1282,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
 
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    inFlightSessionRef.current = threadId;
 
     // Anchor the live-events cursor *before* the turn fires. We use
     // the bus's current ``latest_seq`` so we ignore everything that
@@ -1366,6 +1374,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     try {
       const res = await callApi<TurnPayload>("/agent/run_turn", {
         method: "POST",
+        signal: ctrl.signal,
         body: {
           source: options.source || "user_chat",
           kind: options.kind || "user.chat",
@@ -1396,6 +1405,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           max_iterations: settings.max_iterations,
           max_total_tool_calls: settings.max_total_tool_calls,
           max_wall_seconds: settings.max_wall_seconds,
+          evidence_contract: settings.evidence_contract,
         },
       });
       // One last poll to drain the tail of events that fired
@@ -1460,23 +1470,31 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         // ignore
       }
       stopPoller();
-      const msg =
-        ctrl.signal.aborted
-          ? "Cancelled. The backend may still be finishing this turn; check the journals."
-          : e instanceof Error
-          ? e.message
-          : String(e);
       updateThread(threadId, (t) => ({
         ...t,
         imported: false,
         messages: t.messages.map((m) =>
           m.id === assistantId && m.role === "assistant"
-            ? {
-                ...m,
-                loading: false,
-                error: msg,
-                elapsed_ms: Date.now() - startedMs,
-              }
+            ? ctrl.signal.aborted
+              ? {
+                  ...m,
+                  loading: false,
+                  error: undefined,
+                  turn: {
+                    ...(m.turn ?? {}),
+                    reply_text: cancelledReply,
+                    final_text: cancelledReply,
+                    stopped_reason: "cancelled",
+                    transition_reason: "operator_cancel",
+                  },
+                  elapsed_ms: Date.now() - startedMs,
+                }
+              : {
+                  ...m,
+                  loading: false,
+                  error: e instanceof Error ? e.message : String(e),
+                  elapsed_ms: Date.now() - startedMs,
+                }
             : m
         ),
       }));
@@ -1485,6 +1503,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       setSending(false);
       turnInFlightRef.current = false;
       abortRef.current = null;
+      inFlightSessionRef.current = null;
     }
   }
 
@@ -1493,6 +1512,35 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   }
 
   function cancel() {
+    const activeSessionId = inFlightSessionRef.current || sessionId || "";
+    if (activeSessionId) {
+      void callApi("/agent/interrupt", {
+        method: "POST",
+        body: { session_id: activeSessionId, reason: "operator_cancel" },
+      }).catch(() => undefined);
+      updateThread(activeSessionId, (t) => {
+        const messages = [...t.messages];
+        const idx = messages.findLastIndex((m) => m.role === "assistant" && m.loading);
+        if (idx >= 0) {
+          const m = messages[idx] as Extract<ChatMessage, { role: "assistant" }>;
+          messages[idx] = {
+            ...m,
+            loading: false,
+            error: undefined,
+            turn: {
+              ...(m.turn ?? {}),
+              reply_text: cancelledReply,
+              final_text: cancelledReply,
+              stopped_reason: "cancelled",
+              transition_reason: "operator_cancel",
+            },
+            elapsed_ms:
+              typeof m.started_ms === "number" ? Date.now() - m.started_ms : undefined,
+          };
+        }
+        return { ...t, imported: false, messages };
+      });
+    }
     if (abortRef.current) abortRef.current.abort();
     // Also stop the live-event poller so we don't keep hitting the
     // bus after the user explicitly aborted.
@@ -1502,6 +1550,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       clearInterval(handle.timer);
       handle.timer = null;
     }
+    setSending(false);
+    turnInFlightRef.current = false;
+    abortRef.current = null;
+    inFlightSessionRef.current = null;
   }
 
   if (!hydrated) {
@@ -1526,7 +1578,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       />
       <div className="flex min-h-0 flex-1 flex-col min-w-0">
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
-          {sessionId && missingSession ? (
+          {sessionId && missingSession && (!active || active.messages.length === 0) ? (
             <div className="max-w-xl mx-auto px-6 py-16 text-center">
               <h2 className="text-lg text-white font-semibold mb-2">
                 Session not found
@@ -1588,12 +1640,12 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         </div>
         {awaitingApproval ? (
           <div
-            className="border-t border-[#f5a524]/25 bg-[#f5a524]/[0.06] px-4 py-2 text-xs text-[#ffd58a]"
+            className="border-t border-warn/25 bg-warn/[0.06] px-4 py-2 text-xs text-amber-200"
             role="status"
           >
             <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
               <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
-              <span className="font-mono text-[10px] text-[#f5a524]/80">
+              <span className="font-mono text-[10px] text-warn/80">
                 {activeApprovalIds[0]?.slice(0, 18)}
               </span>
             </div>

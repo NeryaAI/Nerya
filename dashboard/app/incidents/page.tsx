@@ -44,7 +44,7 @@ function severityTone(
 }
 
 function fmtTs(ts: unknown): string {
-  if (ts == null) return "—";
+  if (ts == null) return "–";
   if (typeof ts === "string") return formatTsShort(ts);
   const seconds = Number(ts);
   if (!Number.isFinite(seconds)) return String(ts);
@@ -150,7 +150,7 @@ export default function IncidentsPage() {
               <button
                 onClick={toggleKillSwitch}
                 disabled={busy === "kill"}
-                className={`btn-ghost text-xs ${killSwitch.kill_switch ? "text-accent-300" : "text-[#ef4560]"}`}
+                className={`btn-ghost text-xs ${killSwitch.kill_switch ? "text-accent-300" : "text-danger"}`}
                 title={t("killSwitchToggleTitle")}
               >
                 {busy === "kill"
@@ -180,8 +180,8 @@ export default function IncidentsPage() {
           <div
             className={`rounded-lg border px-4 py-3 text-sm ${
               worst.severity === "trading_halted"
-                ? "border-[#ef4560]/50 bg-[#ef4560]/10 text-[#ef4560]"
-                : "border-[#f5a524]/40 bg-[#f5a524]/10 text-[#f5a524]"
+                ? "border-danger/50 bg-danger/10 text-danger"
+                : "border-warn/40 bg-warn/10 text-warn"
             }`}
           >
             <div className="flex items-center gap-2">
@@ -273,10 +273,10 @@ export default function IncidentsPage() {
                       </td>
                       <td className="font-mono">{incident.kind}</td>
                       <td className="font-mono text-ink-300">
-                        {String((incident as Record<string, unknown>).account_id ?? "—")}
+                        {String((incident as Record<string, unknown>).account_id ?? "–")}
                       </td>
                       <td className="font-mono text-ink-300">
-                        {String((incident as Record<string, unknown>).strategy_id ?? "—")}
+                        {String((incident as Record<string, unknown>).strategy_id ?? "–")}
                       </td>
                       <td className="font-mono text-ink-200 truncate max-w-[280px]">
                         {String(
@@ -336,10 +336,10 @@ export default function IncidentsPage() {
                       </td>
                       <td className="font-mono">{r.scope}</td>
                       <td className="font-mono text-ink-300">
-                        {r.account_id || "—"}
+                        {r.account_id || "–"}
                       </td>
                       <td className="font-mono text-ink-300">
-                        {r.strategy_id || "—"}
+                        {r.strategy_id || "–"}
                       </td>
                       <td>{Number(r.summary?.issue_count ?? 0)}</td>
                       <td className="text-ink-400 font-mono">{fmtTs(r.ts)}</td>

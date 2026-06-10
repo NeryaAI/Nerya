@@ -15,8 +15,8 @@ export default function ChatError({
 
   return (
     <div className="h-screen flex items-center justify-center px-6">
-      <div className="w-full max-w-lg rounded-lg border border-[#ef5564]/30 bg-[#ef5564]/[0.06] p-5">
-        <div className="text-[12px] font-medium text-[#ffb3bd]">
+      <div className="w-full max-w-lg rounded-lg border border-danger/30 bg-danger/[0.06] p-5">
+        <div className="text-[12px] font-medium text-rose-300">
           Chat error
         </div>
         <h2 className="mt-2 text-[17px] font-medium text-ink-100">

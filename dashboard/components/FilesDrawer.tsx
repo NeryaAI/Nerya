@@ -285,7 +285,7 @@ export function FilesDrawer({ open, onClose }: FilesDrawerProps) {
       <aside
         role="dialog"
         aria-label={t("title")}
-        className={`absolute top-0 right-0 h-full w-full sm:w-[480px] max-w-[92vw] flex flex-col pointer-events-auto bg-[#0c0a18]/95 backdrop-blur-airy border-l border-brand-500/15 shadow-airy transition-transform duration-200 ${
+        className={`absolute top-0 right-0 h-full w-full sm:w-[480px] max-w-[92vw] flex flex-col pointer-events-auto bg-ink-900/95 backdrop-blur-airy border-l border-brand-500/15 shadow-airy transition-transform duration-200 ${
           open ? "translate-x-0" : "translate-x-full"
         }`}
       >
@@ -694,7 +694,7 @@ function ViewPane({
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
           spellCheck={false}
-          className="flex-1 min-h-0 m-3 rounded-xl border border-brand-500/15 bg-[#070512]/80 p-3 text-[12px] font-mono text-ink-100 leading-relaxed focus:outline-none focus:border-brand-500/40 resize-none"
+          className="flex-1 min-h-0 m-3 rounded-xl border border-brand-500/15 bg-ink-950/80 p-3 text-[12px] font-mono text-ink-100 leading-relaxed focus:outline-none focus:border-brand-500/40 resize-none"
           placeholder={loading ? t("loading") : ""}
         />
       )}

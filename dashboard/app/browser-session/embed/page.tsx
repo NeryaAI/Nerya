@@ -227,7 +227,7 @@ export default function BrowserSessionEmbedPage() {
 
   if (!sessionId) {
     return (
-      <main className="flex h-screen items-center justify-center bg-[#050711] p-6 text-sm text-ink-400">
+      <main className="flex h-screen items-center justify-center bg-ink-950 p-6 text-sm text-ink-400">
         {t("missingSession")}
       </main>
     );
@@ -245,7 +245,7 @@ export default function BrowserSessionEmbedPage() {
   }
 
   return (
-    <main className="h-screen w-screen overflow-hidden bg-[#050711] text-ink-100">
+    <main className="h-screen w-screen overflow-hidden bg-ink-950 text-ink-100">
       <div
         ref={viewportRef}
         tabIndex={0}
@@ -286,7 +286,7 @@ export default function BrowserSessionEmbedPage() {
             </span>
           ) : null}
           {error ? (
-            <span className="rounded-md border border-[#ef4560]/40 bg-[#4b101b]/80 px-2 py-1 text-[11px] text-[#ffb8c2] shadow-lg backdrop-blur">
+            <span className="rounded-md border border-danger/40 bg-danger/15 px-2 py-1 text-[11px] text-rose-300 shadow-lg backdrop-blur">
               {error}
             </span>
           ) : null}

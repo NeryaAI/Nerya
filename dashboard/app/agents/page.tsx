@@ -702,7 +702,7 @@ function SkillSelector({
                   key={id}
                   type="button"
                   onClick={() => toggle(id)}
-                  className="inline-flex max-w-[160px] items-center gap-1 rounded-md border border-[#f5a524]/30 bg-[#f5a524]/10 px-2 py-0.5 font-mono text-[10px] text-[#f5a524]"
+                  className="inline-flex max-w-[160px] items-center gap-1 rounded-md border border-warn/30 bg-warn/10 px-2 py-0.5 font-mono text-[10px] text-warn"
                 >
                   <span className="truncate">{id}</span>
                   <XIcon size={11} className="shrink-0" />

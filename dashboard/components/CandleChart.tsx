@@ -9,6 +9,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import type { Candle } from "../lib/api";
+import { useChartTheme } from "../lib/chartTheme";
 
 type Mode = "candlestick" | "line" | "area";
 
@@ -25,8 +26,6 @@ type Props = {
 const TONE_UP = "#10d993";
 const TONE_DOWN = "#ef4560";
 const BRAND = "#b48bff";
-const GRID = "rgba(139,92,246,0.12)";
-const TEXT = "rgba(202,201,225,0.72)";
 
 function toChartTime(ts: number): UTCTimestamp {
   return (ts > 1e12 ? Math.floor(ts / 1000) : ts) as UTCTimestamp;
@@ -42,6 +41,7 @@ export function CandleChart({
   error,
 }: Props) {
   const t = useTranslations("candleChart");
+  const chartTheme = useChartTheme();
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // lightweight-charts requires strictly ascending, unique time keys.
@@ -77,24 +77,24 @@ export function CandleChart({
       height,
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: TEXT,
+        textColor: chartTheme.text,
         fontSize: 11,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: GRID },
-        horzLines: { color: GRID },
+        vertLines: { color: chartTheme.grid },
+        horzLines: { color: chartTheme.grid },
       },
       crosshair: { mode: CrosshairMode.Magnet },
       rightPriceScale: {
-        borderColor: GRID,
+        borderColor: chartTheme.grid,
         scaleMargins: {
           top: 0.08,
           bottom: showVolume ? 0.24 : 0.08,
         },
       },
       timeScale: {
-        borderColor: GRID,
+        borderColor: chartTheme.grid,
         timeVisible: true,
         secondsVisible: false,
       },
@@ -174,7 +174,7 @@ export function CandleChart({
       ro.disconnect();
       chart.remove();
     };
-  }, [cleanedCandles, height, mode, showVolume, width]);
+  }, [chartTheme, cleanedCandles, height, mode, showVolume, width]);
 
   const lastUp = last ? last.close >= last.open : true;
 
@@ -183,7 +183,9 @@ export function CandleChart({
       <div ref={containerRef} className="h-full w-full" />
 
       {last ? (
-        <div className="absolute top-1 right-1 text-right pointer-events-none" aria-hidden>
+        /* Top-left so it never collides with the price-scale labels on
+           the right edge of the chart. */
+        <div className="absolute top-1 left-2 pointer-events-none" aria-hidden>
           <div className="text-[11px] text-ink-500 font-medium">
             {t("last")}
           </div>
@@ -212,7 +214,7 @@ export function CandleChart({
 }
 
 function formatPrice(v: number): string {
-  if (!Number.isFinite(v)) return "—";
+  if (!Number.isFinite(v)) return "-";
   if (v >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
   if (v >= 1) return v.toFixed(2);
   if (v >= 0.01) return v.toFixed(4);

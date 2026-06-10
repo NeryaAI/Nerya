@@ -53,7 +53,7 @@ function summariseBytes(n?: number): string {
 }
 
 function fmtTs(ts?: string): string {
-  if (!ts) return "—";
+  if (!ts) return "–";
   // ISO-ish "2026-05-13T18:12:39.375Z" → "18:12:39"
   const m = /T(\d{2}:\d{2}:\d{2})/.exec(ts);
   return m ? m[1] : ts;
@@ -437,7 +437,7 @@ export function BrowserSessionPanel() {
                     </Pill>
                   </div>
                   <div className="mt-1 truncate text-[11px] text-ink-400">
-                    {s.current_url || "—"}
+                    {s.current_url || "–"}
                   </div>
                   <div className="mt-1 text-[10px] text-ink-500">
                     {s.last_fetch_method || "?"} ·{" "}
@@ -569,17 +569,17 @@ export function BrowserSessionPanel() {
               <span>
                 URL:{" "}
                 <span className="font-mono text-ink-200 break-all">
-                  {activeRecord?.current_url || "—"}
+                  {activeRecord?.current_url || "–"}
                 </span>
               </span>
               <span>
                 engine:{" "}
                 <span className="font-mono text-ink-200">
-                  {activeRecord?.engine || "—"}
+                  {activeRecord?.engine || "–"}
                 </span>
               </span>
               <span className="ml-auto">
-                {last?.fetch_method || "—"} · {summariseBytes(last?.bytes)} ·{" "}
+                {last?.fetch_method || "–"} · {summariseBytes(last?.bytes)} ·{" "}
                 {last?.elapsed_ms ?? 0}ms
               </span>
             </div>
@@ -594,11 +594,11 @@ export function BrowserSessionPanel() {
             title="Latest screenshot"
             description={activeRecord?.last_screenshot
               ? `${
-                activeRecord.last_screenshot.fetch_method || "—"
+                activeRecord.last_screenshot.fetch_method || "–"
               } · ${
                 summariseBytes(activeRecord.last_screenshot.bytes)
               } · ${activeRecord.last_screenshot.elapsed_ms ?? 0}ms`
-              : "No screenshot yet — click the Screenshot button above."}
+              : "No screenshot yet. Click the Screenshot button above."}
           >
             {activeRecord?.last_screenshot?.data_uri
               ? (
@@ -696,7 +696,7 @@ export function BrowserSessionPanel() {
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_auto]">
             <input
               className="input-dark text-xs font-mono"
-              placeholder="CSS selector — e.g. button.primary"
+              placeholder="CSS selector, e.g. button.primary"
               value={selector}
               onChange={(e) => setSelector(e.target.value)}
               disabled={!activeSessionId}
@@ -855,7 +855,7 @@ export function BrowserSessionPanel() {
                     </span>
                     <Pill tone={tone}>{level}</Pill>
                     <span className="font-mono text-ink-200 break-all">
-                      {evt.text || "—"}
+                      {evt.text || "–"}
                     </span>
                     {evt.url
                       ? (
@@ -954,10 +954,10 @@ export function BrowserSessionPanel() {
                         <td className="px-2 py-1 text-ink-500">
                           {fmtTs(evt.ts)}
                         </td>
-                        <td className="px-2 py-1">{evt.method || "—"}</td>
+                        <td className="px-2 py-1">{evt.method || "–"}</td>
                         <td className="px-2 py-1">
                           <Pill tone={tone}>
-                            {evt.status ?? evt.failure?.slice(0, 4) ?? "—"}
+                            {evt.status ?? evt.failure?.slice(0, 4) ?? "–"}
                           </Pill>
                         </td>
                         <td className="px-2 py-1 truncate text-ink-200">
@@ -967,11 +967,11 @@ export function BrowserSessionPanel() {
                             rel="noreferrer"
                             className="hover:underline"
                           >
-                            {evt.url || "—"}
+                            {evt.url || "–"}
                           </a>
                         </td>
                         <td className="px-2 py-1 text-right text-ink-500">
-                          {evt.elapsed_ms ?? "—"}
+                          {evt.elapsed_ms ?? "–"}
                         </td>
                       </tr>
                     );

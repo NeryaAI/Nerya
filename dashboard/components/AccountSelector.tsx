@@ -141,7 +141,7 @@ export function AccountSelector() {
       </button>
       {open ? (
         <div
-          className="absolute right-0 z-50 mt-2 w-[calc(100vw-1rem)] max-w-[20rem] rounded-xl border border-brand-500/20 bg-[#0c0d1d] shadow-2xl sm:w-80"
+          className="absolute right-0 z-50 mt-2 w-[calc(100vw-1rem)] max-w-[20rem] rounded-xl border border-brand-500/20 bg-ink-900 shadow-2xl sm:w-80"
           role="menu"
         >
           <div className="px-3 py-2 border-b border-brand-500/10 text-[12px] text-ink-400 flex items-center justify-between">

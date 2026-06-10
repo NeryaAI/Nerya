@@ -120,8 +120,8 @@ export function ApprovalRequestCard({
     state === "approved"
       ? "border-brand-500/40 bg-brand-500/[0.08] text-brand-200"
       : state === "rejected"
-      ? "border-[#ef5564]/40 bg-[#ef5564]/[0.08] text-[#ffb3bd]"
-      : "border-[#f5a524]/40 bg-[#f5a524]/[0.07] text-[#f5a524]";
+      ? "border-danger/40 bg-danger/[0.08] text-rose-300"
+      : "border-warn/40 bg-warn/[0.07] text-warn";
   return (
     <div className={`rounded-lg border px-3 py-2.5 space-y-2 ${statusTone}`}>
       <div className="flex items-center justify-between gap-2">
@@ -187,7 +187,7 @@ export function ApprovalRequestCard({
             const style = button.style || "default";
             const cls =
               style === "danger"
-                ? "border-[#ef5564]/50 bg-[#ef5564]/10 text-[#ffb3bd] hover:bg-[#ef5564]/20"
+                ? "border-danger/50 bg-danger/10 text-rose-300 hover:bg-danger/20"
                 : style === "primary"
                 ? "border-accent-400/50 bg-accent-400/10 text-accent-400 hover:bg-accent-400/20"
                 : "border-brand-500/20 bg-white/[0.04] text-ink-200 hover:bg-white/[0.08]";
@@ -223,7 +223,7 @@ export function ApprovalRequestCard({
               <button
                 onClick={() => onAction?.(`reject:${approvalId}`)}
                 disabled={busy}
-                className="inline-flex items-center gap-1.5 rounded-md border border-[#ef5564]/50 bg-[#ef5564]/10 px-2.5 py-1 text-xs text-[#ffb3bd] hover:bg-[#ef5564]/20 transition-colors disabled:opacity-50 disabled:cursor-wait"
+                className="inline-flex items-center gap-1.5 rounded-md border border-danger/50 bg-danger/10 px-2.5 py-1 text-xs text-rose-300 hover:bg-danger/20 transition-colors disabled:opacity-50 disabled:cursor-wait"
               >
                 <ShieldXIcon size={14} />
                 <span>{busy ? tCommon("working") : tCommon("reject")}</span>

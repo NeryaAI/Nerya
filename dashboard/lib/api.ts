@@ -2,7 +2,11 @@
 // All calls run inside Next route handlers / Server Components so we never
 // have to worry about CORS or exposing the backend to the browser.
 
-const BASE = process.env.NERYA_API || "http://127.0.0.1:18317";
+// Use a function to read the env var so Next.js doesn't inline it at build time.
+function _apiBase(): string {
+  return process.env.NERYA_API || "http://127.0.0.1:18318";
+}
+const BASE = _apiBase();
 
 export class ApiError extends Error {
   status: number;

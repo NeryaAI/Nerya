@@ -139,7 +139,7 @@ function classifyError(raw: string): {
     const [, p, status, body] = provider;
     kind = `${p}@${status}`;
     message = body || message;
-    if (status === "429") hint = "Provider rate-limited. The kernel will back off — try again in a few seconds.";
+    if (status === "429") hint = "Provider rate-limited. The kernel will back off. Try again in a few seconds.";
     else if (status === "401" || status === "403") hint = "Auth rejected. Check the API key under Settings → LLM Tiers.";
     else if (status === "500" || status === "502" || status === "503" || status === "504") {
       hint = "Provider had a transient outage. Loop will retry; raw response shown above.";
@@ -178,7 +178,7 @@ function ErrorCard({ error }: { error: string }) {
       role="alert"
     >
       <div className="flex items-center gap-2 text-[12px] text-rose-300 font-medium">
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-400 shadow-[0_0_8px_rgba(244,63,94,0.7)]" />
+        <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-500" />
         Turn failed · {kind}
       </div>
       <div className="text-sm text-rose-50 whitespace-pre-wrap break-words">
@@ -261,7 +261,7 @@ function IconButton({
 }) {
   const toneClass =
     tone === "danger"
-      ? "hover:text-[#ef5564] hover:border-[#ef5564]/40"
+      ? "hover:text-danger hover:border-danger/40"
       : tone === "primary"
       ? "text-accent-300 border-accent-400/40 bg-accent-400/10 hover:bg-accent-400/20"
       : "hover:text-white hover:border-brand-500/40";
@@ -343,7 +343,7 @@ function InlineEditor({
             if (canSave) onSave();
           }
         }}
-        className="min-h-[96px] w-full resize-y rounded-lg border border-brand-500/25 bg-ink-950/45 px-3 py-2 text-sm leading-relaxed text-white placeholder:text-ink-500 focus:outline-none focus:border-brand-500/60"
+        className="min-h-[96px] w-full resize-y rounded-lg border border-brand-500/25 bg-ink-950/45 px-3 py-2 text-sm leading-relaxed text-white placeholder:text-ink-300 focus:outline-none focus:border-brand-500/60"
       />
       <div
         className={`flex items-center gap-1.5 ${
@@ -672,7 +672,7 @@ export function AssistantBubble({
 
           {!msg.error && !reasoning && !msg.loading ? (
             <div
-              data-turn-section="reply-empty"
+              data-turn-section="reply"
               className="text-ink-400 italic text-xs"
             >
               (no reply returned)

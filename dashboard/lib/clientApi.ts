@@ -170,20 +170,18 @@ async function cachedRead<T>(
 }
 
 async function post<T>(path: string, body: unknown = {}): Promise<T> {
-  return cachedRead("POST", path, body, async () => {
-    const res = await fetch(`${BASE}${path}`, {
-      method: "POST",
-      headers: authHeaders({ "content-type": "application/json" }),
-      body: JSON.stringify(body),
-      cache: "no-store",
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      handleAuthFailure(res.status);
-      throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
-    }
-    return (await res.json()) as T;
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify(body),
+    cache: "no-store",
   });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    handleAuthFailure(res.status);
+    throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+  }
+  return (await res.json()) as T;
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -209,7 +207,7 @@ async function get<T>(path: string): Promise<T> {
  */
 export async function callApi<T = unknown>(
   path: string,
-  init?: { method?: string; body?: unknown }
+  init?: { method?: string; body?: unknown; signal?: AbortSignal }
 ): Promise<T> {
   const normalizedPath = path.startsWith("/") ? path : "/" + path;
   const method = (init?.method || "GET").toUpperCase();
@@ -219,6 +217,7 @@ export async function callApi<T = unknown>(
       method,
       headers: authHeaders({ "content-type": "application/json" }),
       body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+      signal: init?.signal,
     });
     const text = await res.text();
     let body: unknown = null;
@@ -250,7 +249,7 @@ export async function callApi<T = unknown>(
     }
     return body as T;
   };
-  if (method === "GET" || method === "POST") {
+  if (method === "GET") {
     return cachedRead(method, normalizedPath, init?.body, load);
   }
   return load();
@@ -1369,19 +1368,36 @@ export type OAuthProviderStatus = {
 };
 
 
+export type LlmRouteConfig = {
+  provider: string;
+  model: string;
+  models?: string[];
+  base_url?: string;
+  provider_key_ref?: string;
+  provider_key_refs?: string[];
+  provider_key?: string;
+  provider_keys?: string[];
+  has_key_ref?: boolean;
+  kind?: string;
+  provider_native_web_search?: Record<string, unknown>;
+};
+
 export type LlmTierConfig = {
   tier: string;
   provider: string;
   model: string;
+  models?: string[];
   base_url?: string;
   provider_key_ref?: string;
   provider_key?: string;
   has_key_ref?: boolean;
+  provider_native_web_search?: Record<string, unknown>;
   // Reasoning intensity hint forwarded to capable models (OpenAI o-series,
   // Codex Responses, Anthropic extended thinking, Gemini). Empty string
   // means "do not pass" — the model uses its built-in default. Allowed
   // values are the strings returned in `LlmConfigResponse.reasoning_levels`.
   reasoning_effort?: string;
+  routes?: LlmRouteConfig[];
 };
 
 export type LlmProviderProfile = {
@@ -3701,24 +3717,32 @@ export const clientApi = {
       { id },
     ),
   scheduleRunNow: (id: string) =>
-    post<{ ok: boolean; fired: boolean; event_id?: string }>(
+    post<{
+      ok: boolean;
+      schedule_id?: string;
+      fired?: boolean;
+      event_id?: string;
+      session?: Record<string, unknown>;
+      sessions?: Array<Record<string, unknown>>;
+      script?: Record<string, unknown>;
+      result?: Record<string, unknown>;
+      error?: string;
+    }>(
       "/triggers/schedules/run_now",
       { id },
     ),
   scheduleRemove: (id: string) =>
     post<{ ok: boolean }>("/triggers/schedules/remove", { id }),
   scheduleStatus: (id: string) =>
-    get<{
-      id: string;
-      enabled: boolean;
-      cron?: string;
-      every_s?: number;
-      last_tick_at?: string | null;
-      next_due_at?: string | null;
-      is_due: boolean;
-    }>(`/triggers/schedules/status?id=${encodeURIComponent(id)}`),
+    get<{ ok: boolean; schedules: TriggerSchedule[] }>(
+      `/triggers/schedules/status?id=${encodeURIComponent(id)}`,
+    ),
+  scheduleStatuses: () =>
+    get<{ ok: boolean; schedules: TriggerSchedule[] }>(
+      "/triggers/schedules/status",
+    ),
   scheduleTick: () =>
-    post<{ fired: number; events: string[] }>("/triggers/schedules/tick"),
+    post<{ ok: boolean; fired: Array<Record<string, unknown>> }>("/triggers/schedules/tick"),
 
   // Agent / session operator plane
   // ---------------------------------------------------------------
@@ -4250,6 +4274,12 @@ export type AgentTurnState = {
 
 export type AgentRunTurnResult = {
   trigger_event_id?: string;
+  turn_id?: string;
+  stopped_reason?: string | null;
+  transition_reason?: string | null;
+  final_text?: string;
+  artifact_index?: Record<string, unknown>;
+  final_report?: Record<string, unknown>;
   decision?: Record<string, unknown>;
   actions?: Array<Record<string, unknown>>;
   subagents?: Array<Record<string, unknown>>;
@@ -4311,10 +4341,27 @@ export type TriggerRoute = {
 };
 
 export type TriggerDeliveryTarget = {
-  kind: "messages" | "webhook";
+  kind:
+    | "messages"
+    | "webhook"
+    | "gateway"
+    | "platform"
+    | "dashboard"
+    | "local"
+    | "telegram"
+    | "discord"
+    | "slack"
+    | "feishu"
+    | "wecom"
+    | "dingtalk"
+    | "matrix"
+    | "whatsapp"
+    | string;
   channel?: string;
+  platform?: string;
   url?: string;
   headers?: Record<string, string>;
+  [key: string]: unknown;
 };
 
 export type TriggerSchedule = {
@@ -4337,10 +4384,14 @@ export type TriggerSchedule = {
   last_tick_at?: string | null;
   next_due_at?: string | null;
   // compatibility cron/session extension
-  session_kind?: "trigger" | "agent";
+  last_fired_ts?: number | null;
+  session_kind?: "trigger" | "agent" | "script";
   attached_skills?: string[];
   delivery_targets?: TriggerDeliveryTarget[];
   session_ttl_seconds?: number | null;
+  session_mode?: "ephemeral" | "reuse" | "fanout";
+  session_id?: string | null;
+  session_ids?: string[];
 };
 
 export type ClientApi = typeof clientApi;

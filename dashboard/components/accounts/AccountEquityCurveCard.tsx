@@ -10,6 +10,7 @@ import {
 import { useTranslations } from "next-intl";
 import { Card, Empty, ErrorBanner } from "../Page";
 import { clientApi, type AccountEquityPoint } from "../../lib/clientApi";
+import { useChartTheme } from "../../lib/chartTheme";
 
 type RangeId = "1h" | "24h" | "7d" | "30d" | "all";
 
@@ -44,7 +45,7 @@ const RANGE_CONFIGS: RangeConfig[] = [
 ];
 
 function fmtUsd(value: number, currency: string = "USDT"): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "–";
   const abs = Math.abs(value);
   const digits = abs >= 1000 ? 2 : abs >= 1 ? 4 : 6;
   return `${value.toLocaleString(undefined, {
@@ -90,6 +91,7 @@ export function AccountEquityCurveCard({
   currency?: string;
 }) {
   const t = useTranslations("accountEquity");
+  const chartTheme = useChartTheme();
   const [range, setRange] = useState<RangeId>("24h");
   const [points, setPoints] = useState<AccountEquityPoint[]>([]);
   const [loading, setLoading] = useState(true);
@@ -148,16 +150,16 @@ export function AccountEquityCurveCard({
       height: 260,
       layout: {
         background: { color: "transparent" },
-        textColor: "#cbd5e1",
+        textColor: chartTheme.text,
         attributionLogo: false,
       },
       grid: {
-        vertLines: { color: "rgba(148,163,184,.10)" },
-        horzLines: { color: "rgba(148,163,184,.10)" },
+        vertLines: { color: chartTheme.grid },
+        horzLines: { color: chartTheme.grid },
       },
-      rightPriceScale: { borderColor: "rgba(148,163,184,.2)" },
+      rightPriceScale: { borderColor: chartTheme.grid },
       timeScale: {
-        borderColor: "rgba(148,163,184,.2)",
+        borderColor: chartTheme.grid,
         timeVisible: true,
         secondsVisible: range === "1h",
       },
@@ -183,7 +185,7 @@ export function AccountEquityCurveCard({
       chartRef.current = null;
       areaRef.current = null;
     };
-  }, [node, range]);
+  }, [chartTheme, node, range]);
 
   // Push fresh data into the area series whenever `points` changes.
   useEffect(() => {
@@ -263,7 +265,7 @@ export function AccountEquityCurveCard({
             <Stat label={t("statCurrent")} value={fmtUsd(stats?.end ?? NaN, currency)} tone="brand" />
             <Stat
               label={t("statChange")}
-              value={stats?.change?.text || "—"}
+              value={stats?.change?.text || "–"}
               tone={
                 stats?.change == null
                   ? "neutral"
@@ -300,7 +302,7 @@ function Stat({
       : tone === "ok"
         ? "text-accent-200"
         : tone === "danger"
-          ? "text-[#ff8a9a]"
+          ? "text-rose-300"
           : "text-ink-100";
   return (
     <div className="rounded border border-brand-500/10 px-2 py-1.5">

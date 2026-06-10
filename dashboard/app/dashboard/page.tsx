@@ -185,7 +185,7 @@ export default function DashboardOverview() {
     return equity.map((p) => p.equity_usd);
   }, [equity]);
 
-  const mode = workspace ? (workspace.live_trading_enabled ? "live" : "paper") : "—";
+  const mode = workspace ? (workspace.live_trading_enabled ? "live" : "paper") : "–";
   const killed = !!workspace?.kill_switch;
 
   const focusedAccount =
@@ -229,7 +229,7 @@ export default function DashboardOverview() {
       id: `proposal:${p.id || p.kind || Math.random()}`,
       type: "proposal",
       severity: "warn",
-      title: t("proposalPending", { label: p.summary || p.kind || p.id || "—" }),
+      title: t("proposalPending", { label: p.summary || p.kind || p.id || "–" }),
       summary: p.status || t("open"),
       href: "/inbox",
       requires_action: true,
@@ -276,15 +276,11 @@ export default function DashboardOverview() {
 
       <PageBody>
         {/* Section 1 — Overview / greeting / KPIs / quick actions.
-            No outer Card; sits directly at the top of the page. */}
-        <section className="relative min-w-0 pl-3">
-          <span
-            aria-hidden
-            className="pointer-events-none absolute left-0 top-1 h-[calc(100%-2rem)] w-[2px] rounded-full bg-brand-500/60"
-          />
-
+            No outer Card; sits directly at the top of the page.
+            Marker is the heading typography itself (no decorative rail). */}
+        <section className="min-w-0">
           <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-            <h1 className="text-[24px] leading-[1.2] font-medium text-[color:var(--text-base)]">
+            <h1 className="text-[24px] leading-[1.2] font-medium tracking-tight text-[color:var(--text-base)]">
               {t(greetingKey)}, {operatorName}.
             </h1>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[color:var(--text-muted)]">
@@ -323,7 +319,7 @@ export default function DashboardOverview() {
               delta={
                 summary
                   ? t("accountCount", { count: summary.accounts.length })
-                  : "—"
+                  : "–"
               }
             />
             <Kpi
@@ -434,15 +430,14 @@ export default function DashboardOverview() {
               >
                 ↻
               </button>
-              <span className="text-[12px] text-[color:var(--text-muted)] ml-1">
-                {settings.kline.symbol}
-                {firstClose ? (
-                  <span className={`ml-2 ${candleDeltaPct >= 0 ? "text-emerald-500" : "text-rose-500"}`}>
-                    {candleDeltaPct >= 0 ? "+" : ""}
-                    {candleDeltaPct.toFixed(2)}%
-                  </span>
-                ) : null}
-              </span>
+              {firstClose ? (
+                <span
+                  className={`text-[12px] ml-1 ${candleDeltaPct >= 0 ? "text-emerald-500" : "text-rose-500"}`}
+                >
+                  {candleDeltaPct >= 0 ? "+" : ""}
+                  {candleDeltaPct.toFixed(2)}%
+                </span>
+              ) : null}
             </div>
           }
         >
@@ -551,7 +546,7 @@ export default function DashboardOverview() {
                               </Pill>
                             </td>
                             <td className="text-ink-200 font-mono">{size.toFixed(4)}</td>
-                            <td className="text-ink-200 font-mono">{entry ? entry.toFixed(2) : "—"}</td>
+                            <td className="text-ink-200 font-mono">{entry ? entry.toFixed(2) : "–"}</td>
                             <td className={openPnl >= 0 ? "text-emerald-500 font-mono" : "text-rose-500 font-mono"}>
                               {fmtSigned(openPnl)}
                             </td>
@@ -598,14 +593,14 @@ export default function DashboardOverview() {
                         return (
                           <tr key={tr.order_id || i}>
                             <td className="font-mono text-[12px]">{formatTime(tr.ts)}</td>
-                            <td className="font-mono text-[12px]">{tr.market || "—"}</td>
+                            <td className="font-mono text-[12px]">{tr.market || "–"}</td>
                             <td>
                               <Pill tone={isBuy ? "ok" : "danger"}>
                                 {isBuy ? "Buy" : "Sell"}
                               </Pill>
                             </td>
                             <td className="text-ink-200 font-mono">
-                              {tr.price ? Number(tr.price).toFixed(4) : "—"}
+                              {tr.price ? Number(tr.price).toFixed(4) : "–"}
                             </td>
                           </tr>
                         );
@@ -768,7 +763,7 @@ function NoFocusedAccountStrip({ hasAccounts }: { hasAccounts: boolean }) {
 }
 
 function fmtMoney(v: number | undefined): string {
-  if (v === undefined || v === null || !Number.isFinite(v)) return "—";
+  if (v === undefined || v === null || !Number.isFinite(v)) return "–";
   const abs = Math.abs(v);
   if (abs >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
   if (abs >= 1e3) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
@@ -776,7 +771,7 @@ function fmtMoney(v: number | undefined): string {
 }
 
 function fmtSigned(v: number | undefined): string {
-  if (v === undefined || v === null || !Number.isFinite(v)) return "—";
+  if (v === undefined || v === null || !Number.isFinite(v)) return "–";
   const sign = v > 0 ? "+" : v < 0 ? "-" : "";
   return `${sign}$${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }

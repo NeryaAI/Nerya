@@ -94,7 +94,7 @@ export function StrategyScheduleCard({
           <button
             onClick={() => void pause()}
             disabled={busy !== null}
-            className="text-xs rounded px-3 py-1.5 border border-[#f5a524]/40 text-[#f5a524] hover:bg-[#f5a524]/10"
+            className="text-xs rounded px-3 py-1.5 border border-warn/40 text-warn hover:bg-warn/10"
           >
             {busy === "schedule:pause" ? t("pausing") : t("pause")}
           </button>
@@ -158,7 +158,7 @@ function ScheduleRow({
           ? `cron: ${entry.cron}`
           : entry.every_seconds
             ? t("everySeconds", { n: entry.every_seconds })
-            : "—"}
+            : "–"}
       </div>
       <div className="mt-0.5 text-[11px] text-ink-500 truncate">
         {t("targetArrow")} <span className="font-mono">{entry.target}</span>

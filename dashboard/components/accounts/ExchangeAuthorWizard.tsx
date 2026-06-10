@@ -371,7 +371,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
       ) : null}
 
       {error ? (
-        <div className="mt-3 text-[#ef4560] text-xs font-mono">{error}</div>
+        <div className="mt-3 text-danger text-xs font-mono">{error}</div>
       ) : null}
     </Card>
   );

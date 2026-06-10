@@ -226,7 +226,7 @@ export function StrategyBindCard({
           <div className="mt-1.5 flex items-center gap-2 text-[11px] text-ink-400">
             <span>{t("current")}</span>
             <span className="font-mono text-ink-200">
-              {currentAccountId || "—"}
+              {currentAccountId || "–"}
             </span>
             {selectedAccount ? (
               <Pill
@@ -243,7 +243,7 @@ export function StrategyBindCard({
             ) : null}
           </div>
           {accountBlocked ? (
-            <div className="mt-1 text-[11px] text-[#ef4560]">
+            <div className="mt-1 text-[11px] text-danger">
               {t("cannotBindPrefix")}{" "}
               <span className="font-mono">
                 {selectedAccount!.profile.status}

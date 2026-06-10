@@ -2,7 +2,7 @@ import "./globals.css";
 import type { Metadata } from "next";
 import { ThemeApplier } from "../components/ThemeApplier";
 import { I18nProvider } from "../components/I18nProvider";
-import { AppShell } from "../components/landing/AppShell";
+import { AppShell } from "../components/AppShell";
 import { DialogProvider } from "../lib/dialogs";
 
 export const metadata: Metadata = {

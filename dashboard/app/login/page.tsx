@@ -78,7 +78,7 @@ export default function LoginPage() {
 
           <form
             onSubmit={submit}
-            className="rounded-lg border border-brand-500/20 bg-ink-900/80 p-5 shadow-[0_18px_60px_-30px_rgba(0,0,0,0.8)]"
+            className="card p-5"
           >
             <div className="mb-5 flex items-start justify-between gap-3">
               <div>

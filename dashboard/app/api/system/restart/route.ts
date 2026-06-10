@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
     typeof body.apiPort === "number" || typeof body.apiPort === "string"
       ? String(body.apiPort)
       : null,
-    18317,
+    18318,
   );
   const hasDashboardPort =
     typeof body.dashboardPort === "number" || typeof body.dashboardPort === "string";

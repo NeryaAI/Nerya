@@ -81,7 +81,7 @@ export function SectionTabs({ section }: { section: SectionKey }) {
             >
               {t(tab.labelKey)}
               {active ? (
-                <span className="absolute inset-x-2 -bottom-px h-px bg-brand-300 shadow-[0_0_10px_rgba(180,139,255,0.75)]" />
+                <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-brand-400" />
               ) : null}
             </Link>
           );

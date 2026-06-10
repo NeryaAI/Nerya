@@ -11,18 +11,21 @@ export function BacktestTables({
   tables: Array<{ id: string; columns: string[]; rows: unknown[][] }>;
 }) {
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+    <div className="grid grid-cols-1 gap-4">
       {tables.map((table) => (
         <Card key={table.id} title={table.id.replace(/_/g, " ")}>
           {table.rows.length === 0 ? (
             <Empty label="No rows" />
           ) : (
-            <div className="embedded-table-scroll max-h-80 overflow-auto">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-ink-950">
+            <div className="embedded-table-scroll max-h-96 overflow-auto rounded-md border border-[color:var(--line)]">
+              <table className="min-w-[720px] w-full text-xs">
+                <thead className="sticky top-0 bg-[color:var(--card-hi)]">
                   <tr>
                     {table.columns.map((col) => (
-                      <th key={col} className="text-left font-medium text-ink-300 py-2 pr-3">
+                      <th
+                        key={col}
+                        className="whitespace-nowrap px-3 py-2 text-left font-medium text-[color:var(--text-muted)]"
+                      >
                         {col}
                       </th>
                     ))}
@@ -32,7 +35,10 @@ export function BacktestTables({
                   {table.rows.map((row, idx) => (
                     <tr key={idx} className="border-t border-brand-500/10">
                       {row.map((cell, cellIdx) => (
-                        <td key={cellIdx} className="py-2 pr-3 text-ink-200 font-mono align-top">
+                        <td
+                          key={cellIdx}
+                          className="px-3 py-2 align-top font-mono text-[color:var(--text-base)]"
+                        >
                           <Cell value={cell} />
                         </td>
                       ))}
@@ -51,10 +57,14 @@ export function BacktestTables({
 function Cell({ value }: { value: unknown }) {
   const [open, setOpen] = useState(false);
   if (value === null || value === undefined || value === "") {
-    return <span className="text-ink-500">—</span>;
+    return <span className="text-ink-500">-</span>;
   }
   if (typeof value === "number") {
-    return <span>{Number.isFinite(value) ? formatNumber(value) : "inf"}</span>;
+    return (
+      <span className="whitespace-nowrap">
+        {Number.isFinite(value) ? formatNumber(value) : "inf"}
+      </span>
+    );
   }
   if (typeof value === "boolean") {
     return (
@@ -64,7 +74,7 @@ function Cell({ value }: { value: unknown }) {
     );
   }
   if (typeof value !== "object") {
-    return <span>{String(value)}</span>;
+    return <span className="block max-w-[24rem] whitespace-normal break-words">{String(value)}</span>;
   }
   const summary = Array.isArray(value)
     ? `[${value.length} item${value.length === 1 ? "" : "s"}]`
@@ -82,7 +92,7 @@ function Cell({ value }: { value: unknown }) {
         {summary}
       </button>
       {open ? (
-        <div className="mt-1 normal-case">
+        <div className="mt-1 min-w-[18rem] normal-case">
           <JsonView value={value} showRawToggle={false} className="bg-ink-950/40" />
         </div>
       ) : null}

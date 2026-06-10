@@ -194,15 +194,23 @@ export function Card({
     <section
       className={[
         "card card-hover min-w-0 relative",
-        featured
-          ? "before:absolute before:left-0 before:top-3 before:bottom-3 before:w-[2px] before:rounded-full before:bg-brand-500/70"
-          : "",
+        featured ? "card-featured" : "",
       ].join(" ")}
     >
       {(title || actions) && (
         <div className="card-head">
           <div className="min-w-0">
-            {title && <h3 className="card-title break-words">{title}</h3>}
+            {title && (
+              <h3 className="card-title break-words">
+                {featured ? (
+                  <span
+                    aria-hidden
+                    className="mr-2 inline-block h-1.5 w-1.5 translate-y-[-2px] rounded-full bg-brand-400 align-middle"
+                  />
+                ) : null}
+                {title}
+              </h3>
+            )}
             {description && <p className="card-subtle mt-1 break-words">{description}</p>}
           </div>
           {actions ? (

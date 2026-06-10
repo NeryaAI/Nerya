@@ -31,14 +31,17 @@ import { Sparkline } from "../../components/Sparkline";
 import { formatTsShort } from "../../lib/format";
 
 function money(value: unknown): string {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "—";
-  return `$${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  let n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  // Avoid the confusing "$-0" rendering for tiny negative values.
+  if (Math.abs(n) < 0.005) n = 0;
+  const abs = Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return n < 0 ? `-$${abs}` : `$${abs}`;
 }
 
 function numberish(value: unknown): string {
   const n = Number(value);
-  if (!Number.isFinite(n)) return value == null ? "—" : String(value);
+  if (!Number.isFinite(n)) return value == null ? "-" : String(value);
   return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
 }
 
@@ -508,12 +511,12 @@ export default function PortfolioPage() {
                     const ts = Number(row.ts);
                     const tsLabel = Number.isFinite(ts)
                       ? formatTsShort(new Date(ts * 1000).toISOString())
-                      : "—";
+                      : "–";
                     const assets = Object.entries(row.free_by_asset || {})
                       .sort(([, a], [, b]) => Number(b) - Number(a))
                       .slice(0, 3)
                       .map(([k, v]) => `${k}=${numberish(v)}`)
-                      .join(" · ") || "—";
+                      .join(" · ") || "–";
                     return (
                       <tr key={row.account_id}>
                         <td className="font-mono text-[12px]">
@@ -585,12 +588,12 @@ export default function PortfolioPage() {
                     const isShort = String(p.side || "").toLowerCase() === "short";
                     const sideLabel = p.side
                       ? p.side[0].toUpperCase() + p.side.slice(1).toLowerCase()
-                      : "—";
+                      : "–";
                     return (
                       <tr key={`${p.account_id}-${p.market}-${index}`}>
                         <td className="font-mono text-[12px]">{p.account_id}</td>
                         <td className="font-mono text-[12px] text-[color:var(--text-base)]">
-                          {p.market || "—"}
+                          {p.market || "–"}
                         </td>
                         <td>
                           <Pill tone={isShort ? "danger" : "ok"}>{sideLabel}</Pill>
@@ -710,7 +713,9 @@ function AccountHealthCard({
         </span>
       </div>
 
-      <div className="grid grid-cols-3 gap-2 text-[12px]">
+      {/* Zero-value bookkeeping fields (reserved / protections) stay
+          hidden so a fresh paper account reads as 4 numbers, not 6. */}
+      <div className="grid grid-cols-2 gap-2 text-[12px] sm:grid-cols-4">
         <div>
           <div className="text-[color:var(--text-muted)]">{t("totalLower")}</div>
           <div className="text-[color:var(--text-base)]">{money(snapshot?.total_usd)}</div>
@@ -728,19 +733,21 @@ function AccountHealthCard({
           </div>
         </div>
         <div>
-          <div className="text-[color:var(--text-muted)]">{t("reservedLower")}</div>
-          <div className={entry.reserved_usd > 0 ? "text-amber-500" : "text-[color:var(--text-base)]"}>
-            {money(entry.reserved_usd)}
-          </div>
-        </div>
-        <div>
           <div className="text-[color:var(--text-muted)]">{t("openPositionsLower")}</div>
           <div className="text-[color:var(--text-base)]">{entry.open_position_count}</div>
         </div>
-        <div>
-          <div className="text-[color:var(--text-muted)]">{t("protectionsLower")}</div>
-          <div className="text-[color:var(--text-base)]">{entry.protection_count}</div>
-        </div>
+        {entry.reserved_usd > 0 ? (
+          <div>
+            <div className="text-[color:var(--text-muted)]">{t("reservedLower")}</div>
+            <div className="text-amber-500">{money(entry.reserved_usd)}</div>
+          </div>
+        ) : null}
+        {entry.protection_count > 0 ? (
+          <div>
+            <div className="text-[color:var(--text-muted)]">{t("protectionsLower")}</div>
+            <div className="text-[color:var(--text-base)]">{entry.protection_count}</div>
+          </div>
+        ) : null}
       </div>
 
       {snapshot && Number(snapshot.total_usd) > 0 ? (

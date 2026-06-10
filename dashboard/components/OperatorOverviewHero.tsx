@@ -143,33 +143,33 @@ function HealthChip({
   const t = useTranslations("operatorHero");
   const accent =
     tone === "ok"
-      ? { bar: "bg-accent-500", text: "text-accent-400", glow: "shadow-[0_0_12px_rgba(16,217,147,0.45)]" }
+      ? { dot: "bg-emerald-500", text: "text-emerald-500" }
       : tone === "warn"
-      ? { bar: "bg-[#f5a524]", text: "text-[#f5a524]", glow: "shadow-[0_0_12px_rgba(245,165,36,0.45)]" }
+      ? { dot: "bg-amber-500", text: "text-amber-500" }
       : tone === "danger"
-      ? { bar: "bg-[#ef4560]", text: "text-[#ef4560]", glow: "shadow-[0_0_12px_rgba(239,69,96,0.45)]" }
-      : { bar: "bg-brand-400", text: "text-brand-300", glow: "shadow-[0_0_12px_rgba(180,139,255,0.45)]" };
+      ? { dot: "bg-rose-500", text: "text-rose-500" }
+      : { dot: "bg-brand-400", text: "text-brand-300" };
   return (
-    <div className="relative overflow-hidden rounded-xl border border-brand-500/15 bg-white/[0.03] backdrop-blur-glass px-3 py-3 hover:border-brand-500/25 transition-colors min-w-0">
-      <span className={`absolute left-0 top-0 bottom-0 w-[2px] ${accent.bar} ${on ? accent.glow : "opacity-30"}`} />
-      <div className="pl-2">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] font-medium text-ink-400">
-            {t("status")}
-          </span>
-          <span className={`text-[11px] font-mono shrink-0 ${on ? accent.text : "text-ink-500"}`}>
+    <div className="rounded-lg border border-[color:var(--line)] bg-ink-950/40 px-3 py-3 min-w-0 transition-colors hover:border-[color:var(--line-hi)]">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium text-[color:var(--text-muted)]">
+          {t("status")}
+        </span>
+        <span className="flex items-center gap-1.5 shrink-0">
+          <span className={`h-1.5 w-1.5 rounded-full ${on ? accent.dot : "bg-[color:var(--text-soft,#9c98ba)] opacity-30"}`} />
+          <span className={`text-[11px] font-mono ${on ? accent.text : "text-[color:var(--text-muted)]"}`}>
             {on ? t("on") : t("off")}
           </span>
-        </div>
-        <div className="mt-1 text-[13px] font-medium leading-snug text-white">
-          {label}
-        </div>
-        {subtitle ? (
-          <div className="text-[10.5px] text-ink-400 mt-0.5 font-mono truncate">
-            {subtitle}
-          </div>
-        ) : null}
+        </span>
       </div>
+      <div className="mt-1 text-[13px] font-medium leading-snug text-[color:var(--text-base)]">
+        {label}
+      </div>
+      {subtitle ? (
+        <div className="text-[10.5px] text-[color:var(--text-muted)] mt-0.5 font-mono truncate">
+          {subtitle}
+        </div>
+      ) : null}
     </div>
   );
 }

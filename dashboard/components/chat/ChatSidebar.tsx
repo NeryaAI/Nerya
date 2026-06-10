@@ -75,8 +75,8 @@ export function ChatSidebar({
                   <div
                     className={`group flex items-start gap-1 rounded-lg px-2 py-2 text-sm transition-colors cursor-pointer ${
                       active
-                        ? "bg-brand-500/12 border border-brand-500/30 text-white shadow-[inset_2px_0_0_rgb(180,139,255)]"
-                        : "hover:bg-white/[0.04] border border-transparent text-ink-200"
+                        ? "bg-brand-500/15 border border-brand-500/40 text-white font-semibold"
+                        : "hover:bg-brand-500/5 border border-transparent text-ink-200"
                     }`}
                   >
                     <button
@@ -97,7 +97,7 @@ export function ChatSidebar({
                         });
                         if (ok) onDelete(th.id);
                       }}
-                      className="opacity-0 group-hover:opacity-100 text-ink-500 hover:text-[#ef5564] text-xs px-1.5 transition-opacity"
+                      className="opacity-0 group-hover:opacity-100 text-ink-500 hover:text-danger text-xs px-1.5 transition-opacity"
                       title={tCommon("delete")}
                       aria-label={tCommon("delete")}
                     >

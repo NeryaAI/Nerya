@@ -127,7 +127,7 @@ export function Select<T extends string = string>({
             : active
             ? active.label
             : (
-              <span className="text-ink-500">{placeholder ?? "—"}</span>
+              <span className="text-ink-500">{placeholder ?? "–"}</span>
             )}
         </span>
         <ChevronDownIcon
@@ -145,12 +145,12 @@ export function Select<T extends string = string>({
         align={align}
         width={panelWidth ?? autoWidth}
         offset={6}
-        className="max-h-72 overflow-y-auto rounded-xl border border-brand-500/20 bg-[rgba(14,16,28,0.92)] py-1 shadow-[0_18px_48px_-22px_rgba(67,32,180,0.65)] backdrop-blur-airy"
+        className="max-h-72 overflow-y-auto rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] py-1 shadow-[0_2px_8px_rgba(2,6,23,0.18)]"
       >
         <ul role="listbox" className="text-[13px]">
           {options.length === 0 ? (
             <li className="px-3 py-2 text-[12px] text-ink-500 italic">
-              —
+              No options
             </li>
           ) : (
             options.map((option) => {

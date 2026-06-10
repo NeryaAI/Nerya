@@ -543,8 +543,8 @@ function Stat({
   const color = {
     neutral: "text-white",
     ok: "text-accent-300",
-    warn: "text-[#f5a524]",
-    danger: "text-[#ef4560]",
+    warn: "text-warn",
+    danger: "text-danger",
     brand: "text-brand-200",
   }[tone];
   return (
@@ -595,7 +595,7 @@ function LearningChain({
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-ink-500">
           {blocked ? (
             <span>
-              {t("blocked")}: <span className="font-mono text-[#ef4560]">{blocked}</span>
+              {t("blocked")}: <span className="font-mono text-danger">{blocked}</span>
             </span>
           ) : null}
           {lastActivity ? (
@@ -1193,7 +1193,7 @@ function TokenList({
   if (!values.length) {
     return empty ? <span className="text-ink-500">{empty}</span> : null;
   }
-  const color = tone === "danger" ? "border-[#ef4560]/25 text-[#ef4560]" : "border-brand-500/10 text-ink-300";
+  const color = tone === "danger" ? "border-danger/25 text-danger" : "border-brand-500/10 text-ink-300";
   return (
     <div className="flex flex-wrap gap-1.5">
       {values.map((value) => (

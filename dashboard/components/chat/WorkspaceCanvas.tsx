@@ -686,7 +686,7 @@ function HtmlFrame({ item, title }: { item: CanvasItem; title: string }) {
 function ImageView({ item }: { item: CanvasItem }) {
   if (!item.imageSrc) return <EmptyCanvas title={item.title} />;
   return (
-    <div className="flex h-full min-h-0 items-center justify-center overflow-auto bg-[#050711] p-3">
+    <div className="flex h-full min-h-0 items-center justify-center overflow-auto bg-ink-950 p-3">
       <img
         src={item.imageSrc}
         alt={item.title}
@@ -714,7 +714,7 @@ function BrowserSessionFrame({ item }: { item: CanvasItem }) {
     <iframe
       title={item.title}
       src={`/browser-session/embed?${params.toString()}`}
-      className="h-full w-full border-0 bg-[#050711]"
+      className="h-full w-full border-0 bg-ink-950"
       sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
     />
   );
@@ -941,7 +941,7 @@ export function WorkspaceCanvas({
             ) : null}
 
             {error ? (
-              <div className="mt-2 rounded border border-[#ef4560]/25 bg-[#ef4560]/10 px-2 py-1 text-[11px] text-[#ff9aa8]">
+              <div className="mt-2 rounded border border-danger/25 bg-danger/10 px-2 py-1 text-[11px] text-rose-300">
                 {error}
               </div>
             ) : null}

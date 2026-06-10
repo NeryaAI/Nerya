@@ -10,7 +10,7 @@ import { RuntimeFlagsPanel } from "./RuntimeFlagsPanel";
 import { SwitchControl } from "./SwitchControl";
 import { Select as PortalSelect, type SelectOption as PortalSelectOption } from "./Select";
 import { PortalDropdown, useDropdown } from "./PortalDropdown";
-import { CheckIcon, ChevronDownIcon, PlusIcon, RefreshIcon, SearchIcon, SettingsIcon, SparkIcon } from "./icons";
+import { CheckIcon, ChevronDownIcon, PlusIcon, RefreshIcon, SearchIcon, SettingsIcon, SparkIcon, TrashIcon } from "./icons";
 import { DEFAULT_SETTINGS, useUiSettings } from "../lib/settings";
 import {
   clientApi,
@@ -18,6 +18,7 @@ import {
   type GatewayPlatformSpec,
   type GatewayUpsertRequest,
   type LlmProviderProfile,
+  type LlmRouteConfig,
   type LlmTierConfig,
   type MemoryActivityEvent,
   type MemoryExternalConfig,
@@ -338,8 +339,91 @@ function gatewayCsvList(csv: string): string[] {
   return csv.split(/[,\n]/).map((part) => part.trim()).filter(Boolean);
 }
 
+function splitRouteValues(value: string | string[] | undefined): string[] {
+  if (!value) return [];
+  const raw = Array.isArray(value) ? value : value.split(/[\n,]/);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    const text = String(item || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
+function emptyRoute(): LlmRouteConfig {
+  return {
+    provider: "",
+    model: "",
+    models: [],
+    base_url: "",
+    provider_key_ref: "",
+    provider_key_refs: [],
+    provider_key: "",
+    provider_keys: [],
+    kind: "chat_completions",
+  };
+}
+
+function routesOf(row: LlmTierConfig): LlmRouteConfig[] {
+  if (Array.isArray(row.routes) && row.routes.length > 0) {
+    return row.routes.map((route) => ({
+      provider: route.provider || "",
+      model: route.model || splitRouteValues(route.models).join(", "),
+      models: route.models || splitRouteValues(route.model),
+      base_url: route.base_url || "",
+      provider_key_ref: route.provider_key_ref || splitRouteValues(route.provider_key_refs).join(", "),
+      provider_key_refs: route.provider_key_refs || splitRouteValues(route.provider_key_ref),
+      provider_key: route.provider_key || splitRouteValues(route.provider_keys).join(", "),
+      provider_keys: route.provider_keys || splitRouteValues(route.provider_key),
+      has_key_ref: route.has_key_ref,
+      kind: route.kind || "chat_completions",
+      provider_native_web_search: route.provider_native_web_search,
+    }));
+  }
+  if (row.provider || row.model || row.base_url || row.provider_key_ref) {
+    return [{
+      provider: row.provider || "",
+      model: row.model || splitRouteValues(row.models).join(", "),
+      models: row.models || splitRouteValues(row.model),
+      base_url: row.base_url || "",
+      provider_key_ref: row.provider_key_ref || "",
+      provider_key_refs: splitRouteValues(row.provider_key_ref),
+      provider_key: row.provider_key || "",
+      provider_keys: splitRouteValues(row.provider_key),
+      has_key_ref: row.has_key_ref,
+      kind: "chat_completions",
+      provider_native_web_search: row.provider_native_web_search,
+    }];
+  }
+  return [emptyRoute()];
+}
+
+function tierWithRoutes(row: LlmTierConfig): LlmTierConfig {
+  const routes = routesOf(row);
+  const first = routes[0] || emptyRoute();
+  return {
+    ...row,
+    provider: first.provider || row.provider || "",
+    model: first.model || row.model || "",
+    base_url: first.base_url || row.base_url || "",
+    provider_key_ref: first.provider_key_ref || row.provider_key_ref || "",
+    routes,
+  };
+}
+
 function emptyTier(tier: string): LlmTierConfig {
-  return { tier, provider: "", model: "", base_url: "", provider_key_ref: "", reasoning_effort: "" };
+  return {
+    tier,
+    provider: "",
+    model: "",
+    base_url: "",
+    provider_key_ref: "",
+    reasoning_effort: "",
+    routes: [emptyRoute()],
+  };
 }
 
 // Canonical reasoning-effort levels, in display order. Mirrors the
@@ -368,13 +452,14 @@ function prettifyReasoningLevel(level: string): string {
 }
 
 function ensureAssignmentTiers(rows: LlmTierConfig[]): LlmTierConfig[] {
-  const byTier = new Map(rows.map((row) => [row.tier, row]));
+  const byTier = new Map(rows.map((row) => [row.tier, tierWithRoutes(row)]));
   for (const tier of ASSIGNMENT_TIERS) {
     if (!byTier.has(tier)) byTier.set(tier, emptyTier(tier));
   }
   const primary = ASSIGNMENT_TIERS.map((tier) => byTier.get(tier)).filter(Boolean) as LlmTierConfig[];
   const extra = rows
     .filter((row) => !ASSIGNMENT_TIERS.includes(row.tier as typeof ASSIGNMENT_TIERS[number]))
+    .map(tierWithRoutes)
     .sort((a, b) => a.tier.localeCompare(b.tier));
   return [...primary, ...extra];
 }
@@ -528,7 +613,7 @@ function ModelSelectInput({
       >
         <input
           ref={inputRef}
-          className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[12px] font-mono text-ink-100 outline-none placeholder:text-ink-500 disabled:cursor-not-allowed"
+          className="h-full min-w-0 flex-1 bg-transparent px-2.5 text-[12px] font-mono text-ink-100 outline-none placeholder:text-ink-300 disabled:cursor-not-allowed"
           value={value}
           onFocus={() => {
             if (!disabled) dropdown.setOpen(true);
@@ -690,6 +775,13 @@ function fingerprintConfig(
       tier: row.tier,
       provider: row.provider,
       model: row.model,
+      routes: routesOf(row).map((route) => ({
+        provider: route.provider || "",
+        model: route.model || "",
+        base_url: route.base_url || "",
+        provider_key_ref: route.provider_key_ref || "",
+        kind: route.kind || "",
+      })),
       reasoning_effort: row.reasoning_effort || "",
     })),
   });
@@ -1664,6 +1756,9 @@ export function SettingsWorkspace({
     if (providerDraft) names.add(providerDraft.trim().toLowerCase());
     tierRows.forEach((r) => {
       if (r.provider) names.add(r.provider);
+      routesOf(r).forEach((route) => {
+        if (route.provider) names.add(route.provider);
+      });
     });
     return Array.from(names).filter(Boolean).sort();
   }, [modelCatalog, providerCatalog, providerDraft, providerProfiles, providers, tierRows]);
@@ -1726,8 +1821,58 @@ export function SettingsWorkspace({
     return map;
   }, [providerProfiles]);
 
+  function providerArtifacts(rawProvider: string) {
+    const trimmed = rawProvider.trim();
+    const lower = trimmed.toLowerCase();
+    const provider = providers.find(
+      (row) => row.provider === trimmed || row.provider === lower,
+    );
+    const profile = providerProfileMap.get(trimmed) || providerProfileMap.get(lower);
+    const catalog = catalogById.get(trimmed) || catalogById.get(lower);
+    return {
+      provider_id: lower,
+      provider,
+      profile,
+      catalog,
+      base_url:
+        profile?.base_url ||
+        provider?.base_url ||
+        catalog?.base_url ||
+        DEFAULT_PROVIDER_BASE_URLS[lower] ||
+        "",
+    };
+  }
+
+  function routeDefaultsForProvider(rawProvider: string) {
+    const artifacts = providerArtifacts(rawProvider);
+    return {
+      base_url: artifacts.base_url,
+      kind:
+        artifacts.catalog?.api_mode === "anthropic_messages"
+          ? "anthropic_messages"
+          : "chat_completions",
+    };
+  }
+
+  function routeHasCredential(route: LlmRouteConfig): boolean {
+    if (!route.provider.trim()) return false;
+    const artifacts = providerArtifacts(route.provider);
+    return Boolean(
+      route.provider_key ||
+      route.provider_key_ref ||
+      route.has_key_ref ||
+      (route.provider_key_refs || []).length > 0 ||
+      artifacts.profile?.provider_key_ref ||
+      artifacts.profile?.has_key_ref ||
+      artifacts.provider?.ready ||
+      artifacts.provider_id === "ollama",
+    );
+  }
+
   const configuredTierCount = useMemo(
-    () => tierRows.filter((row) => row.provider && row.model).length,
+    () => tierRows.filter((row) =>
+      routesOf(row).some((route) => route.provider && route.model),
+    ).length,
     [tierRows],
   );
 
@@ -1848,6 +1993,69 @@ export function SettingsWorkspace({
         const next = { ...row, ...patch };
         if (patch.provider) next.model = "";
         return next;
+      }),
+    );
+  }
+
+  function patchTierRoute(
+    tierIndex: number,
+    routeIndex: number,
+    patch: Partial<LlmRouteConfig>,
+  ) {
+    setTierRows((rows) =>
+      rows.map((row, i) => {
+        if (i !== tierIndex) return row;
+        const routes = routesOf(row).map((route, j) => {
+          if (j !== routeIndex) return route;
+          const next = { ...route, ...patch };
+          if (patch.provider !== undefined && patch.provider !== route.provider) {
+            next.model = "";
+            next.models = [];
+            next.provider_key = "";
+            next.provider_keys = [];
+            next.provider_key_ref = "";
+            next.provider_key_refs = [];
+            next.has_key_ref = false;
+          }
+          return next;
+        });
+        const first = routes[0] || emptyRoute();
+        return {
+          ...row,
+          provider: first.provider || "",
+          model: first.model || "",
+          base_url: first.base_url || "",
+          provider_key_ref: first.provider_key_ref || "",
+          routes,
+        };
+      }),
+    );
+  }
+
+  function addTierRoute(tierIndex: number) {
+    setTierRows((rows) =>
+      rows.map((row, i) => {
+        if (i !== tierIndex) return row;
+        return { ...row, routes: [...routesOf(row), emptyRoute()] };
+      }),
+    );
+  }
+
+  function removeTierRoute(tierIndex: number, routeIndex: number) {
+    setTierRows((rows) =>
+      rows.map((row, i) => {
+        if (i !== tierIndex) return row;
+        const routes = routesOf(row).filter((_, j) => j !== routeIndex);
+        const nextRoutes = routes.length ? routes : [emptyRoute()];
+        const first = nextRoutes[0] || emptyRoute();
+        return {
+          ...row,
+          provider: first.provider || "",
+          model: first.model || "",
+          base_url: first.base_url || "",
+          provider_key_ref: first.provider_key_ref || "",
+          routes: nextRoutes,
+        };
       }),
     );
   }
@@ -2050,19 +2258,52 @@ export function SettingsWorkspace({
     setSaving(true);
     try {
       const intentRow = tierRows.find((row) => row.tier === INTENT_TIER);
-      const nextIntentTier = intentRow?.provider && intentRow.model ? INTENT_TIER : intentTier || "light";
+      const intentReady = intentRow
+        ? routesOf(intentRow).some((route) => route.provider && route.model)
+        : false;
+      const nextIntentTier = intentReady ? INTENT_TIER : intentTier || "light";
+      const rowsForSave = tierRows
+        .map((row) => {
+          const routes = routesOf(row)
+            .filter((route) => route.provider.trim() && route.model.trim())
+            .map((route) => {
+              const models = splitRouteValues(route.models?.length ? route.models : route.model);
+              const providerKeyRefs = splitRouteValues(
+                route.provider_key_refs?.length ? route.provider_key_refs : route.provider_key_ref,
+              );
+              const providerKeys = splitRouteValues(
+                route.provider_keys?.length ? route.provider_keys : route.provider_key,
+              );
+              return {
+                provider: route.provider.trim().toLowerCase(),
+                model: models.join(", "),
+                models,
+                base_url: (route.base_url || "").trim(),
+                provider_key_ref: providerKeyRefs.join(", "),
+                provider_key_refs: providerKeyRefs,
+                provider_key: providerKeys.join(", "),
+                provider_keys: providerKeys,
+                kind: (route.kind || "").trim(),
+              };
+            });
+          if (!row.tier.trim() || routes.length === 0) return null;
+          const first = routes[0];
+          return {
+            tier: row.tier.trim(),
+            provider: first.provider,
+            model: first.model,
+            base_url: first.base_url,
+            provider_key_ref: first.provider_key_ref,
+            reasoning_effort: (row.reasoning_effort || "").trim().toLowerCase(),
+            routes,
+          };
+        })
+        .filter(Boolean) as LlmTierConfig[];
       const res = await clientApi.llmConfigSet({
         default_tier: defaultTier,
         intent_tier: nextIntentTier,
         providers: profilesForSave(),
-        tiers: tierRows
-          .filter((row) => row.tier.trim() && row.provider.trim() && row.model.trim())
-          .map((row) => ({
-            tier: row.tier.trim(),
-            provider: row.provider.trim().toLowerCase(),
-            model: row.model.trim(),
-            reasoning_effort: (row.reasoning_effort || "").trim().toLowerCase(),
-          })),
+        tiers: rowsForSave,
       });
       if (!res.ok) throw new Error(res.error || "save failed");
       const savedDefaultTier = res.default_tier || defaultTier;
@@ -2840,7 +3081,7 @@ export function SettingsWorkspace({
       if (!body.keys && !body.base_urls) {
         setSearchEngineRowResult((p) => ({
           ...p,
-          [engine]: "no changes — type a key or change the base URL first",
+          [engine]: "no changes: type a key or change the base URL first",
         }));
         return;
       }
@@ -2886,7 +3127,7 @@ export function SettingsWorkspace({
         : "";
       setSearchEngineRowResult((p) => ({
         ...p,
-        [engine]: `ok — ${count} result(s) via ${engineUsed || engine} · ${res.elapsed_ms ?? "?"}ms`,
+        [engine]: `ok: ${count} result(s) via ${engineUsed || engine} · ${res.elapsed_ms ?? "?"}ms`,
       }));
     } catch (e) {
       setSearchEngineRowResult((p) => ({
@@ -3093,7 +3334,7 @@ export function SettingsWorkspace({
       }
       setBrowserRowResult((p) => ({
         ...p,
-        [name]: `ok — ${res.fetch_method || name} · ${res.elapsed_ms ?? "?"}ms · ${res.bytes ?? "?"}B`,
+        [name]: `ok: ${res.fetch_method || name} · ${res.elapsed_ms ?? "?"}ms · ${res.bytes ?? "?"}B`,
       }));
     } catch (e) {
       setBrowserRowResult((p) => ({
@@ -3262,7 +3503,7 @@ export function SettingsWorkspace({
                 : tSearch("keyless")}
               {row.needs_base_url
                 ? ` · ${tSearch("baseUrlInline", {
-                    url: baseUrlInfo.effective || "—",
+                    url: baseUrlInfo.effective || "–",
                   })}`
                 : ""}
             </div>
@@ -3323,8 +3564,8 @@ export function SettingsWorkspace({
             />
             <span className="self-center text-[11px] text-ink-500">
               {tSearch("envDefault", {
-                env: baseUrlInfo.env || "—",
-                def: baseUrlInfo.default || "—",
+                env: baseUrlInfo.env || "–",
+                def: baseUrlInfo.default || "–",
               })}
             </span>
           </div>
@@ -3732,56 +3973,6 @@ export function SettingsWorkspace({
                   })}
                 </datalist>
               </Field>
-              <Field label={tProvider("baseUrlLabel")} hint={tProvider("baseUrlHint")}>
-                <input
-                  className="input-dark font-mono"
-                  value={providerBaseUrlDraft}
-                  onChange={(e) => setProviderBaseUrlDraft(e.target.value)}
-                  placeholder={
-                    customProviderKind
-                      ? CUSTOM_PROVIDER_KINDS.find((k) => k.id === customProviderKind)?.placeholder
-                      : "https://api.openai.com/v1"
-                  }
-                />
-              </Field>
-              {/* Custom-provider preset picker — only meaningful for a
-                  provider id that isn't in the catalogue. The selection
-                  is informational today (the writer routes by
-                  ``api_mode`` from the catalog when present); for a
-                  truly custom id, the operator's choice tells the
-                  router which adapter shape to use. */}
-              {!catalogById.has(providerDraft.trim().toLowerCase()) ? (
-                <Field label={tProvider("customKindLabel")} hint={tProvider("customKindHint")}>
-                  <PortalSelect<CustomProviderKind | "">
-                    value={customProviderKind}
-                    onChange={(next) => {
-                      setCustomProviderKind(next);
-                      if (next === "openai_compat" && !providerBaseUrlDraft) {
-                        setProviderBaseUrlDraft("https://api.example.com/v1");
-                      } else if (
-                        next === "anthropic_compat" &&
-                        !providerBaseUrlDraft
-                      ) {
-                        setProviderBaseUrlDraft("https://api.example.com/v1");
-                      }
-                    }}
-                    options={[
-                      { value: "", label: tProvider("customKindAuto") },
-                      {
-                        value: "openai_compat",
-                        label: tProvider("customKindOpenAI"),
-                      },
-                      {
-                        value: "anthropic_compat",
-                        label: tProvider("customKindAnthropic"),
-                      },
-                    ]}
-                    size="sm"
-                    ariaLabel={tProvider("customKindLabel")}
-                    className="font-mono"
-                  />
-                </Field>
-              ) : null}
               <Field label={tProvider("apiKeyLabel")} hint={tProvider("apiKeyHint")}>
                 <input
                   className="input-dark font-mono"
@@ -3840,10 +4031,62 @@ export function SettingsWorkspace({
               </div>
             ) : null}
 
-            {/* Manual model entry — escape hatch when ``/models`` is
-                missing, gated, or the operator already knows the id. */}
-            <div className="mt-3 rounded-lg border border-[color:var(--line)] px-3 py-2.5">
-              <div className="flex flex-wrap items-end gap-2">
+            {/* Low-frequency knobs live behind progressive disclosure:
+                base URL is auto-filled for catalogue providers, the
+                preset picker only matters for custom ids, and manual
+                model entry is an escape hatch when /models is gated. */}
+            <Advanced
+              title={tProvider("advancedTitle")}
+              description={tProvider("advancedDesc")}
+              storageKey="nerya.settings.provider.advanced"
+            >
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <Field label={tProvider("baseUrlLabel")} hint={tProvider("baseUrlHint")}>
+                  <input
+                    className="input-dark font-mono"
+                    value={providerBaseUrlDraft}
+                    onChange={(e) => setProviderBaseUrlDraft(e.target.value)}
+                    placeholder={
+                      customProviderKind
+                        ? CUSTOM_PROVIDER_KINDS.find((k) => k.id === customProviderKind)?.placeholder
+                        : "https://api.openai.com/v1"
+                    }
+                  />
+                </Field>
+                {!catalogById.has(providerDraft.trim().toLowerCase()) ? (
+                  <Field label={tProvider("customKindLabel")} hint={tProvider("customKindHint")}>
+                    <PortalSelect<CustomProviderKind | "">
+                      value={customProviderKind}
+                      onChange={(next) => {
+                        setCustomProviderKind(next);
+                        if (next === "openai_compat" && !providerBaseUrlDraft) {
+                          setProviderBaseUrlDraft("https://api.example.com/v1");
+                        } else if (
+                          next === "anthropic_compat" &&
+                          !providerBaseUrlDraft
+                        ) {
+                          setProviderBaseUrlDraft("https://api.example.com/v1");
+                        }
+                      }}
+                      options={[
+                        { value: "", label: tProvider("customKindAuto") },
+                        {
+                          value: "openai_compat",
+                          label: tProvider("customKindOpenAI"),
+                        },
+                        {
+                          value: "anthropic_compat",
+                          label: tProvider("customKindAnthropic"),
+                        },
+                      ]}
+                      size="sm"
+                      ariaLabel={tProvider("customKindLabel")}
+                      className="font-mono"
+                    />
+                  </Field>
+                ) : null}
+              </div>
+              <div className="mt-3 flex flex-wrap items-end gap-2">
                 <div className="flex-1 min-w-[180px]">
                   <div className="flex items-center justify-between gap-2 mb-1">
                     <span className="text-[12px] text-ink-300">
@@ -3878,7 +4121,7 @@ export function SettingsWorkspace({
                   {tProvider("manualAdd")}
                 </button>
               </div>
-            </div>
+            </Advanced>
 
             {discoveredModels.length ? (
               <div className="embedded-list-scroll mt-4 rounded-lg border border-brand-500/10 bg-ink-950/35">
@@ -3994,12 +4237,12 @@ export function SettingsWorkspace({
 
             <div className="space-y-3">
               {tierRows.map((row, index) => {
-                const models = modelCatalog[row.provider] || [];
-                const provider = providers.find((p) => p.provider === row.provider);
-                const profile = providerProfileMap.get(row.provider);
-                const modelOptions = row.model && !models.includes(row.model)
-                  ? [row.model, ...models]
-                  : models;
+                const routes = routesOf(row);
+                const configuredRoutes = routes.filter((route) =>
+                  route.provider.trim() && route.model.trim()
+                ).length;
+                const anyRouteConfigured = configuredRoutes > 0;
+                const anyRouteReady = routes.some((route) => routeHasCredential(route));
                 const laneKey = row.tier === INTENT_TIER
                   ? "laneIntent"
                   : row.tier === "light" ? "laneLight"
@@ -4019,47 +4262,191 @@ export function SettingsWorkspace({
                         </div>
                       </div>
                       <div className="flex flex-wrap justify-end gap-1.5">
-                        <Pill tone={provider?.ready || profile?.has_key_ref || profile?.provider_key_ref ? "ok" : "warn"}>
-                          {provider?.ready || profile?.has_key_ref || profile?.provider_key_ref ? tModel("ready") : tModel("keyRefMissing")}
+                        <Pill tone={anyRouteReady ? "ok" : "warn"}>
+                          {anyRouteReady ? tModel("ready") : tModel("keyRefMissing")}
+                        </Pill>
+                        <Pill tone={anyRouteConfigured ? "neutral" : "warn"}>
+                          {tModel("configuredRoutes", { count: configuredRoutes })}
                         </Pill>
                         {row.tier === defaultTier ? <Pill tone="brand">{tModel("default")}</Pill> : null}
                         {row.tier === intentTier ? <Pill tone="brand">{tModel("intent")}</Pill> : null}
                       </div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                      <Field label={tProvider("providerLabel")} hint={profile?.base_url || provider?.base_url || tModel("selectProvider")}>
-                        <PortalSelect
-                          value={row.provider}
-                          onChange={(value) =>
-                            patchTier(index, { provider: value })
-                          }
-                          options={[
-                            { value: "", label: tModel("selectProvider") },
-                            ...providerOptions.map((p) => ({
-                              value: p,
-                              label: p,
-                            })),
-                          ]}
-                          size="sm"
-                          ariaLabel={tProvider("providerLabel")}
-                        />
-                      </Field>
-                      <Field label={tProvider("modelLabel")} hint={models.length ? tModel("importedCount", { count: models.length }) : tModel("importModelsFirst")}>
-                        <ModelSelectInput
-                          value={row.model}
-                          onChange={(value) => {
-                            patchTier(index, { model: value });
-                            if (row.tier === INTENT_TIER && value)
-                              setIntentTier(INTENT_TIER);
-                          }}
-                          disabled={!row.provider}
-                          options={modelOptions}
-                          placeholder={tModel("selectModel")}
-                          ariaLabel={tProvider("modelLabel")}
-                          className="font-mono"
-                          emptyHint={models.length ? tModel("selectModel") : tModel("importModelsFirst")}
-                        />
-                      </Field>
+                    <div className="space-y-2.5">
+                      {routes.map((route, routeIndex) => {
+                        const artifacts = providerArtifacts(route.provider);
+                        const models = modelCatalog[route.provider] || [];
+                        const routeModelValues = splitRouteValues(
+                          route.models?.length ? route.models : route.model,
+                        );
+                        const modelInputValue = routeModelValues.length
+                          ? routeModelValues.join(", ")
+                          : route.model;
+                        const modelOptions = modelInputValue && !models.includes(modelInputValue)
+                          ? [modelInputValue, ...models]
+                          : models;
+                        const providerKeyValues = splitRouteValues(
+                          route.provider_keys?.length ? route.provider_keys : route.provider_key,
+                        );
+                        const providerKeyRefValues = splitRouteValues(
+                          route.provider_key_refs?.length
+                            ? route.provider_key_refs
+                            : route.provider_key_ref,
+                        );
+                        const keyValue = providerKeyValues.length
+                          ? providerKeyValues.join(", ")
+                          : providerKeyRefValues.join(", ");
+                        const routeReady = routeHasCredential(route);
+                        const canRemove = routes.length > 1;
+                        return (
+                          <div
+                            key={`${row.tier}-${routeIndex}`}
+                            className="rounded-lg border border-[color:var(--line)] bg-ink-950/20 p-3"
+                          >
+                            <div className="mb-2.5 flex items-center justify-between gap-2">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <span className="text-[12px] font-medium text-ink-200">
+                                  {tModel("routeLabel", { index: routeIndex + 1 })}
+                                </span>
+                                <Pill tone={routeReady ? "ok" : "warn"}>
+                                  {routeReady ? tModel("ready") : tModel("keyRefMissing")}
+                                </Pill>
+                              </div>
+                              <button
+                                type="button"
+                                className="icon-btn h-7 w-7 rounded-md"
+                                onClick={() => removeTierRoute(index, routeIndex)}
+                                disabled={!canRemove}
+                                aria-label={tModel("removeRoute")}
+                                title={tModel("removeRoute")}
+                              >
+                                <TrashIcon size={13} />
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                              <Field
+                                label={tProvider("providerLabel")}
+                                hint={artifacts.base_url || tModel("selectProvider")}
+                              >
+                                <PortalSelect
+                                  value={route.provider}
+                                  onChange={(value) => {
+                                    const defaults = routeDefaultsForProvider(value);
+                                    patchTierRoute(index, routeIndex, {
+                                      provider: value,
+                                      base_url: defaults.base_url,
+                                      kind: defaults.kind,
+                                    });
+                                  }}
+                                  options={[
+                                    { value: "", label: tModel("selectProvider") },
+                                    ...providerOptions.map((p) => ({
+                                      value: p,
+                                      label: p,
+                                    })),
+                                  ]}
+                                  size="sm"
+                                  ariaLabel={tProvider("providerLabel")}
+                                />
+                              </Field>
+                              <Field
+                                label={tProvider("modelLabel")}
+                                hint={models.length ? tModel("importedCount", { count: models.length }) : tModel("importModelsFirst")}
+                              >
+                                <ModelSelectInput
+                                  value={modelInputValue}
+                                  onChange={(value) => {
+                                    patchTierRoute(index, routeIndex, {
+                                      model: value,
+                                      models: splitRouteValues(value),
+                                    });
+                                    if (row.tier === INTENT_TIER && value)
+                                      setIntentTier(INTENT_TIER);
+                                  }}
+                                  disabled={!route.provider}
+                                  options={modelOptions}
+                                  placeholder={tModel("selectModel")}
+                                  ariaLabel={tProvider("modelLabel")}
+                                  className="font-mono"
+                                  emptyHint={models.length ? tModel("selectModel") : tModel("importModelsFirst")}
+                                />
+                              </Field>
+                              <Field label={tProvider("baseUrlLabel")} hint={tProvider("baseUrlHint")}>
+                                <input
+                                  className="input-dark font-mono text-xs"
+                                  value={route.base_url || ""}
+                                  onChange={(e) =>
+                                    patchTierRoute(index, routeIndex, { base_url: e.target.value })
+                                  }
+                                  placeholder={artifacts.base_url || "https://api.example.com/v1"}
+                                  autoComplete="off"
+                                  spellCheck={false}
+                                />
+                              </Field>
+                              <Field label={tProvider("apiKeyLabel")} hint={tProvider("apiKeyHint")}>
+                                <input
+                                  className="input-dark font-mono text-xs"
+                                  value={keyValue}
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    const values = splitRouteValues(value);
+                                    patchTierRoute(index, routeIndex, value.trim().startsWith("vault://")
+                                      ? {
+                                          provider_key_ref: value,
+                                          provider_key_refs: values,
+                                          provider_key: "",
+                                          provider_keys: [],
+                                        }
+                                      : {
+                                          provider_key: value,
+                                          provider_keys: values,
+                                          provider_key_ref: "",
+                                          provider_key_refs: [],
+                                        });
+                                  }}
+                                  type={keyValue.startsWith("vault://") ? "text" : "password"}
+                                  placeholder={tProvider("apiKeyPlaceholder")}
+                                  autoComplete="off"
+                                  spellCheck={false}
+                                />
+                              </Field>
+                              <Field label={tModel("kindLabel")} hint={tModel("kindHint")}>
+                                <PortalSelect
+                                  value={route.kind || "chat_completions"}
+                                  onChange={(value) =>
+                                    patchTierRoute(index, routeIndex, { kind: value })
+                                  }
+                                  options={[
+                                    {
+                                      value: "chat_completions",
+                                      label: tModel("kindChatCompletions"),
+                                    },
+                                    {
+                                      value: "anthropic_messages",
+                                      label: tModel("kindAnthropicMessages"),
+                                    },
+                                  ]}
+                                  size="sm"
+                                  ariaLabel={tModel("kindLabel")}
+                                  className="font-mono"
+                                />
+                              </Field>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div className="flex flex-wrap items-end gap-3">
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => addTierRoute(index)}
+                        >
+                          <PlusIcon size={14} />
+                          {tModel("addRoute")}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
                       <Field
                         label={tModel("reasoningEffortLabel")}
                         hint={tModel("reasoningEffortHint")}
@@ -4069,7 +4456,7 @@ export function SettingsWorkspace({
                           onChange={(value) =>
                             patchTier(index, { reasoning_effort: value })
                           }
-                          disabled={!row.provider || !row.model}
+                          disabled={!anyRouteConfigured}
                           options={[
                             {
                               value: "",
@@ -5147,16 +5534,16 @@ export function SettingsWorkspace({
               </div>
               <div className="mt-3 space-y-1 text-[11px] text-ink-500">
                 <div>
-                  {tSearch("probe")}: <span className="font-mono">{searchStatus?.searxng?.probe?.ok ? "ok" : (searchStatus?.searxng?.probe?.error || "—")}</span>
+                  {tSearch("probe")}: <span className="font-mono">{searchStatus?.searxng?.probe?.ok ? "ok" : (searchStatus?.searxng?.probe?.error || "–")}</span>
                   {searchStatus?.searxng?.probe?.elapsed_ms != null
                     ? ` · ${searchStatus.searxng.probe.elapsed_ms}ms`
                     : ""}
                 </div>
                 <div>
-                  {tSearch("baseUrl")}: <span className="font-mono">{searchStatus?.searxng?.base_url || "—"}</span>
+                  {tSearch("baseUrl")}: <span className="font-mono">{searchStatus?.searxng?.base_url || "–"}</span>
                 </div>
                 <div>
-                  {tSearch("config")}: <span className="font-mono">{searchStatus?.searxng?.config_dir || "—"}</span>
+                  {tSearch("config")}: <span className="font-mono">{searchStatus?.searxng?.config_dir || "–"}</span>
                 </div>
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
@@ -5267,7 +5654,7 @@ export function SettingsWorkspace({
             <div className="mb-2 text-[11px] text-ink-500">
               {tBrowsers("platformInfo", {
                 platform: browsersStatus?.platform || "?",
-                dir: browsersStatus?.binaries_dir || "—",
+                dir: browsersStatus?.binaries_dir || "–",
               })}
             </div>
             <div className="space-y-3">
@@ -5601,7 +5988,7 @@ export function SettingsWorkspace({
                 </div>
                 <Row
                   label={tMemory("backendSummary_memsearch_dep")}
-                  desc={memoryStatus?.install_package || "—"}
+                  desc={memoryStatus?.install_package || "–"}
                 >
                   <Pill tone={memoryStatus?.dependency_available ? "ok" : "warn"}>
                     {memoryStatus?.dependency_available
@@ -5614,7 +6001,7 @@ export function SettingsWorkspace({
                   desc={memoryStatus?.embedding?.base_url || ""}
                 >
                   <span className="font-mono text-[12px] text-ink-200">
-                    {memoryStatus?.embedding?.model || "—"}
+                    {memoryStatus?.embedding?.model || "–"}
                   </span>
                 </Row>
                 <Row
@@ -5622,7 +6009,7 @@ export function SettingsWorkspace({
                   desc={memoryStatus?.milvus?.collection || ""}
                 >
                   <span className="font-mono text-[12px] text-ink-200">
-                    {memoryStatus?.milvus?.uri || "—"}
+                    {memoryStatus?.milvus?.uri || "–"}
                   </span>
                 </Row>
                 <Row label={tMemory("backendSummary_memsearch_watcher")}>
@@ -5672,12 +6059,12 @@ export function SettingsWorkspace({
                 </div>
                 <Row label={tMemory("backendSummary_agentmemory_base_url")}>
                   <span className="font-mono text-[12px] text-ink-200">
-                    {agentmemoryDraft.base_url || "—"}
+                    {agentmemoryDraft.base_url || "–"}
                   </span>
                 </Row>
                 <Row label={tMemory("backendSummary_agentmemory_project")}>
                   <span className="font-mono text-[12px] text-ink-200">
-                    {agentmemoryDraft.project || "—"}
+                    {agentmemoryDraft.project || "–"}
                   </span>
                 </Row>
                 <Row label={tMemory("backendSummary_agentmemory_secret")}>
@@ -6219,7 +6606,7 @@ export function SettingsWorkspace({
                         </div>
                       </div>
                       <Pill tone={pct > 90 ? "warn" : "brand"}>
-                        {`${pct}% — ${used}/${limit}`}
+                        {`${pct}% (${used}/${limit})`}
                       </Pill>
                     </div>
                     <div className="space-y-2">

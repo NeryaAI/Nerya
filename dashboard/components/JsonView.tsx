@@ -81,7 +81,7 @@ export function JsonView({
       <div className="embedded-scroll max-h-[420px] overflow-auto pt-1.5">
         {showRaw ? (
           <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-ink-200">
-            {rawText || "—"}
+            {rawText || "–"}
           </pre>
         ) : (
           <Node

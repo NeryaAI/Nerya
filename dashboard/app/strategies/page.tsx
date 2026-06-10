@@ -74,11 +74,11 @@ function pnlClassName(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value) || value === 0) {
     return "text-ink-400";
   }
-  return value > 0 ? "text-accent-400" : "text-[#ef4560]";
+  return value > 0 ? "text-accent-400" : "text-danger";
 }
 
 function formatSignedUsd(value: number | undefined): string {
-  if (value === undefined || !Number.isFinite(value)) return "—";
+  if (value === undefined || !Number.isFinite(value)) return "–";
   const sign = value > 0 ? "+" : value < 0 ? "-" : "";
   return `${sign}$${Math.abs(value).toLocaleString(undefined, {
     maximumFractionDigits: 2,
@@ -715,7 +715,7 @@ function StrategyCard({
       </div>
       <div className="relative flex items-baseline justify-between gap-3">
         <div className="text-[12px] text-[color:var(--text-muted)]">
-          {strategy.mode || "—"} · {strategy.account_id || "—"}
+          {strategy.mode || "–"} · {strategy.account_id || "–"}
         </div>
         <div className={`text-[18px] font-medium tabular-nums ${pnlClassName(totalPnl)}`}>
           {formatSignedUsd(totalPnl)}

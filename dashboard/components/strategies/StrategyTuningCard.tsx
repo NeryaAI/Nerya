@@ -191,7 +191,7 @@ export function StrategyTuningCard({
               <button
                 onClick={() => void pause()}
                 disabled={busy !== null}
-                className="text-xs rounded px-2 py-1 border border-[#f5a524]/40 text-[#f5a524] hover:bg-[#f5a524]/10"
+                className="text-xs rounded px-2 py-1 border border-warn/40 text-warn hover:bg-warn/10"
               >
                 {t("pause")}
               </button>
@@ -343,8 +343,8 @@ function Stat({
   const toneClass = {
     neutral: "text-ink-100",
     ok: "text-accent-300",
-    warn: "text-[#f5a524]",
-    danger: "text-[#ef4560]",
+    warn: "text-warn",
+    danger: "text-danger",
   }[tone];
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3">

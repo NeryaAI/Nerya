@@ -46,8 +46,8 @@ export function Tag({
   const cls = {
     neutral: "bg-ink-900/60 border-ink-700 text-ink-300",
     ok: "bg-brand-500/15 border-brand-500/40 text-brand-300",
-    warn: "bg-[#f5a524]/10 border-[#f5a524]/40 text-[#f5a524]",
-    err: "bg-[#ef5564]/10 border-[#ef5564]/40 text-[#ef5564]",
+    warn: "bg-warn/10 border-warn/40 text-warn",
+    err: "bg-danger/10 border-danger/40 text-danger",
     brand: "bg-brand-500/15 border-brand-500/40 text-brand-300",
   }[tone];
   return (

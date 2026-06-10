@@ -22,9 +22,25 @@ import { SwitchControl } from "./SwitchControl";
 import { clientApi } from "../lib/clientApi";
 import type { RuntimeFlag } from "../lib/operatorTypes";
 
+const FLAG_COPY_KEYS: Record<string, string> = {
+  "runtime.capability_catalog_v2": "capabilityCatalog",
+  "runtime.data_source_sync_state": "dataSourceSync",
+  "runtime.tool_result_compaction": "toolResultCompaction",
+  "runtime.evidence_vault": "evidenceVault",
+  "runtime.prompt_guard_review_queue": "promptGuardReview",
+  "runtime.operator_profile": "operatorProfile",
+  "runtime.e2e_artifact_capture": "e2eArtifactCapture",
+};
+
+function formatPhase(raw: string) {
+  const match = raw.match(/^phase(\d+)$/i);
+  return match ? match[1] : raw;
+}
+
 export function RuntimeFlagsPanel() {
   const t = useTranslations("runtimeFlags");
   const tCommon = useTranslations("common");
+  const tDynamic = t as unknown as (key: string, values?: Record<string, string | number | boolean>) => string;
 
   const [flags, setFlags] = useState<RuntimeFlag[]>([]);
   const [overridesPath, setOverridesPath] = useState<string>("");
@@ -133,6 +149,10 @@ export function RuntimeFlagsPanel() {
           <ul className="space-y-2">
             {flags.map((f) => {
               const overridden = f.enabled !== f.default;
+              const copyKey = FLAG_COPY_KEYS[f.key];
+              const semanticTitle = copyKey ? tDynamic(`items.${copyKey}.title`) : t("unknownTitle");
+              const semanticSummary = copyKey ? tDynamic(`items.${copyKey}.summary`) : f.summary;
+              const semanticScope = copyKey ? tDynamic(`items.${copyKey}.scope`) : f.key;
               return (
                 <li
                   key={f.key}
@@ -140,22 +160,37 @@ export function RuntimeFlagsPanel() {
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <span className="font-mono text-[12px] text-ink-100 truncate">
-                          {f.key}
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <span className="text-[13px] font-medium text-ink-100">
+                          {semanticTitle}
                         </span>
-                        <Pill tone="brand">{f.phase}</Pill>
+                        <Pill tone={f.enabled ? "ok" : "warn"}>
+                          {f.enabled ? t("enabledStatus") : t("disabledStatus")}
+                        </Pill>
+                        <Pill tone="brand">{t("phaseLabel", { phase: formatPhase(f.phase) })}</Pill>
                         {overridden ? (
                           <Pill tone="warn">{t("overridden")}</Pill>
                         ) : null}
                       </div>
-                      <div className="text-[11px] text-ink-500 leading-snug">
-                        {f.summary}
+                      <div className="text-[11.5px] text-ink-500 leading-snug">
+                        {semanticSummary}
                       </div>
-                      <div className="text-[10px] text-ink-500 mt-1 font-mono">
-                        {t("envOverride")}: {f.env_override} ·{" "}
-                        {t("defaultLabel")}: {f.default ? t("on") : t("off")}
+                      <div className="mt-1 text-[10.5px] text-ink-500 leading-snug">
+                        <span className="font-medium text-ink-400">{t("scopeLabel")}: </span>
+                        {semanticScope}
                       </div>
+                      <details className="mt-1 text-[10px] text-ink-500">
+                        <summary className="inline cursor-pointer select-none text-ink-500 hover:text-ink-300">
+                          {t("technicalDetails")}
+                        </summary>
+                        <div className="mt-1 space-y-0.5 font-mono">
+                          <div>{t("technicalKey")}: {f.key}</div>
+                          <div>
+                            {t("envOverride")}: {f.env_override} ·{" "}
+                            {t("defaultLabel")}: {f.default ? t("on") : t("off")}
+                          </div>
+                        </div>
+                      </details>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <SwitchControl

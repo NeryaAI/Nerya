@@ -304,7 +304,7 @@ export function StrategyProposalApprovalCard({
   return (
     <div
       className={[
-        "rounded-lg border border-[#f5a524]/30 bg-[#f5a524]/[0.055] text-xs",
+        "rounded-lg border border-warn/30 bg-warn/[0.055] text-xs",
         compact ? "p-3" : "p-4",
       ].join(" ")}
       data-proposal-id={proposalId}
@@ -312,7 +312,7 @@ export function StrategyProposalApprovalCard({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <StrategiesIcon size={15} className="text-[#f5a524]" />
+            <StrategiesIcon size={15} className="text-warn" />
             <span className="font-mono text-sm text-ink-100">
               {strategyId || proposalId}
             </span>
@@ -324,11 +324,19 @@ export function StrategyProposalApprovalCard({
           <div className="mt-1 text-ink-300 leading-relaxed">
             {stringValue(normalized.summary) || t("fallbackSummary")}
           </div>
-          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-ink-500 font-mono">
-            <span>{t("proposalId")}: {proposalId}</span>
-            {normalized.target ? <span>{t("target")}: {String(normalized.target)}</span> : null}
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-500">
             {normalized.ts ? <span>{formatTsShort(String(normalized.ts))}</span> : null}
             {files.length ? <span>{t("files", { count: files.length })}</span> : null}
+            {/* Raw ids are reviewer/debug detail; keep them one click away. */}
+            <details className="inline-block">
+              <summary className="cursor-pointer list-none text-ink-500 hover:text-ink-300 underline decoration-dotted underline-offset-2">
+                {t("detailsToggle")}
+              </summary>
+              <span className="mt-1 block font-mono text-ink-500">
+                {t("proposalId")}: {proposalId}
+                {normalized.target ? ` · ${t("target")}: ${String(normalized.target)}` : ""}
+              </span>
+            </details>
           </div>
         </div>
 
@@ -372,7 +380,7 @@ export function StrategyProposalApprovalCard({
         </div>
       ) : null}
       {error ? (
-        <div className="mt-3 rounded-md border border-[#ef4560]/40 bg-[#ef4560]/10 px-3 py-2 text-[#ffb3bd]">
+        <div className="mt-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-rose-300">
           {error}
         </div>
       ) : null}
@@ -391,8 +399,8 @@ function IssueList({
 }) {
   const cls =
     tone === "danger"
-      ? "border-[#ef4560]/30 bg-[#ef4560]/10 text-[#ffb3bd]"
-      : "border-[#f5a524]/30 bg-[#f5a524]/10 text-[#f5a524]";
+      ? "border-danger/30 bg-danger/10 text-rose-300"
+      : "border-warn/30 bg-warn/10 text-warn";
   return (
     <div className={`rounded-md border px-3 py-2 ${cls}`}>
       <div className="text-[11px] font-medium">{title}</div>
