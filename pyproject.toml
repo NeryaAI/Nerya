@@ -46,6 +46,9 @@ where = [".", "sdk/python"]
 include = ["nerya*", "nerya_sdk*"]
 exclude = ["tests*", "dashboard*", "workspace_template*", "sdk.typescript*"]
 
+[tool.setuptools.package-data]
+nerya = ["agent/route_manifest_presets/*.yml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

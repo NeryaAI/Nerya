@@ -2,7 +2,7 @@ param(
     [string]$ShortcutName = "NeryaLocal.cmd",
     [string]$Workspace = "$HOME\.nerya",
     [int]$ApiPort = 18317,
-    [int]$DashboardPort = 18380,
+    [int]$DashboardPort = 0,
     [switch]$Remove
 )
 
@@ -24,9 +24,20 @@ if ($Remove) {
     exit 0
 }
 
+$startArgs = @(
+    "-NoProfile",
+    "-ExecutionPolicy Bypass",
+    "-File `"$startScript`"",
+    "-Workspace `"$Workspace`"",
+    "-ApiPort $ApiPort"
+)
+if ($DashboardPort -gt 0) {
+    $startArgs += "-DashboardPort $DashboardPort"
+}
+
 $command = @(
     "@echo off"
-    "pwsh -NoProfile -ExecutionPolicy Bypass -File `"$startScript`" -Workspace `"$Workspace`" -ApiPort $ApiPort -DashboardPort $DashboardPort"
+    "pwsh $($startArgs -join ' ')"
 ) -join "`r`n"
 
 Set-Content -LiteralPath $startupCmd -Value $command -Encoding ASCII
