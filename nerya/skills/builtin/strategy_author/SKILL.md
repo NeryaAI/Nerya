@@ -1,7 +1,7 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: strategy_author
-description: "Use to author SDK strategy code, scaffold, validate, refactor, or backtest a Nerya strategy package before proposal promotion, including meme, wallet, on-chain, and custom-data strategies."
+description: "Use to author, validate, refactor, or backtest a Nerya strategy package before proposal promotion."
 version: 0.1.0
 license: MIT
 author: Nerya
@@ -10,200 +10,67 @@ tags:
   - trading
   - backtest
   - sdk
-  - meme
-  - wallet
   - onchain
+  - polymarket
   - custom-data
 ---
 <!-- nerya-skill-frontmatter-end -->
 
 # Strategy Author
-
-Use when the user wants a trading strategy created or changed.
+Use when the user wants a trading strategy created, changed, validated, or reviewed.
 
 ## Flow
-
-DEFINE markets, accounts, timeframe, trigger, risk limits, and goal.
-If the operator asks you to create/generate/build a strategy and backtest it
-but leaves those details open, do not reply with a questionnaire. Choose
-conservative defaults yourself for proposal/paper/backtest work: inherit the
-session market context when present; otherwise use connector discovery and
-pick a liquid market with real historical candles; use a paper account,
-non-live mode, modest sizing, and a default preset backtest. Document those
-assumptions in the proposal rationale or `strategy.md`. Ask the operator only
-when the missing choice would make the action live, destructive, irreversible,
-or honestly impossible.
-For ordinary or generic strategy prompts, do not override `files.main.py`.
-Let `strategy_generate_proposal` use its stock StrategyContext-compatible
-template. Only provide inline file overrides when the operator asks for
-behavior that the stock archetype cannot express.
-When the requested logic needs custom data, provider-specific reads,
-wallet/chain-native evidence, non-standard replay rules, or explicitly avoids
-one of the stock archetypes, that means the stock archetype cannot express it:
-draft the package files yourself with the Nerya strategy SDK and pass them via
-`files`. In that lane, `strategy_generate_proposal` is only the proposal
-packager/validator; do not rely on its generated `main.py` for the strategy
-logic.
-SELECT archetype: scalping, trend, news, sentiment, on-chain, rotation,
-mean reversion, or custom.
-GENERATE strategy package as a proposal, not direct workspace mutation.
+DEFINE markets, accounts, timeframe, trigger, risk limits, and goal. When a create/backtest request leaves details open, choose conservative paper/proposal defaults unless the missing choice would make the action live, destructive, irreversible, or honestly impossible.
+KEEP every operator-named venue, market, and strategy concept verbatim in the package metadata: the strategy id/title and `markets` list must mention each requested venue (for example a Binance+Aster cash-and-carry request keeps both `binance` and `aster` plus the cash-and-carry/basis wording). If a requested venue has no usable provider yet, keep it in metadata, mark that leg `not ready`, and say so — do not silently swap in a different venue.
+SELECT an archetype only when it fits: scalping, trend, news, sentiment, on-chain, rotation, mean reversion, prediction-market, or custom.
+GENERATE strategy packages as proposals, not direct workspace mutation. Prefer `strategy_generate_proposal` stock templates for ordinary strategies. Provide inline `files` only when custom data, wallet/chain evidence, prediction-market evidence, or non-standard replay rules make the stock archetype insufficient.
 VALIDATE static contract.
-BACKTEST with `strategy_backtest({"proposal_id": "...", "preset": "default"})`
-after validation unless the user explicitly skips it. The default preset
-uses a 45-day replay window so the effective run remains longer than one
-month even when a provider lacks the latest partial day.
-SUMMARISE results, blocked risks, and next operator action.
+BACKTEST after validation with `strategy_backtest({"proposal_id":"<proposal_id>","preset":"default","allow_mock":false})`.
+SUMMARISE proposal id, validation/backtest evidence, blocked risks, and the next operator action. Do not promote, approve, paper, shadow, or live trade unless the operator explicitly asks for that gate.
 
-## Market context inheritance
+## Boundaries
+Use to author SDK strategy code through proposal-aware tools, not direct workspace mutation.
+Draft package files inline inside `strategy_generate_proposal.files`. Do not call `write_file`, `edit_file`, `list_dir`, shell, or a temporary workspace directory to stage a strategy package before proposal generation.
 
-Treat the active chat/session market scope as part of the operator brief.
-This is advisory context for your judgment, not a hard router. Preserve the
-market scope already established by prior turns unless the operator
-explicitly changes domains. Examples are examples, not defaults: do not
-substitute BTC, crypto, futures, or another template market just because an
-archetype mentions it.
+### Market context inheritance
+Treat active session market scope as advisory context for your judgment, not a hard router.
+Preserve the market scope that the session has already established unless the operator changes domains.
+Examples are examples, not defaults. State the Market scope assumption when you inherit context.
 
-Preserve the market scope that the session has already established.
+For hard-to-replay markets, use real provider/event evidence or a strategy-local freeform backtest. Never use mock, random, synthetic, or placeholder candles as performance evidence.
 
-Before selecting `markets`, write the assumption into `strategy.md` or the
-proposal rationale, for example: `Market scope assumption: prior session
-context is China-listed AI companies, so this proposal keeps an equity
-market scope.`
+Hard-to-replay scopes include: - meme; - wallet; - onchain; - polymarket; - prediction-market.
 
-## Backtest gate
+If no durable replay source exists, report the data gap and the explicit operator-approval waiver needed before promotion. A waiver is not a passed backtest.
 
-After `strategy_generate_proposal` passes validation, run:
+When the operator names a `prp_*` proposal id, Resolve and operate on the exact proposal first.
+Use returned proposal_paths, pass `proposal_id` into validation/backtest calls, and prefer `strategy_backtest({"proposal_id":"<proposal_id>","preset":"default","allow_mock":false})`.
+Use raw paths or CLI forms such as `--proposal-id <proposal_id>` only when the action is still proposal validation and the proposal-aware tool asks for that evidence.
+Do not substitute a promoted `strategy_id` for a proposal id.
 
-```json
-strategy_backtest({"proposal_id": "<proposal_id>", "preset": "default", "allow_mock": false})
-```
+Promotion changes the workspace. Do not promote, approve, paper, shadow, or live trade unless the operator explicitly asks for that gate.
 
-or from CLI:
-
-```bash
-python -m nerya.skills.builtin.backtest.scripts.backtest_run --proposal-id <proposal_id> --preset default
-```
-
-If the tool result includes `next_required_action`, follow it immediately;
-do not ask another confirmation question first unless the user explicitly
-asked to skip or customise the backtest. Only promote after the proposal has
-backtest artefacts. For meme/on-chain strategies, an accepted custom/event
-replay counts as the backtest artefact. If no standard OHLCV backtest or
-durable replay source exists, promotion is allowed only with an explicit
-operator-approved standard-backtest waiver; call `strategy_promote` with
-`backtest_policy: "flexible_meme"`, `operator_approved: true`, and a
-non-empty `approval_note`, and report that the strategy did not pass a
-standard backtest.
-Use returned `proposal_paths`, `strategy_root`, `metrics_path`, and
-`report_path` for follow-up reads. Do not call `strategy_view` or read
-`~/.nerya/strategies/<id>` for a proposal that has not been promoted, and do
-not regenerate a strategy only because the promoted strategy path is absent.
-If `coverage_ok` is false, state that the historical data coverage is
-insufficient and do not call the run a valid one-month-plus backtest.
-If `strategy_backtest` returns `ok:false` with `reason:no_historical_data`,
-for ordinary markets stop and report the data-source gap. For meme/on-chain
-markets, switch once to the flexible path: build a custom/event replay from
-real wallet, DEX, holder, top-trader, or trade history when possible; if that
-is also unavailable, ask for explicit operator approval of the waiver before
-promotion. Do not keep regenerating variants, and do not retry with mock,
-synthetic, random, or placeholder candles.
-For on-chain meme, news, social, Polymarket, or other hard-to-replay markets,
-bound the data search: use `connector_list`, `connector_view`, and at most one
-real `market_data`/`strategy_backtest` attempt. If no durable historical
-OHLCV/event series is available, report the honest data gap. Do not inspect
-connector source files or docs repeatedly, and do not request shell just to
-keep searching.
-For wallet/on-chain strategy authoring, once `connector_list` and `data_api`
-have shown a usable provider route, stop discovery and write the SDK proposal.
-Do not call shell, glob, or raw file reads to enumerate local connector source
-or workspace files just to learn data-source names; the provider catalog and
-tool schemas are the source of truth. After proposal generation, read only the
-returned `proposal_paths` / artifact paths needed for validation or repair.
-For meme/wallet-flow strategies, the efficient evidence boundary is:
-wallet capability catalog, meme strategy guide, one candidate-discovery call,
-one candidate enrichment/risk call, and one historical replay/OHLCV attempt.
-After those are present, generate the SDK strategy package immediately. Do not
-keep browsing token lists, fetching unrelated pages, or expanding discovery
-just because more data may exist; report remaining data gaps in `strategy.md`
-and the final answer. Do not send a final summary or continue discovery after
-that boundary until a `strategy_generate_proposal` call with SDK `files` has
-been attempted at least once. If the evidence is imperfect, put the gap and
-required operator approval into `strategy.md` instead of delaying proposal
-authoring.
-For wallet-backed on-chain meme strategies, do not stop at `connector_list`.
-First call `data_api(op="call", provider="wallet",
-action="capability_catalog", args={"topic":"meme"})` or
-`data_api(op="call", provider="wallet", action="meme_strategy_guide")`.
-Use the returned `selection.selected_route.call` for historical candles; the
-route must follow whichever wallet is installed and logged in. If no wallet is
-ready, use the returned GOAT/self-custody fallback only after the install path
-is approved/configured through `wallet_install(provider="self_custody",
-mode="goat")`, and recommend installing OKX OnchainOS/XAgent/Bitget for richer
-meme discovery and risk data.
-Use OnchainOS actions such as `token_hot_tokens`, `memepump_tokens`,
-`token_report`, `security_token_scan`, `token_holders`, `token_top_trader`,
-`token_trades`, and `signal_list` for discovery/enrichment. Use
-`market_data.get_candles` with wallet venues like
-`OKX_ONCHAIN:<chain>:<token_contract>` for historical replay. Treat swaps,
-transfers, signing, bridging, and DeFi investment commands as gated execution
-paths only; they must go through the Nerya trading/risk/approval flow, not
-through `data_api`.
-If the operator says on-chain, DEX, wallet-flow, or chain-native, do not satisfy
-that request with CEX proxies such as `binance:DOGEUSDT` unless the operator
-explicitly accepts a non-on-chain proxy. A Binance/Coinbase meme pair can be
-offered only as a clearly labelled alternative; it is not a valid on-chain
-backtest. When no on-chain/DEX historical replay source is available, stop and
-say the strategy cannot be honestly standard-backtested with current
-connectors; it may enter paper/shadow/live progression only through the
-explicit waiver and operator approval gates.
-
-## Backtest-compatible code contract
-
-For simple prompts, prefer the stock templates from `strategy_generate_proposal`
-instead of hand-writing `main.py`.
-
-For custom strategies, write `files.main.py` before calling
-`strategy_generate_proposal`. Use the Nerya strategy SDK surface:
-`StrategyContext`, `StrategyResult`, and when the strategy needs the runtime
-Agent to inspect long-tail tools, `StrategyAgentTask`. Strategy code may gather
-standard market context with `ctx.market.*`, position/risk context with
-`ctx.portfolio` and `ctx.policy`, and then either return a direct
-`ctx.result.*`/`ctx.trading.*` result or return `StrategyAgentTask.dispatch`
-with a bounded evidence contract for the Agent. The prompt inside an agent task
-should describe the required evidence and decision rules; it should not be a
-placeholder that asks the Agent to invent the strategy later.
-
-If you do override `main.py`, keep it inside the StrategyContext facade:
-
-- get the market from `ctx.config.markets[0]`
-- load candles with `ctx.market.candles(market, timeframe="1h", limit=160)`
-  or derived indicators with `ctx.market.features(...)`
-- inspect positions with `ctx.portfolio.positions(market)`
-- size with `ctx.policy.default_order_usd`, `ctx.portfolio.equity_usd`, or
-  explicit policy values
-- place entries/exits through `ctx.trading.open_position`,
-  `ctx.trading.close_position`, or `ctx.trading.submit_intent`
-- return `ctx.result.*` / `StrategyResult`, not raw order-list dictionaries
-
-Do not use the native `market_data` tool schema inside strategy code:
-`ctx.market_data.get_candles`, `portfolio.get_account`,
-`portfolio.get_positions`, and `ctx.account_id` are not valid package APIs.
-They will fail validation/backtest.
-
-When `strategy_backtest(..., allow_mock=false)` fails, repair the proposal and
-rerun `strategy_backtest`. Do not replace it with a shell script, random price
-series, or synthetic/placeholder candles. A custom replay is acceptable only
-when it consumes durable historical data and states its limitations.
-
-When reporting backtest results, use the tool's `metrics_display` values when
-available. Raw keys ending in `_pct` are already percentage points:
-`0.0274` means `0.0274%`, not `2.74%`.
-Never multiply raw `_pct` fields by 100 or move the decimal in the final
-operator summary.
+## Critical Contracts
+If `recommended_coverage_ok` is false but real candles were used, call it an attempted short-window real-data backtest. Do not call the standard backtest unavailable, do not rewrite the thesis into trend/scalping, and Paper review can continue; Shadow/live progression still requires explicit operator approval.
+If a result returns `paper_review_allowed` or a `review_gate`, Do not override it with a manual FAIL/no_trades rejection. If `strategy_backtest` returns `ok:true`, call it completed standard OHLCV when appropriate.
+Do not treat reason:no_historical_data, a promoted strategy path is absent, or zero trades as permission to regenerate a strategy only because promotion has not occurred.
+For missing low-risk details, do not reply with a questionnaire; choose non-live mode, modest sizing, and do not override `files.main.py` unless custom evidence requires it.
+For custom strategies, write `files.main.py`; draft the package files yourself with the Nerya strategy SDK when there is prediction-market/Polymarket evidence. `strategy_generate_proposal` is only the proposal packager.
+SDK notes: Use exactly `from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask`; do not import from nerya.sdk, do not import from nerya.strategy, and do not guess private submodules. Do not call StrategyResult.order. Do not call StrategyResult.dispatch. Do not call StrategyResult.batch. Return ctx.result.hold/skip/ok/error for terminal outcomes, call ctx.trading.submit_intent/open_position/close_position for trades, and use StrategyAgentTask.dispatch/skip/error for Agent-decision flows. Never pass `context=`, `session_key` must be a small object not a string, Never wrap the task with `ctx.result.agent_task`, use StrategyAgentTask, and Never multiply raw `_pct` fields by 100.
+For on-chain meme, news, social, or wallet strategies, do not request shell just to inspect providers; stop discovery and write the SDK proposal. Do not call shell, glob, or raw file reads once the efficient evidence boundary is met; generate the SDK strategy package immediately.
+Continue until a `strategy_generate_proposal` call with SDK `files` exists for custom hard-to-replay scopes; preserve preferred_provider and mark not ready instead of silently substituting another provider.
+Wallet Meme Quick Path: when selection.mode` is `wallet_binding` and `market_data` already returned the exact chain:token, do not install a fallback; rely on the runtime scanner.
+Use execution_mode: "agent_task" when the strategy needs Agent decisions.
+On-chain means on-chain: do not satisfy
+that request with CEX proxies; generic chain markets are not a valid on-chain
+backtest.
+Do not copy those low-level action names into StrategyAgentTask` prompts or operator-facing strategy docs.
+Do not call
+`strategy_promote` during an ordinary proposal/backtest request, and do not set `operator_approved: true` yourself.
 
 ## Lazy References
 
-- `references/full-playbook.md` for the full authoring and validation gate.
+- `references/full-playbook.md` for full package structure, SDK contract, wallet/on-chain rules, proposal-id handling, and backtest repair gates.
 - `references/scalping_cron.md`
 - `references/trend_follow_subagent.md`
 - `references/news_track_filter.md`

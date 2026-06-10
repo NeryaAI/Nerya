@@ -3,8 +3,9 @@
 2026-04-26: ``skill.yml`` was retired. The full typed manifest lives in
 ``SKILL.md`` frontmatter (skill-runtime compatibility). This scaffolder
 emits exactly one ``SKILL.md`` with the manifest baked into the
-frontmatter, plus a placeholder body, ``actions.py`` shim, ``references/``
-dir, and ``tests/`` dir.
+frontmatter, plus placeholder ``references/``, ``scripts/``, and
+``templates/`` dirs. Legacy ``actions.py``/YAML definition surfaces are
+not generated.
 """
 
 from __future__ import annotations
@@ -25,13 +26,15 @@ def _dump_skill_md(manifest: dict[str, Any], skill_id: str) -> str:
     body = (
         f"# {title}\n\n"
         f"{description}\n\n"
-        "Auto-generated proposal. See `references/` for design notes "
-        "and `actions.py` for the runnable surface.\n"
+        "Auto-generated proposal. Keep workflow instructions in this "
+        "`SKILL.md`, put detailed notes under `references/`, and add "
+        "reviewed helper commands under `scripts/` only when needed.\n"
     )
     return f"---\n{raw}\n---\n\n{body}"
 
 
 def scaffold(pending_dir: Path, skill_id: str, manifest: dict[str, Any], actions_py: str) -> Path:
+    del actions_py  # Deprecated compatibility parameter; never write executable skill shims.
     target = pending_dir / skill_id
     target.mkdir(parents=True, exist_ok=True)
     # SKILL.md is the *only* manifest. yaml_io.dumps lets us reuse the
@@ -39,7 +42,7 @@ def scaffold(pending_dir: Path, skill_id: str, manifest: dict[str, Any], actions
     (target / "SKILL.md").write_text(
         _dump_skill_md(manifest, skill_id), encoding="utf-8"
     )
-    (target / "actions.py").write_text(actions_py, encoding="utf-8")
     (target / "references").mkdir(exist_ok=True)
-    (target / "tests").mkdir(exist_ok=True)
+    (target / "scripts").mkdir(exist_ok=True)
+    (target / "templates").mkdir(exist_ok=True)
     return target

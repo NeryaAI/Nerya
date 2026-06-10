@@ -416,7 +416,10 @@ def routes():
         profiles = accounts_mod.load_account_profiles(client.config.paths)
         return {
             "accounts": [
-                _account_summary(client, profile)
+                {
+                    "id": profile.id,
+                    **_account_summary(client, profile),
+                }
                 for profile in profiles.values()
             ],
             "ts": time.time(),

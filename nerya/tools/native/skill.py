@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from ...core.sandbox import sandbox_exec
 from ...security.runtime_env import build_process_env
 from ..types import (
     RiskLevel,
@@ -55,7 +56,10 @@ from ..types import (
 # ---------------------------------------------------------------------------
 
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(?P<fm>.*?)\n---\s*\n", re.DOTALL)
+_FRONTMATTER_RE = re.compile(
+    r"^\s*(?:<!--.*?-->\s*)*---\s*\n(?P<fm>.*?)\n---\s*\n",
+    re.DOTALL,
+)
 
 
 @dataclass
@@ -320,6 +324,44 @@ def is_browser_skill_script_run(payload: dict[str, Any]) -> bool:
     return sid == "browser" and bool(name)
 
 
+_SAFE_SCRIPT_PERMISSIONS = frozenset({"read", "network", "rss", "web", "http"})
+
+
+def is_low_risk_builtin_skill_script_run(
+    payload: dict[str, Any],
+    *,
+    skill_index: SkillIndex,
+    trusted_roots: Iterable[Path],
+) -> bool:
+    """Return true for explicitly low-risk scripts from trusted built-in skills."""
+
+    sid = str(payload.get("skill_id") or payload.get("id") or "").strip()
+    name = str(payload.get("name") or payload.get("script") or "").strip()
+    if not sid or not name:
+        return False
+    rec = skill_index.get(sid)
+    if rec is None or name not in set(rec.scripts):
+        return False
+    permissions = {
+        str(item).strip().lower()
+        for item in rec.permissions
+        if str(item).strip()
+    }
+    if not permissions or not permissions <= _SAFE_SCRIPT_PERMISSIONS:
+        return False
+    script_path = _script_path(skill_index, sid, name)
+    if script_path is None:
+        return False
+    resolved_script = script_path.resolve()
+    for root in trusted_roots:
+        try:
+            resolved_script.relative_to(Path(root).resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult:
     args = call.arguments or {}
     sid = str(args.get("skill_id") or "").strip()
@@ -427,9 +469,10 @@ def script_run_handler(
     except Exception:
         env = None
     try:
-        proc = subprocess.run(
+        proc = sandbox_exec(
             cmd,
-            cwd=str(root),
+            cwd=root,
+            root=root,
             env=env,
             capture_output=True,
             text=True,
@@ -455,30 +498,38 @@ def script_run_handler(
             ),
         )
     duration = time.time() - started
-    stdout = (proc.stdout or "")[-8000:]
+    raw_stdout = proc.stdout or ""
+    stdout = raw_stdout[-8000:]
     stderr = (proc.stderr or "")[-8000:]
+    stdout_json: Any = None
+    if raw_stdout.strip():
+        try:
+            stdout_json = json.loads(raw_stdout)
+        except Exception:
+            stdout_json = None
     success = proc.returncode == 0
     text_summary = (
         f"$ {' '.join(cmd[:3])}{' …' if len(cmd) > 3 else ''}\n"
         f"exit={proc.returncode}  duration={duration:.2f}s\n"
         f"---- stdout ----\n{stdout}\n---- stderr ----\n{stderr}"
     )
+    json_payload = {
+        "skill_id": sid,
+        "name": name,
+        "exit_code": proc.returncode,
+        "duration_sec": round(duration, 3),
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    if stdout_json is not None:
+        json_payload["stdout_json"] = stdout_json
     return ToolResult(
         tool_use_id=call.id,
         name=call.name,
         is_error=not success,
         content=[
             ToolResultPart.text_part(text_summary),
-            ToolResultPart.json_part(
-                {
-                    "skill_id": sid,
-                    "name": name,
-                    "exit_code": proc.returncode,
-                    "duration_sec": round(duration, 3),
-                    "stdout": stdout,
-                    "stderr": stderr,
-                }
-            ),
+            ToolResultPart.json_part(json_payload),
         ],
     )
 
@@ -488,6 +539,7 @@ __all__ = [
     "SkillRecord",
     "index_skills",
     "is_browser_skill_script_run",
+    "is_low_risk_builtin_skill_script_run",
     "script_inspect_handler",
     "script_run_handler",
     "skill_index_handler",

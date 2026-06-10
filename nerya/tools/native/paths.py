@@ -29,7 +29,9 @@ class WorkspaceEscapeError(ValueError):
         self.resolved = resolved
         self.root = root
         super().__init__(
-            f"path {raw!r} resolves to {resolved} which is outside workspace root {root}"
+            f"permission denied: path {raw!r} resolves to {resolved} which is "
+            f"outside the workspace sandbox root {root}; access refused. Only "
+            "workspace-relative paths are allowed."
         )
 
 

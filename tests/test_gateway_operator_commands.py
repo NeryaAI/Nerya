@@ -80,7 +80,17 @@ def _write_account(tmp_path) -> None:
 def test_gateway_menu_includes_strategy_and_portfolio_commands():
     commands = {row["command"] for row in menu_commands(platform="telegram")}
 
-    assert {"strategies", "accounts", "portfolio"}.issubset(commands)
+    assert {"strategies", "accounts", "portfolio", "workflows"}.issubset(commands)
+
+
+def test_gateway_workflows_command_describes_schedule_surface(tmp_path):
+    outcome = DEFAULT_REGISTRY.handle("/workflows", _ctx(tmp_path, "/workflows"))
+
+    assert outcome.handled is True
+    assert outcome.command == "/workflows"
+    assert "Workflows" in outcome.reply_text
+    assert "schedule" in outcome.reply_text
+    assert "调度" in outcome.reply_text
 
 
 def test_gateway_strategies_lists_and_describes_workspace_strategies(tmp_path):

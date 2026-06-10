@@ -43,6 +43,7 @@ from ...core.truth import (
     resolve_allow_mock,
 )
 from ...strategy_history import open_session, store as history_store, track_outcome
+from ...trading.account_snapshots import latest_snapshot
 from ...trading import portfolio as portfolio_mod
 from ...trading.accounts import load_accounts
 from ...core.errors import ApprovalPending
@@ -155,6 +156,7 @@ RISK_CHECK_SCHEMA: dict[str, Any] = {
     "properties": {
         "intent": {
             "type": "object",
+            "properties": {},
             "description": (
                 "Trade intent payload (see TradeIntent). intent_id is "
                 "auto-generated when omitted."
@@ -183,87 +185,143 @@ KILL_SWITCH_SET_SCHEMA: dict[str, Any] = {
     "required": ["enabled"],
 }
 
+_TRADE_INTENT_SCHEMA_PROPERTIES: dict[str, Any] = {
+    "intent_id": {"type": "string"},
+    "strategy_id": {
+        "type": "string",
+        "description": "Defaults to manual_agent or the active strategy context.",
+    },
+    "account_id": {"type": "string"},
+    "market": {
+        "type": "string",
+        "description": (
+            "Canonical '<venue>:<symbol>' market, e.g. mock:BTC/USDT. "
+            "If the venue and symbol are separate, pass venue + symbol."
+        ),
+    },
+    "symbol": {
+        "type": "string",
+        "description": "Adapter alias for the symbol/pair when market is separate.",
+    },
+    "venue": {
+        "type": "string",
+        "description": "Adapter alias used with symbol or a market missing venue.",
+    },
+    "side": {"type": "string", "enum": ["buy", "sell"]},
+    "size": {
+        "type": "number",
+        "description": "Order size. Use size_pct_nav instead for NAV-percent sizing.",
+    },
+    "size_unit": {
+        "type": "string",
+        "enum": ["base", "quote", "usd"],
+        "default": "usd",
+    },
+    "size_pct_nav": {
+        "type": "number",
+        "minimum": 0,
+        "description": (
+            "Fraction of account NAV to size, e.g. 1.0 for all-in or "
+            "0.10 for 10%. The adapter converts this to size_unit=usd "
+            "before RiskGate. If the operator requests all-in/full "
+            "allocation with an explicit cap, keep size_pct_nav=1.0 "
+            "and set max_size_pct_nav to the cap; do not replace the "
+            "operator intent with the capped amount or an arbitrary "
+            "fixed notional."
+        ),
+    },
+    "max_size_pct_nav": {
+        "type": "number",
+        "minimum": 0,
+        "description": (
+            "Optional stricter cap for this request, as a NAV fraction. "
+            "It can only reject/limit, never loosen RiskGate policy. "
+            "For all-in/full-allocation requests this should represent "
+            "the limit while size_pct_nav remains the requested full "
+            "allocation."
+        ),
+    },
+    "order_type": {
+        "type": "string",
+        "enum": ["market", "limit", "stop", "stop_limit"],
+        "default": "market",
+    },
+    "limit_price": {"type": "number"},
+    "stop_price": {"type": "number"},
+    "time_in_force": {
+        "type": "string",
+        "enum": ["gtc", "ioc", "fok", "post_only"],
+        "default": "gtc",
+    },
+    "confidence": {"type": "number"},
+    "reasoning": {"type": "string"},
+    "rationale": {
+        "type": "string",
+        "description": "Adapter alias for reasoning.",
+    },
+    "source": {"type": "string"},
+    "trigger_event_id": {"type": "string"},
+    "meta": {"type": "object"},
+}
+
+RISK_CHECK_SCHEMA["properties"]["intent"]["properties"] = _TRADE_INTENT_SCHEMA_PROPERTIES
+RISK_CHECK_SCHEMA["properties"]["intent"]["required"] = ["account_id", "side"]
+RISK_CHECK_SCHEMA["properties"].update(_TRADE_INTENT_SCHEMA_PROPERTIES)
+RISK_CHECK_SCHEMA.pop("required", None)
+
+_PROTECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Optional bracket TP/SL. Triggers the TradePlan pipeline "
+        "(open_position) when ``side='buy'`` — for SHORT entries "
+        "use ``plan_action='open_short'`` alongside. Each child "
+        "spec accepts ``type`` (pct|price|atr|pnl_usd|r_multiple) "
+        "and ``value``."
+    ),
+    "properties": {
+        "stop_loss": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["pct", "price", "atr", "pnl_usd"],
+                },
+                "value": {"type": "number"},
+            },
+            "required": ["type", "value"],
+        },
+        "take_profit": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["pct", "price", "r_multiple", "pnl_usd"],
+                },
+                "value": {"type": "number"},
+            },
+            "required": ["type", "value"],
+        },
+        "trailing_stop": {
+            "type": "object",
+            "properties": {
+                "activation_pct": {"type": "number"},
+                "trail_pct": {"type": "number"},
+            },
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["hard_exchange", "soft_runtime", "hybrid"],
+            "default": "hybrid",
+        },
+    },
+}
+
 TRADE_INTENT_SUBMIT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "strategy_id": {"type": "string"},
-        "account_id": {"type": "string"},
-        "market": {
-            "type": "string",
-            "description": "venue:symbol (e.g. binance:BTC/USDT).",
-        },
-        "side": {"type": "string", "enum": ["buy", "sell"]},
-        "size": {"type": "number"},
-        "size_unit": {"type": "string", "enum": ["base", "quote", "usd"]},
-        "order_type": {
-            "type": "string",
-            "enum": ["market", "limit", "stop", "stop_limit"],
-        },
-        "limit_price": {"type": "number"},
-        "stop_price": {"type": "number"},
-        "time_in_force": {
-            "type": "string",
-            "enum": ["gtc", "ioc", "fok", "post_only"],
-            "default": "gtc",
-        },
-        "confidence": {"type": "number"},
-        "reasoning": {"type": "string"},
-        "source": {"type": "string"},
-        "trigger_event_id": {"type": "string"},
+        **_TRADE_INTENT_SCHEMA_PROPERTIES,
         "market_snapshot": {"type": "object"},
-        # Optional bracket TP/SL. When present the order routes through
-        # the TradePlan pipeline (``TradingAPI.open_position``) and
-        # arms the protection at the exchange (live) or in-process
-        # protection executor (paper/shadow) in one atomic step.
-        # Agents SHOULD include this for every fresh entry on a CEX —
-        # bare market orders without a stop are a known way to leak
-        # capital during overnight gaps.
-        "protection": {
-            "type": "object",
-            "description": (
-                "Optional bracket TP/SL. Triggers the TradePlan pipeline "
-                "(open_position) when ``side='buy'`` — for SHORT entries "
-                "use ``plan_action='open_short'`` alongside. Each child "
-                "spec accepts ``type`` (pct|price|atr|pnl_usd|r_multiple) "
-                "and ``value``."
-            ),
-            "properties": {
-                "stop_loss": {
-                    "type": "object",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": ["pct", "price", "atr", "pnl_usd"],
-                        },
-                        "value": {"type": "number"},
-                    },
-                    "required": ["type", "value"],
-                },
-                "take_profit": {
-                    "type": "object",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": ["pct", "price", "r_multiple", "pnl_usd"],
-                        },
-                        "value": {"type": "number"},
-                    },
-                    "required": ["type", "value"],
-                },
-                "trailing_stop": {
-                    "type": "object",
-                    "properties": {
-                        "activation_pct": {"type": "number"},
-                        "trail_pct": {"type": "number"},
-                    },
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["hard_exchange", "soft_runtime", "hybrid"],
-                    "default": "hybrid",
-                },
-            },
-        },
+        "protection": _PROTECTION_SCHEMA,
         # When provided alongside ``protection``, controls which
         # TradePlan action is dispatched. Defaults to ``open_long`` for
         # ``side='buy'`` and ``open_short`` for ``side='sell'``.
@@ -278,7 +336,7 @@ TRADE_INTENT_SUBMIT_SCHEMA: dict[str, Any] = {
             ],
         },
     },
-    "required": ["account_id", "market", "side", "size", "size_unit", "order_type"],
+    "required": ["account_id", "side"],
 }
 
 STRATEGY_LIST_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}}
@@ -312,8 +370,362 @@ def _usage_error(call: ToolCall, message: str) -> ToolResult:
     )
 
 
+_TRADE_INTENT_NUMBER_FIELDS = {
+    "size",
+    "limit_price",
+    "stop_price",
+    "confidence",
+    "size_pct_nav",
+    "max_size_pct_nav",
+}
+
+_MARKET_SNAPSHOT_NUMBER_FIELDS = {
+    "price",
+    "mark_price",
+    "mid",
+    "bid",
+    "ask",
+    "age_s",
+}
+
+
+def _coerce_json_number_string(raw: Any) -> Any:
+    if not isinstance(raw, str):
+        return raw
+    text = raw.strip()
+    if not text:
+        return raw
+    try:
+        value = float(text)
+    except Exception:
+        return raw
+    if value != value or value in (float("inf"), float("-inf")):
+        return raw
+    if value.is_integer() and all(ch not in text.lower() for ch in (".", "e")):
+        return int(value)
+    return value
+
+
+def _normalize_numeric_fields(
+    data: dict[str, Any],
+    fields: set[str],
+) -> dict[str, Any]:
+    normalized: dict[str, Any] | None = None
+    for field in fields:
+        if field not in data:
+            continue
+        value = data.get(field)
+        coerced = _coerce_json_number_string(value)
+        if coerced is value:
+            continue
+        if normalized is None:
+            normalized = dict(data)
+        normalized[field] = coerced
+    return normalized if normalized is not None else data
+
+
+def _normalize_trade_intent_spec(args: dict[str, Any]) -> dict[str, Any]:
+    return _normalize_numeric_fields(dict(args), _TRADE_INTENT_NUMBER_FIELDS)
+
+
+@dataclasses.dataclass
+class _NormalizedIntent:
+    spec: dict[str, Any]
+    forced_reject_reasons: list[str] = dataclasses.field(default_factory=list)
+    validation_block: dict[str, Any] | None = None
+    normalization: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+def _coerce_pct_fraction(raw: Any) -> float | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        is_percent = text.endswith("%")
+        if is_percent:
+            text = text[:-1].strip()
+        value = _coerce_json_number_string(text)
+        if not isinstance(value, (int, float)):
+            return None
+        pct = float(value)
+        return pct / 100.0 if is_percent else pct
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
+
+
+def _venue_from_account(config: Config, account_id: str) -> str:
+    if not account_id:
+        return ""
+    try:
+        account = load_accounts(config.paths).get(account_id)
+    except Exception:
+        account = None
+    if account is None:
+        return ""
+    return str(account.venue or account.exchange or "").strip()
+
+
+def _normalize_market_fields(spec: dict[str, Any], *, config: Config) -> dict[str, Any]:
+    normalized = dict(spec)
+    market = str(normalized.get("market") or "").strip()
+    symbol = str(normalized.get("symbol") or "").strip()
+    venue = str(normalized.get("venue") or "").strip()
+    if not venue:
+        venue = _venue_from_account(config, str(normalized.get("account_id") or ""))
+
+    if not market and symbol:
+        market = f"{venue}:{symbol}" if venue else symbol
+    elif market and ":" not in market and venue:
+        market = f"{venue}:{market}"
+
+    if market:
+        normalized["market"] = market
+    return normalized
+
+
+def _account_nav_usd(
+    config: Config,
+    account_id: str,
+    *,
+    market: str = "",
+    market_snapshot: dict[str, Any] | None = None,
+) -> tuple[float | None, str]:
+    if not account_id:
+        return None, "account_id_missing"
+
+    try:
+        snap = latest_snapshot(config.paths, account_id)
+    except Exception:
+        snap = None
+    if snap is not None:
+        return float(snap.nav_usd or 0.0), "account_snapshot"
+
+    try:
+        account = load_accounts(config.paths).get(account_id)
+    except Exception:
+        account = None
+    if account is None:
+        return None, "account_unknown"
+
+    ledger_path = config.paths.virtual_ledgers / f"{account_id}.json"
+    ledger_existed = ledger_path.exists()
+    try:
+        ledger = open_ledger(config.paths, account.id, account.initial_balance_usd)
+        marks: dict[str, float] = {}
+        if market:
+            price = (market_snapshot or {}).get("price")
+            coerced = _coerce_json_number_string(price)
+            if isinstance(coerced, (int, float)) and float(coerced) > 0:
+                marks[market] = float(coerced)
+        equity = float(ledger.equity_estimate(marks))
+    except Exception:
+        equity = 0.0
+    if equity > 0:
+        return equity, "virtual_ledger"
+    if ledger_existed:
+        return equity, "virtual_ledger"
+    return float(account.initial_balance_usd or 0.0), "account_initial_balance"
+
+
+def _risk_decision_payload(
+    *,
+    decision: str,
+    reasons: list[str],
+    estimated_notional_usd: float = 0.0,
+    limits_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "intent_id": "",
+        "decision": decision,
+        "reasons": reasons,
+        "limits_snapshot": limits_snapshot or {},
+        "virtual_ledger_snapshot": {},
+        "estimated_notional_usd": estimated_notional_usd,
+        "risk_evaluation_id": "",
+        "account_snapshot": {},
+        "reservation_blocked_usd": 0.0,
+        "ts": now_iso(),
+        "shadow_only": False,
+        "promotion_state": "",
+        "fix_hints": [],
+    }
+
+
+def _validation_block_payload(
+    spec: dict[str, Any],
+    *,
+    reason: str,
+    message: str,
+    status: str = "validation_blocked",
+    estimated_notional_usd: float = 0.0,
+    normalization: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "order_id": None,
+        "intent": redact_dict(spec),
+        "risk_decision": _risk_decision_payload(
+            decision="reject",
+            reasons=[reason],
+            estimated_notional_usd=estimated_notional_usd,
+        ),
+        "validation": {
+            "status": "blocked",
+            "reason": reason,
+            "message": message,
+        },
+        "normalization": normalization or {},
+    }
+
+
+def _apply_forced_reject(decision: Any, reasons: list[str], *, metadata: dict[str, Any]) -> Any:
+    if not reasons:
+        return decision
+    existing = [str(r) for r in (decision.reasons or []) if str(r) != "ok"]
+    merged = []
+    for reason in [*reasons, *existing]:
+        if reason not in merged:
+            merged.append(reason)
+    decision.decision = "reject"
+    decision.reasons = merged
+    limits = dict(decision.limits_snapshot or {})
+    limits.setdefault("adapter_constraints", {}).update(metadata)
+    decision.limits_snapshot = limits
+    return decision
+
+
+def _normalize_trade_intent_for_domain(
+    raw: dict[str, Any],
+    *,
+    config: Config,
+    default_strategy: str,
+    default_source: str,
+    market_snapshot: dict[str, Any] | None = None,
+) -> _NormalizedIntent:
+    spec = _normalize_market_fields(_normalize_trade_intent_spec(raw), config=config)
+    normalization: dict[str, Any] = {}
+
+    rationale = spec.pop("rationale", None)
+    if rationale and not spec.get("reasoning"):
+        spec["reasoning"] = str(rationale)
+
+    size_pct_nav = _coerce_pct_fraction(spec.pop("size_pct_nav", None))
+    max_size_pct_nav = _coerce_pct_fraction(spec.pop("max_size_pct_nav", None))
+    if max_size_pct_nav is not None and max_size_pct_nav > 1:
+        max_size_pct_nav = max_size_pct_nav / 100.0
+    if size_pct_nav is not None and size_pct_nav > 1 and size_pct_nav <= 100:
+        # Providers sometimes emit "10" for "10%". Treat values over
+        # 1 up to 100 as percent points only for explicitly percent fields.
+        size_pct_nav = size_pct_nav / 100.0
+
+    forced_reject_reasons: list[str] = []
+    if (
+        size_pct_nav is not None
+        and max_size_pct_nav is not None
+        and size_pct_nav > max_size_pct_nav
+    ):
+        forced_reject_reasons.append(
+            f"max_size_pct_nav_exceeded:{size_pct_nav:.4f}>{max_size_pct_nav:.4f}"
+        )
+
+    if size_pct_nav is not None:
+        if size_pct_nav <= 0:
+            return _NormalizedIntent(
+                spec=spec,
+                validation_block=_validation_block_payload(
+                    spec,
+                    reason="nav_sizing_invalid",
+                    message="size_pct_nav must be positive.",
+                ),
+            )
+        account_id = str(spec.get("account_id") or "")
+        market = str(spec.get("market") or "")
+        nav_usd, nav_source = _account_nav_usd(
+            config,
+            account_id,
+            market=market,
+            market_snapshot=market_snapshot,
+        )
+        normalization["sizing"] = {
+            "method": "pct_nav",
+            "size_pct_nav": size_pct_nav,
+            "max_size_pct_nav": max_size_pct_nav,
+            "nav_usd": nav_usd,
+            "nav_source": nav_source,
+        }
+        if nav_usd is None or nav_usd <= 0:
+            if forced_reject_reasons:
+                return _NormalizedIntent(
+                    spec=spec,
+                    forced_reject_reasons=forced_reject_reasons,
+                    validation_block=_validation_block_payload(
+                        spec,
+                        reason=forced_reject_reasons[0],
+                        message="size_pct_nav exceeds the explicit max_size_pct_nav cap.",
+                        status="rejected",
+                        normalization=normalization,
+                    ),
+                    normalization=normalization,
+                )
+            return _NormalizedIntent(
+                spec=spec,
+                validation_block=_validation_block_payload(
+                    spec,
+                    reason="nav_sizing_unavailable",
+                    message=(
+                        "size_pct_nav requires a positive account NAV from "
+                        "account snapshots or the virtual ledger."
+                    ),
+                    normalization=normalization,
+                ),
+                normalization=normalization,
+            )
+        spec["size"] = float(nav_usd) * float(size_pct_nav)
+        spec["size_unit"] = "usd"
+        meta = dict(spec.get("meta") or {})
+        meta.setdefault("sizing_method", "pct_nav")
+        meta.setdefault("size_pct_nav", size_pct_nav)
+        meta.setdefault("nav_usd", nav_usd)
+        meta.setdefault("nav_source", nav_source)
+        if max_size_pct_nav is not None:
+            meta.setdefault("max_size_pct_nav", max_size_pct_nav)
+        spec["meta"] = meta
+
+    spec.setdefault("order_type", "market")
+    spec.setdefault("time_in_force", "gtc")
+    spec.setdefault("strategy_id", default_strategy)
+    spec.setdefault("source", default_source)
+    for key in ("symbol", "venue"):
+        spec.pop(key, None)
+    return _NormalizedIntent(
+        spec=spec,
+        forced_reject_reasons=forced_reject_reasons,
+        normalization=normalization,
+    )
+
+
+def _normalize_market_snapshot(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    return _normalize_numeric_fields(dict(raw), _MARKET_SNAPSHOT_NUMBER_FIELDS)
+
+
+def _risk_check_intent_spec(args: dict[str, Any]) -> dict[str, Any]:
+    raw = args.get("intent")
+    if isinstance(raw, dict) and raw:
+        return dict(raw)
+    return {
+        key: args[key]
+        for key in _TRADE_INTENT_SCHEMA_PROPERTIES
+        if key in args
+    }
+
+
 def _build_intent(args: dict[str, Any], *, default_strategy: str = "manual_agent") -> TradeIntent:
-    spec = dict(args)
+    spec = _normalize_trade_intent_spec(args)
     if "intent_id" in spec:
         return TradeIntent(**spec)
     spec.setdefault("strategy_id", default_strategy)
@@ -368,18 +780,40 @@ def virtual_ledger_handler(call: ToolCall, *, config: Config) -> ToolResult:
 
 def risk_check_handler(call: ToolCall, *, config: Config) -> ToolResult:
     args = call.arguments or {}
-    raw = args.get("intent")
-    if not isinstance(raw, dict) or not raw:
-        return _usage_error(call, "intent (dict) is required")
+    raw = _risk_check_intent_spec(args)
+    if not raw:
+        return _usage_error(call, "intent fields are required")
+    snapshot = _normalize_market_snapshot(args.get("market_snapshot"))
+    normalized = _normalize_trade_intent_for_domain(
+        raw,
+        config=config,
+        default_strategy="manual_agent",
+        default_source="agent:native",
+        market_snapshot=snapshot,
+    )
+    if normalized.validation_block is not None:
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data=normalized.validation_block,
+        )
     try:
-        intent = _build_intent(raw)
+        intent = _build_intent(normalized.spec)
     except Exception as exc:
         return _usage_error(call, f"invalid intent: {type(exc).__name__}: {exc}")
-    snapshot = args.get("market_snapshot") if isinstance(args.get("market_snapshot"), dict) else None
     decision = RiskGate(config).evaluate(intent, market_snapshot=snapshot)
+    _apply_forced_reject(
+        decision,
+        normalized.forced_reject_reasons,
+        metadata=normalized.normalization,
+    )
     return ToolResult.from_json(
         tool_use_id=call.id, name=call.name,
-        data={"intent": intent.asdict(), "risk_decision": decision.asdict()},
+        data={
+            "intent": intent.asdict(),
+            "risk_decision": decision.asdict(),
+            "normalization": normalized.normalization,
+        },
     )
 
 
@@ -497,10 +931,49 @@ def trade_intent_submit_handler(
     args = call.arguments or {}
     if not args:
         return _usage_error(call, "intent fields required (account_id, market, side, ...)")
-    spec = dict(args)
-    snapshot_in = spec.pop("market_snapshot", None)
+    spec = _normalize_trade_intent_spec(args)
+    snapshot_in = _normalize_market_snapshot(spec.pop("market_snapshot", None))
     protection = spec.pop("protection", None)
     plan_action = spec.pop("plan_action", None)
+    normalized = _normalize_trade_intent_for_domain(
+        spec,
+        config=config,
+        default_strategy=spec.get("strategy_id") or default_strategy,
+        default_source=spec.get("source") or default_source,
+        market_snapshot=snapshot_in,
+    )
+    if normalized.validation_block is not None:
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data=normalized.validation_block,
+        )
+    spec = normalized.spec
+
+    if normalized.forced_reject_reasons:
+        try:
+            intent = _build_intent(spec, default_strategy=default_strategy)
+            snapshot = _resolve_market_snapshot(config, intent, supplied=snapshot_in)
+            decision = RiskGate(config).evaluate(intent, market_snapshot=snapshot)
+            _apply_forced_reject(
+                decision,
+                normalized.forced_reject_reasons,
+                metadata=normalized.normalization,
+            )
+            return ToolResult.from_json(
+                tool_use_id=call.id,
+                name=call.name,
+                data={
+                    "status": "rejected",
+                    "order_id": None,
+                    "session_id": None,
+                    "intent": redact_dict(intent.asdict()),
+                    "risk_decision": decision.asdict(),
+                    "normalization": normalized.normalization,
+                },
+            )
+        except (TypeError, ValueError) as exc:
+            return _usage_error(call, f"invalid intent: {type(exc).__name__}: {exc}")
 
     # --- Bracket-aware path: route through TradingAPI / TradePlan ---
     if isinstance(protection, dict) and protection:
@@ -510,7 +983,7 @@ def trade_intent_submit_handler(
             spec=spec,
             protection=protection,
             plan_action=plan_action,
-            market_snapshot=snapshot_in if isinstance(snapshot_in, dict) else None,
+            market_snapshot=snapshot_in,
             default_strategy=default_strategy,
             default_source=default_source,
         )
@@ -520,7 +993,7 @@ def trade_intent_submit_handler(
         envelope = _submit(
             config,
             spec=spec,
-            market_snapshot=snapshot_in if isinstance(snapshot_in, dict) else None,
+            market_snapshot=snapshot_in,
             default_strategy=spec.get("strategy_id") or default_strategy,
             default_source=spec.get("source") or default_source,
         )

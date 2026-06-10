@@ -13,6 +13,9 @@ Covers:
 
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
 import pytest
 
 from nerya.tools.executor import (
@@ -225,6 +228,81 @@ def test_repair_preserves_existing_strategy_id():
     assert call.arguments["strategy_id"] == "already_set"
 
 
+def test_repair_parses_strategy_files_json_string():
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={
+            "strategy_id": "macd_agent",
+            "markets": ["BINANCE:BTCUSDT"],
+            "accounts": ["paper"],
+            "files": '{"main.py":"def run(ctx):\\n    return ctx.result()"}',
+        },
+    )
+    _repair_arguments_before_validation(call)
+    assert call.arguments["files"] == {
+        "main.py": "def run(ctx):\n    return ctx.result()"
+    }
+
+
+def test_repair_collects_dotted_strategy_file_arguments():
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={
+            "strategy_id": "bsc_smart_money_meme",
+            "markets": ["OKX_ONCHAIN:bsc:meme"],
+            "accounts": ["paper"],
+            "files.main.py": "def run(ctx):\n    return ctx.result.skip('wait')",
+            "files.strategy.md": "# BSC smart money meme",
+        },
+    )
+    _repair_arguments_before_validation(call)
+    assert call.arguments["files"]["main.py"].startswith("def run")
+    assert "BSC smart money" in call.arguments["files"]["strategy.md"]
+
+
+def test_repair_backfills_strategy_fields_from_inline_manifest():
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={
+            "files": {
+                "strategy.yml": """
+strategy_id: bsc_smart_money_meme
+title: BSC Smart Money Meme
+markets:
+  - OKX_ONCHAIN:bsc:meme
+accounts:
+  - paper
+mode: paper
+execution:
+  execution_mode: agent
+""",
+                "main.py": "def run(ctx):\n    return ctx.result.skip('wait')",
+                "strategy.md": "# BSC Smart Money Meme",
+            },
+        },
+    )
+    _repair_arguments_before_validation(call)
+    assert call.arguments["strategy_id"] == "bsc_smart_money_meme"
+    assert call.arguments["markets"] == ["OKX_ONCHAIN:bsc:meme"]
+    assert call.arguments["accounts"] == ["paper"]
+    assert call.arguments["execution_mode"] == "agent"
+    assert call.arguments["strategy_class"] == "agent"
+
+
+def test_repair_leaves_non_object_strategy_files_string_for_schema_validation():
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={
+            "strategy_id": "bad_files",
+            "markets": ["BINANCE:BTCUSDT"],
+            "accounts": ["paper"],
+            "files": "main.py: pass",
+        },
+    )
+    _repair_arguments_before_validation(call)
+    assert call.arguments["files"] == "main.py: pass"
+
+
 def test_repair_leaves_unrelated_tools_alone():
     call = ToolCall(name="other_tool", arguments={"title": "Foo"})
     _repair_arguments_before_validation(call)
@@ -268,6 +346,10 @@ def _proposal_descriptor() -> ToolDescriptor:
                 "title": {"type": "string"},
                 "markets": {"type": "array"},
                 "accounts": {"type": "array"},
+                "files": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                },
                 "mode": {
                     "type": "string",
                     "enum": ["paper", "shadow", "live"],
@@ -327,3 +409,247 @@ def test_executor_recovery_hint_is_compact_and_actionable():
         "action": "fix_arguments_and_retry",
         "tool_name": "strategy_generate_proposal",
     }
+
+
+def test_executor_decodes_json_string_container_arguments():
+    captured: list[dict] = []
+    descriptor = _proposal_descriptor()
+    descriptor = replace(
+        descriptor,
+        handler=lambda call: (
+            captured.append(dict(call.arguments or {}))
+            or ToolResult.from_text(tool_use_id=call.id, name=call.name, text="ok")
+        ),
+    )
+    executor = _build_executor(descriptor)
+    files = {"main.py": "print('ok')", "strategy.md": "# Strategy"}
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={
+            "strategy_id": "json_files_strategy",
+            "markets": json.dumps(["BINANCE:ETHUSDT"]),
+            "accounts": ["paper"],
+            "files": json.dumps(files),
+        },
+    )
+
+    result = executor.execute(call)
+
+    assert not result.is_error
+    assert captured[0]["markets"] == ["BINANCE:ETHUSDT"]
+    assert captured[0]["files"] == files
+
+
+def test_executor_decodes_schema_array_item_wrapper_before_validation():
+    captured: list[dict] = []
+    descriptor = ToolDescriptor(
+        name="array_tool",
+        description="stub",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "symbols": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["symbols"],
+        },
+        handler=lambda call: (
+            captured.append(dict(call.arguments or {}))
+            or ToolResult.from_text(tool_use_id=call.id, name=call.name, text="ok")
+        ),
+        risk=RiskLevel.READ,
+        permission_scope=PermissionScope.WORKSPACE,
+    )
+    executor = _build_executor(descriptor)
+    call = ToolCall(name="array_tool", arguments={"symbols": {"item": "BTCUSDT"}})
+
+    result = executor.execute(call)
+
+    assert not result.is_error
+    assert captured[0]["symbols"] == ["BTCUSDT"]
+
+
+def test_executor_coerces_schema_number_strings_before_validation():
+    captured: list[dict] = []
+    descriptor = ToolDescriptor(
+        name="numeric_tool",
+        description="stub",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "size": {"type": "number"},
+                "confidence": {"type": "number"},
+            },
+            "required": ["size", "confidence"],
+        },
+        handler=lambda call: (
+            captured.append(dict(call.arguments or {}))
+            or ToolResult.from_text(tool_use_id=call.id, name=call.name, text="ok")
+        ),
+        risk=RiskLevel.READ,
+        permission_scope=PermissionScope.WORKSPACE,
+    )
+    executor = _build_executor(descriptor)
+    call = ToolCall(name="numeric_tool", arguments={"size": "100", "confidence": "0.75"})
+
+    result = executor.execute(call)
+
+    assert not result.is_error
+    assert captured[0]["size"] == 100
+    assert captured[0]["confidence"] == 0.75
+
+
+def test_repair_normalizes_strategy_market_account_item_objects():
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={
+            "strategy_id": "btcusdt_funding_arb",
+            "markets": {
+                "item": {
+                    "venue": "binance",
+                    "market": "BINANCE:BTCUSDT",
+                    "instrument": "perp",
+                },
+            },
+            "accounts": {
+                "item": {
+                    "venue": "binance",
+                    "account_id": "binance_paper_001",
+                    "mode": "paper",
+                },
+            },
+        },
+    )
+
+    _repair_arguments_before_validation(call, _proposal_descriptor().input_schema)
+
+    assert call.arguments["markets"] == ["BINANCE:BTCUSDT"]
+    assert call.arguments["accounts"] == ["binance_paper_001"]
+
+
+def test_repair_uses_account_label_and_venue_for_strategy_arrays():
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={
+            "strategy_id": "btcusdt_funding_arb",
+            "markets": ["BTC/USDT:USDT"],
+            "accounts": [
+                {
+                    "venue": "binance_perpetual",
+                    "label": "binance_perp_paper",
+                    "mode": "paper",
+                    "credentials": "missing",
+                },
+            ],
+        },
+    )
+
+    _repair_arguments_before_validation(call, _proposal_descriptor().input_schema)
+
+    assert call.arguments["markets"] == ["binance_perpetual:BTC/USDT:USDT"]
+    assert call.arguments["accounts"] == ["binance_perp_paper"]
+
+
+def test_executor_decodes_raw_json_object_arguments_before_validation():
+    captured: list[dict] = []
+    descriptor = _proposal_descriptor()
+    descriptor = replace(
+        descriptor,
+        handler=lambda call: (
+            captured.append(dict(call.arguments or {}))
+            or ToolResult.from_text(tool_use_id=call.id, name=call.name, text="ok")
+        ),
+    )
+    executor = _build_executor(descriptor)
+    raw = json.dumps(
+        {
+            "strategy_id": "binance_aster_cash_carry",
+            "title": "Binance + Aster Cash Carry",
+            "markets": ["BINANCE:BTCUSDT", "ASTER:BTCUSDT-PERP"],
+            "accounts": ["binance_paper", "paper"],
+            "mode": "paper",
+            "files": {
+                "main.py": "def run(ctx):\n    return ctx.result.skip('gap')",
+            },
+        }
+    )
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={"_raw": raw},
+    )
+
+    result = executor.execute(call)
+
+    assert not result.is_error
+    assert captured[0]["strategy_id"] == "binance_aster_cash_carry"
+    assert captured[0]["markets"] == ["BINANCE:BTCUSDT", "ASTER:BTCUSDT-PERP"]
+    assert captured[0]["files"]["main.py"].startswith("def run")
+
+
+def test_executor_recovers_truncated_raw_json_before_validation():
+    captured: list[dict] = []
+    descriptor = _proposal_descriptor()
+    descriptor = replace(
+        descriptor,
+        handler=lambda call: (
+            captured.append(dict(call.arguments or {}))
+            or ToolResult.from_text(tool_use_id=call.id, name=call.name, text="ok")
+        ),
+    )
+    executor = _build_executor(descriptor)
+    raw = (
+        '{"strategy_id":"bsc_whale_copytrade",'
+        '"title":"BSC Whale Copytrade",'
+        '"description":"Whale flow strategy.",'
+        '"prompt":"Use BSC whale flow evidence.",'
+        '"strategy_class":"agent",'
+        '"execution_mode":"agent_task",'
+        '"mode":"paper",'
+        '"markets":["bsc:0xMEME"],'
+        '"accounts":["binance_paper"],'
+        '"files": '
+    )
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={"_raw": raw},
+    )
+
+    result = executor.execute(call)
+
+    assert not result.is_error
+    assert captured[0]["strategy_id"] == "bsc_whale_copytrade"
+    assert captured[0]["markets"] == ["bsc:0xMEME"]
+    assert captured[0]["accounts"] == ["binance_paper"]
+    assert captured[0]["execution_mode"] == "agent_task"
+    assert "_raw" not in captured[0]
+
+
+def test_executor_unwraps_strategy_proposal_object_argument_before_validation():
+    captured: list[dict] = []
+    descriptor = _proposal_descriptor()
+    descriptor = replace(
+        descriptor,
+        handler=lambda call: (
+            captured.append(dict(call.arguments or {}))
+            or ToolResult.from_text(tool_use_id=call.id, name=call.name, text="ok")
+        ),
+    )
+    executor = _build_executor(descriptor)
+    call = ToolCall(
+        name="strategy_generate_proposal",
+        arguments={
+            "request": {
+                "strategy_id": "eth_rsi_agent_breakout",
+                "title": "ETH RSI Agent Breakout",
+                "markets": ["BINANCE:ETHUSDT"],
+                "accounts": ["binance_paper"],
+                "mode": "paper",
+            }
+        },
+    )
+
+    result = executor.execute(call)
+
+    assert not result.is_error
+    assert captured[0]["strategy_id"] == "eth_rsi_agent_breakout"
+    assert captured[0]["markets"] == ["BINANCE:ETHUSDT"]
+    assert captured[0]["accounts"] == ["binance_paper"]

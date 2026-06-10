@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import fnmatch
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,13 @@ PROTECTED_SCOPES = {
     # live trading / kill switch
     "nerya.yml:runtime.live_trading_enabled",
     "nerya.yml:runtime.kill_switch",
+    # trading/risk posture. These may be discussed as advisory changes,
+    # but cannot be staged through the self-config patch surface.
+    "nerya.yml:trading.*",
+    "nerya.yml:risk",
+    "nerya.yml:risk.*",
+    "nerya.yml:risk_limits",
+    "nerya.yml:risk_limits.*",
     # signer / approval policy
     "approvals/policy.yml",
     "approvals/signer_policy.yml",
@@ -254,6 +262,5 @@ def is_protected(target: str) -> bool:
 
 def _matches(rule: str, target: str) -> bool:
     if "*" in rule:
-        prefix, suffix = rule.split("*", 1)
-        return target.startswith(prefix) and target.endswith(suffix)
+        return fnmatch.fnmatchcase(target, rule)
     return rule == target

@@ -41,15 +41,22 @@ class SubAgentSpec:
     prompt: str = ""
     allowed_skills: list[str] = field(default_factory=list)
     tier: str = "medium"
+    canonical_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.canonical_name:
+            self.canonical_name = self.name
 
     @classmethod
     def load(cls, path: Path, *, name: str | None = None,
              allowed_skills: list[str] | None = None,
-             tier: str = "medium") -> "SubAgentSpec":
+             tier: str = "medium",
+             canonical_name: str | None = None) -> "SubAgentSpec":
         n = name or path.stem.replace(".agent", "")
         prompt = path.read_text(encoding="utf-8") if path.exists() else ""
         return cls(name=n, prompt_path=path, prompt=prompt,
-                   allowed_skills=allowed_skills or [], tier=tier)
+                   allowed_skills=allowed_skills or [], tier=tier,
+                   canonical_name=canonical_name)
 
 
 DEFAULT_SUBAGENT_SKILLS = {
@@ -161,6 +168,66 @@ DEFAULT_SUBAGENT_SKILLS = {
     "coding_agent": ["operator", "script", "websearch", "trace", "llm"],
     "code_critic": ["operator", "trace", "strategy_review", "llm"],
 }
+
+
+DEFAULT_SUBAGENT_PROFILES: dict[str, str] = {
+    "fundamental_analyst": "fundamentals_analyst",
+    "financial_analyst": "fundamentals_analyst",
+    "valuation_analyst": "fundamentals_analyst",
+    "valuation_reviewer": "fundamentals_analyst",
+    "dcf_analyst": "fundamentals_analyst",
+    "dcf_modeler": "fundamentals_analyst",
+    "sec_analyst": "fundamentals_analyst",
+    "sec_filing_analyst": "fundamentals_analyst",
+    "sec_filing_reviewer": "fundamentals_analyst",
+    "filing_reviewer": "fundamentals_analyst",
+    "investor_perspective": "fundamentals_analyst",
+    "guru_perspective": "fundamentals_analyst",
+    "investment_gurus": "fundamentals_analyst",
+}
+
+
+def canonical_subagent_name(name: str) -> str:
+    """Return the execution profile for a requested role name.
+
+    TeamStore and event streams keep the requested role identity. The
+    canonical profile only selects default prompt, skills, budget, and
+    evidence policy when the model or operator uses a near-synonym role name.
+    """
+
+    raw = str(name or "").strip()
+    if not raw:
+        return raw
+    if raw in DEFAULT_SUBAGENT_SKILLS:
+        return raw
+    normalised = raw.lower().replace("-", "_").replace(" ", "_")
+    if normalised in DEFAULT_SUBAGENT_SKILLS:
+        return normalised
+    explicit = DEFAULT_SUBAGENT_PROFILES.get(normalised)
+    if explicit:
+        return explicit
+    tokens = {token for token in normalised.split("_") if token}
+    if tokens & {
+        "fundamental",
+        "fundamentals",
+        "financial",
+        "valuation",
+        "dcf",
+        "sec",
+        "filing",
+        "filings",
+        "investor",
+        "guru",
+        "gurus",
+    }:
+        return "fundamentals_analyst"
+    if tokens & {"technical", "chart", "momentum"}:
+        return "technical_analyst"
+    if tokens & {"sentiment", "social", "news"}:
+        return "sentiment_analyst"
+    if tokens & {"risk", "critic"}:
+        return "risk_critic"
+    return raw
 
 
 # Some workspaces do not ship ``<name>.agent.md`` files. Without a
@@ -329,6 +396,12 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "Mission. Synthesize analyst reports, bull/bear debate, and risk\n"
         "input into a decisive investment plan. Load ``research_report``\n"
         "only when a formal report is required.\n\n"
+        "Evidence audit duty. Before using an analyst claim, check it\n"
+        "carries a tool-backed evidence entry from this run. Drop or\n"
+        "down-weight unsourced claims and stale pre-session dates, and\n"
+        "sanity-check numeric magnitudes (an indicator or level wildly out\n"
+        "of scale with the instrument's traded price is an error — exclude\n"
+        "it and flag it).\n\n"
         "Output contract (strict JSON):\n"
         "  - ``rating``: ``Buy`` | ``Overweight`` | ``Hold`` | ``Underweight`` | ``Sell``\n"
         "  - ``thesis``: short paragraph\n"
@@ -344,7 +417,9 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "Mission. Convert validated analysis into a professional research\n"
         "report. Load ``research_report`` for the full format only when\n"
         "you are actually writing a report. Preserve uncertainty and do\n"
-        "not add claims absent from analyst inputs.\n\n"
+        "not add claims absent from analyst inputs. Exclude input claims\n"
+        "that lack tool-backed evidence or cite stale pre-session dates as\n"
+        "current; record them under ``missing_evidence`` instead.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``report_markdown``: string\n"
         "  - ``missing_evidence``: list[str]\n"
@@ -609,13 +684,15 @@ def load_registry(paths: WorkspacePaths) -> dict[str, SubAgentSpec]:
         return out
     for p in sorted(root.glob("*.agent.md")):
         name = p.stem.replace(".agent", "")
+        canonical = canonical_subagent_name(name)
         meta = _load_role_meta(root, name)
-        allowed = meta.get("allowed_skills") or DEFAULT_SUBAGENT_SKILLS.get(name, [])
-        tier = meta.get("tier") or DEFAULT_TIERS.get(name, "medium")
+        allowed = meta.get("allowed_skills") or DEFAULT_SUBAGENT_SKILLS.get(canonical, [])
+        tier = meta.get("tier") or DEFAULT_TIERS.get(canonical, "medium")
         out[name] = SubAgentSpec.load(
             p, name=name,
             allowed_skills=list(allowed),
             tier=str(tier),
+            canonical_name=canonical,
         )
     return out
 
@@ -674,6 +751,7 @@ def list_roles(paths: WorkspacePaths) -> list[dict[str, Any]]:
             "allowed_skills": list(spec.allowed_skills),
             "persistent": True,
             "source": "workspace",
+            "canonical_name": spec.canonical_name or name,
             "prompt_path": str(spec.prompt_path),
             "prompt_excerpt": (spec.prompt or "")[:280],
         })
@@ -688,6 +766,7 @@ def list_roles(paths: WorkspacePaths) -> list[dict[str, Any]]:
             "allowed_skills": list(allowed),
             "persistent": False,
             "source": "default",
+            "canonical_name": name,
             "prompt_path": None,
             "prompt_excerpt": "",
         })
@@ -707,18 +786,21 @@ def describe_role(paths: WorkspacePaths, name: str) -> Optional[dict[str, Any]]:
             "allowed_skills": list(spec.allowed_skills),
             "persistent": True,
             "source": "workspace",
+            "canonical_name": spec.canonical_name or name,
             "prompt_path": str(spec.prompt_path),
             "prompt": spec.prompt,
         }
-    if name in DEFAULT_SUBAGENT_SKILLS:
+    canonical = canonical_subagent_name(name)
+    if canonical in DEFAULT_SUBAGENT_SKILLS:
         return {
             "name": name,
-            "tier": DEFAULT_TIERS.get(name, "medium"),
-            "allowed_skills": list(DEFAULT_SUBAGENT_SKILLS[name]),
+            "tier": DEFAULT_TIERS.get(canonical, "medium"),
+            "allowed_skills": list(DEFAULT_SUBAGENT_SKILLS[canonical]),
             "persistent": False,
-            "source": "default",
+            "source": "default" if canonical == name else "default_profile",
+            "canonical_name": canonical,
             "prompt_path": None,
-            "prompt": DEFAULT_SUBAGENT_PROMPTS.get(name, ""),
+            "prompt": DEFAULT_SUBAGENT_PROMPTS.get(canonical, ""),
         }
     return None
 
@@ -750,13 +832,15 @@ def save_role(
     prompt_path = _prompt_path(paths, name)
     prompt_path.write_text(prompt, encoding="utf-8")
 
-    final_skills = list(allowed_skills or DEFAULT_SUBAGENT_SKILLS.get(name, []))
-    final_tier = str(tier or DEFAULT_TIERS.get(name, "medium"))
+    canonical = canonical_subagent_name(name)
+    final_skills = list(allowed_skills or DEFAULT_SUBAGENT_SKILLS.get(canonical, []))
+    final_tier = str(tier or DEFAULT_TIERS.get(canonical, "medium"))
 
     meta = {
         "name": name,
         "tier": final_tier,
         "allowed_skills": final_skills,
+        "canonical_name": canonical,
     }
     yaml_io.dump(_meta_path(paths, name), meta)
 
@@ -764,6 +848,7 @@ def save_role(
         "name": name,
         "tier": final_tier,
         "allowed_skills": final_skills,
+        "canonical_name": canonical,
         "persistent": True,
         "source": "workspace",
         "prompt_path": str(prompt_path),
@@ -792,9 +877,11 @@ def delete_role(paths: WorkspacePaths, name: str) -> bool:
 
 __all__ = [
     "DEFAULT_SUBAGENT_PROMPTS",
+    "DEFAULT_SUBAGENT_PROFILES",
     "DEFAULT_SUBAGENT_SKILLS",
     "DEFAULT_TIERS",
     "SubAgentSpec",
+    "canonical_subagent_name",
     "delete_role",
     "describe_role",
     "list_roles",

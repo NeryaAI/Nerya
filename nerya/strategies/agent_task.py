@@ -16,6 +16,19 @@ from typing import Any, Literal
 AgentTaskStatus = Literal["dispatch", "skip", "error"]
 
 
+def _coerce_mapping(value: Any, *, string_key: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        return {string_key: value}
+    try:
+        return dict(value)
+    except Exception:
+        return {string_key: str(value)}
+
+
 @dataclass
 class StrategyAgentTask:
     status: AgentTaskStatus
@@ -40,8 +53,8 @@ class StrategyAgentTask:
         return cls(
             status="dispatch",
             prompt=str(prompt or ""),
-            session_key=dict(session_key or {}),
-            metadata=dict(metadata or {}),
+            session_key=_coerce_mapping(session_key, string_key="key"),
+            metadata=_coerce_mapping(metadata, string_key="value"),
             artifacts=[dict(a) for a in (artifacts or [])],
             attached_skills=[str(s) for s in (attached_skills or []) if str(s).strip()],
             reason=str(reason or ""),
@@ -54,7 +67,11 @@ class StrategyAgentTask:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> "StrategyAgentTask":
-        return cls(status="skip", reason=str(reason or ""), metadata=dict(metadata or {}))
+        return cls(
+            status="skip",
+            reason=str(reason or ""),
+            metadata=_coerce_mapping(metadata, string_key="value"),
+        )
 
     @classmethod
     def error(
@@ -63,7 +80,11 @@ class StrategyAgentTask:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> "StrategyAgentTask":
-        return cls(status="error", reason=str(reason or ""), metadata=dict(metadata or {}))
+        return cls(
+            status="error",
+            reason=str(reason or ""),
+            metadata=_coerce_mapping(metadata, string_key="value"),
+        )
 
     @classmethod
     def from_value(cls, value: Any) -> "StrategyAgentTask":
@@ -78,8 +99,8 @@ class StrategyAgentTask:
             return cls(
                 status=status,  # type: ignore[arg-type]
                 prompt=str(value.get("prompt") or value.get("text") or ""),
-                session_key=dict(value.get("session_key") or {}),
-                metadata=dict(value.get("metadata") or {}),
+                session_key=_coerce_mapping(value.get("session_key"), string_key="key"),
+                metadata=_coerce_mapping(value.get("metadata"), string_key="value"),
                 artifacts=[dict(a) for a in (value.get("artifacts") or [])],
                 attached_skills=[
                     str(s) for s in (value.get("attached_skills") or []) if str(s).strip()

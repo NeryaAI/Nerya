@@ -4,7 +4,24 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
+
+
+def _replace_with_retry(tmp: str, path: Path) -> None:
+    """Replace ``path`` with a short retry window for Windows file locks."""
+
+    last_error: Exception | None = None
+    for attempt in range(8):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.025 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    os.replace(tmp, path)
 
 
 def atomic_write_text(path: Path, data: str, encoding: str = "utf-8") -> None:
@@ -19,7 +36,7 @@ def atomic_write_text(path: Path, data: str, encoding: str = "utf-8") -> None:
                 os.fsync(fh.fileno())
             except (OSError, AttributeError):
                 pass
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     except Exception:
         try:
             os.unlink(tmp)
@@ -40,7 +57,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
                 os.fsync(fh.fileno())
             except (OSError, AttributeError):
                 pass
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     except Exception:
         try:
             os.unlink(tmp)

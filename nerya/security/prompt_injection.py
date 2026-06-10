@@ -18,7 +18,10 @@ a real LLM, much less turns into a ``TradeIntent``.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
+
+_LOG = logging.getLogger(__name__)
 
 
 def wrap_untrusted(source: str, content: str) -> str:
@@ -45,6 +48,10 @@ _SUSPICIOUS_PATTERNS = [
     # secrets
     re.compile(r"\b(exfiltrate|reveal|leak|print|dump)\s+(the\s+)?(api|private|secret|bot)?\s*(key|token|secret|seed|mnemonic)\b", re.I),
     re.compile(r"\b(show|send)\s+(me\s+)?(the\s+)?(\.env|environment\s+variables|api\s+key)\b", re.I),
+    re.compile(r"\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b.{0,80}\b(vault|secrets?|credentials?|tokens?)\b", re.I | re.S),
+    re.compile(r"\b(vault|secrets?|credentials?|tokens?)\b.{0,80}\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b", re.I | re.S),
+    re.compile(r"(读取|查看|展示|输出|打印|泄露|导出).{0,40}(vault|密钥|令牌|token|api\s*key|凭证.{0,8}(内容|明文|原文|值|实际))", re.I | re.S),
+    re.compile(r"(vault|密钥|令牌|token|api\s*key|凭证.{0,8}(内容|明文|原文|值|实际)).{0,40}(读取|查看|展示|输出|打印|泄露|导出)", re.I | re.S),
     # limits tampering
     re.compile(r"\b(raise|increase|set)\s+(the\s+)?(daily|max|position|notional)\s+limit\b", re.I),
     re.compile(r"\bmodify\s+limits\.yml\b", re.I),
@@ -55,12 +62,32 @@ _SUSPICIOUS_PATTERNS = [
 ]
 
 
+def _safe_pattern_hits(
+    patterns: tuple[re.Pattern[str], ...] | list[re.Pattern[str]],
+    content: str,
+) -> tuple[list[str], bool]:
+    """Return ``(hits, failed)`` while failing open on scanner errors."""
+
+    hits = []
+    text = content or ""
+    for pat in patterns:
+        try:
+            if pat.search(text):
+                hits.append(pat.pattern)
+        except Exception as exc:  # pragma: no cover - warning side effect only
+            _LOG.warning(
+                "prompt guard scanner failed open for pattern %r: %s",
+                getattr(pat, "pattern", "<unknown>"),
+                exc,
+            )
+            return [], True
+    return hits, False
+
+
 def flag_suspicious(content: str) -> list[str]:
     """Return the list of injection pattern descriptions that matched."""
-    hits = []
-    for pat in _SUSPICIOUS_PATTERNS:
-        if pat.search(content or ""):
-            hits.append(pat.pattern)
+
+    hits, _failed = _safe_pattern_hits(_SUSPICIOUS_PATTERNS, content)
     return hits
 
 
@@ -106,6 +133,10 @@ _BLOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bturn\s+on\s+live\s+mode\b", re.I),
     re.compile(r"\b(exfiltrate|reveal|leak|print|dump)\s+(the\s+)?(api|private|secret|bot)?\s*(key|token|secret|seed|mnemonic)\b", re.I),
     re.compile(r"\b(show|send)\s+(me\s+)?(the\s+)?(\.env|environment\s+variables|api\s+key)\b", re.I),
+    re.compile(r"\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b.{0,80}\b(vault|secrets?|credentials?|tokens?)\b", re.I | re.S),
+    re.compile(r"\b(vault|secrets?|credentials?|tokens?)\b.{0,80}\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b", re.I | re.S),
+    re.compile(r"(读取|查看|展示|输出|打印|泄露|导出).{0,40}(vault|密钥|令牌|token|api\s*key|凭证.{0,8}(内容|明文|原文|值|实际))", re.I | re.S),
+    re.compile(r"(vault|密钥|令牌|token|api\s*key|凭证.{0,8}(内容|明文|原文|值|实际)).{0,40}(读取|查看|展示|输出|打印|泄露|导出)", re.I | re.S),
     re.compile(r"\bexecute\s+(this|the)\s+(order|trade)\s+without\b", re.I),
 )
 
@@ -114,6 +145,8 @@ _REVIEW_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(raise|increase|set)\s+(the\s+)?(daily|max|position|notional)\s+limit\b", re.I),
     re.compile(r"\bmodify\s+limits\.yml\b", re.I),
     re.compile(r"\b(jailbreak|prompt\s*injection|override\s+policy|DAN\s+mode)\b", re.I),
+    re.compile(r"\bDAN\b", re.I),
+    re.compile(r"没有任何限制|不受限制|无限制", re.I),
 )
 
 
@@ -129,8 +162,11 @@ def classify(content: str) -> dict:
     """
 
     text = content or ""
-    blocks = [p.pattern for p in _BLOCK_PATTERNS if p.search(text)]
-    reviews = [p.pattern for p in _REVIEW_PATTERNS if p.search(text)]
+    blocks, block_failed = _safe_pattern_hits(_BLOCK_PATTERNS, text)
+    reviews, review_failed = _safe_pattern_hits(_REVIEW_PATTERNS, text)
+    if block_failed or review_failed:
+        return {"verdict": "allow", "hits": [],
+                "policy": "prompt_guard.fail_open"}
     if blocks:
         return {"verdict": "block", "hits": blocks + reviews,
                 "policy": "prompt_guard.block_v1"}

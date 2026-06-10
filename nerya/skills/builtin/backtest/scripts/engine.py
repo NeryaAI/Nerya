@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
 import bisect
+import inspect
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +16,12 @@ from .indicators import compute_indicators
 from .mock_ctx import MockCtx, MockPolicy, MockState, SimpleConfigView, append_jsonl
 from .portfolio import PortfolioState
 from .slippage import apply_slippage, compute_fee, fee_bps_for, slip_bps_for
+
+
+def _resolve_strategy_decision(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return asyncio.run(value)
+    return value
 
 
 @dataclass
@@ -173,7 +181,7 @@ def run_backtest(
                 policy_obj=policy_view,
                 config=strategy_view,
             )
-            decision = strategy_run(ctx)
+            decision = _resolve_strategy_decision(strategy_run(ctx))
             result.decisions.append(_decision_row(ts, market, decision))
             fills, rejects = settle(pending, current, next_bars, portfolio, config)
             result.trades.extend(fills)

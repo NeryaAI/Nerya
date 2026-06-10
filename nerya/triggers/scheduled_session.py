@@ -38,6 +38,7 @@ Flow per tick
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 import traceback
@@ -48,6 +49,15 @@ from ..core import jsonl
 from ..core.config import Config
 from ..core.time import now_iso
 from .schedule import ScheduleEntry
+
+
+_SESSION_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _safe_session_fragment(value: str) -> str:
+    text = _SESSION_ID_SAFE_RE.sub("_", str(value or "").strip())
+    text = text.strip("._-")
+    return text or "schedule"
 
 
 @dataclass
@@ -104,16 +114,38 @@ class ScheduledSessionRunner:
     delivery_fn: Any = None
 
     # ------------------------------------------------------------- run
+    def run_many(
+        self,
+        entry: ScheduleEntry,
+        *,
+        now_ts: float | None = None,
+    ) -> list[ScheduledSessionResult]:
+        """Execute one turn in every session selected by ``entry``.
+
+        ``ephemeral`` preserves the original behaviour: every firing gets a
+        fresh session. ``reuse`` keeps all firings in one stable session, and
+        ``fanout`` runs the same prompt once per configured ``session_ids``
+        entry.
+        """
+
+        now_ts = time.time() if now_ts is None else float(now_ts)
+        session_ids = self._session_ids_for(entry, now_ts)
+        return [
+            self.run_once(entry, now_ts=now_ts, session_id=session_id)
+            for session_id in session_ids
+        ]
+
     def run_once(self, entry: ScheduleEntry,
-                 *, now_ts: float | None = None) -> ScheduledSessionResult:
+                 *, now_ts: float | None = None,
+                 session_id: str | None = None) -> ScheduledSessionResult:
         """Execute one scheduled agent session for ``entry``.
 
         Must only be called when ``entry.session_kind == 'agent'`` —
         the caller (cron tick) is responsible for that branch.
         """
         now_ts = time.time() if now_ts is None else float(now_ts)
-        session_id = f"sched:{entry.id}:{int(now_ts)}"
-        trigger_event_id = f"sched_evt:{entry.id}:{int(now_ts)}"
+        session_id = session_id or self._session_ids_for(entry, now_ts)[0]
+        trigger_event_id = f"sched_evt_{_safe_session_fragment(entry.id)}_{int(now_ts)}"
         t0 = time.monotonic()
         trigger = {
             "id": trigger_event_id,
@@ -253,6 +285,17 @@ class ScheduledSessionRunner:
         if entry.attached_skills:
             payload.setdefault("attached_skills", list(entry.attached_skills))
         return payload
+
+    @staticmethod
+    def _session_ids_for(entry: ScheduleEntry, now_ts: float) -> list[str]:
+        if entry.session_mode == "fanout":
+            return list(entry.session_ids or [])
+        if entry.session_mode == "reuse":
+            return [
+                entry.session_id
+                or f"sched_{_safe_session_fragment(entry.id)}"
+            ]
+        return [f"sched_{_safe_session_fragment(entry.id)}_{int(now_ts)}"]
 
     def _journal(self, entry: ScheduleEntry,
                  result: ScheduledSessionResult, now_ts: float) -> None:

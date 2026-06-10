@@ -150,11 +150,31 @@ def _collect_routes(config: Config | None = None) -> None:
             _register(method, path, handler)
 
 
+def _path_params(pattern: str, path: str) -> dict[str, str] | None:
+    if pattern == path:
+        return {}
+    pattern_parts = [part for part in pattern.strip("/").split("/") if part]
+    path_parts = [part for part in path.strip("/").split("/") if part]
+    if len(pattern_parts) != len(path_parts):
+        return None
+    params: dict[str, str] = {}
+    for expected, actual in zip(pattern_parts, path_parts):
+        if expected.startswith("{") and expected.endswith("}") and len(expected) > 2:
+            params[expected[1:-1]] = actual
+            continue
+        if expected != actual:
+            return None
+    return params
+
+
 def _match(method: str, path: str):
     for m, p, h in _ROUTES:
-        if m == method and p == path:
-            return h
-    return None
+        if m != method:
+            continue
+        params = _path_params(p, path)
+        if params is not None:
+            return h, params
+    return None, {}
 
 
 def _status_body_from_result(result: Any) -> tuple[int, dict[str, Any]]:
@@ -403,12 +423,13 @@ def build_server(
                     "reason": auth.reason,
                 })
                 return
-            handler = _match("GET", parsed.path)
+            handler, path_params = _match("GET", parsed.path)
             if not handler:
                 self._write(404, {"error": "not_found", "path": self.path})
                 return
             query = {k: v[0] if len(v) == 1 else v
                      for k, v in parse_qs(parsed.query).items()}
+            query.update(path_params)
             try:
                 result = handler(_client_for_current_thread(config), query)
                 if isinstance(result, StreamingResponse):
@@ -428,14 +449,17 @@ def build_server(
                     "reason": auth.reason,
                 })
                 return
-            handler = _match("POST", path_only)
+            handler, path_params = _match("POST", path_only)
             if not handler:
                 self._write(404, {"error": "not_found", "path": self.path})
                 return
             try:
+                payload = self._read_body()
+                if path_params:
+                    payload = {**path_params, **payload}
                 result = handler(
                     _client_for_current_thread(config),
-                    self._read_body(),
+                    payload,
                 )
                 status, body = _status_body_from_result(result)
                 self._write(status, body)

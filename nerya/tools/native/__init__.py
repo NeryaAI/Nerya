@@ -35,6 +35,10 @@ Modules:
 * :mod:`data_api`      — ``data_api``: discover schemas and call bounded
   read-only provider-specific data actions beyond standard ticker / OHLCV
   reads (AkShare tables, wallet provider data, allowlisted OnchainOS reads).
+* :mod:`accounts`      — ``account_list`` / ``account_upsert``: inspect and
+  create safe paper accounts through the official account control plane.
+* :mod:`gateway`       — ``gateway_diagnose``: read-only messaging gateway
+  diagnostics for live channel config and provider probes.
 * :mod:`trading`       — ``portfolio_summary`` / ``portfolio_positions`` /
   ``portfolio_pnl`` / ``virtual_ledger`` / ``risk_check`` /
   ``strategy_list`` / ``strategy_view`` / ``strategy_history`` /

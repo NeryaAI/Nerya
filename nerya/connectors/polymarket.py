@@ -1,4 +1,4 @@
-"""Polymarket v2 CLOB + Gamma + Data API connector.
+"""Polymarket v2 CLOB + Gamma connector.
 
 Surfaces prediction-market orderbooks and candles as ordinary Nerya
 :class:`Connector` reads so the rest of the stack (market_data skill,
@@ -8,16 +8,17 @@ Endpoints used (public):
 
 * ``https://clob.polymarket.com``          — CLOB v2 (orderbooks, orders)
 * ``https://gamma-api.polymarket.com``     — Gamma (market metadata)
-* ``https://data-api.polymarket.com``      — price series / candles
 
 Writes (``place_order``) require EIP-712 signing via the API user's
 Polygon wallet — we require the caller to pass a pre-built JSON order
 payload + signature in ``credentials.extra["signed_order"]`` since
 EIP-712 on-chain signing lives in the wallet layer, not here.
 
-Markets can be referenced by *token id* (the long hex condition token
-id) or by *slug* (Gamma's ``market.slug``). ``_resolve_token`` handles
-both — slugs get one metadata lookup and are cached.
+Markets can be referenced by *asset/token id* (Polymarket's long
+decimal CLOB token id, or a 0x condition token id when supplied by an
+upstream source) or by *slug* (Gamma's ``market.slug``).
+``_resolve_token`` handles both — slugs get one metadata lookup and are
+cached.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from .http import HttpTransport, UrllibHttp
 
 CLOB_URL = "https://clob.polymarket.com"
 GAMMA_URL = "https://gamma-api.polymarket.com"
-DATA_URL = "https://data-api.polymarket.com"
+DATA_URL = CLOB_URL
 
 
 @dataclass
@@ -72,11 +73,12 @@ class PolymarketConnector(CEXConnectorBase):
     def _resolve_token(self, market: str) -> tuple[str, dict[str, Any]]:
         """Return ``(token_id, market_meta)``.
 
-        Accepts either a condition token id (``0x...`` 66-char hex) or
-        a Gamma market slug. Slugs are cached.
+        Accepts either a CLOB asset id (long decimal string), a
+        condition token id (``0x...`` 66-char hex), or a Gamma market
+        slug. Slugs are cached.
         """
         m = market.split(":", 1)[-1].strip()
-        if m.lower().startswith("0x") and len(m) >= 60:
+        if _looks_like_token_id(m):
             return m, self._market_cache.get(m, {"token_id": m})
         if m in self._market_cache:
             meta = self._market_cache[m]
@@ -116,10 +118,12 @@ class PolymarketConnector(CEXConnectorBase):
         book_raw = self._get(self.clob_url, "book", params={"token_id": token_id})
         bids = (book_raw or {}).get("bids") or []  # type: ignore[union-attr]
         asks = (book_raw or {}).get("asks") or []  # type: ignore[union-attr]
-        bid = float(bids[0]["price"]) if bids else 0.0
-        ask = float(asks[0]["price"]) if asks else 0.0
+        bid_levels = _sorted_levels(bids, reverse=True)
+        ask_levels = _sorted_levels(asks)
+        bid = bid_levels[0][0] if bid_levels else 0.0
+        ask = ask_levels[0][0] if ask_levels else 0.0
         mid = (bid + ask) / 2 if (bid and ask) else (bid or ask)
-        last = float((book_raw or {}).get("tick_size") or 0) or mid  # type: ignore[union-attr]
+        last = _float_or_zero((book_raw or {}).get("last_trade_price")) or mid  # type: ignore[union-attr]
         spread_bps = ((ask - bid) / mid) * 10_000 if mid else 0.0
         return Ticker(
             market=market, bid=bid, ask=ask, mid=mid, last=last,
@@ -132,8 +136,8 @@ class PolymarketConnector(CEXConnectorBase):
         book = self._get(self.clob_url, "book", params={"token_id": token_id})
         if not isinstance(book, dict):
             raise TradingError(f"polymarket book bad response for {market}")
-        bids = [[float(r["price"]), float(r["size"])] for r in book.get("bids") or []]
-        asks = [[float(r["price"]), float(r["size"])] for r in book.get("asks") or []]
+        bids = _sorted_levels(book.get("bids") or [], reverse=True)
+        asks = _sorted_levels(book.get("asks") or [])
         return {
             "market": market, "token_id": token_id,
             "bid": bids[0][0] if bids else 0.0,
@@ -145,17 +149,16 @@ class PolymarketConnector(CEXConnectorBase):
     def get_klines(
         self, market: str, *, interval: str = "1h", limit: int = 100,
     ) -> list[list[Any]]:
-        """Polymarket Data API price history → ccxt-style OHLCV rows.
+        """Polymarket CLOB price history -> ccxt-style OHLCV rows.
 
-        The Polymarket data API returns point-in-time prices rather than
+        The Polymarket CLOB API returns point-in-time prices rather than
         full OHLCV. We synthesize OHLC from consecutive prices so the
         rest of the stack (candles cache, backtests) keeps working.
         """
         token_id, _meta = self._resolve_token(market)
         span = _interval_to_span(interval)
-        doc = self._get(self.data_url, "prices-history", params={
-            "market": token_id, "interval": span, "fidelity": limit,
-        })
+        params = {"market": token_id, "interval": span, "fidelity": limit}
+        doc = self._get_price_history(params)
         rows = doc.get("history") if isinstance(doc, dict) else doc
         if not isinstance(rows, list):
             return []
@@ -170,6 +173,17 @@ class PolymarketConnector(CEXConnectorBase):
             candles.append([ts_ms, o, max(o, price), min(o, price), price, 0.0])
             prev_price = price
         return candles
+
+    def _get_price_history(self, params: dict[str, Any]) -> dict[str, Any] | list[Any]:
+        try:
+            return self._get(self.clob_url, "prices-history", params=params)
+        except TradingError as primary_error:
+            if self.data_url.rstrip("/") == self.clob_url.rstrip("/"):
+                raise
+            try:
+                return self._get(self.data_url, "prices-history", params=params)
+            except TradingError:
+                raise primary_error
 
     # --------------------------------------------------------- private
     def get_balances(self) -> list[Balance]:
@@ -250,13 +264,38 @@ class PolymarketConnector(CEXConnectorBase):
 
 
 def _interval_to_span(interval: str) -> str:
-    """Map a Nerya/ccxt interval to a Polymarket data API ``interval=`` param."""
+    """Map a Nerya/ccxt interval to a Polymarket ``interval=`` param."""
     s = interval.lower()
     mapping = {
         "1m": "1h", "5m": "1h", "15m": "1d",
         "1h": "1d", "4h": "1w", "1d": "1m", "1w": "max",
     }
     return mapping.get(s, "1d")
+
+
+def _looks_like_token_id(value: str) -> bool:
+    v = value.strip()
+    return (v.lower().startswith("0x") and len(v) >= 60) or (v.isdigit() and len(v) >= 20)
+
+
+def _float_or_zero(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sorted_levels(rows: list[Any], *, reverse: bool = False) -> list[list[float]]:
+    levels: list[list[float]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        price = _float_or_zero(row.get("price"))
+        size = _float_or_zero(row.get("size"))
+        if price <= 0 or size <= 0:
+            continue
+        levels.append([price, size])
+    return sorted(levels, key=lambda item: item[0], reverse=reverse)
 
 
 def _map_pm_status(raw: Any) -> str:

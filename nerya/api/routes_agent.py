@@ -15,13 +15,12 @@ from ..agent.recovery import list_open_turns, load_turn_state
 from ..agent.session import SessionStore
 from ..core import jsonl
 from ..observability.trace import build_trace, explain_trace
+from .gateway_commands import CommandContext, DEFAULT_REGISTRY
 from .gateway_events import turn_events
 
 
 _RUN_TURN_LOCK_GUARD = threading.RLock()
 _RUN_TURN_LOCKS: dict[str, threading.Lock] = {}
-
-
 def _run_turn_lock_key(client: Any, session_id: str | None) -> str:
     sid = str(session_id or "").strip()
     if not sid:
@@ -92,6 +91,71 @@ def _with_turn_limit_overrides(config, payload: dict[str, Any]):
     if max_wall_seconds is not None:
         native["max_wall_seconds"] = float(max_wall_seconds)
     return config.__class__(paths=config.paths, data=data)
+
+
+def _run_turn_user_text(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    body = payload.get("payload")
+    if isinstance(body, dict):
+        text = body.get("text") or body.get("content") or body.get("message")
+        if isinstance(text, str):
+            return text
+    trigger = payload.get("trigger")
+    if isinstance(trigger, dict):
+        body = trigger.get("payload")
+        if isinstance(body, dict):
+            text = body.get("text") or body.get("content") or body.get("message")
+            if isinstance(text, str):
+                return text
+    return ""
+
+
+def _run_turn_command_response(client: Any, payload: dict[str, Any], user_text: str) -> dict[str, Any] | None:
+    """Handle registered slash commands before they enter the LLM loop."""
+
+    text = str(user_text or "").strip()
+    if not text.startswith("/"):
+        return None
+    trigger = normalise_trigger_payload(payload)
+    trigger_payload = trigger.get("payload") if isinstance(trigger.get("payload"), dict) else {}
+    outcome = DEFAULT_REGISTRY.handle(
+        text,
+        CommandContext(
+            client=client,
+            platform=str(trigger_payload.get("platform") or trigger.get("source") or "dashboard"),
+            chat_id=str(trigger_payload.get("chat_id") or payload.get("session_id") or "dashboard"),
+            session_id=str(payload.get("session_id") or ""),
+            raw_text=text,
+        ),
+    )
+    if not outcome.handled:
+        return None
+    reply = outcome.reply_text
+    return {
+        "trigger_event_id": trigger.get("id") or trigger.get("event_id"),
+        "decision": {"action": "send_message", "text": reply, "command": outcome.command},
+        "actions": [{"action": "send_message", "payload": {"text": reply, "command": outcome.command}}],
+        "tool_trace": [],
+        "budget": {"iterations": 0, "tool_calls": 0, "errors": 0, "aborted": False, "transition_reason": "slash_command"},
+        "reply_text": reply,
+        "events": [],
+        "turn_id": str(payload.get("turn_id") or ""),
+        "stopped_reason": "command",
+        "transition_reason": "slash_command",
+        "final_text": reply,
+        "iterations": 0,
+        "steps": [],
+        "blocks": [],
+        "activity_events": [],
+        "harness": "command",
+        "artifact_index": {},
+        "verifier_outcome": {},
+        "execution_state": {},
+        "final_report": {},
+        "attachments": [],
+        "command": outcome.command,
+    }
 
 
 def _iso_from_db_ts(value: Any) -> str:
@@ -282,6 +346,137 @@ def _project_tool_trace_from_blocks(blocks: list[dict[str, Any]]) -> list[dict[s
                 }
             )
     return trace
+
+
+_BACKTEST_LOCATOR_KEYS = (
+    "strategy_id",
+    "proposal_id",
+    "backtest_ts",
+    "out_dir",
+    "backtest_dir",
+    "metrics_path",
+    "raw_metrics_file",
+    "report_path",
+    "chart_path",
+    "equity_path",
+    "trades_path",
+    "result_path",
+)
+
+
+def _json_object_from_compacted_result(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    text = value.strip()
+    marker = "[compacted_kept]"
+    if marker in text:
+        text = text.split(marker, 1)[1].strip()
+    if not text.startswith("{"):
+        return {}
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _backtest_locator_from_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    locator = {
+        key: payload.get(key)
+        for key in _BACKTEST_LOCATOR_KEYS
+        if payload.get(key) not in (None, "", [])
+    }
+    if not locator.get("raw_metrics_file") and payload.get("metrics_path"):
+        locator["raw_metrics_file"] = payload.get("metrics_path")
+    return locator
+
+
+def _augment_turn_backtest_locators(
+    turn_payload: dict[str, Any] | None,
+    *,
+    raw_payload_by_ref: dict[str, Any] | None = None,
+    client: Any | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(turn_payload, dict):
+        return turn_payload
+    raw_cache: dict[str, Any] = dict(raw_payload_by_ref or {})
+
+    def raw_payload(ref: str) -> Any:
+        if not ref:
+            return None
+        if ref in raw_cache:
+            return raw_cache[ref]
+        if client is None:
+            return None
+        try:
+            from ..llm.tool_raw_store import open_store
+
+            rec = open_store(client).read(ref)
+        except Exception:
+            rec = None
+        raw_cache[ref] = rec.payload if rec is not None else None
+        return raw_cache[ref]
+
+    def locator_for(block: dict[str, Any]) -> dict[str, Any]:
+        action = str(block.get("action") or "")
+        compaction = block.get("compaction") if isinstance(block.get("compaction"), dict) else {}
+        if "backtest" not in action and compaction.get("rule_id") != "backtest.report":
+            return {}
+        locator = _backtest_locator_from_payload(block)
+        locator.update(_backtest_locator_from_payload(_json_object_from_compacted_result(block.get("result"))))
+        if locator.get("strategy_id") and locator.get("backtest_ts"):
+            return locator
+        ref = str(compaction.get("raw_ref") or "").strip()
+        locator.update(_backtest_locator_from_payload(raw_payload(ref)))
+        return locator
+
+    changed = False
+    next_payload = dict(turn_payload)
+    blocks = next_payload.get("blocks")
+    if isinstance(blocks, list):
+        next_blocks: list[Any] = []
+        for env in blocks:
+            if not isinstance(env, dict):
+                next_blocks.append(env)
+                continue
+            block = env.get("block") if isinstance(env.get("block"), dict) else env
+            if not isinstance(block, dict):
+                next_blocks.append(env)
+                continue
+            locator = locator_for(block)
+            if not locator:
+                next_blocks.append(env)
+                continue
+            changed = True
+            next_block = {**block, **locator}
+            if env.get("block") is block:
+                next_blocks.append({**env, "block": next_block})
+            else:
+                next_blocks.append(next_block)
+        if changed:
+            next_payload["blocks"] = next_blocks
+
+    traces = next_payload.get("tool_trace")
+    if isinstance(traces, list):
+        next_traces: list[Any] = []
+        for item in traces:
+            if not isinstance(item, dict):
+                next_traces.append(item)
+                continue
+            locator = locator_for(item)
+            if locator:
+                changed = True
+                next_traces.append({**item, **locator})
+            else:
+                next_traces.append(item)
+        if changed:
+            next_payload["tool_trace"] = next_traces
+
+    return next_payload if changed else turn_payload
 
 
 def _rehydrate_turn_tool_events(
@@ -593,6 +788,7 @@ def routes():
         raw = (
             (payload.get("permission_mode") if isinstance(payload, dict) else None)
             or _os.environ.get("NERYA_PERMISSION_MODE")
+            or client.config.get("runtime.permission_mode")
             or "default"
         )
         try:
@@ -622,16 +818,16 @@ def routes():
         run_config = _with_turn_limit_overrides(client.config, payload)
         trigger = normalise_trigger_payload(payload)
         requested_session_id = payload.get("session_id")
+        _user_text = _run_turn_user_text(payload)
 
         # Auto-classify the incoming operator/user/channel text against the
         # prompt-guard policy. ``review`` and ``block`` verdicts auto-enqueue
         # into the review queue so the Action Inbox renders them; ``block``
         # short-circuits the turn so the LLM never sees the hostile prompt.
-        _user_text = ""
         _pg = None
         try:
             from ..agent.prompt_firewall import classify_user_input, extract_user_text
-            _user_text = extract_user_text(trigger) or ""
+            _user_text = extract_user_text(trigger) or _user_text
             if _user_text:
                 _channel = (
                     (trigger.get("payload") or {}).get("channel")
@@ -652,12 +848,17 @@ def routes():
                         "blocked": True,
                         "prompt_guard": _pg,
                         "message": (
-                            "Prompt guard blocked this input. Review the matched "
-                            "patterns and resolve the queue item from the Action Inbox."
+                            "I cannot fulfill this request. For security reasons, "
+                            "this input was blocked by the prompt guard. Review the "
+                            "matched patterns and resolve the queue item from the "
+                            "Action Inbox."
                         ),
                     }
         except Exception:  # pragma: no cover - defensive, never block on guard error
             _pg = None
+        command_response = _run_turn_command_response(client, payload, _user_text)
+        if command_response is not None:
+            return command_response
         with _claim_run_turn_session(client, requested_session_id) as claimed:
             if not claimed:
                 return {
@@ -681,11 +882,20 @@ def routes():
                 model_id=model_id,
             )
             try:
+                from ..harness.cancellation import CancelToken
+
+                cancel_token = CancelToken()
                 result = kernel.run_turn(
                     trigger=trigger,
                     strategy_id=payload.get("strategy_id"),
                     session_id=requested_session_id,
                     turn_id=payload.get("turn_id"),
+                    cancel_token=cancel_token,
+                    evidence_contract=(
+                        payload.get("evidence_contract")
+                        if isinstance(payload.get("evidence_contract"), dict)
+                        else None
+                    ),
                 )
             except Exception as exc:
                 tb = traceback.format_exc()
@@ -710,12 +920,17 @@ def routes():
             "events": turn_events(result),
             "turn_id": result.turn_id,
             "stopped_reason": result.stopped_reason,
+            "transition_reason": getattr(result, "transition_reason", None),
             "final_text": getattr(result, "final_text", ""),
             "iterations": getattr(result, "iterations", 0),
             "steps": list(result.steps or []),
             "blocks": list(result.blocks or []),
             "activity_events": list(getattr(result, "activity_events", []) or []),
             "harness": getattr(result, "harness", "native"),
+            "artifact_index": dict(getattr(result, "artifact_index", {}) or {}),
+            "verifier_outcome": dict(getattr(result, "verifier_outcome", {}) or {}),
+            "execution_state": dict(getattr(result, "execution_state", {}) or {}),
+            "final_report": dict(getattr(result, "final_report", {}) or {}),
             "attachments": list(getattr(result, "attachments", []) or []),
         }
         # Surface the prompt-guard verdict on review (block already short-
@@ -830,7 +1045,16 @@ def routes():
         tid = payload.get("turn_id")
         if not tid:
             return {"error": "turn_id required"}
-        return load_turn_state(client.config.paths, tid).asdict()
+        try:
+            return load_turn_state(client.config.paths, tid).asdict()
+        except KeyError as exc:
+            return {
+                "_status": 404,
+                "ok": False,
+                "error": "turn_state_not_found",
+                "message": str(exc),
+                "turn_id": str(tid),
+            }
 
     # Session sources that represent a human-initiated chat thread — these
     # are the only ones the dashboard chat sidebar should display by default.
@@ -1194,6 +1418,10 @@ def routes():
                             turn_candidate,
                             tool_events_by_turn.get(str(r.get("turn_id") or ""), []),
                         )
+                        turn_payload = _augment_turn_backtest_locators(
+                            turn_payload,
+                            client=client,
+                        )
                 messages.append(
                     {
                         "message_id": r.get("message_id"),
@@ -1321,6 +1549,30 @@ def routes():
         cancelled = signal_cancel(str(sid), reason=str(p.get("reason") or "operator_interrupt"))
         return {"ok": True, "cancelled": cancelled, "session_id": str(sid)}
 
+    def steer(client, payload):
+        """POST /agent/steer — mid-turn redirect.
+
+        Queues an operator message for the *running* turn of
+        ``session_id`` (or ``turn_id``). The agent loop drains the
+        queue between iterations and appends each message to the live
+        transcript as a pinned user message, so the model
+        course-corrects on its next round without aborting the turn or
+        losing the tool work already done. Returns ``steered=False``
+        when no turn is currently running under that id — the caller
+        should then send a normal new-turn message instead.
+        """
+
+        from ..harness.cancellation import signal_steer
+        p = payload or {}
+        sid = p.get("session_id") or p.get("turn_id")
+        message = str(p.get("message") or p.get("text") or "").strip()
+        if not sid:
+            return {"ok": False, "error": "session_id required"}
+        if not message:
+            return {"ok": False, "error": "message required"}
+        steered = signal_steer(str(sid), message)
+        return {"ok": True, "steered": steered, "session_id": str(sid)}
+
     def tool_registry(client, _payload):
         """GET /agent/tools — enumerate native tools.
 
@@ -1409,5 +1661,6 @@ def routes():
         ("GET",  "/agent/session/transcript", session_transcript_handler),
         ("GET",  "/agent/stream/events", stream_events),
         ("POST", "/agent/interrupt", interrupt),
+        ("POST", "/agent/steer", steer),
         ("GET",  "/agent/tools", tool_registry),
     ]

@@ -61,10 +61,12 @@ def _render_summary(result: Any, entry: Any) -> str:
         decision = result.get("decision")
         actions = result.get("actions") or []
         stopped_reason = result.get("stopped_reason")
+        script_result = result.get("result")
     else:
         decision = getattr(result, "decision", None)
         actions = getattr(result, "actions", None) or []
         stopped_reason = getattr(result, "stopped_reason", None)
+        script_result = None
 
     msg: str | None = None
     if isinstance(decision, dict):
@@ -78,6 +80,14 @@ def _render_summary(result: Any, entry: Any) -> str:
         skill = first.get("skill") or first.get("skill_id") or "?"
         action = first.get("action") or "?"
         msg = f"scheduled session ran {skill}.{action}"
+    if msg is None and isinstance(script_result, dict):
+        for key in ("message", "summary", "text", "headline", "note"):
+            v = script_result.get(key)
+            if isinstance(v, str) and v.strip():
+                msg = v.strip()
+                break
+    if msg is None and isinstance(script_result, list):
+        msg = f"scheduled script returned {len(script_result)} item(s)"
     if msg is None:
         if stopped_reason:
             msg = f"scheduled session stopped: {stopped_reason}"
@@ -95,14 +105,20 @@ def _result_envelope(result: Any, entry: Any) -> dict[str, Any]:
         decision = result.get("decision")
         actions = list(result.get("actions") or [])
         stopped_reason = result.get("stopped_reason")
+        script_id = result.get("script_id")
+        script_run_id = result.get("script_run_id")
+        script_result = result.get("result")
     else:
         turn_id = getattr(result, "turn_id", None)
         trigger_event_id = getattr(result, "trigger_event_id", None)
         decision = getattr(result, "decision", None)
         actions = list(getattr(result, "actions", None) or [])
         stopped_reason = getattr(result, "stopped_reason", None)
+        script_id = None
+        script_run_id = None
+        script_result = None
 
-    return {
+    envelope = {
         "schedule_id": entry.id,
         "target": entry.target,
         "strategy_id": entry.strategy_id,
@@ -114,6 +130,13 @@ def _result_envelope(result: Any, entry: Any) -> dict[str, Any]:
         "session_kind": entry.session_kind,
         "ts": now_iso(),
     }
+    if script_id:
+        envelope["script_id"] = script_id
+    if script_run_id:
+        envelope["script_run_id"] = script_run_id
+    if script_result is not None:
+        envelope["result"] = script_result
+    return envelope
 
 
 # --------------------------------------------------------------- targets
@@ -122,12 +145,18 @@ def _result_envelope(result: Any, entry: Any) -> dict[str, Any]:
 def _deliver_messages(config: Config, entry: Any,
                       target: dict[str, Any], result: Any,
                       pipeline: MessagePipeline) -> dict[str, Any]:
-    channel = str(target.get("channel") or "").strip()
+    kind = str(target.get("kind") or "").strip().lower()
+    channel = str(
+        target.get("channel")
+        or target.get("platform")
+        or target.get("to")
+        or (kind if kind not in {"messages", "gateway", "platform"} else "")
+    ).strip()
     if not channel:
         return {
             "ok": False,
-            "kind": "messages",
-            "error": "messages target missing 'channel'",
+            "kind": kind or "messages",
+            "error": "gateway/messages target missing 'channel' or 'platform'",
         }
     text = _render_summary(result, entry)
     try:
@@ -143,13 +172,13 @@ def _deliver_messages(config: Config, entry: Any,
     except Exception as exc:  # pragma: no cover - defensive
         return {
             "ok": False,
-            "kind": "messages",
+            "kind": kind or "messages",
             "channel": channel,
             "error": f"{type(exc).__name__}: {exc}",
         }
     return {
         "ok": bool(out.get("delivered")),
-        "kind": "messages",
+        "kind": kind or "messages",
         "channel": channel,
         "message_id": out.get("message_id"),
         "rate_limited": bool(out.get("rate_limited")),
@@ -220,7 +249,9 @@ def deliver_scheduled_session(config: Config, entry: Any,
 
     for target in entry.delivery_targets or []:
         kind = str(target.get("kind") or "").strip().lower()
-        if kind == "messages":
+        if kind in {"messages", "gateway", "platform", "dashboard", "local",
+                    "telegram", "discord", "slack", "feishu", "wecom",
+                    "dingtalk", "matrix", "whatsapp"}:
             row = _deliver_messages(config, entry, target, result, pipeline)
         elif kind == "webhook":
             row = _deliver_webhook(config, entry, target, result, transport)

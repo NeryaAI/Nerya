@@ -17,13 +17,15 @@ payload caps) that everything else uses.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from ..core import jsonl
 from ..core.atomic_write import atomic_write_text
@@ -34,6 +36,7 @@ from .event import TriggerEvent
 from .runtime import TriggerRuntime
 from .schedule import ScheduleEntry, load_schedules
 from .scheduled_session import ScheduledSessionRunner
+from .scheduled_script import ScheduledScriptRunner
 
 
 def _state_path(cfg: Config) -> Path:
@@ -55,6 +58,57 @@ def _read_state(path: Path) -> dict[str, float]:
 def _write_state(path: Path, state: dict[str, float]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps(state, indent=2, sort_keys=True))
+
+
+@contextlib.contextmanager
+def _cron_tick_lock(path: Path) -> Iterator[bool]:
+    """Try to acquire the workspace-wide cron tick lock.
+
+    Multiple local runtimes can point at the same workspace during E2E or
+    operator restarts. The cron state file is shared, so each tick must be
+    process-exclusive before it reads schedules or writes last-fired state.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = path.open("a+b")
+    acquired = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except OSError:
+                fh.close()
+                yield False
+                return
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                fh.close()
+                yield False
+                return
+        yield True
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
 
 
 @dataclass
@@ -87,6 +141,7 @@ class CronScheduler:
     # the first time we need them via :mod:`importlib` (see below).
     kernel_factory: Any = None
     delivery_fn: Any = None
+    script_runner: Any = None
 
     def _session_runner(self) -> ScheduledSessionRunner:
         if self.scheduled_session_runner is None:
@@ -115,6 +170,28 @@ class CronScheduler:
             )
         return self.scheduled_session_runner
 
+    def _script_runner(self) -> ScheduledScriptRunner:
+        script_runner = self.script_runner
+        delivery_fn = self.delivery_fn
+        if script_runner is None:
+            import importlib
+            script_runner = importlib.import_module(
+                "nerya.scripts.runner",
+            ).run_script
+        if delivery_fn is None:
+            import importlib
+            try:
+                delivery_fn = importlib.import_module(
+                    "nerya.messaging.scheduled_delivery",
+                ).deliver_scheduled_session
+            except Exception:  # pragma: no cover - defensive
+                delivery_fn = None
+        return ScheduledScriptRunner(
+            config=self.config,
+            script_runner=script_runner,
+            delivery_fn=delivery_fn,
+        )
+
     # ---------------------------------------------------------------- public
     def list_entries(self) -> list[ScheduleEntry]:
         return load_schedules(self.config.paths)
@@ -126,6 +203,14 @@ class CronScheduler:
         ``result`` from the trigger router; agent-kind entries carry a
         ``session`` dict from the scheduled-session runner.
         """
+        with _cron_tick_lock(self.config.paths.state / "cron.lock") as acquired:
+            if not acquired:
+                return []
+            return self._tick_locked(now_ts=now_ts)
+
+    def _tick_locked(self, *, now_ts: float | None = None) -> list[dict[str, Any]]:
+        """Run one cron tick after the workspace lock is acquired."""
+
         now_ts = time.time() if now_ts is None else float(now_ts)
         now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
         state_path = _state_path(self.config)
@@ -143,7 +228,7 @@ class CronScheduler:
 
             if entry.session_kind == "agent":
                 try:
-                    session_result = self._session_runner().run_once(
+                    session_results = self._session_runner().run_many(
                         entry, now_ts=now_ts,
                     )
                 except Exception as e:  # pragma: no cover - defensive
@@ -159,20 +244,55 @@ class CronScheduler:
                     state[entry.id] = now_ts
                     continue
                 state[entry.id] = now_ts
+                primary = session_results[0]
                 jsonl.append(self.config.paths.journal("cron"), {
                     "kind": "cron.scheduled_session",
                     "schedule_id": entry.id,
-                    "session_id": session_result.session_id,
-                    "turn_id": session_result.turn_id,
+                    "session_id": primary.session_id,
+                    "turn_id": primary.turn_id,
                     "target": entry.target,
-                    "ok": session_result.ok,
+                    "ok": all(r.ok for r in session_results),
+                    "session_count": len(session_results),
                     "ts": now_iso(),
                 })
                 fired.append({
                     "schedule_id": entry.id,
-                    "session_id": session_result.session_id,
-                    "event_id": session_result.trigger_event_id,
-                    "session": session_result.asdict(),
+                    "session_id": primary.session_id,
+                    "event_id": primary.trigger_event_id,
+                    "session": primary.asdict(),
+                    "sessions": [r.asdict() for r in session_results],
+                })
+                continue
+
+            if entry.session_kind == "script":
+                try:
+                    script_result = self._script_runner().run_once(
+                        entry, now_ts=now_ts,
+                    )
+                except Exception as e:  # pragma: no cover - defensive
+                    fired.append({
+                        "schedule_id": entry.id,
+                        "error": {
+                            "code": "scheduled_script_failed",
+                            "message": f"{type(e).__name__}: {e}",
+                        },
+                    })
+                    state[entry.id] = now_ts
+                    continue
+                state[entry.id] = now_ts
+                jsonl.append(self.config.paths.journal("cron"), {
+                    "kind": "cron.scheduled_script",
+                    "schedule_id": entry.id,
+                    "script_id": script_result.script_id,
+                    "script_run_id": script_result.script_run_id,
+                    "target": entry.target,
+                    "ok": script_result.ok,
+                    "ts": now_iso(),
+                })
+                fired.append({
+                    "schedule_id": entry.id,
+                    "script_id": script_result.script_id,
+                    "script": script_result.asdict(),
                 })
                 continue
 

@@ -140,6 +140,26 @@ def cmd_dev_tail(args) -> int:
     return 0
 
 
+def cmd_dev_context_full(args) -> int:
+    from pathlib import Path
+
+    from ...llm.context_audit import build_context_full_audit
+
+    client = _client(args.workspace, getattr(args, "profile", None))
+    path = Path(args.path) if args.path else client.config.paths.dev_log("llm_context_full")
+    _print(build_context_full_audit(
+        path,
+        session_id=args.session_id,
+        turn_id=args.turn_id,
+        call_id=args.call_id,
+        subagent=args.subagent,
+        context_scope=args.context_scope,
+        include_payload=bool(args.include_payload),
+        limit=args.limit,
+    ))
+    return 0
+
+
 def cmd_dev_clear(args) -> int:
     client = _client(args.workspace, getattr(args, "profile", None))
     root = client.config.paths.dev_logs
@@ -194,6 +214,19 @@ def register(sub) -> None:
                    default="http", nargs="?")
     p.add_argument("--limit", type=int, default=50)
     p.set_defaults(func=cmd_dev_tail)
+    p = dev.add_parser("context-full"); _add_ws(p)
+    p.add_argument("--path", default=None,
+                   help="Override the llm_context_full.jsonl path.")
+    p.add_argument("--session-id", default=None)
+    p.add_argument("--turn-id", default=None)
+    p.add_argument("--call-id", default=None)
+    p.add_argument("--subagent", default=None)
+    p.add_argument("--context-scope", default=None)
+    p.add_argument("--include-payload", action="store_true",
+                   help="Include full redacted request/response payloads.")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Return only the last N matching calls.")
+    p.set_defaults(func=cmd_dev_context_full)
     p = dev.add_parser("clear"); _add_ws(p); p.set_defaults(func=cmd_dev_clear)
 
 
@@ -203,6 +236,6 @@ __all__ = [
     "cmd_mcp_serve", "cmd_mcp_list_tools",
     "cmd_acp_serve",
     "cmd_cron_list", "cmd_cron_run_once",
-    "cmd_dev_status", "cmd_dev_tail", "cmd_dev_clear",
+    "cmd_dev_status", "cmd_dev_tail", "cmd_dev_context_full", "cmd_dev_clear",
     "register",
 ]

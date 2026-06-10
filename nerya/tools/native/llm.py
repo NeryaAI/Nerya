@@ -38,6 +38,20 @@ from ..types import (
 _CALLER_ID = "agent:native"
 
 
+def _context_metadata(call: ToolCall, *, scope: str) -> dict[str, Any]:
+    meta = call.metadata if isinstance(call.metadata, dict) else {}
+    return {
+        "session_id": meta.get("session_id"),
+        "turn_id": call.turn_id or meta.get("turn_id"),
+        "iteration": call.iteration,
+        "strategy_id": meta.get("strategy_id"),
+        "trigger_event_id": meta.get("trigger_event_id"),
+        "parent_call_id": call.id or call.parent_call_id,
+        "team_run_id": meta.get("team_run_id"),
+        "context_scope": scope,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -168,6 +182,7 @@ def llm_complete_handler(call: ToolCall, *, config: Config) -> ToolResult:
             caller=_CALLER_ID,
             tier=tier,
             schema=schema,
+            metadata=_context_metadata(call, scope="native_llm_complete"),
         )
     except Exception as exc:
         return _exec_error(call, exc)
@@ -196,6 +211,7 @@ def llm_classify_handler(call: ToolCall, *, config: Config) -> ToolResult:
             text=text,
             labels=[str(label) for label in labels],
             tier=tier,
+            metadata=_context_metadata(call, scope="native_llm_classify"),
         )
     except Exception as exc:
         return _exec_error(call, exc)
@@ -220,6 +236,7 @@ def llm_extract_json_handler(call: ToolCall, *, config: Config) -> ToolResult:
             schema=schema,
             task=task,
             tier=tier,
+            metadata=_context_metadata(call, scope="native_llm_extract_json"),
         )
     except Exception as exc:
         return _exec_error(call, exc)
@@ -240,6 +257,7 @@ def llm_compress_handler(call: ToolCall, *, config: Config) -> ToolResult:
             caller=_CALLER_ID,
             text=text,
             max_tokens=max_tokens,
+            metadata=_context_metadata(call, scope="native_llm_compress"),
         )
     except Exception as exc:
         return _exec_error(call, exc)

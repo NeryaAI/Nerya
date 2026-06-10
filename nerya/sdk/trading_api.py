@@ -73,37 +73,173 @@ class TradingAPI:
         :meth:`close_position` instead — they produce typed
         :class:`TradePlan` objects with explicit sizing + protection,
         which the new control plane can reason about.
+
+        Routes through :func:`nerya.trading.submit.submit_trade_intent`
+        directly — the trading skill is SKILL.md-based and no longer
+        declares the old ``submit_trade_intent`` action spec.
         """
-        return self.skills.call(
-            "trading", "submit_trade_intent",
-            payload=payload,
-            caller=payload.pop("_caller", "sdk"),
-            strategy_id=payload.get("strategy_id"),
-            session_id=payload.pop("_session_id", None),
-            trigger_event_id=payload.pop("_trigger_event_id", None),
-        )
+        from ..trading.submit import submit_trade_intent
+
+        payload.pop("_caller", None)
+        payload.pop("_session_id", None)
+        trigger_event_id = payload.pop("_trigger_event_id", None)
+        spec = dict(payload)
+        if trigger_event_id and not spec.get("trigger_event_id"):
+            spec["trigger_event_id"] = str(trigger_event_id)
+        try:
+            return submit_trade_intent(self.config, spec=spec)
+        except ApprovalPending as p:
+            return {
+                "status": "pending_approval",
+                "order_id": None,
+                "approval_id": p.approval_id,
+            }
+        except (TypeError, ValueError) as exc:
+            return {
+                "status": "rejected",
+                "order_id": None,
+                "error": "intent_validation_failed",
+                "detail": str(exc),
+            }
 
     def cancel_order(self, *, strategy_id: str, order_id: str,
                      caller: str = "sdk") -> dict[str, Any]:
-        return self.skills.call(
-            "trading", "cancel_order",
-            payload={"strategy_id": strategy_id, "order_id": order_id},
-            caller=caller, strategy_id=strategy_id,
+        """Cancel a resting order recorded in the strategy's order ledger.
+
+        Paper-mode market orders fill synchronously, so there is usually
+        nothing to cancel — the envelope says so instead of erroring.
+        """
+        record = self._find_ledger_record(
+            strategy_id, ledger="orders", order_id=order_id
         )
+        if record is None:
+            return {
+                "ok": False,
+                "error": "order_not_found",
+                "strategy_id": strategy_id,
+                "order_id": order_id,
+            }
+        status = str(record.get("status") or "").lower()
+        if status in {"filled", "canceled", "cancelled", "rejected", "expired"}:
+            return {
+                "ok": False,
+                "error": "order_not_cancellable",
+                "detail": f"order already terminal (status={status or 'unknown'})",
+                "strategy_id": strategy_id,
+                "order_id": order_id,
+            }
+        # The order ledger row only carries order/intent ids; join the
+        # intents ledger for account + market so we can reach the venue.
+        intent_id = str(record.get("intent_id") or "")
+        intent_row = None
+        if intent_id:
+            for row in self._tail_ledger(strategy_id, "intents", limit=500):
+                if str(row.get("intent_id") or "") == intent_id:
+                    intent_row = row
+                    break
+        account_id = str((intent_row or {}).get("account_id") or "")
+        market = str((intent_row or {}).get("market") or "")
+        if not account_id or not market:
+            return {
+                "ok": False,
+                "error": "order_record_incomplete",
+                "detail": "ledger records lack account_id/market for venue cancel",
+                "strategy_id": strategy_id,
+                "order_id": order_id,
+            }
+        from ..connectors.registry import ConnectorRegistry
+        from ..trading.accounts import get_account
+
+        try:
+            account = get_account(self.config.paths, account_id)
+            registry = ConnectorRegistry(workspace=self.config.paths.root)
+            connector = registry.get(account.id, account.connector_cfg())
+            ack = connector.cancel_order(market=market, order_id=order_id)
+        except Exception as exc:  # noqa: BLE001 — venue errors become envelopes
+            return {
+                "ok": False,
+                "error": "venue_cancel_failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+                "strategy_id": strategy_id,
+                "order_id": order_id,
+            }
+        result = ack.asdict() if hasattr(ack, "asdict") else dict(ack or {})
+        return {
+            "ok": True,
+            "strategy_id": strategy_id,
+            "order_id": order_id,
+            "result": result,
+        }
 
     def get_order_status(self, *, strategy_id: str, order_id: str) -> dict[str, Any]:
-        return self.skills.call(
-            "trading", "get_order_status",
-            payload={"strategy_id": strategy_id, "order_id": order_id},
-            caller="sdk", strategy_id=strategy_id,
+        record = self._find_ledger_record(
+            strategy_id, ledger="orders", order_id=order_id
         )
+        if record is None:
+            return {
+                "ok": False,
+                "error": "order_not_found",
+                "strategy_id": strategy_id,
+                "order_id": order_id,
+            }
+        return {"ok": True, "order": record}
 
     def get_strategy_history(self, *, strategy_id: str, limit: int = 20) -> dict[str, Any]:
-        return self.skills.call(
-            "trading", "get_strategy_history",
-            payload={"strategy_id": strategy_id, "limit": limit},
-            caller="sdk", strategy_id=strategy_id,
-        )
+        """Tail the strategy's order/fill ledgers (newest first)."""
+        return {
+            "ok": True,
+            "strategy_id": strategy_id,
+            "orders": self._tail_ledger(strategy_id, "orders", limit=limit),
+            "fills": self._tail_ledger(strategy_id, "fills", limit=limit),
+        }
+
+    # -- legacy ledger helpers -----------------------------------------
+
+    def _tail_ledger(
+        self, strategy_id: str, ledger: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Read the newest rows from a strategy history ledger, flattened.
+
+        Ledger rows wrap the business fields (``{"session_id", "payload"}``
+        for orders/fills, ``{"session_id", "intent"}`` for intents); we
+        merge the nested dict up so callers see ``order_id`` etc. directly.
+        """
+        import json as _json
+
+        path = self.config.paths.strategy_history(strategy_id) / f"{ledger}.jsonl"
+        if not path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines[-max(1, int(limit)):]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = _json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            flat = dict(row)
+            for nested_key in ("payload", "intent", "fill", "risk_decision"):
+                nested = flat.pop(nested_key, None)
+                if isinstance(nested, dict):
+                    flat = {**nested, **flat}
+            rows.append(flat)
+        rows.reverse()
+        return rows
+
+    def _find_ledger_record(
+        self, strategy_id: str, *, ledger: str, order_id: str
+    ) -> dict[str, Any] | None:
+        for row in self._tail_ledger(strategy_id, ledger, limit=500):
+            if str(row.get("order_id") or "") == order_id:
+                return row
+        return None
 
     # ------------------------------------------------------------------
     # New control-plane methods

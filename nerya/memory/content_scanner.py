@@ -31,8 +31,13 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 import re
+from dataclasses import dataclass, field
+from typing import Any
 from typing import Final
+
+_LOG = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -110,31 +115,86 @@ _INVISIBLE_CHARS: Final[frozenset[str]] = frozenset({
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class MemoryScanResult:
+    allowed: bool
+    error: str | None = None
+    audit_event: dict[str, Any] = field(default_factory=dict)
+
+
+def scan_memory_content_with_audit(content: str) -> MemoryScanResult:
+    """Return scanner verdict plus an audit event.
+
+    Scanner implementation errors fail open. This prevents a broken
+    defensive scanner from making memory unusable while preserving an
+    explicit audit trail for the operator.
+    """
+
+    try:
+        return _scan_memory_content(content)
+    except Exception as exc:
+        _LOG.warning("memory content scanner failed open: %s", exc)
+        return MemoryScanResult(True, audit_event={
+            "policy": "memory_content_scanner.fail_open",
+            "scanner_failed": True,
+            "error": str(exc),
+        })
+
+
+def _scan_memory_content(content: str) -> MemoryScanResult:
+    """Return an audited scanner result for memory notebook content."""
+    if not content:
+        return MemoryScanResult(
+            True,
+            audit_event={"policy": "memory_content_scanner.allow_empty"},
+        )
+
+    for ch in _INVISIBLE_CHARS:
+        if ch in content:
+            err = (
+                f"Blocked: content contains invisible unicode character "
+                f"U+{ord(ch):04X} (possible injection)."
+            )
+            return MemoryScanResult(
+                False,
+                error=err,
+                audit_event={
+                    "policy": "memory_content_scanner.block",
+                    "rule_id": "invisible_unicode",
+                    "codepoint": f"U+{ord(ch):04X}",
+                },
+            )
+
+    for pattern, pid in _THREAT_PATTERNS:
+        if pattern.search(content):
+            err = (
+                f"Blocked: content matches threat pattern '{pid}'. "
+                "Memory entries are injected into the system prompt and "
+                "must not contain prompt-injection or exfiltration payloads."
+            )
+            return MemoryScanResult(
+                False,
+                error=err,
+                audit_event={
+                    "policy": "memory_content_scanner.block",
+                    "rule_id": pid,
+                },
+            )
+
+    return MemoryScanResult(
+        True,
+        audit_event={"policy": "memory_content_scanner.allow"},
+    )
+
+
 def scan_memory_content(content: str) -> str | None:
     """Return an error message if ``content`` is unsafe; ``None`` otherwise.
 
     The error message is intentionally human-readable so it can be
     surfaced to the operator (or to the agent's tool-call result) verbatim.
     """
-    if not content:
-        return None
-
-    for ch in _INVISIBLE_CHARS:
-        if ch in content:
-            return (
-                f"Blocked: content contains invisible unicode character "
-                f"U+{ord(ch):04X} (possible injection)."
-            )
-
-    for pattern, pid in _THREAT_PATTERNS:
-        if pattern.search(content):
-            return (
-                f"Blocked: content matches threat pattern '{pid}'. "
-                "Memory entries are injected into the system prompt and "
-                "must not contain prompt-injection or exfiltration payloads."
-            )
-
-    return None
+    result = scan_memory_content_with_audit(content)
+    return None if result.allowed else result.error
 
 
-__all__ = ["scan_memory_content"]
+__all__ = ["MemoryScanResult", "scan_memory_content", "scan_memory_content_with_audit"]

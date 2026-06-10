@@ -54,10 +54,17 @@ For URL → markdown:
 - Jina Reader (`https://r.jina.ai/<url>`) only as a fallback for
   blocked, JS-thin, or low-quality pages, not as the default path.
 
-For JS-heavy pages:
+For anti-bot or JS-heavy pages:
 
-- **playwright** — when the page only renders after JS executes.
-  Heavyweight; only use when a static fetch fails.
+- Keep using `scripts/fetch_url.py`; do not hand-roll a separate
+  scraper. The script detects common blocker pages (`captcha`,
+  `verify you are human`, Cloudflare/Akamai-style interstitials,
+  access denied, unusual traffic) and walks:
+  direct fetch + markdown extraction → Jina Reader → configured
+  headless browser engine → Scrapling.
+- **Configured headless browser engine** — use when direct extraction
+  and Jina Reader still return blocker/thin content. It is selected in
+  the dashboard Browsers tab and called automatically by `fetch_url.py`.
 
 ## Patterns
 

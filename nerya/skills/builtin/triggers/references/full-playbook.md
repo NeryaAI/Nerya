@@ -60,18 +60,17 @@ before acting.
 Order placement, transfers, and any "external mutation" must use the
 second pattern.
 
-## Bundled scripts
+## Creation surfaces
 
+Operator-facing recurring reports and non-strategy agent/script work belong to
+the `tasks` skill. Use `tasks/scripts/create_task.py` for those cases.
 
-| Script                       | Purpose                                                |
-| ---------------------------- | ------------------------------------------------------ |
-| `scripts/create_trigger.py`  | Register a new trigger (schedule / event / condition). |
-| `scripts/list_triggers.py`   | Show active triggers.                                  |
-| `scripts/cancel_trigger.py`  | Remove a trigger by id.                                |
-| `scripts/trigger_history.py` | Past firings of a trigger.                             |
+Lower-level trigger route changes should go through trigger APIs or proposals:
+`/triggers/routes/add`, `/triggers/routes/update`, `/triggers/schedules/add`,
+`/triggers/schedules/status`, and `/triggers/stats`.
 
-
-Each script reads JSON via `--json` / `--payload-file` / stdin.
+Do not invent trigger scripts that are not present under this skill's
+`scripts/` folder.
 
 ## Failure modes
 

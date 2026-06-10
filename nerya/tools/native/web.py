@@ -17,11 +17,10 @@ when the kwargs are omitted.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from ...skills.builtin.research.scripts import fetch_url, search_fetch, web_search
-from ..types import ToolCall, ToolError, ToolErrorKind, ToolResult
+from ..types import ToolCall, ToolResult
 
 
 _ENGINE_ENUM = [
@@ -73,18 +72,6 @@ _BASE_URLS_PROP = {
         "instance). Falls back to workspace JSON / env / built-in default."
     ),
 }
-
-
-_NATIVE_ROUTE_WEB_QUERY_RE = re.compile(
-    r"(?is)"
-    r"\b(solana|meme|on[-\s]?chain|dex|wallet|smart\s*money)\b"
-    r".*\b(api|data\s*provider|tracking|wallet\s*analysis|token\s*pairs|"
-    r"price\s*data|birdeye|dexscreener|jupiter|raydium)\b"
-)
-_NATIVE_ROUTE_WEB_URL_RE = re.compile(
-    r"(?i)(birdeye\.so|dexscreener\.com|docs\.dexscreener|api\.dexscreener|"
-    r"docs\.jup\.ag|api\.raydium)"
-)
 
 
 WEB_SEARCH_SCHEMA: dict[str, Any] = {
@@ -164,8 +151,23 @@ WEB_SEARCH_FETCH_SCHEMA: dict[str, Any] = {
         "timeout_s": {"type": "number", "minimum": 1, "default": 15},
         "use_jina_fallback": {"type": "boolean", "default": True},
         "prefer_jina": {"type": "boolean", "default": False},
-        "use_browser_fallback": {"type": "boolean", "default": True},
-        "use_scrapling_fallback": {"type": "boolean", "default": True},
+        "use_browser_fallback": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Allow the configured browser engine to render fetched "
+                "search results when direct/Jina output is blocked or too "
+                "thin. Search-fetch still caps fetch_top_n and total budget."
+            ),
+        },
+        "use_scrapling_fallback": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Allow Scrapling stealth fetch as the final tier for fetched "
+                "search results when direct/Jina/browser tiers fail."
+            ),
+        },
         "min_content_chars": {"type": "integer", "minimum": 0, "default": 160},
     },
     "required": ["query"],
@@ -214,30 +216,9 @@ def _coerce_base_urls(value: Any) -> dict[str, str] | None:
     return out or None
 
 
-def _native_route_redirect(call: ToolCall, *, target: str) -> ToolResult:
-    return ToolResult.from_error(
-        tool_use_id=call.id,
-        name=call.name,
-        error=ToolError(
-            kind=ToolErrorKind.PERMISSION_DENIED,
-            message=(
-                f"{call.name} was not run for {target}: this looks like "
-                "data-route/API/tool discovery for a wallet/on-chain meme "
-                "strategy. Use data_api wallet.meme_strategy_guide, follow "
-                "its bounded_sequence, read strategy_author with skill_view, "
-                "then call strategy_generate_proposal with SDK files. Public "
-                "web research is still available for genuinely external news "
-                "or docs, but not to rediscover routes Nerya already exposes."
-            ),
-        ),
-    )
-
-
 def web_search_handler(call: ToolCall) -> ToolResult:
     args = call.arguments or {}
     query = str(args.get("query") or "")
-    if _NATIVE_ROUTE_WEB_QUERY_RE.search(query):
-        return _native_route_redirect(call, target="native route discovery")
     data = web_search.run(
         query=query,
         max_results=int(args.get("max_results") or 8),
@@ -254,8 +235,6 @@ def web_search_handler(call: ToolCall) -> ToolResult:
 def web_fetch_handler(call: ToolCall) -> ToolResult:
     args = call.arguments or {}
     url = str(args.get("url") or "")
-    if _NATIVE_ROUTE_WEB_URL_RE.search(url):
-        return _native_route_redirect(call, target=url)
     data = fetch_url.run(
         url=url,
         strip_html=bool(args.get("strip_html", True)),
@@ -273,8 +252,6 @@ def web_fetch_handler(call: ToolCall) -> ToolResult:
 def web_search_fetch_handler(call: ToolCall) -> ToolResult:
     args = call.arguments or {}
     query = str(args.get("query") or "")
-    if _NATIVE_ROUTE_WEB_QUERY_RE.search(query):
-        return _native_route_redirect(call, target="native route discovery")
     data = search_fetch.run(
         query=query,
         max_results=int(args.get("max_results") or 8),

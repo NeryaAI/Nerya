@@ -56,6 +56,7 @@ from ._engines import (
 
 _DEFAULT_MAX_RESULTS = 8
 _HARD_RESULT_CAP = 25
+_KEYLESS_FALLBACK_ENGINES = ("searxng", "duckduckgo", "duckduckgo_lite")
 
 
 def _normalize_keys_arg(value: Any) -> dict[str, list[str]]:
@@ -112,14 +113,36 @@ def run(
         extra_base_urls=_normalize_base_urls_arg(base_urls),
     )
     chain = cfg.usable_chain()
+    engine_chain = list(cfg.engines)
+    config_sources = dict(cfg.sources)
+    initial_unusable_errors = [
+        f"{e.name}: no API keys configured" for e in cfg.engines if not e.usable
+    ]
+    if not chain and engines:
+        seen = {e.name for e in cfg.engines}
+        fallback_engines = [
+            name for name in _KEYLESS_FALLBACK_ENGINES if name not in seen
+        ]
+        if fallback_engines:
+            fallback_cfg = resolve_config(
+                engines=fallback_engines,
+                region=region,
+                safesearch=safesearch,
+                extra_keys=_normalize_keys_arg(keys),
+                extra_base_urls=_normalize_base_urls_arg(base_urls),
+            )
+            fallback_chain = fallback_cfg.usable_chain()
+            engine_chain.extend(fallback_cfg.engines)
+            if fallback_chain:
+                chain = fallback_chain
+                config_sources["fallback"] = "keyless"
     if not chain:
         return {
             "ok": False,
             "query": query,
-            "engine_chain": [e.name for e in cfg.engines],
-            "fallback_errors": [
-                f"{e.name}: no API keys configured" for e in cfg.engines if not e.usable
-            ],
+            "engine_chain": [e.name for e in engine_chain],
+            "fallback_errors": initial_unusable_errors
+            or [f"{e.name}: unavailable" for e in engine_chain],
             "elapsed_ms": 0,
             "count": 0,
             "results": [],
@@ -168,8 +191,8 @@ def run(
         return {
             "ok": False,
             "query": query,
-            "engine_chain": [e.name for e in cfg.engines],
-            "fallback_errors": errors,
+            "engine_chain": [e.name for e in engine_chain],
+            "fallback_errors": [*initial_unusable_errors, *errors],
             "elapsed_ms": elapsed_ms,
             "count": 0,
             "results": [],
@@ -179,13 +202,13 @@ def run(
         "ok": True,
         "query": query,
         "engine": used_engine,
-        "engine_chain": [e.name for e in cfg.engines],
+        "engine_chain": [e.name for e in engine_chain],
         "key_index": used_key_index,
-        "fallback_errors": errors,
+        "fallback_errors": [*initial_unusable_errors, *errors],
         "elapsed_ms": elapsed_ms,
         "count": len(results),
         "results": results,
-        "config_sources": cfg.sources,
+        "config_sources": config_sources,
     }
 
 

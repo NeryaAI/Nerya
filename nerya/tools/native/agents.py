@@ -22,6 +22,8 @@ that crashes the agent loop.
 from __future__ import annotations
 
 import json
+import re
+import time
 import uuid
 from threading import Lock
 from typing import Any
@@ -40,6 +42,9 @@ from ...subagents.registry import (
     save_role,
 )
 from ...subagents.result_aggregator import aggregate
+from ...teams.models import TeamMember, TeamMemberSpec, TeamRun, TeamTask, TeamTaskSpec, TeamTemplate
+from ...teams.store import TeamStore
+from ...teams.templates import get_template
 from ..types import (
     ToolCall,
     ToolError,
@@ -62,15 +67,453 @@ def _publish_team_event(kind: str, **payload: Any) -> None:
         pass
 
 
+def _persist_team_run_snapshot(
+    *,
+    config: Config,
+    common_event: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    """Mirror native ``team_run`` executions to the durable TeamStore API."""
+
+    paths = getattr(config, "paths", None)
+    if paths is None:
+        return
+    try:
+        store = TeamStore(paths)
+        run_id = str(summary.get("team_run_id") or common_event.get("team_run_id") or "").strip()
+        if not run_id:
+            return
+        team_template = str(
+            common_event.get("team_template")
+            or summary.get("team_template")
+            or "ad_hoc_parallel_team"
+        )
+        role_names = [str(r) for r in (summary.get("roles_requested") or common_event.get("roles") or [])]
+        if not role_names:
+            role_names = [
+                str(r.get("subagent") or "")
+                for r in (summary.get("results") or []) + (summary.get("failures") or [])
+                if isinstance(r, dict) and str(r.get("subagent") or "")
+            ]
+        members = [
+            TeamMember.from_spec(
+                TeamMemberSpec(
+                    name=role_name,
+                    role=role_name,
+                    subagent_name=role_name,
+                    required=True,
+                    tier="medium",
+                    description="Native team_run member.",
+                )
+            )
+            for role_name in role_names
+        ]
+        template = TeamTemplate(
+            id=team_template,
+            description="Native synchronous team_run mirror.",
+            lead=role_names[0] if role_names else "team",
+            members=[
+                TeamMemberSpec(
+                    name=role_name,
+                    role=role_name,
+                    subagent_name=role_name,
+                    required=True,
+                    tier="medium",
+                    description="Native team_run member.",
+                )
+                for role_name in role_names
+            ],
+            tasks=[
+                TeamTaskSpec(
+                    id=f"role-{role_name}",
+                    owner=role_name,
+                    subagent_name=role_name,
+                    subject=str(summary.get("task") or common_event.get("task") or ""),
+                    required=True,
+                    output_kinds=["decision_input"],
+                )
+                for role_name in role_names
+            ],
+            max_rounds=1,
+            max_parallel=int(common_event.get("max_parallel") or max(1, len(role_names) or 1)),
+            output_schema={"kind": "native_team_run_summary"},
+        )
+        existing = store.read_run(run_id)
+        if existing is None:
+            run = TeamRun(
+                id=run_id,
+                template_id=team_template,
+                goal=str(summary.get("task") or common_event.get("task") or ""),
+                status="running",
+                phase="research",
+                turn_id=common_event.get("turn_id"),
+                trigger_event_id=common_event.get("trigger_event_id"),
+                strategy_id=common_event.get("strategy_id"),
+                session_id=common_event.get("session_id"),
+                metrics={},
+            )
+            store.create_run(run, template, members)
+        succeeded = {str(x) for x in summary.get("roles_succeeded") or []}
+        failed = {str(x) for x in summary.get("roles_failed") or []}
+        result_by_role = {
+            str(row.get("subagent") or ""): row
+            for row in summary.get("results") or []
+            if isinstance(row, dict)
+        }
+        failure_by_role = {
+            str(row.get("subagent") or ""): row
+            for row in summary.get("failures") or []
+            if isinstance(row, dict)
+        }
+        for role_name in role_names:
+            result_row = result_by_role.get(role_name) or {}
+            failure_row = failure_by_role.get(role_name) or {}
+            result_output = result_row.get("output")
+            failure_output = failure_row.get("output")
+            output = (
+                result_output
+                if isinstance(result_output, dict)
+                else failure_output
+                if isinstance(failure_output, dict)
+                else {}
+            )
+            task = TeamTask(
+                id=f"role-{role_name}",
+                run_id=run_id,
+                owner=role_name,
+                subagent_name=role_name,
+                subject=str(summary.get("task") or common_event.get("task") or ""),
+                description="Native synchronous team_run member execution.",
+                required=True,
+                status="completed" if role_name in succeeded else "failed" if role_name in failed else "completed",
+                payload={
+                    "native_team_run": True,
+                    "output": output,
+                    "metrics": result_row.get("metrics") or failure_row.get("metrics") or {},
+                    "tokens": result_row.get("tokens", failure_row.get("tokens")),
+                    "usd": result_row.get("usd", failure_row.get("usd")),
+                },
+                result_summary=str(
+                    output.get("summary")
+                    or result_row.get("summary")
+                    or failure_row.get("error")
+                    or ""
+                )[:1000],
+                error=str(failure_row.get("error") or "") or None,
+            )
+            store.update_task(task)
+        run = store.read_run(run_id) or TeamRun(
+            id=run_id,
+            template_id=team_template,
+            goal=str(summary.get("task") or common_event.get("task") or ""),
+        )
+        run.status = str(summary.get("status") or "completed")
+        run.phase = "close"
+        run.final_context_ref = "synthesis/final_context.json"
+        run.final_report_ref = "synthesis/final_report.md"
+        run.metrics = {
+            "native_team_run": True,
+            "roles_total": len(role_names),
+            "roles_succeeded": len(succeeded),
+            "roles_failed": len(failed),
+            "max_parallel": summary.get("max_parallel") or common_event.get("max_parallel"),
+            "timeout_s": summary.get("timeout_s") or common_event.get("timeout_s"),
+            "timeout_uncapped_s": (
+                summary.get("timeout_uncapped_s")
+                or common_event.get("timeout_uncapped_s")
+            ),
+            "timeout_capped_by_parent": (
+                summary.get("timeout_capped_by_parent")
+                if "timeout_capped_by_parent" in summary
+                else common_event.get("timeout_capped_by_parent")
+            ),
+            "parent_remaining_wall_seconds": (
+                summary.get("parent_remaining_wall_seconds")
+                or common_event.get("parent_remaining_wall_seconds")
+            ),
+            "parent_final_reserve_seconds": (
+                summary.get("parent_final_reserve_seconds")
+                or common_event.get("parent_final_reserve_seconds")
+            ),
+            "tokens_total": summary.get("tokens_total"),
+            "usd_total": summary.get("usd_total"),
+            "output_language": summary.get("output_language"),
+            "analysis_language": summary.get("analysis_language"),
+        }
+        store.write_synthesis_json(run_id, "final_context", summary)
+        store.write_synthesis_text(
+            run_id,
+            "final_report.md",
+            _native_team_run_report(summary),
+        )
+        store.update_run(run)
+        try:
+            from ...core import jsonl
+
+            jsonl.append(config.paths.journal("agent"), {
+                "kind": "team.run",
+                "run_id": run_id,
+                "template_id": team_template,
+                "status": run.status,
+                "phase": run.phase,
+                "metrics": run.metrics,
+                "report_ref": run.final_report_ref,
+                "native_team_run": True,
+            })
+        except Exception:
+            pass
+    except Exception:
+        return
+
+
+def _native_team_run_report(summary: dict[str, Any]) -> str:
+    title = " ".join(str(summary.get("task") or "").split())[:160].strip()
+    lines = [
+        f"# {title}" if title else "# AgentTeam evidence",
+        "",
+    ]
+
+    synthesis = _public_team_synthesis(summary)
+    if synthesis:
+        lines.extend(["", "## Synthesis", synthesis])
+
+    role_lines: list[str] = []
+    for row in (summary.get("results") if isinstance(summary.get("results"), list) else [])[:12]:
+        if not isinstance(row, dict):
+            continue
+        role_lines.append(_public_team_role_line(row))
+    for row in (summary.get("failures") if isinstance(summary.get("failures"), list) else [])[:12]:
+        if not isinstance(row, dict):
+            continue
+        role_lines.append(_public_team_failure_line(row))
+    if role_lines:
+        lines.extend(["", "## Role findings", *[line for line in role_lines if line]])
+    else:
+        lines.extend([
+            "",
+            "## Role findings",
+            "The team returned bounded evidence, but no role-level summary was available for final rendering.",
+        ])
+    return "\n".join(lines).strip() + "\n"
+
+
+def _public_team_completion_label(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"completed", "ok", "success"}:
+        return "completed"
+    if normalized in {"completed_with_failures", "partial", "degraded"}:
+        return "partial"
+    if normalized in {"failed", "error", "timeout"}:
+        return "failed"
+    return "partial"
+
+
+def _public_team_parse_jsonish(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 5:
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text[0] not in "{[":
+            return value
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return value
+        return _public_team_parse_jsonish(parsed, depth=depth + 1)
+    if isinstance(value, list):
+        return [_public_team_parse_jsonish(item, depth=depth + 1) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _public_team_parse_jsonish(v, depth=depth + 1) for k, v in value.items()}
+    return value
+
+
+_PUBLIC_TEAM_INTERNAL_KEYS = {
+    "analysis_language",
+    "call_id",
+    "done",
+    "error_kind",
+    "metrics",
+    "ok",
+    "output_language",
+    "payload",
+    "raw",
+    "raw_observations",
+    "role",
+    "skill_calls",
+    "status",
+    "task_id",
+    "team_run_id",
+    "tokens",
+    "tools_used",
+    "truncated",
+    "usd",
+}
+_PUBLIC_TEAM_SUMMARY_KEYS = (
+    "executive_summary",
+    "summary",
+    "conclusion",
+    "recommendation",
+    "direction",
+    "bias",
+    "thesis",
+    "evidence",
+    "narratives",
+    "blockers",
+    "risks",
+    "data_gaps",
+    "evidence_gaps",
+)
+
+
+def _public_team_clean(value: Any, *, depth: int = 0) -> Any:
+    parsed = _public_team_parse_jsonish(value)
+    if depth >= 5:
+        return parsed
+    if isinstance(parsed, dict):
+        cleaned: dict[str, Any] = {}
+        for key, child in parsed.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in _PUBLIC_TEAM_INTERNAL_KEYS:
+                continue
+            cleaned[str(key)] = _public_team_clean(child, depth=depth + 1)
+        return {k: v for k, v in cleaned.items() if v not in (None, "", [], {})}
+    if isinstance(parsed, list):
+        return [
+            child
+            for item in parsed[:12]
+            if (child := _public_team_clean(item, depth=depth + 1)) not in (None, "", [], {})
+        ]
+    return parsed
+
+
+def _public_team_one_line(value: Any, *, limit: int = 700) -> str:
+    cleaned = _public_team_clean(value)
+    if cleaned in (None, "", [], {}):
+        return ""
+    if isinstance(cleaned, dict):
+        parts: list[str] = []
+        for key in _PUBLIC_TEAM_SUMMARY_KEYS:
+            if key not in cleaned:
+                continue
+            rendered = _public_team_one_line(cleaned.get(key), limit=220)
+            if rendered:
+                parts.append(rendered)
+            if len(parts) >= 4:
+                break
+        if not parts:
+            for key, child in cleaned.items():
+                rendered = _public_team_one_line(child, limit=220)
+                if rendered:
+                    parts.append(f"{str(key).replace('_', ' ')}: {rendered}")
+                if len(parts) >= 4:
+                    break
+        text = "; ".join(parts)
+    elif isinstance(cleaned, list):
+        text = "; ".join(
+            part for item in cleaned[:8] if (part := _public_team_one_line(item, limit=220))
+        )
+    else:
+        text = " ".join(str(cleaned).split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _public_team_synthesis(summary: dict[str, Any]) -> str:
+    aggregated = summary.get("aggregated")
+    if isinstance(aggregated, dict):
+        for container_key in ("subagents", "roles"):
+            container = aggregated.get(container_key)
+            if not isinstance(container, dict):
+                continue
+            fragments: list[str] = []
+            for role, output in list(container.items())[:6]:
+                rendered = _public_team_one_line(output, limit=320)
+                if rendered:
+                    fragments.append(f"- {role}: {rendered}")
+            if fragments:
+                return "\n".join(fragments)
+    return _public_team_one_line(aggregated, limit=1000)
+
+
+def _public_team_role_line(row: dict[str, Any]) -> str:
+    role = str(row.get("subagent") or row.get("role") or "team_member").strip()
+    output = row.get("output")
+    summary = _public_team_one_line(output, limit=700)
+    if not summary:
+        summary = str(row.get("summary") or "").strip()
+    if not summary:
+        summary = "bounded evidence was collected, but this role did not produce a complete narrative"
+    return f"### {role}\n{summary}"
+
+
+def _public_team_failure_line(row: dict[str, Any]) -> str:
+    role = str(row.get("subagent") or row.get("role") or "team_member").strip()
+    detail = _public_team_one_line(row.get("output"), limit=500)
+    if not detail:
+        error_text = str(row.get("error") or row.get("summary") or "").strip().lower()
+        if "timeout" in error_text:
+            detail = "one team member did not complete its conclusion within the turn budget"
+        elif error_text:
+            detail = "one team member returned degraded output; diagnostic details are available in logs"
+        else:
+            detail = "one team member did not complete its conclusion in this turn"
+    return f"### {role}\n{detail}"
+
+
+def _resolve_team_template(
+    *,
+    requested: str,
+    role_names: list[str],
+    task: str = "",
+) -> str:
+    requested = (requested or "").strip()
+    del role_names, task
+    if requested:
+        return requested
+    return "ad_hoc_parallel_team"
+
+
+def _required_template_roles(template_id: str) -> list[str]:
+    template = get_template(template_id)
+    if template is None:
+        return []
+    roles: list[str] = []
+    for member in template.members:
+        if not member.required:
+            continue
+        role_name = str(
+            member.subagent_name
+            or member.role
+            or member.name
+            or ""
+        ).strip()
+        if role_name and role_name not in roles:
+            roles.append(role_name)
+    return roles
+
+
 _TEAM_RUN_TURN_CACHE_MAX = 128
 _TEAM_RUN_TURN_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _TEAM_RUN_TURN_CACHE_ORDER: list[tuple[str, str]] = []
 _TEAM_RUN_TURN_CACHE_LOCK = Lock()
-_LANGUAGE_KEYS = (
+_TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS = 120.0
+_TEAM_RUN_PARENT_MIN_FINAL_RESERVE_SECONDS = 30.0
+_TEAM_RUN_PARENT_RESERVE_SLACK_SECONDS = 15.0
+_OUTPUT_LANGUAGE_KEYS = (
     "output_language",
     "target_language",
     "response_language",
     "preferred_language",
+)
+_ANALYSIS_LANGUAGE_KEYS = (
+    "analysis_language",
+    "internal_language",
+    "working_language",
+    "discussion_language",
+    "reasoning_language",
+)
+_ROLE_WORKING_LANGUAGE_KEYS = (
     "language",
     "locale",
 )
@@ -189,23 +632,357 @@ def _resolve_team_output_language(
     shared_payload: dict[str, Any],
 ) -> str:
     for source in (args, shared_payload):
-        for key in _LANGUAGE_KEYS:
+        for key in _OUTPUT_LANGUAGE_KEYS:
             language = _explicit_output_language(source.get(key))
             if language:
                 return language
     for entry in raw_roles:
         if not isinstance(entry, dict):
             continue
-        for key in _LANGUAGE_KEYS:
+        for key in _OUTPUT_LANGUAGE_KEYS:
             language = _explicit_output_language(entry.get(key))
             if language:
                 return language
         payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
-        for key in _LANGUAGE_KEYS:
+        for key in _OUTPUT_LANGUAGE_KEYS:
             language = _explicit_output_language(payload.get(key))
             if language:
                 return language
     return "the original user prompt language"
+
+
+def _resolve_team_analysis_language(
+    *,
+    args: dict[str, Any],
+    raw_roles: list[Any],
+    shared_payload: dict[str, Any],
+    output_language: str,
+) -> str:
+    for source in (args, shared_payload):
+        for key in _ANALYSIS_LANGUAGE_KEYS:
+            language = _explicit_output_language(source.get(key))
+            if language:
+                return language
+        for key in _ROLE_WORKING_LANGUAGE_KEYS:
+            language = _explicit_output_language(source.get(key))
+            if language:
+                return language
+    for entry in raw_roles:
+        if not isinstance(entry, dict):
+            continue
+        for key in _ANALYSIS_LANGUAGE_KEYS:
+            language = _explicit_output_language(entry.get(key))
+            if language:
+                return language
+        for key in _ROLE_WORKING_LANGUAGE_KEYS:
+            language = _explicit_output_language(entry.get(key))
+            if language:
+                return language
+        payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+        for key in _ANALYSIS_LANGUAGE_KEYS:
+            language = _explicit_output_language(payload.get(key))
+            if language:
+                return language
+        for key in _ROLE_WORKING_LANGUAGE_KEYS:
+            language = _explicit_output_language(payload.get(key))
+            if language:
+                return language
+    return output_language
+
+
+def _parse_duration_seconds(value: Any, *, allow_bare_number: bool = False) -> float | None:
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        return seconds if seconds > 0 else None
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if allow_bare_number:
+        try:
+            seconds = float(text)
+            return seconds if seconds > 0 else None
+        except Exception:
+            pass
+    match = re.search(
+        r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>s|sec|secs|second|seconds|秒|m|min|mins|minute|minutes|分钟)\b",
+        text,
+    )
+    if not match:
+        return None
+    seconds = float(match.group("value"))
+    unit = match.group("unit")
+    if unit in {"m", "min", "mins", "minute", "minutes", "分钟"}:
+        seconds *= 60.0
+    return seconds if seconds > 0 else None
+
+
+def _positive_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _parent_remaining_wall_seconds(call: ToolCall) -> float | None:
+    """Return the parent turn budget left at tool execution time."""
+
+    remaining = _positive_float(_call_meta(call, "remaining_wall_seconds"))
+    deadline = _positive_float(_call_meta(call, "turn_deadline_epoch"))
+    if deadline is not None:
+        remaining_from_deadline = max(0.0, deadline - time.time())
+        if remaining is None:
+            return remaining_from_deadline
+        return min(remaining, remaining_from_deadline)
+    return remaining
+
+
+def _parent_final_reserve_seconds(call: ToolCall | None) -> float:
+    if call is None:
+        return _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS
+    for key in (
+        "team_run_final_reserve_seconds",
+        "wall_time_final_synthesis_seconds",
+    ):
+        parsed = _positive_float(_call_meta(call, key))
+        if parsed is not None:
+            return max(_TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS, parsed)
+    return _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS
+
+
+def _apply_parent_wall_budget_cap(
+    timeout_s: float,
+    *,
+    parent_remaining_wall_seconds: float | None,
+    parent_final_reserve_seconds: float,
+    structural_floor_seconds: float = 0.0,
+) -> float:
+    if parent_remaining_wall_seconds is None:
+        return timeout_s
+    reserve = max(0.0, parent_final_reserve_seconds)
+    if structural_floor_seconds > 0:
+        reserve = min(reserve, _TEAM_RUN_PARENT_MIN_FINAL_RESERVE_SECONDS)
+    if (
+        structural_floor_seconds > 0
+        and parent_remaining_wall_seconds
+        >= timeout_s + reserve - _TEAM_RUN_PARENT_RESERVE_SLACK_SECONDS
+    ):
+        return timeout_s
+    cap = parent_remaining_wall_seconds - reserve
+    if cap <= 0:
+        return min(timeout_s, 1.0)
+    return min(timeout_s, cap)
+
+
+def _has_operator_team_time_budget(
+    *,
+    args: dict[str, Any],
+    shared_payload: dict[str, Any],
+) -> bool:
+    """Whether the team call carries an explicit non-tool timeout constraint.
+
+    ``timeout_s`` / ``max_wall_seconds`` are tool execution controls. They can
+    be model-authored and should not, by themselves, shrink a deep team below
+    the structural timeout floor. Separate deadline/time_budget fields indicate
+    the operator or planner is carrying an actual time constraint.
+    """
+
+    for source in (shared_payload, args):
+        for key in ("deadline", "timeout", "time_budget", "time_budget_s"):
+            if _parse_duration_seconds(
+                source.get(key),
+                allow_bare_number=(key.endswith("_s")),
+            ) is not None:
+                return True
+    return False
+
+
+def _effective_team_timeout_seconds(
+    *,
+    args: dict[str, Any],
+    shared_payload: dict[str, Any],
+    config: Config,
+    parent_remaining_wall_seconds: float | None = None,
+    parent_final_reserve_seconds: float = _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS,
+) -> float:
+    explicit_candidates: list[float] = []
+    for key in ("timeout_s", "max_wall_seconds"):
+        parsed = _parse_duration_seconds(args.get(key), allow_bare_number=True)
+        if parsed is not None:
+            explicit_candidates.append(parsed)
+    if explicit_candidates:
+        timeout = max(30.0, min(explicit_candidates))
+        auto_floor = _team_timeout_floor_seconds(args)
+        if (
+            auto_floor > timeout
+            and not _has_operator_team_time_budget(
+                args=args,
+                shared_payload=shared_payload,
+            )
+        ):
+            timeout = auto_floor
+        return _apply_parent_wall_budget_cap(
+            timeout,
+            parent_remaining_wall_seconds=parent_remaining_wall_seconds,
+            parent_final_reserve_seconds=parent_final_reserve_seconds,
+            structural_floor_seconds=auto_floor,
+        )
+
+    candidates: list[float] = []
+    for key in (
+        "deadline",
+        "timeout",
+        "timeout_s",
+        "max_wall_seconds",
+        "time_budget",
+        "time_budget_s",
+    ):
+        parsed = _parse_duration_seconds(shared_payload.get(key), allow_bare_number=False)
+        if parsed is not None:
+            candidates.append(parsed)
+    auto_floor = _team_timeout_floor_seconds(args)
+    if not candidates:
+        try:
+            configured = config.get("agent.team_run.timeout_s", 300)
+        except Exception:
+            configured = 300
+        parsed = _parse_duration_seconds(configured, allow_bare_number=True)
+        if parsed is not None:
+            candidates.append(parsed)
+    if not candidates:
+        candidates.append(300.0)
+    timeout = max(30.0, max(auto_floor, min(candidates)))
+    try:
+        max_timeout = _parse_duration_seconds(
+            config.get("agent.team_run.max_timeout_s", 900),
+            allow_bare_number=True,
+        )
+    except Exception:
+        max_timeout = 900.0
+    timeout = min(timeout, max_timeout or 900.0)
+    return _apply_parent_wall_budget_cap(
+        timeout,
+        parent_remaining_wall_seconds=parent_remaining_wall_seconds,
+        parent_final_reserve_seconds=parent_final_reserve_seconds,
+        structural_floor_seconds=auto_floor,
+    )
+
+
+def _team_timeout_floor_seconds(args: dict[str, Any]) -> float:
+    roles = _coerce_roles_arg(args.get("roles"), args=args)
+    role_count = len(roles) if isinstance(roles, list) else 0
+    if role_count <= 0:
+        return 0.0
+    try:
+        workers = max(1, int(args.get("max_parallel") or 4))
+    except Exception:
+        workers = 4
+    workers = max(1, min(workers, role_count))
+    waves = max(1, (role_count + workers - 1) // workers)
+    template = str(args.get("team_template") or "").strip()
+    role_names = {
+        str(role.get("name") or "").strip()
+        for role in roles
+        if isinstance(role, dict)
+    }
+    curated_deep_team = _is_curated_deep_team(
+        template=template,
+        role_names=role_names,
+    )
+    if waves <= 1 and not curated_deep_team:
+        return 0.0
+    # Each wave can spend one tool round plus one synthesis round on the
+    # provider; add reserve for slow public sources and queueing.
+    floor = 120 + waves * 240
+    if curated_deep_team:
+        floor = max(floor, 600, waves * 360)
+    return float(floor)
+
+
+def _is_curated_deep_team(*, template: str, role_names: set[str]) -> bool:
+    if template not in {
+        "market_analysis_team",
+        "investment_committee_team",
+        "strategy_design_team",
+    }:
+        return False
+    deep_role_names = {
+        "fundamentals_analyst",
+        "technical_analyst",
+        "sentiment_analyst",
+        "valuation_analyst",
+        "sec_analyst",
+        "investor_perspective",
+        "bull_researcher",
+        "bear_researcher",
+        "risk_critic",
+        "research_manager",
+        "research_editor",
+        "market_analyst",
+        "execution_planner",
+        "strategy_reviewer",
+        "plan_lane",
+    }
+    return bool(role_names & deep_role_names)
+
+
+def _config_get(config: Config, key: str, default: Any = None) -> Any:
+    getter = getattr(config, "get", None)
+    if not callable(getter):
+        return default
+    try:
+        return getter(key, default)
+    except Exception:
+        return default
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _team_template_parallel_limit(team_template: str) -> int | None:
+    template_id = str(team_template or "").strip()
+    if not template_id:
+        return None
+    try:
+        template = get_template(template_id)
+    except Exception:
+        template = None
+    if template is None:
+        return None
+    return _positive_int(getattr(template, "max_parallel", None))
+
+
+def _effective_team_workers(
+    *,
+    args: dict[str, Any],
+    config: Config,
+    role_count: int,
+    team_template: str,
+) -> int:
+    if role_count <= 0:
+        return 1
+    requested = _positive_int(args.get("max_parallel"))
+    template_limit = _team_template_parallel_limit(team_template)
+    configured_limit = _positive_int(_config_get(config, "agent.team_run.max_parallel"))
+    if configured_limit is None:
+        configured_limit = _positive_int(
+            _config_get(config, "agent.subagents.max_parallel"),
+        )
+    if configured_limit is None:
+        configured_limit = 4
+
+    base = requested or template_limit or configured_limit
+    cap = min(role_count, configured_limit)
+    if template_limit is not None:
+        cap = min(cap, template_limit)
+    return max(1, min(base, cap))
 
 
 def _compact_json_value(value: Any, *, limit: int = 12000, depth: int = 0) -> Any:
@@ -293,6 +1070,55 @@ def _compact_member_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _member_output_failure_kind(output: Any) -> str | None:
+    if not isinstance(output, dict):
+        return None
+    contract = output.get("evidence_contract")
+    if isinstance(contract, dict):
+        status = str(contract.get("status") or "").strip()
+        missing = contract.get("missing_evidence")
+        if status in {"degraded", "failed", "partial"} or missing:
+            return str(
+                contract.get("error_kind")
+                or output.get("error_kind")
+                or "insufficient_research_evidence"
+            )
+    if bool(output.get("degraded")):
+        return str(
+            output.get("error_kind")
+            or output.get("quality")
+            or "degraded_output"
+        )
+    quality = str(output.get("quality") or "").strip()
+    if quality == "tool_observation_fallback":
+        return "tool_observation_fallback"
+    if bool(output.get("partial")):
+        return str(output.get("error_kind") or quality or "partial_output")
+    return None
+
+
+def _apply_member_evidence_contract(output: Any) -> Any:
+    if not isinstance(output, dict):
+        return output
+    contract = output.get("evidence_contract")
+    if not isinstance(contract, dict):
+        return output
+    missing = contract.get("missing_evidence")
+    status = str(contract.get("status") or "").strip()
+    if not missing and status not in {"degraded", "failed", "partial"}:
+        return output
+    merged = dict(output)
+    if missing and "missing_evidence" not in merged:
+        merged["missing_evidence"] = list(missing) if isinstance(missing, list) else missing
+    merged.setdefault("quality", str(contract.get("quality") or "degraded_missing_evidence"))
+    merged.setdefault(
+        "error_kind",
+        str(contract.get("error_kind") or "insufficient_research_evidence"),
+    )
+    merged.setdefault("partial", True)
+    return merged
+
+
 def _team_assignment_prompt(
     *,
     task: str,
@@ -300,6 +1126,7 @@ def _team_assignment_prompt(
     payload: dict[str, Any],
     instructions: str = "",
     output_language: str = "",
+    analysis_language: str = "",
 ) -> str:
     lines = [
         "Agent Team member assignment",
@@ -307,7 +1134,21 @@ def _team_assignment_prompt(
         f"Team mission: {task}",
         f"Role: {role_name}",
     ]
-    if output_language:
+    if output_language and analysis_language and analysis_language != output_language:
+        lines.extend([
+            "",
+            "Language contract:",
+            f"- Role analysis language: {analysis_language}.",
+            f"- Final report language: {output_language}.",
+            "- Write role analysis, evidence notes, role conclusions, and "
+            "natural-language JSON values in the role analysis language.",
+            "- The parent turn will synthesize the final user-facing report "
+            "in the final report language.",
+            "- Preserve JSON keys, enum values required by the role contract, "
+            "proper nouns, tickers, source names, code identifiers, URLs, "
+            "and numeric metrics in their original form.",
+        ])
+    elif output_language:
         lines.extend([
             "",
             "Output language:",
@@ -324,14 +1165,17 @@ def _team_assignment_prompt(
         "",
         "Data discipline:",
         "- Stay on the team mission and payload subject only.",
-        "- For market, company, research, or risk tasks, gather "
-        "role-relevant source data before writing the role conclusion; "
-        "if one data source fails, try another visible data/search/provider "
-        "tool and report the exact remaining gap instead of returning only "
-        "a query, plan, or unavailable-data claim.",
-        "- When using market_data, always pass an explicit market/symbol from the mission or payload; never call it with empty arguments.",
-        "- For on-chain/meme/DEX data beyond OHLCV, inspect data_api provider='wallet' and provider='onchainos' before claiming a source is unavailable.",
-        "- For wallet-backed meme strategies, call data_api wallet.capability_catalog or wallet.meme_strategy_guide before authoring rules, use selection.selected_route.call for the installed/logged-in wallet, and follow GOAT/self_custody fallback plus install recommendations when no wallet is ready.",
+        "- Gather role-relevant source data before writing the role conclusion; "
+        "if one source fails, try another visible capability or report the "
+        "exact remaining gap.",
+        "- For tool calls, use explicit fields from the mission, payload, "
+        "or prior tool results; do not invent default markets, providers, "
+        "wallets, or credentials.",
+        "- For provider-specific data, prefer list/schema/capability "
+        "discovery first, then call the concrete action returned by that "
+        "tool result.",
+        "- Do not fabricate data, fill missing evidence with placeholders, "
+        "or claim unavailable sources were checked unless a tool result says so.",
         "",
         "Input payload:",
         json.dumps(redact_display_dict(payload), ensure_ascii=False, indent=2, default=str),
@@ -339,19 +1183,126 @@ def _team_assignment_prompt(
     return redact_text("\n".join(lines))
 
 
-def _coerce_roles_arg(raw_roles: Any) -> list[Any]:
+def _coerce_roles_arg(raw_roles: Any, *, args: dict[str, Any] | None = None) -> list[Any]:
+    roles: list[Any] = []
     if isinstance(raw_roles, list):
-        return raw_roles
+        roles.extend(raw_roles)
+    elif isinstance(raw_roles, str) and raw_roles.strip():
+        try:
+            parsed = json.loads(raw_roles)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            roles.extend(parsed)
+        elif isinstance(parsed, dict) and isinstance(parsed.get("roles"), list):
+            roles.extend(parsed["roles"])
+            roles.extend(_collect_role_payloads(parsed.get("role_payloads")))
+    if isinstance(args, dict):
+        roles.extend(_collect_role_payloads(args.get("role_payloads")))
+        roles.extend(_collect_provider_wrapped_roles(args.get("item")))
+        roles.extend(_collect_provider_wrapped_roles(args.get("items")))
+        raw_args = _coerce_raw_args(args.get("_raw") or args.get("raw"))
+        if raw_args:
+            roles.extend(_coerce_roles_arg(raw_args.get("roles"), args=raw_args))
+    return roles
+
+
+def _roles_arg_explicitly_supplied(args: dict[str, Any]) -> bool:
+    raw_roles = args.get("roles")
+    if isinstance(raw_roles, list):
+        return bool(raw_roles)
     if isinstance(raw_roles, str) and raw_roles.strip():
         try:
             parsed = json.loads(raw_roles)
         except Exception:
-            return []
+            parsed = None
         if isinstance(parsed, list):
-            return parsed
+            return bool(parsed)
         if isinstance(parsed, dict) and isinstance(parsed.get("roles"), list):
-            return list(parsed["roles"])
-    return []
+            return bool(parsed["roles"])
+        if isinstance(parsed, dict) and _collect_role_payloads(parsed.get("role_payloads")):
+            return True
+    return bool(
+        _collect_role_payloads(args.get("role_payloads"))
+        or _collect_provider_wrapped_roles(args.get("item"))
+        or _collect_provider_wrapped_roles(args.get("items"))
+        or _collect_raw_roles(args.get("_raw") or args.get("raw"))
+    )
+
+
+def _coerce_raw_args(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _collect_raw_roles(value: Any) -> list[Any]:
+    raw_args = _coerce_raw_args(value)
+    if not raw_args:
+        return []
+    return _coerce_roles_arg(raw_args.get("roles"), args=raw_args)
+
+
+def _collect_role_payloads(value: Any) -> list[dict[str, Any]]:
+    roles: list[dict[str, Any]] = []
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict) and item.get("name"):
+                roles.append(item)
+            else:
+                roles.extend(_collect_role_payloads(item))
+        return roles
+    if not isinstance(value, dict):
+        return roles
+    for raw_name, raw_payload in value.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if isinstance(raw_payload, dict) and isinstance(raw_payload.get("payload"), dict):
+            role = dict(raw_payload)
+            role["name"] = str(role.get("name") or name).strip()
+            roles.append(role)
+        elif isinstance(raw_payload, dict):
+            roles.append({"name": name, "payload": dict(raw_payload)})
+        else:
+            roles.append({"name": name, "payload": {"value": raw_payload}})
+    return roles
+
+
+def _collect_provider_wrapped_roles(value: Any) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    if isinstance(value, list):
+        for item in value:
+            collected.extend(_collect_provider_wrapped_roles(item))
+        return collected
+    if not isinstance(value, dict):
+        return collected
+
+    name = value.get("name")
+    if isinstance(name, str) and name.strip():
+        role: dict[str, Any] = {"name": name.strip()}
+        payload = value.get("payload")
+        if isinstance(payload, dict):
+            role["payload"] = dict(payload)
+        instructions = value.get("instructions")
+        if isinstance(instructions, str) and instructions.strip():
+            role["instructions"] = instructions.strip()
+        collected.append(role)
+
+    collected.extend(_collect_role_payloads(value.get("role_payloads")))
+    raw_args = _coerce_raw_args(value.get("_raw") or value.get("raw"))
+    if raw_args:
+        collected.extend(_coerce_roles_arg(raw_args.get("roles"), args=raw_args))
+
+    for key in ("item", "items", "roles"):
+        collected.extend(_collect_provider_wrapped_roles(value.get(key)))
+    return collected
 
 
 SUBAGENT_LIST_SCHEMA: dict[str, Any] = {
@@ -551,7 +1502,12 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
             "description": (
                 "One-line shared mission for the whole team. Each role "
                 "sees this verbatim under '=== team task ===' so they "
-                "can orient before reading their own payload."
+                "can orient before reading their own payload. Use only real "
+                "operator-provided or tool-observed evidence. If a required "
+                "API, webhook, feed, credential, or source body is missing, "
+                "state that blocker in the mission and ask roles to report "
+                "the evidence gap; do not invent mock, placeholder, synthetic, "
+                "or proxy source content."
             ),
         },
         "roles": {
@@ -561,8 +1517,12 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
                 "List of roles to spawn in parallel. Each entry is "
                 "{name: <role>, payload: {...}}. ``name`` must match a "
                 "registered subagent (workspace or default). ``payload`` "
-                "is merged on top of the shared ``shared_payload``. Pass "
-                "this as a real JSON array, not a stringified JSON array."
+                "is merged on top of the shared ``shared_payload``. A "
+                "role payload field named ``language`` or ``locale`` means "
+                "the role's working/analysis language; use top-level "
+                "``output_language`` for the final user-visible report "
+                "language. Pass this as a real JSON array, not a stringified "
+                "JSON array."
             ),
             "items": {
                 "type": "object",
@@ -580,6 +1540,21 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
                 "required": ["name"],
             },
         },
+        "team_template": {
+            "type": "string",
+            "enum": [
+                "ad_hoc_parallel_team",
+                "market_analysis_team",
+                "investment_committee_team",
+                "strategy_design_team",
+            ],
+            "description": (
+                "Optional explicit built-in team template. Set this only "
+                "when the operator names a template or role_list/role_get "
+                "evidence shows the template is the right match. Otherwise "
+                "use ad_hoc_parallel_team with explicit roles."
+            ),
+        },
         "shared_payload": {
             "type": "object",
             "description": "Common payload merged into every role's payload.",
@@ -587,9 +1562,19 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
         "output_language": {
             "type": "string",
             "description": (
-                "Target language for user-visible team member outputs and "
-                "the final synthesis. Default is inferred from the team task "
-                "and payload; set this from the latest user prompt when known."
+                "Target language for the final user-visible team synthesis "
+                "or report. Default is inferred from the team task and "
+                "payload; set this from the latest user prompt when it "
+                "explicitly asks for a final/report/output language."
+            ),
+        },
+        "analysis_language": {
+            "type": "string",
+            "description": (
+                "Optional language for team members' internal analysis, "
+                "evidence notes, and role conclusions when the operator asks "
+                "for a split-language workflow such as Chinese analysis with "
+                "an English final report. Defaults to output_language."
             ),
         },
         "max_parallel": {"type": "integer", "minimum": 1},
@@ -599,7 +1584,9 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
             "description": (
                 "Hard wall-clock budget for the whole team_run. Pending "
                 "members are returned as timeout failures instead of "
-                "blocking the parent turn forever."
+                "blocking the parent turn forever. Keep this at 30 seconds "
+                "or higher; for quick user deadlines, make role instructions "
+                "concise rather than setting an unrealistically low timeout."
             ),
         },
         "allow_additional_team_run": {
@@ -690,7 +1677,8 @@ def team_run_handler(
             ),
         )
 
-    raw_roles = _coerce_roles_arg(args.get("roles"))
+    roles_explicitly_supplied = _roles_arg_explicitly_supplied(args)
+    raw_roles = _coerce_roles_arg(args.get("roles"), args=args)
     if not isinstance(raw_roles, list) or not raw_roles:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -712,6 +1700,12 @@ def team_run_handler(
         task=task,
         raw_roles=raw_roles,
         shared_payload=shared_payload,
+    )
+    analysis_language = _resolve_team_analysis_language(
+        args=args,
+        raw_roles=raw_roles,
+        shared_payload=shared_payload,
+        output_language=output_language,
     )
     original_user_prompt = str(
         args.get("original_user_prompt")
@@ -774,6 +1768,7 @@ def team_run_handler(
         per_role = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
         merged.update(per_role)
         merged.setdefault("output_language", output_language)
+        merged.setdefault("analysis_language", analysis_language)
         if original_user_prompt:
             merged.setdefault("original_user_prompt", original_user_prompt)
         merged["__team_task"] = task
@@ -793,6 +1788,48 @@ def team_run_handler(
             payload=merged,
             instructions=instructions,
             output_language=output_language,
+            analysis_language=analysis_language,
+        )
+
+    requested_team_template = team_template
+    team_template = _resolve_team_template(
+        requested=requested_team_template,
+        role_names=role_names,
+        task=task,
+    )
+    if (
+        team_template == "market_analysis_team"
+        and requested_team_template == "market_analysis_team"
+        and not roles_explicitly_supplied
+    ):
+        existing_roles = {name.lower() for name in role_names}
+        for required_role in _required_template_roles(team_template):
+            if required_role.lower() in existing_roles:
+                continue
+            role_names.append(required_role)
+            existing_roles.add(required_role.lower())
+            merged = dict(shared_payload or {})
+            merged.setdefault("output_language", output_language)
+            merged.setdefault("analysis_language", analysis_language)
+            if original_user_prompt:
+                merged.setdefault("original_user_prompt", original_user_prompt)
+            merged["__team_task"] = task
+            merged["team_run_id"] = team_run_id
+            merged["team_template"] = team_template
+            merged["team_call_id"] = call.id
+            merged["task_id"] = f"role-{required_role}"
+            merged["task_owner"] = required_role
+            merged["task_subject"] = task
+            role_payloads[required_role] = merged
+    for role_name in role_names:
+        role_payloads[role_name]["team_template"] = team_template
+        role_assignment_prompts[role_name] = _team_assignment_prompt(
+            task=task,
+            role_name=role_name,
+            payload=role_payloads[role_name],
+            instructions=str(role_payloads[role_name].get("__team_instructions") or ""),
+            output_language=output_language,
+            analysis_language=analysis_language,
         )
 
     if not allow_additional_team_run:
@@ -839,17 +1876,30 @@ def team_run_handler(
 
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    workers = max(1, min(int(max_parallel or 4), len(role_names)))
-    timeout_raw = args.get("timeout_s") or args.get("max_wall_seconds")
-    if timeout_raw is None:
-        try:
-            timeout_raw = config.get("agent.team_run.timeout_s", 300)
-        except Exception:
-            timeout_raw = 300
-    try:
-        team_timeout_s = max(30.0, float(timeout_raw or 300))
-    except Exception:
-        team_timeout_s = 300.0
+    workers = _effective_team_workers(
+        args={**args, "max_parallel": max_parallel},
+        config=config,
+        role_count=len(role_names),
+        team_template=team_template,
+    )
+    timeout_args = dict(args)
+    timeout_args["max_parallel"] = workers
+    timeout_args["team_template"] = team_template
+    parent_remaining_wall_seconds = _parent_remaining_wall_seconds(call)
+    parent_final_reserve_seconds = _parent_final_reserve_seconds(call)
+    uncapped_team_timeout_s = _effective_team_timeout_seconds(
+        args=timeout_args,
+        shared_payload=shared_payload,
+        config=config,
+    )
+    team_timeout_s = _effective_team_timeout_seconds(
+        args=timeout_args,
+        shared_payload=shared_payload,
+        config=config,
+        parent_remaining_wall_seconds=parent_remaining_wall_seconds,
+        parent_final_reserve_seconds=parent_final_reserve_seconds,
+    )
+    timeout_capped_by_parent = team_timeout_s < uncapped_team_timeout_s
     common_event = {
         "call_id": call.id,
         "tool_call_id": call.id,
@@ -862,9 +1912,14 @@ def team_run_handler(
         "task": task,
         "goal": task,
         "output_language": output_language,
+        "analysis_language": analysis_language,
         "roles": role_names,
         "max_parallel": workers,
         "timeout_s": team_timeout_s,
+        "timeout_uncapped_s": uncapped_team_timeout_s,
+        "timeout_capped_by_parent": timeout_capped_by_parent,
+        "parent_remaining_wall_seconds": parent_remaining_wall_seconds,
+        "parent_final_reserve_seconds": parent_final_reserve_seconds,
         "collaboration_model": (
             "Agent Team run: each member is a subagent runtime with its "
             "own prompt/input/tool loop; team_run aggregates all member "
@@ -922,9 +1977,9 @@ def team_run_handler(
                     **common_event,
                 )
                 continue
-            output = envelope.get("output") or {}
-            degraded = isinstance(output, dict) and bool(output.get("degraded"))
-            ok = bool(envelope.get("ok", True)) and not degraded
+            output = _apply_member_evidence_contract(envelope.get("output") or {})
+            failure_kind = _member_output_failure_kind(output)
+            ok = bool(envelope.get("ok", True)) and failure_kind is None
             usd = float(envelope.get("usd") or 0.0)
             entry = {
                 "subagent": role_name,
@@ -937,9 +1992,9 @@ def team_run_handler(
                 "metrics": envelope.get("metrics") or {},
                 "steps": envelope.get("steps") or [],
                 "error": envelope.get("error")
-                or (output.get("summary") if degraded else None),
+                or (output.get("summary") if failure_kind else None),
                 "error_kind": envelope.get("error_kind")
-                or (output.get("error_kind") if degraded else None),
+                or failure_kind,
             }
             if ok:
                 results.append(entry)
@@ -1025,11 +2080,20 @@ def team_run_handler(
         "ok": not failures,
         "status": status,
         "team_run_id": team_run_id,
+        "team_template": team_template,
         "task": task,
         "output_language": output_language,
+        "analysis_language": analysis_language,
         "roles_requested": role_names,
         "roles_succeeded": [r["subagent"] for r in results],
         "roles_failed": [f["subagent"] for f in failures],
+        "roles_total": len(role_names),
+        "max_parallel": workers,
+        "timeout_s": team_timeout_s,
+        "timeout_uncapped_s": uncapped_team_timeout_s,
+        "timeout_capped_by_parent": timeout_capped_by_parent,
+        "parent_remaining_wall_seconds": parent_remaining_wall_seconds,
+        "parent_final_reserve_seconds": parent_final_reserve_seconds,
         "tokens_total": sum(int(r.get("tokens") or 0) for r in results),
         "usd_total": round(sum(float(r.get("usd") or 0.0) for r in results), 4),
         "results": compact_results,
@@ -1050,6 +2114,11 @@ def team_run_handler(
         aggregated=redact_display_dict(compact_aggregated),
         **common_event,
     )
+    _persist_team_run_snapshot(
+        config=config,
+        common_event=common_event,
+        summary=summary,
+    )
     if not allow_additional_team_run:
         _remember_team_run_summary(guard_key, summary)
     return ToolResult.from_json(
@@ -1069,24 +2138,11 @@ def role_list_handler(
         name=call.name,
         data={
             "guidance": (
-                "For public-company or stock research reports, prefer the "
-                "default investment-research roles such as "
-                "fundamentals_analyst, technical_analyst, sentiment_analyst, "
-                "bull_researcher, bear_researcher, risk_critic, and "
-                "research_manager. Workspace finance-ops roles like "
-                "valuation_reviewer are domain-specific; use them only when "
-                "the user asks for fund/GP valuation, accounting, KYC, "
-                "pitch/deck, or model-building work."
+                "Role catalog only. Choose roles from their names, prompts, "
+                "allowed skills, and the operator's actual request. Do not "
+                "treat similarly named workspace roles as implicit routes; "
+                "fetch role_get when a role's scope is unclear."
             ),
-            "recommended_stock_research_roles": [
-                "fundamentals_analyst",
-                "technical_analyst",
-                "sentiment_analyst",
-                "bull_researcher",
-                "bear_researcher",
-                "risk_critic",
-                "research_manager",
-            ],
             "roles": list_roles(config.paths),
         },
     )

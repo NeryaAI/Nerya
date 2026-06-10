@@ -24,6 +24,12 @@ from ...core.paths import WorkspacePaths
 from ...skills.kernel import SkillKernel
 from ..registry import ToolRegistry, make_native_descriptor
 from ..types import PermissionScope, RiskLevel, ToolCall, ToolError, ToolErrorKind, ToolResult
+from .accounts import (
+    ACCOUNT_LIST_SCHEMA,
+    ACCOUNT_UPSERT_SCHEMA,
+    account_list_handler,
+    account_upsert_handler,
+)
 from .agents import (
     ROLE_DELETE_SCHEMA,
     ROLE_GET_SCHEMA,
@@ -49,10 +55,20 @@ from .connectors import (
     market_data_handler,
 )
 from .data_api import DATA_API_SCHEMA, data_api_handler
+from .data_sources import (
+    DATA_SOURCE_STATUS_SCHEMA,
+    DATA_SOURCE_SYNC_NOW_SCHEMA,
+    data_source_status_handler,
+    data_source_sync_now_handler,
+)
 from .evolve import (
+    EVOLVE_CORE_CONFIG_PATCH_SCHEMA,
+    EVOLVE_PROVIDER_PROPOSAL_SCHEMA,
     EVOLVE_PROPOSALS_SCHEMA,
     EVOLVE_REFLECT_SCHEMA,
     EVOLVE_SKILL_PROPOSAL_SCHEMA,
+    evolve_core_config_patch_handler,
+    evolve_provider_proposal_handler,
     evolve_proposals_handler,
     evolve_reflect_handler,
     evolve_skill_proposal_handler,
@@ -64,6 +80,7 @@ from .file_ops import (
     read_file_handler,
     write_file_handler,
 )
+from .gateway import GATEWAY_DIAGNOSE_SCHEMA, gateway_diagnose_handler
 from .llm import (
     LLM_CLASSIFY_SCHEMA,
     LLM_COMPLETE_SCHEMA,
@@ -97,6 +114,7 @@ from .resources import (
 from .search import glob_handler, grep_handler
 from .tasks import (
     SUBAGENT_RUN_ASYNC_SCHEMA,
+    TASK_CREATE_SCHEMA,
     TASK_GET_SCHEMA,
     TASK_LIST_SCHEMA,
     TASK_OUTPUT_SCHEMA,
@@ -104,6 +122,7 @@ from .tasks import (
     TASK_SUMMARY_SCHEMA,
     TASK_UPDATE_SCHEMA,
     subagent_run_async_handler,
+    task_create_handler,
     task_get_handler,
     task_list_handler,
     task_output_handler,
@@ -115,6 +134,7 @@ from .shell import classify_shell_risk, run_shell_handler
 from .skill import (
     SkillIndex,
     is_browser_skill_script_run,
+    is_low_risk_builtin_skill_script_run,
     script_inspect_handler,
     script_run_handler,
     skill_index_handler,
@@ -252,8 +272,9 @@ class NativeToolDeps:
     """Kind of the current Agent trigger, for handler defaults."""
 
     strategy_order_auto_approve: bool = False
-    """True only for strategy-triggered turns allowed to place orders
-    without the native tool permission card."""
+    """True only for strategy-triggered turns allowed to run strategy
+    runtime tools / submit strategy orders without the native tool
+    permission card. Domain gates still enforce trading invariants."""
 
     permission_mode: str = "default"
     """Current agent turn permission mode, threaded to plan tools."""
@@ -558,9 +579,44 @@ def _wrap_market_data(deps: NativeToolDeps):
     return handler
 
 
+def _wrap_connector_view(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return connector_view_handler(call, config_like=deps.config)
+
+    return handler
+
+
 def _wrap_data_api(deps: NativeToolDeps):
     def handler(call: ToolCall):
         return data_api_handler(call, config_like=deps.config)
+
+    return handler
+
+
+def _wrap_data_source_status(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return data_source_status_handler(call, config=deps.config)
+
+    return handler
+
+
+def _wrap_data_source_sync_now(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return data_source_sync_now_handler(call, config=deps.config)
+
+    return handler
+
+
+def _wrap_account_list(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return account_list_handler(call, config_like=deps.config)
+
+    return handler
+
+
+def _wrap_account_upsert(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return account_upsert_handler(call, config_like=deps.config)
 
     return handler
 
@@ -581,9 +637,9 @@ def _wrap_wallet_install(deps: NativeToolDeps):
         provider = str(args.get("provider") or "self_custody").strip().lower()
         mode = str(args.get("mode") or "default").strip().lower()
         override = str(args.get("command") or "").strip()
-        approve = bool(args.get("approve", False))
+        approve = bool(args.get("approve", False)) or deps.permission_mode == "yolo"
         try:
-            from ...install.dep_installer import run_install
+            from ...install.dep_installer import install as run_install
             from ...wallet import PROVIDERS
 
             entry = PROVIDERS.get(provider)
@@ -650,7 +706,11 @@ def _wrap_wallet_install(deps: NativeToolDeps):
                     "provider": provider,
                     "mode": mode,
                     "results": results,
-                    "next": "re-run data_api wallet.capability_catalog and use selection.selected_route.call",
+                    "next": (
+                        "refresh provider capability discovery and follow "
+                        "the concrete next_required_action or call shape "
+                        "returned by that tool result"
+                    ),
                 },
             )
         except Exception as exc:  # noqa: BLE001 - native tool should return structured errors.
@@ -680,6 +740,34 @@ def _wrap_script_run(deps: NativeToolDeps):
         return script_run_handler(call, skill_index=deps.skill_index, cwd=deps.workspace_root)
 
     return handler
+
+
+def _trusted_builtin_skill_roots(deps: NativeToolDeps) -> list[Path]:
+    try:
+        from ... import skills as _skills_pkg
+
+        builtin = (Path(_skills_pkg.__file__).parent / "builtin").resolve()
+    except Exception:
+        return []
+    roots: list[Path] = []
+    for root in deps.skill_roots:
+        try:
+            resolved = Path(root).resolve()
+        except Exception:
+            continue
+        if resolved == builtin:
+            roots.append(resolved)
+    return roots
+
+
+def _auto_approve_skill_script_run(deps: NativeToolDeps, payload: dict[str, Any]) -> bool:
+    if is_browser_skill_script_run(payload):
+        return True
+    return is_low_risk_builtin_skill_script_run(
+        payload,
+        skill_index=deps.skill_index,
+        trusted_roots=_trusted_builtin_skill_roots(deps),
+    )
 
 
 def _wrap_memory_recall(deps: NativeToolDeps):
@@ -725,6 +813,13 @@ def _wrap_subagent_run_async(deps: NativeToolDeps):
             skills=deps.skills,
             store=deps.task_store,
         )
+
+    return handler
+
+
+def _wrap_task_create(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return task_create_handler(call, workspace=deps.workspace_root)
 
     return handler
 
@@ -861,6 +956,20 @@ def _wrap_evolve_proposals(deps: NativeToolDeps):
 def _wrap_evolve_skill_proposal(deps: NativeToolDeps):
     def handler(call: ToolCall):
         return evolve_skill_proposal_handler(call, config=deps.config)
+
+    return handler
+
+
+def _wrap_evolve_core_config_patch(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return evolve_core_config_patch_handler(call, config=deps.config)
+
+    return handler
+
+
+def _wrap_evolve_provider_proposal(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return evolve_provider_proposal_handler(call, config=deps.config)
 
     return handler
 
@@ -1202,11 +1311,119 @@ def _wrap_strategy_promote(deps: NativeToolDeps):
 
 def _wrap_strategy_run_tick(deps: NativeToolDeps):
     def handler(call: ToolCall):
+        guarded = _strategy_agent_run_tick_call(deps, call)
+        if isinstance(guarded, ToolResult):
+            return guarded
         return strategy_run_tick_handler(
-            call, config=deps.config, skills=deps.skills
+            guarded, config=deps.config, skills=deps.skills
         )
 
     return handler
+
+
+_AUTO_APPROVED_STRATEGY_TICK_MODES = frozenset({"paper", "shadow"})
+_STRATEGY_TICK_MODE_KEYS = ("mode_override", "mode", "execution_mode")
+
+
+def _strategy_tick_mode(payload: dict[str, Any]) -> str:
+    for key in _STRATEGY_TICK_MODE_KEYS:
+        value = payload.get(key)
+        if value:
+            return str(value).strip().lower()
+    return ""
+
+
+def _strategy_tick_payload_id(payload: dict[str, Any]) -> str:
+    return str(payload.get("strategy_id") or "").strip()
+
+
+def _is_active_strategy_runtime_tick(payload: dict[str, Any], deps: NativeToolDeps) -> bool:
+    if not (deps.strategy_order_auto_approve and deps.active_strategy_id):
+        return False
+    requested = _strategy_tick_payload_id(payload)
+    return not requested or requested == deps.active_strategy_id
+
+
+def _configured_strategy_tick_mode(payload: dict[str, Any], deps: NativeToolDeps) -> str:
+    strategy_id = _strategy_tick_payload_id(payload)
+    if not strategy_id:
+        return ""
+    paths = (deps.config.paths if deps.config is not None else None) or deps.paths
+    if paths is None:
+        return ""
+    try:
+        from ...strategies.package import load_package
+
+        return str(load_package(paths, strategy_id).manifest.mode or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def is_strategy_run_tick_auto_approved(
+    payload: dict[str, Any],
+    deps: NativeToolDeps,
+) -> bool:
+    """Allow unattended strategy ticks at the tool layer.
+
+    ``strategy_run_tick`` is the runtime entrypoint, not the final
+    trade approval boundary. Live execution is still constrained by
+    ``StrategyRunner`` and by ``trade_intent_submit`` / RiskGate.
+    """
+
+    mode = _strategy_tick_mode(payload)
+    if mode in _AUTO_APPROVED_STRATEGY_TICK_MODES:
+        return True
+    active_strategy_tick = _is_active_strategy_runtime_tick(payload, deps)
+    if mode == "live":
+        return active_strategy_tick
+    if active_strategy_tick:
+        return True
+    configured_mode = _configured_strategy_tick_mode(payload, deps)
+    return configured_mode in _AUTO_APPROVED_STRATEGY_TICK_MODES
+
+
+def is_paper_strategy_run_tick(payload: dict[str, Any]) -> bool:
+    """Compatibility helper for callers that only need paper detection."""
+
+    return _strategy_tick_mode(payload) == "paper"
+
+
+def _strategy_agent_run_tick_call(
+    deps: NativeToolDeps,
+    call: ToolCall,
+) -> ToolCall | ToolResult:
+    if not (deps.strategy_order_auto_approve and deps.active_strategy_id):
+        return call
+
+    args = dict(call.arguments or {})
+    requested_strategy = _strategy_tick_payload_id(args)
+    if requested_strategy and requested_strategy != deps.active_strategy_id:
+        return _tool_permission_denied(
+            call,
+            "strategy Agent session cannot run a tick for a different strategy",
+            detail={
+                "active_strategy_id": deps.active_strategy_id,
+                "requested_strategy_id": requested_strategy,
+            },
+        )
+
+    args["strategy_id"] = deps.active_strategy_id
+    if deps.active_trigger_event_id and not args.get("trigger_event_id"):
+        args["trigger_event_id"] = deps.active_trigger_event_id
+    if deps.active_trigger_source and not args.get("operator"):
+        args["operator"] = deps.active_trigger_source
+
+    return ToolCall(
+        name=call.name,
+        arguments=args,
+        id=call.id,
+        turn_id=call.turn_id,
+        iteration=call.iteration,
+        caller=call.caller,
+        started_at=call.started_at,
+        parent_call_id=call.parent_call_id,
+        metadata=dict(call.metadata or {}),
+    )
 
 
 def _wrap_strategy_kill_switch(deps: NativeToolDeps):
@@ -1249,6 +1466,13 @@ def _wrap_strategy_tuning_status(deps: NativeToolDeps):
 def _wrap_strategy_tuning_snapshot(deps: NativeToolDeps):
     def handler(call: ToolCall):
         return strategy_tuning_snapshot_handler(call, config=deps.config)
+
+    return handler
+
+
+def _wrap_gateway_diagnose(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return gateway_diagnose_handler(call, paths=deps.paths)
 
     return handler
 
@@ -1386,7 +1610,14 @@ def register_native_tools(
         ),
         make_native_descriptor(
             name="write_file",
-            description="Create or overwrite a workspace file with the given contents.",
+            description=(
+                "Create or overwrite a workspace file with the given contents. "
+                "Do not use write_file to stage generated strategy packages "
+                "under ~/.nerya, workspace/strategies, or temporary strategy "
+                "directories. For strategy authoring, pass package-relative "
+                "file bodies directly through strategy_generate_proposal.files "
+                "so the result is a proposal with validation/backtest paths."
+            ),
             input_schema=_WRITE_FILE_SCHEMA,
             handler=_wrap_write_file(deps),
             risk=RiskLevel.WRITE,
@@ -1412,7 +1643,14 @@ def register_native_tools(
                 "with `files` containing SDK code when custom logic is needed. "
                 "Use read_file/glob for narrow artifact inspection and reserve "
                 "shell for explicit operator commands, tests, builds, or cases "
-                "where no native tool exists."
+                "where no native tool exists. If the sandbox refuses a command "
+                "(permission_denied / workspace_sandbox_escape), report the "
+                "refusal plainly by quoting the permission_denied reason "
+                "(权限不足/拒绝) before any workaround suggestions — never "
+                "soften a security refusal into a generic apology, and never "
+                "offer an escape hatch that does not exist: there is no "
+                "operator mode, flag, or approval that lets run_shell read "
+                "host/system files outside the workspace."
             ),
             input_schema=_RUN_SHELL_SCHEMA,
             handler=_wrap_run_shell(deps),
@@ -1531,7 +1769,7 @@ def register_native_tools(
             is_concurrency_safe=False,
             tags=("skill", "script", "exec"),
             result_kind="shell",
-            auto_approve_when=is_browser_skill_script_run,
+            auto_approve_when=lambda payload: _auto_approve_skill_script_run(deps, payload),
         ),
         # ----- web research -----
         make_native_descriptor(
@@ -1611,7 +1849,11 @@ def register_native_tools(
                 "to check whether a specific exchange is available "
                 "before authoring a new connector. Returns id, label, "
                 "kind, aliases, runtime, install_hint, supports matrix "
-                "and doc links."
+                "and doc links. When you report wallets, balances, or "
+                "readiness to the operator, label every entry with the exact "
+                "`provider=<id>` form (for example provider=evm, provider=okx, "
+                "provider=solana) — keep the literal English word `provider` "
+                "and the raw id; never translate either into prose."
             ),
             input_schema=CONNECTOR_LIST_SCHEMA,
             handler=connector_list_handler,
@@ -1630,10 +1872,14 @@ def register_native_tools(
                 "connector by id or alias. Use after connector_list "
                 "spots a relevant provider so you can read the actual "
                 "Connector subclass — endpoint URLs, method names, "
-                "credential shape — instead of guessing."
+                "credential shape, and whether required credentials are "
+                "configured — instead of guessing. If credential_status "
+                "is missing, do not keep probing the web/provider; report "
+                "the missing credential and ask the operator to configure "
+                "a vault/env-backed key."
             ),
             input_schema=CONNECTOR_VIEW_SCHEMA,
-            handler=connector_view_handler,
+            handler=_wrap_connector_view(deps),
             risk=RiskLevel.READ,
             permission_scope=PermissionScope.WORKSPACE,
             read_only=True,
@@ -1652,34 +1898,24 @@ def register_native_tools(
                 "Actions: get_ticker, get_mark_price, get_candles, "
                 "calculate_features, summarize_market, compress_context. "
                 "Always pass market or symbol; this tool never infers a "
-                "default market for you.\n"
-                "DATA SOURCE ROUTING (native-first):\n"
-                "  • US equity OHLC / FX / index history → use this tool with "
-                "venue='yahoo', e.g. market_data(action='get_candles', "
-                "venue='yahoo', market='AAPL', interval='1d', count=30). The "
-                "yahoo MCP get_historical_stock_prices tool is intentionally "
-                "denied at registry-load — this tool is the canonical fallback.\n"
-                "  • Crypto CEX OHLC (BTC/ETH/major alts) → venue='binance' "
-                "(or bybit/okx/hyperliquid). e.g. market_data("
-                "action='get_candles', venue='binance', market='BTCUSDT', "
-                "interval='1d', count=7).\n"
-                "  • Wallet/on-chain token OHLCV → first use data_api "
-                "wallet.capability_catalog or wallet.meme_strategy_guide, "
-                "then call this tool with selection.selected_route.call. "
-                "That route depends on the installed/logged-in wallet: "
-                "OKX/XAgent/Bitget use their wallet venues, while no ready "
-                "wallet uses the GOAT/self_custody fallback "
-                "venue='onchain', market='ONCHAIN:solana:<token>'.\n"
-                "  • Chinese A-share OHLC → venue='tushare' (needs "
-                "TUSHARE_TOKEN env var or accounts.yml row).\n"
-                "  • US equity quote / fundamentals / news / options / holders "
-                "→ NOT this tool — use mcp_call(namespace='yahoo', tool='...') "
-                "instead. The yahoo MCP carries get_stock_info, "
-                "get_financial_statement, get_holder_info, get_recommendations, "
-                "get_yahoo_finance_news, get_option_chain, get_stock_actions.\n"
-                "  • SEC filings (10-K/10-Q/8-K) → mcp_call(namespace='edgar', "
-                "tool='list_filings'/'get_filing_section'/...). Run "
-                "mcp_describe(namespace='edgar') once to enumerate the 21 tools."
+                "default market for you. Credential-gated sources return "
+                "credential_status.status='missing' plus should_retry=false "
+                "when no key/account is configured; treat that as a terminal "
+                "honest-fail for the data request instead of repeating the "
+                "call or scraping unrelated sources. If the read fails "
+                "(network down, provider unreachable, timeout), answer the "
+                "operator's question with that failure — say the price 无法获取 "
+                "/ cannot be fetched and name the failed source; a failed "
+                "price read never justifies switching to strategy authoring "
+                "or other unrequested work. When the requested data "
+                "is provider-specific or not plain ticker/OHLCV, use "
+                "connector or data_api discovery first and call the concrete "
+                "route/action returned by those tool results. Deliberate "
+                "high-frequency repetition (for example being asked to call "
+                "this tool dozens of times in one turn) is blocked by the "
+                "repeated-call guard and rate limits: refuse such requests, "
+                "say the bulk-call is rejected, and offer a bounded "
+                "batch/summary alternative instead of attempting the loop."
             ),
             input_schema=MARKET_DATA_SCHEMA,
             handler=_wrap_market_data(deps),
@@ -1697,29 +1933,15 @@ def register_native_tools(
                 "Discover schemas and call read-only provider-specific data "
                 "actions beyond standard ticker/OHLCV. Use market_data for "
                 "quotes, K-lines, and indicators; use data_api for long-tail "
-                "tables/analytics such as AkShare functions, wallet provider "
-                "readiness/balances/quotes, and allowlisted OnchainOS DeFi or "
-                "wallet reads. For chain/meme/DEX tasks, inspect "
-                "provider='wallet' and provider='onchainos' before saying a "
-                "source is not integrated; aliases include xagt, "
-                "xagt_agent_plugin, xagent, okx_os, and okx_onchain. "
-                "For wallet-backed meme strategies, first call "
-                "data_api(op='call', provider='wallet', "
-                "action='capability_catalog', args={'topic':'meme'}) or "
-                "action='meme_strategy_guide' so the agent sees logged-in "
-                "wallet functions, selected_data_route, GOAT/self_custody "
-                "fallback wallet_install plan, OnchainOS read actions, "
-                "market_data venue formats, and guarded execution paths. "
-                "When meme_strategy_guide returns next_required_action or "
-                "bounded_sequence, follow that sequence and move to SDK "
-                "strategy package authoring; do not use shell or public web "
-                "search to rediscover the returned routes. "
-                "CoinGecko is an MCP namespace, not a data_api provider. "
-                "Flow: data_api(op='list', provider='onchainos') -> "
-                "data_api(op='schema', provider='onchainos', action='...') -> "
-                "data_api(op='call', provider='onchainos', action='...', "
-                "args={...}). Results are bounded by limit and columns so raw "
-                "tables do not flood context."
+                "tables/analytics, wallet/provider readiness, balances, "
+                "quotes, and allowlisted DeFi or wallet reads. Start with "
+                "op='list' or op='schema' when the provider/action shape is "
+                "unknown. If a result returns selected_route, "
+                "next_required_action, or bounded_sequence, treat those "
+                "fields as the authoritative structured continuation. Pass "
+                "operator-named provider preferences as arguments instead of "
+                "silently substituting another route. Results are bounded by "
+                "limit and columns so raw tables do not flood context."
             ),
             input_schema=DATA_API_SCHEMA,
             handler=_wrap_data_api(deps),
@@ -1733,15 +1955,125 @@ def register_native_tools(
             auto_approve=True,
         ),
         make_native_descriptor(
+            name="gateway_diagnose",
+            description=(
+                "Read-only diagnostics for messaging gateway connectivity. "
+                "Use when the operator asks why a Telegram, Slack, Discord, "
+                "webhook, or other gateway channel cannot connect, send, or "
+                "reply. For Telegram this checks live messages/channels.yml "
+                "configuration, vault-backed token/chat refs, Telegram getMe/"
+                "getChat probes when configured, and returns concrete hints. "
+                "Does not send messages or mutate config."
+            ),
+            input_schema=GATEWAY_DIAGNOSE_SCHEMA,
+            handler=_wrap_gateway_diagnose(deps),
+            risk=RiskLevel.READ,
+            permission_scope=PermissionScope.NONE,
+            read_only=True,
+            is_concurrency_safe=True,
+            tags=("gateway", "messaging", "diagnose", "read"),
+            result_kind="json",
+            auto_approve=True,
+        ),
+        make_native_descriptor(
+            name="data_source_status",
+            description=(
+                "Read Nerya's unified data-source sync ledger. Use this for "
+                "operator requests asking for all data-source sync status, "
+                "freshness, stale sources, or recent sync events instead of "
+                "probing unrelated market/account tools."
+            ),
+            input_schema=DATA_SOURCE_STATUS_SCHEMA,
+            handler=_wrap_data_source_status(deps),
+            risk=RiskLevel.READ,
+            permission_scope=PermissionScope.WORKSPACE,
+            read_only=True,
+            is_concurrency_safe=True,
+            tags=("data", "sync", "status", "read"),
+            result_kind="json",
+            auto_approve=True,
+        ),
+        make_native_descriptor(
+            name="data_source_sync_now",
+            description=(
+                "Force one registered data-source contributor to sync now "
+                "and return the updated row plus recent events. Use this when "
+                "the operator names a source_id such as account:paper_main or "
+                "market:public_ccxt and asks to sync/refresh it immediately. "
+                "This updates only the sync ledger/freshness state; it does "
+                "not place trades or mutate live trading gates."
+            ),
+            input_schema=DATA_SOURCE_SYNC_NOW_SCHEMA,
+            handler=_wrap_data_source_sync_now(deps),
+            risk=RiskLevel.WRITE,
+            permission_scope=PermissionScope.WORKSPACE,
+            read_only=False,
+            is_concurrency_safe=False,
+            tags=("data", "sync", "status", "write"),
+            result_kind="json",
+            auto_approve=True,
+        ),
+        make_native_descriptor(
+            name="account_list",
+            description=(
+                "List configured trading accounts from the workspace account "
+                "control plane. Use this before claiming an account is missing "
+                "or after account_upsert to verify the created paper account."
+            ),
+            input_schema=ACCOUNT_LIST_SCHEMA,
+            handler=_wrap_account_list(deps),
+            risk=RiskLevel.READ,
+            permission_scope=PermissionScope.WORKSPACE,
+            read_only=True,
+            is_concurrency_safe=True,
+            tags=("account", "trading", "read"),
+            result_kind="json",
+            auto_approve=True,
+        ),
+        make_native_descriptor(
+            name="account_upsert",
+            description=(
+                "Create or update a non-live paper account through Nerya's "
+                "official account registry. Use when the operator asks to add "
+                "a paper/shadowless exchange, broker, DEX, or chain account. "
+                "For venues handled by ccxt, pass the concrete provider id "
+                "when it exists (for example venue='kraken') or venue='ccxt:kraken'. "
+                "Paper accounts do not need credentials: when the operator "
+                "asks for a paper account, call this immediately with venue + "
+                "mode='paper' instead of asking for API keys first; vault "
+                "credential refs are optional and only needed for "
+                "credentialed reads. "
+                "Account creation is preparation, not the goal: if the "
+                "operator actually asked for a strategy, backtest, or trade, "
+                "continue to strategy_generate_proposal / the trading tools "
+                "in the same turn after the account exists — do not end the "
+                "turn with only accounts created. "
+                "Plaintext credentials are refused; live/canary/shadow accounts "
+                "must go through the dashboard intake/proposal flow."
+            ),
+            input_schema=ACCOUNT_UPSERT_SCHEMA,
+            handler=_wrap_account_upsert(deps),
+            risk=RiskLevel.WRITE,
+            permission_scope=PermissionScope.WORKSPACE,
+            read_only=False,
+            is_concurrency_safe=False,
+            mutates_paths=True,
+            tags=("account", "trading", "write"),
+            result_kind="json",
+            auto_approve_when=lambda payload: (
+                str(payload.get("mode") or "paper").strip().lower() == "paper"
+                and not bool(payload.get("live_trading_enabled", False))
+            ),
+        ),
+        make_native_descriptor(
             name="wallet_install",
             description=(
                 "Install a catalog-listed wallet provider dependency through "
                 "Nerya's dependency installer. Use only after "
-                "wallet.capability_catalog reports no ready wallet or returns "
-                "an explicit install recommendation. For no-wallet meme tasks, "
-                "call wallet_install(provider='self_custody', mode='goat') to "
-                "install GOAT SDK packages plus Python self-custody fallbacks, "
-                "then re-run capability_catalog and use selection.selected_route.call. "
+                "provider capability discovery reports a missing dependency "
+                "or returns an explicit install recommendation. After a "
+                "successful install, refresh capability discovery and follow "
+                "the concrete call shape returned by that result. "
                 "Installs obey runtime.allow_auto_install, "
                 "NERYA_ALLOW_AUTO_INSTALL, or explicit operator approval."
             ),
@@ -1806,12 +2138,9 @@ def register_native_tools(
                 auto_approve=True,
             ),
             # ----- recipes -----
-            # Recipes are short operator-curated runbooks ("if you see X,
-            # run Y") rendered into the system prompt as a digest. The
+            # Recipes are short operator-curated workflow records. The
             # native tools let the model fetch the full list / body on
-            # demand without bloating the prompt — useful when the model
-            # spots a hint in the digest and wants the verbatim playbook
-            # before replaying it.
+            # demand without bloating the always-on prompt.
             make_native_descriptor(
                 name="recipe_list",
                 description=(
@@ -1888,8 +2217,11 @@ def register_native_tools(
                 description=(
                     "Run a reflection tick over recent journals + risk + "
                     "subagent telemetry and write a 'learning_update' "
-                    "proposal under evolution/proposals/. Never mutates "
-                    "live config — proposals require operator approval."
+                    "proposal under evolution/proposals/. Use this for "
+                    "requests to review performance, reflect on failures, "
+                    "apply a lesson/experience, or find problems. Never "
+                    "mutates live config — proposals require operator "
+                    "approval."
                 ),
                 input_schema=EVOLVE_REFLECT_SCHEMA,
                 handler=_wrap_evolve_reflect(deps),
@@ -1905,7 +2237,15 @@ def register_native_tools(
                 name="evolve_proposals",
                 description=(
                     "List recent self-improvement proposals with id, kind, "
-                    "state, summary, target."
+                    "state, summary, target. When the user or tool output "
+                    "already names a proposal id, pass proposal_id for an "
+                    "exact read-only lookup instead of using shell, glob, "
+                    "or workspace directory searches. This tool is read-only "
+                    "and cannot create or apply a proposal; do not use it as "
+                    "a substitute for evolve_reflect, evolve_skill_proposal, "
+                    "evolve_core_config_patch, strategy_generate_proposal, or "
+                    "strategy_tuning_generate when the task asks for new "
+                    "reflection, learning, skill, config, or strategy changes."
                 ),
                 input_schema=EVOLVE_PROPOSALS_SCHEMA,
                 handler=_wrap_evolve_proposals(deps),
@@ -1921,7 +2261,13 @@ def register_native_tools(
                     "Capture a repeated or newly discovered workflow as a "
                     "reviewable SKILL.md proposal. Writes only under "
                     "evolution/proposals/<id>/after/skills/<skill_id>/; "
-                    "does not activate or mutate live skills."
+                    "does not activate or mutate live skills. If the operator "
+                    "asks Nerya to learn, add, or create a reusable skill or "
+                    "workflow, call this tool after the minimum necessary "
+                    "research instead of ending with a prose promise. Do not "
+                    "use this for ambiguous bug reports or targetful operations "
+                    "like promote/apply/approve unless the operator explicitly "
+                    "asks to turn that workflow into a reusable skill."
                 ),
                 input_schema=EVOLVE_SKILL_PROPOSAL_SCHEMA,
                 handler=_wrap_evolve_skill_proposal(deps),
@@ -1931,6 +2277,71 @@ def register_native_tools(
                 is_concurrency_safe=False,
                 mutates_paths=True,
                 tags=("evolve", "skills", "workflow"),
+                result_kind="json",
+            ),
+            make_native_descriptor(
+                name="evolve_core_config_patch",
+                description=(
+                    "Propose a non-protected runtime config change to "
+                    "nerya.yml / agents.yml / workspace.yml / "
+                    "news_feeds.yml / messages/channels.yml / policy files. "
+                    "This never mutates the live config; it writes a "
+                    "core_config_patch proposal under evolution/proposals/ "
+                    "for operator review. Use this instead of edit_file, "
+                    "write_file, or run_shell when changing default LLM "
+                    "routing, reasoning_effort, max_parallel, custom RSS "
+                    "feeds, outbound channel/webhook config, severity-based "
+                    "notification routing, trade notification fan-out, or "
+                    "other agent/runtime defaults. For messages/channels.yml "
+                    "severity routing, propose top-level severity_routes such "
+                    "as {info: [telegram], critical: [telegram, discord], "
+                    "silent: []}; do not invent targets like "
+                    "notifications.routing. For Telegram channels, use "
+                    "bot_token_ref plus numeric chat_id or vault-backed "
+                    "chat_id_ref. Do not use this "
+                    "for protected "
+                    "risk exposure, signer, secret, approval, or live-trading "
+                    "limits; those direct changes must be refused with "
+                    "`advisory reject`. When you report such a reject to the "
+                    "operator, name only the protected scope that was hit in "
+                    "one line (for example nerya.yml:risk) — do not paste the "
+                    "full protected-set list from the tool error."
+                ),
+                input_schema=EVOLVE_CORE_CONFIG_PATCH_SCHEMA,
+                handler=_wrap_evolve_core_config_patch(deps),
+                risk=RiskLevel.WRITE,
+                permission_scope=PermissionScope.WORKSPACE,
+                read_only=False,
+                is_concurrency_safe=False,
+                mutates_paths=True,
+                tags=("evolve", "config", "proposal"),
+                result_kind="json",
+            ),
+            make_native_descriptor(
+                name="evolve_provider_proposal",
+                description=(
+                    "Create a reviewable provider_proposal for a missing "
+                    "exchange, DEX, perpetual venue, wallet data source, or "
+                    "external market-data provider. Use this after checking "
+                    "connector_list/connector_view/data_api and confirming "
+                    "the venue is not already integrated. Do not use this "
+                    "just because a strategy/backtest request mentions a "
+                    "venue; for trading strategy construction use "
+                    "strategy_generate_proposal and report provider/data "
+                    "readiness gaps from tool evidence if needed. Include venue, "
+                    "docs_url, base_url, auth/signing model, and evidence. "
+                    "This writes only under evolution/proposals/<id>/ and "
+                    "never mutates live provider registry, credentials, or "
+                    "accounts."
+                ),
+                input_schema=EVOLVE_PROVIDER_PROPOSAL_SCHEMA,
+                handler=_wrap_evolve_provider_proposal(deps),
+                risk=RiskLevel.WRITE,
+                permission_scope=PermissionScope.WORKSPACE,
+                read_only=False,
+                is_concurrency_safe=False,
+                mutates_paths=True,
+                tags=("evolve", "provider", "proposal"),
                 result_kind="json",
             ),
         ])
@@ -1979,17 +2390,21 @@ def register_native_tools(
                         "Spawn an Agent Team in parallel: multiple roles "
                         "share one mission and run concurrently under "
                         "a bounded budget. Returns aggregated findings "
-                        "(per-role output + cross-role aggregate). Use "
-                        "this when the user asks for a team/committee/"
-                        "deep-research, or when a low-frequency strategy "
-                        "wants multi-perspective decisions. The roles "
-                        "argument must be an actual JSON array of role "
-                        "objects, not a quoted JSON string. This tool is "
-                        "synchronous: after it returns, write the complete "
-                        "requested answer from its results/failures instead "
-                        "of giving a launch/status acknowledgement, asking "
-                        "whether the user wants details, checking task_list, "
-                        "or running another team_run for the same task."
+                        "(per-role output + cross-role aggregate). Use this "
+                        "when the operator explicitly asks for multiple "
+                        "parallel roles or when the request is already split "
+                        "into independent analysis lanes. Pick roles from "
+                        "role_list/role_get evidence and the task itself; do "
+                        "not infer a hidden template from prompt keywords. "
+                        "The roles argument must be an actual JSON array of "
+                        "role objects, not a quoted JSON string. This tool is "
+                        "synchronous: after it returns, answer from its "
+                        "results/failures instead of giving only a launch "
+                        "acknowledgement or running another team_run for the "
+                        "same task. If an input feed/API/credential is "
+                        "missing, make that blocker explicit and do not "
+                        "substitute mock, placeholder, synthetic, or proxy "
+                        "source content."
                     ),
                     input_schema=TEAM_RUN_SCHEMA,
                     handler=_wrap_team_run(deps),
@@ -2006,11 +2421,9 @@ def register_native_tools(
                     description=(
                         "List every Agent Team role (workspace + "
                         "defaults). Workspace roles override defaults "
-                        "with the same name. For public-company stock "
-                        "research, prefer the default investment-research "
-                        "roles over similarly named finance-ops workspace "
-                        "roles unless the user asks for that operations "
-                        "workflow."
+                        "with the same name. This is a catalog, not a route "
+                        "selector; inspect role_get when names overlap or "
+                        "scope is unclear."
                     ),
                     input_schema=ROLE_LIST_SCHEMA,
                     handler=_wrap_role_list(deps),
@@ -2073,8 +2486,10 @@ def register_native_tools(
                 make_native_descriptor(
                     name="subagent_run_async",
                     description=(
-                        "Spawn a subagent in the background. Returns a "
-                        "task_id immediately; use task_get / "
+                        "Spawn a one-off subagent in the background when the "
+                        "operator asks for a background/后台 task or async "
+                        "work. Return the task_id instead of doing the work "
+                        "synchronously in the parent turn; use task_get / "
                         "task_output to fetch results when the task "
                         "reports state='succeeded'. Live-trading "
                         "skills remain denied. Cancellation is "
@@ -2087,6 +2502,27 @@ def register_native_tools(
                     read_only=False,
                     is_concurrency_safe=True,
                     tags=("subagent", "exec", "async"),
+                    result_kind="json",
+                    auto_approve=True,
+                ),
+                make_native_descriptor(
+                    name="task_create",
+                    description=(
+                        "Create or update a recurring non-strategy task "
+                        "schedule. Use this for hourly/daily/cron/every-N "
+                        "agent or approved-script jobs. Default output "
+                        "delivery to dashboard/local unless the operator's "
+                        "original request explicitly names an external "
+                        "delivery channel. For one-off background work use "
+                        "subagent_run_async instead."
+                    ),
+                    input_schema=TASK_CREATE_SCHEMA,
+                    handler=_wrap_task_create(deps),
+                    risk=RiskLevel.WRITE,
+                    permission_scope=PermissionScope.WORKSPACE,
+                    read_only=False,
+                    is_concurrency_safe=False,
+                    tags=("task", "schedule", "automation"),
                     result_kind="json",
                     auto_approve=True,
                 ),
@@ -2249,7 +2685,9 @@ def register_native_tools(
                     "sending an order. Returns the decision (allow / "
                     "escalate / reject) plus the reasons + estimated "
                     "notional. Use this before trade_intent_submit when "
-                    "in doubt — it never mutates state."
+                    "in doubt — it never mutates state. For direct "
+                    "one-shot order requests, this is the risk evidence "
+                    "path; do not replace it with a strategy proposal."
                 ),
                 input_schema=RISK_CHECK_SCHEMA,
                 handler=_wrap_risk_check(deps),
@@ -2330,7 +2768,13 @@ def register_native_tools(
                     "execution. Returns rejected / pending_approval / "
                     "filled with the full risk_decision. DANGEROUS: "
                     "every successful call writes order/fill ledgers and "
-                    "may move real money on live accounts."
+                    "may move real money on live accounts. The native tool "
+                    "permission layer lets this call reach the domain gate; "
+                    "RiskGate and ApprovalGate remain authoritative for "
+                    "rejected / pending_approval / filled outcomes. Direct "
+                    "Call this tool after risk_check when the structured "
+                    "intent is actionable; pending_approval means the "
+                    "gateway/UI approval gate is now authoritative."
                 ),
                 input_schema=TRADE_INTENT_SUBMIT_SCHEMA,
                 handler=_wrap_trade_intent_submit(deps),
@@ -2341,6 +2785,7 @@ def register_native_tools(
                 mutates_paths=True,
                 tags=("trading", "execute"),
                 result_kind="json",
+                auto_approve=True,
             ),
         ])
         # ----- LLM domain -----
@@ -2427,7 +2872,15 @@ def register_native_tools(
                     "(strategy.yml / strategy.md / main.py / optional "
                     "subagents/<name>.agent.md / tests). Returns the "
                     "proposal_id + validation outcome. Promotion "
-                    "still requires operator approval. When validation "
+                    "still requires operator approval. Only for requests "
+                    "that actually ask for a strategy: never reroute 'enable "
+                    "live trading' or an immediate buy/sell order into a new "
+                    "strategy package — those need an explicit answer (live "
+                    "stays off / paper only / risk-gated order), not this tool. "
+                    "The same rule binds scheduled task runs: a recurring "
+                    "task whose workflow says 'read the feed and judge the "
+                    "position' must do exactly that, not author a new "
+                    "strategy package on each tick. When validation "
                     "passes, the result includes `backtest_required` and "
                     "`next_required_action`; call strategy_backtest with "
                     "that proposal_id before asking to promote. The result "
@@ -2435,33 +2888,60 @@ def register_native_tools(
                     "after/strategies/<id>/ files; use those paths for reads "
                     "and fixes instead of probing promoted strategy paths.\n\n"
                     "Use the `files` arg only when custom code is really "
-                    "needed. For simple operator prompts, prefer the stock "
-                    "template because it is already backtest-compatible. "
-                    "When the requested logic needs custom data, "
-                    "provider-specific reads, wallet/chain-native evidence, "
-                    "non-standard replay, or explicitly avoids a stock "
-                    "archetype, draft the SDK package files first and pass "
-                    "them through `files`; this tool should package and "
-                    "validate that implementation, not invent the core "
-                    "strategy logic. "
+                    "needed or the stock template cannot represent explicit "
+                    "data, signal, execution, or replay requirements from "
+                    "the request/tool evidence. In that lane, draft the SDK "
+                    "package files first and pass them through `files`; this "
+                    "tool packages and validates that implementation rather "
+                    "than inventing hidden strategy logic. "
+                    "Keep proposal tool calls compact: include only the "
+                    "fields needed to create the package, omit long "
+                    "`tuning_prompt`, verbose `prompt`, policy, and LLM "
+                    "policy text unless the operator explicitly asked for "
+                    "them, and prefer the top-level `files.main.py` and "
+                    "`files.strategy.md` aliases when a provider may truncate "
+                    "large nested tool arguments. "
                     "`files` is a string-keyed map of package-relative paths "
                     "(e.g. 'main.py', 'tests/test_main.py', 'strategy.md', "
                     "'subagents/<name>.agent.md') to the FULL UTF-8 body for "
-                    "that file. Any custom main.py must stay inside the "
+                    "that file; draft those bodies inline in this tool call "
+                    "instead of first calling write_file/edit_file on a "
+                    "temporary strategy directory. Any custom main.py must "
+                    "stay inside the "
                     "StrategyContext contract: read candles through "
                     "ctx.market.candles/features, read positions through "
                     "ctx.portfolio.positions, place orders through ctx.trading, "
-                    "and return ctx.result/StrategyResult. Do not use native "
+                    "and return ctx.result/StrategyResult or "
+                    "StrategyAgentTask. Use "
+                    "exactly `from nerya.strategies import StrategyContext, "
+                    "StrategyResult, StrategyAgentTask`; do not import from "
+                    "nerya.sdk, do not import from nerya.strategy, and do not "
+                    "guess private submodules. Do not call "
+                    "StrategyResult.order. Do not call "
+                    "StrategyResult.dispatch. Do not call "
+                    "StrategyResult.batch. Use ctx.result.hold/skip/ok/error "
+                    "for terminal outcomes and ctx.trading.submit_intent/"
+                    "open_position/close_position for trades. Use "
+                    "StrategyAgentTask.dispatch(prompt=..., metadata=...) only "
+                    "when the Agent should make a decision, "
+                    "StrategyAgentTask.skip(reason, metadata=...) when "
+                    "preconditions are not met, and StrategyAgentTask.error(...) "
+                    "for unrecoverable data/contract failures. "
+                    "For agent-task strategies, do not return ctx.result.hold() "
+                    "or ctx.result.skip() from non-dispatch branches; use "
+                    "StrategyAgentTask.skip(...) so the run records an "
+                    "agent-task skip instead of a normal strategy hold. "
+                    "Do not pass context= to StrategyAgentTask.dispatch and "
+                    "pass session_key as a small object, not a string. "
+                    "Do not call ctx.result.agent_task(...). Do not use native "
                     "market_data tool shapes such as get_candles, legacy "
                     "portfolio.get_positions/get_account, ctx.account_id, or "
                     "raw order-list returns.\n\n"
-                    "Before choosing `markets`, preserve the session market "
-                    "context from prior user turns and document the market "
-                    "scope assumption in strategy.md or the proposal rationale. "
-                    "If the user gives only a generic follow-up, infer the "
-                    "intended scope from the conversation instead of copying "
-                    "an unrelated example market; ask for clarification when "
-                    "the scope is genuinely ambiguous."
+                    "Before choosing `markets`, preserve explicit session "
+                    "market context and concrete tool-result markets. Do not "
+                    "copy example markets or substitute a provider route that "
+                    "was not requested or observed. Ask for clarification "
+                    "when the market/account scope is genuinely ambiguous."
                 ),
                 input_schema=STRATEGY_GENERATE_PROPOSAL_SCHEMA,
                 handler=_wrap_strategy_generate_proposal(deps),
@@ -2479,7 +2959,10 @@ def register_native_tools(
                     "Run schema + static-policy + import-smoke "
                     "validation against a promoted strategy package "
                     "(strategy_id) or against an in-flight proposal's "
-                    "after/strategies/<id>/ files (proposal_id)."
+                    "after/strategies/<id>/ files (proposal_id). If the "
+                    "operator gives a prp_* proposal id, pass proposal_id; "
+                    "do not validate a similarly named promoted strategy "
+                    "package instead."
                 ),
                 input_schema=STRATEGY_VALIDATE_SCHEMA,
                 handler=_wrap_strategy_validate(deps),
@@ -2492,21 +2975,45 @@ def register_native_tools(
             make_native_descriptor(
                 name="strategy_backtest",
                 description=(
-                    "Run the built-in backtest engine for a strategy package. "
+                    "Run the built-in backtest engine for a strategy package, "
+                    "or a strategy-local freeform SDK backtest when the "
+                    "package provides one. "
                     "Accepts either strategy_id for promoted packages or "
                     "proposal_id for in-flight strategy proposals, so the "
-                    "agent can validate and backtest before promotion. "
-                    "The default preset replays a 45-day window, long enough "
-                    "to stay above one month after provider lag or incomplete "
-                    "current-day data. "
+                    "agent can validate and backtest before promotion. If "
+                    "the operator gives a prp_* proposal id, call this with "
+                    "proposal_id and do not substitute a similarly named "
+                    "promoted strategy_id. "
+                    "The default preset replays a 45-day window because "
+                    "one month or more is preferred, but shorter real-data "
+                    "windows are valid when the package/result explains the "
+                    "data coverage. "
                     "Writes backtest artifacts under the package's "
                     "backtests/<timestamp>/ directory and returns the verdict "
                     "plus key metrics, `strategy_root`, and artifact paths. "
                     "If loaded candle coverage is below min_backtest_days, "
-                    "`coverage_ok` is false and the run must not be treated "
-                    "as a valid one-month-plus backtest. If the result has "
+                    "`recommended_coverage_ok` is false and the run should "
+                    "be described as a short-window backtest, not rejected "
+                    "solely for being under one month. Do not call the "
+                    "standard backtest unavailable when real candles were "
+                    "loaded. For non-template or custom-data strategies, a "
+                    "freeform SDK backtest is accepted when it returns a "
+                    "capital curve and trade details; do not force a "
+                    "different template in that lane. If the result has "
                     "`reason='no_historical_data'`, stop and report the data "
-                    "gap; do not retry with mock/synthetic/placeholder data. Use "
+                    "gap; do not retry with mock/synthetic/placeholder data. "
+                    "For custom/event-driven packages, use returned replay "
+                    "evidence and `paper_review_allowed` / `review_gate` for "
+                    "paper review; do not override those gate fields with a "
+                    "manual FAIL/no_trades rejection. Shadow/live progression "
+                    "still requires explicit operator approval. "
+                    "If the returned payload has ok=true, describe it as a "
+                    "completed backtest; when kind=freeform_backtest, describe "
+                    "it as a strategy-local SDK research backtest, otherwise "
+                    "as a completed standard OHLCV replay over the loaded window, "
+                    "never as unavailable, impossible, or not applicable; "
+                    "zero trades means no simulated OHLCV fills. "
+                    "Use "
                     "metrics_display for operator-facing summaries. Raw "
                     "*_pct metric values are already percentage points; "
                     "display 0.15 as 0.15%, not 15%. Never multiply them "
@@ -2533,10 +3040,14 @@ def register_native_tools(
                     "package proposal. Refuses to promote when the "
                     "validator reports any blockers. By default it also "
                     "refuses promotion until the proposal has a "
-                    "strategy_backtest artifact. Meme/on-chain strategies "
-                    "may use backtest_policy=flexible_meme with a real "
-                    "custom/event replay or explicit operator-approved "
-                    "standard-backtest waiver."
+                    "strategy_backtest artifact. Custom event-driven "
+                    "packages may use backtest_policy=flexible_meme with a "
+                    "real replay or explicit operator-approved "
+                    "standard-backtest waiver. Do not call this tool during "
+                    "an ordinary create/review strategy request. Call it only "
+                    "when the operator explicitly asks to promote, approve, "
+                    "move to paper/shadow/live, or continue an approval gate; "
+                    "otherwise report the required approval as the next step."
                 ),
                 input_schema=STRATEGY_PROMOTE_SCHEMA,
                 handler=_wrap_strategy_promote(deps),
@@ -2566,6 +3077,9 @@ def register_native_tools(
                 mutates_paths=True,
                 tags=("strategy", "exec"),
                 result_kind="json",
+                auto_approve_when=lambda payload: is_strategy_run_tick_auto_approved(
+                    payload, deps
+                ),
             ),
             make_native_descriptor(
                 name="strategy_kill_switch",

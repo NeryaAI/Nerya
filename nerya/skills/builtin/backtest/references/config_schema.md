@@ -7,8 +7,8 @@ points.
 |---|---|---:|---|
 | `initial_capital_usd` | number | 10000 | Starting cash. |
 | `warmup_bars` | integer | 50 | Bars available before decisions start. |
-| `min_backtest_days` | integer | 30 | Loader rejects windows below this. |
-| `window_days` | integer | 45 | Replay window. Default is longer than one month so provider lag or incomplete current-day data does not shrink the effective replay below 30 days. |
+| `min_backtest_days` | integer | 30 | Recommended coverage window. Shorter real-data runs are allowed and reported as short-window backtests. |
+| `window_days` | integer | 45 | Replay window. Default is longer than one month because 30d+ evidence is preferred, but new/short-lived markets may use any available real history. |
 | `tf` | string | `1h` | Candle interval. |
 | `markets` | string[] | [] | Filled from `strategy.yml` by CLI. |
 | `indicators` | map | SMA/EMA/RSI/ATR | Period lists by indicator name. |

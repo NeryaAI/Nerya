@@ -66,6 +66,10 @@ _SENSITIVE_MUTATION_GLOBS = (
     ".env.*",
     "nerya.yml",
     "nerya.yaml",
+    "news_feeds.yml",
+    "news_feeds.yaml",
+    "messages/channels.yml",
+    "messages/channels.yaml",
     "accounts/*",
     "exchanges.yml",
     "exchanges.yaml",
@@ -81,6 +85,21 @@ _SENSITIVE_MUTATION_GLOBS = (
     "providers/*",
     "providers/**/*",
 )
+
+
+_PROPOSAL_ONLY_CONFIG_FILES = {
+    "nerya.yml",
+    "nerya.yaml",
+    "agents.yml",
+    "workspace.yml",
+    "news_feeds.yml",
+    "news_feeds.yaml",
+    "messages/channels.yml",
+    "messages/channels.yaml",
+    "policies/planner.yml",
+    "policies/tier_policy.yml",
+}
+
 
 def _normalise_mutation_path(value: Any) -> str:
     raw = str(value or "").strip().replace("\\", "/")
@@ -104,6 +123,47 @@ def classify_file_mutation_risk(arguments: dict[str, Any]) -> RiskLevel:
     if is_sensitive_mutation_path((arguments or {}).get("path")):
         return RiskLevel.DANGEROUS
     return RiskLevel.WRITE
+
+
+def _proposal_required_tools(path: str) -> list[str]:
+    p = _normalise_mutation_path(path)
+    if not p or p.startswith("evolution/proposals/"):
+        return []
+    if p in _PROPOSAL_ONLY_CONFIG_FILES:
+        return ["evolve_core_config_patch"]
+    if fnmatch.fnmatchcase(p, "strategies/*") or fnmatch.fnmatchcase(p, "strategies/**/*"):
+        return ["strategy_generate_proposal", "strategy_tuning_generate"]
+    return []
+
+
+def _proposal_required_result(
+    call: ToolCall,
+    *,
+    path: str,
+    tools: list[str],
+) -> ToolResult:
+    primary = tools[0] if tools else "proposal tool"
+    return ToolResult.from_error(
+        tool_use_id=call.id,
+        name=call.name,
+        error=ToolError(
+            kind=ToolErrorKind.PERMISSION_DENIED,
+            message=(
+                f"direct mutation of {path!r} is proposal-only. "
+                "Do not mutate the live workspace file with edit_file/write_file; "
+                f"call {primary} and stage the change under evolution/proposals/ "
+                "for operator review."
+            ),
+            retryable=False,
+            recovery_hint={
+                "next_required_action": {
+                    "tool": primary,
+                    "path": path,
+                    "reason": "proposal_only_mutation",
+                }
+            },
+        ),
+    )
 
 
 def _read_text(path: Path) -> tuple[str, bool, int]:
@@ -430,6 +490,15 @@ def edit_file_handler(
             ),
         )
 
+    rel_path = _short_path(p, root)
+    proposal_tools = _proposal_required_tools(rel_path)
+    if proposal_tools:
+        return _proposal_required_result(
+            call,
+            path=rel_path,
+            tools=proposal_tools,
+        )
+
     try:
         before, _, _ = _read_text(p)
     except OSError as exc:
@@ -589,6 +658,15 @@ def write_file_handler(
             tool_use_id=call.id,
             name=call.name,
             error=ToolError(kind=ToolErrorKind.PERMISSION_DENIED, message=str(exc)),
+        )
+
+    rel_path = _short_path(p, root)
+    proposal_tools = _proposal_required_tools(rel_path)
+    if proposal_tools:
+        return _proposal_required_result(
+            call,
+            path=rel_path,
+            tools=proposal_tools,
         )
 
     existed = p.exists()

@@ -23,6 +23,7 @@ import pytest
 import nerya.agent  # noqa: F401
 from nerya.connectors.data_sources import (
     DataSourceCredentials,
+    GlassnodeConnector,
     PolygonConnector,
     TushareConnector,
     _env_fallback_api_key,
@@ -32,10 +33,13 @@ from nerya.core import yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.tools.native.connectors import (
+    connector_view_handler,
+    market_data_handler,
     _public_connector,
     _resolve_account_for_venue,
     _vault_passphrase_from_env,
 )
+from nerya.tools.types import ToolCall
 
 
 pytestmark = pytest.mark.smoke
@@ -161,6 +165,49 @@ def test_phase_m_public_connector_builds_polygon_io_even_without_creds() -> None
     a deliberate naming convention that pre-dates Phase M."""
     conn = _public_connector("polygon_io", config_like=None)
     assert isinstance(conn, PolygonConnector)
+
+
+def test_phase_m_public_connector_builds_glassnode_even_without_creds() -> None:
+    conn = _public_connector("glassnode", config_like=None)
+    assert isinstance(conn, GlassnodeConnector)
+
+
+def test_market_data_short_circuits_missing_data_source_credentials(tmp_path) -> None:
+    cfg_obj = _bare_config(tmp_path)
+
+    result = market_data_handler(
+        ToolCall(
+            name="market_data",
+            arguments={
+                "action": "get_ticker",
+                "venue": "glassnode",
+                "market": "BTC:supply/lth_sum",
+            },
+        ),
+        config_like=cfg_obj,
+    )
+
+    data = result.content[0].data
+    assert result.is_error is False
+    assert data["error"] == "credential_missing"
+    assert data["should_retry"] is False
+    assert data["credential_status"]["status"] == "missing"
+    assert "api_key" in data["credential_status"]["required_fields"]
+
+
+def test_connector_view_reports_missing_data_source_credentials(tmp_path) -> None:
+    cfg_obj = _bare_config(tmp_path)
+
+    result = connector_view_handler(
+        ToolCall(name="connector_view", arguments={"id": "glassnode"}),
+        config_like=cfg_obj,
+    )
+
+    data = result.content[0].data
+    assert data["found"] is True
+    assert data["credential_status"]["required"] is True
+    assert data["credential_status"]["status"] == "missing"
+    assert data["credential_status"]["should_retry"] is False
 
 
 def test_phase_m_public_connector_polygon_resolves_to_evm_chain_not_data_source() -> None:

@@ -7,12 +7,14 @@ import inspect
 import re
 from typing import Any
 
+from ..data.equities import EquitiesClient
 from .registry import DataApiRegistry
 from .types import DataActionSpec, DataApiContext, DataApiError
 
 
 AKSHARE_DOCS = "https://akshare.akfamily.xyz/data/index.html"
 AKSHARE_HTTP_DOCS = "https://akshare.akfamily.xyz/deploy_http.html"
+FINANCIAL_DATASETS_DOCS = "https://docs.financialdatasets.ai"
 
 _AKSHARE_CURATED_SCHEMAS: dict[str, dict[str, Any]] = {
     "stock_zh_a_hist": {
@@ -222,13 +224,344 @@ class AkShareDataProvider:
         return bool(_PUBLIC_ACTION_RE.match(name or "")) and not name.startswith("_")
 
 
+_FINANCIAL_DATASETS_ACTIONS: dict[str, dict[str, Any]] = {
+    "income_statements": {
+        "title": "US equity income statements",
+        "description": "Read annual or quarterly income statements for a US public company.",
+        "tags": ("equity", "financials", "income_statement", "fundamentals", "dcf"),
+        "row_keys": ("income_statements", "financials", "statements"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US-listed equity ticker symbol."},
+                "period": {"type": "string", "default": "annual", "description": "annual or quarterly."},
+                "limit": {"type": "integer", "default": 4, "minimum": 1, "maximum": 40},
+            },
+            "required": ["ticker"],
+            "additionalProperties": True,
+        },
+    },
+    "balance_sheets": {
+        "title": "US equity balance sheets",
+        "description": "Read annual or quarterly balance sheets for a US public company.",
+        "tags": ("equity", "financials", "balance_sheet", "fundamentals", "dcf"),
+        "row_keys": ("balance_sheets", "financials", "statements"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US-listed equity ticker symbol."},
+                "period": {"type": "string", "default": "annual", "description": "annual or quarterly."},
+                "limit": {"type": "integer", "default": 4, "minimum": 1, "maximum": 40},
+            },
+            "required": ["ticker"],
+            "additionalProperties": True,
+        },
+    },
+    "cash_flow_statements": {
+        "title": "US equity cash-flow statements",
+        "description": "Read annual or quarterly cash-flow statements for a US public company.",
+        "tags": ("equity", "financials", "cash_flow", "fundamentals", "dcf"),
+        "row_keys": ("cash_flow_statements", "cash_flows", "financials", "statements"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US-listed equity ticker symbol."},
+                "period": {"type": "string", "default": "annual", "description": "annual or quarterly."},
+                "limit": {"type": "integer", "default": 4, "minimum": 1, "maximum": 40},
+            },
+            "required": ["ticker"],
+            "additionalProperties": True,
+        },
+    },
+    "all_statements": {
+        "title": "US equity financial statements",
+        "description": "Read combined financial statements for a US public company.",
+        "tags": ("equity", "financials", "statements", "fundamentals", "dcf"),
+        "row_keys": ("financials", "statements"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US-listed equity ticker symbol."},
+                "period": {"type": "string", "default": "annual", "description": "annual or quarterly."},
+                "limit": {"type": "integer", "default": 4, "minimum": 1, "maximum": 40},
+            },
+            "required": ["ticker"],
+            "additionalProperties": True,
+        },
+    },
+    "metrics_snapshot": {
+        "title": "US equity financial metrics snapshot",
+        "description": "Read current valuation, profitability, and balance-sheet metrics for a US public company.",
+        "tags": ("equity", "financial_metrics", "valuation", "fundamentals", "dcf"),
+        "row_keys": ("financial_metrics", "metrics"),
+        "schema": {
+            "type": "object",
+            "properties": {"ticker": {"type": "string", "description": "US equity ticker."}},
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "historical_metrics": {
+        "title": "US equity historical financial metrics",
+        "description": "Read historical valuation and fundamental metrics for a US public company.",
+        "tags": ("equity", "financial_metrics", "valuation", "history", "dcf"),
+        "row_keys": ("financial_metrics", "metrics"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US equity ticker."},
+                "period": {"type": "string", "default": "annual"},
+                "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 80},
+            },
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "analyst_estimates": {
+        "title": "US equity analyst estimates",
+        "description": "Read analyst estimate rows for revenue, earnings, and forward fundamentals.",
+        "tags": ("equity", "analyst_estimates", "valuation", "forecast", "dcf"),
+        "row_keys": ("analyst_estimates", "estimates"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US equity ticker."},
+                "limit": {"type": "integer", "default": 8, "minimum": 1, "maximum": 40},
+            },
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "earnings": {
+        "title": "US equity earnings events",
+        "description": "Read recent earnings rows for a US public company.",
+        "tags": ("equity", "earnings", "fundamentals"),
+        "row_keys": ("earnings", "items"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US equity ticker."},
+                "limit": {"type": "integer", "default": 4, "minimum": 1, "maximum": 40},
+            },
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "segments": {
+        "title": "US equity segment financials",
+        "description": "Read business or geographic segment financial rows for a US public company.",
+        "tags": ("equity", "segments", "financials", "fundamentals"),
+        "row_keys": ("segments", "financials"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US equity ticker."},
+                "period": {"type": "string", "default": "annual"},
+                "limit": {"type": "integer", "default": 4, "minimum": 1, "maximum": 40},
+            },
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "insider_trades": {
+        "title": "US equity insider trades",
+        "description": "Read recent insider trading rows for a US public company.",
+        "tags": ("equity", "insider_trades", "sentiment", "governance"),
+        "row_keys": ("insider_trades", "trades"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US equity ticker."},
+                "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+            },
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "news": {
+        "title": "US equity company news",
+        "description": "Read recent company news rows from Financial Datasets for a US public company.",
+        "tags": ("equity", "news", "sentiment"),
+        "row_keys": ("news", "items"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US equity ticker."},
+                "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
+            },
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "prices": {
+        "title": "US equity historical prices",
+        "description": "Read price rows for a US public company from Financial Datasets.",
+        "tags": ("equity", "prices", "market", "technical"),
+        "row_keys": ("prices", "items"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US equity ticker."},
+                "interval": {"type": "string", "default": "day"},
+                "limit": {"type": "integer", "default": 120, "minimum": 1, "maximum": 500},
+            },
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "company_facts": {
+        "title": "US equity company facts",
+        "description": "Read company profile/facts for a US public company.",
+        "tags": ("equity", "company_facts", "profile", "fundamentals"),
+        "row_keys": ("company_facts", "facts"),
+        "schema": {
+            "type": "object",
+            "properties": {"ticker": {"type": "string", "description": "US equity ticker."}},
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+    "filings": {
+        "title": "US equity SEC filings",
+        "description": "Read SEC filing metadata rows such as 10-K, 10-Q, and 8-K for a US public company.",
+        "tags": ("equity", "sec", "filings", "10-k", "10-q", "fundamentals"),
+        "row_keys": ("filings", "items"),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "US-listed equity ticker symbol."},
+                "form": {"type": "string", "description": "Optional SEC form filter, e.g. 10-K, 10-Q, or 8-K."},
+                "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 80},
+            },
+            "required": ["ticker"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+class FinancialDatasetsProvider:
+    """Read-only bridge for US equity financials and SEC filing metadata."""
+
+    provider = "financial_datasets"
+
+    def list_actions(
+        self,
+        *,
+        query: str = "",
+        tags: tuple[str, ...] = (),
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        query_l = (query or "").strip().lower()
+        tag_set = {str(tag or "").strip().lower() for tag in tags if str(tag or "").strip()}
+        rows: list[dict[str, Any]] = []
+        for name in sorted(_FINANCIAL_DATASETS_ACTIONS):
+            row = self._preview(name)
+            if tag_set and not tag_set.intersection({str(t).lower() for t in row.get("tags") or []}):
+                continue
+            if query_l and not _row_matches(row, query_l):
+                continue
+            rows.append(row)
+            if len(rows) >= max(1, int(limit or 20)):
+                break
+        return rows
+
+    def schema(self, action: str) -> dict[str, Any]:
+        action_name = self._validate_action(action)
+        meta = _FINANCIAL_DATASETS_ACTIONS[action_name]
+        return {
+            **self._preview(action_name),
+            "input_schema": meta["schema"],
+            "setup": _financial_datasets_setup_summary(),
+        }
+
+    def call(
+        self,
+        action: str,
+        args: dict[str, Any],
+        *,
+        context: DataApiContext,
+    ) -> Any:
+        action_name = self._validate_action(action)
+        clean_args = dict(args or {})
+        ticker = _required(clean_args, "ticker").upper()
+        client = EquitiesClient()
+        method = getattr(client, action_name, None)
+        if not callable(method):
+            raise DataApiError(
+                f"financial_datasets action not implemented: {action_name}",
+                kind="not_found",
+                detail={"provider": self.provider, "action": action_name},
+                retryable=False,
+            )
+        kwargs = _filter_action_kwargs(action_name, clean_args)
+        try:
+            raw = method(ticker, **kwargs)
+        except TypeError as exc:
+            raise DataApiError(
+                f"financial_datasets.{action_name} rejected the provided arguments",
+                kind="schema_validation",
+                detail={"error": str(exc), "input_schema": self.schema(action_name)["input_schema"]},
+                retryable=False,
+            ) from exc
+        except Exception as exc:
+            raise DataApiError(
+                f"financial_datasets.{action_name} failed",
+                kind="provider_error",
+                detail={"error": str(exc), "provider": self.provider, "action": action_name},
+                retryable=True,
+            ) from exc
+        return _normalize_financial_datasets_result(action_name, raw)
+
+    def _preview(self, action: str) -> dict[str, Any]:
+        meta = _FINANCIAL_DATASETS_ACTIONS[action]
+        return {
+            "provider": self.provider,
+            "action": action,
+            "title": meta["title"],
+            "description": meta["description"],
+            "tags": list(meta.get("tags") or ()),
+            "output_kind": "json",
+            "docs_url": FINANCIAL_DATASETS_DOCS,
+        }
+
+    def _validate_action(self, action: str) -> str:
+        action_name = str(action or "").strip().lower()
+        if action_name not in _FINANCIAL_DATASETS_ACTIONS:
+            raise DataApiError(
+                f"financial_datasets action not found: {action_name or action}",
+                kind="not_found",
+                detail={
+                    "provider": self.provider,
+                    "action": action,
+                    "available_actions": sorted(_FINANCIAL_DATASETS_ACTIONS),
+                },
+                retryable=False,
+            )
+        return action_name
+
+
 def build_data_api_registry() -> DataApiRegistry:
     registry = DataApiRegistry()
     registry.register_provider(AkShareDataProvider())
+    registry.register_provider(FinancialDatasetsProvider())
     for spec in _wallet_specs():
         registry.register_action(spec)
     for spec in _onchainos_specs():
         registry.register_action(spec)
+    for alias in (
+        "equities",
+        "equity",
+        "us_equities",
+        "financialdatasets",
+        "financial_datasets_ai",
+        "sec",
+        "sec_filings",
+        "edgar",
+        "financials",
+        "stock_financials",
+    ):
+        registry.register_provider_alias(alias, "financial_datasets")
     for alias in (
         "wallets",
         "wallet_provider",
@@ -280,7 +613,20 @@ def _wallet_specs() -> list[DataActionSpec]:
             ),
             tags=("wallet", "onchain", "catalog", "xagt", "xagent", "dex", "meme", "token"),
             output_kind="json",
-            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": "Optional wallet provider to inspect, e.g. xagt, xagt-plugin, okx_os.",
+                    },
+                    "preferred_provider": {
+                        "type": "string",
+                        "description": "Alias of provider for strategy-routing tasks.",
+                    },
+                },
+                "additionalProperties": False,
+            },
             handler=_wallet_readiness,
         ),
         DataActionSpec(
@@ -319,6 +665,15 @@ def _wallet_specs() -> list[DataActionSpec]:
                         "description": "When true, also probes OnchainOS wallet status and redacts sensitive fields.",
                     },
                     "timeout_s": {"type": "number", "default": 8},
+                    "chain": {"type": "string", "default": "solana"},
+                    "token": {"type": "string"},
+                    "preferred_provider": {
+                        "type": "string",
+                        "description": (
+                            "Optional wallet provider preference from the operator, "
+                            "for example xagt_agent_plugin, xagt_onchain, okx_os, or bitget."
+                        ),
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -342,6 +697,13 @@ def _wallet_specs() -> list[DataActionSpec]:
                     "token": {
                         "type": "string",
                         "description": "Optional token contract selected after discovery.",
+                    },
+                    "preferred_provider": {
+                        "type": "string",
+                        "description": (
+                            "Optional wallet provider preference from the operator, "
+                            "for example xagt_agent_plugin, xagt_onchain, okx_os, or bitget."
+                        ),
                     },
                 },
                 "additionalProperties": False,
@@ -449,14 +811,41 @@ def _wallet_list_sources(context: DataApiContext, args: dict[str, Any]) -> dict[
     }
 
 
-def _wallet_readiness(context: DataApiContext, args: dict[str, Any]) -> list[dict[str, Any]]:
+def _wallet_readiness(context: DataApiContext, args: dict[str, Any]) -> Any:
     from ..wallet import readiness_report
 
-    return readiness_report(
+    rows = readiness_report(
         context.config_data,
         workspace=context.workspace,
         vault_passphrase=context.vault_passphrase,
     )
+    preferred_provider = _preferred_wallet_provider(args)
+    if preferred_provider:
+        filtered = [
+            row for row in rows
+            if isinstance(row, dict)
+            and str(row.get("id") or row.get("readiness", {}).get("provider") or "").lower()
+            == preferred_provider
+        ]
+        compact = [_compact_wallet_provider_status(row) for row in filtered]
+        ready = any(bool((row.get("readiness") or {}).get("ready")) for row in compact)
+        return {
+            "provider": preferred_provider,
+            "ready": ready,
+            "count": len(compact),
+            "provider_status": compact,
+            "next_required_action": (
+                "Provider readiness is resolved. If this is a meme strategy task "
+                "and ready is true, use wallet.meme_strategy_guide with the same "
+                "preferred_provider and proceed to SDK proposal authoring; do not "
+                "repeat wallet.readiness."
+            ),
+        }
+    return [
+        _compact_wallet_provider_status(row)
+        for row in rows
+        if isinstance(row, dict)
+    ]
 
 
 def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -515,12 +904,14 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
 
     chain = str(args.get("chain") or "solana").strip() or "solana"
     token = str(args.get("token") or "").strip()
+    preferred_provider = _preferred_wallet_provider(args)
     selection = _wallet_data_selection(
         binding_catalog,
         readiness_rows,
         chain=chain,
         token=token,
         live_status=live_status,
+        preferred_provider=preferred_provider,
     )
     workflow = _meme_strategy_workflow(chain=chain, token=token, selection=selection)
     available_routes = selection.get("available_routes") if isinstance(selection, dict) else []
@@ -530,18 +921,27 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
         "No ready wallet route is available; request operator approval before "
         "using wallet_install for GOAT/self-custody fallback."
         if fallback_active
-        else "A wallet-backed route is already ready; do not call wallet_install "
-        "or install GOAT for this task."
+        else "A wallet-backed route is already ready; use selected_route directly "
+        "and skip dependency installation."
     )
     compact_selection = _compact_wallet_selection(selection)
     response: dict[str, Any] = {
         "next_required_action": (
-            "If this is a meme/on-chain strategy task, call "
-            "wallet.meme_strategy_guide once for the bounded evidence "
-            "sequence, read strategy_author with skill_view, then author the "
-            "SDK strategy package. Do not repeat capability_catalog with "
-            "larger limits and do not use shell or web search to rediscover "
-            f"the same routes. {wallet_route_note}"
+            "For read-only wallet/on-chain data lookup, call selected_route.call "
+            "with market_data (or the listed read-only onchainos data_api action) "
+            "and summarize the evidence; do not author a strategy proposal. "
+            "Only if the operator explicitly asks to create/author/backtest a "
+            "meme/on-chain strategy, call wallet.meme_strategy_guide once for "
+            "the bounded evidence sequence, read strategy_author with skill_view, "
+            "then author the SDK strategy package. Do not repeat capability_catalog "
+            "with larger limits and do not use shell, raw file reads, or web search "
+            f"to rediscover the same routes. {wallet_route_note}"
+            + (
+                f" The operator requested wallet provider {preferred_provider}; "
+                "use the selected_route only if it matches that preference."
+                if preferred_provider
+                else ""
+            )
         ),
         "selected_route": selection.get("selected_route") if isinstance(selection, dict) else {},
         "available_route_count": len(available_routes) if isinstance(available_routes, list) else 0,
@@ -556,19 +956,25 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
             for row in binding_catalog
         ],
         "selection": compact_selection,
-        "meme_strategy_workflow": workflow,
-        "callable_read_actions": {
-            "wallet": _wallet_global_actions(),
-            "onchainos": _compact_action_catalog(_onchainos_read_catalog(topic=topic)),
+        "preferred_provider": preferred_provider,
+        "guide_call": {
+            "op": "call",
+            "provider": "wallet",
+            "action": "meme_strategy_guide",
+            "args": {
+                key: value
+                for key, value in {
+                    "chain": chain,
+                    "token": token,
+                    "preferred_provider": preferred_provider,
+                }.items()
+                if value
+            },
         },
         "rules": [
             "Do not infer wallet-backed on-chain data from connector_list; use data_api wallet/onchainos first.",
             "Choose the data route from installed/logged-in wallet bindings; do not hardcode OKX/XAgent/GOAT.",
-            "When no wallet binding is ready, bootstrap the GOAT/self_custody fallback for generic ONCHAIN candles and recommend installing richer wallet providers.",
-            "Use data_api for discovery/enrichment, market_data for OHLCV, and trade_intent_submit/strategy runtime for execution.",
-            "data_api is read-only; transfers, swaps, signing, bridge, and calldata-building stay behind RiskGate/ApprovalGate/live flags.",
-            "For an on-chain meme backtest, CEX pairs such as DOGEUSDT are proxies only, not valid chain-native evidence.",
-            "Do not repeat this catalog call with larger limits; use wallet.meme_strategy_guide for the compact next-step sequence.",
+            "Do not repeat this catalog call with larger limits; for read-only queries use selected_route.call, and reserve wallet.meme_strategy_guide for strategy authoring.",
             wallet_route_note,
         ],
         "detail_hint": (
@@ -583,7 +989,8 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
             "providers": readiness_rows,
             "market_data_sources": list_wallet_market_data_sources(),
             "selection_full": selection,
-            "callable_read_actions_full": {
+            "meme_strategy_workflow": workflow,
+            "callable_read_actions": {
                 "wallet": _wallet_global_actions(),
                 "onchainos": _onchainos_read_catalog(topic=topic),
             },
@@ -593,7 +1000,14 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
     return response
 
 
-def _compact_action_catalog(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _compact_action_catalog(
+    rows: list[dict[str, Any]],
+    *,
+    topic: str = "",
+) -> list[dict[str, Any]]:
+    if str(topic or "").strip().lower() == "meme":
+        essentials = _meme_onchainos_action_names()
+        rows = [row for row in rows if str(row.get("action") or "") in essentials]
     return [
         {
             "provider": row.get("provider"),
@@ -606,35 +1020,111 @@ def _compact_action_catalog(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _meme_onchainos_action_names() -> set[str]:
+    return {
+        "leaderboard_list",
+        "market_kline",
+        "market_price",
+        "market_prices",
+        "memepump_aped_wallet",
+        "memepump_chains",
+        "memepump_similar_tokens",
+        "memepump_token_bundle_info",
+        "memepump_token_details",
+        "memepump_token_dev_info",
+        "memepump_tokens",
+        "portfolio_dex_history",
+        "portfolio_overview",
+        "portfolio_recent_pnl",
+        "portfolio_token_pnl",
+        "security_token_scan",
+        "signal_list",
+        "token_advanced_info",
+        "token_cluster_list",
+        "token_cluster_overview",
+        "token_cluster_top_holders",
+        "token_holders",
+        "token_hot_tokens",
+        "token_info",
+        "token_liquidity",
+        "token_price_info",
+        "token_report",
+        "token_search",
+        "token_top_trader",
+        "token_trades",
+        "tracker_activities",
+    }
+
+
 def _compact_wallet_selection(selection: dict[str, Any]) -> dict[str, Any]:
     fallback = selection.get("fallback") if isinstance(selection.get("fallback"), dict) else {}
     routes = selection.get("available_routes") if isinstance(selection.get("available_routes"), list) else []
     return {
         "mode": selection.get("mode"),
+        "preference": selection.get("preference") or {},
         "installed_logged_in_wallets": selection.get("installed_logged_in_wallets") or [],
         "onchainos_logged_in": selection.get("onchainos_logged_in"),
         "selected_route": selection.get("selected_route") or {},
         "available_route_count": len(routes),
-        "fallback": fallback,
-        "install_recommendations": selection.get("install_recommendations") or [],
+        "fallback": _compact_wallet_fallback(fallback),
+        "install_recommendations": _compact_install_recommendations(
+            selection.get("install_recommendations") or []
+        ),
         "routing_rules": selection.get("routing_rules") or [],
+    }
+
+
+def _compact_install_recommendations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for row in rows[:4]:
+        if not isinstance(row, dict):
+            continue
+        item = {
+            "provider": row.get("provider"),
+            "label": row.get("label"),
+            "ready": row.get("ready"),
+            "reason": _short_text(row.get("reason") or row.get("install_hint"), 160),
+        }
+        install = row.get("install") if isinstance(row.get("install"), dict) else {}
+        commands = install.get("commands") if isinstance(install.get("commands"), list) else []
+        if commands:
+            item["install_command"] = commands[0]
+        compact.append(item)
+    return compact
+
+
+def _compact_wallet_fallback(fallback: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(fallback, dict):
+        return {}
+    if bool(fallback.get("active")):
+        return fallback
+    return {
+        "active": False,
+        "provider": fallback.get("provider"),
+        "label": fallback.get("label"),
+        "why": "Inactive because a ready wallet-backed market-data route is selected.",
     }
 
 
 def _compact_wallet_provider_status(row: dict[str, Any]) -> dict[str, Any]:
     provider_id = str(row.get("id") or row.get("readiness", {}).get("provider") or "")
-    return {
+    readiness = _compact_wallet_readiness(row.get("readiness"))
+    out = {
         "id": provider_id,
         "label": row.get("label"),
         "configured_wallet_id": row.get("configured_wallet_id"),
-        "readiness": _compact_wallet_readiness(row.get("readiness")),
+        "readiness": readiness,
         "capabilities": _compact_wallet_capabilities(row.get("capabilities")),
         "stability": row.get("stability"),
         "market_data_sources": row.get("market_data_sources") or [],
-        "install_hint": row.get("install_hint"),
-        "install_command": row.get("install_command"),
-        "install_alternatives": row.get("install_alternatives") or [],
     }
+    if not (isinstance(readiness, dict) and readiness.get("ready")):
+        out.update({
+            "install_hint": row.get("install_hint"),
+            "install_command": row.get("install_command"),
+            "install_alternatives": row.get("install_alternatives") or [],
+        })
+    return out
 
 
 def _compact_wallet_readiness(readiness: Any) -> dict[str, Any] | None:
@@ -685,17 +1175,44 @@ def _wallet_data_selection(
     chain: str,
     token: str,
     live_status: dict[str, Any] | None = None,
+    preferred_provider: str = "",
 ) -> dict[str, Any]:
     token_hint = token or "<token_contract>"
     routes = _wallet_market_data_routes(bindings, chain=chain, token=token_hint)
     ready_routes = [row for row in routes if row.get("ready")]
-    selected = ready_routes[0] if ready_routes else None
+    preferred_routes = [
+        row for row in routes
+        if preferred_provider and str(row.get("provider") or "").lower() == preferred_provider
+    ]
+    ready_preferred_routes = [row for row in preferred_routes if row.get("ready")]
+    selected = (
+        ready_preferred_routes[0]
+        if ready_preferred_routes
+        else (ready_routes[0] if ready_routes and not preferred_provider else None)
+    )
+    if selected is None and preferred_routes:
+        selected = preferred_routes[0]
+    preferred_unavailable = bool(preferred_provider and not ready_preferred_routes)
     no_wallet_ready = selected is None
     fallback = _goat_self_custody_fallback(chain=chain, token=token_hint, active=no_wallet_ready)
     installed = [row for row in bindings if row.get("ready")]
     onchainos_logged_in = _onchainos_logged_in(live_status or {})
     return {
-        "mode": "wallet_binding" if selected else "goat_self_custody_fallback",
+        "mode": (
+            "preferred_wallet_unavailable"
+            if preferred_unavailable
+            else ("wallet_binding" if selected else "goat_self_custody_fallback")
+        ),
+        "preference": {
+            "preferred_provider": preferred_provider,
+            "matched_ready_route": bool(ready_preferred_routes),
+            "matched_route_count": len(preferred_routes),
+            "note": (
+                "Operator requested this wallet/provider; do not silently substitute a different wallet route."
+                if preferred_provider
+                else ""
+            ),
+        },
         "installed_logged_in_wallets": [
             {
                 "wallet_id": row.get("wallet_id"),
@@ -719,6 +1236,7 @@ def _wallet_data_selection(
         ),
         "routing_rules": [
             "Prefer a ready wallet binding that exposes chain:token market data for meme tokens.",
+            "If the operator names a wallet provider, prefer that provider and report when it is not ready instead of silently substituting another wallet.",
             "Use OKX OnchainOS/XAgent for discovery, security, holders, traders, and memepump feeds when logged in.",
             "Use generic ONCHAIN candles as the fallback when no richer wallet data source is installed/logged in.",
             "Execution remains gated; this selection is for read-only data and sizing evidence.",
@@ -770,9 +1288,9 @@ def _wallet_market_data_routes(
 
 def _wallet_route_priority(provider: str, market_format: str) -> int:
     provider_l = provider.lower()
-    if provider_l == "okx_os":
-        return 10
     if provider_l == "xagt_agent_plugin":
+        return 10
+    if provider_l == "okx_os":
         return 20
     if provider_l == "bitget":
         return 30
@@ -800,9 +1318,70 @@ def _route_use_cases(provider: str, market_format: str) -> list[str]:
     return ["wallet-backed market data"]
 
 
+def _preferred_wallet_provider(args: dict[str, Any]) -> str:
+    raw = (
+        args.get("preferred_provider")
+        or args.get("provider")
+        or args.get("wallet_provider")
+        or args.get("provider_preference")
+        or args.get("wallet")
+        or ""
+    )
+    candidate = str(raw or "").strip().lower()
+    if not candidate:
+        return ""
+    candidate_norm = (
+        candidate
+        .replace("@", "")
+        .replace("/", "_")
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+    common_aliases = {
+        "xagt": "xagt_agent_plugin",
+        "xagt_plugin": "xagt_agent_plugin",
+        "xagt_agent_plugin": "xagt_agent_plugin",
+        "xagt_onchain": "xagt_agent_plugin",
+        "xagent": "xagt_agent_plugin",
+        "x_agent": "xagt_agent_plugin",
+        "okx": "okx_os",
+        "okx_web3": "okx_os",
+        "okx_onchain": "okx_os",
+        "okx_os": "okx_os",
+        "bitget_wallet": "bitget",
+        "binance": "binance_agentic",
+        "binance_agentic": "binance_agentic",
+        "binance_agentic_wallet": "binance_agentic",
+        "binance_web3": "binance_agentic",
+        "binance_web3_wallet": "binance_agentic",
+        "goat": "self_custody",
+        "goat_sdk": "self_custody",
+        "self_custody": "self_custody",
+    }
+    if candidate_norm in common_aliases:
+        return common_aliases[candidate_norm]
+    try:
+        from ..wallet.registry import resolve_provider_name
+
+        return str(
+            resolve_provider_name(candidate)
+            or resolve_provider_name(candidate_norm)
+            or candidate_norm
+        ).strip().lower()
+    except Exception:
+        return candidate_norm
+
+
 def _goat_self_custody_fallback(*, chain: str, token: str, active: bool) -> dict[str, Any]:
+    if not active:
+        return {
+            "active": False,
+            "provider": "self_custody",
+            "label": "GOAT/self-custody fallback",
+            "why": "Inactive because a ready wallet-backed market-data route is selected.",
+        }
     return {
-        "active": bool(active),
+        "active": True,
         "provider": "self_custody",
         "label": "GOAT/self-custody fallback",
         "why": (
@@ -915,6 +1494,7 @@ def _onchainos_logged_in(live_status: dict[str, Any]) -> bool | None:
 def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -> dict[str, Any]:
     chain = str(args.get("chain") or "solana").strip() or "solana"
     token = str(args.get("token") or "").strip()
+    preferred_provider = _preferred_wallet_provider(args)
     catalog = _wallet_capability_catalog(
         context,
         {
@@ -922,6 +1502,7 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
             "include_live_status": False,
             "chain": chain,
             "token": token,
+            "preferred_provider": preferred_provider,
         },
     )
     selection = catalog.get("selection") if isinstance(catalog, dict) else {}
@@ -956,8 +1537,8 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
         "No ready wallet route is available; ask for operator approval before "
         "using wallet_install for GOAT/self-custody fallback."
         if fallback_active
-        else "A wallet-backed route is already ready; do not call wallet_install "
-        "or install GOAT for this task."
+        else "A wallet-backed route is already ready; use selected_route directly "
+        "and skip dependency installation."
     )
     compact_selection = _compact_wallet_selection(selection)
     return {
@@ -965,15 +1546,43 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
             "Read strategy_author via skill_view, execute only the bounded "
             "native evidence sequence below, then call "
             "strategy_generate_proposal with files containing Nerya SDK "
-            "strategy code. Do not use shell or public web search to "
-            f"rediscover sources already listed here. {wallet_route_note}"
+            "strategy code. Do not use shell, public web search, raw file "
+            "reads, wallet.readiness/list_sources, or another "
+            "capability_catalog call to rediscover sources already listed "
+            f"here. {wallet_route_note}"
+            + (
+                f" The operator requested wallet provider {preferred_provider}; "
+                "do not silently substitute a different wallet route."
+                if preferred_provider
+                else ""
+            )
         ),
         "authoring_contract": {
             "skill": "strategy_author",
             "implementation": "write package-relative files such as main.py and strategy.md",
             "sdk": ["StrategyContext", "StrategyResult", "StrategyAgentTask"],
+            "sdk_import": (
+                "from nerya.strategies import StrategyContext, "
+                "StrategyResult, StrategyAgentTask"
+            ),
+            "sdk_import_note": (
+                "Use the public nerya.strategies import surface; do not "
+                "import SDK classes from nerya.strategies.result, "
+                "nerya.strategies.context, or nerya.strategy."
+            ),
             "proposal_tool_role": "package and validate the supplied files, not generate the core strategy",
+            "prompt_contract": (
+                "Use exact provider/action names only for the evidence tool "
+                "calls. In generated StrategyAgentTask prompts and "
+                "operator-facing docs, describe evidence categories instead "
+                "of copying low-level function names."
+            ),
             "live_guardrail": "paper/shadow/live progression needs operator approval when standard replay is insufficient",
+            "address_policy": (
+                "If the operator did not supply a token contract, author a "
+                "universe-scanning meme strategy over candidate feeds; do not "
+                "block proposal generation waiting for one address."
+            ),
         },
         "bounded_sequence": [
             {
@@ -995,6 +1604,13 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
                 "step": "historical_replay_or_ohlcv",
                 "tool": "market_data",
                 "call": historical_ohlcv.get("call", {}),
+                "must_feed_strategy_markets": (
+                    "If this call returns ok with a concrete `market` such as "
+                    "XAGT_ONCHAIN:solana:<token_contract>, pass that exact value "
+                    "as strategy_generate_proposal.markets. Do not fall back to "
+                    "the generic XAGT_ONCHAIN:solana universe route for a direct "
+                    "generate-and-backtest request."
+                ),
             },
             {
                 "step": "author_sdk_strategy_package",
@@ -1008,6 +1624,7 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
             },
         ],
         "selected_route": selected_route,
+        "preferred_provider": preferred_provider,
         "available_route_count": available_route_count,
         "install_recommendations": install_recommendations,
         "selection": compact_selection,
@@ -1015,6 +1632,8 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
         "minimum_evidence": [
             "wallet.capability_catalog is called first and its selection.selected_route is used instead of hardcoding a wallet.",
             "If selection.mode is goat_self_custody_fallback, install/approve GOAT/self_custody first and treat generic ONCHAIN candles as fallback evidence.",
+            "If no token contract is supplied, the proposal can be a runtime scanner over Solana meme candidates rather than a single-token strategy.",
+            "If the bounded market_data call succeeds for a selected candidate, use that exact chain:token market in strategy.yml so standard short-window replay can run.",
             "candidate tokens come from onchainos token_hot_tokens or memepump_tokens, not a CEX ticker substitution.",
             "token risk is checked with token_report plus security_token_scan before strategy generation.",
             "historical replay uses market_data get_candles on OKX_ONCHAIN/XAGT_ONCHAIN/BITGET_ONCHAIN/ONCHAIN with chain:token format.",
@@ -1024,9 +1643,11 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
             row["action"]
             for row in _onchainos_read_catalog(topic="meme")
             if row.get("provider") == "onchainos"
+            and row.get("action") in _meme_onchainos_action_names()
         ],
         "anti_patterns": [
             "Do not stop after connector_list returns no meme connector; wallet and onchainos data live in data_api.",
+            "Do not re-read wallet readiness/source files after this guide has selected a ready route.",
             "Do not use provider='coingecko' with data_api; CoinGecko is an MCP namespace.",
             "Do not claim an honest on-chain backtest if only Binance/Coinbase CEX candles were used.",
             "Do not use run_shell, web_search, or web_fetch to rediscover the data routes returned by this guide.",
@@ -1224,7 +1845,13 @@ def _meme_strategy_workflow(
         "interval": "5m",
         "count": 300,
     }
+    selected_wallet_id = str(selected_route.get("wallet_id") or "<wallet_id>")
     fallback = selection.get("fallback") if isinstance(selection.get("fallback"), dict) else {}
+    preference = selection.get("preference") if isinstance(selection.get("preference"), dict) else {}
+    preferred_provider = str(preference.get("preferred_provider") or "").strip()
+    discover_args = {"topic": "meme"}
+    if preferred_provider:
+        discover_args["preferred_provider"] = preferred_provider
     install_step: list[dict[str, Any]] = []
     if fallback.get("active"):
         install_step.append({
@@ -1245,7 +1872,7 @@ def _meme_strategy_workflow(
                 "op": "call",
                 "provider": "wallet",
                 "action": "capability_catalog",
-                "args": {"topic": "meme"},
+                "args": discover_args,
             },
             "purpose": "Find ready wallet providers, market_data venues, and gated execution paths.",
         },
@@ -1331,14 +1958,14 @@ def _meme_strategy_workflow(
                     "op": "call",
                     "provider": "wallet",
                     "action": "balance",
-                    "args": {"wallet_id": "<wallet_id>", "chain": chain, "address": "<wallet_address>"},
+                    "args": {"wallet_id": selected_wallet_id, "chain": chain, "address": "<wallet_address>"},
                 },
                 {
                     "op": "call",
                     "provider": "wallet",
                     "action": "quote",
                     "args": {
-                        "wallet_id": "<wallet_id>",
+                        "wallet_id": selected_wallet_id,
                         "chain": chain,
                         "token_in": "<base_token>",
                         "token_out": token_hint,
@@ -2490,6 +3117,68 @@ def _schema_from_signature(fn: Any) -> dict[str, Any]:
     if required:
         schema["required"] = required
     return schema
+
+
+def _filter_action_kwargs(action: str, args: dict[str, Any]) -> dict[str, Any]:
+    meta = _FINANCIAL_DATASETS_ACTIONS.get(action) or {}
+    schema = meta.get("schema") if isinstance(meta.get("schema"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    kwargs: dict[str, Any] = {}
+    for key in properties:
+        if key == "ticker" or key not in args:
+            continue
+        value = args.get(key)
+        if value in (None, ""):
+            continue
+        kwargs[key] = value
+    return kwargs
+
+
+def _normalize_financial_datasets_result(action: str, raw: Any) -> Any:
+    if not isinstance(raw, dict):
+        return raw
+    rows = _financial_datasets_rows(action, raw)
+    if rows is None:
+        return raw
+    out: dict[str, Any] = {
+        "data": rows,
+        "source_url": raw.get("source_url"),
+    }
+    envelope = raw.get("_envelope")
+    if isinstance(envelope, dict):
+        out["_envelope"] = envelope
+    return {key: value for key, value in out.items() if value not in (None, "")}
+
+
+def _financial_datasets_rows(action: str, raw: dict[str, Any]) -> list[Any] | None:
+    data = raw.get("data")
+    if isinstance(data, list):
+        return data
+    meta = _FINANCIAL_DATASETS_ACTIONS.get(action) or {}
+    row_keys = tuple(meta.get("row_keys") or ())
+    if isinstance(data, dict):
+        for key in row_keys:
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+        for key in ("data", "result", "items", "records", "rows"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    for key in row_keys + ("data", "result", "items", "records", "rows"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            return value
+    return None
+
+
+def _financial_datasets_setup_summary() -> dict[str, Any]:
+    return {
+        "provider": "financial_datasets",
+        "env": ["NERYA_FINANCIAL_DATASETS_KEYS", "FINANCIAL_DATASETS_API_KEY"],
+        "vault": ["vault://financial_datasets.keys", "vault://financial_datasets_api_key"],
+        "secret_policy": "Configure keys through env or vault refs; data_api never returns plaintext keys.",
+    }
 
 
 def _json_type_from_annotation(annotation: Any) -> str:

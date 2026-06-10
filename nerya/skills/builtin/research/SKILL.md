@@ -15,9 +15,14 @@ Use before making claims that depend on current external information.
 ## Flow
 
 SEARCH only as broadly as needed.
+FOR latest economy/finance headline requests, load `news_social` first
+and run its RSS script before broad web search.
 FETCH full pages before relying on snippets.
 USE markdown extraction first; use Jina Reader as fallback when direct
 fetch is blocked or thin.
+IF a page shows anti-bot, CAPTCHA, "verify you are human", JS-only, or
+similar blocker content, keep using `scripts/fetch_url.py`; it falls
+through to Jina Reader and then the configured headless browser engine.
 TRACK source URL, fetch method, and timestamp.
 SUMMARISE without over-quoting.
 PASS evidence to `market_research` or `research_report` when needed.

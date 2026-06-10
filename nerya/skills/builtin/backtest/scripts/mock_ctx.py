@@ -31,17 +31,66 @@ class MockMarket:
 
     def candles(
         self,
-        market: str,
-        *,
+        market: str | None = None,
+        *args: Any,
         timeframe: str = "1m",
+        interval: str | None = None,
         limit: int = 100,
+        count: int | None = None,
         account: str | None = None,
+        symbol: str | None = None,
+        **_kwargs: Any,
     ) -> list[dict[str, Any]]:
         del account
+        market, timeframe, limit = self._normalise_candle_args(
+            market,
+            args,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            symbol=symbol,
+        )
         rows = self.timeframe_bars_by_market.get(market, {}).get(timeframe)
         if rows is None:
             rows = self.bars_by_market.get(market, [])
         return list(rows)[-int(limit):]
+
+    def _normalise_candle_args(
+        self,
+        market: str | None,
+        args: tuple[Any, ...],
+        *,
+        timeframe: str,
+        limit: int,
+        symbol: str | None = None,
+    ) -> tuple[str, str, int]:
+        """Accept common generated-code candle call shapes.
+
+        The documented API is ``candles(market, timeframe=..., limit=...)``.
+        LLM-authored strategy drafts often use positional variants such as
+        ``candles(market, "1d", 120)``; the backtest mock should accept those
+        when the meaning is unambiguous so validation and replay share one SDK
+        contract.
+        """
+
+        chosen_market = str(symbol or market or self.market)
+        chosen_timeframe = str(timeframe or "1m")
+        chosen_limit = int(limit or 100)
+        if args:
+            chosen_timeframe = str(args[0])
+        if len(args) >= 2:
+            try:
+                chosen_limit = int(args[1])
+            except Exception:
+                chosen_limit = int(limit or 100)
+        if market and not symbol and not args and self._looks_like_timeframe(str(market)):
+            chosen_market = self.market
+            chosen_timeframe = str(market)
+        return chosen_market, chosen_timeframe, chosen_limit
+
+    @staticmethod
+    def _looks_like_timeframe(value: str) -> bool:
+        text = value.strip().lower()
+        return len(text) >= 2 and text[:-1].isdigit() and text[-1] in {"m", "h", "d", "w"}
 
     def ticker(self, market: str, *, account: str | None = None) -> dict[str, Any]:
         del account
@@ -55,21 +104,103 @@ class MockMarket:
 
     def get_candles(
         self,
-        market: str,
-        *,
+        market: str | None = None,
+        *args: Any,
         timeframe: str = "1m",
         interval: str | None = None,
         limit: int = 100,
         count: int | None = None,
         account: str | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Compatibility alias matching common market-data wording."""
+        """Compatibility alias matching common market-data wording.
+
+        Mirrors :meth:`candles` positional tolerance (for example
+        ``get_candles("SOL/USDT", "1h", limit=200)``) so backtest and live
+        replay share one SDK contract for generated strategies.
+        """
 
         return self.candles(
             market,
+            *args,
             timeframe=interval or timeframe,
             limit=count or limit,
             account=account,
+            symbol=symbol,
+            **kwargs,
+        )
+
+    def ohlcv(
+        self,
+        market: str | None = None,
+        *args: Any,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Compatibility alias for generated strategies that ask for OHLCV."""
+
+        return self.candles(
+            market,
+            *args,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+            symbol=symbol,
+            **kwargs,
+        )
+
+    def get_ohlcv(
+        self,
+        market: str | None = None,
+        *args: Any,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Compatibility alias for SDKs/generated code that use get_ohlcv."""
+
+        return self.ohlcv(
+            market,
+            *args,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+            symbol=symbol,
+            **kwargs,
+        )
+
+    def klines(
+        self,
+        market: str | None = None,
+        *args: Any,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Compatibility alias for generated strategies that ask for klines."""
+
+        return self.candles(
+            market,
+            *args,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+            symbol=symbol,
+            **kwargs,
         )
 
     def mark_price(self, market: str, *, account: str | None = None) -> float:
@@ -565,8 +696,141 @@ class MockCtx:
         return "backtest"
 
     @property
+    def symbol(self) -> str:
+        return self.market_name
+
+    @property
+    def timeframe(self) -> str:
+        return str(getattr(self.config_obj, "tf", "") or "1m")
+
+    @property
     def market_data(self) -> MockMarket:
         return self.market
+
+    def ohlcv(
+        self,
+        market: str | None = None,
+        *args: Any,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Top-level OHLCV helper matching ``ctx.market.candles``."""
+
+        return self.market.candles(
+            market,
+            *args,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+            symbol=symbol,
+            **kwargs,
+        )
+
+    def get_ohlcv(
+        self,
+        market: str | None = None,
+        *args: Any,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Top-level compatibility alias matching ``ctx.ohlcv``."""
+
+        return self.ohlcv(
+            market,
+            *args,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+            symbol=symbol,
+            **kwargs,
+        )
+
+    def get_candles(
+        self,
+        market: str | None = None,
+        *args: Any,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Top-level compatibility alias for common generated-code wording."""
+
+        return self.ohlcv(
+            market,
+            *args,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+            symbol=symbol,
+            **kwargs,
+        )
+
+    def klines(
+        self,
+        market: str | None = None,
+        *args: Any,
+        timeframe: str = "1m",
+        interval: str | None = None,
+        limit: int = 100,
+        count: int | None = None,
+        account: str | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Top-level compatibility alias matching ``ctx.market.klines``."""
+
+        return self.ohlcv(
+            market,
+            *args,
+            timeframe=interval or timeframe,
+            limit=count or limit,
+            account=account,
+            symbol=symbol,
+            **kwargs,
+        )
+
+    def history(
+        self,
+        market: str | None = None,
+        timeframe: str = "1m",
+        field: str = "close",
+        *,
+        length: int = 100,
+        count: int | None = None,
+        limit: int | None = None,
+        symbol: str | None = None,
+        **kwargs: Any,
+    ) -> list[float]:
+        """Return one numeric field from OHLCV rows for common generated code."""
+
+        rows = self.ohlcv(
+            market,
+            timeframe=timeframe,
+            limit=count or limit or length,
+            symbol=symbol,
+            **kwargs,
+        )
+        values: list[float] = []
+        for row in rows:
+            try:
+                values.append(float(row.get(field, 0.0)))
+            except Exception:
+                values.append(0.0)
+        return values
 
     @property
     def logger(self) -> logging.Logger:

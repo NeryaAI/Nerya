@@ -10,7 +10,12 @@ from nerya.core import jsonl, yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.db.sqlite import connect
-from nerya.tools.native.trading import trade_intent_submit_handler
+from nerya.tools.native.trading import (
+    RISK_CHECK_SCHEMA,
+    TRADE_INTENT_SUBMIT_SCHEMA,
+    risk_check_handler,
+    trade_intent_submit_handler,
+)
 from nerya.tools.types import ToolCall
 from nerya.trading.account_snapshots import capture_snapshot, latest_snapshot
 from nerya.trading.order_intents import SizingPolicy, TradeEntry, TradePlan
@@ -140,6 +145,318 @@ def test_manual_agent_order_still_waits_for_approval(tmp_path):
     assert pending[-1]["intent"]["source"] == "agent:native"
 
 
+def test_risk_check_accepts_provider_numeric_strings(tmp_path):
+    cfg = _config(tmp_path)
+    intent = _intent_spec("agent:native")
+    intent.update({
+        "size": "100",
+        "confidence": "0.75",
+        "limit_price": "50000",
+    })
+    call = ToolCall(
+        name="risk_check",
+        arguments={
+            "intent": intent,
+            "market_snapshot": {"price": "50000", "age_s": "0", "source": "test"},
+        },
+        id="toolu_risk_strings",
+    )
+
+    result = risk_check_handler(call, config=cfg)
+
+    assert result.is_error is False
+    out = result.content[0].data
+    assert out["intent"]["size"] == 100
+    assert out["intent"]["confidence"] == 0.75
+    assert out["risk_decision"]["decision"] in {"allow", "escalate", "reject"}
+
+
+def test_risk_check_schema_exposes_trade_intent_contract():
+    intent_schema = RISK_CHECK_SCHEMA["properties"]["intent"]
+    props = intent_schema.get("properties") or {}
+    top_level_props = RISK_CHECK_SCHEMA.get("properties") or {}
+
+    for name in (
+        "strategy_id",
+        "account_id",
+        "market",
+        "side",
+        "size",
+        "size_unit",
+        "order_type",
+        "confidence",
+    ):
+        assert name in props
+
+    assert props["side"]["enum"] == ["buy", "sell"]
+    assert props["size_unit"]["enum"] == ["base", "quote", "usd"]
+    assert "symbol" in props
+    assert "venue" in props
+    assert "size_pct_nav" in props
+    assert "max_size_pct_nav" in props
+    for name in (
+        "strategy_id",
+        "account_id",
+        "market",
+        "side",
+        "size",
+        "size_unit",
+        "order_type",
+        "confidence",
+        "symbol",
+        "venue",
+        "size_pct_nav",
+        "max_size_pct_nav",
+    ):
+        assert name in top_level_props
+    assert "intent" not in (RISK_CHECK_SCHEMA.get("required") or [])
+    assert "size_pct_nav" in TRADE_INTENT_SUBMIT_SCHEMA["properties"]
+
+
+def test_risk_check_accepts_top_level_trade_intent_fields(tmp_path):
+    cfg = _config(tmp_path)
+    call = ToolCall(
+        name="risk_check",
+        arguments={
+            "strategy_id": "s1",
+            "account_id": "paper_main",
+            "symbol": "BTC/USDT",
+            "venue": "mock",
+            "side": "buy",
+            "size_pct_nav": "1.0",
+            "max_size_pct_nav": "0.10",
+            "order_type": "market",
+            "confidence": "1.0",
+            "market_snapshot": {"price": "50000", "age_s": "0", "source": "test"},
+        },
+        id="toolu_risk_top_level",
+    )
+
+    result = risk_check_handler(call, config=cfg)
+
+    assert result.is_error is False, result
+    out = result.content[0].data
+    assert out["intent"]["market"] == "mock:BTC/USDT"
+    assert out["intent"]["size"] == pytest.approx(10_000.0)
+    assert out["risk_decision"]["decision"] == "reject"
+    assert any(
+        str(reason).startswith("max_size_pct_nav_exceeded:1.0000>0.1000")
+        for reason in out["risk_decision"]["reasons"]
+    )
+
+
+def test_risk_check_normalizes_alias_fields_and_pct_nav_cap(tmp_path):
+    cfg = _config(tmp_path)
+    call = ToolCall(
+        name="risk_check",
+        arguments={
+            "intent": {
+                "strategy_id": "s1",
+                "account_id": "paper_main",
+                "symbol": "BTC/USDT",
+                "venue": "mock",
+                "side": "buy",
+                "size_pct_nav": "1.0",
+                "max_size_pct_nav": "0.10",
+                "order_type": "market",
+                "confidence": "1.0",
+                "rationale": "all-in request with a 10% NAV cap",
+            },
+            "market_snapshot": {"price": "50000", "age_s": "0", "source": "test"},
+        },
+        id="toolu_pct_aliases",
+    )
+
+    result = risk_check_handler(call, config=cfg)
+
+    assert result.is_error is False, result
+    out = result.content[0].data
+    assert out["intent"]["market"] == "mock:BTC/USDT"
+    assert out["intent"]["size_unit"] == "usd"
+    assert out["intent"]["size"] == pytest.approx(10_000.0)
+    assert out["intent"]["reasoning"] == "all-in request with a 10% NAV cap"
+    assert out["risk_decision"]["decision"] == "reject"
+    assert any(
+        str(reason).startswith("max_size_pct_nav_exceeded:1.0000>0.1000")
+        for reason in out["risk_decision"]["reasons"]
+    )
+
+
+def test_risk_check_rejects_minimax_nested_payload_with_top_level_duplicates(tmp_path):
+    cfg = _config(tmp_path)
+    yaml_io.dump(
+        cfg.paths.accounts_file,
+        {
+            "accounts": [
+                {
+                    "id": "paper_main",
+                    "exchange": "mock",
+                    "venue": "mock",
+                    "mode": "paper",
+                    "status": "active",
+                    "initial_balance_usd": 10_000,
+                    "permissions": {"place_order": True},
+                },
+                {
+                    "id": "alpaca_paper",
+                    "exchange": "alpaca",
+                    "venue": "alpaca",
+                    "mode": "paper",
+                    "status": "read_only",
+                    "initial_balance_usd": 100_000,
+                    "permissions": {},
+                },
+            ]
+        },
+    )
+    call = ToolCall(
+        name="risk_check",
+        arguments={
+            "intent": {
+                "intent_id": "repro",
+                "account_id": "alpaca_paper",
+                "market": "BINANCE:BTCUSDT",
+                "venue": "binance",
+                "symbol": "BTCUSDT",
+                "side": "buy",
+                "size": 1,
+                "size_pct_nav": 1,
+                "max_size_pct_nav": 0.10,
+                "order_type": "market",
+                "time_in_force": "gtc",
+                "confidence": 0.7,
+                "reasoning": (
+                    "Operator requested full NAV allocation into BTC; "
+                    "10% NAV per-trade cap is the binding constraint."
+                ),
+                "source": "operator_chat",
+            },
+            "account_id": "alpaca_paper",
+            "market": "BINANCE:BTCUSDT",
+            "symbol": "BTCUSDT",
+            "venue": "binance",
+            "side": "buy",
+            "size": 1,
+            "size_pct_nav": 1,
+            "max_size_pct_nav": 0.10,
+            "order_type": "market",
+            "limit_price": 0,
+            "time_in_force": "gtc",
+        },
+        id="toolu_minimax_l3",
+    )
+
+    result = risk_check_handler(call, config=cfg)
+
+    assert result.is_error is False, result
+    out = result.content[0].data
+    assert out["intent"]["account_id"] == "alpaca_paper"
+    assert out["intent"]["size"] == pytest.approx(100_000.0)
+    assert out["normalization"]["sizing"]["size_pct_nav"] == 1.0
+    assert out["normalization"]["sizing"]["max_size_pct_nav"] == 0.10
+    assert out["risk_decision"]["decision"] == "reject"
+    assert any(
+        str(reason).startswith("max_size_pct_nav_exceeded:1.0000>0.1000")
+        for reason in out["risk_decision"]["reasons"]
+    )
+
+
+def test_risk_check_pct_nav_without_positive_nav_returns_blocker(tmp_path):
+    cfg = _config(tmp_path)
+    yaml_io.dump(
+        cfg.paths.accounts_file,
+        {
+            "accounts": [
+                {
+                    "id": "zero_paper",
+                    "exchange": "mock",
+                    "venue": "mock",
+                    "mode": "paper",
+                    "status": "active",
+                    "initial_balance_usd": 0,
+                }
+            ]
+        },
+    )
+    yaml_io.dump(
+        cfg.paths.strategy("s1") / "strategy.yml",
+        {
+            "id": "s1",
+            "status": "paper",
+            "account_id": "zero_paper",
+            "markets": ["mock:BTC/USDT"],
+            "paper_trading_enabled": True,
+            "live_trading_enabled": False,
+        },
+    )
+    yaml_io.dump(
+        cfg.paths.strategy("s1") / "limits.yml",
+        {
+            "allowed_markets": ["mock:BTC/USDT"],
+            "min_confidence": 0,
+            "max_stale_seconds": 60,
+            "approval_threshold_usd": 1,
+        },
+    )
+    call = ToolCall(
+        name="risk_check",
+        arguments={
+            "intent": {
+                "strategy_id": "s1",
+                "account_id": "zero_paper",
+                "market": "BTC/USDT",
+                "venue": "mock",
+                "side": "buy",
+                "size_pct_nav": "0.05",
+                "order_type": "market",
+            }
+        },
+        id="toolu_pct_no_nav",
+    )
+
+    result = risk_check_handler(call, config=cfg)
+
+    assert result.is_error is False, result
+    out = result.content[0].data
+    assert out["status"] == "validation_blocked"
+    assert out["risk_decision"]["decision"] == "reject"
+    assert out["risk_decision"]["reasons"] == ["nav_sizing_unavailable"]
+
+
+def test_trade_intent_submit_rejects_pct_nav_over_cap_without_order(tmp_path):
+    cfg = _config(tmp_path)
+    call = ToolCall(
+        name="trade_intent_submit",
+        arguments={
+            "strategy_id": "s1",
+            "account_id": "paper_main",
+            "symbol": "BTC/USDT",
+            "venue": "mock",
+            "side": "buy",
+            "size_pct_nav": "1.0",
+            "max_size_pct_nav": "0.10",
+            "order_type": "market",
+            "confidence": 1,
+            "market_snapshot": {"price": 50000, "age_s": 0, "source": "test"},
+        },
+        id="toolu_submit_pct_cap",
+    )
+
+    result = trade_intent_submit_handler(call, config=cfg, default_strategy="s1")
+
+    assert result.is_error is False, result
+    out = result.content[0].data
+    assert out["status"] == "rejected"
+    assert out["order_id"] is None
+    assert out["intent"]["market"] == "mock:BTC/USDT"
+    assert out["intent"]["size"] == pytest.approx(10_000.0)
+    assert any(
+        str(reason).startswith("max_size_pct_nav_exceeded:1.0000>0.1000")
+        for reason in out["risk_decision"]["reasons"]
+    )
+    assert jsonl.read_all(cfg.paths.approvals_pending) == []
+
+
 def test_strategy_agent_native_tool_defaults_auto_approve(tmp_path):
     cfg = _config(tmp_path)
     spec = _intent_spec()
@@ -189,6 +506,18 @@ def test_only_strategy_triggered_turns_get_order_permission_bypass():
     assert not _strategy_triggered_order_turn(
         "s1",
         {"source": "dashboard", "kind": "user.chat"},
+    )
+    assert not _strategy_triggered_order_turn(
+        "s1",
+        {"source": "dashboard", "kind": "schedule.tick"},
+    )
+    assert _strategy_triggered_order_turn(
+        "s1",
+        {
+            "source": "dashboard",
+            "kind": "schedule.tick",
+            "payload": {"strategy_triggered": True},
+        },
     )
 
 

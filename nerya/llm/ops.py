@@ -39,6 +39,7 @@ from ..llm.provider_catalog import (
     default_base_url as _catalog_default_base_url,
     lookup as _catalog_lookup,
 )
+from ..llm.route_candidates import configured_routes, split_csv_values
 from ..llm.providers import DEFAULT_BASE_URLS, ModelInfo
 from ..llm.provider_routing import load as routing_load
 from ..llm.provider_routing import save as routing_save
@@ -67,16 +68,20 @@ def provider_readiness(config: Config) -> dict[str, Any]:
     # has a ``provider_key_ref``.
     used: dict[str, dict[str, Any]] = {}
     for tier_name, tier_cfg in tiers.items():
-        provider = (tier_cfg.get("provider") or "").lower()
-        if not provider:
+        if not isinstance(tier_cfg, dict):
             continue
-        entry = used.setdefault(provider, {"tiers": [], "has_key_ref": False,
-                                           "base_url": None})
-        entry["tiers"].append(tier_name)
-        if tier_cfg.get("provider_key_ref"):
-            entry["has_key_ref"] = True
-        if tier_cfg.get("base_url"):
-            entry["base_url"] = tier_cfg["base_url"]
+        for route_cfg in configured_routes(tier_cfg):
+            provider = (route_cfg.get("provider") or "").lower()
+            if not provider:
+                continue
+            entry = used.setdefault(provider, {"tiers": [], "has_key_ref": False,
+                                               "base_url": None})
+            if tier_name not in entry["tiers"]:
+                entry["tiers"].append(tier_name)
+            if route_cfg.get("provider_key_ref"):
+                entry["has_key_ref"] = True
+            if route_cfg.get("base_url"):
+                entry["base_url"] = route_cfg["base_url"]
     for provider, profile in profiles.items():
         entry = used.setdefault(provider, {"tiers": [], "has_key_ref": False,
                                            "base_url": None})
@@ -85,7 +90,7 @@ def provider_readiness(config: Config) -> dict[str, Any]:
         if profile.get("base_url"):
             entry["base_url"] = profile["base_url"]
     out = []
-    for name in sorted(set(adapters.keys()).union(profiles.keys())):
+    for name in sorted(set(adapters.keys()).union(profiles.keys()).union(used.keys())):
         info = used.get(name) or {"tiers": [], "has_key_ref": False,
                                     "base_url": None}
         catalog_entry = _catalog_lookup(name)
@@ -110,16 +115,19 @@ def provider_readiness(config: Config) -> dict[str, Any]:
 
 
 def tier_list(config: Config) -> dict[str, Any]:
-    tiers = _get_cfg(config, "llm.tiers", {}) or {}
+    tiers = effective_tiers(config)
     rows = []
     for tier_name, tier_cfg in sorted(tiers.items()):
+        routes = [_route_config_to_row(route, {}) for route in configured_routes(tier_cfg)]
         rows.append({
             "tier": tier_name,
             "provider": tier_cfg.get("provider"),
             "model": tier_cfg.get("model"),
+            "models": split_csv_values(tier_cfg.get("model")),
             "base_url": tier_cfg.get("base_url"),
             "has_key_ref": bool(tier_cfg.get("provider_key_ref")),
             "reasoning_effort": tier_cfg.get("reasoning_effort") or "",
+            "routes": routes,
             "provider_native_web_search": normalise_provider_native_web_search(
                 tier_cfg.get("provider_native_web_search")
             ),
@@ -200,6 +208,31 @@ def _store_llm_key(
     return f"vault://{name}"
 
 
+def _normalise_provider_key_refs(
+    config: Config,
+    *,
+    provider: str,
+    slot: str,
+    value: Any,
+    vault_passphrase: str | None = None,
+) -> str:
+    refs: list[str] = []
+    for index, item in enumerate(split_csv_values(value), start=1):
+        if item.startswith("vault://"):
+            refs.append(item)
+            continue
+        refs.append(
+            _store_llm_key(
+                config,
+                provider=provider,
+                slot=f"{slot}_{index}" if index > 1 else slot,
+                value=item,
+                vault_passphrase=vault_passphrase,
+            )
+        )
+    return ", ".join(ref for ref in refs if ref)
+
+
 def _resolve_llm_key(
     config: Config,
     ref: str,
@@ -239,24 +272,29 @@ def _normalise_provider_profile(
     base_url = str(raw.get("base_url") or "").strip()
     if base_url and not (base_url.startswith("http://") or base_url.startswith("https://")):
         raise ValueError(f"{provider}: base_url must start with http:// or https://")
-    key_ref = str(raw.get("provider_key_ref") or "").strip()
-    one_time_key = str(
-        raw.get("provider_key") or raw.get("api_key") or raw.get("key") or ""
-    ).strip()
+    key_ref = _normalise_provider_key_refs(
+        config,
+        provider=provider,
+        slot="provider",
+        value=raw.get("provider_key_refs") or raw.get("provider_key_ref"),
+        vault_passphrase=vault_passphrase,
+    )
+    one_time_key = ", ".join(
+        split_csv_values(
+            raw.get("provider_keys")
+            or raw.get("api_keys")
+            or raw.get("provider_key")
+            or raw.get("api_key")
+            or raw.get("key")
+            or ""
+        )
+    )
     if one_time_key:
         key_ref = _store_llm_key(
             config,
             provider=provider,
             slot="provider",
             value=one_time_key,
-            vault_passphrase=vault_passphrase,
-        )
-    elif key_ref and not key_ref.startswith("vault://"):
-        key_ref = _store_llm_key(
-            config,
-            provider=provider,
-            slot="provider",
-            value=key_ref,
             vault_passphrase=vault_passphrase,
         )
     out: dict[str, Any] = {}
@@ -283,6 +321,25 @@ def _normalise_provider_profile(
             raw.get("provider_native_web_search")
         )
     return provider, out
+
+
+def _apply_provider_profile(
+    cfg: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    out = dict(cfg or {})
+    provider = str(out.get("provider") or "").strip().lower()
+    profile = profiles.get(provider) or {}
+    for key in (
+        "base_url", "provider_key_ref", "provider_key_env", "kind",
+        "provider_native_web_search",
+    ):
+        if key == "provider_native_web_search":
+            if key not in out and profile.get(key) is not None:
+                out[key] = profile[key]
+        elif not out.get(key) and profile.get(key):
+            out[key] = profile[key]
+    return out
 
 
 def _tier_policy_defaults(tier: str) -> dict[str, Any]:
@@ -316,17 +373,21 @@ def effective_tiers(config: Config) -> dict[str, dict[str, Any]]:
         return out
     for tier, raw_cfg in tiers.items():
         cfg = dict(raw_cfg or {})
-        provider = str(cfg.get("provider") or "").strip().lower()
-        profile = profiles.get(provider) or {}
-        for key in (
-            "base_url", "provider_key_ref", "provider_key_env", "kind",
-            "provider_native_web_search",
-        ):
-            if key == "provider_native_web_search":
-                if key not in cfg and profile.get(key) is not None:
-                    cfg[key] = profile[key]
-            elif not cfg.get(key) and profile.get(key):
-                cfg[key] = profile[key]
+        cfg = _apply_provider_profile(cfg, profiles)
+        if cfg.get("routes"):
+            routes = [
+                _apply_provider_profile(route, profiles)
+                for route in configured_routes(cfg)
+            ]
+            cfg["routes"] = routes
+            if routes:
+                first = routes[0]
+                for key in (
+                    "provider", "model", "base_url", "provider_key_ref",
+                    "provider_key_env", "kind", "provider_native_web_search",
+                ):
+                    if key in first:
+                        cfg[key] = first[key]
         out[str(tier)] = cfg
     return out
 
@@ -342,35 +403,85 @@ def _normalise_model_tier_row(
     tier = str(raw.get("tier") or "").strip()
     if not _TIER_RE.fullmatch(tier):
         raise ValueError(f"invalid tier name: {tier!r}")
+    raw_routes = raw.get("routes")
+    if isinstance(raw_routes, list) and raw_routes:
+        routes = [
+            _normalise_route_row(
+                config,
+                tier=tier,
+                raw_route=route,
+                route_index=index,
+                vault_passphrase=vault_passphrase,
+            )
+            for index, route in enumerate(raw_routes)
+        ]
+        routes = [
+            route for route in routes
+            if route.get("provider") and route.get("model")
+        ]
+        if not routes:
+            raise ValueError(f"{tier}: at least one route requires provider and model")
+        out: dict[str, Any] = {"routes": routes}
+        first = routes[0]
+        for key in (
+            "provider", "model", "base_url", "provider_key_ref", "kind",
+            "provider_native_web_search",
+        ):
+            if key in first:
+                out[key] = first[key]
+        raw_effort = raw.get("reasoning_effort")
+        if raw_effort is not None:
+            eff = str(raw_effort).strip().lower().replace("-", "_")
+            if eff and eff not in REASONING_EFFORT_LEVELS:
+                raise ValueError(
+                    f"{tier}: invalid reasoning_effort {raw_effort!r}; "
+                    f"must be one of {list(REASONING_EFFORT_LEVELS)}"
+                )
+            if eff:
+                out["reasoning_effort"] = eff
+        if "provider_native_web_search" in raw:
+            out["provider_native_web_search"] = normalise_provider_native_web_search(
+                raw.get("provider_native_web_search")
+            )
+        return tier, out
+
     provider = str(raw.get("provider") or "").strip().lower()
-    model = str(raw.get("model") or "").strip()
+    model_values = split_csv_values(raw.get("models"))
+    if not model_values:
+        model_values = split_csv_values(raw.get("model"))
+    model = ", ".join(model_values)
     if not provider:
         raise ValueError(f"{tier}: provider is required")
     if not _PROVIDER_RE.fullmatch(provider):
         raise ValueError(f"{tier}: invalid provider {provider!r}")
     if not model:
         raise ValueError(f"{tier}: model is required")
-    if len(model) > 160:
+    if any(len(item) > 160 for item in model_values):
         raise ValueError(f"{tier}: model id is too long")
     base_url = str(raw.get("base_url") or "").strip()
-    provider_key_ref = str(raw.get("provider_key_ref") or "").strip()
-    one_time_key = str(
-        raw.get("provider_key") or raw.get("api_key") or raw.get("key") or ""
-    ).strip()
+    provider_key_ref = _normalise_provider_key_refs(
+        config,
+        provider=provider,
+        slot=tier,
+        value=raw.get("provider_key_refs") or raw.get("provider_key_ref"),
+        vault_passphrase=vault_passphrase,
+    )
+    one_time_key = ", ".join(
+        split_csv_values(
+            raw.get("provider_keys")
+            or raw.get("api_keys")
+            or raw.get("provider_key")
+            or raw.get("api_key")
+            or raw.get("key")
+            or ""
+        )
+    )
     if one_time_key:
         provider_key_ref = _store_llm_key(
             config,
             provider=provider,
             slot=tier,
             value=one_time_key,
-            vault_passphrase=vault_passphrase,
-        )
-    elif provider_key_ref and not provider_key_ref.startswith("vault://"):
-        provider_key_ref = _store_llm_key(
-            config,
-            provider=provider,
-            slot=tier,
-            value=provider_key_ref,
             vault_passphrase=vault_passphrase,
         )
     out: dict[str, Any] = {
@@ -403,21 +514,134 @@ def _normalise_model_tier_row(
     return tier, out
 
 
+def _normalise_route_row(
+    config: Config,
+    *,
+    tier: str,
+    raw_route: Any,
+    route_index: int,
+    vault_passphrase: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(raw_route, dict):
+        raise ValueError(f"{tier}: route {route_index + 1} must be an object")
+    provider = str(raw_route.get("provider") or "").strip().lower()
+    model_values = split_csv_values(raw_route.get("models"))
+    if not model_values:
+        model_values = split_csv_values(raw_route.get("model"))
+    model = ", ".join(model_values)
+    if not provider:
+        raise ValueError(f"{tier}: route {route_index + 1} provider is required")
+    if not _PROVIDER_RE.fullmatch(provider):
+        raise ValueError(
+            f"{tier}: route {route_index + 1} invalid provider {provider!r}"
+        )
+    if not model:
+        raise ValueError(f"{tier}: route {route_index + 1} model is required")
+    if any(len(item) > 160 for item in model_values):
+        raise ValueError(f"{tier}: route {route_index + 1} model id is too long")
+    base_url = str(raw_route.get("base_url") or "").strip()
+    if base_url and not (
+        base_url.startswith("http://") or base_url.startswith("https://")
+    ):
+        raise ValueError(
+            f"{tier}: route {route_index + 1} base_url must start with http:// or https://"
+        )
+    route_slot = f"{tier}_route_{route_index + 1}"
+    provider_key_ref = _normalise_provider_key_refs(
+        config,
+        provider=provider,
+        slot=route_slot,
+        value=raw_route.get("provider_key_refs") or raw_route.get("provider_key_ref"),
+        vault_passphrase=vault_passphrase,
+    )
+    one_time_key = ", ".join(
+        split_csv_values(
+            raw_route.get("provider_keys")
+            or raw_route.get("api_keys")
+            or raw_route.get("provider_key")
+            or raw_route.get("api_key")
+            or raw_route.get("key")
+            or ""
+        )
+    )
+    if one_time_key:
+        provider_key_ref = _store_llm_key(
+            config,
+            provider=provider,
+            slot=route_slot,
+            value=one_time_key,
+            vault_passphrase=vault_passphrase,
+        )
+    out: dict[str, Any] = {"provider": provider, "model": model}
+    if base_url:
+        out["base_url"] = base_url
+    if provider_key_ref:
+        out["provider_key_ref"] = provider_key_ref
+    raw_kind = str(raw_route.get("kind") or "").strip().lower()
+    if raw_kind:
+        if raw_kind not in {"chat_completions", "anthropic_messages"}:
+            raise ValueError(
+                f"{tier}: route {route_index + 1} kind must be "
+                f"'chat_completions' or 'anthropic_messages', got {raw_kind!r}"
+            )
+        out["kind"] = raw_kind
+    if "provider_native_web_search" in raw_route:
+        out["provider_native_web_search"] = normalise_provider_native_web_search(
+            raw_route.get("provider_native_web_search")
+        )
+    return out
+
+
+def _route_config_to_row(
+    route_cfg: dict[str, Any],
+    inherited: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    inherited = inherited or {}
+    provider = str(route_cfg.get("provider") or "").strip().lower()
+    key_ref = route_cfg.get("provider_key_ref") or inherited.get("provider_key_ref") or ""
+    key_refs = split_csv_values(key_ref)
+    return {
+        "provider": provider,
+        "model": route_cfg.get("model") or "",
+        "models": split_csv_values(route_cfg.get("model")),
+        "base_url": route_cfg.get("base_url") or inherited.get("base_url") or "",
+        "provider_key_ref": key_ref,
+        "provider_key_refs": key_refs,
+        "has_key_ref": bool(key_ref),
+        "kind": str(route_cfg.get("kind") or inherited.get("kind") or "").strip(),
+        "provider_native_web_search": normalise_provider_native_web_search(
+            route_cfg.get(
+                "provider_native_web_search",
+                inherited.get("provider_native_web_search"),
+            )
+        ),
+    }
+
+
 def llm_config(config: Config) -> dict[str, Any]:
-    tiers = _get_cfg(config, "llm.tiers", {}) or {}
+    tiers = effective_tiers(config)
     profiles = _provider_profiles(config)
     rows = []
     for tier_name, tier_cfg in sorted(tiers.items()):
         provider = str(tier_cfg.get("provider") or "").strip().lower()
         inherited = profiles.get(provider) or {}
+        routes = [
+            _route_config_to_row(
+                route,
+                profiles.get(str(route.get("provider") or "").strip().lower()) or {},
+            )
+            for route in configured_routes(tier_cfg)
+        ]
         rows.append({
             "tier": tier_name,
             "provider": provider,
             "model": tier_cfg.get("model") or "",
+            "models": split_csv_values(tier_cfg.get("model")),
             "base_url": tier_cfg.get("base_url") or inherited.get("base_url") or "",
             "provider_key_ref": tier_cfg.get("provider_key_ref") or inherited.get("provider_key_ref") or "",
             "has_key_ref": bool(tier_cfg.get("provider_key_ref") or inherited.get("provider_key_ref")),
             "reasoning_effort": str(tier_cfg.get("reasoning_effort") or "").strip().lower(),
+            "routes": routes,
             "provider_native_web_search": normalise_provider_native_web_search(
                 tier_cfg.get(
                     "provider_native_web_search",
@@ -519,12 +743,19 @@ def llm_config_set(
                 merged.setdefault(key, value)
             for key in (
                 "provider", "model", "base_url", "provider_key_ref",
-                "reasoning_effort",
+                "reasoning_effort", "routes",
             ):
                 if key in patch:
                     merged[key] = patch[key]
                 else:
                     merged.pop(key, None)
+            if "routes" in patch:
+                first = patch["routes"][0] if patch["routes"] else {}
+                for key in ("provider", "model", "base_url", "provider_key_ref", "kind"):
+                    if key in first:
+                        merged[key] = first[key]
+                    elif key in {"base_url", "provider_key_ref", "kind"}:
+                        merged.pop(key, None)
             if "provider_native_web_search" in patch:
                 merged["provider_native_web_search"] = patch[
                     "provider_native_web_search"
@@ -573,7 +804,15 @@ def models_refresh(
     config: Config, *, vault_passphrase: str | None = None,
 ) -> dict[str, Any]:
     catalog = ModelCatalog(workspace=config.paths.root)
-    tiers = effective_tiers(config)
+    effective = effective_tiers(config)
+    tiers: dict[str, dict[str, Any]] = {}
+    for tier_name, tier_cfg in effective.items():
+        routes = configured_routes(tier_cfg)
+        if len(routes) <= 1:
+            tiers[tier_name] = dict(routes[0] if routes else tier_cfg)
+            continue
+        for index, route_cfg in enumerate(routes, start=1):
+            tiers[f"{tier_name}:route:{index}"] = dict(route_cfg)
     for provider, profile in _provider_profiles(config).items():
         pseudo_name = f"provider:{provider}"
         tiers.setdefault(pseudo_name, {

@@ -37,6 +37,7 @@ from .registry import (
     DEFAULT_SUBAGENT_SKILLS,
     DEFAULT_TIERS,
     SubAgentSpec,
+    canonical_subagent_name,
     load_registry,
 )
 
@@ -87,6 +88,7 @@ class StrategySubAgentRegistry:
         return path if path.exists() else None
 
     def _strategy_tier(self, name: str) -> str:
+        canonical = canonical_subagent_name(name)
         pkg = self._load_package()
         if pkg is not None:
             tuning = pkg.manifest.tuning
@@ -97,16 +99,18 @@ class StrategySubAgentRegistry:
             tier = str(pkg.manifest.llm_policy.default_tier or "").strip()
             if tier:
                 return tier
-        return DEFAULT_TIERS.get(name, "medium")
+        return DEFAULT_TIERS.get(canonical, "medium")
 
     def get(self, name: str) -> SubAgentSpec:
+        canonical = canonical_subagent_name(name)
         path = self._strategy_prompt_path(name)
         if path is not None:
             return SubAgentSpec.load(
                 path,
                 name=name,
-                allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(name, [])),
+                allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(canonical, [])),
                 tier=self._strategy_tier(name),
+                canonical_name=canonical,
             )
         spec = self._load_global().get(name)
         if spec is not None:
@@ -114,7 +118,10 @@ class StrategySubAgentRegistry:
             # to the default body in that case so the model never runs with
             # an empty role prompt.
             if not (spec.prompt or "").strip():
-                spec.prompt = DEFAULT_SUBAGENT_PROMPTS.get(name, spec.prompt)
+                spec.prompt = DEFAULT_SUBAGENT_PROMPTS.get(
+                    spec.canonical_name or canonical,
+                    spec.prompt,
+                )
             return spec
         return SubAgentSpec(
             name=name,
@@ -122,9 +129,10 @@ class StrategySubAgentRegistry:
             # Ship a default prompt body so the role still has scope and an
             # output contract even when no file exists on disk. Operators can
             # override it by writing ``workspace/subagents/<name>.agent.md``.
-            prompt=DEFAULT_SUBAGENT_PROMPTS.get(name, ""),
-            allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(name, [])),
-            tier=DEFAULT_TIERS.get(name, "medium"),
+            prompt=DEFAULT_SUBAGENT_PROMPTS.get(canonical, ""),
+            allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(canonical, [])),
+            tier=DEFAULT_TIERS.get(canonical, "medium"),
+            canonical_name=canonical,
         )
 
     def list_names(self) -> list[str]:

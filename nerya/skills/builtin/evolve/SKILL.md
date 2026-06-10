@@ -1,7 +1,7 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: evolve
-description: "Use for proposal-first Nerya capability growth: new skill proposals, workflow-to-skill conversion, self-reflection, and reviewed extension plans."
+description: "Use for proposal-first Nerya capability growth: new skill proposals, workflow-to-skill conversion, self-reflection, reviewed extension plans, and runtime config-change proposals. Protected scopes (risk/exposure limits, live trading, kill switch, signer/secrets) are never editable: answer those requests with an explicit advisory reject, not config-file hunting."
 version: 0.1.0
 license: MIT
 author: Nerya
@@ -29,6 +29,24 @@ TURN durable facts into memory.
 IF proposing a larger capability:
 WRITE the smallest reviewed proposal first.
 DEFER implementation until operator approval.
+
+IF the operator asks to change runtime/agent config (LLM routing,
+channels, feeds, notification routing, workspace defaults):
+USE `evolve_core_config_patch` with the matching target file; the
+change lands as a `core_config_patch` proposal for review, never a
+live edit.
+
+## Protected scopes
+
+Risk limits (`risk.*`, `risk_limits.*`, strategy `limits.yml`), global
+exposure caps, live trading (`runtime.live_trading_enabled`), the kill
+switch, signer/approval policy, accounts, and vault files are
+protected: `evolve_core_config_patch` answers `advisory reject:
+protected_scope` for them by design. When asked to raise a risk cap or
+flip live trading, do not reroute the request into a strategy proposal
+or shell edit; surface the advisory reject plainly (the change is
+refused / rejected as advisory-only) and point the operator to the
+dashboard approval path that owns that scope.
 
 ## Scripts
 

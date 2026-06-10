@@ -53,11 +53,14 @@ def routes():
         if spec is None:
             return {"ok": False, "error": "unknown_venue",
                     "known": sorted({s["id"] for s in list_providers()})}
+        fields = [f.to_dict() for f in spec.credential_fields]
         return {
             "ok": True,
             "venue": venue,
             "provider": spec.to_info(),
-            "credential_fields": [f.to_dict() for f in spec.credential_fields],
+            "credential_fields": fields,
+            # Backward-compatible shape used by older dashboard/e2e clients.
+            "schema": {"fields": fields},
             "install_command": spec.install_command,
             "install_hint": spec.install_hint,
         }

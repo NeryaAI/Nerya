@@ -11,20 +11,28 @@ existing workspaces keep working untouched.
 
 compatibility extension (2026-04-24)
 ------------------------------------
-Four optional fields on ``ScheduleEntry`` let a schedule behave as a
-"scheduled agent session" rather than a plain trigger emitter:
+Optional fields on ``ScheduleEntry`` let a schedule behave as a
+"scheduled task" rather than a plain trigger emitter:
 
-* ``session_kind``: ``"trigger"`` (default, legacy) or ``"agent"``. An
-  ``agent`` schedule, when due, spawns a fresh session and runs one
-  agent turn with the configured skills attached.
+* ``session_kind``: ``"trigger"`` (default, legacy), ``"agent"``, or
+  ``"script"``. An ``agent`` schedule, when due, runs one agent turn in
+  the session selected by ``session_mode``.
 * ``attached_skills``: skill names the scheduled session is allowed to
   call. Empty list = no restriction beyond the strategy's own policy.
 * ``delivery_targets``: list of routed outputs (``messages`` channel or
   webhook URL) applied after the agent turn completes.
 * ``session_ttl_seconds``: optional wallclock ceiling for the scheduled
   agent session; ``None`` means single-turn-and-close.
+* ``session_mode``: ``"ephemeral"`` (new session per fire), ``"reuse"``
+  (stable session per schedule), or ``"fanout"`` (run once per configured
+  session id).
+* ``session_id`` / ``session_ids``: stable session targets for ``reuse`` and
+  ``fanout`` agent schedules.
 
-All four are backwards compatible: legacy YAML without these keys keeps
+For approved-script schedules, the script id is read from
+``payload.script_id`` or a ``script:<id>`` target.
+
+These fields are backwards compatible: legacy YAML without these keys keeps
 parsing and behaves identically.
 """
 
@@ -40,8 +48,34 @@ from ..core.errors import TriggerValidationError
 from ..core.paths import WorkspacePaths
 
 
-_VALID_SESSION_KINDS = frozenset({"trigger", "agent"})
-_VALID_DELIVERY_KINDS = frozenset({"messages", "webhook"})
+_VALID_SESSION_KINDS = frozenset({"trigger", "agent", "script"})
+_VALID_SESSION_MODES = frozenset({"ephemeral", "reuse", "fanout"})
+_SESSION_MODE_ALIASES = {
+    "new": "ephemeral",
+    "new_each_run": "ephemeral",
+    "fresh": "ephemeral",
+    "same": "reuse",
+    "fixed": "reuse",
+    "persistent": "reuse",
+    "multiple": "fanout",
+    "multi": "fanout",
+}
+_VALID_DELIVERY_KINDS = frozenset({
+    "messages",
+    "webhook",
+    "gateway",
+    "platform",
+    "dashboard",
+    "local",
+    "telegram",
+    "discord",
+    "slack",
+    "feishu",
+    "wecom",
+    "dingtalk",
+    "matrix",
+    "whatsapp",
+})
 
 
 @dataclass
@@ -62,8 +96,20 @@ class ScheduleEntry:
     attached_skills: list[str] = field(default_factory=list)
     delivery_targets: list[dict[str, Any]] = field(default_factory=list)
     session_ttl_seconds: int | None = None
+    session_mode: str = "ephemeral"
+    session_id: str | None = None
+    session_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        self.session_kind = str(self.session_kind or "trigger").strip().lower()
+        self.session_mode = _normalise_session_mode(self.session_mode)
+        self.session_ids = [
+            str(s).strip() for s in (self.session_ids or [])
+            if str(s).strip()
+        ]
+        if self.session_id is not None:
+            sid = str(self.session_id).strip()
+            self.session_id = sid or None
         if self.every_seconds is None and not self.cron:
             raise TriggerValidationError(
                 f"schedule {self.id!r} must set either every_seconds or cron"
@@ -87,10 +133,24 @@ class ScheduleEntry:
                 f"schedule {self.id!r} session_kind must be one of "
                 f"{sorted(_VALID_SESSION_KINDS)!r}, got {self.session_kind!r}"
             )
+        if self.session_mode not in _VALID_SESSION_MODES:
+            raise TriggerValidationError(
+                f"schedule {self.id!r} session_mode must be one of "
+                f"{sorted(_VALID_SESSION_MODES)!r}, got {self.session_mode!r}"
+            )
         if self.attached_skills and self.session_kind != "agent":
             raise TriggerValidationError(
                 f"schedule {self.id!r} attached_skills only apply to "
                 f"session_kind='agent'"
+            )
+        if (self.session_id or self.session_ids) and self.session_kind != "agent":
+            raise TriggerValidationError(
+                f"schedule {self.id!r} session_id/session_ids only apply to "
+                f"session_kind='agent'"
+            )
+        if self.session_mode == "fanout" and not self.session_ids:
+            raise TriggerValidationError(
+                f"schedule {self.id!r} session_mode='fanout' requires session_ids"
             )
         for tgt in self.delivery_targets:
             if not isinstance(tgt, dict) or "kind" not in tgt:
@@ -182,6 +242,9 @@ def load_schedules(paths: WorkspacePaths) -> list[ScheduleEntry]:
             "session_kind": str(row.get("session_kind") or "trigger"),
             "attached_skills": list(row.get("attached_skills") or []),
             "delivery_targets": list(row.get("delivery_targets") or []),
+            "session_mode": row.get("session_mode") or "ephemeral",
+            "session_id": row.get("session_id"),
+            "session_ids": list(row.get("session_ids") or []),
         }
         ttl = row.get("session_ttl_seconds")
         if ttl is not None:
@@ -241,9 +304,20 @@ def save_schedules(paths: WorkspacePaths, entries: list[ScheduleEntry]) -> None:
             row["delivery_targets"] = [dict(t) for t in e.delivery_targets]
         if e.session_ttl_seconds is not None:
             row["session_ttl_seconds"] = int(e.session_ttl_seconds)
+        if e.session_mode and e.session_mode != "ephemeral":
+            row["session_mode"] = e.session_mode
+        if e.session_id:
+            row["session_id"] = e.session_id
+        if e.session_ids:
+            row["session_ids"] = list(e.session_ids)
         rows.append(row)
     paths.triggers_schedules_file.parent.mkdir(parents=True, exist_ok=True)
     yaml_io.dump(paths.triggers_schedules_file, {"schedules": rows})
+
+
+def _normalise_session_mode(value: str | None) -> str:
+    raw = str(value or "ephemeral").strip().lower()
+    return _SESSION_MODE_ALIASES.get(raw, raw)
 
 
 # ================================================================== cron

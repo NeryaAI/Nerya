@@ -48,6 +48,9 @@ def routes():
             attached_skills=payload.get("attached_skills"),
             delivery_targets=payload.get("delivery_targets"),
             session_ttl_seconds=payload.get("session_ttl_seconds"),
+            session_mode=payload.get("session_mode"),
+            session_id=payload.get("session_id"),
+            session_ids=payload.get("session_ids"),
         )
 
     def add_schedule_from_text(client, payload):

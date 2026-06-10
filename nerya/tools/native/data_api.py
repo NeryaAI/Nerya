@@ -99,9 +99,11 @@ def data_api_handler(
                     (
                         "limit does not expand wallet catalog/guide object results. "
                         "Use the compact next_required_action and bounded_sequence "
-                        "already returned: read strategy_author with skill_view and "
-                        "move to strategy_generate_proposal with SDK files instead "
-                        "of repeating catalog discovery."
+                        "already returned. For read-only lookup, call the selected "
+                        "market_data/data_api route and summarize. For strategy "
+                        "authoring, read strategy_author with skill_view and move "
+                        "to strategy_generate_proposal with SDK files instead of "
+                        "repeating catalog discovery."
                     ),
                     detail={"provider": provider, "action": action},
                     retryable=False,
@@ -128,11 +130,18 @@ def data_api_handler(
             retryable=False,
         )
     except DataApiError as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        detail = {
+            **detail,
+            "op": op,
+            "provider": args.get("provider"),
+            "action": args.get("action"),
+        }
         return _error(
             call,
             _tool_error_kind(exc.kind),
             exc.message,
-            detail=exc.detail,
+            detail=detail,
             retryable=exc.retryable,
         )
     except Exception as exc:

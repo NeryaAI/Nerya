@@ -1,0 +1,15 @@
+id: general-operator-v1
+name: General operator
+description: Runtime preset for non-trading operator workspaces.
+version: 1
+mode: general_operator
+capabilities:
+  - memory
+  - subagent
+  - trace
+  - message
+  - script
+  - evolution
+  - capability_developer
+  - workspace
+fallback: generic

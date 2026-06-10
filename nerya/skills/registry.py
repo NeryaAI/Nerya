@@ -217,6 +217,26 @@ class SkillRegistry:
         return reg
 
 
+def list_bundled_skill_names() -> list[str]:
+    """Return the allow-listed built-in skill names shipped with Nerya.
+
+    Nerya's historical directory name is ``skills/builtin``. The
+    AgentArchitecturePatterns vocabulary calls these bundled skills; this
+    function is the compatibility allowlist surface for that concept.
+    """
+
+    bundled_root = Path(__file__).parent / "builtin"
+    if not bundled_root.exists():
+        return []
+    names: list[str] = []
+    for _d, md in _walk_skill_dirs(bundled_root):
+        try:
+            names.append(SkillManifest.from_skill_md(md).id)
+        except Exception:
+            continue
+    return sorted(set(names))
+
+
 def _user_skill_roots(workspace_paths) -> list[Path]:
     """Return additional procedural-skill roots ordered by precedence.
 

@@ -159,6 +159,8 @@ class TeamStore:
                 continue
             data = _read_json(child / "run.json")
             if data:
+                if "template" not in data and data.get("template_id"):
+                    data["template"] = data["template_id"]
                 rows.append(data)
             if len(rows) >= limit:
                 break

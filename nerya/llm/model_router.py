@@ -36,6 +36,11 @@ from .provider_catalog import (
     lookup as _catalog_lookup,
     resolve_alias as _catalog_resolve_alias,
 )
+from .route_candidates import (
+    RESOLVED_PROVIDER_KEY,
+    expand_tier_route_cfgs,
+    split_csv_values,
+)
 from .providers import (
     DEFAULT_BASE_URLS,
     ProviderCallable,
@@ -155,16 +160,6 @@ class ModelRouter:
         caller: str | None = None,
     ) -> CallResult:
         cfg = self.tiers.get(tier) or {}
-        raw_provider = (cfg.get("provider") or "mock").lower()
-        provider_name = _catalog_resolve_alias(raw_provider) or raw_provider
-        model = cfg.get("model") or ""
-        # Base URL precedence: explicit tier override → catalog default →
-        # legacy DEFAULT_BASE_URLS map (kept for tests that monkeypatch it).
-        base_url = (
-            cfg.get("base_url")
-            or _catalog_default_base_url(provider_name)
-            or DEFAULT_BASE_URLS.get(provider_name)
-        )
         max_tokens = int(cfg.get("max_tokens") or 1024)
         temperature = float(cfg.get("temperature") or 0.1)
         price_overrides = cfg.get("prices") or None
@@ -177,142 +172,189 @@ class ModelRouter:
         reasoning_effort = _normalise_reasoning_effort(cfg.get("reasoning_effort"))
         reasoning_summary = str(cfg.get("reasoning_summary") or "").strip().lower()
 
-        # Resolve provider key. First preference is a vault ref
-        # (``provider_key_ref: vault://...``). As a fallback for dev / e2e
-        # we also accept ``provider_key_env: NERYA_LLM_KEY`` which reads
-        # an environment variable. We never log or return the resolved
-        # value; treat it as write-only to the adapter.
-        key_ref = cfg.get("provider_key_ref")
-        api_key = self._resolve_key(key_ref) if key_ref else None
-        if not api_key:
-            env_name = cfg.get("provider_key_env")
-            if env_name:
-                import os
-                api_key = os.environ.get(env_name) or None
-        # OAuth-managed providers (openai-codex, claude-code) prefer the
-        # stored login record over env-var fallbacks. This is the path
-        # operators take when they click "Sign in with ChatGPT" /
-        # "Sign in with Claude" in the dashboard.
-        if not api_key and self._config_like is not None:
+        routes = expand_tier_route_cfgs(
+            cfg,
+            keys_for_route=lambda route: self._resolve_route_api_keys(route),
+            model_override=None,
+        )
+        last_error: LLMError | None = None
+        for route_index, route_cfg in enumerate(routes):
+            raw_route_provider = (route_cfg.get("provider") or "mock").lower()
+            route_provider = _catalog_resolve_alias(raw_route_provider) or raw_route_provider
+            route_keys = self._resolve_route_api_keys(route_cfg)
+            route_catalog_entry = _catalog_lookup(route_provider)
+            route_key_optional = bool(
+                route_catalog_entry and route_catalog_entry.extra.get("key_optional")
+            )
+            if route_provider != "mock" and not route_keys and not route_key_optional:
+                last_error = LLMError(
+                    f"LLM tier '{tier}' route unavailable "
+                    f"(provider={route_provider!r}, reason=missing_api_key)"
+                )
+                if route_index < len(routes) - 1:
+                    continue
+                raise last_error
+            if route_provider == "mock":
+                res = _mock_call(tier=tier, task=task, prompt=prompt, schema=schema)
+                return CallResult(
+                    text=res.text,
+                    tokens=res.total_tokens,
+                    usd_cost=res.usd_cost,
+                    provider="mock",
+                    model="mock",
+                    latency_ms=0,
+                    finish_reason="mock",
+                    mode="mock",
+                    degraded=False,
+                    fallback_used=route_index > 0,
+                    error="",
+                )
+            adapter = self._providers.get(route_provider)
+            if adapter is None:
+                route_kind = str(route_cfg.get("kind") or "").strip().lower()
+                route_api_mode = (
+                    route_kind
+                    or (route_catalog_entry.api_mode if route_catalog_entry else "")
+                )
+                if route_api_mode == "chat_completions" or route_cfg.get("base_url"):
+                    adapter = self._providers.get("compat")
+                elif route_api_mode == "anthropic_messages":
+                    adapter = (
+                        self._providers.get("anthropic-compat")
+                        or self._providers.get("anthropic")
+                    )
+            if adapter is None:
+                last_error = LLMError(f"no adapter registered for provider '{route_provider}'")
+                if route_index < len(routes) - 1:
+                    continue
+                raise last_error
+            route_base_url = (
+                route_cfg.get("base_url")
+                or _catalog_default_base_url(route_provider)
+                or DEFAULT_BASE_URLS.get(route_provider)
+            )
+            model = str(route_cfg.get("model") or "")
+            api_key = str(route_cfg.get(RESOLVED_PROVIDER_KEY) or "")
+            adapter_kwargs: dict[str, Any] = dict(
+                tier=tier,
+                task=task,
+                model=model,
+                prompt=prompt,
+                schema=schema,
+                api_key=api_key,
+                base_url=route_base_url,
+                max_tokens=int(route_cfg.get("max_tokens") or max_tokens),
+                price_overrides=route_cfg.get("prices") or price_overrides,
+                temperature=float(route_cfg.get("temperature") or temperature),
+                provider_name=route_provider,
+            )
+            # Only propagate reasoning kwargs to adapters that accept them.
             try:
-                from .oauth_login import OAUTH_PROVIDERS, resolve_oauth_token
-                if provider_name in OAUTH_PROVIDERS:
-                    api_key = resolve_oauth_token(
-                        self._config_like, provider=provider_name,
-                    ) or None
-            except Exception:
-                # Never block the call on the OAuth lookup; fall through
-                # to env-var fallback.
-                pass
+                import inspect
+                sig = inspect.signature(adapter.__call__) if callable(adapter) else None
+            except (TypeError, ValueError):
+                sig = None
+            if sig is not None:
+                params = sig.parameters
+                if timeout_override is not None and "timeout" in params:
+                    adapter_kwargs["timeout"] = float(timeout_override)
+                if reasoning_effort and "reasoning_effort" in params:
+                    adapter_kwargs["reasoning_effort"] = reasoning_effort
+                if reasoning_summary and "reasoning_summary" in params:
+                    adapter_kwargs["reasoning_summary"] = reasoning_summary
+            try:
+                res: ProviderResult = adapter(**adapter_kwargs)
+            except LLMError as exc:
+                last_error = exc
+                if route_index < len(routes) - 1:
+                    continue
+                raise
+            except Exception as exc:  # pragma: no cover
+                crash = LLMError(f"provider '{route_provider}' crashed: {exc}")
+                if route_index < len(routes) - 1:
+                    last_error = crash
+                    continue
+                raise crash from exc
+
+            return CallResult(
+                text=res.text,
+                tokens=res.total_tokens or (res.prompt_tokens + res.completion_tokens),
+                usd_cost=res.usd_cost,
+                provider=res.provider or route_provider,
+                model=res.model or model,
+                latency_ms=res.latency_ms,
+                finish_reason=res.finish_reason,
+                mode="live",
+                fallback_used=route_index > 0,
+                reasoning_text=getattr(res, "reasoning_text", "") or "",
+                reasoning_tokens=int(getattr(res, "reasoning_tokens", 0) or 0),
+                reasoning_effort=(
+                    getattr(res, "reasoning_effort", "") or reasoning_effort
+                ),
+            )
+        if last_error is not None:
+            raise last_error
+        raise LLMError(f"LLM tier '{tier}' has no route candidates")
+
+    # ------------------------------------------------------------ internal
+    def _resolve_api_keys(
+        self,
+        cfg: dict[str, Any],
+        *,
+        provider_name: str,
+    ) -> list[str]:
+        keys: list[str] = []
+
+        def add_values(value: Any) -> None:
+            for key in split_csv_values(value):
+                if key not in keys:
+                    keys.append(key)
+
+        for ref in split_csv_values(cfg.get("provider_key_ref")):
+            add_values(self._resolve_key(ref))
+
+        env_names = split_csv_values(cfg.get("provider_key_env"))
+        if env_names:
+            import os
+            for env_name in env_names:
+                add_values(os.environ.get(env_name) or "")
+
         # Catalog-driven env-var fallback (e.g. ``ANTHROPIC_API_KEY`` →
         # ``ANTHROPIC_TOKEN`` → ``CLAUDE_CODE_OAUTH_TOKEN`` for the
         # ``anthropic`` provider, ``CLAUDE_CODE_OAUTH_TOKEN`` for
         # ``claude-code``). Tier-level overrides above still win.
-        if not api_key:
+        if not keys:
             import os
             for env_name in _catalog_default_env_keys(provider_name):
-                value = os.environ.get(env_name)
-                if value:
-                    api_key = value
+                add_values(os.environ.get(env_name) or "")
+                if keys:
                     break
+        return keys
 
-        # Catalog can mark a provider as ``key_optional`` (e.g. local Ollama,
-        # which accepts requests without a bearer token). Treat a missing
-        # key on those providers as "no key required" instead of degraded.
-        catalog_entry = _catalog_lookup(provider_name)
-        key_optional = bool(
-            catalog_entry and catalog_entry.extra.get("key_optional")
-        )
-
-        if provider_name == "mock" or (not api_key and not key_optional):
-            # Production truth gate: only return mock content when mock mode
-            # is explicitly authorised (tests, paper mode, env flag). Otherwise
-            # surface an explicit LLMError so callers handle degradation.
-            if provider_name != "mock" and not self._mock_allowed():
-                reason = "missing_api_key" if not api_key else "no_provider"
-                raise LLMError(
-                    f"LLM tier '{tier}' unavailable "
-                    f"(provider={provider_name!r}, reason={reason}); "
-                    "set NERYA_ALLOW_MOCK_DATA=1 or runtime.mock_mode for mocks"
-                )
-            if provider_name == "mock" and not self._mock_allowed():
-                # tier is explicitly configured as mock; this is an opt-in
+    def _resolve_route_api_keys(self, cfg: dict[str, Any]) -> list[str]:
+        provider_name = _catalog_resolve_alias(
+            str(cfg.get("provider") or "mock").strip().lower()
+        ) or str(cfg.get("provider") or "mock").strip().lower()
+        api_keys = self._resolve_api_keys(cfg, provider_name=provider_name)
+        if not api_keys and self._config_like is not None:
+            try:
+                from .oauth_login import OAUTH_PROVIDERS, resolve_oauth_token
+                if provider_name in OAUTH_PROVIDERS:
+                    api_keys = split_csv_values(
+                        resolve_oauth_token(
+                            self._config_like, provider=provider_name,
+                        )
+                    )
+            except Exception:
                 pass
-            res = _mock_call(tier=tier, task=task, prompt=prompt, schema=schema)
-            return CallResult(
-                text=res.text,
-                tokens=res.total_tokens,
-                usd_cost=res.usd_cost,
-                provider="mock",
-                model="mock",
-                latency_ms=0,
-                finish_reason="mock",
-                mode="mock",
-                degraded=False,
-                fallback_used=(provider_name != "mock"),
-                error="" if provider_name == "mock" else "missing_api_key",
-            )
+        return api_keys
 
-        adapter = self._providers.get(provider_name)
-        if adapter is None:
-            raise LLMError(f"no adapter registered for provider '{provider_name}'")
-
-        adapter_kwargs: dict[str, Any] = dict(
-            tier=tier,
-            task=task,
-            model=model,
-            prompt=prompt,
-            schema=schema,
-            api_key=api_key,
-            base_url=base_url,
-            max_tokens=max_tokens,
-            price_overrides=price_overrides,
-            temperature=temperature,
-            provider_name=provider_name,
-        )
-        # Only propagate reasoning kwargs to adapters that accept them — older
-        # ones (Bedrock, Ollama) don't and would crash on unknown keyword.
-        try:
-            import inspect
-            sig = inspect.signature(adapter.__call__) if callable(adapter) else None
-        except (TypeError, ValueError):
-            sig = None
-        if sig is not None:
-            params = sig.parameters
-            if timeout_override is not None and "timeout" in params:
-                adapter_kwargs["timeout"] = float(timeout_override)
-            if reasoning_effort and "reasoning_effort" in params:
-                adapter_kwargs["reasoning_effort"] = reasoning_effort
-            if reasoning_summary and "reasoning_summary" in params:
-                adapter_kwargs["reasoning_summary"] = reasoning_summary
-        try:
-            res: ProviderResult = adapter(**adapter_kwargs)
-        except LLMError:
-            raise
-        except Exception as exc:  # pragma: no cover
-            raise LLMError(f"provider '{provider_name}' crashed: {exc}") from exc
-
-        return CallResult(
-            text=res.text,
-            tokens=res.total_tokens or (res.prompt_tokens + res.completion_tokens),
-            usd_cost=res.usd_cost,
-            provider=res.provider or provider_name,
-            model=res.model or model,
-            latency_ms=res.latency_ms,
-            finish_reason=res.finish_reason,
-            mode="live",
-            reasoning_text=getattr(res, "reasoning_text", "") or "",
-            reasoning_tokens=int(getattr(res, "reasoning_tokens", 0) or 0),
-            reasoning_effort=getattr(res, "reasoning_effort", "") or reasoning_effort,
-        )
-
-    # ------------------------------------------------------------ internal
     def _resolve_key(self, ref: str) -> str | None:
         if not self.workspace or not ref:
             return None
         if not ref.startswith("vault://"):
             # plaintext refs forbidden — return None so we fall back to mock.
-            log.warning("ignoring non-vault provider_key_ref %r", ref)
+            log.warning("ignoring non-vault provider_key_ref")
             return None
         try:
             from ..security.secrets import SecretVault

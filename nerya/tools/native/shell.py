@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
+from ...core.sandbox import sandbox_exec
 from ...security.runtime_env import build_process_env
 from ..types import (
     ContextModifier,
@@ -78,6 +80,43 @@ _NETWORK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\byarn\s+add\b"),
     re.compile(r"\bgit\s+push\b"),
 )
+_NETWORK_FETCH_HEADS = {"curl", "wget"}
+_READ_ONLY_PIPE_HEADS = {
+    "awk",
+    "cat",
+    "cut",
+    "grep",
+    "head",
+    "jq",
+    "python",
+    "python3",
+    "py",
+    "sed",
+    "sort",
+    "tail",
+    "tr",
+    "uniq",
+    "wc",
+}
+_NETWORK_WRITE_FLAGS_RE = re.compile(
+    r"(?ix)"
+    r"("
+    r"\b(?:curl|wget)\b[^\n|;&]*\s(?:"
+    r"-o|--output|-O|--remote-name|--output-document|"
+    r"-T|--upload-file|--ftp-create-dirs"
+    r")(?:\s|=|$)|"
+    r"\b(?:curl|wget)\b[^\n|;&]*\s(?:"
+    r"-d|--data(?:-[a-z-]+)?|-F|--form|--form-string|"
+    r"--post-data|--method\s+(?:POST|PUT|PATCH|DELETE)"
+    r")(?:\s|=|$)"
+    r")"
+)
+_NETWORK_MUTATING_METHOD_RE = re.compile(
+    r"(?i)\b(?:curl|wget)\b[^\n|;&]*(?:-X|--request)\s*=?\s*(POST|PUT|PATCH|DELETE)\b"
+)
+_NETWORK_SECRET_SEND_RE = re.compile(
+    r"(?i)\b(authorization|cookie|x-api-key|api[_-]?key|bearer|secret|token)\b"
+)
 
 _NATIVE_STRATEGY_DISCOVERY_TERMS = (
     "capability_catalog",
@@ -117,16 +156,25 @@ _READ_HEADS = {
     "git", "where", "which", "Get-ChildItem".lower(), "Get-Content".lower(),
     "Select-String".lower(),
 }
+_FS_PATH_ACCESS_HEADS = {
+    "cat", "type", "head", "tail", "more", "less", "ls", "dir",
+    "stat", "file", "get-content", "gc",
+}
 _SAFE_GIT_SUBCOMMANDS = {
     "status", "log", "diff", "show", "branch", "remote", "config",
     "rev-parse", "ls-files", "grep", "describe", "tag", "blame",
 }
+_URL_LIKE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_ABSOLUTE_PATH_FLAG_RE = re.compile(r"^/[A-Za-z](?::.*)?$")
 _CONFIG_PATH_RE = re.compile(
     r"(?ix)"
     r"(^|[\s\"'])"
     r"("
     r"\.env(?:\.[^\s\"']+)?|"
     r"nerya\.ya?ml|"
+    r"news_feeds\.ya?ml|"
+    r"messages[/\\]channels\.ya?ml|"
     r"accounts[/\\][^\s\"']+|"
     r"exchanges\.ya?ml|"
     r"triggers[/\\]schedules\.yml|"
@@ -135,16 +183,118 @@ _CONFIG_PATH_RE = re.compile(
     r"(vault|secrets)[/\\][^\s\"']+"
     r")"
 )
+_PROPOSAL_ONLY_CONFIG_PATH_RE = re.compile(
+    r"(?ix)(^|[\s\"'])"
+    r"(nerya\.ya?ml|agents\.ya?ml|workspace\.ya?ml|"
+    r"news_feeds\.ya?ml|"
+    r"messages[/\\]channels\.ya?ml|"
+    r"policies[/\\](planner|tier_policy)\.ya?ml)"
+)
+_LIVE_STRATEGY_PATH_RE = re.compile(
+    r"(?ix)(^|[\s\"'])strategies[/\\][^/\\\s\"']+[/\\][^\s\"']+"
+)
+_SHELL_WRITE_TEXT_RE = re.compile(
+    r"(?ix)"
+    r"\b(Set-Content|Add-Content|Clear-Content|Out-File)\b|"
+    r"WriteAllText|write_text|open\s*\([^)]*[\"']w[\"']|"
+    r"\bsed\b[^\n|;&]*\s-i\b|"
+    r"\bperl\b[^\n|;&]*\s-pi\b"
+)
+
+
+def _mask_quoted_shell_text(cmd: str) -> str:
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    for ch in cmd:
+        if quote:
+            if escaped:
+                out.append(" ")
+                escaped = False
+                continue
+            if ch == "\\" and quote == '"':
+                out.append(" ")
+                escaped = True
+                continue
+            if ch == quote:
+                quote = ""
+                out.append(ch)
+            else:
+                out.append(" ")
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            out.append(ch)
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _command_heads(cmd: str) -> list[str]:
     heads: list[str] = []
-    for match in _SHELL_SEGMENT_RE.finditer(cmd):
+    for match in _SHELL_SEGMENT_RE.finditer(_mask_quoted_shell_text(cmd)):
         raw = match.group(1).strip().strip("\"'")
         if not raw:
             continue
         heads.append(Path(raw).name.lower())
     return heads
+
+
+def _shell_segments(cmd: str) -> list[list[str]]:
+    segments: list[list[str]] = []
+    for raw in re.split(r"[;&|]+", cmd):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            tokens = shlex.split(raw, posix=False)
+        except ValueError:
+            tokens = raw.split()
+        cleaned = [t.strip().strip("\"'") for t in tokens if t.strip().strip("\"'")]
+        if cleaned:
+            segments.append(cleaned)
+    return segments
+
+
+def _looks_like_absolute_path_arg(token: str) -> bool:
+    text = str(token or "").strip().strip("\"'")
+    if not text or text.startswith("-") or _URL_LIKE_RE.match(text):
+        return False
+    # Windows command switches such as /s or /b are not paths.
+    if _ABSOLUTE_PATH_FLAG_RE.match(text):
+        return False
+    return (
+        text.startswith("/")
+        or text.startswith("\\")
+        or text.startswith("~")
+        or bool(_WINDOWS_DRIVE_RE.match(text))
+    )
+
+
+def _absolute_path_escape(cmd: str, *, root: Path) -> str:
+    """Return the first absolute filesystem argument outside workspace.
+
+    ``cwd`` sandboxing is not sufficient for shell tools: commands such as
+    ``cat /etc/passwd`` can still target host paths. Keep this check in the
+    native shell layer so every provider/model gets the same hard verifier.
+    """
+
+    root_resolved = Path(root).expanduser().resolve()
+    for segment in _shell_segments(cmd):
+        head = Path(segment[0]).name.lower()
+        if head not in _FS_PATH_ACCESS_HEADS:
+            continue
+        for token in segment[1:]:
+            if not _looks_like_absolute_path_arg(token):
+                continue
+            try:
+                candidate = Path(token).expanduser().resolve()
+                candidate.relative_to(root_resolved)
+            except ValueError:
+                return token
+            except Exception:
+                return token
+    return ""
 
 
 def _looks_like_config_write(cmd: str, heads: list[str]) -> bool:
@@ -155,6 +305,54 @@ def _looks_like_config_write(cmd: str, heads: list[str]) -> bool:
     if any(head in _WRITE_HEADS or head in _DELETE_HEADS for head in heads):
         return True
     return False
+
+
+def _proposal_only_shell_tool(cmd: str, heads: list[str]) -> str:
+    if not (
+        _PROPOSAL_ONLY_CONFIG_PATH_RE.search(cmd)
+        or _LIVE_STRATEGY_PATH_RE.search(cmd)
+    ):
+        return ""
+    writes = (
+        ">" in cmd
+        or ">>" in cmd
+        or _SHELL_WRITE_TEXT_RE.search(cmd)
+        or any(head in _WRITE_HEADS or head in _DELETE_HEADS for head in heads)
+    )
+    if not writes:
+        return ""
+    if _PROPOSAL_ONLY_CONFIG_PATH_RE.search(cmd):
+        return "evolve_core_config_patch"
+    return "strategy_generate_proposal"
+
+
+def _looks_like_read_only_network_fetch(cmd: str, heads: list[str]) -> bool:
+    if not any(head in _NETWORK_FETCH_HEADS for head in heads):
+        return False
+    if ">" in cmd or ">>" in cmd:
+        return False
+    if _NETWORK_WRITE_FLAGS_RE.search(cmd):
+        return False
+    if _NETWORK_MUTATING_METHOD_RE.search(cmd):
+        return False
+    if _NETWORK_SECRET_SEND_RE.search(cmd):
+        return False
+    for head in heads:
+        if head in _NETWORK_FETCH_HEADS:
+            continue
+        if head in {"python", "python3", "py"}:
+            if re.search(
+                rf"\b{re.escape(head)}(?:\.exe)?\b\s+-m\s+json\.tool\b",
+                cmd,
+                re.IGNORECASE,
+            ):
+                continue
+            return False
+        if head == "sed" and re.search(r"\bsed\b[^\n|;&]*\s-i\b", cmd, re.IGNORECASE):
+            return False
+        if head not in _READ_ONLY_PIPE_HEADS:
+            return False
+    return True
 
 
 def _looks_like_native_strategy_discovery(cmd: str, description: str) -> bool:
@@ -230,6 +428,8 @@ def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
             return RiskLevel.DANGEROUS
     if re.search(r"\bfind\b.*\s-delete\b", cmd, re.IGNORECASE):
         return RiskLevel.DANGEROUS
+    if _looks_like_read_only_network_fetch(cmd, heads):
+        return RiskLevel.READ
     for rx in _NETWORK_PATTERNS:
         if rx.search(cmd):
             return RiskLevel.EXEC
@@ -283,6 +483,29 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
                 message="run_shell requires a non-empty 'command' string",
             ),
         )
+    heads = _command_heads(cmd)
+    proposal_tool = _proposal_only_shell_tool(cmd, heads)
+    if proposal_tool:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.PERMISSION_DENIED,
+                message=(
+                    "run_shell was not executed: the command appears to mutate "
+                    "a proposal-only live strategy or runtime config path. "
+                    f"Call {proposal_tool} and stage the change under "
+                    "evolution/proposals/ for operator review instead."
+                ),
+                retryable=False,
+                recovery_hint={
+                    "next_required_action": {
+                        "tool": proposal_tool,
+                        "reason": "proposal_only_shell_mutation",
+                    }
+                },
+            ),
+        )
     if _looks_like_native_strategy_discovery(cmd, str(description)):
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -302,6 +525,41 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
                     "operator commands, tests, builds, or cases with no "
                     "native tool."
                 ),
+                retryable=False,
+                detail={
+                    "reason": "tool_redirect",
+                    "preferred_tools": ["glob", "list_dir", "read_file"],
+                },
+                recovery_hint={
+                    "reason": "tool_redirect",
+                    "preferred_tools": ["glob", "list_dir", "read_file"],
+                },
+            ),
+        )
+    escaped_path = _absolute_path_escape(cmd, root=root)
+    if escaped_path:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.PERMISSION_DENIED,
+                message=(
+                    "permission_denied: workspace sandbox blocked an "
+                    f"absolute path outside the workspace: {escaped_path!r}. "
+                    "权限不足，已拒绝访问 workspace 沙箱之外的路径。"
+                    "run_shell cannot read host/system files; use read_file "
+                    "or list_dir with workspace-relative paths only. Tell the "
+                    "operator this command was refused (拒绝) by the sandbox."
+                ),
+                retryable=False,
+                detail={
+                    "path": escaped_path,
+                    "reason": "workspace_sandbox_escape",
+                },
+                recovery_hint={
+                    "action": "use_workspace_relative_path",
+                    "reason": "workspace_sandbox_escape",
+                },
             ),
         )
     try:
@@ -336,66 +594,69 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
     except Exception:
         env = os.environ.copy()
     started = time.monotonic()
-    proc: Optional[subprocess.Popen[str]] = None
     try:
-        proc = subprocess.Popen(
-            cmd,
-            shell=True,
-            cwd=str(cwd),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
         if background:
-            elapsed_ms = int((time.monotonic() - started) * 1000)
+            proc = sandbox_exec(
+                cmd,
+                shell=True,
+                cwd=cwd,
+                root=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                background=True,
+            )
+            elapsed_ms = proc.elapsed_ms
+            pid = proc.pid
             return ToolResult(
                 tool_use_id=call.id,
                 name=call.name,
                 elapsed_ms=elapsed_ms,
                 content=[
                     ToolResultPart.text_part(
-                        f"$ {cmd}\n[backgrounded; pid={proc.pid}]"
+                        f"$ {cmd}\n[backgrounded; pid={pid}]"
                     ),
                     ToolResultPart.json_part(
                         {
                             "command": cmd,
                             "cwd": to_workspace_relative(cwd, root),
-                            "pid": proc.pid,
+                            "pid": pid,
                             "background": True,
                             "description": description,
                         }
                     ),
                 ],
-                metadata={"pid": proc.pid, "background": True},
+                metadata={"pid": pid, "background": True},
             )
 
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            try:
-                stdout, stderr = proc.communicate(timeout=2)
-            except Exception:
-                stdout, stderr = "", ""
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=call.name,
-                error=ToolError(
-                    kind=ToolErrorKind.TIMEOUT,
-                    message=f"command exceeded timeout of {timeout_s}s",
-                    detail={
-                        "command": cmd,
-                        "cwd": to_workspace_relative(cwd, root),
-                        "stdout_preview": (stdout or "")[:1024],
-                        "stderr_preview": (stderr or "")[:1024],
-                    },
-                ),
-            )
+        proc = sandbox_exec(
+            cmd,
+            shell=True,
+            cwd=cwd,
+            root=root,
+            env=env,
+            timeout=timeout_s,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.TIMEOUT,
+                message=f"command exceeded timeout of {timeout_s}s",
+                detail={
+                    "command": cmd,
+                    "cwd": to_workspace_relative(cwd, root),
+                    "stdout_preview": str(stdout)[:1024],
+                    "stderr_preview": str(stderr)[:1024],
+                },
+            ),
+        )
     except OSError as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -406,10 +667,10 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
             ),
         )
 
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    exit_code = proc.returncode if proc else -1
-    stdout, stdout_truncated = _truncate(stdout or "", limit=output_limit)
-    stderr, stderr_truncated = _truncate(stderr or "", limit=output_limit)
+    elapsed_ms = proc.elapsed_ms
+    exit_code = int(proc.returncode or 0)
+    stdout, stdout_truncated = _truncate(proc.stdout or "", limit=output_limit)
+    stderr, stderr_truncated = _truncate(proc.stderr or "", limit=output_limit)
 
     text = (
         f"$ {cmd}\n"

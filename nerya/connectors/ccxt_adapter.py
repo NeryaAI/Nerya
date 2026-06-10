@@ -73,6 +73,7 @@ class CcxtConnector(CEXConnectorBase):
     credentials: CEXCredentials = field(default_factory=CEXCredentials)
     live: bool = False
     options: dict[str, Any] = field(default_factory=dict)
+    timeout_ms: int = 15_000
     _client: Any = None
 
     def __post_init__(self) -> None:
@@ -90,7 +91,7 @@ class CcxtConnector(CEXConnectorBase):
             )
         params: dict[str, Any] = {
             "enableRateLimit": True,
-            "timeout": 15_000,
+            "timeout": max(250, int(self.timeout_ms or 15_000)),
         }
         if self.credentials.api_key:
             params["apiKey"] = self.credentials.api_key

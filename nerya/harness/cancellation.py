@@ -92,7 +92,8 @@ def maybe(token: Optional[CancelToken]) -> CancelToken:
 
 # Process-wide registry of live tokens keyed by session/turn id, so the
 # dashboard's POST /agent/interrupt can flip the right token without
-# holding a Python reference. _REGISTRY_LOCK = threading.Lock()
+# holding a Python reference.
+_REGISTRY_LOCK = threading.Lock()
 _REGISTRY: dict[str, CancelToken] = {}
 
 
@@ -123,6 +124,91 @@ def signal_cancel(key: str, *, reason: str = "operator_interrupt") -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Mid-turn steering (Codex TurnSteer-style operator redirect)
+# ---------------------------------------------------------------------------
+
+
+_STEER_MAX_PENDING = 16
+_STEER_MAX_CHARS = 4_000
+
+
+@dataclass
+class SteerInbox:
+    """Thread-safe queue of operator messages for a *running* turn.
+
+    Cancellation kills a turn and throws away the work in flight;
+    steering redirects it. The agent loop drains this inbox at the top
+    of every iteration and appends each message to the live transcript
+    as a pinned user message, so the model course-corrects on the next
+    model round without losing any tool evidence already earned.
+
+    Like :class:`CancelToken`, the inbox is passive and process-local:
+    the HTTP layer pushes via :func:`signal_steer`, the loop polls.
+    Bounded (``16`` pending messages of up to ``4000`` chars) so a
+    misbehaving caller cannot balloon the transcript.
+    """
+
+    _messages: list[str] = field(default_factory=list, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def push(self, text: str) -> bool:
+        clean = str(text or "").strip()
+        if not clean:
+            return False
+        with self._lock:
+            if len(self._messages) >= _STEER_MAX_PENDING:
+                return False
+            self._messages.append(clean[:_STEER_MAX_CHARS])
+        return True
+
+    def drain(self) -> list[str]:
+        with self._lock:
+            out = list(self._messages)
+            self._messages.clear()
+        return out
+
+    @property
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._messages)
+
+
+_STEER_REGISTRY_LOCK = threading.Lock()
+_STEER_REGISTRY: dict[str, SteerInbox] = {}
+
+
+def register_steer_inbox(key: str, inbox: SteerInbox) -> None:
+    if not key:
+        return
+    with _STEER_REGISTRY_LOCK:
+        _STEER_REGISTRY[key] = inbox
+
+
+def unregister_steer_inbox(key: str) -> None:
+    if not key:
+        return
+    with _STEER_REGISTRY_LOCK:
+        _STEER_REGISTRY.pop(key, None)
+
+
+def signal_steer(key: str, message: str) -> bool:
+    """Queue an operator message for the live turn (if any).
+
+    Returns whether a registered inbox accepted the message — ``False``
+    means no turn is currently running under that key (or the inbox is
+    full) and the caller should fall back to a normal new-turn message.
+    """
+
+    if not key:
+        return False
+    with _STEER_REGISTRY_LOCK:
+        inbox = _STEER_REGISTRY.get(key)
+    if inbox is None:
+        return False
+    return inbox.push(message)
+
+
 __all__ = [
     "CancelToken",
     "CancelledError",
@@ -130,4 +216,8 @@ __all__ = [
     "register_token",
     "unregister_token",
     "signal_cancel",
+    "SteerInbox",
+    "register_steer_inbox",
+    "unregister_steer_inbox",
+    "signal_steer",
 ]

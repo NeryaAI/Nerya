@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from ...core.sandbox import sandbox_exec
 from ..types import (
     ToolCall,
     ToolError,
@@ -38,11 +39,65 @@ _DEFAULT_RESULTS = 80
 _HARD_RESULTS = 500
 _DEFAULT_GLOB_RESULTS = 200
 _HARD_GLOB_RESULTS = 1000
+_GLOB_MAGIC = set("*?[")
 
 
 # ---------------------------------------------------------------------------
 # glob
 # ---------------------------------------------------------------------------
+
+
+def _has_glob_magic(part: str) -> bool:
+    return any(ch in part for ch in _GLOB_MAGIC)
+
+
+def _absolute_glob_parts(pattern: str) -> tuple[Path, str] | None:
+    pattern_path = Path(pattern)
+    if not pattern_path.is_absolute():
+        return None
+
+    parts = pattern_path.parts
+    first_magic = next(
+        (idx for idx, part in enumerate(parts) if _has_glob_magic(part)),
+        None,
+    )
+    if first_magic is None:
+        return pattern_path.parent, pattern_path.name
+    if first_magic == 0:
+        return None
+    base = Path(*parts[:first_magic])
+    rel_pattern = os.path.join(*parts[first_magic:])
+    return base, rel_pattern
+
+
+def _glob_base_and_pattern(
+    *,
+    root: Path,
+    base: str,
+    pattern: str,
+) -> tuple[Path, str] | ToolResult:
+    absolute = _absolute_glob_parts(pattern)
+    if absolute is None:
+        try:
+            base_p = resolve_workspace_path(base, root=root, default=".")
+        except WorkspaceEscapeError as exc:
+            return ToolResult.from_error(
+                tool_use_id="",
+                name="glob",
+                error=ToolError(kind=ToolErrorKind.PERMISSION_DENIED, message=str(exc)),
+            )
+        return base_p, pattern
+
+    abs_base, rel_pattern = absolute
+    try:
+        base_p = resolve_workspace_path(str(abs_base), root=root, default=".")
+    except WorkspaceEscapeError as exc:
+        return ToolResult.from_error(
+            tool_use_id="",
+            name="glob",
+            error=ToolError(kind=ToolErrorKind.PERMISSION_DENIED, message=str(exc)),
+        )
+    return base_p, rel_pattern.replace("\\", "/")
 
 
 def glob_handler(call: ToolCall, *, root: Path) -> ToolResult:
@@ -62,14 +117,12 @@ def glob_handler(call: ToolCall, *, root: Path) -> ToolResult:
             ),
         )
 
-    try:
-        base_p = resolve_workspace_path(str(base), root=root, default=".")
-    except WorkspaceEscapeError as exc:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(kind=ToolErrorKind.PERMISSION_DENIED, message=str(exc)),
-        )
+    resolved = _glob_base_and_pattern(root=root, base=str(base), pattern=str(pattern))
+    if isinstance(resolved, ToolResult):
+        resolved.tool_use_id = call.id
+        resolved.name = call.name
+        return resolved
+    base_p, pattern = resolved
 
     if not base_p.exists():
         return ToolResult.from_error(
@@ -101,7 +154,7 @@ def glob_handler(call: ToolCall, *, root: Path) -> ToolResult:
                     "mtime": stat.st_mtime,
                 }
             )
-    except OSError as exc:
+    except (NotImplementedError, ValueError, OSError) as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
@@ -171,9 +224,10 @@ def _grep_with_rg(
     cmd.append(pattern)
     cmd.append(str(base))
     try:
-        proc = subprocess.run(
+        proc = sandbox_exec(
             cmd,
-            cwd=str(root),
+            cwd=root,
+            root=root,
             capture_output=True,
             text=True,
             timeout=timeout_s,

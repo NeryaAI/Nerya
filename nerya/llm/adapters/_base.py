@@ -14,6 +14,8 @@ lives in its own module and only imports from here.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import re
 import time
@@ -24,6 +26,34 @@ from ...core import devmode
 from ...core.errors import LLMError
 from ..rate_limits import global_store, parse_rate_limit_headers
 from ..retry import is_retryable_status, jittered_backoff
+
+
+WireTraceCallback = Callable[[dict[str, Any]], None]
+_WIRE_TRACE_CALLBACK: contextvars.ContextVar[WireTraceCallback | None] = (
+    contextvars.ContextVar("nerya_llm_wire_trace_callback", default=None)
+)
+
+
+@contextlib.contextmanager
+def wire_trace(callback: WireTraceCallback | None):
+    """Temporarily attach a per-call observer to provider HTTP traffic."""
+
+    token = _WIRE_TRACE_CALLBACK.set(callback)
+    try:
+        yield
+    finally:
+        _WIRE_TRACE_CALLBACK.reset(token)
+
+
+def _emit_wire_trace(event: dict[str, Any]) -> None:
+    callback = _WIRE_TRACE_CALLBACK.get()
+    if callback is None:
+        return
+    try:
+        callback(event)
+    except Exception:
+        # Wire tracing is diagnostic only. It must never alter provider calls.
+        pass
 
 
 # =============================================================== data types
@@ -82,6 +112,23 @@ class Transport(Protocol):
 
 
 # ---------------------------------------------------------------- default
+def _default_user_agent() -> str:
+    try:
+        from ... import __version__ as _nerya_version
+    except Exception:  # pragma: no cover — packaging edge
+        _nerya_version = "0"
+    return f"Nerya/{_nerya_version} (LLM client; +https://github.com/nerya)"
+
+
+# CDN / WAF gateways (e.g. Cloudflare) ban the default ``Python-urllib/3.x``
+# browser signature outright ("error code: 1010"), which silently knocks out
+# any provider fronted by such a gateway. Always send an explicit product UA.
+_DEFAULT_HEADERS: dict[str, str] = {
+    "User-Agent": _default_user_agent(),
+    "Accept": "application/json",
+}
+
+
 class UrllibTransport:
     """Standard-library HTTP client that emits / reads JSON. No third-party deps."""
 
@@ -123,12 +170,15 @@ class UrllibTransport:
         )
 
     def _request_full(self, method, url, *, headers, body, timeout):
+        import http.client
         import urllib.error
         import urllib.request
 
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
-        for k, v in headers.items():
+        merged = dict(_DEFAULT_HEADERS)
+        merged.update(headers)
+        for k, v in merged.items():
             req.add_header(k, v)
         started = time.time()
         status: int | None = None
@@ -158,6 +208,9 @@ class UrllibTransport:
             except urllib.error.URLError as exc:
                 error_msg = str(exc.reason)
                 raise LLMError(f"network error calling provider: {exc.reason}") from exc
+            except (http.client.RemoteDisconnected, TimeoutError, ConnectionError, OSError) as exc:
+                error_msg = str(exc)
+                raise LLMError(f"network error calling provider: {exc}") from exc
         finally:
             devmode.record_http(
                 method=method,
@@ -185,6 +238,46 @@ def _rate_limit_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
 
 
+def _deadline_remaining(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    try:
+        return float(deadline) - time.time()
+    except (TypeError, ValueError):
+        return None
+
+
+def _timeout_for_deadline(
+    timeout: float,
+    deadline: float | None,
+    *,
+    attempts_left: int = 1,
+) -> float:
+    del attempts_left
+    base_timeout = max(0.001, float(timeout or 0.001))
+    remaining = _deadline_remaining(deadline)
+    if remaining is None:
+        return base_timeout
+    if remaining <= 0:
+        raise LLMError(
+            "llm request timeout: deadline exceeded before provider call"
+        )
+    return max(0.001, min(base_timeout, remaining))
+
+
+def _sleep_with_deadline(delay: float, deadline: float | None) -> None:
+    sleep_for = max(0.0, float(delay or 0.0))
+    remaining = _deadline_remaining(deadline)
+    if remaining is not None:
+        if remaining <= 0:
+            raise LLMError(
+                "llm request timeout: deadline exceeded before retry sleep"
+            )
+        sleep_for = min(sleep_for, remaining)
+    if sleep_for > 0:
+        time.sleep(sleep_for)
+
+
 def _post_with_retry(
     transport: Transport,
     url: str,
@@ -196,6 +289,7 @@ def _post_with_retry(
     api_key: str,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     base_delay: float = _DEFAULT_BASE_DELAY,
+    deadline: float | None = None,
 ) -> tuple[int, dict[str, Any], dict[str, str]]:
     """POST JSON with jittered retry + rate-limit header capture.
 
@@ -209,30 +303,78 @@ def _post_with_retry(
 
     wait_s = store.should_defer(provider_name, key_fp)
     if wait_s > 0:
-        time.sleep(min(wait_s, 5.0))
+        _sleep_with_deadline(min(wait_s, 5.0), deadline)
 
     last_status = 0
     last_doc: dict[str, Any] = {}
     last_headers: dict[str, str] = {}
     for attempt in range(1, max_attempts + 1):
+        attempt_timeout = _timeout_for_deadline(
+            timeout,
+            deadline,
+            attempts_left=max_attempts - attempt + 1,
+        )
+        started = time.time()
+        _emit_wire_trace({
+            "phase": "request",
+            "method": "POST",
+            "url": url,
+            "headers": headers,
+            "body": body,
+            "timeout": attempt_timeout,
+            "wire_attempt": attempt,
+            "max_wire_attempts": max_attempts,
+            "provider_name": provider_name,
+        })
         try:
             if supports_headers:
                 status, doc, resp_headers = transport.post_json_with_headers(  # type: ignore[attr-defined]
-                    url, headers=headers, body=body, timeout=timeout,
+                    url, headers=headers, body=body, timeout=attempt_timeout,
                 )
             else:
                 status, doc = transport.post_json(
-                    url, headers=headers, body=body, timeout=timeout,
+                    url, headers=headers, body=body, timeout=attempt_timeout,
                 )
                 resp_headers = {}
-        except LLMError:
+        except LLMError as exc:
+            _emit_wire_trace({
+                "phase": "error",
+                "method": "POST",
+                "url": url,
+                "elapsed_ms": round((time.time() - started) * 1000, 2),
+                "wire_attempt": attempt,
+                "max_wire_attempts": max_attempts,
+                "provider_name": provider_name,
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            })
             if attempt >= max_attempts:
                 raise
-            time.sleep(jittered_backoff(attempt, base_delay=base_delay,
-                                          max_delay=_DEFAULT_MAX_DELAY))
+            _sleep_with_deadline(
+                jittered_backoff(
+                    attempt,
+                    base_delay=base_delay,
+                    max_delay=_DEFAULT_MAX_DELAY,
+                ),
+                deadline,
+            )
             continue
 
         last_status, last_doc, last_headers = status, doc, resp_headers
+        _emit_wire_trace({
+            "phase": "response",
+            "method": "POST",
+            "url": url,
+            "status": status,
+            "headers": resp_headers,
+            "body": doc,
+            "elapsed_ms": round((time.time() - started) * 1000, 2),
+            "wire_attempt": attempt,
+            "max_wire_attempts": max_attempts,
+            "provider_name": provider_name,
+        })
 
         if resp_headers:
             rl_state = parse_rate_limit_headers(resp_headers, provider=provider_name)
@@ -250,7 +392,7 @@ def _post_with_retry(
                 delay = max(delay, float(retry_after))
             except (TypeError, ValueError):
                 pass
-        time.sleep(min(delay, _DEFAULT_MAX_DELAY))
+        _sleep_with_deadline(min(delay, _DEFAULT_MAX_DELAY), deadline)
 
     return last_status, last_doc, last_headers
 
@@ -352,6 +494,7 @@ __all__ = [
     "Transport",
     "UrllibTransport",
     "ProviderCallable",
+    "wire_trace",
     "_post_with_retry",
     "_price_for",
     "_estimate_tokens",

@@ -4,7 +4,10 @@ import pytest
 
 from nerya.db.repositories import AgentSessionRepository
 from nerya.db.sqlite import connect
-from nerya.api.routes_agent import _rehydrate_turn_tool_events
+from nerya.api.routes_agent import (
+    _augment_turn_backtest_locators,
+    _rehydrate_turn_tool_events,
+)
 
 pytestmark = pytest.mark.smoke
 
@@ -210,3 +213,67 @@ def test_rehydrate_turn_payload_from_tool_events():
     assert out["activity_events_rehydrated"] is True
     assert out["activity_events"][0]["kind"] == "team.member.end"
     assert out["activity_events"][0]["subagent"] == "analyst"
+
+
+def test_augment_turn_backtest_locators_from_raw_ref():
+    turn = {
+        "blocks": [
+            {
+                "block": {
+                    "kind": "tool_result",
+                    "action": "strategy_backtest",
+                    "call_id": "call_1",
+                    "ok": True,
+                    "result": (
+                        "backtest: metrics=['total_return_pct'], errors=0\n"
+                        "[compacted_kept]\n"
+                        '{"metrics": {"total_return_pct": "12.34%"}, '
+                        '"strategy_id": "polymarket_odds_tracker"}'
+                    ),
+                    "compaction": {
+                        "rule_id": "backtest.report",
+                        "raw_ref": "raw://2026-05-21/call_1",
+                    },
+                }
+            }
+        ],
+        "tool_trace": [
+            {
+                "action": "strategy_backtest",
+                "call_id": "call_1",
+                "ok": True,
+                "result": '{"strategy_id": "polymarket_odds_tracker"}',
+                "compaction": {
+                    "rule_id": "backtest.report",
+                    "raw_ref": "raw://2026-05-21/call_1",
+                },
+            }
+        ],
+    }
+    raw = {
+        "raw://2026-05-21/call_1": {
+            "strategy_id": "polymarket_odds_tracker",
+            "proposal_id": "prp_625b2c8ffd0d",
+            "backtest_ts": "freeform_20260521_050643",
+            "chart_path": (
+                "C:\\Users\\Ricky\\.nerya\\evolution\\proposals\\prp_625b2c8ffd0d\\"
+                "after\\strategies\\polymarket_odds_tracker\\backtests\\"
+                "freeform_20260521_050643\\chart.json"
+            ),
+            "raw_metrics_file": (
+                "C:\\Users\\Ricky\\.nerya\\evolution\\proposals\\prp_625b2c8ffd0d\\"
+                "after\\strategies\\polymarket_odds_tracker\\backtests\\"
+                "freeform_20260521_050643\\metrics.json"
+            ),
+        }
+    }
+
+    out = _augment_turn_backtest_locators(turn, raw_payload_by_ref=raw)
+
+    block = out["blocks"][0]["block"]
+    trace = out["tool_trace"][0]
+    assert block["proposal_id"] == "prp_625b2c8ffd0d"
+    assert block["backtest_ts"] == "freeform_20260521_050643"
+    assert block["chart_path"].endswith("chart.json")
+    assert trace["proposal_id"] == "prp_625b2c8ffd0d"
+    assert trace["raw_metrics_file"].endswith("metrics.json")

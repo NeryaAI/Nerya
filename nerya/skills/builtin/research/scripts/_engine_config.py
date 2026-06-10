@@ -25,7 +25,7 @@ from typing import Any
 
 _DEFAULT_CHAIN: tuple[str, ...] = (
     "exa", "tavily", "perplexity", "langsearch", "brave", "serper",
-    "firecrawl", "searxng", "bing", "duckduckgo",
+    "firecrawl", "searxng", "bing", "duckduckgo", "duckduckgo_lite",
 )
 _KEYLESS_ENGINES: frozenset[str] = frozenset(
     {"duckduckgo", "duckduckgo_html", "duckduckgo_lite", "searxng"}

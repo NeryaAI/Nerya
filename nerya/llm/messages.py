@@ -76,9 +76,12 @@ from ..core.errors import LLMError
 from .adapters._base import (
     Transport,
     UrllibTransport,
+    _emit_wire_trace,
     _estimate_tokens,
     _post_with_retry,
+    _timeout_for_deadline,
 )
+from .adapters.openai import _REASONING_MODEL_PREFIXES
 
 
 _LOG = logging.getLogger(__name__)
@@ -144,6 +147,11 @@ def _raw_body_excerpt(doc: dict[str, Any] | None, *, limit: int = 600) -> str:
         msg = err_obj.get("message")
         if msg:
             return str(msg)[:limit]
+    elif err_obj:
+        text = str(err_obj).strip()
+        if len(text) > limit:
+            text = text[:limit] + "…"
+        return text
     raw = doc.get("raw")
     if raw:
         text = str(raw).strip()
@@ -160,6 +168,7 @@ def _http_post_capturing_headers(
     headers: dict[str, str],
     body: dict[str, Any],
     timeout: float,
+    deadline: float | None = None,
 ) -> tuple[int, dict[str, Any], dict[str, str]]:
     """Single-shot POST that always returns ``(status, doc, headers)``.
 
@@ -170,14 +179,69 @@ def _http_post_capturing_headers(
     (``MockTransport`` in some tests).
     """
 
+    request_timeout = _timeout_for_deadline(timeout, deadline)
+    started = time.time()
+    _emit_wire_trace({
+        "phase": "request",
+        "method": "POST",
+        "url": url,
+        "headers": headers,
+        "body": body,
+        "timeout": request_timeout,
+        "wire_attempt": 1,
+        "max_wire_attempts": 1,
+    })
     if hasattr(transport, "post_json_with_headers"):
-        return transport.post_json_with_headers(  # type: ignore[attr-defined]
-            url, headers=headers, body=body, timeout=timeout,
-        )
-    status, doc = transport.post_json(
-        url, headers=headers, body=body, timeout=timeout,
-    )
-    return status, doc, {}
+        try:
+            status, doc, resp_headers = transport.post_json_with_headers(  # type: ignore[attr-defined]
+                url, headers=headers, body=body, timeout=request_timeout,
+            )
+        except LLMError as exc:
+            _emit_wire_trace({
+                "phase": "error",
+                "method": "POST",
+                "url": url,
+                "elapsed_ms": round((time.time() - started) * 1000, 2),
+                "wire_attempt": 1,
+                "max_wire_attempts": 1,
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            })
+            raise
+    else:
+        try:
+            status, doc = transport.post_json(
+                url, headers=headers, body=body, timeout=request_timeout,
+            )
+        except LLMError as exc:
+            _emit_wire_trace({
+                "phase": "error",
+                "method": "POST",
+                "url": url,
+                "elapsed_ms": round((time.time() - started) * 1000, 2),
+                "wire_attempt": 1,
+                "max_wire_attempts": 1,
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                },
+            })
+            raise
+        resp_headers = {}
+    _emit_wire_trace({
+        "phase": "response",
+        "method": "POST",
+        "url": url,
+        "status": status,
+        "headers": resp_headers,
+        "body": doc,
+        "elapsed_ms": round((time.time() - started) * 1000, 2),
+        "wire_attempt": 1,
+        "max_wire_attempts": 1,
+    })
+    return status, doc, resp_headers
 
 
 def _make_llm_error(
@@ -239,6 +303,7 @@ class MessagesRequest:
     stream: bool = False
     reasoning_effort: Optional[str] = None
     reasoning_summary: Optional[str] = None
+    deadline: Optional[float] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -621,6 +686,7 @@ class AnthropicMessagesBackend:
             timeout=self.timeout,
             provider_name=self.provider_name,
             api_key=self.api_key,
+            deadline=request.deadline,
         )
         latency_ms = int((time.time() - started) * 1000)
         if status >= 400:
@@ -715,13 +781,23 @@ def _openai_render_messages(
       reasoning channel out-of-band).
     """
 
-    out: list[dict[str, Any]] = []
+    system_chunks: list[str] = []
     if system:
-        out.append({"role": "system", "content": system})
+        system_chunks.append(system)
+    out: list[dict[str, Any]] = []
 
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content")
+        if role == "system":
+            if isinstance(content, str):
+                if content:
+                    system_chunks.append(content)
+            elif isinstance(content, list):
+                text = _content_parts_to_text(content)
+                if text:
+                    system_chunks.append(text)
+            continue
         if role == "user":
             if isinstance(content, str):
                 out.append({"role": "user", "content": content})
@@ -789,14 +865,20 @@ def _openai_render_messages(
             text = "\n".join(t for t in text_chunks if t)
             if text:
                 assistant_msg["content"] = text
-            else:
+            elif tool_calls:
                 assistant_msg["content"] = None
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls
-            out.append(assistant_msg)
+            if text or tool_calls:
+                out.append(assistant_msg)
         else:
             if isinstance(content, str):
                 out.append({"role": role or "user", "content": content})
+    if system_chunks:
+        return [
+            {"role": "system", "content": "\n\n".join(system_chunks)},
+            *out,
+        ]
     return out
 
 
@@ -844,22 +926,38 @@ def _openai_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
         choice = (doc.get("choices") or [{}])[0]
     except Exception as exc:
         raise LLMError(f"openai messages: malformed choices: {exc}") from exc
-    msg = choice.get("message") or {}
+    if not isinstance(choice, dict):
+        raise LLMError("openai messages: malformed choice")
+    raw_msg = choice.get("message") or {}
+    msg = raw_msg if isinstance(raw_msg, dict) else {}
     finish = str(choice.get("finish_reason") or "")
     content_blocks: list[dict[str, Any]] = []
 
-    text_payload = msg.get("content")
+    text_payload = raw_msg if isinstance(raw_msg, str) else msg.get("content")
     if isinstance(text_payload, str) and text_payload:
-        content_blocks.append({"type": "text", "text": text_payload})
+        thinking_text, visible_text = _split_visible_thinking(text_payload)
+        if thinking_text:
+            content_blocks.append({"type": "thinking", "thinking": thinking_text})
+        if visible_text:
+            content_blocks.append({"type": "text", "text": visible_text})
     elif isinstance(text_payload, list):
         for p in text_payload:
             if isinstance(p, dict):
                 ptype = p.get("type")
                 if ptype in {"text", "output_text"}:
-                    content_blocks.append({
-                        "type": "text",
-                        "text": str(p.get("text") or ""),
-                    })
+                    thinking_text, visible_text = _split_visible_thinking(
+                        str(p.get("text") or "")
+                    )
+                    if thinking_text:
+                        content_blocks.append({
+                            "type": "thinking",
+                            "thinking": thinking_text,
+                        })
+                    if visible_text:
+                        content_blocks.append({
+                            "type": "text",
+                            "text": visible_text,
+                        })
                 elif ptype in {"image_url", "output_image", "input_image"}:
                     image_url = p.get("image_url") or p.get("url") or ""
                     if isinstance(image_url, dict):
@@ -874,7 +972,11 @@ def _openai_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
                         "source_kind": "model",
                     })
 
-    reasoning_blob = msg.get("reasoning") or msg.get("reasoning_content")
+    reasoning_blob = (
+        msg.get("reasoning")
+        or msg.get("reasoning_content")
+        or msg.get("reasoning_details")
+    )
     if reasoning_blob:
         rtext = ""
         if isinstance(reasoning_blob, str):
@@ -924,13 +1026,40 @@ def _openai_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
     # together / moonshot builds) emit ``finish_reason="stop"`` on the same
     # chunk that carries tool_calls, which would normally map to
     # ``end_turn`` and cause the agent loop to drop out after one tool call
-    # before the model has seen the tool_result. If we actually produced
-    # tool_use blocks, force ``stop_reason="tool_use"`` so the loop
-    # continues into the next iteration.
-    if any(b.get("type") == "tool_use" for b in content_blocks):
+    # before the model has seen the tool_result. Keep length/max-token stops
+    # intact though: tool arguments may be truncated and must not execute.
+    if (
+        stop_reason not in {"max_tokens", "length", "content_filter"}
+        and any(b.get("type") == "tool_use" for b in content_blocks)
+    ):
         stop_reason = "tool_use"
 
     return content_blocks, stop_reason
+
+
+def _split_visible_thinking(text: str) -> tuple[str, str]:
+    """Split provider-visible ``<think>`` traces from answer text.
+
+    Several OpenAI-compatible reasoning models, including MiniMax-M3 when
+    adaptive thinking is left on, can place reasoning directly in
+    ``message.content``. Treat a leading ``<think>`` block as a thinking
+    surface so the loop does not mistake a truncated reasoning trace for a
+    final answer. This is protocol normalization, not task routing.
+    """
+
+    raw = str(text or "")
+    stripped = raw.lstrip()
+    if not stripped.lower().startswith("<think>"):
+        return "", raw
+    leading_ws_len = len(raw) - len(stripped)
+    body = raw[leading_ws_len + len("<think>"):]
+    lower = body.lower()
+    end = lower.find("</think>")
+    if end < 0:
+        return body.strip(), ""
+    thinking = body[:end].strip()
+    visible = body[end + len("</think>"):].strip()
+    return thinking, visible
 
 
 @dataclass
@@ -948,6 +1077,7 @@ class OpenAIMessagesBackend:
     base_url: str = "https://api.openai.com/v1"
     transport: Transport = field(default_factory=UrllibTransport)
     timeout: float = 180.0
+    max_attempts: int = 5
     provider_name: str = "openai"
     reasoning_effort: Optional[str] = None
     reasoning_summary: Optional[str] = None
@@ -964,6 +1094,11 @@ class OpenAIMessagesBackend:
             "messages": rendered_messages,
         }
         native_web_search = _provider_native_web_search_settings(request)
+        minimax_compat = _is_minimax_openai_compat(
+            provider_name=self.provider_name,
+            base_url=self.base_url,
+            model=self.model,
+        )
         if _is_reasoning_model_id(self.model):
             body["max_completion_tokens"] = request.max_tokens
             eff = (
@@ -982,6 +1117,17 @@ class OpenAIMessagesBackend:
                 body["reasoning"] = {"summary": summ}
                 if eff and eff != "none":
                     body["reasoning"]["effort"] = eff
+        elif minimax_compat:
+            body["max_completion_tokens"] = request.max_tokens
+            body["temperature"] = request.temperature
+            if _minimax_thinking_enabled(
+                request_effort=request.reasoning_effort,
+                backend_effort=self.reasoning_effort,
+            ):
+                body["thinking"] = {"type": "adaptive"}
+                body["reasoning_split"] = True
+            else:
+                body["thinking"] = {"type": "disabled"}
         else:
             body["max_tokens"] = request.max_tokens
             body["temperature"] = request.temperature
@@ -1008,6 +1154,8 @@ class OpenAIMessagesBackend:
             timeout=self.timeout,
             provider_name=self.provider_name,
             api_key=self.api_key,
+            max_attempts=max(1, int(self.max_attempts or 1)),
+            deadline=request.deadline,
         )
         latency_ms = int((time.time() - started) * 1000)
         if status >= 400:
@@ -1031,10 +1179,50 @@ class OpenAIMessagesBackend:
         )
 
 
-_REASONING_MODEL_PREFIXES: tuple[str, ...] = (
-    "gpt-5", "o1", "o3", "o4", "deepseek-r1", "deepseek-reasoner",
-    "qwen-qwq", "qwen3-think", "qwen3-thinking",
-)
+# _REASONING_MODEL_PREFIXES is imported from adapters/openai.py (single
+# source of truth). This module used to carry its own stale copy that was
+# missing the Stepfun prefixes, so every messages-path call sent
+# ``max_tokens`` (which step-3* burns on internal reasoning) and never
+# plumbed ``reasoning_effort`` — team-synthesis / final-answer calls then
+# came back with empty visible content.
+
+_MINIMAX_THINKING_OFF_VALUES: set[str] = {
+    "",
+    "0",
+    "false",
+    "none",
+    "off",
+    "disabled",
+    "disable",
+}
+_MINIMAX_THINKING_ON_VALUES: set[str] = {
+    "1",
+    "true",
+    "on",
+    "enabled",
+    "enable",
+    "adaptive",
+}
+
+
+def _is_minimax_openai_compat(
+    *, provider_name: str, base_url: str, model: str,
+) -> bool:
+    haystack = " ".join(
+        str(part or "").lower()
+        for part in (provider_name, base_url, model)
+    )
+    return "minimax" in haystack
+
+
+def _minimax_thinking_enabled(
+    *, request_effort: str | None, backend_effort: str | None,
+) -> bool:
+    raw = request_effort if request_effort is not None else backend_effort
+    value = str(raw or "").strip().lower()
+    if value in _MINIMAX_THINKING_OFF_VALUES:
+        return False
+    return value in _MINIMAX_THINKING_ON_VALUES
 
 
 def _is_reasoning_model_id(model: str) -> bool:
@@ -1269,7 +1457,7 @@ class GeminiMessagesBackend:
         started = time.time()
         status, doc, resp_headers = _http_post_capturing_headers(
             self.transport, url, headers=headers, body=body,
-            timeout=self.timeout,
+            timeout=self.timeout, deadline=request.deadline,
         )
         latency_ms = int((time.time() - started) * 1000)
         if status >= 400:
@@ -1334,7 +1522,7 @@ class OllamaMessagesBackend:
         started = time.time()
         status, doc, resp_headers = _http_post_capturing_headers(
             self.transport, url, headers=headers, body=body,
-            timeout=self.timeout,
+            timeout=self.timeout, deadline=request.deadline,
         )
         latency_ms = int((time.time() - started) * 1000)
         if status >= 400:

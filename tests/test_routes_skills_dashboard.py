@@ -9,7 +9,7 @@ from nerya.api import routes_skills
 from nerya.api.route_scopes import required_scope
 from nerya.core.config import DEFAULT_CONFIG, Config
 from nerya.core.paths import WorkspacePaths
-from nerya.skills.installer import _normalize_source_hints, _pick_skill_dir
+from nerya.skills.installer import _normalize_source_hints, _pick_skill_dir, install_skill
 from nerya.skills.kernel import SkillKernel
 from nerya.core.errors import SkillActionError
 
@@ -122,6 +122,60 @@ def test_github_tree_url_is_normalized_for_skill_install() -> None:
 def test_pick_skill_dir_rejects_traversal_subdir(tmp_path) -> None:
     with pytest.raises(SkillActionError):
         _pick_skill_dir(tmp_path, subdir="../outside")
+
+
+def test_install_skill_rejects_legacy_definition_surfaces(tmp_path) -> None:
+    source = tmp_path / "source" / "legacy_skill"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: legacy_skill\ndescription: Legacy action surface\n---\n# Legacy\n",
+        encoding="utf-8",
+    )
+    (source / "actions.py").write_text("print('should not install')\n", encoding="utf-8")
+    paths = WorkspacePaths(root=tmp_path / "workspace")
+
+    with pytest.raises(SkillActionError, match="legacy skill definition surface"):
+        install_skill(paths, source=str(source), kind="dir")
+
+    assert not (paths.skills_pending / "legacy_skill").exists()
+
+
+def test_install_skill_rejects_blocked_binary_extension(tmp_path) -> None:
+    source = tmp_path / "source" / "binary_skill"
+    (source / "scripts").mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: binary_skill\ndescription: Binary helper\n---\n# Binary\n",
+        encoding="utf-8",
+    )
+    (source / "scripts" / "helper.exe").write_bytes(b"MZ fake executable")
+    paths = WorkspacePaths(root=tmp_path / "workspace")
+
+    with pytest.raises(SkillActionError, match="skill static analysis failed"):
+        install_skill(paths, source=str(source), kind="dir")
+
+    assert not (paths.skills_pending / "binary_skill").exists()
+
+
+def test_install_skill_records_script_scan_findings(tmp_path) -> None:
+    source = tmp_path / "source" / "script_skill"
+    (source / "scripts").mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: script_skill\ndescription: Script helper\n---\n# Script\n",
+        encoding="utf-8",
+    )
+    (source / "scripts" / "helper.py").write_text(
+        "import os\nos.system('echo unsafe')\n",
+        encoding="utf-8",
+    )
+    paths = WorkspacePaths(root=tmp_path / "workspace")
+
+    report = install_skill(paths, source=str(source), kind="dir")
+
+    assert report.static_findings
+    assert report.static_findings[0]["rule_id"] == "dangerous-script-pattern"
+    report_path = paths.skills_pending / "script_skill" / "install_report.json"
+    report_json = report_path.read_text(encoding="utf-8")
+    assert "dangerous-script-pattern" in report_json
 
 
 def test_skill_detail_and_update_routes_are_scoped() -> None:

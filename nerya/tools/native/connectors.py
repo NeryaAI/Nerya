@@ -29,12 +29,14 @@ at import time.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import inspect
+import os
 from pathlib import Path
 from typing import Any
 
 from ...connectors.mock_exchange import MockExchange
-from ...connectors.provider_spec import ExchangeProviderSpec, get_registry
+from ...connectors.provider_spec import CredentialField, ExchangeProviderSpec, get_registry
 from ...connectors.registry import build_connector
 from ...core.market_defaults import resolve_market_defaults
 from ...core.truth import degraded_envelope, live_envelope
@@ -170,6 +172,16 @@ MARKET_DATA_SCHEMA: dict[str, Any] = {
             "maximum": 500,
             "description": "Alias for count.",
         },
+        "timeout_s": {
+            "type": "number",
+            "minimum": 0.25,
+            "maximum": 15,
+            "default": 5,
+            "description": (
+                "Optional per-request market data timeout in seconds. "
+                "The runtime caps this so slow public feeds degrade quickly."
+            ),
+        },
     },
     "required": ["action"],
 }
@@ -178,6 +190,15 @@ MARKET_DATA_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+_DATA_SOURCE_API_KEY_ENV_NAMES: dict[str, tuple[str, ...]] = {
+    "tushare": ("TUSHARE_TOKEN", "TUSHARE_API_KEY", "NERYA_TUSHARE_TOKEN"),
+    "polygon_io": ("POLYGON_API_KEY", "POLYGON_IO_API_KEY", "NERYA_POLYGON_API_KEY"),
+    "coinmarketcap": ("COINMARKETCAP_API_KEY", "CMC_API_KEY", "NERYA_CMC_API_KEY"),
+    "glassnode": ("GLASSNODE_API_KEY", "NERYA_GLASSNODE_API_KEY"),
+    "dune": ("DUNE_API_KEY", "NERYA_DUNE_API_KEY"),
+    "messari": ("MESSARI_API_KEY", "NERYA_MESSARI_API_KEY"),
+}
 
 
 def _factory_module_path(spec: ExchangeProviderSpec) -> Path | None:
@@ -232,12 +253,164 @@ def _factory_module_path(spec: ExchangeProviderSpec) -> Path | None:
 
 def _spec_to_dict(
     spec: ExchangeProviderSpec, *, include_source_path: bool = False,
+    config_like: Any | None = None,
 ) -> dict[str, Any]:
     info = spec.to_info()
+    info["credential_status"] = _credential_status(spec, config_like=config_like)
     if include_source_path:
         src = _factory_module_path(spec)
         info["source_path"] = str(src) if src is not None else None
     return info
+
+
+def _credential_status(
+    spec: ExchangeProviderSpec,
+    *,
+    config_like: Any | None = None,
+) -> dict[str, Any]:
+    required = [field for field in spec.credential_fields if field.required]
+    if not required:
+        return {
+            "required": False,
+            "status": "not_required",
+            "configured": True,
+            "required_fields": [],
+            "configured_accounts": [],
+            "env_candidates": [],
+        }
+
+    required_names = [field.name for field in required]
+    configured_accounts = _configured_credential_accounts(
+        spec,
+        required_fields=required,
+        config_like=config_like,
+    )
+    env_candidates = _credential_env_candidates(spec, required_fields=required)
+    configured_by_env = _env_satisfies_required(required, env_candidates)
+    configured = bool(configured_accounts) or configured_by_env
+    return {
+        "required": True,
+        "status": "configured" if configured else "missing",
+        "configured": configured,
+        "required_fields": required_names,
+        "configured_accounts": configured_accounts,
+        "env_candidates": env_candidates,
+        "should_retry": configured,
+        "next_required_action": (
+            ""
+            if configured
+            else "configure_provider_credentials"
+        ),
+        "operator_message": (
+            ""
+            if configured
+            else (
+                f"{spec.label} requires credentials before live data can be "
+                "verified. Configure a vault-backed account credential or an "
+                "approved environment variable, then retry the data request."
+            )
+        ),
+    }
+
+
+def _credential_env_candidates(
+    spec: ExchangeProviderSpec,
+    *,
+    required_fields: list[CredentialField],
+) -> list[dict[str, Any]]:
+    env_names = _DATA_SOURCE_API_KEY_ENV_NAMES.get(spec.id, ())
+    if not env_names:
+        return []
+    required_names = {field.name for field in required_fields}
+    if "api_key" not in required_names:
+        return []
+    return [
+        {
+            "field": "api_key",
+            "name": name,
+            "present": bool(os.environ.get(name, "").strip()),
+        }
+        for name in env_names
+    ]
+
+
+def _env_satisfies_required(
+    required_fields: list[CredentialField],
+    env_candidates: list[dict[str, Any]],
+) -> bool:
+    required_names = {field.name for field in required_fields}
+    if required_names == {"api_key"}:
+        return any(bool(row.get("present")) for row in env_candidates)
+    return False
+
+
+def _configured_credential_accounts(
+    spec: ExchangeProviderSpec,
+    *,
+    required_fields: list[CredentialField],
+    config_like: Any | None,
+) -> list[dict[str, Any]]:
+    paths = getattr(config_like, "paths", None) if config_like is not None else None
+    if paths is None:
+        return []
+    try:
+        from ...trading.accounts import load_accounts
+        accounts = load_accounts(paths)
+    except Exception:
+        return []
+    accepted_venues = {spec.id, *spec.aliases}
+    required_names = [field.name for field in required_fields]
+    out: list[dict[str, Any]] = []
+    for acc in accounts.values():
+        venue = (getattr(acc, "venue", "") or "").strip().lower()
+        if venue not in accepted_venues:
+            continue
+        raw = dict(getattr(acc, "raw", {}) or {})
+        creds = raw.get("credentials") if isinstance(raw.get("credentials"), dict) else {}
+        present_fields = [
+            name for name in required_names
+            if str(creds.get(name) or "").strip()
+        ]
+        if len(present_fields) != len(required_names):
+            continue
+        out.append({
+            "id": str(getattr(acc, "id", "") or raw.get("id") or ""),
+            "venue": venue,
+            "fields": present_fields,
+            "uses_vault_ref": {
+                name: str(creds.get(name) or "").startswith("vault://")
+                for name in present_fields
+            },
+        })
+    return out
+
+
+def _credential_missing_payload(
+    venue: str,
+    market: str,
+    *,
+    config_like: Any | None,
+    capability: str,
+) -> dict[str, Any] | None:
+    spec = get_registry().find(venue)
+    if spec is None:
+        return None
+    status = _credential_status(spec, config_like=config_like)
+    if status.get("status") != "missing":
+        return None
+    return {
+        "venue": venue,
+        "market": market,
+        "error": "credential_missing",
+        "credential_status": status,
+        "should_retry": False,
+        "next_required_action": "configure_provider_credentials",
+        "_envelope": degraded_envelope(
+            capability,
+            error="credential_missing",
+            venue=venue.lower(),
+        ).as_dict(),
+    }
 
 
 def _usage_error(call: ToolCall, message: str) -> ToolResult:
@@ -287,7 +460,40 @@ def _market_id(args: dict[str, Any], *, config_like: Any | None) -> tuple[str, s
     return venue, _normalize_market(venue, market)
 
 
-def _public_connector(venue: str, *, config_like: Any | None) -> Any | None:
+def _market_timeout_s(args: dict[str, Any]) -> float:
+    raw = args.get("timeout_s")
+    if raw is None:
+        raw = os.environ.get("NERYA_MARKET_DATA_TIMEOUT_SECONDS") or 5.0
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        timeout = 5.0
+    return max(0.25, min(timeout, 15.0))
+
+
+def _apply_connector_timeout(conn: Any, timeout_s: float) -> Any:
+    if conn is None:
+        return conn
+    try:
+        current = getattr(conn, "timeout", None)
+        setattr(conn, "timeout", min(float(current), timeout_s) if current else timeout_s)
+    except Exception:
+        pass
+    try:
+        timeout_ms = int(timeout_s * 1000)
+        current_ms = getattr(conn, "timeout_ms", None)
+        setattr(conn, "timeout_ms", min(int(current_ms), timeout_ms) if current_ms else timeout_ms)
+    except Exception:
+        pass
+    return conn
+
+
+def _public_connector(
+    venue: str,
+    *,
+    config_like: Any | None,
+    timeout_s: float | None = None,
+) -> Any | None:
     venue_l = (venue or "").strip().lower()
     if venue_l in {"mock", "paper"}:
         return MockExchange()
@@ -299,10 +505,17 @@ def _public_connector(venue: str, *, config_like: Any | None) -> Any | None:
     cfg, workspace, vault_passphrase = _resolve_account_for_venue(
         venue_l, config_like=config_like,
     )
+    if timeout_s is not None:
+        cfg = dict(cfg)
+        cfg["timeout_s"] = timeout_s
+        cfg["timeout_ms"] = int(timeout_s * 1000)
     try:
-        return build_connector(
+        conn = build_connector(
             cfg, workspace=workspace, vault_passphrase=vault_passphrase,
         )
+        if timeout_s is not None:
+            conn = _apply_connector_timeout(conn, timeout_s)
+        return conn
     except Exception:
         return None
 
@@ -403,6 +616,75 @@ def _clean_envelope(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+def _row_timestamp(row: Any) -> Any:
+    if isinstance(row, dict):
+        return (
+            row.get("timestamp")
+            or row.get("ts")
+            or row.get("time")
+            or row.get("datetime")
+            or row.get("date")
+        )
+    if isinstance(row, (list, tuple)) and row:
+        return row[0]
+    return None
+
+
+def _iso_utc_timestamp(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if seconds > 1_000_000_000_000:
+            seconds /= 1000.0
+        try:
+            return (
+                datetime.fromtimestamp(seconds, tz=timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        except (OSError, OverflowError, ValueError):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z") and "T" in text:
+        return text
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (
+        parsed.astimezone(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _candle_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "bars": 0,
+            "first_timestamp": None,
+            "last_timestamp": None,
+            "first_timestamp_iso": None,
+            "last_timestamp_iso": None,
+        }
+    first_ts = _row_timestamp(rows[0])
+    last_ts = _row_timestamp(rows[-1])
+    return {
+        "bars": len(rows),
+        "first_timestamp": first_ts,
+        "last_timestamp": last_ts,
+        "first_timestamp_iso": _iso_utc_timestamp(first_ts),
+        "last_timestamp_iso": _iso_utc_timestamp(last_ts),
+    }
+
+
 def _context_text(market: str, interval: str, candles: list[dict[str, Any]], features: dict[str, Any]) -> str:
     if not candles:
         return (
@@ -427,7 +709,22 @@ def _market_candles(args: dict[str, Any], *, config_like: Any | None) -> dict[st
     venue, market = _market_id(args, config_like=config_like)
     interval = str(args.get("interval") or "1m")
     count = _count(args)
-    connector = _public_connector(venue, config_like=config_like)
+    timeout_s = _market_timeout_s(args)
+    missing = _credential_missing_payload(
+        venue,
+        market,
+        config_like=config_like,
+        capability="candles",
+    )
+    if missing is not None:
+        return {
+            **missing,
+            "interval": interval,
+            "count": 0,
+            "coverage": _candle_coverage([]),
+            "candles": [],
+        }
+    connector = _public_connector(venue, config_like=config_like, timeout_s=timeout_s)
     rows = fetch_candles(
         market,
         count=count,
@@ -445,11 +742,15 @@ def _market_candles(args: dict[str, Any], *, config_like: Any | None) -> dict[st
             venue=venue.lower(),
         ).as_dict()
     )
+    coverage = _candle_coverage(rows)
     return {
         "venue": venue,
         "market": market,
         "interval": interval,
         "count": len(rows),
+        "coverage": coverage,
+        "first_timestamp_iso": coverage["first_timestamp_iso"],
+        "last_timestamp_iso": coverage["last_timestamp_iso"],
         "candles": rows,
         "_envelope": envelope,
     }
@@ -457,7 +758,16 @@ def _market_candles(args: dict[str, Any], *, config_like: Any | None) -> dict[st
 
 def _market_ticker(args: dict[str, Any], *, config_like: Any | None) -> dict[str, Any]:
     venue, market = _market_id(args, config_like=config_like)
-    connector = _public_connector(venue, config_like=config_like)
+    timeout_s = _market_timeout_s(args)
+    missing = _credential_missing_payload(
+        venue,
+        market,
+        config_like=config_like,
+        capability="ticker",
+    )
+    if missing is not None:
+        return missing
+    connector = _public_connector(venue, config_like=config_like, timeout_s=timeout_s)
     if connector is None:
         return {
             "venue": venue,
@@ -542,7 +852,7 @@ def market_data_handler(call: ToolCall, *, config_like: Any | None = None) -> To
 # ---------------------------------------------------------------------------
 
 
-def connector_list_handler(call: ToolCall) -> ToolResult:
+def connector_list_handler(call: ToolCall, *, config_like: Any | None = None) -> ToolResult:
     """List all connectors registered in the in-process provider spec."""
 
     args = call.arguments or {}
@@ -561,32 +871,50 @@ def connector_list_handler(call: ToolCall) -> ToolResult:
             ]).lower()
             if query not in haystack:
                 continue
-        rows.append(_spec_to_dict(spec, include_source_path=include_source))
+        rows.append(
+            _spec_to_dict(
+                spec,
+                include_source_path=include_source,
+                config_like=config_like,
+            )
+        )
 
     rows.sort(key=lambda r: (r.get("kind", ""), r.get("id", "")))
+    suggested_data_api_checks: list[dict[str, Any]] = []
+    if query and not rows:
+        suggested_data_api_checks = [
+            {
+                "op": "list",
+                "provider": "wallet",
+                "query": query,
+            },
+            {
+                "op": "list",
+                "provider": "onchainos",
+                "query": query,
+            },
+        ]
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
         data={
             "count": len(rows),
+            "query": query,
             "connectors": rows,
+            **(
+                {"suggested_data_api_checks": suggested_data_api_checks}
+                if suggested_data_api_checks
+                else {}
+            ),
             "hint": (
                 "If a venue / data source is in this list it is *already "
                 "integrated* — wire the strategy to it directly. If it is "
-                "missing, first check whether it is a wallet-backed or "
-                "provider-specific data source: call data_api(op='list', "
-                "provider='wallet') and data_api(op='list', "
-                "provider='onchainos'). XAgent/xagt_agent_plugin, OKX "
-                "OnchainOS, DeFi positions, and on-chain meme/DEX reads live "
-                "there, not in the exchange Connector registry. For meme "
-                "strategies, call wallet.capability_catalog or "
-                "wallet.meme_strategy_guide and use its selected route for "
-                "the installed/logged-in wallet; if no wallet is ready, "
-                "follow the GOAT/self_custody fallback and install "
-                "recommendations. "
-                "Only after "
-                "both surfaces are missing should you follow the coding skill "
-                "(extending-nerya.md) "
+                "missing, first check whether it is exposed by a "
+                "provider-specific data_api surface via op='list' and "
+                "op='schema'. Use concrete call shapes returned by those "
+                "tool results instead of guessing provider routes. Only "
+                "after connector and data_api surfaces are missing should "
+                "you follow the coding skill (extending-nerya.md) "
                 "to author a real Connector subclass under "
                 "nerya/connectors/<vendor>.py + register it via "
                 "_register_builtins. Do not mock the data and do not "
@@ -596,7 +924,7 @@ def connector_list_handler(call: ToolCall) -> ToolResult:
     )
 
 
-def connector_view_handler(call: ToolCall) -> ToolResult:
+def connector_view_handler(call: ToolCall, *, config_like: Any | None = None) -> ToolResult:
     """Detail for a single provider, including (optionally) its source."""
 
     args = call.arguments or {}
@@ -622,24 +950,24 @@ def connector_view_handler(call: ToolCall) -> ToolResult:
                     f"No provider matches {raw!r}. This venue is *not* "
                     "registered as an exchange Connector. Before authoring "
                     "new code, check data_api providers for long-tail data: "
-                    "provider='wallet' (aliases include xagt_agent_plugin / "
-                    "xagent) and provider='onchainos' (aliases include "
-                    "okx_os / okx_onchain). Only if those are missing, author "
-                    "a real Connector under nerya/connectors/<vendor>.py and "
-                    "register it in provider_spec._register_builtins. Read "
-                    "official docs first; do not mock."
+                    "use op='list' and op='schema' on relevant providers, "
+                    "then call only concrete actions returned by the catalog. "
+                    "Only if those are missing, author a real Connector under "
+                    "nerya/connectors/<vendor>.py and register it in "
+                    "provider_spec._register_builtins. Read official docs "
+                    "first; do not mock."
                 ),
             },
         )
 
-    info = _spec_to_dict(spec, include_source_path=True)
+    info = _spec_to_dict(spec, include_source_path=True, config_like=config_like)
     info["found"] = True
     include_source = bool(args.get("include_source", False))
     if not include_source and max_bytes > 0:
         info["source_omitted"] = True
         info["source_hint"] = (
             "Source omitted by default. For strategy authoring, use connector "
-            "metadata plus wallet/onchain data_api routes and move to "
+            "metadata plus data_api capability results and move to "
             "strategy_generate_proposal; request include_source=true only when "
             "implementing or debugging connector code."
         )

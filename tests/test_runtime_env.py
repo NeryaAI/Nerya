@@ -124,8 +124,30 @@ def test_run_shell_redirects_workspace_file_enumeration(tmp_path):
     assert result.is_error is True
     assert result.error is not None
     assert result.error.kind is ToolErrorKind.PERMISSION_DENIED
+    assert result.error.retryable is False
+    assert result.error.recovery_hint["reason"] == "tool_redirect"
+    assert result.error.recovery_hint["preferred_tools"] == ["glob", "list_dir", "read_file"]
+    assert result.error.detail["reason"] == "tool_redirect"
     assert "glob" in result.text()
     assert "list_dir" in result.text()
+
+
+def test_run_shell_refuses_absolute_read_path_outside_workspace(tmp_path):
+    result = run_shell_handler(
+        ToolCall(
+            name="run_shell",
+            arguments={"command": "cat /etc/passwd"},
+        ),
+        root=tmp_path,
+    )
+
+    assert result.is_error is True
+    assert result.error is not None
+    assert result.error.kind is ToolErrorKind.PERMISSION_DENIED
+    text = result.text()
+    assert "permission_denied" in text
+    assert "workspace sandbox" in text
+    assert "/etc/passwd" in text
 
 
 def test_script_run_loads_vault_runtime_env(tmp_path):
@@ -155,6 +177,37 @@ def test_script_run_loads_vault_runtime_env(tmp_path):
     assert result.is_error is False
     part = next(p for p in result.content if p.type == "json")
     assert "script-loaded" in str((part.data or {}).get("stdout") or "")
+
+
+def test_script_run_preserves_parsed_stdout_json_before_tail_truncation(tmp_path):
+    skill_dir = tmp_path / "skills" / "demo"
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nid: demo\ndescription: test skill\n---\n# Demo\n",
+        encoding="utf-8",
+    )
+    (scripts_dir / "emit_json.py").write_text(
+        "import json\n"
+        "items = [{'title': f'Headline {i}', 'url': f'https://example.com/{i}'} for i in range(200)]\n"
+        "print(json.dumps({'ok': True, 'count': len(items), 'items': items}))\n",
+        encoding="utf-8",
+    )
+    index = SkillIndex([tmp_path / "skills"])
+
+    result = script_run_handler(
+        ToolCall(
+            name="script_run",
+            arguments={"skill_id": "demo", "name": "emit_json.py"},
+        ),
+        skill_index=index,
+        cwd=tmp_path,
+    )
+
+    assert result.is_error is False
+    part = next(p for p in result.content if p.type == "json")
+    assert part.data["stdout_json"]["count"] == 200
+    assert part.data["stdout_json"]["items"][0]["title"] == "Headline 0"
 
 
 def test_stdio_mcp_client_receives_vault_runtime_env(tmp_path):

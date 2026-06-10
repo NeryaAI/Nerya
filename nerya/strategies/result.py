@@ -8,8 +8,9 @@ code can't smuggle in side effects through the return value.
 
 Three primary lifecycles map onto the same dataclass:
 
-* **HOLD**         — ``ctx.result.hold(reason=...)`` — strategy looked
-  but found no setup; runner journals and exits.
+* **HOLD**         — ``ctx.result.hold(reason=...)`` or
+  ``ctx.result.skip(reason=...)`` — strategy looked but found no setup;
+  runner journals and exits.
 * **SUBMITTED**    — strategy called ``ctx.trading.submit_intent(...)``;
   the trading facade returns the canonical envelope, the runner wraps
   it as ``StrategyResult.from_trade_envelope(envelope)``.
@@ -19,8 +20,9 @@ Three primary lifecycles map onto the same dataclass:
 
 The facade in :mod:`nerya.strategies.context` exposes a
 :class:`ResultBuilder` so authors write ``ctx.result.hold(...)`` /
-``ctx.result.ok(...)`` instead of constructing the dataclass directly;
-this keeps the public contract tight even when we add new fields.
+``ctx.result.skip(...)`` / ``ctx.result.ok(...)`` instead of constructing
+the dataclass directly; this keeps the public contract tight even when we
+add new fields.
 """
 
 from __future__ import annotations
@@ -91,6 +93,12 @@ class StrategyResult:
             reason=str(reason or "").strip(),
             metadata=dict(metadata or {}),
         )
+
+    @classmethod
+    def skip(cls, *, reason: str = "", metadata: Optional[dict[str, Any]] = None) -> "StrategyResult":
+        """Alias for ``hold`` used by generated code for no-setup branches."""
+
+        return cls.hold(reason=reason, metadata=metadata)
 
     @classmethod
     def ok(cls, *, reason: str = "", metadata: Optional[dict[str, Any]] = None) -> "StrategyResult":
@@ -199,6 +207,9 @@ class ResultBuilder:
 
     def hold(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None) -> StrategyResult:
         return StrategyResult.hold(reason=reason, metadata=metadata)
+
+    def skip(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None) -> StrategyResult:
+        return StrategyResult.skip(reason=reason, metadata=metadata)
 
     def ok(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None) -> StrategyResult:
         return StrategyResult.ok(reason=reason, metadata=metadata)

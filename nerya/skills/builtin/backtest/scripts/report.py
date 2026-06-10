@@ -24,12 +24,12 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
         "| Metric | Value |",
         "|---|---:|",
     ]
-    if metrics.get("coverage_ok") is False:
+    if metrics.get("recommended_coverage_ok") is False:
         lines[8:8] = [
-            "## Coverage warning",
+            "## Coverage note",
             str(
                 metrics.get("coverage_message")
-                or "Loaded candle coverage is below the configured minimum."
+                or "Loaded candle coverage is below the recommended window."
             ),
             "",
         ]

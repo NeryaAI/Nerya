@@ -24,7 +24,9 @@ from typing import Any
 
 from ...agent.self_improvement import evolve
 from ...core.config import Config
-from ...evolution.patch_proposal import list_proposals
+from ...core.errors import ProtectedScopeViolation
+from ...evolution.patch_proposal import create_proposal, list_proposals
+from ...evolution.self_config import propose_core_config_patch
 from ...evolution.skill_proposal import propose_skill_from_workflow
 from ..types import (
     ToolCall,
@@ -42,6 +44,13 @@ EVOLVE_REFLECT_SCHEMA: dict[str, Any] = {
 EVOLVE_PROPOSALS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "proposal_id": {
+            "type": "string",
+            "description": (
+                "Optional exact proposal id lookup. When set, searches all "
+                "proposals and ignores limit."
+            ),
+        },
         "limit": {
             "type": "integer",
             "minimum": 1,
@@ -113,6 +122,135 @@ EVOLVE_SKILL_PROPOSAL_SCHEMA: dict[str, Any] = {
     "required": ["name", "description", "workflow"],
 }
 
+EVOLVE_CORE_CONFIG_PATCH_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "target": {
+            "type": "string",
+            "description": (
+                "Workspace config file to propose, for example nerya.yml, "
+                "agents.yml, workspace.yml, news_feeds.yml, "
+                "messages/channels.yml, triggers/routes.yml, "
+                "policies/planner.yml, or "
+                "policies/tier_policy.yml."
+            ),
+        },
+        "summary": {
+            "type": "string",
+            "description": "Concise operator-facing summary of the config change.",
+        },
+        "config_after": {
+            "type": "object",
+            "description": (
+                "Full parsed YAML object for the target file after the proposed "
+                "change. The live file is not mutated. For messages/channels.yml "
+                "or messages/channels.yaml, use the canonical shape "
+                "`channels: {<id>: {kind: telegram|discord|webhook, ...}}` plus "
+                "top-level `severity_routes: {info: [telegram], critical: "
+                "[telegram, discord], silent: []}` for severity-based routing. "
+                "For Telegram, store bot tokens as `bot_token_ref`; if the "
+                "operator provides a vault-backed chat id, use `chat_id_ref`, "
+                "otherwise use plaintext numeric `chat_id`. "
+                "Do not use ad-hoc targets such as notifications.routing."
+            ),
+        },
+        "rationale": {
+            "type": "string",
+            "description": "Optional markdown rationale and review notes.",
+        },
+    },
+    "required": ["target", "summary", "config_after"],
+}
+
+EVOLVE_PROVIDER_PROPOSAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "venue": {
+            "type": "string",
+            "description": "Stable provider/venue id, for example aster or hyperliquid_perpetual.",
+        },
+        "label": {
+            "type": "string",
+            "description": "Human-readable provider label.",
+        },
+        "kind": {
+            "type": "string",
+            "description": "Provider class such as cex, dex, perp, data_source, or wallet.",
+        },
+        "runtime": {
+            "type": "string",
+            "description": "Proposed runtime adapter type, for example python, python_ccxt, or custom_http.",
+        },
+        "base_url": {
+            "type": "string",
+            "description": "Primary REST/API base URL from the provider docs.",
+        },
+        "docs_url": {
+            "type": "string",
+            "description": "Canonical provider API documentation URL.",
+        },
+        "auth": {
+            "type": "string",
+            "description": "Authentication/signing model, for example EIP-712 Agent Key.",
+        },
+        "summary": {
+            "type": "string",
+            "description": "Operator-facing summary of the provider proposal.",
+        },
+        "rationale": {
+            "type": "string",
+            "description": "Markdown rationale and evidence notes.",
+        },
+        "evidence_refs": {
+            "description": "URLs, files, or log refs used as evidence.",
+            "oneOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}},
+            ],
+        },
+        "metadata": {
+            "type": "object",
+            "description": "Additional non-secret provider metadata to attach to proposal.yml.",
+        },
+    },
+    "required": ["venue"],
+}
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _provider_proposal_markdown(args: dict[str, Any]) -> str:
+    fields = [
+        ("venue", args.get("venue")),
+        ("label", args.get("label")),
+        ("kind", args.get("kind")),
+        ("runtime", args.get("runtime")),
+        ("base_url", args.get("base_url")),
+        ("docs_url", args.get("docs_url")),
+        ("auth", args.get("auth")),
+    ]
+    lines = ["# Provider Proposal", ""]
+    for key, value in fields:
+        text = str(value or "").strip()
+        if text:
+            lines.append(f"- {key}: {text}")
+    evidence = _string_list(args.get("evidence_refs"))
+    if evidence:
+        lines.extend(["", "## Evidence"])
+        lines.extend(f"- {item}" for item in evidence)
+    rationale = str(args.get("rationale") or "").strip()
+    if rationale:
+        lines.extend(["", "## Rationale", rationale])
+    return "\n".join(lines) + "\n"
+
 
 def evolve_reflect_handler(call: ToolCall, *, config: Config) -> ToolResult:
     """Run a reflection tick and return the new proposal envelope."""
@@ -161,6 +299,41 @@ def evolve_proposals_handler(call: ToolCall, *, config: Config) -> ToolResult:
                 kind=ToolErrorKind.EXECUTION_ERROR,
                 message=f"{type(exc).__name__}: {exc}",
             ),
+        )
+    proposal_id = str(args.get("proposal_id") or "").strip()
+    if proposal_id:
+        match = next((p for p in proposals if p.id == proposal_id), None)
+        if match is None:
+            return ToolResult.from_json(
+                tool_use_id=call.id,
+                name=call.name,
+                data={
+                    "found": False,
+                    "proposal_id": proposal_id,
+                    "count": 0,
+                    "proposal": None,
+                    "proposals": [],
+                },
+            )
+        item = {
+            "id": match.id,
+            "kind": match.kind,
+            "state": match.state,
+            "summary": match.summary,
+            "ts": match.ts,
+            "target": match.target,
+            "path": str(match.path),
+        }
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "found": True,
+                "proposal_id": proposal_id,
+                "count": 1,
+                "proposal": item,
+                "proposals": [item],
+            },
         )
     proposals = sorted(
         proposals,
@@ -215,10 +388,156 @@ def evolve_skill_proposal_handler(call: ToolCall, *, config: Config) -> ToolResu
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
 
 
+def evolve_core_config_patch_handler(call: ToolCall, *, config: Config) -> ToolResult:
+    """Draft a non-protected runtime config patch as a reviewable proposal."""
+
+    args = call.arguments or {}
+    config_after = args.get("config_after")
+    if not isinstance(config_after, dict):
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.SCHEMA_VALIDATION,
+                message="config_after must be a full parsed YAML object",
+            ),
+        )
+    try:
+        proposal = propose_core_config_patch(
+            config.paths,
+            target=str(args.get("target") or ""),
+            summary=str(args.get("summary") or "Core config patch"),
+            config_after=config_after,
+            rationale=str(args.get("rationale") or ""),
+            current_config=config.data,
+        )
+    except ProtectedScopeViolation as exc:
+        target = str(args.get("target") or "")
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.PERMISSION_DENIED,
+                message=(
+                    "advisory reject: protected scope change refused. "
+                    f"{exc}"
+                ),
+                detail={
+                    "reason": "protected_scope",
+                    "target": target,
+                    "decision": "advisory reject",
+                },
+                retryable=False,
+                recovery_hint={
+                    "decision": "advisory reject",
+                    "reason": "protected_scope",
+                    "target": target,
+                },
+            ),
+        )
+    except Exception as exc:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.EXECUTION_ERROR,
+                message=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+    return ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data={"proposal": proposal.asdict()},
+    )
+
+
+def evolve_provider_proposal_handler(call: ToolCall, *, config: Config) -> ToolResult:
+    """Draft a missing exchange/data provider as a reviewable proposal."""
+
+    args = dict(call.arguments or {})
+    venue = str(args.get("venue") or "").strip().lower().replace(" ", "_")
+    if not venue:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.SCHEMA_VALIDATION,
+                message="venue is required",
+            ),
+        )
+    args["venue"] = venue
+    summary = str(args.get("summary") or f"Add provider proposal for {venue}").strip()
+    metadata = {
+        "venue": venue,
+        "label": str(args.get("label") or "").strip(),
+        "kind": str(args.get("kind") or "").strip(),
+        "runtime": str(args.get("runtime") or "").strip(),
+        "base_url": str(args.get("base_url") or "").strip(),
+        "docs_url": str(args.get("docs_url") or "").strip(),
+        "auth": str(args.get("auth") or "").strip(),
+    }
+    extra_metadata = args.get("metadata")
+    if isinstance(extra_metadata, dict):
+        metadata.update({
+            str(key): value
+            for key, value in extra_metadata.items()
+            if value not in (None, "")
+        })
+    metadata = {key: value for key, value in metadata.items() if value not in (None, "")}
+    try:
+        proposal = create_proposal(
+            config.paths,
+            kind="provider_proposal",
+            summary=summary,
+            rationale=str(args.get("rationale") or summary),
+            test_plan=(
+                "# Test plan\n\n"
+                "- Review the provider spec fields and credential schema.\n"
+                "- Add connector/provider implementation in a separate approval step.\n"
+                "- Run provider ping and read-only market-data smoke checks before live use.\n"
+            ),
+            rollback=(
+                "# Rollback\n\n"
+                "Reject or archive this proposal; no live provider config was mutated.\n"
+            ),
+            extra_files={
+                f"after/providers/{venue}/provider.md": _provider_proposal_markdown(args),
+            },
+            initial_state="pending_review",
+            target=f"providers/{venue}.yml",
+            evidence_refs=_string_list(args.get("evidence_refs")),
+            metadata=metadata,
+        )
+    except Exception as exc:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.EXECUTION_ERROR,
+                message=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+    return ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data={
+            "ok": True,
+            "proposal_id": proposal.id,
+            "proposal": proposal.asdict(),
+            "metadata": metadata,
+            "next_required_action": "review_provider_proposal",
+        },
+    )
+
+
 __all__ = [
+    "EVOLVE_PROVIDER_PROPOSAL_SCHEMA",
     "EVOLVE_PROPOSALS_SCHEMA",
     "EVOLVE_REFLECT_SCHEMA",
+    "EVOLVE_CORE_CONFIG_PATCH_SCHEMA",
     "EVOLVE_SKILL_PROPOSAL_SCHEMA",
+    "evolve_core_config_patch_handler",
+    "evolve_provider_proposal_handler",
     "evolve_proposals_handler",
     "evolve_reflect_handler",
     "evolve_skill_proposal_handler",

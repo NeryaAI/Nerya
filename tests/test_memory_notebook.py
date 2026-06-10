@@ -15,7 +15,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nerya.memory.content_scanner import scan_memory_content
+from nerya.memory.content_scanner import (
+    scan_memory_content,
+    scan_memory_content_with_audit,
+)
 from nerya.memory.context_fence import (
     build_memory_context_block,
     sanitize_context,
@@ -79,6 +82,21 @@ class TestContentScanner:
         # Real Chinese / accented text must pass.
         assert scan_memory_content("操作者偏好3-5日波段策略，避免日内剥头皮。") is None
         assert scan_memory_content("Préfère les positions courtes à moyen terme.") is None
+
+    def test_scanner_failure_fails_open_with_audit(self, monkeypatch):
+        from nerya.memory import content_scanner as cs
+
+        class ExplodingPattern:
+            def search(self, _content):  # noqa: ANN001
+                raise RuntimeError("scanner unavailable")
+
+        monkeypatch.setattr(cs, "_THREAT_PATTERNS", ((ExplodingPattern(), "explode"),))
+
+        assert scan_memory_content("normal memory") is None
+        result = scan_memory_content_with_audit("normal memory")
+        assert result.allowed is True
+        assert result.audit_event["policy"] == "memory_content_scanner.fail_open"
+        assert result.audit_event["scanner_failed"] is True
 
 
 # ---------------------------------------------------------------------------

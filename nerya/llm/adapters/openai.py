@@ -92,6 +92,11 @@ class OpenAIAdapter:
         # "high" | "xhigh". Unknown values are passed through verbatim
         # (useful for compat servers); legacy models silently ignore.
         is_reasoning_model = _is_reasoning_model(model)
+        minimax_compat = _is_minimax_openai_compat(
+            provider_name=provider_name,
+            base_url=base_url or self.base_url,
+            model=model,
+        )
         if is_reasoning_model:
             # gpt-5/o-series ignore ``temperature`` and require
             # ``max_completion_tokens`` instead of ``max_tokens``.
@@ -109,6 +114,17 @@ class OpenAIAdapter:
                 body["reasoning"] = {"summary": summ}
                 if eff and eff != "none":
                     body["reasoning"]["effort"] = eff
+        elif minimax_compat:
+            # MiniMax's OpenAI-compatible endpoint uses completion-token
+            # naming and explicit thinking controls for MiniMax-M3.
+            body.pop("max_tokens", None)
+            body["max_completion_tokens"] = max_tokens
+            body["temperature"] = temperature
+            if _minimax_thinking_enabled(reasoning_effort):
+                body["thinking"] = {"type": "adaptive"}
+                body["reasoning_split"] = True
+            else:
+                body["thinking"] = {"type": "disabled"}
         else:
             body["temperature"] = temperature
         if schema is not None:
@@ -127,18 +143,25 @@ class OpenAIAdapter:
         latency_ms = int((time.time() - started) * 1000)
 
         if status >= 400:
-            err = (doc.get("error") or {}).get("message") or doc.get("raw") or f"http_{status}"
+            err = _provider_error_text(doc, status=status)
             raise LLMError(f"{provider_name} api error ({status}): {err}")
 
         try:
             choice = doc["choices"][0]
             msg = choice.get("message") or {}
-            text = msg.get("content") or ""
+            text = _message_text(msg)
             finish = choice.get("finish_reason", "")
             # Reasoning summary surfaces. OpenAI gpt-5 + o-series return it
             # under ``message.reasoning`` (string OR list of {type,text});
             # OpenRouter mirrors the same shape for reasoning-capable models.
-            reasoning_blob = msg.get("reasoning") or msg.get("reasoning_content")
+            if isinstance(msg, dict):
+                reasoning_blob = (
+                    msg.get("reasoning")
+                    or msg.get("reasoning_content")
+                    or msg.get("reasoning_details")
+                )
+            else:
+                reasoning_blob = None
             reasoning_text = _extract_reasoning_text(reasoning_blob)
         except Exception as exc:
             raise LLMError(f"{provider_name} returned malformed body: {exc}") from exc
@@ -255,6 +278,63 @@ def _is_reasoning_model(model: str) -> bool:
         return False
     low = model.lower()
     return any(low.startswith(p) for p in _REASONING_MODEL_PREFIXES)
+
+
+_MINIMAX_THINKING_ON_VALUES: frozenset[str] = frozenset({
+    "1", "true", "on", "enabled", "enable", "adaptive",
+})
+
+
+def _is_minimax_openai_compat(
+    *, provider_name: str, base_url: str, model: str,
+) -> bool:
+    haystack = " ".join(
+        str(part or "").lower()
+        for part in (provider_name, base_url, model)
+    )
+    return "minimax" in haystack
+
+
+def _minimax_thinking_enabled(effort: str | None) -> bool:
+    return str(effort or "").strip().lower() in _MINIMAX_THINKING_ON_VALUES
+
+
+def _provider_error_text(doc: dict[str, Any], *, status: int) -> str:
+    err = doc.get("error") if isinstance(doc, dict) else None
+    if isinstance(err, dict):
+        msg = err.get("message")
+        if msg:
+            return str(msg)
+    if err:
+        return str(err)
+    raw = doc.get("raw") if isinstance(doc, dict) else None
+    if raw:
+        return str(raw)
+    return f"http_{status}"
+
+
+def _message_text(message: Any) -> str:
+    if isinstance(message, str):
+        return message
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                chunks.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text") or part.get("content")
+                if text:
+                    chunks.append(str(text))
+        return "\n".join(chunks)
+    if isinstance(content, dict):
+        text = content.get("text") or content.get("content")
+        return str(text or "")
+    return ""
 
 
 def _extract_reasoning_text(blob: Any) -> str:

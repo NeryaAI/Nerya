@@ -1,0 +1,9 @@
+id: minimal-v1
+name: Minimal
+description: Restricted preset for boot smoke tests and low-capability workspaces.
+version: 1
+mode: minimal
+capabilities:
+  - message
+  - trace
+fallback: generic

@@ -14,7 +14,11 @@ from nerya.sdk.trigger_api import TriggerAPI
 from nerya.sdk.strategy_api import StrategyAPI
 from nerya.strategies.package import load_package
 from nerya.strategies.scheduler_bridge import compile_trading_schedule
-from nerya.tools.native.bootstrap import build_native_tool_deps, _wrap_trade_intent_submit
+from nerya.tools.native.bootstrap import (
+    _wrap_strategy_run_tick,
+    _wrap_trade_intent_submit,
+    build_native_tool_deps,
+)
 from nerya.tools.types import ToolCall, ToolErrorKind, ToolResult
 from nerya.triggers.runtime import TriggerRuntime
 from nerya.triggers.strategy_agent_task_executor import (
@@ -512,6 +516,49 @@ def test_trigger_runtime_executes_strategy_run_tick_targets(tmp_path):
     assert len(list((cfg.paths.strategy("cron_tick") / "runs").glob("*.json"))) == 1
 
 
+def test_strategy_agent_run_tick_wrapper_pins_strategy_and_trigger(tmp_path):
+    cfg = _config(tmp_path)
+    _write_tick_strategy(cfg, "s1")
+    deps = build_native_tool_deps(
+        workspace_root=cfg.paths.root,
+        skill_roots=[],
+        paths=cfg.paths,
+        config=cfg,
+    )
+    deps.active_strategy_id = "s1"
+    deps.active_trigger_event_id = "evt_macd"
+    deps.active_trigger_source = "scheduled_session"
+    deps.strategy_order_auto_approve = True
+    handler = _wrap_strategy_run_tick(deps)
+
+    result = handler(
+        ToolCall(
+            name="strategy_run_tick",
+            id="toolu_tick_other",
+            arguments={"strategy_id": "other"},
+        )
+    )
+
+    assert result.is_error is True
+    assert result.error is not None
+    assert result.error.kind == ToolErrorKind.PERMISSION_DENIED
+    assert result.error.detail["requested_strategy_id"] == "other"
+
+    result = handler(
+        ToolCall(
+            name="strategy_run_tick",
+            id="toolu_tick",
+            arguments={"strategy_id": "s1"},
+        )
+    )
+
+    assert result.is_error is False
+    out = result.content[0].data
+    assert out["strategy_id"] == "s1"
+    assert out["trigger_event_id"] == "evt_macd"
+    assert out["inputs"]["operator"] == "scheduled_session"
+
+
 def test_strategy_agent_trade_wrapper_pins_strategy_source_and_trigger_context(tmp_path):
     cfg = _config(tmp_path)
     _write_legacy_trade_strategy(cfg)
@@ -565,6 +612,61 @@ def test_strategy_agent_trade_wrapper_pins_strategy_source_and_trigger_context(t
     assert approved[-1]["intent"]["source"] == "strategy_agent"
     assert approved[-1]["intent"]["trigger_event_id"] == "evt_macd"
     assert approved[-1]["intent"]["meta"]["agent_session_id"] == "strat_agent_test"
+
+
+def test_chat_trade_call_in_strategy_session_still_uses_domain_approval(tmp_path):
+    cfg = _config(tmp_path)
+    _write_legacy_trade_strategy(cfg)
+    ensure_strategy_agent_profile(
+        paths=cfg.paths,
+        session_id="strat_agent_test",
+        strategy_id="s1",
+        profile={
+            "allowed_tools": ["risk_check"],
+            "accounts": ["paper_main"],
+            "markets": ["mock:BTC/USDT"],
+            "risk_limits": {"max_single_order_usd": 1},
+        },
+        session_key={"market": "mock:BTC/USDT"},
+        policy="per_strategy",
+    )
+    deps = build_native_tool_deps(
+        workspace_root=cfg.paths.root,
+        skill_roots=[],
+        paths=cfg.paths,
+        config=cfg,
+    )
+    deps.active_strategy_id = "s1"
+    deps.active_session_id = "strat_agent_test"
+    deps.strategy_order_auto_approve = False
+
+    result = _wrap_trade_intent_submit(deps)(
+        ToolCall(
+            name="trade_intent_submit",
+            id="toolu_trade_chat_strategy_context",
+            arguments={
+                "account_id": "paper_main",
+                "market": "mock:BTC/USDT",
+                "side": "buy",
+                "size": 100,
+                "size_unit": "usd",
+                "order_type": "market",
+                "confidence": 0.9,
+                "market_snapshot": {"price": 50_000, "age_s": 0, "source": "test"},
+                "meta": {"operator_text_locale": "zh-CN"},
+            },
+        )
+    )
+
+    assert result.is_error is False, result
+    out = result.content[0].data
+    assert out["status"] == "pending_approval"
+    assert out["approval_id"]
+    assert out["intent"]["strategy_id"] == "s1"
+    assert out["intent"]["source"] == "agent:native"
+    assert out["intent"]["meta"]["operator_text_locale"] == "zh-CN"
+    assert jsonl.read_all(cfg.paths.approvals_approved) == []
+    assert jsonl.read_all(cfg.paths.approvals_pending)[-1]["approval_id"] == out["approval_id"]
 
 
 def test_strategy_agent_trade_wrapper_rejects_profile_violations(tmp_path):

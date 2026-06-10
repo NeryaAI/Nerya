@@ -55,6 +55,8 @@ class FakeTransport:
 def _resolver(ref: str) -> str | None:
     if ref == "vault://telegram_bot_token":
         return "123456:test-token"
+    if ref == "vault://telegram_chat_id":
+        return "7457389323"
     return None
 
 
@@ -119,6 +121,28 @@ def test_telegram_send_falls_back_to_plain_text_on_parse_error(tmp_path):
     assert tx.calls[0]["body"]["parse_mode"] == "HTML"
     assert "parse_mode" not in tx.calls[1]["body"]
     assert tx.calls[1]["body"]["text"] == msg["text"]
+
+
+def test_telegram_send_resolves_chat_id_ref(tmp_path):
+    tx = FakeTransport()
+    msg = {
+        "message_id": "msg-chat-ref",
+        "text": "hello",
+    }
+
+    telegram.send(
+        tmp_path,
+        msg,
+        channel_cfg={
+            "bot_token_ref": "vault://telegram_bot_token",
+            "chat_id_ref": "vault://telegram_chat_id",
+        },
+        resolve_secret=_resolver,
+        transport=tx,
+    )
+
+    assert msg["delivered"] is True
+    assert tx.calls[0]["body"]["chat_id"] == "7457389323"
 
 
 def test_telegram_send_splits_long_agent_reply_as_plain_text(tmp_path):

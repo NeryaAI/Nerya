@@ -65,6 +65,7 @@ def test_builtin_registry_includes_core_compact_skills() -> None:
         "markets",
         "research",
         "strategy_author",
+        "tasks",
         "trading",
         "triggers",
     }.issubset(ids)

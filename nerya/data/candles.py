@@ -239,8 +239,23 @@ def _canonical_venue(venue: str) -> str:
         "ONCHAIN": "ONCHAIN",
         "PAPER": "PAPER",
         "MOCK": "MOCK",
+        "EQUITY": "YAHOO",
+        "EQUITIES": "YAHOO",
+        "STOCK": "YAHOO",
+        "STOCKS": "YAHOO",
+        "US_EQUITY": "YAHOO",
+        "US_EQUITIES": "YAHOO",
+        "US_STOCK": "YAHOO",
+        "US_STOCKS": "YAHOO",
+        "YAHOO_FINANCE": "YAHOO",
     }
     return aliases.get(key, key)
+
+
+def canonical_venue(venue: str) -> str:
+    """Public wrapper for shared market-data venue canonicalization."""
+
+    return _canonical_venue(venue)
 
 
 def _market_for_venue(market: str, venue: str) -> str:
@@ -481,7 +496,7 @@ def discover_market_data_sources(config_like: Any | None = None) -> list[dict[st
                 if child.is_dir() and (child / "provider.py").exists():
                     _add_source(out, seen, child.name, origin="workspace_providers")
 
-    for venue in ("binance", "binance_perpetual", "okx", "bybit", "kraken"):
+    for venue in ("yahoo", "binance", "binance_perpetual", "okx", "bybit", "kraken"):
         _add_source(out, seen, venue, origin="built_in_public_rest")
     for binding in _wallet_market_data_bindings(config_like):
         source = dict(binding.get("market_data_source") or {})
@@ -835,6 +850,7 @@ def _venue_of(market: str) -> str:
 
 __all__ = [
     "mock_candles",
+    "canonical_venue",
     "discover_market_data_sources",
     "fetch_candles",
     "fetch_public_ticker",

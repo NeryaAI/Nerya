@@ -15,8 +15,9 @@ from typing import Any, Callable
 _jitter_counter = 0
 _jitter_lock = threading.Lock()
 
-# HTTP statuses that should be retried
-_TRANSIENT_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 522, 524})
+# HTTP statuses that should be retried. ``529`` is a non-standard provider
+# overload/peak-busy status used by some OpenAI-compatible endpoints.
+_TRANSIENT_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 522, 524, 529})
 
 
 def jittered_backoff(

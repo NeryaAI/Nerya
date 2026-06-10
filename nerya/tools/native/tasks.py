@@ -26,7 +26,9 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
+from ...core.errors import TriggerValidationError
 from ...core.config import Config
+from ...skills.builtin.tasks.scripts import create_task
 from ...skills.kernel import SkillKernel
 from ...subagents.dispatcher import SubAgentDispatcher
 from ...subagents.tasks import TaskStore, run_in_thread
@@ -64,6 +66,64 @@ SUBAGENT_RUN_ASYNC_SCHEMA: dict[str, Any] = {
         "trigger_event_id": {"type": "string"},
     },
     "required": ["name"],
+}
+
+TASK_CREATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "Stable schedule/task id."},
+        "title": {"type": "string"},
+        "task_type": {
+            "type": "string",
+            "enum": ["agent", "script"],
+            "description": "Use agent for recurring agent sessions; script for approved scripts.",
+        },
+        "source_request": {
+            "type": "string",
+            "description": "The operator's original request for auditability.",
+        },
+        "generated_prompt": {
+            "type": "string",
+            "description": (
+                "Durable prompt executed by recurring agent tasks. It must "
+                "perform the scheduled business work directly, not create "
+                "more recurring schedules/tasks or clone itself on each tick."
+            ),
+        },
+        "script_id": {
+            "type": "string",
+            "description": "Required for script tasks unless target is script:<id>.",
+        },
+        "script_args": {"type": "object"},
+        "cron": {
+            "type": "string",
+            "description": "Five-field cron expression such as 0 9 * * *.",
+        },
+        "every_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Interval schedule in seconds.",
+        },
+        "timezone": {"type": "string"},
+        "session_mode": {"type": "string", "enum": ["ephemeral", "reuse"]},
+        "session_id": {"type": "string"},
+        "delivery_targets": {
+            "oneOf": [
+                {"type": "string"},
+                {"type": "object"},
+                {"type": "array", "items": {"type": ["object", "string"]}},
+            ],
+            "description": (
+                "Output routing targets. Use dashboard/local as safe defaults. "
+                "Only include external gateways such as telegram, discord, or "
+                "slack when the operator's original source_request explicitly "
+                "asked for that output channel; do not add unrelated channels."
+            ),
+        },
+        "payload": {"type": "object"},
+        "enabled": {"type": "boolean"},
+    },
+    "required": ["task_type"],
 }
 
 TASK_LIST_SCHEMA: dict[str, Any] = {
@@ -264,6 +324,21 @@ def subagent_run_async_handler(
     if not name:
         return _usage_error(call, "name is required")
     payload = args.get("payload") if isinstance(args.get("payload"), dict) else {}
+    team_summary = _cached_team_summary(call, args)
+    if team_summary is not None:
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "task_id": team_summary.get("team_run_id"),
+                "name": "team_run",
+                "state": team_summary.get("status") or "completed",
+                "status": "team_already_completed",
+                "skipped": True,
+                "team_summary": team_summary,
+                "next_action": _team_task_hint(team_summary),
+            },
+        )
     meta = call.metadata if isinstance(call.metadata, dict) else {}
     strategy_id = args.get("strategy_id") or meta.get("strategy_id") or None
     session_id = args.get("session_id") or meta.get("session_id") or None
@@ -355,6 +430,43 @@ def task_list_handler(
             ],
         },
     )
+
+
+def task_create_handler(
+    call: ToolCall,
+    *,
+    workspace: str | "Path",
+) -> ToolResult:
+    try:
+        result = create_task.run(dict(call.arguments or {}), workspace=workspace)
+    except TriggerValidationError as exc:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.SCHEMA_VALIDATION,
+                message=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - surface concrete tool failure.
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.EXECUTION_ERROR,
+                message=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+    if not result.get("ok"):
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.SCHEMA_VALIDATION,
+                message=str(result.get("error") or "task_create failed"),
+            ),
+        )
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
 
 
 def task_get_handler(
@@ -559,6 +671,7 @@ def task_summary_handler(
 
 __all__ = [
     "SUBAGENT_RUN_ASYNC_SCHEMA",
+    "TASK_CREATE_SCHEMA",
     "TASK_GET_SCHEMA",
     "TASK_LIST_SCHEMA",
     "TASK_OUTPUT_SCHEMA",
@@ -566,6 +679,7 @@ __all__ = [
     "TASK_SUMMARY_SCHEMA",
     "TASK_UPDATE_SCHEMA",
     "subagent_run_async_handler",
+    "task_create_handler",
     "task_get_handler",
     "task_list_handler",
     "task_output_handler",

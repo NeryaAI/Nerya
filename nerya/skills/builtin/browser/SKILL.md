@@ -10,102 +10,50 @@ author: Nerya
 
 # Browser
 
-Use for pages that require DOM inspection, JavaScript, clicks, forms,
-screenshots, console/network evidence, or viewport-level visual QA.
+Use for rendered pages that need DOM inspection, JavaScript, clicks,
+forms, screenshots, console/network evidence, or viewport-level visual QA.
 
 ## Flow
 
 IF a plain HTTP fetch proves the fact:
-USE the lighter fetch path.
+USE the lighter fetch/research path.
 
 IF JavaScript, login, scrolling, canvas, or interaction matters:
-OPEN browser session.
+OPEN a browser session.
 CAPTURE page state before acting.
 ACT with the smallest click/type/navigation step.
 VERIFY with DOM, screenshot, console, `api_requests`, or network evidence.
 RETURN only the evidence relevant to the user task.
 
-## Scripts
+For multi-step browsing, spawn one focused browser subagent and keep the
+main agent as coordinator.
 
-- `scripts/browser_session.py` for browser session helpers.
+## Script
 
-Use `script_run` directly for normal browser work. Do not inspect the
-script first unless you are changing the script or the operation is
-unknown. The script is JSON-in / JSON-out.
+RUN `scripts/browser_session.py` through `script_run`; it is JSON-in /
+JSON-out and talks to the configured Nerya API.
 
-Open an interactive session:
+Common operations:
 
-```json
-{
-  "skill_id": "browser",
-  "name": "browser_session.py",
-  "args": [
-    "--json",
-    "{\"operation\":\"open\",\"session_id\":\"browser-smoke-1\",\"url\":\"https://example.com\",\"interactive\":true,\"engine\":\"cloakbrowser\",\"wait_until\":\"commit\",\"timeout_s\":30}"
-  ]
-}
-```
+- `open`, `navigate`, `snapshot`, `screenshot`, `close`
+- `click`, `type`, `press`, `scroll`, `drag`, `wait`, `wait_for_selector`
+- `eval`, `console`, `network`, `api_requests`, `api_fetch`
 
-Inspect DOM state with a direct operation. JavaScript goes in
-`expression`:
+Use `interactive=true` for normal browser work. Use `cloakbrowser` when
+live console/network/API-event capture or coordinate drag is required.
 
-```json
-{
-  "skill_id": "browser",
-  "name": "browser_session.py",
-  "args": [
-    "--json",
-    "{\"operation\":\"eval\",\"session_id\":\"browser-smoke-1\",\"expression\":\"document.title\",\"interactive\":true,\"timeout_s\":20}"
-  ]
-}
-```
+## Evidence Contract
 
-Click a selector:
+Report:
 
-```json
-{
-  "skill_id": "browser",
-  "name": "browser_session.py",
-  "args": [
-    "--json",
-    "{\"operation\":\"click\",\"session_id\":\"browser-smoke-1\",\"selector\":\"button[type=submit]\",\"interactive\":true,\"timeout_s\":20}"
-  ]
-}
-```
-
-Capture page evidence:
-
-```json
-{
-  "skill_id": "browser",
-  "name": "browser_session.py",
-  "args": [
-    "--json",
-    "{\"operation\":\"snapshot\",\"session_id\":\"browser-smoke-1\",\"interactive\":true,\"timeout_s\":20}"
-  ]
-}
-```
-
-Close the session:
-
-```json
-{
-  "skill_id": "browser",
-  "name": "browser_session.py",
-  "args": [
-    "--json",
-    "{\"operation\":\"close\",\"session_id\":\"browser-smoke-1\",\"interactive\":true,\"timeout_s\":20}"
-  ]
-}
-```
-
-Use direct operations for normal browser work. `operation:"action"` is
-only a compatibility path for older examples and low-level CDP actions.
-
-Common interactive operations: `snapshot`, `screenshot`, `click`,
-`type`, `press`, `scroll`, `drag`, `eval`, `console`, `network`,
-`api_requests`, `api_fetch`, `wait`, and `wait_for_selector`.
+- `session_id`
+- current URL
+- action result or error
+- screenshot path when captured
+- console/network/API evidence when relevant
+- backend limitation when the selected engine cannot provide an evidence type
 
 ## Lazy References
 
-- `references/full-playbook.md` for browser-agent operating rules.
+- `references/full-playbook.md` for browser operating rules, backend
+  capabilities, and JSON command examples.

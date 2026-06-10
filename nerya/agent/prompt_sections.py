@@ -20,9 +20,28 @@ from .project_rules import ProjectRule, render_rules
 
 
 __all__ = [
+    "CACHE_BOUNDARY_LAYER",
+    "CACHE_BOUNDARY_MARKER",
     "PromptSection",
     "PromptComposer",
 ]
+
+# ---------------------------------------------------------------------------
+# Cache boundary — layers above this index are byte-identical across turns
+# (eligible for provider-side prompt caching); layers below change every
+# turn and must be re-sent.
+#
+#   Layer 0 – Identity            (cached)
+#   Layer 1 – Tool behavior       (cached)
+#   Layer 2 – Skills index        (cached)
+#   Layer 3 – Frozen memory       (cached until the snapshot changes)
+#   ---- CACHE_BOUNDARY ----
+#   Layer 4 – Timestamp           (uncached)
+#   Layer 5 – Task progress       (uncached)
+#   Layer 6 – Transcript          (uncached)
+# ---------------------------------------------------------------------------
+CACHE_BOUNDARY_LAYER: int = 3
+CACHE_BOUNDARY_MARKER: str = "--- CACHE_BOUNDARY ---"
 
 
 @dataclass
@@ -40,6 +59,7 @@ class PromptSection:
     priority: int = 50
     budget_chars: int = 4000
     pinned: bool = False
+    cache_boundary: bool = False
 
     def render(self) -> str:
         head = f"## {self.name}"
@@ -85,6 +105,25 @@ class PromptComposer:
             budget_chars=budget_chars,
         )
 
+    def add_cache_boundary(self) -> None:
+        """Insert a cache-boundary marker section.
+
+        Everything rendered *above* this section (layers 0-2) is
+        byte-identical across turns and eligible for prompt caching.
+        Everything *below* (layers 3-6) changes every turn.
+
+        The marker line is what downstream logs/tests use to verify
+        where the stable prefix ends.
+        """
+        self.add(PromptSection(
+            name="Cache Boundary",
+            body=CACHE_BOUNDARY_MARKER,
+            priority=0,
+            budget_chars=0,
+            pinned=True,
+            cache_boundary=True,
+        ))
+
     def render(self) -> str:
         ordered = sorted(
             self._sections,
@@ -93,7 +132,16 @@ class PromptComposer:
         out: list[str] = []
         used = 0
         dropped = 0
+        boundary_inserted = False
         for s in ordered:
+            if s.cache_boundary:
+                # Record the position — the marker will be emitted after
+                # all cached (pinned + high-priority) sections that appear
+                # before it in the ordered list.
+                boundary_inserted = True
+                out.append(s.body)
+                used += len(s.body) + 2
+                continue
             block = s.render()
             cost = len(block) + 2
             if not s.pinned and used + cost > self.max_chars:

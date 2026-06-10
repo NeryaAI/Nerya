@@ -95,6 +95,7 @@ class ArtifactIndex:
     commands: list[dict[str, Any]] = field(default_factory=list)
     tests_run: list[dict[str, Any]] = field(default_factory=list)
     errors: list[dict[str, Any]] = field(default_factory=list)
+    recovered_errors: list[dict[str, Any]] = field(default_factory=list)
     unverified_risks: list[dict[str, Any]] = field(default_factory=list)
     counters: dict[str, int] = field(default_factory=dict)
 
@@ -106,6 +107,7 @@ class ArtifactIndex:
             "commands": list(self.commands),
             "tests_run": list(self.tests_run),
             "errors": list(self.errors),
+            "recovered_errors": list(self.recovered_errors),
             "unverified_risks": list(self.unverified_risks),
             "counters": dict(self.counters),
         }
@@ -142,6 +144,14 @@ class ArtifactIndex:
                     f"- {e.get('tool')}: {e.get('kind')} — "
                     f"{e.get('message') or ''}"
                 )
+        if self.recovered_errors:
+            lines.append("")
+            lines.append("**Recovered errors**")
+            for e in self.recovered_errors:
+                lines.append(
+                    f"- {e.get('tool')}: {e.get('kind')} — "
+                    f"{e.get('message') or ''}"
+                )
         if self.unverified_risks:
             lines.append("")
             lines.append("**Unverified risks**")
@@ -174,6 +184,52 @@ def _is_test_command(command: str) -> bool:
 
 def _is_destructive_command(command: str) -> bool:
     return any(p.search(command or "") for p in _DESTRUCTIVE_PATTERNS)
+
+
+def _is_tool_redirect_result(result: dict[str, Any]) -> bool:
+    recovery = result.get("recovery")
+    if not isinstance(recovery, dict):
+        return False
+    return str(recovery.get("reason") or "").strip().lower() == "tool_redirect"
+
+
+def _recovery_key(action: str, payload: dict[str, Any]) -> tuple[str, str] | None:
+    """Return a stable target key for retry recovery accounting."""
+
+    if action in {"run_shell", "script_run"}:
+        return None
+    for key in (
+        "task_id",
+        "id",
+        "name",
+        "strategy_id",
+        "proposal_id",
+        "account_id",
+        "provider",
+        "venue",
+        "market",
+        "symbol",
+        "path",
+        "url",
+        "target",
+    ):
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return (action, f"{key}:{text}")
+    return None
+
+
+def _tool_error_entry(action: str, result: dict[str, Any]) -> dict[str, Any]:
+    err_dict = result.get("error") or {}
+    return {
+        "tool": action,
+        "kind": err_dict.get("kind") if isinstance(err_dict, dict) else None,
+        "message": (err_dict.get("message") if isinstance(err_dict, dict) else None)
+        or str(result.get("error") or "")[:200],
+    }
 
 
 def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
@@ -227,12 +283,22 @@ def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
         else:
             tool_results[cid] = block
 
-    # ---- pass 2: classify ---------------------------------------------
+    attempts: list[tuple[str, dict[str, Any], dict[str, Any], bool, tuple[str, str] | None]] = []
+    successful_positions: dict[tuple[str, str], list[int]] = {}
     for bid, use in tool_uses.items():
         action = str(use.get("action") or "")
         payload = use.get("payload") or {}
+        payload = payload if isinstance(payload, dict) else {}
         result = tool_results.get(bid) or {}
         ok = bool(result.get("ok", True))
+        key = _recovery_key(action, payload)
+        pos = len(attempts)
+        attempts.append((action, payload, result, ok, key))
+        if ok and key:
+            successful_positions.setdefault(key, []).append(pos)
+
+    # ---- pass 2: classify ---------------------------------------------
+    for pos, (action, payload, result, ok, key) in enumerate(attempts):
 
         if action == "read_file":
             p = _normalize_path(str(payload.get("path") or ""))
@@ -256,18 +322,19 @@ def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
                     created_set.add(p)
         elif action == "run_shell":
             command = str(payload.get("command") or "")
-            shell_data = result.get("output") or {}
-            exit_code = shell_data.get("exit_code") if isinstance(shell_data, dict) else None
-            entry = {
-                "command": command,
-                "exit_code": exit_code,
-                "ok": ok,
-            }
-            index.commands.append(entry)
-            if _is_test_command(command):
-                index.tests_run.append(entry)
-            if _is_destructive_command(command):
-                destructive_commands_without_followup.append(entry)
+            if not _is_tool_redirect_result(result):
+                shell_data = result.get("output") or {}
+                exit_code = shell_data.get("exit_code") if isinstance(shell_data, dict) else None
+                entry = {
+                    "command": command,
+                    "exit_code": exit_code,
+                    "ok": ok,
+                }
+                index.commands.append(entry)
+                if _is_test_command(command):
+                    index.tests_run.append(entry)
+                if _is_destructive_command(command):
+                    destructive_commands_without_followup.append(entry)
         elif action in {"script_run"}:
             entry = {
                 "script": payload.get("name"),
@@ -275,16 +342,15 @@ def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
             }
             index.commands.append(entry)
         # error tracking
-        if not ok:
-            err_dict = result.get("error") or {}
-            index.errors.append(
-                {
-                    "tool": action,
-                    "kind": err_dict.get("kind") if isinstance(err_dict, dict) else None,
-                    "message": (err_dict.get("message") if isinstance(err_dict, dict) else None) or
-                                str(result.get("error") or "")[:200],
-                }
+        if not ok and not _is_tool_redirect_result(result):
+            entry = _tool_error_entry(action, result)
+            recovered = key is not None and any(
+                success_pos > pos for success_pos in successful_positions.get(key, [])
             )
+            if recovered:
+                index.recovered_errors.append(entry)
+            else:
+                index.errors.append(entry)
 
     index.created = sorted(created_set)
     index.modified = [p for p in edited_paths if p not in created_set]
@@ -353,6 +419,7 @@ def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
         "commands": len(index.commands),
         "tests_run": len(index.tests_run),
         "errors": len(index.errors),
+        "recovered_errors": len(index.recovered_errors),
         "unverified_risks": len(index.unverified_risks),
     }
     return index
@@ -447,6 +514,14 @@ def render_final_report(index: ArtifactIndex) -> dict[str, Any]:
                 "message": (e.get("message") or "")[:200],
             }
             for e in index.errors
+        ],
+        "recovered_errors": [
+            {
+                "tool": e.get("tool"),
+                "kind": e.get("kind"),
+                "message": (e.get("message") or "")[:200],
+            }
+            for e in index.recovered_errors
         ],
         "unverified_risks": list(index.unverified_risks),
         "counters": dict(index.counters),

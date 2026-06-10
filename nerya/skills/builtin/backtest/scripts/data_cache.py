@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 import csv
 import io
+import os
+import subprocess
+import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -18,6 +22,10 @@ from .....data.candles import fetch_candles
 
 class NoHistoricalDataError(RuntimeError):
     """Raised when the candle source returns no usable rows."""
+
+
+_BINANCE_VISION_REQUEST_TIMEOUT_SECONDS = 3.0
+_BINANCE_VISION_TOTAL_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass(frozen=True)
@@ -61,13 +69,21 @@ def get_candles(
     cache_root: str | Path,
     *,
     allow_mock: bool | None = None,
+    config_like: Any | None = None,
 ) -> list[dict[str, Any]]:
     rng = CandleRange(market=market, tf=tf, start=int(start), end=int(end))
     path = cache_path_for(rng, cache_root)
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
 
-    rows = _source_fetch(market, tf=tf, start=start, end=end, allow_mock=allow_mock)
+    rows = _source_fetch(
+        market,
+        tf=tf,
+        start=start,
+        end=end,
+        allow_mock=allow_mock,
+        config_like=config_like,
+    )
     if not rows:
         raise NoHistoricalDataError(f"no historical candles for {market} {tf}")
     filtered = [
@@ -92,13 +108,23 @@ def _source_fetch(
     start: int,
     end: int,
     allow_mock: bool | None = None,
+    config_like: Any | None = None,
 ) -> list[dict[str, Any]]:
     count = max(1, int((int(end) - int(start)) / _tf_seconds(tf)) + 5)
     if _binance_vision_base(market) is not None:
         rows = _fetch_binance_vision(market, tf=tf, start=start, end=end)
         if rows:
             return rows[-count:]
-    return list(fetch_candles(market, count=count, interval=tf, allow_mock=allow_mock) or [])
+    return list(
+        fetch_candles(
+            market,
+            count=count,
+            interval=tf,
+            allow_mock=allow_mock,
+            config_like=config_like,
+        )
+        or []
+    )
 
 
 def _normalise_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -159,7 +185,10 @@ def _fetch_binance_vision(
     end_day = datetime.fromtimestamp(int(end), tz=timezone.utc).date()
     rows: list[dict[str, Any]] = []
     day = start_day
+    deadline = time.monotonic() + _binance_vision_total_timeout_seconds()
     while day <= end_day:
+        if time.monotonic() >= deadline:
+            break
         url = (
             f"https://data.binance.vision/{base}/"
             f"{symbol}/{tf}/{symbol}-{tf}-{day.isoformat()}.zip"
@@ -171,14 +200,11 @@ def _fetch_binance_vision(
 
 
 def _read_binance_vision_zip(url: str, *, start: int, end: int) -> list[dict[str, Any]]:
-    try:
-        with urllib.request.urlopen(url, timeout=12) as resp:
-            payload = resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return []
-        return []
-    except Exception:
+    payload = _download_binance_vision_payload(
+        url,
+        timeout=_binance_vision_request_timeout_seconds(),
+    )
+    if not payload:
         return []
 
     out: list[dict[str, Any]] = []
@@ -206,6 +232,59 @@ def _read_binance_vision_zip(url: str, *, start: int, end: int) -> list[dict[str
     except Exception:
         return []
     return out
+
+
+def _download_binance_vision_payload(url: str, *, timeout: float) -> bytes | None:
+    code = (
+        "import sys, urllib.error, urllib.request\n"
+        "url = sys.argv[1]\n"
+        "timeout = float(sys.argv[2])\n"
+        "try:\n"
+        "    with urllib.request.urlopen(url, timeout=timeout) as resp:\n"
+        "        sys.stdout.buffer.write(resp.read())\n"
+        "except urllib.error.HTTPError as exc:\n"
+        "    sys.exit(0 if exc.code == 404 else 1)\n"
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", code, url, str(float(timeout))],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=max(float(timeout) + 1.0, 1.0),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _binance_vision_request_timeout_seconds() -> float:
+    return _float_env(
+        "NERYA_BACKTEST_BINANCE_VISION_REQUEST_TIMEOUT_SECONDS",
+        _BINANCE_VISION_REQUEST_TIMEOUT_SECONDS,
+        minimum=0.5,
+    )
+
+
+def _binance_vision_total_timeout_seconds() -> float:
+    return _float_env(
+        "NERYA_BACKTEST_BINANCE_VISION_TOTAL_TIMEOUT_SECONDS",
+        _BINANCE_VISION_TOTAL_TIMEOUT_SECONDS,
+        minimum=0.0,
+    )
+
+
+def _float_env(name: str, default: float, *, minimum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    return max(float(minimum), value)
 
 
 def _to_seconds(value: Any) -> int:

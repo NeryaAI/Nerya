@@ -25,9 +25,13 @@ build/
 .omx/
 .cache/
 .tmp/
+.claude/
 .hackathon_demo_runs/
 .nl_e2e_runs/
 .smoke_runs/
+/journals/
+/outbox/
+verify-*.json
 test-results/
 submission-*.md
 %SystemDrive%/

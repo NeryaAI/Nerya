@@ -382,11 +382,14 @@ def routes():
             }, ensure_ascii=False),
         ]
         started = time.monotonic()
+        env = dict(os.environ)
+        env["NERYA_WORKSPACE"] = str(client.config.paths.root)
         try:
             res = subprocess.run(
                 cmd,
                 cwd=str(client.config.paths.root),
                 capture_output=True,
+                env=env,
                 timeout=45,
                 text=True,
             )

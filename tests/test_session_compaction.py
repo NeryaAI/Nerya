@@ -16,6 +16,7 @@ from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.db.repositories import AgentSessionRepository
 from nerya.db.sqlite import connect
+from nerya.llm.messages import _openai_render_messages
 
 
 pytestmark = pytest.mark.smoke
@@ -176,8 +177,58 @@ def test_transcript_compact_breadcrumb_carries_structured_signal() -> None:
     )
 
     assert report.summary_inserted is True
-    breadcrumb = compacted[0]["content"]
+    breadcrumbs = [
+        m for m in compacted
+        if m.get("kind") == "transcript.compact.breadcrumb"
+    ]
+    assert breadcrumbs, "expected a compaction breadcrumb"
+    breadcrumb = breadcrumbs[0]["content"]
     assert "Preserved summary" in breadcrumb
     assert "read_file" in breadcrumb
     assert "nerya/agent/kernel.py" in breadcrumb
+    # The operator user anchor survives compaction ahead of the breadcrumb.
+    assert compacted[0]["content"] == "Read nerya/agent/kernel.py first."
     assert compacted[-1]["content"] == "tail answer"
+
+
+def test_transcript_compact_preserves_operator_user_anchor_for_chat_shape() -> None:
+    messages: list[dict] = [{"role": "user", "content": "Create and backtest a BTC strategy."}]
+    for i in range(8):
+        call_id = f"call_{i}"
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": call_id,
+                            "name": "read_status",
+                            "input": {"i": i},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": [{"type": "text", "text": f"result {i}"}],
+                        }
+                    ],
+                },
+            ]
+        )
+
+    compacted, report = compact_transcript(
+        messages,
+        keep_tail_messages=4,
+        max_messages=6,
+    )
+    rendered = _openai_render_messages(system="system", messages=compacted)
+    non_system_roles = [m["role"] for m in rendered if m["role"] != "system"]
+
+    assert report.summary_inserted is True
+    assert {"role": "user", "content": "Create and backtest a BTC strategy."} in compacted
+    assert non_system_roles[0] == "user"

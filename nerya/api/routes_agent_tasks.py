@@ -115,6 +115,62 @@ def _build_task_row(state: Any, *, open_ids: set[str], failed_ids: set[str]) -> 
     }
 
 
+def _async_task_status(state: str) -> str:
+    raw = str(state or "").strip().lower()
+    if raw in {"queued", "running"}:
+        return "in_progress"
+    if raw == "failed":
+        return "failed"
+    return "done"
+
+
+def _async_task_rows(client, *, limit: int) -> list[dict[str, Any]]:
+    try:
+        from ..subagents.tasks import TaskStore
+
+        records = TaskStore(client.config.paths).list(limit=limit)
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    for rec in records:
+        status = _async_task_status(rec.state)
+        rows.append({
+            "id": rec.task_id,
+            "task_id": rec.task_id,
+            "status": status,
+            "state": rec.state,
+            "severity": _task_severity(status),
+            "title": rec.name or rec.task_id,
+            "last_action": "subagent_run_async",
+            "strategy_id": rec.strategy_id,
+            "turn_count": 0,
+            "skills_invoked": [rec.name] if rec.name else [],
+            "created_at": rec.started_at,
+            "updated_at": rec.finished_at or rec.started_at,
+            "meta": {
+                "kind": "background_subagent",
+                "payload": dict(rec.payload or {}),
+                "parent_turn_id": rec.parent_turn_id,
+                "parent_session_id": rec.parent_session_id,
+                "tokens": rec.tokens,
+                "usd": rec.usd,
+                "wall_ms": rec.wall_ms,
+                "progress_count": len(rec.progress or []),
+            },
+            "active_turn_ids": (
+                [rec.parent_turn_id]
+                if status == "in_progress" and rec.parent_turn_id
+                else []
+            ),
+            "failed_turn_ids": (
+                [rec.parent_turn_id]
+                if status == "failed" and rec.parent_turn_id
+                else []
+            ),
+        })
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Timeline / artifact extraction
 # ---------------------------------------------------------------------------
@@ -229,10 +285,12 @@ def _list_handler(client, query):
     states = store.list(strategy_id=strategy_id, limit=limit)
     open_ids = _open_turn_ids(client)
     failed_ids = _failed_turn_ids(client)
-    rows = [
+    session_rows = [
         _build_task_row(s, open_ids=open_ids, failed_ids=failed_ids)
         for s in states
     ]
+    async_rows = _async_task_rows(client, limit=limit)
+    rows = (async_rows + session_rows)[:limit]
     if status_filter:
         wanted = {s.strip() for s in str(status_filter).split(",") if s.strip()}
         rows = [r for r in rows if r["status"] in wanted]

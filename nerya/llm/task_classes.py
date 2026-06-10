@@ -48,6 +48,7 @@ _BUILTIN_TASK_CLASS_MAP: dict[str, str] = {
     "intent_classification": CLASSIFICATION,
     # structured extraction
     "extract_json": STRUCTURED_EXTRACTION,
+    "extract_candle_data": STRUCTURED_EXTRACTION,
     "schema_extract": STRUCTURED_EXTRACTION,
     "json_mode": STRUCTURED_EXTRACTION,
     "nl_schedule_parse": STRUCTURED_EXTRACTION,
@@ -64,6 +65,7 @@ _BUILTIN_TASK_CLASS_MAP: dict[str, str] = {
     "risk_critic_review": SUBAGENT_REASONING,
     "news_interpreter": SUBAGENT_REASONING,
     # main agent loop
+    "agent.loop": AGENT_LOOP,
     "normal_agent_loop": AGENT_LOOP,
     "agent_step": AGENT_LOOP,
     "agent_decision": AGENT_LOOP,

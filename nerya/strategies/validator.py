@@ -155,9 +155,42 @@ BACKTEST_UNSUPPORTED_CONTEXT_ATTRIBUTES: dict[str, str] = {
         "ctx.portfolio.positions(market), which returns this strategy's own "
         "position share and is mirrored by the backtest engine."
     ),
+    "portfolio.recent_trades": (
+        "ctx.portfolio.recent_trades is not part of StrategyContext. Use "
+        "ctx.portfolio.positions(market), ctx.portfolio.equity_usd / cash_usd, "
+        "or strategy_history outside the strategy runtime."
+    ),
+    "market.round_qty": (
+        "ctx.market.round_qty is not part of StrategyContext. Size orders with "
+        "ctx.policy/default_order_usd and submit through ctx.trading so the "
+        "runtime risk gate handles exchange-specific rounding."
+    ),
+    "trading.place_market_order": (
+        "ctx.trading.place_market_order is not part of StrategyContext. Use "
+        "ctx.trading.submit_intent(...) or ctx.trading.open_position(...) so "
+        "orders remain risk-gated and backtest-compatible."
+    ),
     "account_id": (
         "ctx.account_id is not part of StrategyContext. Use "
         "ctx.config.accounts[0] when the strategy needs its configured account."
+    ),
+    "agent_task": (
+        "ctx.agent_task is not part of StrategyContext. Import "
+        "StrategyAgentTask from nerya.strategies and return "
+        "StrategyAgentTask.dispatch(...), StrategyAgentTask.skip(...), or "
+        "StrategyAgentTask.error(...) directly so validation and backtest use "
+        "the same public SDK surface."
+    ),
+    "market_available": (
+        "ctx.market_available is not part of StrategyContext. Use "
+        "ctx.market.candles(ctx.config.markets[0], timeframe=..., limit=...) "
+        "or ctx.market.features(ctx.config.markets[0], timeframe=..., "
+        "lookback=...) and skip/hold when data is empty."
+    ),
+    "feature": (
+        "ctx.feature is not part of StrategyContext. Use "
+        "ctx.market.features(ctx.config.markets[0], timeframe=..., "
+        "lookback=...) and read indicator values from the returned mapping."
     ),
 }
 """Generated-code surfaces that validate but fail during backtest.
@@ -166,6 +199,40 @@ These are not security hazards; they are contract hazards. The agent often
 mixes the native ``market_data`` tool schema or older SDK snippets into
 ``main.py``. Static validation should reject that before the operator sees a
 "validated" proposal whose first real backtest crashes.
+"""
+
+_CANDLE_ROW_FIELDS: frozenset[str] = frozenset(
+    {"open", "high", "low", "close", "volume"}
+)
+_RESULT_BUILDER_ALLOWED_METHODS: frozenset[str] = frozenset(
+    {"hold", "skip", "ok", "error"}
+)
+_RESULT_BUILDER_POSITIONAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "hold": ("reason", "metadata"),
+    "skip": ("reason", "metadata"),
+    "ok": ("reason", "metadata"),
+    "error": ("message", "kind", "metadata"),
+}
+
+PLACEHOLDER_MARKET_PARTS: frozenset[str] = frozenset(
+    {
+        "unknown",
+        "placeholder",
+        "tbd",
+        "todo",
+        "changeme",
+        "change-me",
+        "token_contract",
+        "token-address",
+        "token_address",
+    }
+)
+"""Manifest market fragments that mean the agent emitted a placeholder.
+
+Runtime scanners can use a provider universe route such as
+``XAGT_ONCHAIN:solana``. They must not validate a fake token market like
+``XAGT_ONCHAIN:solana:UNKNOWN`` because that makes later backtest and
+operator-review results look more certain than they are.
 """
 
 
@@ -271,7 +338,8 @@ def validate_proposal_files(
         for rel, content in files.items():
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content, encoding="utf-8")
+            normalized = str(content).replace("\r\n", "\n").replace("\r", "\n")
+            p.write_text(normalized, encoding="utf-8", newline="\n")
         # Build a synthetic StrategyPackage so the rest of the
         # pipeline doesn't need to special-case proposal validation.
         manifest_path = root / "strategy.yml"
@@ -329,6 +397,7 @@ def _validate_loaded(package: StrategyPackage) -> StrategyValidation:
 
     # Schema layer was already enforced when load_package returned —
     # but it doesn't check the cross-cuts we care about. Do those here.
+    issues.extend(_manifest_placeholder_issues(package))
     if (
         package.manifest.policy.allow_direct_order is False
         and not package.manifest.subagents
@@ -375,6 +444,42 @@ def _validate_loaded(package: StrategyPackage) -> StrategyValidation:
     )
 
 
+def _manifest_placeholder_issues(
+    package: StrategyPackage,
+) -> list[StrategyValidationIssue]:
+    issues: list[StrategyValidationIssue] = []
+    for market in package.manifest.markets:
+        if _looks_placeholder_market(market):
+            issues.append(
+                StrategyValidationIssue(
+                    severity="blocker",
+                    code="placeholder_market",
+                    message=(
+                        f"strategy market {market!r} is a placeholder; use a "
+                        "concrete provider market or a provider universe route "
+                        "for runtime scanners"
+                    ),
+                    where="strategy.yml::markets",
+                )
+            )
+    return issues
+
+
+def _looks_placeholder_market(market: str) -> bool:
+    text = str(market or "").strip()
+    lowered = text.lower()
+    if not lowered:
+        return True
+    if "<" in text or ">" in text or "..." in text:
+        return True
+    parts = [
+        part.strip()
+        for part in lowered.replace("/", ":").replace("\\", ":").split(":")
+        if part.strip()
+    ]
+    return any(part in PLACEHOLDER_MARKET_PARTS for part in parts)
+
+
 def _has_blocker(issues: Iterable[StrategyValidationIssue]) -> bool:
     return any(i.severity == "blocker" for i in issues)
 
@@ -383,6 +488,7 @@ def _static_scan_package(package: StrategyPackage) -> list[StrategyValidationIss
     """Walk every ``.py`` file in the package and flag forbidden patterns."""
 
     out: list[StrategyValidationIssue] = []
+    is_agent_task = agent_task_requested(package.manifest)
     for py_path in sorted(package.root.rglob("*.py")):
         rel = py_path.relative_to(package.root).as_posix()
         # Skip per-run state, etc.
@@ -414,11 +520,23 @@ def _static_scan_package(package: StrategyPackage) -> list[StrategyValidationIss
             )
             continue
         out.extend(_walk_ast(tree, where=rel))
+        if is_agent_task:
+            out.extend(_agent_task_contract_issues(tree, where=rel))
     return out
 
 
 def _walk_ast(tree: ast.AST, *, where: str) -> list[StrategyValidationIssue]:
     issues: list[StrategyValidationIssue] = []
+    candle_row_names = _collect_candle_row_names(tree)
+    position_row_names = _collect_position_row_names(tree)
+    position_collection_names = _collect_position_collection_names(tree)
+    market_aliases = _collect_strategy_market_aliases(tree)
+    result_aliases = _collect_result_builder_aliases(tree)
+    called_attribute_ids = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -428,9 +546,27 @@ def _walk_ast(tree: ast.AST, *, where: str) -> list[StrategyValidationIssue]:
             if node.module:
                 issues.extend(_check_import(node.module, where=where, lineno=node.lineno))
         elif isinstance(node, ast.Call):
-            issues.extend(_check_call(node, where=where))
+            issues.extend(
+                _check_call(
+                    node,
+                    where=where,
+                    market_aliases=market_aliases,
+                    result_aliases=result_aliases,
+                )
+            )
         elif isinstance(node, ast.Attribute):
-            issues.extend(_check_attribute(node, where=where))
+            issues.extend(
+                _check_attribute(
+                    node,
+                    where=where,
+                    candle_row_names=candle_row_names,
+                    position_row_names=position_row_names,
+                    position_collection_names=position_collection_names,
+                    called_attribute_ids=called_attribute_ids,
+                    market_aliases=market_aliases,
+                    result_aliases=result_aliases,
+                )
+            )
         elif isinstance(node, ast.Name):
             if node.id in DANGEROUS_BUILTINS and isinstance(getattr(node, "ctx", None), ast.Load):
                 # Plain reference is fine in some contexts; the hard
@@ -439,8 +575,141 @@ def _walk_ast(tree: ast.AST, *, where: str) -> list[StrategyValidationIssue]:
     return issues
 
 
+def _agent_task_contract_issues(
+    tree: ast.AST,
+    *,
+    where: str,
+) -> list[StrategyValidationIssue]:
+    """Validate StrategyAgentTask status semantics in generated code."""
+
+    issues: list[StrategyValidationIssue] = []
+    has_dispatch = False
+    allowed_dispatch_keywords = {
+        "prompt",
+        "session_key",
+        "metadata",
+        "artifacts",
+        "attached_skills",
+        "reason",
+    }
+    allowed_constructor_keywords = {
+        "status",
+        "prompt",
+        "session_key",
+        "metadata",
+        "artifacts",
+        "attached_skills",
+        "reason",
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _flatten_attr(node.func)
+        if name == "StrategyAgentTask.dispatch":
+            has_dispatch = True
+        elif name in {"StrategyAgentTask.skip", "StrategyAgentTask.error"}:
+            if len(node.args) <= 1:
+                continue
+            issues.append(
+                StrategyValidationIssue(
+                    severity="blocker",
+                    code="unsupported_agent_task_factory_argument",
+                    message=(
+                        f"{name} accepts only the reason as a positional "
+                        "argument. Pass metadata as metadata=... instead of "
+                        "positional arguments so validation and backtest use "
+                        "the same public SDK contract."
+                    ),
+                    where=where,
+                )
+            )
+            continue
+        elif name == "StrategyAgentTask":
+            arg_names = [
+                keyword.arg if keyword.arg is not None else "**kwargs"
+                for keyword in node.keywords
+                if keyword.arg not in allowed_constructor_keywords
+            ]
+            if node.args:
+                arg_names.insert(0, "positional arguments")
+            if not arg_names:
+                arg_names = ["direct constructor"]
+            issues.append(
+                StrategyValidationIssue(
+                    severity="blocker",
+                    code="unsupported_agent_task_constructor",
+                    message=(
+                        "StrategyAgentTask direct construction is not a public "
+                        "strategy SDK surface for generated packages. Use "
+                        "StrategyAgentTask.dispatch(prompt=..., metadata=...), "
+                        "StrategyAgentTask.skip(...), or StrategyAgentTask.error(...). "
+                        "unsupported keyword/constructor field(s): "
+                        + ", ".join(repr(name) for name in arg_names)
+                        + "."
+                    ),
+                    where=where,
+                )
+            )
+            continue
+        else:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg in allowed_dispatch_keywords:
+                continue
+            arg_name = keyword.arg if keyword.arg is not None else "**kwargs"
+            issues.append(
+                StrategyValidationIssue(
+                    severity="blocker",
+                    code="unsupported_agent_task_dispatch_argument",
+                    message=(
+                        "StrategyAgentTask.dispatch does not accept "
+                        f"{arg_name!r}. Use only prompt, session_key, metadata, "
+                        "artifacts, attached_skills, and reason."
+                    ),
+                    where=where,
+                )
+            )
+    if has_dispatch:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _flatten_attr(node.func)
+            if name not in {"ctx.result.hold", "ctx.result.skip"}:
+                continue
+            issues.append(
+                StrategyValidationIssue(
+                    severity="blocker",
+                    code="agent_task_skip_status",
+                    message=(
+                        "agent-task strategies that dispatch an Agent decision "
+                        "must encode non-dispatch branches with "
+                        "StrategyAgentTask.skip(reason, metadata=...), not "
+                        f"{name}(). This preserves status='skip' and avoids "
+                        "spending an Agent turn when preconditions fail."
+                    ),
+                    where=where,
+                )
+            )
+    return issues
+
+
 def _check_import(module: str, *, where: str, lineno: int) -> list[StrategyValidationIssue]:
     out: list[StrategyValidationIssue] = []
+    if module == "strategy_sdk" or module.startswith("strategy_sdk."):
+        out.append(
+            StrategyValidationIssue(
+                severity="blocker",
+                code="unsupported_strategy_sdk_import",
+                message=(
+                    "strategy_sdk is not available in Nerya strategy backtests. "
+                    "Use the public SDK import: from nerya.strategies import "
+                    "StrategyContext, StrategyResult, StrategyAgentTask "
+                    f"(line {lineno})."
+                ),
+                where=where,
+            )
+        )
+        return out
     head = module.split(".", 1)[0]
     if head in FORBIDDEN_TOP_LEVEL_MODULES or module in FORBIDDEN_TOP_LEVEL_MODULES:
         out.append(
@@ -474,7 +743,13 @@ def _is_allowed_nerya(module: str) -> bool:
     return any(module.startswith(prefix + ".") for prefix in ALLOWED_NERYA_IMPORTS)
 
 
-def _check_call(node: ast.Call, *, where: str) -> list[StrategyValidationIssue]:
+def _check_call(
+    node: ast.Call,
+    *,
+    where: str,
+    market_aliases: set[str],
+    result_aliases: set[str],
+) -> list[StrategyValidationIssue]:
     out: list[StrategyValidationIssue] = []
     func = node.func
     name = _flatten_attr(func)
@@ -508,10 +783,203 @@ def _check_call(node: ast.Call, *, where: str) -> list[StrategyValidationIssue]:
                 where=where,
             )
         )
+    elif _is_strategy_market_call(name, "candles", market_aliases):
+        out.extend(_check_market_candles_call(node, where=where))
+    elif _is_strategy_market_call(name, "features", market_aliases):
+        out.extend(_check_market_features_call(node, where=where))
+    elif _is_strategy_market_call(name, "ticker", market_aliases):
+        out.extend(_check_market_ticker_call(node, where=where))
+    result_method = _result_factory_method_name(name, result_aliases)
+    if result_method is not None:
+        out.extend(
+            _check_result_factory_call(
+                node,
+                method=result_method,
+                call_name=name,
+                where=where,
+            )
+        )
     return out
 
 
-def _check_attribute(node: ast.Attribute, *, where: str) -> list[StrategyValidationIssue]:
+def _is_strategy_market_call(
+    flattened_name: str,
+    method: str,
+    market_aliases: set[str],
+) -> bool:
+    if flattened_name in {f"ctx.market.{method}", f"context.market.{method}"}:
+        return True
+    owner, _, attr = flattened_name.rpartition(".")
+    return attr == method and owner in market_aliases
+
+
+def _check_market_candles_call(
+    node: ast.Call,
+    *,
+    where: str,
+) -> list[StrategyValidationIssue]:
+    first_arg_is_timeframe = _first_arg_is_timeframe_literal(node)
+    missing_market = (
+        not node.args
+        or first_arg_is_timeframe
+    ) and not any(
+        keyword.arg == "market" for keyword in node.keywords
+    )
+    alias_keywords = [
+        str(keyword.arg)
+        for keyword in node.keywords
+        if keyword.arg in {"interval", "count"}
+    ]
+    if not missing_market and not alias_keywords:
+        return []
+
+    details: list[str] = []
+    if missing_market:
+        details.append("missing required market argument")
+    if first_arg_is_timeframe:
+        details.append("positional timeframe was passed where market is required")
+    if alias_keywords:
+        details.append(f"unsupported keyword alias(es): {', '.join(alias_keywords)}")
+    return [
+        StrategyValidationIssue(
+            severity="blocker",
+            code="unsupported_strategy_context_surface",
+            message=(
+                "ctx.market.candles must use the StrategyContext facade as "
+                "ctx.market.candles(market, timeframe=..., limit=...). "
+                f"{'; '.join(details)} at line {node.lineno}."
+            ),
+            where=where,
+        )
+    ]
+
+
+def _check_market_features_call(
+    node: ast.Call,
+    *,
+    where: str,
+) -> list[StrategyValidationIssue]:
+    first_arg_is_timeframe = _first_arg_is_timeframe_literal(node)
+    missing_market = (
+        not node.args
+        or first_arg_is_timeframe
+    ) and not any(
+        keyword.arg == "market" for keyword in node.keywords
+    )
+    alias_keywords = [
+        str(keyword.arg)
+        for keyword in node.keywords
+        if keyword.arg in {"interval", "count", "limit", "symbol", "feature"}
+    ]
+    if not missing_market and not alias_keywords:
+        return []
+
+    details: list[str] = []
+    if missing_market:
+        details.append("missing required market argument")
+    if first_arg_is_timeframe:
+        details.append("positional timeframe was passed where market is required")
+    if alias_keywords:
+        details.append(f"unsupported keyword alias(es): {', '.join(alias_keywords)}")
+    return [
+        StrategyValidationIssue(
+            severity="blocker",
+            code="unsupported_strategy_context_surface",
+            message=(
+                "ctx.market.features must use the StrategyContext facade as "
+                "ctx.market.features(market, timeframe=..., lookback=...). "
+                f"{'; '.join(details)} at line {node.lineno}."
+            ),
+            where=where,
+        )
+    ]
+
+
+def _check_market_ticker_call(
+    node: ast.Call,
+    *,
+    where: str,
+) -> list[StrategyValidationIssue]:
+    missing_market = not node.args and not any(
+        keyword.arg == "market" for keyword in node.keywords
+    )
+    unsupported_keywords = [
+        str(keyword.arg)
+        for keyword in node.keywords
+        if keyword.arg not in {"market", "account"}
+    ]
+    if not missing_market and not unsupported_keywords:
+        return []
+
+    details: list[str] = []
+    if missing_market:
+        details.append("missing required market argument")
+    if unsupported_keywords:
+        details.append(f"unsupported keyword(s): {', '.join(unsupported_keywords)}")
+    return [
+        StrategyValidationIssue(
+            severity="blocker",
+            code="unsupported_strategy_context_surface",
+            message=(
+                "ctx.market.ticker must use the StrategyContext facade as "
+                "ctx.market.ticker(market, account=...). "
+                f"{'; '.join(details)} at line {node.lineno}."
+            ),
+            where=where,
+        )
+    ]
+
+
+def _check_result_factory_call(
+    node: ast.Call,
+    *,
+    method: str,
+    call_name: str,
+    where: str,
+) -> list[StrategyValidationIssue]:
+    if method not in _RESULT_BUILDER_ALLOWED_METHODS:
+        return [
+            StrategyValidationIssue(
+                severity="blocker",
+                code="unsupported_strategy_context_surface",
+                message=(
+                    f"{call_name} is not part of the StrategyResult facade. "
+                    "Use ctx.result.hold/skip/ok/error for terminal outcomes, "
+                    "ctx.trading.open_position or ctx.trading.submit_intent for "
+                    "entries, and ctx.trading.close_position for exits "
+                    f"(line {node.lineno})."
+                ),
+                where=where,
+            )
+        ]
+    if not node.args:
+        return []
+    field_names = _RESULT_BUILDER_POSITIONAL_FIELDS[method]
+    allowed = ", ".join(f"{field}=..." for field in field_names)
+    return [
+        StrategyValidationIssue(
+            severity="blocker",
+            code="unsupported_strategy_context_surface",
+            message=(
+                f"{call_name} uses keyword-only SDK arguments; pass {allowed} "
+                f"instead of positional arguments at line {node.lineno}."
+            ),
+            where=where,
+        )
+    ]
+
+
+def _check_attribute(
+    node: ast.Attribute,
+    *,
+    where: str,
+    candle_row_names: set[str],
+    position_row_names: set[str],
+    position_collection_names: set[str],
+    called_attribute_ids: set[int],
+    market_aliases: set[str],
+    result_aliases: set[str],
+) -> list[StrategyValidationIssue]:
     out: list[StrategyValidationIssue] = []
     name = _flatten_attr(node)
     if name == "os.environ" or name == "os.getenv":
@@ -529,7 +997,268 @@ def _check_attribute(node: ast.Attribute, *, where: str) -> list[StrategyValidat
     issue = _strategy_context_contract_issue(name, lineno=node.lineno, where=where)
     if issue is not None:
         out.append(issue)
+    result_method = _result_factory_method_name(name, result_aliases)
+    if (
+        result_method is not None
+        and result_method not in _RESULT_BUILDER_ALLOWED_METHODS
+        and id(node) not in called_attribute_ids
+    ):
+        out.append(
+            StrategyValidationIssue(
+                severity="blocker",
+                code="unsupported_strategy_context_surface",
+                message=(
+                    f"{name} is not part of the StrategyResult facade. Use "
+                    "ctx.result.hold/skip/ok/error for terminal outcomes, "
+                    "ctx.trading.open_position or ctx.trading.submit_intent "
+                    "for entries, and ctx.trading.close_position for exits "
+                    f"(line {node.lineno})."
+                ),
+                where=where,
+            )
+        )
+    if (
+        (
+            name in {"ctx.market.features", "context.market.features"}
+            or name in {f"{alias}.features" for alias in market_aliases}
+        )
+        and id(node) not in called_attribute_ids
+    ):
+        out.append(
+            StrategyValidationIssue(
+                severity="blocker",
+                code="unsupported_strategy_context_surface",
+                message=(
+                    "ctx.market.features is a StrategyContext method, not a "
+                    "mapping. Call ctx.market.features(market, timeframe=..., "
+                    f"lookback=...) before reading indicator values (line {node.lineno})."
+                ),
+                where=where,
+            )
+        )
+    if (
+        name in {"ctx.portfolio.positions", "context.portfolio.positions"}
+        and id(node) not in called_attribute_ids
+    ):
+        out.append(
+            StrategyValidationIssue(
+                severity="blocker",
+                code="unsupported_strategy_context_surface",
+                message=(
+                    "ctx.portfolio.positions is a StrategyContext method, not "
+                    "an iterable property. Call ctx.portfolio.positions(market) "
+                    f"before iterating positions (line {node.lineno})."
+                ),
+                where=where,
+            )
+        )
+    if (
+        isinstance(node.ctx, ast.Load)
+        and node.attr in _CANDLE_ROW_FIELDS
+        and isinstance(node.value, ast.Name)
+        and node.value.id in candle_row_names
+    ):
+        out.append(
+            StrategyValidationIssue(
+                severity="blocker",
+                code="unsupported_strategy_context_surface",
+                message=(
+                    "StrategyContext candle rows are dicts; use "
+                    f"{node.value.id}[{node.attr!r}] instead of "
+                    f"{node.value.id}.{node.attr} at line {node.lineno}."
+                ),
+                where=where,
+            )
+        )
+    if (
+        isinstance(node.ctx, ast.Load)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in position_collection_names
+    ):
+        out.append(
+            StrategyValidationIssue(
+                severity="blocker",
+                code="unsupported_strategy_context_surface",
+                message=(
+                    "ctx.portfolio.positions(market) returns a list; "
+                    "iterate positions or select a row before reading fields "
+                    f"instead of {node.value.id}.{node.attr} at line {node.lineno}."
+                ),
+                where=where,
+            )
+        )
+    if (
+        isinstance(node.ctx, ast.Load)
+        and node.attr == "get"
+        and isinstance(node.value, ast.Name)
+        and node.value.id in position_row_names
+    ):
+        out.append(
+            StrategyValidationIssue(
+                severity="blocker",
+                code="unsupported_strategy_context_surface",
+                message=(
+                    "StrategyPosition rows are dataclasses; use "
+                    f"{node.value.id}.market, {node.value.id}.side, "
+                    f"{node.value.id}.size, or {node.value.id}.entry_price "
+                    f"instead of {node.value.id}.get(...) at line {node.lineno}."
+                ),
+                where=where,
+            )
+        )
     return out
+
+
+def _collect_candle_row_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        generators = getattr(node, "generators", None)
+        if generators is not None:
+            for generator in generators:
+                if _looks_like_candle_iter(generator.iter):
+                    _collect_target_names(generator.target, names)
+        elif isinstance(node, ast.For) and _looks_like_candle_iter(node.iter):
+            _collect_target_names(node.target, names)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                _collect_candle_row_assignment_names(target, node.value, names)
+        elif isinstance(node, ast.AnnAssign):
+            _collect_candle_row_assignment_names(node.target, node.value, names)
+    return names
+
+
+def _collect_position_row_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.For) and _looks_like_positions_iter(node.iter):
+            _collect_target_names(node.target, names)
+    return names
+
+
+def _collect_position_collection_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _looks_like_positions_iter(node.value):
+            for target in node.targets:
+                _collect_target_names(target, names)
+        elif isinstance(node, ast.AnnAssign) and _looks_like_positions_iter(node.value):
+            _collect_target_names(node.target, names)
+    return names
+
+
+def _collect_candle_row_assignment_names(
+    target: ast.AST,
+    value: ast.AST | None,
+    out: set[str],
+) -> None:
+    if value is None:
+        return
+    if _looks_like_candle_row_expr(value):
+        _collect_target_names(target, out)
+        return
+    if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+        for child_target, child_value in zip(target.elts, value.elts):
+            _collect_candle_row_assignment_names(child_target, child_value, out)
+
+
+def _looks_like_candle_row_expr(node: ast.AST) -> bool:
+    return isinstance(node, ast.Subscript) and _looks_like_candle_iter(node.value)
+
+
+def _looks_like_positions_iter(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    return _flatten_attr(node.func) in {
+        "ctx.portfolio.positions",
+        "context.portfolio.positions",
+    }
+
+
+def _collect_strategy_market_aliases(tree: ast.AST) -> set[str]:
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "market"
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id in {"ctx", "context"}
+        ):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                aliases.add(target.id)
+    return aliases
+
+
+def _collect_result_builder_aliases(tree: ast.AST) -> set[str]:
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "result"
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id in {"ctx", "context"}
+        ):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                aliases.add(target.id)
+    return aliases
+
+
+def _result_factory_method_name(
+    flattened_name: str,
+    result_aliases: set[str],
+) -> str | None:
+    if flattened_name in {
+        "ctx.result",
+        "context.result",
+        "StrategyResult",
+        *result_aliases,
+    }:
+        return None
+    owner, _, method = flattened_name.rpartition(".")
+    if not owner or not method:
+        return None
+    if owner in {"ctx.result", "context.result", "StrategyResult", *result_aliases}:
+        return method
+    return None
+
+
+def _looks_like_candle_iter(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Name):
+        return False
+    name = node.id.lower()
+    return (
+        name == "candles"
+        or name.startswith("candles_")
+        or name.endswith("_candles")
+        or "_candles_" in name
+    )
+
+
+def _first_arg_is_timeframe_literal(node: ast.Call) -> bool:
+    return bool(node.args) and _looks_like_timeframe_literal(node.args[0])
+
+
+def _looks_like_timeframe_literal(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        return False
+    text = node.value.strip().lower()
+    return len(text) > 1 and text[-1] in {"m", "h", "d", "w"} and text[:-1].isdigit()
+
+
+def _collect_target_names(node: ast.AST, out: set[str]) -> None:
+    if isinstance(node, ast.Name):
+        out.add(node.id)
+        return
+    if isinstance(node, (ast.Tuple, ast.List)):
+        for child in node.elts:
+            _collect_target_names(child, out)
 
 
 def _strategy_context_contract_issue(
@@ -541,7 +1270,7 @@ def _strategy_context_contract_issue(
     if not name:
         return None
     parts = name.split(".")
-    if not parts or parts[0] not in {"ctx", "context"}:
+    if not parts or parts[0] not in {"ctx", "context", "_ctx"}:
         return None
     suffix = ".".join(parts[1:])
     message = BACKTEST_UNSUPPORTED_CONTEXT_ATTRIBUTES.get(suffix)
@@ -571,6 +1300,28 @@ def _flatten_attr(node: ast.AST) -> str:
         return ""
     parts.reverse()
     return ".".join(parts)
+
+
+def _entrypoint_import_error_message(exc: Exception) -> str:
+    base = f"failed to import entrypoint: {type(exc).__name__}: {exc}"
+    text = str(exc)
+    if (
+        isinstance(exc, ImportError)
+        and (
+            "StrategyAgentTask" in text
+            or "StrategyContext" in text
+            or "StrategyResult" in text
+            or "strategy_sdk" in text
+            or "nerya.strategy" in text
+        )
+    ):
+        return (
+            base
+            + "; use the public SDK import: "
+            + "from nerya.strategies import StrategyContext, "
+            + "StrategyResult, StrategyAgentTask"
+        )
+    return base
 
 
 def _smoke_test_import(package: StrategyPackage) -> list[StrategyValidationIssue]:
@@ -608,7 +1359,7 @@ def _smoke_test_import(package: StrategyPackage) -> list[StrategyValidationIssue
             StrategyValidationIssue(
                 severity="blocker",
                 code="import_failed",
-                message=f"failed to import entrypoint: {type(exc).__name__}: {exc}",
+                message=_entrypoint_import_error_message(exc),
                 where=package.manifest.entrypoint_module,
             )
         )

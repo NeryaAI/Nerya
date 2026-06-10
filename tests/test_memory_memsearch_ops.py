@@ -27,6 +27,76 @@ def test_memsearch_vector_index_is_disabled_by_default(tmp_path):
     assert out["backend"] == "memsearch"
 
 
+def test_memsearch_search_reports_milvus_lite_gap_for_local_uri(tmp_path, monkeypatch):
+    # memsearch importable but milvus_lite missing (the Windows situation):
+    # a local file URI must yield a clean dependency_missing error instead
+    # of a pymilvus stack trace.
+    cfg = _config(tmp_path)
+    cfg.data.setdefault("memory", {})["vector_search"] = {
+        "enabled": True,
+        "backend": "memsearch",
+        "milvus": {"uri": "~/.memsearch/milvus.db"},
+    }
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name == "memsearch":
+            return object()
+        if name == "milvus_lite":
+            return None
+        raise AssertionError(f"unexpected probe: {name}")
+
+    monkeypatch.setattr(memsearch_index.importlib.util, "find_spec", fake_find_spec)
+
+    out = memsearch_index.search(cfg, query="anything")
+    assert out["ok"] is False
+    assert out["error"] == "dependency_missing"
+    assert out["dependency_gap"] == "milvus_lite_not_installed"
+    assert "remote Milvus" in out["detail"]
+
+    status = memsearch_index.status(cfg)
+    assert status["dependency_gap"] == "milvus_lite_not_installed"
+
+
+def test_memsearch_remote_uri_does_not_require_milvus_lite(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    cfg.data.setdefault("memory", {})["vector_search"] = {
+        "enabled": True,
+        "backend": "memsearch",
+        "milvus": {"uri": "http://milvus.internal:19530"},
+    }
+
+    def fake_find_spec(name, *args, **kwargs):
+        if name == "memsearch":
+            return object()
+        if name == "milvus_lite":
+            raise AssertionError("milvus_lite must not be probed for remote URIs")
+        return None
+
+    monkeypatch.setattr(memsearch_index.importlib.util, "find_spec", fake_find_spec)
+
+    assert memsearch_index.runtime_dependency_gap(cfg) == ""
+
+
+def test_memsearch_search_wraps_backend_exception(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    cfg.data.setdefault("memory", {})["vector_search"] = {
+        "enabled": True,
+        "backend": "memsearch",
+        "milvus": {"uri": "http://milvus.internal:19530"},
+    }
+    monkeypatch.setattr(memsearch_index, "runtime_dependency_gap", lambda _cfg: "")
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("backend exploded")
+
+    monkeypatch.setattr(memsearch_index, "_search_async", boom)
+
+    out = memsearch_index.search(cfg, query="anything")
+    assert out["ok"] is False
+    assert out["error"] == "vector_backend_error"
+    assert "backend exploded" in out["detail"]
+
+
 def test_memsearch_install_refuses_when_disabled(tmp_path, monkeypatch):
     cfg = _config(tmp_path)
     called = False

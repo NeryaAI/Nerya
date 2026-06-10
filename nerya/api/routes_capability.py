@@ -109,16 +109,16 @@ def _runtime_section(client) -> dict[str, Any]:
 def _planner_section(client) -> dict[str, Any]:
     cfg = client.config
     paths = getattr(cfg, "paths", None)
-    # when a manifest is pinned the resolver wins; otherwise
-    # fall back to the freeform ``agent.planner.routes`` table so legacy
-    # workspaces keep showing the same routes.
+    # When a manifest is pinned the resolver wins, even when the selected
+    # manifest deliberately contains no routes. Only manifest-less legacy
+    # workspaces fall back to the freeform ``agent.planner.routes`` table.
     try:
         manifest_routes, manifest_fallback, manifest_id = (
             _route_manifests.resolve_routes(cfg, paths=paths)
         )
     except (KeyError, ValueError):
         manifest_routes, manifest_fallback, manifest_id = {}, "generic", None
-    if manifest_id and manifest_routes:
+    if manifest_id:
         routes = manifest_routes
         fallback = manifest_fallback
     else:

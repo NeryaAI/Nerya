@@ -466,10 +466,15 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
             # OKX sandbox / Bybit category hints map through ccxt options
             if cfg.get("category") and exchange_id == "bybit":
                 options.setdefault("defaultType", cfg["category"])
+            timeout_ms = int(
+                cfg.get("timeout_ms")
+                or (float(cfg.get("timeout_s")) * 1000 if cfg.get("timeout_s") else 15_000)
+            )
             return CcxtConnector(
                 exchange_id=exchange_id,
                 credentials=creds, live=bool(cfg.get("live", False)),
                 options=options,
+                timeout_ms=timeout_ms,
             )
 
         return _build
@@ -481,7 +486,8 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     _ccxt = _ccxt_factory("binance")
 
     def _yahoo(cfg, **_kw):
-        return YahooFinanceConnector()
+        timeout = float(cfg.get("timeout_s") or 12.0)
+        return YahooFinanceConnector(timeout=timeout)
 
     def _polymarket(cfg, *, workspace=None, vault_passphrase=None):
         creds = _resolve_cex_creds(cfg, workspace, vault_passphrase)
@@ -489,7 +495,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
             credentials=creds, live=bool(cfg.get("live", False)),
             clob_url=cfg.get("clob_url") or "https://clob.polymarket.com",
             gamma_url=cfg.get("gamma_url") or "https://gamma-api.polymarket.com",
-            data_url=cfg.get("data_url") or "https://data-api.polymarket.com",
+            data_url=cfg.get("data_url") or cfg.get("clob_url") or "https://clob.polymarket.com",
         )
 
     def _bsc(cfg, *, workspace=None, vault_passphrase=None):

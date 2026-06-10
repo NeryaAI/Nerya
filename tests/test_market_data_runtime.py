@@ -13,7 +13,7 @@ from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.data.candles import discover_market_data_sources, fetch_candles, fetch_public_ticker
 from nerya.skills.kernel import SkillKernel
-from nerya.strategies.context import StrategyMarket, StrategyPnL, StrategyPortfolio
+from nerya.strategies.context import StrategyContext, StrategyMarket, StrategyPnL, StrategyPortfolio
 from nerya.strategies.runner import StrategyRunner
 from nerya.subagents.runtime import SubAgentRuntime
 from nerya.tools.native.connectors import market_data_handler
@@ -113,6 +113,48 @@ def test_strategy_market_features_include_indicators(tmp_path) -> None:
     assert features["indicator_backend"] in {"pure_python", "talib"}
 
 
+def test_strategy_market_accepts_common_generated_candle_aliases(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    market = StrategyMarket(
+        paths=cfg.paths,
+        accounts=("paper_main",),
+        _registry_factory=lambda: __import__(
+            "nerya.connectors.registry",
+            fromlist=["ConnectorRegistry"],
+        ).ConnectorRegistry(cfg.paths.root),
+    )
+
+    positional = market.candles("mock:BTC/USDT", "1m", 2)
+    keyword_symbol = market.candles(symbol="mock:BTC/USDT", timeframe="1m", limit=2)
+    ohlcv_alias = market.ohlcv("mock:BTC/USDT", interval="1m", count=2)
+
+    assert len(positional) == 2
+    assert len(keyword_symbol) == 2
+    assert len(ohlcv_alias) == 2
+    assert positional[-1]["close"] == keyword_symbol[-1]["close"]
+    assert positional[-1]["close"] == ohlcv_alias[-1]["close"]
+
+
+def test_strategy_context_exposes_common_generated_ohlcv_helpers(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    market = StrategyMarket(
+        paths=cfg.paths,
+        accounts=("paper_main",),
+        _registry_factory=lambda: __import__(
+            "nerya.connectors.registry",
+            fromlist=["ConnectorRegistry"],
+        ).ConnectorRegistry(cfg.paths.root),
+    )
+    ctx = object.__new__(StrategyContext)
+    ctx.market = market
+
+    candles = ctx.ohlcv("mock:BTC/USDT", timeframe="1m", limit=3)
+    closes = ctx.history("mock:BTC/USDT", "1m", "close", length=3)
+
+    assert len(candles) == 3
+    assert [row["close"] for row in candles] == closes
+
+
 def test_strategy_market_ticker_uses_live_public_path_for_prefixed_markets(
     tmp_path,
     monkeypatch,
@@ -156,6 +198,38 @@ def test_strategy_market_ticker_uses_live_public_path_for_prefixed_markets(
     assert ticker["_envelope"]["mode"] == "live"
 
 
+def test_fetch_candles_routes_equity_aliases_to_yahoo(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    seen: dict[str, object] = {}
+
+    def fake_public_rest_klines(venue, market, *, interval, count):
+        seen["venue"] = venue
+        seen["market"] = market
+        seen["interval"] = interval
+        seen["count"] = count
+        return [
+            {"ts": 1_777_000_000, "open": 100, "high": 102, "low": 99, "close": 101, "volume": 10}
+        ]
+
+    monkeypatch.setattr("nerya.data.candles._fetch_public_rest_klines", fake_public_rest_klines)
+
+    rows = fetch_candles(
+        "equities:TSLA",
+        count=1,
+        interval="1d",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert rows
+    assert seen == {
+        "venue": "YAHOO",
+        "market": "YAHOO:TSLA",
+        "interval": "1d",
+        "count": 1,
+    }
+
+
 def test_native_market_data_returns_candles_and_features(tmp_path) -> None:
     cfg = _config(tmp_path)
 
@@ -190,7 +264,11 @@ def test_native_market_data_returns_candles_and_features(tmp_path) -> None:
 
     assert candles["count"] == 20
     assert len(candles["candles"]) == 20
+    assert candles["coverage"]["bars"] == 20
+    assert "first_timestamp_iso" in candles["coverage"]
+    assert "last_timestamp_iso" in candles["coverage"]
     assert features["count"] == 40
+    assert features["coverage"]["bars"] == 40
     assert features["features"]["rsi_14"] is not None
     assert features["features"]["macd"]["hist"] is not None
 
@@ -208,6 +286,58 @@ def test_native_market_data_requires_explicit_market(tmp_path) -> None:
 
     assert result.is_error
     assert "market or symbol is required" in result.asdict()["content"][0]["text"]
+
+
+def test_native_market_data_passes_bounded_timeout_to_public_connector(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cfg = _config(tmp_path)
+    seen: dict[str, object] = {}
+
+    class FakeConnector:
+        venue = "YAHOO"
+        timeout = 99.0
+        timeout_ms = 99_000
+
+        def get_klines(self, market, *, interval="1d", limit=100):
+            seen["market"] = market
+            seen["interval"] = interval
+            seen["limit"] = limit
+            seen["timeout"] = self.timeout
+            seen["timeout_ms"] = self.timeout_ms
+            return [[1778247000000, 100.0, 101.0, 99.0, 100.5, 1234.0]]
+
+    def fake_build_connector(cfg_arg, **_kwargs):
+        seen["cfg_timeout_s"] = cfg_arg.get("timeout_s")
+        seen["cfg_timeout_ms"] = cfg_arg.get("timeout_ms")
+        return FakeConnector()
+
+    monkeypatch.setattr("nerya.tools.native.connectors.build_connector", fake_build_connector)
+
+    payload = _json_payload(
+        market_data_handler(
+            ToolCall(
+                name="market_data",
+                arguments={
+                    "action": "get_candles",
+                    "venue": "yahoo",
+                    "market": "DXY",
+                    "interval": "1d",
+                    "count": 1,
+                    "timeout_s": 1.5,
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    assert payload["count"] == 1
+    assert seen["cfg_timeout_s"] == 1.5
+    assert seen["cfg_timeout_ms"] == 1500
+    assert seen["timeout"] == 1.5
+    assert seen["timeout_ms"] == 1500
+    assert seen["market"] == "YAHOO:DXY"
 
 
 def test_market_data_sources_are_discovered_from_workspace_config(tmp_path) -> None:
@@ -1436,7 +1566,7 @@ def test_strategy_context_legacy_portfolio_pnl_and_dict_return_compat(tmp_path) 
                 "max_daily_notional_usd": 500,
             "max_open_positions": 1,
             "min_confidence": 0,
-            "max_run_seconds": 10,
+            "max_run_seconds": 30,
             },
         },
     )

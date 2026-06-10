@@ -40,6 +40,7 @@ import json
 import re
 import time
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any, Callable, Iterable, Protocol
@@ -323,7 +324,6 @@ class ExaAdapter(_KeyedAdapter):
             form=None,
         )
         # _http.http_get only supports form-encoded POST; do raw urllib here
-        import urllib.request
         req = urllib.request.Request(
             "https://api.exa.ai/search",
             method="POST",
@@ -369,7 +369,6 @@ class TavilyAdapter(_KeyedAdapter):
             "include_answer": False,
             "include_raw_content": False,
         }).encode("utf-8")
-        import urllib.request
         req = urllib.request.Request(
             "https://api.tavily.com/search",
             method="POST", data=body,
@@ -411,7 +410,6 @@ class PerplexityAdapter(_KeyedAdapter):
             "messages": [{"role": "user", "content": query}],
             "return_citations": True,
         }).encode("utf-8")
-        import urllib.request
         req = urllib.request.Request(
             "https://api.perplexity.ai/chat/completions",
             method="POST", data=body,
@@ -457,7 +455,6 @@ class BraveAdapter(_KeyedAdapter):
             "country": (region or "us").split("-")[-1].upper()[:2] or "US",
         })
         url = f"https://api.search.brave.com/res/v1/web/search?{params}"
-        import urllib.request
         req = urllib.request.Request(
             url,
             headers={
@@ -496,7 +493,6 @@ class SerperAdapter(_KeyedAdapter):
             "num": max_results,
             "gl": (region or "us").split("-")[-1].lower()[:2] or "us",
         }).encode("utf-8")
-        import urllib.request
         req = urllib.request.Request(
             "https://google.serper.dev/search",
             method="POST", data=body,
@@ -537,7 +533,6 @@ class BingAdapter(_KeyedAdapter):
             "responseFilter": "Webpages",
         })
         url = f"https://api.bing.microsoft.com/v7.0/search?{params}"
-        import urllib.request
         req = urllib.request.Request(
             url,
             headers={
@@ -577,7 +572,6 @@ class LangSearchAdapter(_KeyedAdapter):
             "summary": True,
             "count": max(1, min(int(max_results or 10), 10)),
         }).encode("utf-8")
-        import urllib.request
         req = urllib.request.Request(
             "https://api.langsearch.com/v1/web-search",
             method="POST", data=body,
@@ -624,6 +618,27 @@ def _normalize_base_url(value: str | None, *, default: str) -> str:
     return raw.rstrip("/")
 
 
+_SEARCH_REGION_LANGUAGE_CODES: frozenset[str] = frozenset({
+    "ar", "de", "en", "es", "fr", "hi", "id", "it", "ja", "ko",
+    "nl", "pl", "pt", "ru", "sv", "th", "tr", "uk", "vi", "zh",
+})
+
+
+def _searxng_language(region: str | None) -> str:
+    raw = str(region or "").strip().replace("_", "-")
+    if not raw or raw.lower() in {"wt", "wt-wt", "auto", "all"}:
+        return "auto"
+    parts = [p for p in raw.split("-") if p]
+    if len(parts) >= 2:
+        first = parts[0].lower()
+        second = parts[1].lower()
+        if first in _SEARCH_REGION_LANGUAGE_CODES:
+            return f"{first}-{second.upper()}"
+        if second in _SEARCH_REGION_LANGUAGE_CODES:
+            return f"{second}-{first.upper()}"
+    return raw
+
+
 @dataclass
 class SearXNGAdapter:
     """Adapter for a self-hosted SearXNG instance.
@@ -644,11 +659,10 @@ class SearXNGAdapter:
         params = urllib.parse.urlencode({
             "q": query,
             "format": "json",
-            "language": (region or "wt-wt").lower().split("-")[0] or "en",
+            "language": _searxng_language(region),
             "safesearch": {"strict": "2", "moderate": "1", "off": "0"}.get(safesearch, "1"),
         })
         url = f"{base}/search?{params}"
-        import urllib.request
         req = urllib.request.Request(
             url,
             headers={
@@ -705,7 +719,6 @@ class FirecrawlAdapter(_KeyedAdapter):
         if isinstance(scrape, dict):
             body_obj["scrapeOptions"] = scrape
         body = json.dumps(body_obj).encode("utf-8")
-        import urllib.request
         req = urllib.request.Request(
             f"{base}/v1/search",
             method="POST", data=body,

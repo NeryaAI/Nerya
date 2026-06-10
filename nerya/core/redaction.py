@@ -12,14 +12,30 @@ We do two things:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from typing import Any
+
+_REDACT_ENABLED = os.getenv("NERYA_REDACT_ENABLED", "1")
+_REDACTION_ACTIVE = str(_REDACT_ENABLED).strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+_REDACTION_DISABLED_PLACEHOLDER = (
+    "***REDACTION_DISABLED_AT_IMPORT_TEXT_WITHHELD***"
+)
 
 _PATTERNS = [
     # Ethereum private key / generic 32-byte hex
     re.compile(r"\b0x[a-fA-F0-9]{64}\b"),
     # AWS-style access key
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    # Vendor-prefixed API tokens such as ``sk-...`` / ``tp-...``.
+    re.compile(r"\b[A-Za-z]{2,12}(?:-[A-Za-z0-9_]{2,16})?-[A-Za-z0-9_-]{20,}\b"),
+    # Provider keys that use a hex id plus a dot-suffixed secret segment.
+    re.compile(r"\b[a-fA-F0-9]{24,64}\.[A-Za-z0-9_-]{8,}\b"),
     # Generic long base64 / hex secrets (>32 chars, mixed case+digits)
     re.compile(r"\b(?=[A-Za-z0-9+/=]{40,}\b)[A-Za-z0-9+/=]+\b"),
     # Telegram bot token
@@ -40,6 +56,8 @@ _SECRET_KEY_HINTS = {
 def redact_text(text: str) -> str:
     if not isinstance(text, str):
         return text  # type: ignore[return-value]
+    if not _REDACTION_ACTIVE:
+        return _REDACTION_DISABLED_PLACEHOLDER if text else text
     out = text
     for pat in _PATTERNS:
         out = pat.sub("***REDACTED***", out)

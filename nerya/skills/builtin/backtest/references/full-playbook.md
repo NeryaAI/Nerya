@@ -42,6 +42,55 @@ strategy logic over historical data or fixtures derived from real events. A
 paper-trade plan alone is not enough unless the user explicitly accepts "no
 replay possible" after seeing the attempted script and why it cannot run.
 
+## Freeform and short-window runs
+
+When a strategy package contains `backtests/research_backtest.py`,
+`backtests/freeform_backtest.py`, or another supported freeform script, run
+`strategy_backtest` normally. The harness executes the strategy-local script
+first and accepts the run when it emits capital-curve and trade-detail
+artifacts, such as `equity.csv` plus `trades.csv`, or `result.json` with
+`equity_curve` plus `trades`.
+
+Do not force a timeframe, candle window, or stock OHLCV template in the
+freeform lane. The script may use the provider SDK or data source the strategy
+actually depends on; report limitations honestly.
+
+If real OHLCV candles exist but the loaded window is short, run and report the
+backtest anyway. One month or more is preferred for robustness, not required.
+For meme coins, a 1-day window can still cover a meaningful launch-to-drawdown
+lifecycle, so describe it as a short-window real-data backtest with lower
+confidence. Do not say "standard backtest unavailable" solely because
+`recommended_coverage_ok=false`.
+
+For meme/on-chain markets, custom/event replay is often the preferred evidence
+path: reserve, swap, holder, top-trader, wallet-flow, and signal histories are
+more representative than generic OHLCV candles. If no durable replay data
+exists, return a blocked result and state that promotion/live progression needs
+an explicit operator-approved standard-backtest waiver; never label the waiver
+as a passed standard backtest.
+
+For meme smart-money strategies, a no-trades standard OHLCV replay can be an
+engine-fit limit for agent_task/custom-data logic. Do not rewrite the thesis
+into trend/scalping just to force standard trades. Paper review can continue
+when validation passes and real K-line, custom/event replay, or freeform SDK
+backtest evidence exists; shadow/live progression still requires explicit
+operator approval.
+
+If the backtest output includes `paper_review_allowed` or `review_gate`, copy
+that gate conclusion. Do not override it with a manual FAIL/no_trades
+rejection. If `kind=freeform_backtest`, summarize it as a completed
+strategy-local SDK research backtest with capital-curve and trade-detail
+artifacts, not as a standard OHLCV replay. If `strategy_backtest` returns
+`ok:true`, never describe the backtest as unavailable, impossible, or not
+applicable. If a completed run has zero trades, explain that the replay
+completed but the decision logic did not produce simulated fills.
+
+When summarising tool output, use `metrics_display` when present. Raw metric
+keys ending in `_pct` are already percentage points: `0.0274` means `0.0274%`,
+not `2.74%`. If `operator_summary_text` or `operator_summary` is present, copy
+those display strings for the user summary. Never multiply raw `_pct` fields
+by 100 or move the decimal.
+
 ## Default CLI
 
 ```bash

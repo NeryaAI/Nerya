@@ -941,6 +941,19 @@ def _handle_skill_subcommand(spec: CommandSpec, ctx: CommandContext) -> CommandO
     )
 
 
+def _handle_workflows(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
+    text = (
+        "Workflows are available at `/workflows`.\n\n"
+        "Use this surface to review scheduled automations, recurring agent "
+        "tasks, script schedules, delivery targets, and task history. "
+        "Common next steps: create an hourly/daily schedule with `task_create`, "
+        "inspect existing schedules, or open the dashboard workflows page.\n\n"
+        "中文：这里用于查看和管理 workflow / schedule / 调度任务，包括定时 "
+        "agent、脚本任务和通知投递。"
+    )
+    return CommandOutcome(handled=True, reply_text=text, command=spec.name)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -1053,6 +1066,7 @@ BUILTIN_COMMANDS: tuple[tuple[CommandSpec, CommandHandler], ...] = (
     (CommandSpec(name="/strategies", description="List applied strategies — usage: /strategies [<id>]"), _handle_strategies),
     (CommandSpec(name="/accounts", description="List configured trading accounts — usage: /accounts [<id>]"), _handle_accounts),
     (CommandSpec(name="/portfolio", description="Portfolio summary — usage: /portfolio [positions]", aliases=("/positions",)), _handle_portfolio),
+    (CommandSpec(name="/workflows", description="Review workflows and scheduled automations"), _handle_workflows),
     (CommandSpec(name="/wallets", description="List on-chain wallet providers — usage: /wallets [<id>]"), _handle_wallets),
     (CommandSpec(name="/intake", description="List pending account-credential intakes"), _handle_intake),
     (CommandSpec(name="/skills", description="List skills and agent actions"), _handle_skills),

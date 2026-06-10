@@ -27,7 +27,7 @@ import enum
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional, Sequence, Union
+from typing import Any, Awaitable, Callable, Optional, Union
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +278,7 @@ class ToolErrorKind(str, enum.Enum):
     TIMEOUT = "timeout"
     ABORTED = "aborted"
     RATE_LIMIT = "rate_limit"
+    DEDUPED = "deduped"
     SANDBOX_DENIED = "sandbox_denied"
     STALE_FILE = "stale_file"
     DIFF_CONFLICT = "diff_conflict"

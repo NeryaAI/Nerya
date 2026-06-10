@@ -1,0 +1,403 @@
+#!/usr/bin/env python3
+"""Prepare an *isolated* Nerya test workspace that can actually run turns.
+
+A fresh/reset test workspace has no LLM credentials and no provider config, so
+chat turns fail before any assertion runs. This tool clones just the *config +
+credentials* from a working source workspace (default ``~/.nerya``) into the
+isolated test workspace, while STRIPPING anything with external side effects:
+
+  * ``network:``  — cloudflare / tailscale tunnels (would expose a public URL)
+  * ``mcp:``      — MCP connector subprocesses (npx ...)
+
+and FORCING paper-only safety:
+
+  * ``runtime.live_trading_enabled = false``
+  * ``runtime.paper_trading_enabled = true``
+  * ``api.port = 18318`` / ``dashboard.port = 3001`` for E2E isolation
+
+Optionally pass ``--e2e-llm-provider`` + ``--e2e-llm-model`` to pin all
+prompt-E2E tiers to a known real provider/model. This is useful when the
+operator workspace default is real but unsuitable for E2E right now, for
+example because it is rate-limited or has too small a context window.
+
+It also copies the encrypted ``vault/`` so ``vault://`` provider key refs in the
+cloned ``llm:`` section resolve. Data dirs (journals, accounts, strategies, …)
+are NOT copied — the test workspace stays isolated and ``reset_workspace.py``
+(safe mode) keeps ``vault/`` + ``nerya.yml`` across runs.
+
+Usage
+-----
+    python tools/prepare_isolated_test_workspace.py \
+        --target Nerya/dashboard/.nerya-test-workspace \
+    [--source ~/.nerya] [--api-port 18318] [--dashboard-port 3001] [--verify]
+
+``--verify`` opens the copied vault (honouring ``NERYA_VAULT_PASSPHRASE``) and
+prints how many secrets decrypt, so a wrong passphrase fails loudly here rather
+than as an opaque "no provider key" mid-test.
+
+Set ``NERYA_E2E_LLM_BASE_URL`` (or ``--e2e-llm-base-url``) with the provider
+override when the E2E run must pin an OpenAI-compatible provider to a specific
+endpoint instead of inheriting the operator workspace base URL.
+Set ``NERYA_E2E_LLM_KEY`` (or ``--e2e-llm-key``) to seed only the isolated
+workspace vault for the selected provider. The value is never printed.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import sys
+from pathlib import Path
+
+try:
+    import yaml  # nerya depends on pyyaml; available in the venv
+except Exception as exc:  # pragma: no cover
+    print(f"error: pyyaml unavailable ({exc}); run inside the nerya venv", file=sys.stderr)
+    raise SystemExit(2)
+
+# Top-level config keys with external/process side effects — removed from the
+# test config so the isolated runtime boots clean and offline-ish.
+STRIP_KEYS: tuple[str, ...] = ("network", "mcp")
+E2E_TIER_TIMEOUT_CAPS: dict[str, int] = {
+    "intent": 30,
+    "light": 45,
+    "medium": 120,
+    "high": 180,
+}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def curate_config(
+    src_yaml: Path,
+    dst_yaml: Path,
+    *,
+    api_port: int,
+    dashboard_port: int,
+    e2e_llm_provider: str = "",
+    e2e_llm_model: str = "",
+    e2e_llm_high_model: str = "",
+    e2e_llm_base_url: str = "",
+    e2e_llm_key: str = "",
+    e2e_llm_key_ref: str = "",
+) -> list[str]:
+    raw = yaml.safe_load(src_yaml.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise SystemExit(f"error: {src_yaml} is not a mapping")
+    removed: list[str] = []
+    for key in STRIP_KEYS:
+        if key in raw:
+            raw.pop(key, None)
+            removed.append(key)
+    runtime = raw.setdefault("runtime", {})
+    if not isinstance(runtime, dict):
+        runtime = {}
+        raw["runtime"] = runtime
+    runtime["live_trading_enabled"] = False
+    runtime["paper_trading_enabled"] = True
+    runtime["permission_mode"] = "yolo"
+    api = raw.setdefault("api", {})
+    if not isinstance(api, dict):
+        api = {}
+        raw["api"] = api
+    api["host"] = "127.0.0.1"
+    api["port"] = int(api_port)
+    dashboard = raw.setdefault("dashboard", {})
+    if not isinstance(dashboard, dict):
+        dashboard = {}
+        raw["dashboard"] = dashboard
+    dashboard["host"] = "127.0.0.1"
+    dashboard["port"] = int(dashboard_port)
+    _apply_prompt_e2e_runtime_defaults(raw)
+    if e2e_llm_provider and e2e_llm_model:
+        _apply_e2e_llm_override(
+            raw,
+            provider=e2e_llm_provider,
+            model=e2e_llm_model,
+            high_model=e2e_llm_high_model or e2e_llm_model,
+            base_url=e2e_llm_base_url,
+            seed_key=bool(e2e_llm_key),
+            key_ref=e2e_llm_key_ref,
+        )
+    dst_yaml.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# Isolated Playwright test config — generated by "
+        "tools/prepare_isolated_test_workspace.py\n"
+        "# Cloned from a working workspace MINUS network/mcp; paper-only.\n"
+    )
+    dst_yaml.write_text(
+        header + yaml.safe_dump(raw, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    return removed
+
+
+def _provider_key_ref(raw: dict, provider: str) -> str:
+    llm = raw.get("llm") if isinstance(raw, dict) else {}
+    providers = llm.get("providers") if isinstance(llm, dict) else {}
+    profile = providers.get(provider) if isinstance(providers, dict) else {}
+    ref = profile.get("provider_key_ref") if isinstance(profile, dict) else ""
+    return str(ref or "").strip()
+
+
+def _apply_prompt_e2e_runtime_defaults(raw: dict) -> None:
+    """Keep real-provider prompt E2E bounded without changing provider choice."""
+
+    agent = raw.setdefault("agent", {})
+    if not isinstance(agent, dict):
+        agent = {}
+        raw["agent"] = agent
+    planner = agent.setdefault("planner", {})
+    if not isinstance(planner, dict):
+        planner = {}
+        agent["planner"] = planner
+    planner["manifest"] = "trading-v1"
+    planner["routes"] = {}
+    planner["fallback"] = "generic"
+    native = agent.setdefault("native", {})
+    if not isinstance(native, dict):
+        native = {}
+        agent["native"] = native
+    native.update({
+        "max_iterations": 48,
+        "max_total_tool_calls": 160,
+        "llm_retry_attempts": _env_int("NERYA_E2E_LLM_RETRY_ATTEMPTS", 6),
+        "llm_retry_base_delay": _env_float("NERYA_E2E_LLM_RETRY_BASE_DELAY", 2.0),
+        "llm_retry_max_delay": _env_float("NERYA_E2E_LLM_RETRY_MAX_DELAY", 20.0),
+        "wall_time_final_synthesis_seconds": 90.0,
+        "compact_threshold": 40,
+        "microcompact_max_chars": 5000,
+    })
+
+    llm = raw.setdefault("llm", {})
+    if not isinstance(llm, dict):
+        llm = {}
+        raw["llm"] = llm
+    llm["context_log_mode"] = "full"
+    tiers = llm.get("tiers") if isinstance(llm, dict) else {}
+    if not isinstance(tiers, dict):
+        return
+    for tier_name, tier in tiers.items():
+        if not isinstance(tier, dict):
+            continue
+        cap = E2E_TIER_TIMEOUT_CAPS.get(str(tier_name), 75)
+        try:
+            current = float(tier.get("timeout_s") or cap)
+        except (TypeError, ValueError):
+            current = float(cap)
+        tier["timeout_s"] = int(min(current, float(cap)))
+        tier["http_max_attempts"] = 3
+
+
+def _apply_e2e_llm_override(
+    raw: dict,
+    *,
+    provider: str,
+    model: str,
+    high_model: str,
+    base_url: str = "",
+    seed_key: bool = False,
+    key_ref: str = "",
+) -> None:
+    """Pin prompt E2E tiers to a known real provider/model pair.
+
+    The isolated workspace is cloned from a human/operator workspace, whose
+    default provider may be real but unsuitable for prompt E2E at the moment
+    (rate-limited, small context window, no messages support, etc.). Keep this
+    explicit instead of silently falling back to mock.
+    """
+    llm = raw.setdefault("llm", {})
+    if not isinstance(llm, dict):
+        llm = {}
+        raw["llm"] = llm
+    tiers = llm.setdefault("tiers", {})
+    if not isinstance(tiers, dict):
+        tiers = {}
+        llm["tiers"] = tiers
+    providers = llm.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        providers = {}
+        llm["providers"] = providers
+    provider_cfg = providers.setdefault(provider, {})
+    if not isinstance(provider_cfg, dict):
+        provider_cfg = {}
+        providers[provider] = provider_cfg
+    provider_cfg.setdefault("kind", "chat_completions")
+    if base_url:
+        provider_cfg["base_url"] = base_url
+    if key_ref:
+        provider_cfg["provider_key_ref"] = key_ref
+    if seed_key and not provider_cfg.get("provider_key_ref"):
+        safe_provider = "".join(
+            ch if ch.isalnum() or ch in ("_", "-", ".") else "_"
+            for ch in provider.strip().lower()
+        ) or "provider"
+        provider_cfg["provider_key_ref"] = f"vault://e2e/{safe_provider}/api_key"
+    if not provider_cfg.get("provider_key_ref"):
+        provider_cfg["provider_key_ref"] = "vault://e2e_llm_key"
+    for tier_name, tier_model in (
+        ("light", model),
+        ("intent", model),
+        ("medium", model),
+        ("high", high_model),
+    ):
+        tier = tiers.setdefault(tier_name, {})
+        if not isinstance(tier, dict):
+            tier = {}
+            tiers[tier_name] = tier
+        tier["provider"] = provider
+        tier["model"] = tier_model
+
+
+def seed_e2e_provider_key(dst_ws: Path, provider_key_ref: str, provider_key: str) -> None:
+    key = provider_key.strip()
+    ref = provider_key_ref.strip()
+    if not key:
+        return
+    if not ref.startswith("vault://"):
+        raise SystemExit(
+            "error: --e2e-llm-key requires an existing vault:// provider_key_ref "
+            "for the selected provider"
+        )
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    from nerya.security.secrets import SecretVault
+
+    vault_file = dst_ws / "vault" / "secrets.enc"
+    vault_file.parent.mkdir(parents=True, exist_ok=True)
+    vault = SecretVault.open(vault_file)
+    name = ref.removeprefix("vault://")
+    meta = vault.put(
+        name=name,
+        value=key,
+        kind="llm_provider_key",
+        scope=["llm"],
+        owner=f"e2e/{name}",
+    )
+    print(f"  vault : seeded provider key ref {meta.ref()}")
+
+
+def copy_vault(src_ws: Path, dst_ws: Path) -> int:
+    src_vault = src_ws / "vault"
+    if not src_vault.is_dir():
+        print(f"warn: no vault/ in source {src_ws}; LLM keys will be missing")
+        return 0
+    dst_vault = dst_ws / "vault"
+    dst_vault.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for item in src_vault.iterdir():
+        if item.is_file():
+            shutil.copy2(item, dst_vault / item.name)
+            n += 1
+    return n
+
+
+def verify_vault(dst_ws: Path) -> None:
+    # Import lazily so the tool works even outside the package for the copy step.
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
+    try:
+        from nerya.security.secrets import SecretVault
+    except Exception as exc:  # pragma: no cover
+        print(f"verify: skipped (cannot import SecretVault: {exc})")
+        return
+    vault_file = dst_ws / "vault" / "secrets.enc"
+    if not vault_file.exists():
+        print("verify: no vault/secrets.enc to verify")
+        return
+    try:
+        v = SecretVault.open(vault_file)
+        names = list(getattr(v, "_meta", {}).keys())
+        print(f"verify: vault OK — {len(names)} secret(s) decrypt "
+              f"(passphrase {'from env' if os.environ.get('NERYA_VAULT_PASSPHRASE') else 'default'})")
+        provider_like = [n for n in names if "provider" in n or "llm" in n or "openai" in n]
+        if provider_like:
+            print(f"verify: provider key refs present: {', '.join(provider_like[:6])}")
+    except Exception as exc:
+        print(f"verify: FAILED to decrypt vault ({exc}). "
+              f"Set NERYA_VAULT_PASSPHRASE to match the source workspace.",
+              file=sys.stderr)
+        raise SystemExit(1)
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    ap.add_argument("--target", required=True, help="Isolated test workspace path")
+    ap.add_argument("--source", default=os.path.expanduser("~/.nerya"),
+                    help="Working source workspace (default ~/.nerya)")
+    ap.add_argument("--verify", action="store_true",
+                    help="Open the copied vault and report decrypt status")
+    ap.add_argument("--api-port", type=int, default=18318,
+                    help="API port to write into target nerya.yml (default 18318)")
+    ap.add_argument("--dashboard-port", type=int, default=3001,
+                    help="Dashboard port to write into target nerya.yml (default 3001)")
+    ap.add_argument("--e2e-llm-provider", default=os.environ.get("NERYA_E2E_LLM_PROVIDER", ""),
+                    help="Override prompt-E2E LLM provider for all tiers (real provider only)")
+    ap.add_argument("--e2e-llm-model", default=os.environ.get("NERYA_E2E_LLM_MODEL", ""),
+                    help="Override prompt-E2E LLM model for light/intent/medium tiers")
+    ap.add_argument("--e2e-llm-high-model", default=os.environ.get("NERYA_E2E_LLM_HIGH_MODEL", ""),
+                    help="Override prompt-E2E LLM model for high tier")
+    ap.add_argument("--e2e-llm-base-url", default=os.environ.get("NERYA_E2E_LLM_BASE_URL", ""),
+                    help="Override prompt-E2E provider base URL")
+    ap.add_argument("--e2e-llm-key", default=os.environ.get("NERYA_E2E_LLM_KEY", ""),
+                    help="Seed selected provider key into the isolated workspace vault")
+    args = ap.parse_args(argv)
+
+    src = Path(args.source).expanduser().resolve()
+    dst = Path(args.target).expanduser().resolve()
+    if src == dst:
+        print("error: --source and --target must differ", file=sys.stderr)
+        return 2
+    src_yaml = src / "nerya.yml"
+    if not src_yaml.exists():
+        print(f"error: source config not found: {src_yaml}", file=sys.stderr)
+        return 2
+    dst.mkdir(parents=True, exist_ok=True)
+
+    src_doc = yaml.safe_load(src_yaml.read_text(encoding="utf-8")) or {}
+    provider_key_ref = (
+        _provider_key_ref(src_doc, args.e2e_llm_provider)
+        if args.e2e_llm_provider
+        else ""
+    )
+    removed = curate_config(
+        src_yaml,
+        dst / "nerya.yml",
+        api_port=args.api_port,
+        dashboard_port=args.dashboard_port,
+        e2e_llm_provider=args.e2e_llm_provider,
+        e2e_llm_model=args.e2e_llm_model,
+        e2e_llm_high_model=args.e2e_llm_high_model,
+        e2e_llm_base_url=args.e2e_llm_base_url,
+        e2e_llm_key=args.e2e_llm_key,
+        e2e_llm_key_ref=provider_key_ref,
+    )
+    nkeys = copy_vault(src, dst)
+    if args.e2e_llm_key:
+        provider_key_ref = provider_key_ref or _provider_key_ref(
+            yaml.safe_load((dst / "nerya.yml").read_text(encoding="utf-8")) or {},
+            args.e2e_llm_provider,
+        )
+        seed_e2e_provider_key(dst, provider_key_ref, args.e2e_llm_key)
+    print(f"prepared isolated workspace: {dst}")
+    print(f"  config: cloned from {src_yaml} (stripped: {', '.join(removed) or 'none'})")
+    print(f"  vault : copied {nkeys} file(s)")
+    if args.verify:
+        verify_vault(dst)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

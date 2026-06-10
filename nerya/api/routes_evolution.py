@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..evolution import assets as evolution_assets
 from ..evolution.event_store import list_events, list_signals
 from ..evolution.runner import evolve
@@ -19,6 +21,64 @@ from ..evolution.signals import collect_signals
 from ..evolution.timeline import build_timeline
 from ..evolution.validation_plan import run_validation_plan
 from ..evidence import autoingest as _evidence_autoingest
+
+
+_MAX_PROPOSAL_FILE_BYTES = 200_000
+_MAX_PROPOSAL_FILES_TOTAL_BYTES = 1_000_000
+
+
+def _proposal_strategy_files(proposal_path: Path) -> dict[str, str]:
+    strategies_root = proposal_path / "after" / "strategies"
+    if not strategies_root.exists():
+        return {}
+    strategy_dirs = [p for p in strategies_root.iterdir() if p.is_dir()]
+    files: dict[str, str] = {}
+    total = 0
+    for strategy_dir in sorted(strategy_dirs):
+        for path in sorted(p for p in strategy_dir.rglob("*") if p.is_file()):
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > _MAX_PROPOSAL_FILE_BYTES:
+                continue
+            if total + size > _MAX_PROPOSAL_FILES_TOTAL_BYTES:
+                return files
+            try:
+                rel = path.relative_to(strategy_dir).as_posix()
+                if len(strategy_dirs) > 1:
+                    rel = f"{strategy_dir.name}/{rel}"
+                files[rel] = path.read_text(encoding="utf-8")
+                total += size
+            except UnicodeDecodeError:
+                continue
+            except OSError:
+                continue
+    return files
+
+
+def _proposal_detail_dict(proposal) -> dict:
+    detail: dict = {
+        "id": proposal.id,
+        "kind": proposal.kind,
+        "state": proposal.state,
+        "summary": proposal.summary,
+        "ts": proposal.ts,
+        "path": str(proposal.path),
+        "target": proposal.target,
+        "evidence_refs": list(proposal.evidence_refs or []),
+        "source_event_id": proposal.source_event_id,
+        "validation_plan_id": proposal.validation_plan_id,
+        "metadata": dict(proposal.metadata or {}),
+    }
+    for name in ("rationale.md", "diff.patch", "test_plan.md", "rollback.md"):
+        p = proposal.path / name
+        if p.exists():
+            detail[name.replace(".", "_")] = p.read_text(encoding="utf-8")
+    files = _proposal_strategy_files(proposal.path)
+    if files:
+        detail["files"] = files
+    return detail
 
 
 def _apply_handler(client, payload):
@@ -60,6 +120,33 @@ def _apply_handler(client, payload):
 
 
 def routes():
+    def list_proposals_route(client, payload):
+        payload = payload or {}
+        kind = str(payload.get("kind") or "").strip().lower()
+        state = str(payload.get("state") or "").strip().lower()
+        proposals = list_proposals(client.config.paths)
+        if kind:
+            proposals = [p for p in proposals if str(p.kind).lower() == kind]
+        if state:
+            proposals = [p for p in proposals if str(p.state).lower() == state]
+        proposals = sorted(
+            proposals,
+            key=lambda p: (str(p.ts or ""), str(p.id or "")),
+            reverse=True,
+        )
+        limit = int(payload.get("limit") or 0)
+        if limit > 0:
+            proposals = proposals[:limit]
+        return {"proposals": [p.asdict() for p in proposals]}
+
+    def get_proposal_route(client, payload):
+        payload = payload or {}
+        pid = str(payload.get("proposal_id") or payload.get("id") or "").strip()
+        for proposal in list_proposals(client.config.paths):
+            if proposal.id == pid:
+                return _proposal_detail_dict(proposal)
+        return {"_status": 404, "error": "proposal_not_found", "proposal_id": pid}
+
     def reflect(client, payload):
         """POST /evolution/reflect — run a reflection tick and return the
         ranked proposal seeds with evidence attached."""
@@ -239,10 +326,10 @@ def routes():
         )
 
     return [
-        ("POST", "/evolution/proposals",
-         lambda client, payload: {
-             "proposals": [p.asdict() for p in list_proposals(client.config.paths)],
-         }),
+        ("GET", "/evolution/proposals", list_proposals_route),
+        ("POST", "/evolution/proposals", list_proposals_route),
+        ("GET", "/evolution/proposals/{proposal_id}", get_proposal_route),
+        ("POST", "/evolution/proposals/{proposal_id}", get_proposal_route),
         ("POST", "/evolution/apply", _apply_handler),
         ("POST", "/evolution/rollback",
          lambda client, payload: rollback_proposal(client.config.paths,

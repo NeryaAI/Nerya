@@ -7,7 +7,8 @@ agent kernel and passed to the executor via ``NativeToolDeps``.
 Task tools:
 
 * ``todo_write``      — set the *whole* todo list. Mirrors Claude
-  Code's TodoWriteTool. ``content`` + ``activeForm`` per item.
+  Code's TodoWriteTool. ``content`` + ``activeForm`` per item. It has a
+  single in_progress guard so exactly one current focus is active.
 * ``enter_plan_mode`` — flip ``plan_mode = True``. While true, the
   permission engine refuses mutating tools.
 * ``exit_plan_mode``  — submit a plan body for user approval and
@@ -103,6 +104,24 @@ class TaskState:
             if approved:
                 self.plan_mode = False
             self.updated_at = time.time()
+
+
+def format_for_injection(task_state: TaskState) -> str:
+    """Render unfinished todo state for prompt injection after compaction."""
+
+    rows = [
+        item
+        for item in task_state.snapshot_todos()
+        if item.get("status") in {"pending", "in_progress"}
+    ]
+    if not rows:
+        return ""
+    lines = ["# Task Progress", "Unfinished work from the current session:"]
+    for item in rows:
+        status = item.get("status") or "pending"
+        content = item.get("activeForm") or item.get("content") or item.get("id")
+        lines.append(f"- {status}: {content}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +435,7 @@ __all__ = [
     "TodoItem",
     "enter_plan_mode_handler",
     "exit_plan_mode_handler",
+    "format_for_injection",
     "plan_status_handler",
     "todo_write_handler",
 ]

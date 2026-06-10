@@ -52,7 +52,7 @@ from ..tools import (
     ToolOrchestrator,
     ToolRegistry,
 )
-from ..tools.native import (
+from ..tools.native.bootstrap import (
     NativeToolDeps,
     build_native_tool_deps,
     register_native_tools,
@@ -65,11 +65,13 @@ from .attachments import (
     public_attachment_blocks_from_envelopes,
 )
 from .artifact_index import build_artifact_index, render_final_report
+from .execution_state import build_execution_state
 from .market_context import (
     load_session_market_context,
     render_session_market_context_block,
 )
 from .memory import Memory
+from .prompt_sections import CACHE_BOUNDARY_MARKER
 from .self_improvement import maybe_propose_from_turn
 from .session import SessionStore
 from .session_compaction import (
@@ -79,7 +81,7 @@ from .session_compaction import (
     compact_session_history,
 )
 from .session_restore import apply_to_task_state, restore_from_journal
-from .verifier import compute_verifier_nudge
+from .verifier import compute_verifier_nudge, compute_verifier_outcome, VerifierOutcome
 from .streaming import get_default_bus
 from .transcript_blocks import BlockEnvelope
 from .chart_hook import extract_chart_blocks, extract_chart_marker_ids
@@ -146,6 +148,70 @@ def _json_obj(raw: Any) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _tool_result_payload_obj(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return {}
+    text = raw.strip()
+    if not text:
+        return {}
+    parsed = _json_obj(text)
+    if parsed:
+        return parsed
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    return _json_obj(text[start : end + 1])
+
+
+def _captured_domain_approval_from_tool_result_block(
+    block: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """Create a UI approval block for domain-gated tool results."""
+
+    if str(block.get("kind") or "") != "tool_result":
+        return None
+    if not bool(block.get("ok")):
+        return None
+    if str(block.get("action") or "") != "trade_intent_submit":
+        return None
+    data = _tool_result_payload_obj(block.get("result"))
+    if str(data.get("status") or "") != "pending_approval":
+        return None
+    approval_id = str(data.get("approval_id") or "").strip()
+    if not approval_id:
+        return None
+    call_id = str(block.get("call_id") or "")
+    prompt = {
+        "approval_id": approval_id,
+        "text": "Trade approval is required before this order can execute.",
+        "buttons": [],
+    }
+    record = {
+        "approval_id": approval_id,
+        "kind": "trade_intent",
+        "status": "pending",
+        "state": "pending",
+        "intent": data.get("intent"),
+        "risk": data.get("risk_decision"),
+    }
+    return (
+        call_id,
+        {
+            "kind": "approval_request",
+            "approval_id": approval_id,
+            "call_id": call_id,
+            "skill_id": str(block.get("skill_id") or "native"),
+            "action": "trade_intent_submit",
+            "prompt": prompt,
+            "record": record,
+            "reason": "trade approval required",
+        },
+    )
 
 
 def _compact_resume_value(value: Any, *, limit: int = 900) -> str:
@@ -622,10 +688,14 @@ def _compact_turn_payload(
     iterations: int | None,
     tool_calls_count: int | None,
     stop_reason: str | None,
+    transition_reason: str | None,
     aborted: bool | None,
     abort_reason: str | None,
     error_count: int | None,
     final_text: str,
+    artifact_index: dict[str, Any] | None = None,
+    verifier_outcome: dict[str, Any] | None = None,
+    execution_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shape the turn payload persisted on the assistant message row.
 
@@ -659,8 +729,13 @@ def _compact_turn_payload(
             "errors": error_count,
             "aborted": aborted,
             "abort_reason": abort_reason,
+            "transition_reason": transition_reason,
         },
         "stopped_reason": stop_reason,
+        "transition_reason": transition_reason,
+        "artifact_index": artifact_index or {},
+        "verifier_outcome": verifier_outcome or {},
+        "execution_state": execution_state or {},
     }
     if _serialised_size(payload) <= _ASSISTANT_TURN_META_CAP:
         return payload
@@ -729,7 +804,8 @@ def _render_temporal_context_block() -> str:
         "availability, public/company figures, prices, schedules, and anything "
         "the user calls current/latest/recent/today/this year, use live tools "
         "such as web_search_fetch, web_fetch, connector_list/connector_view, "
-        "portfolio/strategy tools, or journals before answering. Report the "
+        "portfolio/strategy tools, journals, or relevant skills loaded on "
+        "demand before answering. Report the "
         "evidence date/source you used. If current tools fail or are "
         "unavailable, say the current status is unverified instead of "
         "presenting model-memory facts as current. Do not describe 2024-2025 "
@@ -739,37 +815,6 @@ def _render_temporal_context_block() -> str:
     )
 
 
-_BROWSER_TASK_RE = re.compile(
-    r"https?://|www\.|browser|webpage|page|dom|click|screenshot|"
-    r"viewport|form|captcha|浏览器|网页|页面|点击|截图|做题|打开|按钮|登录|验证码",
-    re.IGNORECASE,
-)
-
-_TRADING_TASK_RE = re.compile(
-    r"\b(btc|eth|sol|usdt|trade|trading|order|position|portfolio|"
-    r"risk|market|signal|price|candle|ohlcv)\b|"
-    r"交易|买卖|下单|仓位|持仓|组合|资产|风控|行情|市场|信号|策略|止损|止盈|K线|币价",
-    re.IGNORECASE,
-)
-
-_FULL_BROWSER_SCOPE_RE = re.compile(
-    r"\b(all|every|complete|finish|entire|full|end-to-end|until done)\b|"
-    r"全部|所有|完整|全量|做完|完成全部|每个|每一|通关|全流程",
-    re.IGNORECASE,
-)
-
-def _looks_like_browser_task(user_text: str) -> bool:
-    return bool(_BROWSER_TASK_RE.search(user_text or ""))
-
-
-def _looks_like_trading_task(user_text: str) -> bool:
-    return bool(_TRADING_TASK_RE.search(user_text or ""))
-
-
-def _has_explicit_full_browser_scope(user_text: str) -> bool:
-    return bool(_FULL_BROWSER_SCOPE_RE.search(user_text or ""))
-
-
 def _render_output_language_block(user_text: str | None) -> str:
     return (
         "Output language:\n"
@@ -777,6 +822,12 @@ def _render_output_language_block(user_text: str | None) -> str:
         "same natural language as the latest user request. Infer that "
         "language from the user prompt itself instead of relying on fixed "
         "language-name mappings.\n"
+        "- If the latest request explicitly names a final answer, report, or deliverable language, "
+        "that explicit final-output language overrides the prompt's surrounding language. "
+        "For split-language requests, keep working analysis in the requested analysis language "
+        "and write the final user-facing answer/report in the requested final-output language.\n"
+        "- When calling `team_run`, pass the requested final-output language through `output_language` "
+        "and pass any requested internal analysis/discussion language through `analysis_language`.\n"
         "- Translate or synthesize tool/sub-agent outputs into that same "
         "user-facing language; do not leave a mixed-language report just "
         "because evidence, tool fields, or team member outputs used another "
@@ -786,24 +837,6 @@ def _render_output_language_block(user_text: str | None) -> str:
         "names, API names, code identifiers, file paths, URLs, numeric metrics, "
         "and direct source titles in their original form."
     )
-
-
-def _model_user_text_with_scope_boundary(user_text: str) -> str:
-    if not _looks_like_browser_task(user_text):
-        return user_text
-    if _looks_like_trading_task(user_text):
-        return user_text
-    if _has_explicit_full_browser_scope(user_text):
-        return user_text
-    return (
-        user_text
-        + "\n\nBrowser scope boundary: the latest message does not explicitly "
-        "request completing every item, page, question, or a continuous workflow. "
-        "Perform the smallest representative interaction needed to answer or "
-        "verify the browser task, then stop and report concise evidence. Do not "
-        "advance into additional items after that representative interaction."
-    )
-
 
 def _is_approval_continue_trigger(
     trigger: dict[str, Any],
@@ -832,7 +865,7 @@ def _model_user_text_for_trigger(user_text: str, trigger: dict[str, Any]) -> str
             "Do not repeat already completed discovery unless the prior evidence is missing. "
             "If the approved action still cannot run, report the blocker and the evidence already collected."
         )
-    return _model_user_text_with_scope_boundary(user_text)
+    return user_text
 
 
 def _latest_prior_user_text(messages: list[dict[str, Any]]) -> str | None:
@@ -850,46 +883,50 @@ def _render_turn_focus_block(
     user_text: str | None,
     attached_skills: Optional[list[str]] = None,
 ) -> str:
-    """Keep broad native tool exposure aligned with the latest user ask."""
+    """Render a small non-routing execution policy for every turn."""
 
-    text = user_text or ""
-    skill_names = {str(skill).strip().lower() for skill in attached_skills or []}
-    browser_focused = "browser" in skill_names or _looks_like_browser_task(text)
-    trading_focused = _looks_like_trading_task(text)
+    skill_names = [str(skill).strip() for skill in attached_skills or [] if str(skill).strip()]
+    attached = (
+        "Attached-skill hint: prefer these skill bodies when they directly "
+        f"apply: {', '.join(skill_names)}.\n"
+        if skill_names
+        else ""
+    )
+    return (
+        "Turn execution policy:\n"
+        "The latest user message is authoritative. Choose tools from their "
+        "schemas, tool descriptions, loaded skills, and observed state rather "
+        "than keyword routing or hardcoded workflows. Only claim work that is "
+        "backed by tool_result evidence or durable artifacts. For changing "
+        "facts, use live evidence or state that the result is unverified. If a "
+        "tool result or caller contract names a required next action, treat it "
+        "as an execution obligation unless the tool is unavailable or returns "
+        "a concrete blocker. Keep final answers separate from debug traces and "
+        "raw tool payloads.\n"
+        f"{attached}"
+    )
 
-    if browser_focused and not trading_focused:
+
+def _render_permission_mode_block(mode: PermissionMode) -> str:
+    mode_value = mode.value if isinstance(mode, PermissionMode) else str(mode or "default")
+    if mode in (PermissionMode.AUTO, PermissionMode.YOLO):
         return (
-            "Turn focus: browser/web interaction.\n"
-            "The latest user message is authoritative. Use the browser skill/script "
-            "for page interaction, DOM state, screenshots, console/network evidence, "
-            "or form actions. Keep the task scoped to the page or prompt. "
-            "Browser scope rule: infer the requested completion scope from the "
-            "latest message. If it does not explicitly ask to complete every "
-            "item, page, question, or a continuous workflow, perform the "
-            "smallest representative interaction needed to answer or verify, "
-            "then stop with evidence. "
-            "Do not introduce trading, portfolio, market-signal, strategy, order, "
-            "or risk workflows unless the latest user message explicitly asks for "
-            "them. When the requested page task reaches a clear answer or submitted "
-            "state, stop and report the result instead of continuing to unrelated "
-            "workflows.\n"
-            "Browser script payload reminder: use script_run with skill_id=\"browser\", "
-            "name=\"browser_session.py\", args=[\"--json\", "
-            "\"{\\\"operation\\\":\\\"open|snapshot|click|eval|screenshot|console|network\\\", ...}\"]; "
-            "eval JavaScript belongs in \"expression\"."
+            f"Permission mode: {mode_value}.\n"
+            "This is unattended execution. Continue through safe, reversible, "
+            "non-live actions when the permission engine allows them. Stop or "
+            "report the boundary only for protected actions, destructive work, "
+            "secrets, live trading, or a tool/domain result that returns an "
+            "approval or permission blocker."
         )
-    if not trading_focused:
+    if mode is PermissionMode.PLAN:
         return (
-            "Turn focus: general operator task.\n"
-            "The latest user message is authoritative. Do not introduce trading, "
-            "portfolio, market-signal, strategy, order, or risk workflows unless "
-            "the latest user message explicitly asks for them."
+            "Permission mode: plan.\n"
+            "Stay in planning/research mode unless execution is explicitly "
+            "approved."
         )
     return (
-        "Turn focus: trading/market task.\n"
-        "Trading and market-data tools are in scope, but answer only the latest "
-        "user request and do not drift into browser, coding, or unrelated "
-        "workflows unless asked."
+        "Permission mode: default.\n"
+        "Use the permission engine and domain gates as the approval boundary."
     )
 
 
@@ -909,10 +946,10 @@ def _strategy_triggered_order_turn(
         return True
     if source in _STRATEGY_TRIGGER_SOURCES or source.startswith("strategy"):
         return True
-    if kind.startswith(("price.", "news.", "social.", "onchain.", "schedule.")):
-        return True
     if source in _MANUAL_TRIGGER_SOURCES or kind in _MANUAL_TRIGGER_KINDS:
         return False
+    if kind.startswith(("price.", "news.", "social.", "onchain.", "schedule.")):
+        return True
     return False
 
 
@@ -957,18 +994,65 @@ class AgentTurnResult:
     steps: list[dict[str, Any]] = field(default_factory=list)
     blocks: list[dict[str, Any]] = field(default_factory=list)
     stopped_reason: Optional[str] = None
+    transition_reason: Optional[str] = None
     final_text: str = ""
     iterations: int = 0
     harness: str = "native"
     activity_events: list[dict[str, Any]] = field(default_factory=list)
     artifact_index: dict[str, Any] = field(default_factory=dict)
+    verifier_outcome: dict[str, Any] = field(default_factory=dict)
+    execution_state: dict[str, Any] = field(default_factory=dict)
     final_report: dict[str, Any] = field(default_factory=dict)
     attachments: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _normalise_required_artifacts_contract(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, dict):
+        return ()
+    raw_items = value.get("required_artifacts")
+    if not isinstance(raw_items, list):
+        return ()
+    out: list[dict[str, Any]] = []
+    for raw in raw_items[:8]:
+        if not isinstance(raw, dict):
+            continue
+        item: dict[str, Any] = {}
+        for key in (
+            "kind",
+            "tool",
+            "source",
+            "execution_mode",
+            "after_has",
+            "output_language",
+            "analysis_language",
+            "team_template",
+            "subject",
+            "metadata_contains",
+            "venue",
+            "base_url",
+            "docs_url",
+            "auth",
+            "label",
+            "runtime",
+            "market",
+            "account",
+        ):
+            val = raw.get(key)
+            if isinstance(val, str):
+                clean = val.strip()
+                if clean:
+                    item[key] = clean[:96]
+        if raw.get("defer_initial_tool_choice") is True:
+            item["defer_initial_tool_choice"] = True
+        if item.get("kind") or item.get("tool"):
+            out.append(item)
+    return tuple(out)
 
 
 def _loop_config_from_config(
     config: Config,
     *,
+    turn_id: str | None = None,
     llm_tier: str | None = None,
     reasoning_effort: str | None = None,
     reasoning_summary: str | None = None,
@@ -977,11 +1061,13 @@ def _loop_config_from_config(
     session_id: str | None = None,
     strategy_id: str | None = None,
     trigger_event_id: str | None = None,
+    required_artifacts: tuple[dict[str, Any], ...] = (),
     compact_preservation_cb: Any = None,
 ) -> LoopConfig:
     """Build native loop limits from config, preserving legacy harness knobs."""
 
     return LoopConfig(
+        turn_id=turn_id,
         max_iterations=int(
             config.get(
                 "agent.native.max_iterations",
@@ -1010,6 +1096,28 @@ def _loop_config_from_config(
             )
             or None
         ),
+        wall_time_final_synthesis_seconds=float(
+            config.get("agent.native.wall_time_final_synthesis_seconds", 60.0)
+        ),
+        llm_retry_attempts=int(config.get("agent.native.llm_retry_attempts", 10)),
+        llm_retry_base_delay=float(config.get("agent.native.llm_retry_base_delay", 3.0)),
+        llm_retry_max_delay=float(config.get("agent.native.llm_retry_max_delay", 60.0)),
+        llm_retry_full_jitter=bool(config.get("agent.native.llm_retry_full_jitter", True)),
+        token_budget=(
+            int(config.get("agent.native.token_budget", 0)) or None
+        ),
+        enable_diminishing_returns=bool(
+            config.get("agent.native.enable_diminishing_returns", False)
+        ),
+        reactive_compact_max_attempts=int(
+            config.get("agent.native.reactive_compact_max_attempts", 3)
+        ),
+        model_context_window=(
+            int(config.get("agent.native.model_context_window", 0)) or None
+        ),
+        token_pressure_compact_ratio=float(
+            config.get("agent.native.token_pressure_compact_ratio", 0.85)
+        ),
         reasoning_effort=reasoning_effort,
         reasoning_summary=reasoning_summary,
         model_provider=model_provider,
@@ -1017,6 +1125,7 @@ def _loop_config_from_config(
         session_id=session_id,
         strategy_id=strategy_id,
         trigger_event_id=trigger_event_id,
+        required_artifacts=required_artifacts,
         compact_preservation_cb=compact_preservation_cb,
     )
 
@@ -1134,6 +1243,7 @@ class AgentKernel:
         turn_id: Optional[str] = None,
         attached_skills: Optional[list[str]] = None,
         cancel_token: Any = None,
+        evidence_contract: Optional[dict[str, Any]] = None,
     ) -> AgentTurnResult:
         """Run a single agent turn for ``trigger``.
 
@@ -1165,6 +1275,24 @@ class AgentKernel:
             except Exception:
                 pass
 
+        # Mid-turn steering channel: registered for every turn (not just
+        # cancellable ones) so POST /agent/steer can redirect any live
+        # turn by session or turn id. The loop drains it between
+        # iterations; messages land as pinned user messages.
+        steer_inbox = None
+        try:
+            from ..harness.cancellation import (
+                SteerInbox as _SteerInbox,
+                register_steer_inbox as _reg_steer,
+            )
+
+            steer_inbox = _SteerInbox()
+            if session_id:
+                _reg_steer(session_id, steer_inbox)
+            _reg_steer(turn_id, steer_inbox)
+        except Exception:
+            steer_inbox = None
+
         _bind_config(turn_id, self.config)
         self._hooks.fire(
             "before_turn",
@@ -1188,7 +1316,9 @@ class AgentKernel:
                 session_id=session_id,
                 attached_skills=attached_skills,
                 cancel_token=cancel_token,
+                steer_inbox=steer_inbox,
                 session_existed=session_existed,
+                evidence_contract=evidence_contract,
             )
             return result
         finally:
@@ -1271,6 +1401,17 @@ class AgentKernel:
                     _unreg(turn_id)
                 except Exception:
                     pass
+            if steer_inbox is not None:
+                try:
+                    from ..harness.cancellation import (
+                        unregister_steer_inbox as _unreg_steer,
+                    )
+
+                    if session_id:
+                        _unreg_steer(session_id)
+                    _unreg_steer(turn_id)
+                except Exception:
+                    pass
 
     # -------------------------------------------------------------- _run
 
@@ -1284,7 +1425,9 @@ class AgentKernel:
         session_id: Optional[str],
         attached_skills: Optional[list[str]],
         cancel_token: Any = None,
+        steer_inbox: Any = None,
         session_existed: bool = False,
+        evidence_contract: Optional[dict[str, Any]] = None,
     ) -> AgentTurnResult:
         deps = self._ensure_registry()
         strategy_order_auto_approve = _strategy_triggered_order_turn(
@@ -1438,6 +1581,7 @@ class AgentKernel:
 
         loop_config = _loop_config_from_config(
             self.config,
+            turn_id=turn_id,
             llm_tier=self.llm_tier,
             reasoning_effort=self.reasoning_effort,
             reasoning_summary=self.reasoning_summary,
@@ -1446,6 +1590,9 @@ class AgentKernel:
             session_id=session_id,
             strategy_id=strategy_id,
             trigger_event_id=trigger_event_id,
+            required_artifacts=_normalise_required_artifacts_contract(
+                evidence_contract
+            ),
             compact_preservation_cb=_compact_preservation_cb,
         )
         bus = get_default_bus()
@@ -1567,13 +1714,15 @@ class AgentKernel:
                         **common,
                     )
                 elif kind == "tool_result":
+                    call_id = str(block.get("call_id") or "")
                     tool_name = str(block.get("action") or block.get("skill_id") or "")
                     bus.publish(
                         "tool.complete",
-                        tool_call_id=str(block.get("call_id") or ""),
-                        call_id=str(block.get("call_id") or ""),
+                        tool_call_id=call_id,
+                        call_id=call_id,
                         skill_id=str(block.get("skill_id") or "native"),
                         action=str(block.get("action") or ""),
+                        payload=dict(tool_payloads.get(call_id) or {}),
                         ok=bool(block.get("ok")),
                         error=block.get("error"),
                         error_kind=block.get("error_kind"),
@@ -1695,6 +1844,23 @@ class AgentKernel:
                                 )
                             except Exception:
                                 _LOG.debug("chart.block publish failed", exc_info=True)
+                    domain_approval = _captured_domain_approval_from_tool_result_block(block)
+                    if domain_approval is not None:
+                        call_id, approval_block = domain_approval
+                        approval_id = str(approval_block.get("approval_id") or "")
+                        bus.publish(
+                            "approval.request",
+                            approval_id=approval_id,
+                            prompt=approval_block.get("prompt"),
+                            record=approval_block.get("record"),
+                            tool_call_id=call_id,
+                            call_id=call_id,
+                            skill_id=str(block.get("skill_id") or "native"),
+                            action=str(block.get("action") or ""),
+                            reason=approval_block.get("reason"),
+                            **common,
+                        )
+                        captured_approvals.append((call_id, approval_block))
                     # surface approval requests as their
                     # own event so the dashboard can render an
                     # "approval pending" pill instead of just a
@@ -1803,6 +1969,11 @@ class AgentKernel:
             strategy_id=strategy_id,
             session_id=session_id,
             user_text=system_user_text,
+            frozen_memory_block=self._freeze_memory_prompt_block(
+                deps,
+                session_id=session_id,
+                strategy_id=strategy_id,
+            ),
         )
         effective_provider, _effective_model, effective_meta = gw.effective_model_metadata(
             self.llm_tier or self.config.get("agent.native.tier"),
@@ -1889,6 +2060,8 @@ class AgentKernel:
                 user_message=user_message,
                 prior_messages=prior_messages or None,
                 cancel_token=cancel_token,
+                steer_inbox=steer_inbox,
+                turn_id=turn_id,
             )
         finally:
             if _unsubscribe_activity_events is not None:
@@ -1963,11 +2136,20 @@ class AgentKernel:
                 "iterations": outcome.iterations,
                 "tool_calls": outcome.tool_calls,
                 "stop_reason": outcome.stop_reason,
+                "transition_reason": outcome.transition_reason,
                 "aborted": outcome.aborted,
                 "abort_reason": outcome.abort_reason or None,
                 "final_text_len": len(_final_text),
                 "final_text": _final_text[:_FINAL_TEXT_JOURNAL_CAP],
                 "final_text_truncated": len(_final_text) > _FINAL_TEXT_JOURNAL_CAP,
+                "llm_calls": outcome.llm_calls,
+                "input_tokens_total": outcome.input_tokens_total,
+                "output_tokens_total": outcome.output_tokens_total,
+                "prompt_tokens_last": outcome.prompt_tokens_last,
+                "context_window": outcome.context_window,
+                "compaction_count": outcome.compaction_count,
+                "reactive_compaction_count": outcome.reactive_compaction_count,
+                "steer_messages": outcome.steer_messages,
             },
         )
 
@@ -1979,6 +2161,7 @@ class AgentKernel:
                 session_id=session_id,
                 strategy_id=strategy_id,
                 stop_reason=outcome.stop_reason,
+                transition_reason=outcome.transition_reason,
                 iterations=outcome.iterations,
                 tool_calls=outcome.tool_calls,
                 final_text=outcome.final_text,
@@ -1990,55 +2173,9 @@ class AgentKernel:
         block_dicts = [env.as_dict() for env in outcome.blocks]
         output_attachments = public_attachment_blocks_from_envelopes(block_dicts)
         all_attachments = [*user_attachment_meta, *output_attachments]
-        if session_id:
-            compact_activity_events = _compact_turn_activity_events(captured_activity_events)
-            self._record_session_db_turn(
-                session_id=session_id,
-                strategy_id=strategy_id,
-                turn_id=turn_id,
-                user_text=user_text,
-                final_text=outcome.final_text or "",
-                blocks=block_dicts,
-                actions=actions,
-                tool_trace=tool_trace,
-                activity_events=compact_activity_events,
-                iterations=outcome.iterations,
-                tool_calls_count=outcome.tool_calls,
-                stop_reason=outcome.stop_reason,
-                aborted=outcome.aborted,
-                abort_reason=outcome.abort_reason or None,
-                error_count=outcome.error_count,
-            )
-            self._maybe_auto_title_session(
-                session_id=session_id,
-                strategy_id=strategy_id,
-                user_text=user_text,
-                final_text=outcome.final_text or "",
-            )
-        # Verifier nudge: compare pre-turn vs post-turn todo state and
-        # the tool calls that happened in between. When the model
-        # marked >= threshold todos done without running any test /
-        # verify tool / re-read, drop a one-line note into
-        # ``memory/global.md`` so the next turn's recall block picks
-        # it up. We don't *force* the model to act on it — just make
-        # sure it's visible.
-        try:
-            self._fire_verifier_nudge(
-                turn_id=turn_id,
-                strategy_id=strategy_id,
-                blocks=block_dicts,
-                todos_before=todos_before,
-                todos_after=deps.task_state.snapshot_todos(),
-            )
-        except Exception:
-            _LOG.debug("verifier nudge failed", exc_info=True)
-
-        # autonomous artifact index. We collect what
-        # actually changed on disk / what commands ran / what errors
-        # came back so dashboards + CI gates have a structured record
-        # independent of the model's narrative final_text. Failure
-        # here is best-effort: a malformed block list shouldn't break
-        # the turn return path.
+        # autonomous artifact index. Build it before session persistence so
+        # imported/replayed chat turns carry the same evidence payload as the
+        # immediate API response.
         artifact_payload: dict[str, Any] = {}
         final_report_payload: dict[str, Any] = {}
         try:
@@ -2069,6 +2206,134 @@ class AgentKernel:
         except Exception:
             _LOG.debug("artifact index build failed", exc_info=True)
 
+        compact_activity_events = _compact_turn_activity_events(captured_activity_events)
+
+        # 3-tier verifier outcome: produces a structured label (verified,
+        # model_done, no_more_tools, budget_exceeded, interrupted) that
+        # augments the loop's own transition_reason. Model-only prose is
+        # an explicit lazy fallback, not hard verification.
+        verifier_outcome: VerifierOutcome | None = None
+        verifier_payload: dict[str, Any] = {}
+        try:
+            _tokens_used = (
+                int(outcome.input_tokens_total) + int(outcome.output_tokens_total)
+            )
+            verifier_outcome = compute_verifier_outcome(
+                blocks=block_dicts,
+                interrupted=bool(outcome.aborted),
+                # Real provider-reported spend; lets the soft verifier's
+                # budget check operate on facts instead of never firing.
+                tokens_used=_tokens_used or None,
+                tokens_budget=loop_config.token_budget,
+            )
+            verifier_payload = verifier_outcome.asdict()
+        except Exception:
+            _LOG.debug("verifier outcome computation failed", exc_info=True)
+
+        effective_transition_reason = outcome.transition_reason
+        if verifier_outcome is not None:
+            _loop_generic_reasons = {"end_turn", "no_tool_use", ""}
+            if (
+                (effective_transition_reason or "") in _loop_generic_reasons
+                and verifier_outcome.transition_label
+            ):
+                effective_transition_reason = verifier_outcome.transition_label
+            try:
+                jsonl.append(
+                    self.config.paths.journal("agent"),
+                    {
+                        "kind": "agent.verifier.outcome",
+                        "turn_id": turn_id,
+                        "strategy_id": strategy_id,
+                        "session_id": session_id,
+                        "loop_transition_reason": outcome.transition_reason,
+                        "effective_transition_reason": effective_transition_reason,
+                        **verifier_payload,
+                    },
+                )
+            except Exception:
+                _LOG.debug("verifier outcome journal write failed", exc_info=True)
+
+        execution_state_payload: dict[str, Any] = {}
+        try:
+            execution_state_payload = build_execution_state(
+                turn_id=turn_id,
+                blocks=block_dicts,
+                activity_events=compact_activity_events,
+                stop_reason=outcome.stop_reason,
+                transition_reason=effective_transition_reason,
+                aborted=outcome.aborted,
+                abort_reason=outcome.abort_reason or None,
+            )
+            jsonl.append(
+                self.config.paths.journal("agent"),
+                {
+                    "kind": "agent.execution_state",
+                    "turn_id": turn_id,
+                    "strategy_id": strategy_id,
+                    "session_id": session_id,
+                    "execution_state": execution_state_payload,
+                },
+            )
+            try:
+                bus.publish(
+                    "agent.execution_state",
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    strategy_id=strategy_id,
+                    execution_state=execution_state_payload,
+                )
+            except Exception:
+                _LOG.debug("execution_state publish failed", exc_info=True)
+        except Exception:
+            _LOG.debug("execution_state build failed", exc_info=True)
+
+        if session_id:
+            self._record_session_db_turn(
+                session_id=session_id,
+                strategy_id=strategy_id,
+                turn_id=turn_id,
+                user_text=user_text,
+                final_text=outcome.final_text or "",
+                blocks=block_dicts,
+                actions=actions,
+                tool_trace=tool_trace,
+                activity_events=compact_activity_events,
+                iterations=outcome.iterations,
+                tool_calls_count=outcome.tool_calls,
+                stop_reason=outcome.stop_reason,
+                transition_reason=effective_transition_reason,
+                aborted=outcome.aborted,
+                abort_reason=outcome.abort_reason or None,
+                error_count=outcome.error_count,
+                artifact_index=artifact_payload,
+                verifier_outcome=verifier_payload,
+                execution_state=execution_state_payload,
+            )
+            self._maybe_auto_title_session(
+                session_id=session_id,
+                strategy_id=strategy_id,
+                user_text=user_text,
+                final_text=outcome.final_text or "",
+            )
+        # Verifier nudge: compare pre-turn vs post-turn todo state and
+        # the tool calls that happened in between. When the model
+        # marked >= threshold todos done without running any test /
+        # verify tool / re-read, drop a one-line note into
+        # ``memory/global.md`` so the next turn's recall block picks
+        # it up. We don't *force* the model to act on it — just make
+        # sure it's visible.
+        try:
+            self._fire_verifier_nudge(
+                turn_id=turn_id,
+                strategy_id=strategy_id,
+                blocks=block_dicts,
+                todos_before=todos_before,
+                todos_after=deps.task_state.snapshot_todos(),
+            )
+        except Exception:
+            _LOG.debug("verifier nudge failed", exc_info=True)
+
         return AgentTurnResult(
             trigger_event_id=trigger_event_id,
             strategy_id=strategy_id,
@@ -2083,15 +2348,19 @@ class AgentKernel:
                 "errors": outcome.error_count,
                 "aborted": outcome.aborted,
                 "abort_reason": outcome.abort_reason or None,
+                "transition_reason": effective_transition_reason,
             },
             steps=block_dicts,
             blocks=block_dicts,
             stopped_reason=outcome.stop_reason,
+            transition_reason=effective_transition_reason,
             final_text=outcome.final_text,
             iterations=outcome.iterations,
             harness="native",
-            activity_events=_compact_turn_activity_events(captured_activity_events),
+            activity_events=compact_activity_events,
             artifact_index=artifact_payload,
+            verifier_outcome=verifier_payload,
+            execution_state=execution_state_payload,
             final_report=final_report_payload,
             attachments=all_attachments,
         )
@@ -2254,9 +2523,13 @@ class AgentKernel:
         actions: list[dict[str, Any]] | None = None,
         tool_trace: list[dict[str, Any]] | None = None,
         activity_events: list[dict[str, Any]] | None = None,
+        artifact_index: dict[str, Any] | None = None,
+        verifier_outcome: dict[str, Any] | None = None,
+        execution_state: dict[str, Any] | None = None,
         iterations: int | None = None,
         tool_calls_count: int | None = None,
         stop_reason: str | None = None,
+        transition_reason: str | None = None,
         aborted: bool | None = None,
         abort_reason: str | None = None,
         error_count: int | None = None,
@@ -2272,16 +2545,26 @@ class AgentKernel:
                 strategy_id=strategy_id,
                 meta={"last_turn_id": turn_id},
             )
-            if final_text.strip():
-                # May-01 2026 — persist the full turn payload so the
-                # dashboard can rehydrate imported sessions with the
-                # original tool_use / tool_result stream. Without this
-                # the transcript route only returns ``content`` and the
-                # chat view degrades to the ``actions applied`` summary
-                # after a refresh or visibilitychange-triggered
-                # reimport. Cap each nested list at a conservative
-                # budget so a pathological tool_result payload can't
-                # blow up the meta_json cell.
+            has_turn_payload = any(
+                (
+                    final_text.strip(),
+                    blocks,
+                    actions,
+                    tool_trace,
+                    activity_events,
+                    verifier_outcome,
+                    execution_state,
+                    stop_reason,
+                    aborted,
+                    abort_reason,
+                    error_count,
+                )
+            )
+            if has_turn_payload:
+                # Persist the turn payload even when there is no final
+                # assistant prose. Tool-only, aborted, or budget-stopped
+                # turns still need a durable row so the transcript route
+                # can rehydrate the operator-visible tool timeline.
                 assistant_meta = {
                     "turn": _compact_turn_payload(
                         turn_id=turn_id,
@@ -2291,10 +2574,14 @@ class AgentKernel:
                         iterations=iterations,
                         tool_calls_count=tool_calls_count,
                         stop_reason=stop_reason,
+                        transition_reason=transition_reason,
                         aborted=aborted,
                         abort_reason=abort_reason,
                         error_count=error_count,
                         final_text=final_text,
+                        artifact_index=artifact_index,
+                        verifier_outcome=verifier_outcome,
+                        execution_state=execution_state,
                     ),
                 }
                 repo.record_message(
@@ -2417,6 +2704,11 @@ class AgentKernel:
                         "type": "object",
                         "required": ["title"],
                         "properties": {"title": {"type": "string"}},
+                    },
+                    metadata={
+                        "session_id": session_id,
+                        "strategy_id": strategy_id,
+                        "context_scope": "session_title",
                     },
                 )
                 parsed = call.parsed if isinstance(call.parsed, dict) else {}
@@ -2953,6 +3245,7 @@ class AgentKernel:
                     "turn_id": turn_id,
                     "action": top_action,
                     "stop_reason": result.stopped_reason,
+                    "transition_reason": result.transition_reason,
                     "iterations": result.iterations,
                 }),
             )
@@ -3472,6 +3765,36 @@ class AgentKernel:
             pass
         return roots
 
+    def _freeze_memory_prompt_block(
+        self,
+        deps: NativeToolDeps,
+        *,
+        session_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+    ) -> str:
+        """Render the memory prompt fragment once at the turn boundary.
+
+        Memory writes during a turn persist for the next turn, but must
+        not reshape the in-flight prompt or invalidate its cache prefix.
+        """
+
+        if deps.paths is None:
+            return ""
+        try:
+            from ..tools.native.memory import build_system_prompt_block
+
+            return build_system_prompt_block(
+                deps.paths,
+                config=self.config,
+                session_id=session_id,
+                strategy_id=strategy_id,
+                max_chars=int(
+                    self.config.get("agent.native.memory_block_chars", 1200)
+                ),
+            )
+        except Exception:
+            return ""
+
     def _build_system_prompt(
         self,
         deps: NativeToolDeps,
@@ -3480,6 +3803,7 @@ class AgentKernel:
         strategy_id: Optional[str] = None,
         session_id: Optional[str] = None,
         user_text: Optional[str] = None,
+        frozen_memory_block: Optional[str] = None,
     ) -> str:
         """Render the workspace-native system prompt.
 
@@ -3496,22 +3820,15 @@ class AgentKernel:
         except Exception:
             skill_block = ""
 
-        memory_block = ""
-        if deps.paths is not None:
-            try:
-                from ..tools.native.memory import build_system_prompt_block
-
-                memory_block = build_system_prompt_block(
-                    deps.paths,
-                    config=self.config,
-                    session_id=session_id,
-                    strategy_id=strategy_id,
-                    max_chars=int(
-                        self.config.get("agent.native.memory_block_chars", 1200)
-                    ),
-                )
-            except Exception:
-                memory_block = ""
+        memory_block = (
+            frozen_memory_block
+            if frozen_memory_block is not None
+            else self._freeze_memory_prompt_block(
+                deps,
+                session_id=session_id,
+                strategy_id=strategy_id,
+            )
+        )
 
         profile_block = ""
         if deps.paths is not None and session_id:
@@ -3536,11 +3853,9 @@ class AgentKernel:
             except Exception:
                 market_context_block = ""
 
-        # Recipe digest — restored from the legacy planner. Recipes are
-        # short, vetted "if you see X, run Y" runbooks the operator
-        # ships in ``workspace/recipes/`` (or via builtin packs). They
-        # complement the skill index by surfacing higher-level *named
-        # workflows* that often combine multiple skills + tools.
+        # Recipe digest — operator-authored named workflow metadata. Keep
+        # this compact; full recipe bodies are loaded on demand through tools
+        # rather than embedded as always-on routing instructions.
         recipe_block = ""
         if bool(self.config.get("agent.native.expose_recipes", True)):
             try:
@@ -3550,7 +3865,9 @@ class AgentKernel:
             except Exception:
                 recipe_block = ""
 
-        sections: list[str] = []
+        cached_sections: list[str] = []
+        rolling_sections: list[str] = []
+        sections = cached_sections
         sections.append(
             "You are Nerya, an autonomous coding + trading agent. You have"
             " native tools for filesystem, search, shell, planning,"
@@ -3571,16 +3888,17 @@ class AgentKernel:
         )
 
         sections.append(f"Workspace root: {deps.workspace_root}")
-        sections.append(_render_temporal_context_block())
-        sections.append(
+        rolling_sections.append(_render_temporal_context_block())
+        rolling_sections.append(
             _render_turn_focus_block(
                 user_text=user_text,
                 attached_skills=attached_skills,
             )
         )
-        sections.append(_render_output_language_block(user_text))
+        rolling_sections.append(_render_output_language_block(user_text))
+        rolling_sections.append(_render_permission_mode_block(self.permission_mode))
         if attached_skills:
-            sections.append(
+            rolling_sections.append(
                 "Attached skills (preferred for this turn): "
                 + ", ".join(attached_skills)
             )
@@ -3596,155 +3914,15 @@ class AgentKernel:
             sections.append(skill_block)
         sections.append(
             "Workflow:\n"
-            "1. Plan in your head. For multi-step work, use todo_write"
-            " to show progress and continue. Use enter_plan_mode +"
-            " exit_plan_mode only when the user explicitly asks for plan"
-            " approval or before high-risk actions such as destructive"
-            " deletes, sensitive config changes, strategy promotion,"
-            " kill-switch changes, or live trading.\n"
-            "2. Read before edit. edit_file refuses stale reads.\n"
-            "3. Use memory_recall before re-deriving things you've"
-            " already learned; use memory_remember sparingly for durable"
-            " lessons. If you discover a reusable multi-step workflow,"
-            " or the same correction/process recurs, use"
-            " evolve_skill_proposal to draft a lazy-loaded SKILL.md"
-            " proposal instead of putting procedure into memory.\n"
-            "4. If the user asks for Agent Team, team, committee,"
-            " multi-role, or deep-research collaboration, call role_list"
-            " then team_run so the UI shows one coordinated team. Use"
-            " subagent_run only for a single bounded child task;"
-            " live-trading writes stay on the parent. For public-company"
-            " stock research or 研报 requests, prefer default"
-            " investment-research roles such as fundamentals_analyst,"
-            " technical_analyst, sentiment_analyst, bull_researcher,"
-            " bear_researcher, risk_critic, and research_manager; do"
-            " not pick finance-ops workspace roles like"
-            " valuation_reviewer unless the user asks for fund/GP"
-            " valuation or accounting workflows. team_run is"
-            " synchronous: when it returns, synthesize the final report"
-            " from results/failures now. For prompts like"
-            " `启动AgentTeam分析<company>` or stock 研报 requests, the"
-            " expected output is the complete research report in the"
-            " same reply, not a launch/status acknowledgement or a"
-            " follow-up question asking whether the user wants details;"
-            " include the concrete subject identifiers in team_run"
-            " shared_payload / role payloads (for example"
-            " asset_class='public_equity', company='NVIDIA',"
-            " ticker='NVDA', venue='yahoo') so child roles do not infer"
-            " unrelated default markets;"
-            " do not say the team is still running, call task_get,"
-            " task_output, task_list, or run team_run again for the"
-            " same task unless you used an async subagent tool. If"
-            " required roles fail or return degraded"
-            " output, retry the missing analysis or state the evidence"
-            " gap instead of claiming a complete report.\n"
-            "5. Trading discipline: portfolio_summary / strategy_history"
-            " before forming an opinion; risk_check before"
-            " trade_intent_submit; kill_switch_set is DANGEROUS and"
-            " requires operator confirmation.\n"
-            "6. NEVER claim a venue / data source is missing without"
-            " calling connector_list (and connector_view, when you"
-            " want to inspect the existing implementation) first. If"
-            " the venue is in the registry (binance, bybit, okx,"
-            " hyperliquid, polymarket, bsc, evm, solana, mock, ccxt:*"
-            " …) wire the strategy /"
-            " script to it directly via the existing Connector"
-            " subclass — do not re-author it. If it really is missing,"
-            " follow the coding skill's extending-nerya.md playbook to"
-            " write a *real* Connector under workspace/providers/"
-            "<id>/provider.py exposing a top-level SPEC:"
-            " ExchangeProviderSpec, then run scripts/reload_subsystem.py"
-            " providers and confirm with connector_list. This"
-            " workspace track is the default for agent-authored"
-            " adapters because nerya/connectors/<vendor>.py is"
-            " outside the agent's writable workspace root in any"
-            " normal session — the kernel will refuse the write."
-            " Mock data, one-shot scripts, and"
-            " nerya/markets/*_provider.py throwaways are forbidden."
-            " See skill `coding` references/extending-nerya.md.\n"
-            "7. Strategy authoring: when the user asks to create,"
-            " implement, or backtest a strategy, load/use"
-            " `strategy_author`, draft real package files in context,"
-            " and treat that SKILL.md as the authoring contract. Read it"
-            " with skill_view before connector_list, data_api, market_data,"
-            " shell, web, proposal, or package authoring tools when it has"
-            " not already been loaded in the current turn,"
-            " and do not stop to ask for missing market, timeframe,"
-            " account, schedule, or risk parameters when the request is a"
-            " low-risk proposal/paper/backtest workflow. In that case,"
-            " choose conservative defaults yourself: inherit session market"
-            " context when present, otherwise use connector discovery and"
-            " pick a liquid market with real historical candles; use a"
-            " paper account and non-live execution mode; document the"
-            " assumptions in the proposal rationale. Ask the operator only"
-            " when the missing choice would make the action live,"
-            " destructive, irreversible, or honestly impossible."
-            " For ordinary or generic strategy prompts, do not override"
-            " files.main.py; let strategy_generate_proposal use its stock"
-            " StrategyContext-compatible template. Only provide inline file"
-            " overrides when the user asks for behavior that the stock"
-            " archetype cannot express. Requests involving custom data,"
-            " provider-specific reads, chain-native/wallet evidence,"
-            " non-standard replay rules, or an explicit rejection of a"
-            " stock archetype are custom strategy-authoring tasks: draft"
-            " package-rooted SDK files yourself using StrategyContext,"
-            " StrategyResult, and when needed StrategyAgentTask, then use"
-            " strategy_generate_proposal only as the proposal packager."
-            " Call strategy_generate_proposal with inline files, then"
-            " strategy_validate, then strategy_backtest using proposal_id"
-            " before any promotion. A successful strategy_generate_proposal"
-            " response is not terminal when it returns backtest_required or"
-            " next_required_action; immediately run the indicated"
-            " strategy_backtest unless the operator explicitly skips it."
-            " If the generated/validated proposal contradicts the"
-            " requested strategy class or an excluded stock archetype,"
-            " repair it in the same turn by supplying corrected SDK files;"
-            " do not end with a promise to repair it later."
-            " Use returned proposal_paths / strategy_root / metrics_path"
-            " for reads; do not probe promoted strategy paths before"
-            " promotion. If the operator asks for an on-chain or DEX"
-            " strategy, do not satisfy that request with CEX symbols such"
-            " as binance:DOGEUSDT unless the operator explicitly accepts"
-            " a non-on-chain proxy. On-chain means an on-chain/DEX data"
-            " source with durable historical replay data; if that is not"
-            " available, stop and report the gap instead of silently"
-            " substituting CEX candles. If real OHLCV/history is"
-            " unavailable or coverage_ok is false for Polymarket,"
-            " on-chain meme coins,"
-            " news, or other hard markets, stop probing after bounded"
-            " evidence and report the coverage/data-source gap. For"
-            " meme/on-chain strategies, use a custom/event replay when"
-            " durable wallet, DEX, holder, top-trader, or swap history"
-            " exists; otherwise promotion/live progression requires an"
-            " explicit operator-approved standard-backtest waiver and"
-            " must not be described as a passed standard backtest. Do not"
-            " inspect connector source files or docs repeatedly just to"
-            " keep trying; connector_list, connector_view, data_api"
-            " provider catalogs/schemas, and one bounded"
-            " market_data/backtest attempt are enough evidence. Once a"
-            " provider route is visible, stop discovery and write the SDK"
-            " proposal. Do not call shell, glob, or raw file reads to"
-            " enumerate local connector source or workspace files just to"
-            " learn data-source names. For meme/wallet-flow strategies,"
-            " the efficient evidence boundary is wallet capability"
-            " catalog, meme strategy guide, one candidate-discovery call,"
-            " one candidate enrichment/risk call, and one historical"
-            " replay/OHLCV attempt; after that generate the SDK strategy"
-            " package immediately and report remaining data gaps. Do not"
-            " call send_message or continue discovery after that boundary"
-            " until strategy_generate_proposal with SDK files has been"
-            " attempted at least once. If the data is imperfect, encode the"
-            " gap and required operator approval in strategy.md instead of"
-            " delaying proposal authoring. Do not"
-            " fabricate synthetic/random/placeholder replay data. When"
-            " summarising backtests, copy metrics_display/operator_summary"
-            " values exactly. Raw *_pct values are already percentage"
-            " points; never multiply them by 100 or move the decimal.\n"
-            "8. After every batch of tool calls, summarise progress for"
-            " the user in plain text. End the turn with a clear final"
-            " text answer."
+            "1. Inspect real workspace state before making changes.\n"
+            "2. Prefer existing tools, loaded skills, schemas, and local conventions over ad hoc logic.\n"
+            "3. Route protected mutations through proposal or approval tools; never claim a durable change without tool evidence.\n"
+            "4. For required artifacts or tool-declared next actions, let the loop/tool contract drive completion rather than prompt wording.\n"
+            "5. After tool calls, summarize concrete evidence, blockers, and verification in the final answer."
         )
-        return "\n\n".join(sections)
+        return "\n\n".join(
+            [*cached_sections, CACHE_BOUNDARY_MARKER, *rolling_sections]
+        )
 
 
 __all__ = ["AgentKernel", "AgentTurnResult"]

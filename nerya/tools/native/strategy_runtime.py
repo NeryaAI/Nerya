@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from typing import Any, Optional
 
+from ...core import yaml_io
 from ...core.config import Config
 from ...core.errors import NeryaError, TradingError
 from ...evolution.patch_proposal import list_proposals, set_state
@@ -87,14 +89,14 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
         },
         "title": {"type": "string"},
         "description": {"type": "string"},
-        "prompt": {
-            "type": "string",
-            "description": "Operator brief; lands in strategy.md.",
-        },
         "strategy_class": {
             "type": "string",
-            "enum": ["scalping", "trend", "news", "agent", "agent_team"],
+            "enum": ["scalping", "trend", "news", "agent", "agent_task", "agent_team"],
             "default": "scalping",
+            "description": (
+                "Strategy family. `agent_task` is accepted as an alias for "
+                "`strategy_class=agent` plus `execution_mode=agent_task`."
+            ),
         },
         "execution_mode": {
             "type": "string",
@@ -112,6 +114,29 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
         },
         "markets": {"type": "array", "items": {"type": "string"}},
         "accounts": {"type": "array", "items": {"type": "string"}},
+        "files.main.py": {
+            "type": "string",
+            "description": (
+                "Compact top-level alias for files['main.py']. Prefer this "
+                "over a large nested files object when authoring custom SDK "
+                "strategies through OpenAI-compatible providers."
+            ),
+        },
+        "files.strategy.md": {
+            "type": "string",
+            "description": (
+                "Compact top-level alias for files['strategy.md']. Keep it "
+                "concise; detailed tuning notes can be added after the "
+                "proposal exists."
+            ),
+        },
+        "prompt": {
+            "type": "string",
+            "description": (
+                "Concise operator brief; lands in strategy.md. Keep this short "
+                "when files are supplied, and put runnable logic in SDK files."
+            ),
+        },
         "schedule_cron": {"type": "string"},
         "schedule_every_seconds": {"type": "integer", "minimum": 1},
         "news_sources": {"type": "array", "items": {"type": "string"}},
@@ -250,7 +275,8 @@ STRATEGY_PROMOTE_SCHEMA: dict[str, Any] = {
             "default": False,
             "description": (
                 "True only when the operator explicitly approves promoting "
-                "without a standard backtest."
+                "without a standard backtest. The agent must not set this "
+                "during an ordinary create/review request."
             ),
         },
         "approval_note": {
@@ -358,11 +384,20 @@ STRATEGY_TUNING_SNAPSHOT_SCHEMA = STRATEGY_TUNING_STATUS_SCHEMA
 # ---------------------------------------------------------------------------
 
 
-def _usage_error(call: ToolCall, message: str) -> ToolResult:
+def _usage_error(
+    call: ToolCall,
+    message: str,
+    *,
+    recovery_hint: dict[str, Any] | None = None,
+) -> ToolResult:
     return ToolResult.from_error(
         tool_use_id=call.id,
         name=call.name,
-        error=ToolError(kind=ToolErrorKind.SCHEMA_VALIDATION, message=message),
+        error=ToolError(
+            kind=ToolErrorKind.SCHEMA_VALIDATION,
+            message=message,
+            recovery_hint=dict(recovery_hint or {}),
+        ),
     )
 
 
@@ -374,14 +409,37 @@ def _execution_error(call: ToolCall, message: str) -> ToolResult:
     )
 
 
+def _manifest_execution_mode(content: str) -> str:
+    try:
+        raw = yaml_io.loads(content, default={}) or {}
+    except Exception:
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("execution_mode") or "").strip().lower().replace("-", "_")
+
+
 def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
+    args = _normalise_raw_strategy_args(args)
+    strategy_class = str(args.get("strategy_class") or "scalping").strip().lower()
+    execution_mode = str(args.get("execution_mode") or "").strip().lower()
+    if strategy_class == "agent_task":
+        strategy_class = "agent"
+        execution_mode = execution_mode or "agent_task"
+    elif strategy_class == "custom":
+        execution_key = execution_mode.replace("-", "_")
+        strategy_class = (
+            "agent"
+            if execution_key in {"agent", "agent_task", "agent_team", "team"}
+            else "trend"
+        )
     return StrategyGenerationRequest(
         strategy_id=str(args.get("strategy_id") or "").strip(),
         title=str(args.get("title") or ""),
         description=str(args.get("description") or ""),
         prompt=str(args.get("prompt") or ""),
-        strategy_class=str(args.get("strategy_class") or "scalping").strip().lower(),
-        execution_mode=str(args.get("execution_mode") or "").strip().lower(),
+        strategy_class=strategy_class,
+        execution_mode=execution_mode,
         mode=str(args.get("mode") or "paper").strip().lower(),
         markets=tuple(str(m) for m in (args.get("markets") or ())),
         accounts=tuple(str(a) for a in (args.get("accounts") or ())),
@@ -410,6 +468,365 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
     )
 
 
+def _normalise_raw_strategy_args(args: dict[str, Any]) -> dict[str, Any]:
+    raw = args.get("_raw") if isinstance(args, dict) else None
+    if not isinstance(raw, str):
+        return args
+    raw = raw.strip()
+    if not raw.startswith("{"):
+        return args
+    parsed = _parse_raw_strategy_args(raw)
+    truncated_fields: list[str] = []
+    if parsed is None:
+        recovered = _recover_truncated_raw_strategy_args(raw)
+        if recovered is not None:
+            parsed = recovered
+            truncated_fields = [
+                key
+                for key in ("files", "files.main.py", "files.strategy.md")
+                if f'"{key}"' in raw and key not in recovered
+            ]
+    if parsed is None:
+        return args
+    merged = dict(args)
+    merged.pop("_raw", None)
+    merged.update(parsed)
+    if truncated_fields:
+        merged["_provider_raw_truncated"] = True
+        merged["_provider_raw_truncated_fields"] = truncated_fields
+    return merged
+
+
+def _parse_raw_strategy_args(raw: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _recover_truncated_raw_strategy_args(raw: str) -> dict[str, Any] | None:
+    """Recover provider-truncated JSON tool args without inventing fields."""
+
+    cut = raw.rfind(",")
+    attempts = 0
+    while cut > 0 and attempts < 20:
+        attempts += 1
+        candidate = raw[:cut].rstrip() + "}"
+        parsed = _parse_raw_strategy_args(candidate)
+        if isinstance(parsed, dict) and all(
+            parsed.get(key) for key in ("strategy_id", "markets", "accounts")
+        ):
+            return parsed
+        cut = raw.rfind(",", 0, cut)
+    return None
+
+
+def _request_mentions_markers(
+    request: StrategyGenerationRequest,
+    markers: tuple[str, ...],
+) -> bool:
+    body = "\n".join(
+        [
+            request.strategy_id,
+            request.title,
+            request.description,
+            request.prompt,
+            request.strategy_class,
+            request.execution_mode,
+            *request.markets,
+        ]
+    ).lower()
+    return _text_contains_marker(body, markers)
+
+
+def _text_mentions_markers(text: str, markers: tuple[str, ...]) -> bool:
+    return _text_contains_marker(str(text or "").lower(), markers)
+
+
+def _text_contains_marker(lowered: str, markers: tuple[str, ...]) -> bool:
+    tokens: set[str] | None = None
+    for marker in markers:
+        if marker in _TOKEN_MATCH_ONLY_MARKERS:
+            if tokens is None:
+                tokens = _lower_tokens(lowered)
+            if marker in tokens:
+                return True
+            continue
+        if marker in lowered:
+            return True
+    return False
+
+
+def _lower_tokens(lowered: str) -> set[str]:
+    token_chars: list[str] = []
+    tokens: set[str] = set()
+    for char in lowered:
+        if char.isalnum() or char == "_":
+            token_chars.append(char)
+            continue
+        if token_chars:
+            tokens.add("".join(token_chars))
+            token_chars.clear()
+    if token_chars:
+        tokens.add("".join(token_chars))
+    return tokens
+
+
+def _request_mentions_meme_or_onchain(request: StrategyGenerationRequest) -> bool:
+    return _request_mentions_markers(request, _MEME_OR_ONCHAIN_MARKERS)
+
+
+def _request_mentions_hard_to_replay(request: StrategyGenerationRequest) -> bool:
+    return _request_mentions_markers(request, _HARD_TO_REPLAY_MARKERS)
+
+
+def _request_mentions_custom_signal_logic(request: StrategyGenerationRequest) -> bool:
+    return _request_mentions_markers(request, _CUSTOM_SIGNAL_MARKERS)
+
+
+def _request_mentions_agent_decision(request: StrategyGenerationRequest) -> bool:
+    body = "\n".join(
+        [
+            request.strategy_id,
+            request.title,
+            request.description,
+            request.prompt,
+            *request.markets,
+        ]
+    ).lower()
+    return _text_contains_marker(body, _AGENT_DECISION_MARKERS)
+
+
+def _has_package_file(request: StrategyGenerationRequest, rel_path: str) -> bool:
+    wanted = rel_path.replace("\\", "/")
+    return any(str(path).replace("\\", "/") == wanted for path in request.files)
+
+
+def _requires_explicit_sdk_files(request: StrategyGenerationRequest) -> bool:
+    """Return true when template fallback would erase the requested thesis.
+
+    The generic generator is useful for simple CEX trend/scalping examples,
+    but wallet/on-chain/custom-data strategies need the agent to author the
+    SDK package logic itself. Otherwise the tool can silently turn a smart
+    money prompt into the default trend template.
+    """
+
+    if not _request_mentions_hard_to_replay(request):
+        return False
+    has_main = _has_package_file(request, "main.py")
+    has_strategy_doc = _has_package_file(
+        request,
+        "strategy.md",
+    ) or _has_package_file(request, "README.md")
+    return not (has_main and has_strategy_doc)
+
+
+def _raw_payload_truncated_before_sdk_files(args: dict[str, Any]) -> bool:
+    if not args.get("_provider_raw_truncated"):
+        return False
+    fields = args.get("_provider_raw_truncated_fields")
+    if isinstance(fields, list):
+        return any(str(field) in {"files", "files.main.py", "files.strategy.md"} for field in fields)
+    return False
+
+
+def _truncated_sdk_files_payload_error() -> str:
+    return (
+        "strategy_generate_proposal tool arguments were truncated before the "
+        "SDK files arrived. Re-call the tool with a compact payload: include "
+        "only strategy_id, title, strategy_class, execution_mode, mode, "
+        "markets, accounts, plus top-level `files.main.py` and "
+        "`files.strategy.md` string arguments. Omit long prompt, tuning_prompt, "
+        "policy_overrides, and llm_policy_overrides until after the proposal "
+        "exists."
+    )
+
+
+def _requires_custom_signal_main_py(
+    request: StrategyGenerationRequest,
+    *,
+    operator_prompt: str = "",
+) -> bool:
+    if not _request_mentions_custom_signal_logic(request):
+        return False
+    if operator_prompt and not _text_mentions_markers(
+        operator_prompt,
+        _CUSTOM_SIGNAL_MARKERS,
+    ):
+        return False
+    if _has_package_file(request, "main.py"):
+        return False
+    raw = request.execution_mode.strip().lower().replace("-", "_")
+    if raw == "agent_task":
+        raw = "agent"
+    elif raw == "team":
+        raw = "agent_team"
+    if raw in {"script", "agent", "agent_team"}:
+        return True
+    return request.strategy_class in {"scalping", "trend", "news", "agent", "agent_team"}
+
+
+def _custom_signal_main_py_coverage_error(
+    request: StrategyGenerationRequest,
+    *,
+    operator_prompt: str = "",
+) -> str:
+    main_py = request.files.get("main.py", "")
+    if not main_py:
+        return ""
+    requested = _requested_custom_signal_requirements(
+        request,
+        operator_prompt=operator_prompt,
+    )
+    if not requested:
+        return ""
+    main_l = main_py.lower()
+    missing = [
+        label
+        for label, code_markers in requested
+        if not _text_contains_marker(main_l, code_markers)
+    ]
+    if not missing:
+        return ""
+    return (
+        "`files.main.py` is missing requested custom signal logic: "
+        + ", ".join(missing)
+        + ". Put the indicator/data-source reads, trigger preconditions, or "
+        "StrategyAgentTask prompt inputs in main.py; strategy.md alone is not "
+        "a runnable strategy contract."
+    )
+
+
+def _requested_custom_signal_requirements(
+    request: StrategyGenerationRequest,
+    *,
+    operator_prompt: str = "",
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    source = operator_prompt.strip()
+    if not source:
+        source = "\n".join(
+            [
+                request.strategy_id,
+                request.title,
+                request.description,
+                request.prompt,
+                request.strategy_class,
+                request.execution_mode,
+                *request.markets,
+            ]
+        )
+    source_l = source.lower()
+    requested: list[tuple[str, tuple[str, ...]]] = []
+    for label, request_markers, code_markers in _CUSTOM_SIGNAL_TERM_REQUIREMENTS:
+        if _text_contains_marker(source_l, request_markers):
+            requested.append((label, code_markers))
+    return tuple(requested)
+
+
+def _normalise_model_invented_strategy_scope(
+    request: StrategyGenerationRequest,
+    *,
+    operator_prompt: str = "",
+) -> StrategyGenerationRequest:
+    """Undo model-invented agent mode when the operator asked for a plain strategy."""
+
+    if not operator_prompt:
+        return request
+    if _text_mentions_markers(operator_prompt, _AGENT_DECISION_MARKERS):
+        return request
+    strategy_class = request.strategy_class.strip().lower().replace("-", "_")
+    execution_mode = request.execution_mode.strip().lower().replace("-", "_")
+    if strategy_class not in {"agent", "agent_task", "agent_team"} and execution_mode not in {
+        "agent",
+        "agent_task",
+        "agent_team",
+        "team",
+    }:
+        return request
+    if request.files:
+        return request
+    return replace(request, strategy_class="trend", execution_mode="script")
+
+
+def _agent_decision_contract_error(
+    request: StrategyGenerationRequest,
+    *,
+    operator_prompt: str = "",
+) -> str:
+    if not _request_mentions_agent_decision(request):
+        return ""
+    if operator_prompt and not _text_mentions_markers(
+        operator_prompt,
+        _AGENT_DECISION_MARKERS,
+    ):
+        return ""
+    raw = request.execution_mode.strip().lower().replace("-", "_")
+    if raw == "agent_task":
+        raw = "agent"
+    elif raw == "team":
+        raw = "agent_team"
+    strategy_class = request.strategy_class.strip().lower().replace("-", "_")
+    main_py = request.files.get("main.py", "")
+    uses_agent_task = "StrategyAgentTask" in main_py
+    if raw in {"", "agent"} and strategy_class in {"agent", "agent_task"}:
+        if not main_py or uses_agent_task:
+            return ""
+    if raw == "agent" and uses_agent_task:
+        return ""
+    if raw == "agent_team" and strategy_class in {"agent", "agent_team"}:
+        if not main_py or uses_agent_task:
+            return ""
+    return (
+        "strategy requests that ask an Agent to decide, judge, arbitrate, "
+        "check news, size risk, or choose skip/error paths must be packaged "
+        "as an Agent-task strategy: set `strategy_class` to `agent` with "
+        "`execution_mode=agent` for a single-agent decision workflow, or use "
+        "`execution_mode=agent_team` when the request requires a coordinated "
+        "Agent Team. `files.main.py` must return "
+        "`StrategyAgentTask.dispatch(...)` when the Agent should decide, "
+        "`StrategyAgentTask.skip(...)` when preconditions are not met, or "
+        "`StrategyAgentTask.error(...)` for unrecoverable data errors. Do "
+        "not submit script-mode `ctx.result.*` logic for an Agent-decision "
+        "request."
+    )
+
+
+_PLACEHOLDER_BACKTEST_MARKERS = (
+    "示例输出",
+    "示例框架",
+    "模拟回测结果",
+    "模拟交易",
+    "实际应",
+    "placeholder",
+    "demo framework",
+    "synthetic",
+    "fake candle",
+    "random price",
+)
+
+
+def _sdk_files_placeholder_error(request: StrategyGenerationRequest) -> str:
+    if not _request_mentions_hard_to_replay(request):
+        return ""
+    for path, content in request.files.items():
+        rel = str(path).replace("\\", "/").lower()
+        if not rel.startswith("backtests/"):
+            continue
+        lowered = str(content or "").lower()
+        for marker in _PLACEHOLDER_BACKTEST_MARKERS:
+            if marker.lower() in lowered:
+                return (
+                    "wallet/on-chain/meme/prediction-market strategy backtests cannot be "
+                    f"placeholder or simulated examples ({marker!r} found in "
+                    f"{path}). Use real wallet/on-chain evidence already "
+                    "gathered in the conversation, emit a minimal "
+                    "NERYA_FREEFORM_RESULT_JSON payload with equity_curve and "
+                    "trades, and state limitations explicitly."
+                )
+    return ""
+
+
 def _read_proposal_files(
     paths,
     proposal_id: str,
@@ -424,6 +841,18 @@ def _read_proposal_files(
     return read_proposal_strategy_files(paths, proposal_id)
 
 
+_FREEFORM_BACKTEST_KINDS = {
+    "freeform_backtest",
+    "custom_backtest",
+    "research_backtest",
+}
+_NONSTANDARD_BACKTEST_KINDS = {
+    "custom_replay",
+    "event_replay",
+    *_FREEFORM_BACKTEST_KINDS,
+}
+
+
 def _proposal_backtest_artifacts(paths, proposal_id: str, strategy_id: str | None) -> list[dict[str, Any]]:
     if not proposal_id or not strategy_id:
         return []
@@ -436,6 +865,8 @@ def _proposal_backtest_artifacts(paths, proposal_id: str, strategy_id: str | Non
             metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         except Exception:
             metrics = {}
+        if str(metrics.get("backtest_kind") or "") in _NONSTANDARD_BACKTEST_KINDS:
+            continue
         out.append({
             "out_dir": str(metrics_path.parent),
             "metrics_path": str(metrics_path),
@@ -447,6 +878,7 @@ def _proposal_backtest_artifacts(paths, proposal_id: str, strategy_id: str | Non
             "total_trades": metrics.get("total_trades"),
             "backtest_days": metrics.get("backtest_days"),
             "coverage_ok": metrics.get("coverage_ok"),
+            "recommended_coverage_ok": metrics.get("recommended_coverage_ok"),
             "coverage_message": metrics.get("coverage_message"),
         })
     return out
@@ -469,11 +901,199 @@ _MEME_OR_ONCHAIN_MARKERS = (
     "x_agent",
     "goat",
     "dex",
-    "swap",
+    "dexscreener",
+    "decentralized exchange",
+    "decentralised exchange",
+    "swap history",
+    "swap_history",
+    "token swap",
+    "wallet swap",
     "solana:",
     "base:",
     "ethereum:",
 )
+
+_TOKEN_MATCH_ONLY_MARKERS = frozenset({"dex"})
+
+_PREDICTION_MARKET_MARKERS = (
+    "polymarket",
+    "prediction market",
+    "prediction_market",
+    "clob",
+)
+
+_HARD_TO_REPLAY_MARKERS = (
+    *_MEME_OR_ONCHAIN_MARKERS,
+    *_PREDICTION_MARKET_MARKERS,
+)
+
+_CUSTOM_SIGNAL_MARKERS = (
+    "macd",
+    "rsi",
+    "bollinger",
+    "布林",
+    "donchian",
+    "atr",
+    "kdj",
+    "fibonacci",
+    "支撑",
+    "阻力",
+    "support",
+    "resistance",
+    "funding",
+    "资金费率",
+    "cvd",
+    "order flow",
+    "订单流",
+)
+
+_CUSTOM_SIGNAL_TERM_REQUIREMENTS = (
+    (
+        "rsi",
+        ("rsi", "relative strength index", "相对强弱"),
+        ("rsi", "relative strength index", "相对强弱"),
+    ),
+    (
+        "macd",
+        ("macd",),
+        ("macd",),
+    ),
+    (
+        "bollinger",
+        ("bollinger", "布林"),
+        ("bollinger", "bbands", "布林"),
+    ),
+    (
+        "donchian",
+        ("donchian",),
+        ("donchian",),
+    ),
+    (
+        "atr",
+        ("atr", "average true range"),
+        ("atr", "average true range"),
+    ),
+    (
+        "kdj",
+        ("kdj",),
+        ("kdj",),
+    ),
+    (
+        "fibonacci",
+        ("fibonacci", "fib"),
+        ("fibonacci", "fib"),
+    ),
+    (
+        "support_resistance",
+        ("support", "resistance", "支撑", "阻力"),
+        ("support", "resistance", "支撑", "阻力"),
+    ),
+    (
+        "funding_rate",
+        ("funding", "funding rate", "资金费率"),
+        ("funding", "funding_rate", "funding rate", "资金费率"),
+    ),
+    (
+        "order_flow",
+        ("cvd", "order flow", "订单流", "大单流向", "大单", "whale flow"),
+        (
+            "cvd",
+            "order_flow",
+            "order flow",
+            "订单流",
+            "大单流向",
+            "large_trade",
+            "large trade",
+            "whale",
+            "taker",
+        ),
+    ),
+)
+
+_AGENT_DECISION_MARKERS = (
+    "agent",
+    "agentic",
+    "仲裁",
+    "决策",
+    "判断",
+    "决定",
+    "新闻",
+    "news",
+    "news_social",
+    "portfolio",
+    "仓位",
+    "风险预算",
+    "skip",
+    "error",
+)
+_NEWS_CONTEXT_MARKERS = (
+    "news",
+    "headline",
+    "headlines",
+    "catalyst",
+    "catalysts",
+    "social",
+    "sentiment",
+    "macro event",
+    "market event",
+    "新闻",
+    "消息",
+    "事件",
+    "大宗事件",
+    "舆情",
+    "情绪",
+)
+_CRYPTO_CONTEXT_MARKERS = (
+    "btc",
+    "eth",
+    "sol",
+    "bnb",
+    "usdt",
+    "crypto",
+    "defi",
+    "dex",
+    "链上",
+    "加密",
+)
+_SOCIAL_CONTEXT_MARKERS = (
+    "social",
+    "sentiment",
+    "x/twitter",
+    "twitter",
+    "reddit",
+    "舆情",
+    "社媒",
+    "情绪",
+)
+
+
+def _with_inferred_news_sources(
+    request: StrategyGenerationRequest,
+    *,
+    operator_prompt: str,
+) -> StrategyGenerationRequest:
+    if request.news_sources:
+        return request
+    text = " ".join(
+        str(part or "")
+        for part in (
+            operator_prompt,
+            request.prompt,
+            request.title,
+            request.description,
+            " ".join(request.markets),
+        )
+    ).lower()
+    if not any(marker in text for marker in _NEWS_CONTEXT_MARKERS):
+        return request
+    sources: list[str] = []
+    if any(marker in text for marker in _CRYPTO_CONTEXT_MARKERS):
+        sources.append("crypto")
+    else:
+        sources.append("news")
+    if any(marker in text for marker in _SOCIAL_CONTEXT_MARKERS):
+        sources.append("social")
+    return replace(request, news_sources=tuple(dict.fromkeys(sources)))
 
 
 def _proposal_is_meme_or_onchain(
@@ -490,7 +1110,53 @@ def _proposal_is_meme_or_onchain(
             files.get("main.py", ""),
         )
     ).lower()
-    return any(marker in body for marker in _MEME_OR_ONCHAIN_MARKERS)
+    return _text_contains_marker(body, _MEME_OR_ONCHAIN_MARKERS)
+
+
+def _proposal_generic_onchain_markets(files: dict[str, str]) -> list[str]:
+    try:
+        data = yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}
+    except Exception:
+        data = {}
+    markets = data.get("markets") if isinstance(data, dict) else None
+    if isinstance(markets, str):
+        values = [markets]
+    elif isinstance(markets, list):
+        values = [str(item) for item in markets]
+    else:
+        values = []
+    generic: list[str] = []
+    for market in values:
+        parts = str(market or "").split(":")
+        venue = parts[0].upper() if parts else ""
+        if venue in {"XAGT_ONCHAIN", "OKX_ONCHAIN", "BITGET_ONCHAIN", "ONCHAIN"} and len(parts) == 2:
+            generic.append(market)
+    return generic
+
+
+def _target_has_freeform_backtest_script(
+    paths,
+    *,
+    strategy_id: str | None,
+    proposal_id: str | None,
+) -> bool:
+    try:
+        from ...skills.builtin.backtest.scripts.freeform_run import (
+            has_freeform_backtest_script,
+        )
+
+        if proposal_id:
+            sid, _files = _read_proposal_files(paths, proposal_id)
+            if not sid:
+                return False
+            root = paths.evolution / "proposals" / proposal_id / "after" / "strategies" / sid
+        elif strategy_id:
+            root = paths.strategy(strategy_id)
+        else:
+            return False
+        return has_freeform_backtest_script(root)
+    except Exception:
+        return False
 
 
 def _read_json_file(path) -> dict[str, Any]:
@@ -499,6 +1165,112 @@ def _read_json_file(path) -> dict[str, Any]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _artifact_exists(path: Any) -> bool:
+    try:
+        return bool(path) and bool(path.exists())
+    except Exception:
+        return False
+
+
+def _custom_replay_result_summary(
+    *,
+    kind: str,
+    result_path: Any = None,
+    report_path: Any = None,
+    out_dir: Any = None,
+    metrics_path: Any = None,
+    equity_path: Any = None,
+    trades_path: Any = None,
+    chart_path: Any = None,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = result or {}
+    results = payload.get("results")
+    if not isinstance(results, list):
+        results = []
+    equity_curve = payload.get("equity_curve")
+    if not isinstance(equity_curve, list):
+        equity_curve = []
+    trades = payload.get("trades")
+    if not isinstance(trades, list):
+        trades = []
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    buy_count = int(summary.get("buy") or 0) if summary else 0
+    watch_count = int(summary.get("watch") or 0) if summary else 0
+    if not summary and results:
+        buy_count = sum(1 for row in results if str(row.get("decision") or "").upper() == "BUY")
+        watch_count = sum(1 for row in results if str(row.get("decision") or "").upper() == "WATCH")
+    decision_sample = []
+    for row in results[:5]:
+        if not isinstance(row, dict):
+            continue
+        decision_sample.append(
+            {
+                "symbol": row.get("symbol"),
+                "decision": row.get("decision"),
+                "score": row.get("score"),
+                "risk_level": row.get("risk_level"),
+                "liquidity_usd": row.get("liquidity_usd"),
+                "top10_hold_pct": row.get("top10_hold_pct"),
+                "unique_traders": row.get("unique_traders"),
+                "smart_money_inflow_usd": row.get("smart_money_inflow_usd"),
+                "volume_24h_usd": row.get("volume_24h_usd"),
+                "reason": row.get("reason"),
+            }
+        )
+    events_seen = payload.get("events_seen")
+    if events_seen is None and results:
+        events_seen = len(results)
+    signals = payload.get("signals")
+    if signals is None:
+        signals = buy_count + watch_count
+    simulated_trades = payload.get("simulated_trades")
+    if simulated_trades is None:
+        simulated_trades = payload.get("total_trades")
+    if simulated_trades is None:
+        simulated_trades = len(trades) if trades else buy_count
+    equity_points = payload.get("equity_points")
+    if equity_points is None:
+        equity_points = len(equity_curve) if equity_curve else None
+    has_equity_curve = (
+        bool(payload.get("has_equity_curve"))
+        or bool(equity_points)
+        or _artifact_exists(equity_path)
+    )
+    has_trade_details = (
+        bool(payload.get("has_trade_details"))
+        or _artifact_exists(trades_path)
+        or isinstance(payload.get("trades"), list)
+    )
+    limitations = payload.get("limitations") or []
+    return {
+        "kind": kind,
+        "result_path": str(result_path) if result_path else None,
+        "report_path": str(report_path) if report_path else None,
+        "out_dir": str(out_dir) if out_dir else None,
+        "metrics_path": str(metrics_path) if metrics_path else None,
+        "equity_path": str(equity_path) if equity_path else None,
+        "trades_path": str(trades_path) if trades_path else None,
+        "chart_path": str(chart_path) if chart_path else None,
+        "ok": bool(payload.get("ok")) or bool(results) or bool(has_equity_curve and has_trade_details),
+        "replay_kind": payload.get("replay_kind") or payload.get("data_source"),
+        "window": payload.get("window"),
+        "events_seen": events_seen,
+        "signals": signals,
+        "simulated_trades": simulated_trades,
+        "total_trades": payload.get("total_trades"),
+        "equity_points": equity_points,
+        "has_equity_curve": has_equity_curve,
+        "has_trade_details": has_trade_details,
+        "total_return_pct": payload.get("total_return_pct"),
+        "max_drawdown_pct": payload.get("max_drawdown_pct"),
+        "final_equity_usd": payload.get("final_equity_usd"),
+        "summary": summary,
+        "decision_sample": decision_sample,
+        "limitations": limitations if isinstance(limitations, list) else [limitations],
+    }
 
 
 def _proposal_nonstandard_backtest_artifacts(
@@ -521,10 +1293,13 @@ def _proposal_nonstandard_backtest_artifacts(
 
     out: list[dict[str, Any]] = []
     patterns = (
-        ("custom_replay", "custom_replay_result.json", "custom_replay_report.md"),
-        ("event_replay", "event_replay_result.json", "event_replay_report.md"),
+        ("custom_replay", "custom_replay_result.json", "custom_replay_report"),
+        ("event_replay", "event_replay_result.json", "event_replay_report"),
+        ("freeform_backtest", "freeform_backtest_result.json", "freeform_backtest_report"),
+        ("custom_backtest", "custom_backtest_result.json", "custom_backtest_report"),
+        ("research_backtest", "research_backtest_result.json", "research_backtest_report"),
     )
-    for kind, result_name, report_name in patterns:
+    for kind, result_name, report_stem in patterns:
         seen: set[str] = set()
         for result_path in sorted(root.rglob(result_name)):
             key = str(result_path)
@@ -532,30 +1307,64 @@ def _proposal_nonstandard_backtest_artifacts(
                 continue
             seen.add(key)
             result = _read_json_file(result_path)
-            report_path = result_path.with_name(report_name)
+            report_path = result_path.with_name(f"{report_stem}.md")
+            metrics_path = result_path.parent / "metrics.json"
+            equity_path = result_path.parent / "equity.csv"
+            trades_path = result_path.parent / "trades.csv"
+            chart_path = result_path.parent / "chart.json"
             out.append(
-                {
-                    "kind": kind,
-                    "result_path": str(result_path),
-                    "report_path": str(report_path) if report_path.exists() else None,
-                    "ok": bool(result.get("ok")),
-                    "replay_kind": result.get("replay_kind"),
-                    "window": result.get("window"),
-                    "events_seen": result.get("events_seen"),
-                    "signals": result.get("signals"),
-                    "simulated_trades": result.get("simulated_trades"),
-                    "limitations": result.get("limitations") or [],
-                }
+                _custom_replay_result_summary(
+                    kind=kind,
+                    result_path=result_path,
+                    report_path=report_path if report_path.exists() else None,
+                    out_dir=result_path.parent,
+                    metrics_path=metrics_path if metrics_path.exists() else None,
+                    equity_path=equity_path if equity_path.exists() else None,
+                    trades_path=trades_path if trades_path.exists() else None,
+                    chart_path=chart_path if chart_path.exists() else None,
+                    result=result,
+                )
+            )
+        for report_path in sorted(root.rglob(f"{report_stem}.json")):
+            key = str(report_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            report = _read_json_file(report_path)
+            metrics_path = report_path.parent / "metrics.json"
+            equity_path = report_path.parent / "equity.csv"
+            trades_path = report_path.parent / "trades.csv"
+            chart_path = report_path.parent / "chart.json"
+            out.append(
+                _custom_replay_result_summary(
+                    kind=kind,
+                    report_path=report_path,
+                    out_dir=report_path.parent,
+                    metrics_path=metrics_path if metrics_path.exists() else None,
+                    equity_path=equity_path if equity_path.exists() else None,
+                    trades_path=trades_path if trades_path.exists() else None,
+                    chart_path=chart_path if chart_path.exists() else None,
+                    result=report,
+                )
             )
     return out
 
 
 def _qualifying_standard_backtests(backtests: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [bt for bt in backtests if bt.get("coverage_ok") is not False]
+    return list(backtests)
 
 
 def _qualifying_nonstandard_backtests(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [artifact for artifact in artifacts if bool(artifact.get("ok"))]
+    out: list[dict[str, Any]] = []
+    for artifact in artifacts:
+        if not bool(artifact.get("ok")):
+            continue
+        if artifact.get("kind") in _FREEFORM_BACKTEST_KINDS and not (
+            artifact.get("has_equity_curve") and artifact.get("has_trade_details")
+        ):
+            continue
+        out.append(artifact)
+    return out
 
 
 def _proposal_backtest_status(
@@ -591,7 +1400,7 @@ def _proposal_backtest_status(
         "approval_note": waiver_note if waiver_ok else "",
         "risk": (
             "standard_backtest_missing"
-            if accepted_kind in {"custom_replay", "event_replay", "backtest_waiver"}
+            if accepted_kind in {*_NONSTANDARD_BACKTEST_KINDS, "backtest_waiver"}
             else None
         ),
     }
@@ -623,13 +1432,83 @@ def _proposal_strategy_paths(paths, proposal_id: str | None, strategy_id: str | 
     if not proposal_id or not strategy_id:
         return {}
     root = paths.evolution / "proposals" / proposal_id / "after" / "strategies" / strategy_id
+
+    def _rel(p) -> str:
+        # Workspace-relative: that is the contract read_file/list_dir expect,
+        # and it keeps host filesystem layout (absolute C:\... paths) out of
+        # tool results that get quoted verbatim in operator-facing replies.
+        try:
+            return p.relative_to(paths.root).as_posix()
+        except ValueError:
+            return str(p)
+
     return {
-        "strategy_root": str(root),
-        "strategy_yml_path": str(root / "strategy.yml"),
-        "strategy_md_path": str(root / "strategy.md"),
-        "main_path": str(root / "main.py"),
-        "tests_path": str(root / "tests"),
+        "strategy_root": _rel(root),
+        "strategy_yml_path": _rel(root / "strategy.yml"),
+        "strategy_md_path": _rel(root / "strategy.md"),
+        "main_path": _rel(root / "main.py"),
+        "tests_path": _rel(root / "tests"),
     }
+
+
+def _normalised_strategy_key(value: str | None) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _matching_proposal_strategy_candidates(paths, strategy_id: str) -> list[dict[str, Any]]:
+    target = _normalised_strategy_key(strategy_id)
+    if not target:
+        return []
+    matches: list[dict[str, Any]] = []
+    try:
+        proposals = list_proposals(paths)
+    except Exception:
+        return []
+    for proposal in proposals:
+        root = proposal.path / "after" / "strategies"
+        if not root.exists():
+            continue
+        for strategy_dir in root.iterdir():
+            if not strategy_dir.is_dir():
+                continue
+            candidate_id = strategy_dir.name
+            if _normalised_strategy_key(candidate_id) != target:
+                continue
+            matches.append(
+                {
+                    "proposal_id": proposal.id,
+                    "strategy_id": candidate_id,
+                    "state": proposal.state,
+                    "summary": proposal.summary,
+                    "ts": proposal.ts,
+                    "path": str(strategy_dir),
+                }
+            )
+    return sorted(matches, key=lambda item: str(item.get("ts") or ""), reverse=True)
+
+
+def _promoted_strategy_has_placeholder_market(paths, strategy_id: str) -> bool:
+    strategy_yml = paths.strategies / strategy_id / "strategy.yml"
+    if not strategy_yml.exists():
+        return True
+    try:
+        data = yaml_io.load(strategy_yml, default={}) or {}
+    except Exception:
+        return False
+    markets = data.get("markets")
+    if not markets:
+        selection = data.get("selection") if isinstance(data.get("selection"), dict) else {}
+        markets = selection.get("markets")
+    if isinstance(markets, str):
+        market_values = [markets]
+    elif isinstance(markets, list):
+        market_values = [str(item) for item in markets]
+    else:
+        market_values = []
+    if not market_values:
+        return True
+    joined = " ".join(market_values).lower()
+    return any(marker in joined for marker in (":unknown", ":scan", "unknown"))
 
 
 def _proposal_backtest_next_action(proposal_id: str) -> dict[str, Any]:
@@ -651,11 +1530,68 @@ def _proposal_backtest_next_action(proposal_id: str) -> dict[str, Any]:
 def strategy_generate_proposal_handler(
     call: ToolCall, *, config: Config
 ) -> ToolResult:
-    args = call.arguments or {}
+    args = _normalise_raw_strategy_args(call.arguments or {})
     try:
         request = _request_from_args(args)
     except Exception as exc:  # type errors etc.
         return _usage_error(call, f"invalid request: {type(exc).__name__}: {exc}")
+    metadata = call.metadata if isinstance(call.metadata, dict) else {}
+    operator_prompt = str(metadata.get("original_user_prompt") or "")
+    request = _normalise_model_invented_strategy_scope(
+        request,
+        operator_prompt=operator_prompt,
+    )
+    request = _with_inferred_news_sources(
+        request,
+        operator_prompt=operator_prompt,
+    )
+    if _requires_explicit_sdk_files(request):
+        if _raw_payload_truncated_before_sdk_files(args):
+            return _usage_error(call, _truncated_sdk_files_payload_error())
+        return _usage_error(
+            call,
+            (
+                "wallet/on-chain/custom-data or prediction-market strategy "
+                "proposals must include "
+                "`files.main.py` and `files.strategy.md` authored with the "
+                "Nerya Strategy SDK. The proposal tool only packages and "
+                "validates that code; it must not fall back to the default "
+                "trend/scalping generator for this scope."
+            ),
+        )
+    if _requires_custom_signal_main_py(request, operator_prompt=operator_prompt):
+        return _usage_error(
+            call,
+            (
+                "strategy requests with named custom signal logic must include "
+                "`files.main.py` authored with the Nerya Strategy SDK. Draft "
+                "the indicator/trigger logic directly in "
+                "strategy_generate_proposal.files instead of generating a stock "
+                "template and editing proposal files afterwards."
+            ),
+            recovery_hint={
+                "action": "retry_with_required_arguments",
+                "tool_name": "strategy_generate_proposal",
+                "required_arguments": ["files.main.py"],
+                "avoid_arguments": ["files"],
+                "reason": "custom_signal_logic_requires_sdk_file",
+            },
+        )
+    agent_contract_error = _agent_decision_contract_error(
+        request,
+        operator_prompt=operator_prompt,
+    )
+    if agent_contract_error:
+        return _usage_error(call, agent_contract_error)
+    signal_coverage_error = _custom_signal_main_py_coverage_error(
+        request,
+        operator_prompt=operator_prompt,
+    )
+    if signal_coverage_error:
+        return _usage_error(call, signal_coverage_error)
+    placeholder_error = _sdk_files_placeholder_error(request)
+    if placeholder_error:
+        return _usage_error(call, placeholder_error)
 
     do_validate = bool(args.get("validate", True))
     try:
@@ -673,7 +1609,11 @@ def strategy_generate_proposal_handler(
         )
 
     payload = {
-        "strategy_id": request.strategy_id,
+        "strategy_id": result.request.strategy_id,
+        "strategy_class": result.request.strategy_class,
+        "execution_mode": result.files.get("strategy.yml")
+        and _manifest_execution_mode(result.files["strategy.yml"])
+        or result.request.execution_mode,
         "proposal_id": result.proposal.id if result.proposal else None,
         "validation": (
             result.validation.asdict() if result.validation is not None else None
@@ -727,6 +1667,30 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
     args = call.arguments or {}
     strategy_id = (args.get("strategy_id") or "").strip() or None
     proposal_id = (args.get("proposal_id") or "").strip() or None
+    if strategy_id and not proposal_id:
+        matching_proposals = _matching_proposal_strategy_candidates(config.paths, strategy_id)
+        if matching_proposals and _promoted_strategy_has_placeholder_market(
+            config.paths,
+            strategy_id,
+        ):
+            return ToolResult.from_json(
+                tool_use_id=call.id,
+                name=call.name,
+                data={
+                    "ok": False,
+                    "reason": "proposal_id_required_for_matching_inflight_proposal",
+                    "strategy_id": strategy_id,
+                    "message": (
+                        "This promoted strategy package has placeholder or "
+                        "missing markets, while matching in-flight strategy "
+                        "proposals exist. If the operator named a prp_* "
+                        "proposal id, rerun this review with that exact "
+                        "proposal_id instead of this similarly named "
+                        "promoted strategy_id."
+                    ),
+                    "matching_proposals": matching_proposals[:10],
+                },
+            )
     try:
         from ...skills.builtin.backtest.scripts.backtest_run import (
             run_strategy_backtest,
@@ -734,35 +1698,71 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
         from ...skills.builtin.backtest.scripts.data_cache import (
             NoHistoricalDataError,
         )
+        from ...skills.builtin.backtest.scripts.freeform_run import (
+            run_freeform_backtest,
+        )
 
-        result = run_strategy_backtest(
+        if _target_has_freeform_backtest_script(
+            config.paths,
             strategy_id=strategy_id,
             proposal_id=proposal_id,
-            preset=str(args.get("preset") or "default"),
-            config_path=(args.get("config_path") or None),
-            workspace=config.paths.root,
-            allow_mock=bool(args.get("allow_mock", False)),
-        )
+        ):
+            result = run_freeform_backtest(
+                strategy_id=strategy_id,
+                proposal_id=proposal_id,
+                workspace=config.paths.root,
+            )
+        else:
+            result = run_strategy_backtest(
+                strategy_id=strategy_id,
+                proposal_id=proposal_id,
+                preset=str(args.get("preset") or "default"),
+                config_path=(args.get("config_path") or None),
+                workspace=config.paths.root,
+                allow_mock=bool(args.get("allow_mock", False)),
+            )
     except NoHistoricalDataError as exc:
         next_required_action: dict[str, Any] = {
             "type": "report_data_gap",
             "message": (
                 "No durable historical candles were available for the "
-                "requested market/timeframe. Do not retry with mock, "
-                "synthetic, random, or placeholder data; either choose "
-                "a market with real historical candles or ask the "
-                "operator for a data source."
+                "requested market/timeframe or fallback timeframes. Do "
+                "not retry with mock, synthetic, random, or placeholder "
+                "data; either choose a market with real historical "
+                "candles or ask the operator for a data source."
             ),
         }
         if proposal_id:
             try:
                 sid, files = _read_proposal_files(config.paths, proposal_id)
-                if _proposal_is_meme_or_onchain(sid or strategy_id, files):
+                generic_markets = _proposal_generic_onchain_markets(files)
+                if generic_markets:
+                    next_required_action = {
+                        "type": "repair_concrete_market_and_rerun",
+                        "message": (
+                            "The proposal used a generic on-chain universe "
+                            f"market ({', '.join(generic_markets)}) as the "
+                            "manifest market. That is not proof that standard "
+                            "OHLCV is unavailable. If market_data already "
+                            "returned a concrete chain:token market, repair "
+                            "the proposal so strategy.yml markets uses that "
+                            "exact market and rerun strategy_backtest. If no "
+                            "single token was selected, report this as a "
+                            "generic scanner requiring custom/event replay "
+                            "rather than a standard OHLCV result."
+                        ),
+                        "repair_hint": (
+                            "Use the exact concrete market from the successful "
+                            "market_data result, e.g. XAGT_ONCHAIN:solana:<token_contract>."
+                        ),
+                    }
+                elif _proposal_is_meme_or_onchain(sid or strategy_id, files):
                     next_required_action = {
                         "type": "custom_replay_or_operator_approval",
                         "message": (
-                            "Standard OHLCV history is unavailable or not "
-                            "representative for this meme/on-chain strategy. "
+                            "Standard OHLCV history was unavailable across "
+                            "the attempted timeframes or not representative "
+                            "for this meme/on-chain strategy. "
                             "Build a custom/event replay from real wallet, "
                             "DEX, holder, or trade history when possible. If "
                             "no durable replay source exists, promotion "
@@ -798,10 +1798,66 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
         return _execution_error(
             call, f"backtest failed: {type(exc).__name__}: {exc}"
         )
+    model_result = _model_facing_backtest_result(result)
+    if proposal_id:
+        target_sid = strategy_id or str(result.get("strategy_id") or "").strip() or None
+        files: dict[str, str] = {}
+        if not target_sid:
+            try:
+                target_sid, files = _read_proposal_files(config.paths, proposal_id)
+            except Exception:
+                target_sid = None
+        elif target_sid:
+            try:
+                _, files = _read_proposal_files(config.paths, proposal_id)
+            except Exception:
+                files = {}
+        nonstandard_backtests = _proposal_nonstandard_backtest_artifacts(
+            config.paths,
+            proposal_id,
+            target_sid,
+        )
+        model_result["nonstandard_backtests"] = nonstandard_backtests
+        is_meme_or_onchain = _proposal_is_meme_or_onchain(target_sid, files)
+        if is_meme_or_onchain:
+            paper_review_allowed = bool(nonstandard_backtests) or bool(result.get("ok"))
+            result_kind = str(result.get("kind") or "")
+            if result_kind in _FREEFORM_BACKTEST_KINDS:
+                paper_review_basis = "freeform_sdk_backtest"
+            elif nonstandard_backtests and result.get("ok"):
+                paper_review_basis = "real_kline_standard_backtest_plus_custom_event_replay"
+            elif nonstandard_backtests:
+                paper_review_basis = "custom_event_replay"
+            else:
+                paper_review_basis = "real_standard_backtest"
+            model_result["paper_review_allowed"] = paper_review_allowed
+            model_result["paper_review_basis"] = paper_review_basis
+            model_result["shadow_live_requires_user_approval"] = True
+            model_result["paper_review_note"] = (
+                "If paper_review_allowed is true, do not report paper review "
+                "as blocked solely because the standard OHLCV verdict is "
+                "FAIL/no_trades or because the evidence came from a freeform "
+                "SDK backtest. Preserve the meme smart-money thesis and cite "
+                "the custom/freeform replay evidence; shadow/live still "
+                "requires explicit operator approval."
+            )
+            model_result["review_gate"] = {
+                "paper_review_allowed": paper_review_allowed,
+                "paper_review_basis": paper_review_basis,
+                "shadow_live_requires_user_approval": True,
+                "message": (
+                    "For meme/on-chain smart-money strategies, a standard "
+                    "OHLCV replay with no trades can be an engine fit limit, "
+                    "not a reason to rewrite the thesis into trend/scalping. "
+                    "Use real K-line coverage or freeform SDK custom/event "
+                    "replay evidence for paper review; shadow/live "
+                    "progression still requires explicit operator approval."
+                ),
+            }
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
-        data=_model_facing_backtest_result(result),
+        data=model_result,
     )
 
 
@@ -910,7 +1966,7 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
                             "promotion. For meme/on-chain strategies with no "
                             "representative OHLCV history, use "
                             "backtest_policy=flexible_meme and provide a real "
-                            "custom/event replay artifact or explicit "
+                            "custom/freeform/event replay artifact or explicit "
                             "operator approval."
                         ),
                         "validation": validation.asdict(),
@@ -948,10 +2004,11 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
                         "strategy_id": sid,
                         "reason": "operator_approval_required_for_backtest_waiver",
                         "message": (
-                            "No qualifying standard backtest or custom/event "
-                            "replay artifact was found. The strategy can still "
-                            "be promoted only after the operator explicitly "
-                            "approves a standard-backtest waiver."
+                            "No qualifying standard backtest or "
+                            "custom/freeform/event replay artifact was found. "
+                            "The strategy can still be promoted only after the "
+                            "operator explicitly approves a standard-backtest "
+                            "waiver."
                         ),
                         "validation": validation.asdict(),
                         "backtest_status": backtest_status,
@@ -1035,8 +2092,7 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
 
     evidence_record: dict[str, Any] | None = None
     if bool(outcome.get("ok")) and sid and accepted_kind in {
-        "custom_replay",
-        "event_replay",
+        *_NONSTANDARD_BACKTEST_KINDS,
         "backtest_waiver",
     }:
         try:
@@ -1051,9 +2107,9 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
                 "is_meme_or_onchain": is_meme_or_onchain,
                 "approval_note": approval_note if accepted_kind == "backtest_waiver" else "",
             }
-            if accepted_kind in {"custom_replay", "event_replay"}:
+            if accepted_kind in _NONSTANDARD_BACKTEST_KINDS:
                 replay = _qualifying_nonstandard_backtests(nonstandard_backtests)[0]
-                artifact_ref = replay.get("result_path")
+                artifact_ref = replay.get("result_path") or replay.get("report_path")
                 payload["replay"] = replay
             evidence = EvidenceStore(paths).record(
                 strategy_id=sid,

@@ -102,6 +102,7 @@ def microcompact(
     bulk_tools: frozenset[str] = DEFAULT_BULK_TOOLS,
     keep_recent_results: int = 3,
     tool_use_lookup: dict[str, str] | None = None,
+    treat_all_tools_as_bulk: bool = False,
 ) -> tuple[list[dict[str, Any]], MicrocompactReport]:
     """Truncate bulky tool results in-place (returns a new list).
 
@@ -130,6 +131,11 @@ def microcompact(
         already maintains this mapping, supply it for a precise
         ``bulk_tools`` filter; otherwise we resort to scanning the
         prior messages for matching ``tool_use`` blocks.
+    treat_all_tools_as_bulk:
+        Emergency mode used by reactive (context-overflow) compaction:
+        ignore the ``bulk_tools`` allowlist and consider *every*
+        non-error tool result eligible for truncation. Error results
+        and the ``keep_recent_results`` tail are still preserved.
     """
 
     report = MicrocompactReport()
@@ -181,7 +187,7 @@ def microcompact(
                 continue
             tid = str(c.get("tool_use_id") or "")
             name = tool_use_lookup.get(tid, "")
-            if name and name not in bulk_tools:
+            if not treat_all_tools_as_bulk and name and name not in bulk_tools:
                 new_content.append(c)
                 continue
             inner = c.get("content")

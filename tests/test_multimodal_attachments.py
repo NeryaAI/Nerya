@@ -156,6 +156,42 @@ def test_openai_and_gemini_render_user_image_parts(tmp_path):
     assert any("inlineData" in part for part in gemini_parts)
 
 
+def test_openai_render_messages_merges_transcript_system_messages():
+    messages = [
+        {"role": "system", "content": "compaction summary"},
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "resume instructions"}],
+        },
+        {"role": "user", "content": "continue"},
+    ]
+
+    rendered = _openai_render_messages(system="base system", messages=messages)
+
+    assert [m["role"] for m in rendered].count("system") == 1
+    assert rendered[0] == {
+        "role": "system",
+        "content": "base system\n\ncompaction summary\n\nresume instructions",
+    }
+    assert rendered[1] == {"role": "user", "content": "continue"}
+
+
+def test_openai_render_messages_drops_provider_invalid_empty_assistant():
+    messages = [
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "scratch"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": ""}]},
+        {"role": "user", "content": "continue"},
+    ]
+
+    rendered = _openai_render_messages(system="", messages=messages)
+
+    assert rendered == [
+        {"role": "user", "content": "start"},
+        {"role": "user", "content": "continue"},
+    ]
+
+
 def test_model_returned_images_parse_as_attachment_blocks():
     openai_blocks, _ = _openai_parse_response(
         {
@@ -200,3 +236,74 @@ def test_model_returned_images_parse_as_attachment_blocks():
     )
     assert gemini_blocks[0]["type"] == "attachment"
     assert gemini_blocks[0]["data_url"] == "data:image/png;base64,ZmFrZQ=="
+
+
+def test_openai_parse_response_splits_visible_think_tags_from_text():
+    blocks, stop_reason = _openai_parse_response(
+        {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": "<think>\ninternal trace\n</think>\n最终答案",
+                    },
+                }
+            ]
+        }
+    )
+
+    assert stop_reason == "end_turn"
+    assert blocks == [
+        {"type": "thinking", "thinking": "internal trace"},
+        {"type": "text", "text": "最终答案"},
+    ]
+
+
+def test_openai_parse_response_treats_truncated_visible_think_as_thinking_only():
+    blocks, stop_reason = _openai_parse_response(
+        {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": "<think>\nunfinished trace"},
+                }
+            ]
+        }
+    )
+
+    assert stop_reason == "max_tokens"
+    assert blocks == [{"type": "thinking", "thinking": "unfinished trace"}]
+
+
+def test_openai_parse_response_preserves_length_for_truncated_tool_calls():
+    blocks, stop_reason = _openai_parse_response(
+        {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_truncated_team",
+                                "type": "function",
+                                "function": {
+                                    "name": "team_run",
+                                    "arguments": '{"task":"research","roles": ',
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    )
+
+    assert stop_reason == "max_tokens"
+    assert blocks == [
+        {
+            "type": "tool_use",
+            "id": "call_truncated_team",
+            "name": "team_run",
+            "input": {"_raw": '{"task":"research","roles": '},
+        }
+    ]

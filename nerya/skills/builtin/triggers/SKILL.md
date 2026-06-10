@@ -14,6 +14,10 @@ Use when work should happen later or in response to an event.
 
 ## Flow
 
+For operator-facing recurring reports, background work, or non-strategy
+agent/script jobs, use the `tasks` skill first. Use this skill for lower-level
+trigger routes, event hooks, and condition watchers.
+
 CLASSIFY trigger: schedule, event, or condition watcher.
 DEFINE target, payload, idempotency key, cooldown, TTL, and owner.
 DRY-RUN or explain routing before activation.

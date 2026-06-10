@@ -53,8 +53,8 @@ def send(outbox_messages: Path, message: dict[str, Any], *,
     message["channel"] = "telegram"
     cfg = channel_cfg or {}
     token_ref = cfg.get("bot_token_ref") or cfg.get("token_ref")
-    chat_id = cfg.get("chat_id")
     token = _resolve(token_ref, resolve_secret) if token_ref else None
+    chat_id = _chat_id(cfg, resolve_secret)
 
     if not token or not chat_id:
         message["delivered"] = False
@@ -463,6 +463,19 @@ def _token(cfg: dict[str, Any], resolver: Callable[[str], str | None] | None) ->
     return _resolve(token_ref, resolver) if token_ref else None
 
 
+def _chat_id(
+    cfg: dict[str, Any],
+    resolver: Callable[[str], str | None] | None,
+    explicit: str | None = None,
+) -> str | None:
+    raw = explicit if explicit not in (None, "") else cfg.get("chat_id")
+    if raw is not None and str(raw).strip():
+        value = str(raw).strip()
+        return _resolve(value, resolver) if value.startswith("vault://") else value
+    ref = cfg.get("chat_id_ref")
+    return _resolve(str(ref), resolver) if ref else None
+
+
 def set_commands(*, channel_cfg: dict[str, Any] | None = None,
                  commands: list[dict[str, str]] | None = None,
                  resolve_secret: Callable[[str], str | None] | None = None,
@@ -576,7 +589,7 @@ def send_chat_action(*, channel_cfg: dict[str, Any] | None = None,
                      transport: MessagingTransport | None = None) -> dict[str, Any]:
     cfg = channel_cfg or {}
     token = _token(cfg, resolve_secret)
-    effective_chat_id = chat_id or cfg.get("chat_id")
+    effective_chat_id = _chat_id(cfg, resolve_secret, explicit=chat_id)
     if not token:
         return {"ok": False, "error": "telegram: missing bot_token_ref"}
     if not effective_chat_id:
@@ -660,7 +673,7 @@ def get_chat(*, channel_cfg: dict[str, Any] | None = None,
     """
     cfg = channel_cfg or {}
     token = _token(cfg, resolve_secret)
-    effective_chat_id = chat_id or cfg.get("chat_id")
+    effective_chat_id = _chat_id(cfg, resolve_secret, explicit=chat_id)
     if not token:
         return {"ok": False, "error": "telegram: missing bot_token_ref"}
     if not effective_chat_id:

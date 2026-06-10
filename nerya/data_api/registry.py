@@ -119,14 +119,44 @@ class DataApiRegistry:
                 if len(rows) >= max_rows:
                     break
 
+        next_required_action: dict[str, Any] | None = None
+        alias_target = self.aliases().get(query_l, "") if query_l else ""
+        wallet_alias_query = bool(query_l and alias_target == "wallet")
+        if provider_l == "wallet" and (not query_l or wallet_alias_query):
+            readiness_args = {"provider": query_l} if query_l else {}
+            next_required_action = {
+                "tool": "data_api",
+                "message": (
+                    "Call data_api wallet readiness before coding docs, "
+                    "reload_subsystem, provider authoring, or finalizing a "
+                    "wallet/provider availability answer. Use the operator-"
+                    "named provider when present; otherwise call readiness "
+                    "without args to inspect configured wallet providers."
+                ),
+                "arguments": {
+                    "op": "call",
+                    "provider": "wallet",
+                    "action": "readiness",
+                    **({"args": readiness_args} if readiness_args else {}),
+                },
+            }
+
         return {
             "providers": self.providers(),
             "aliases": self.aliases(),
-            **({"requested_provider": requested_provider, "provider": provider_l}
-               if requested_provider and requested_provider != provider_l else {}),
+            **(
+                {"requested_provider": requested_provider, "provider": provider_l}
+                if requested_provider
+                else {}
+            ),
             "count": len(rows),
             "limit": max_rows,
             "actions": rows[:max_rows],
+            **(
+                {"next_required_action": next_required_action}
+                if next_required_action is not None
+                else {}
+            ),
             "hint": (
                 "For chain/meme/DEX discovery, inspect both "
                 "provider='wallet' and provider='onchainos' before deciding "
@@ -231,7 +261,7 @@ def compact_data_result(
                 else row
                 for row in json_rows
             ]
-        return {
+        payload = {
             "provider": provider,
             "action": action,
             "kind": "table",
@@ -240,6 +270,13 @@ def compact_data_result(
             "truncated": len(json_rows) > max_rows,
             "rows": json_rows[:max_rows],
         }
+        if isinstance(raw, dict):
+            if raw.get("source_url"):
+                payload["source_url"] = raw.get("source_url")
+            envelope = raw.get("_envelope")
+            if isinstance(envelope, dict):
+                payload["_envelope"] = _jsonable(envelope)
+        return payload
     return {
         "provider": provider,
         "action": action,

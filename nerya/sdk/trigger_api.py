@@ -111,6 +111,9 @@ class TriggerAPI:
                      attached_skills: list[str] | None = None,
                      delivery_targets: list[dict[str, Any]] | None = None,
                      session_ttl_seconds: int | None = None,
+                     session_mode: str | None = None,
+                     session_id: str | None = None,
+                     session_ids: list[str] | None = None,
                      ) -> dict[str, Any]:
         """Register or update a schedule entry.
 
@@ -121,16 +124,20 @@ class TriggerAPI:
 
         compatibility extensions (all optional):
 
-        * ``session_kind`` = ``"trigger"`` (default, emits a TriggerEvent)
-          or ``"agent"`` (spawns an ephemeral agent session per tick).
+        * ``session_kind`` = ``"trigger"`` (default, emits a TriggerEvent),
+          ``"agent"`` (runs one scheduled agent turn), or ``"script"``
+          (runs an approved script).
         * ``attached_skills`` — list of skill ids the scheduled agent
           session is allowed to call. Only valid when
           ``session_kind == "agent"``.
-        * ``delivery_targets`` — where to route the session output;
-          e.g. ``[{"kind": "messages", "channel": "ops"}]`` or
+        * ``delivery_targets`` — where to route the task output;
+          e.g. ``[{"kind": "gateway", "platform": "telegram"}]``,
+          ``[{"kind": "messages", "channel": "ops"}]``, or
           ``[{"kind": "webhook", "url": "https://..."}]``.
         * ``session_ttl_seconds`` — wallclock ceiling on the spawned
           agent session.
+        * ``session_mode`` / ``session_id`` / ``session_ids`` — choose
+          fresh, reused, or multi-session scheduled agent execution.
         """
         kwargs: dict[str, Any] = {"id": id, "kind": kind,
                                   "target": target,
@@ -157,6 +164,12 @@ class TriggerAPI:
             kwargs["delivery_targets"] = [dict(t) for t in delivery_targets]
         if session_ttl_seconds is not None:
             kwargs["session_ttl_seconds"] = session_ttl_seconds
+        if session_mode is not None:
+            kwargs["session_mode"] = session_mode
+        if session_id is not None:
+            kwargs["session_id"] = session_id
+        if session_ids is not None:
+            kwargs["session_ids"] = list(session_ids)
         entries = [e for e in load_schedules(self.config.paths) if e.id != id]
         entries.append(ScheduleEntry(**kwargs))
         save_schedules(self.config.paths, entries)
@@ -210,7 +223,8 @@ class TriggerAPI:
             "timezone",
             # compatibility extension:
             "session_kind", "attached_skills", "delivery_targets",
-            "session_ttl_seconds",
+            "session_ttl_seconds", "session_mode", "session_id",
+            "session_ids",
         ):
             if key in fields:
                 payload[key] = fields[key]
@@ -251,9 +265,29 @@ class TriggerAPI:
                 config=self.config,
                 kernel_factory=default_kernel_factory,
                 delivery_fn=deliver_scheduled_session,
+            ).run_many(entry, now_ts=now_ts)
+            self._mark_schedule_fired(id, now_ts)
+            primary = result[0]
+            return {
+                "ok": all(r.ok for r in result),
+                "schedule_id": id,
+                "session": primary.asdict(),
+                "sessions": [r.asdict() for r in result],
+            }
+        if entry.session_kind == "script":
+            from ..scripts.runner import run_script
+            try:
+                from ..messaging.scheduled_delivery import deliver_scheduled_session
+            except Exception:
+                deliver_scheduled_session = None
+            from ..triggers.scheduled_script import ScheduledScriptRunner
+            result = ScheduledScriptRunner(
+                config=self.config,
+                script_runner=run_script,
+                delivery_fn=deliver_scheduled_session,
             ).run_once(entry, now_ts=now_ts)
             self._mark_schedule_fired(id, now_ts)
-            return {"ok": result.ok, "schedule_id": id, "session": result.asdict()}
+            return {"ok": result.ok, "schedule_id": id, "script": result.asdict()}
         payload = dict(entry.payload or {})
         payload.setdefault("schedule_id", entry.id)
         payload.setdefault("manual_reason", reason)
@@ -316,6 +350,9 @@ class TriggerAPI:
             "attached_skills": list(entry.attached_skills or []),
             "delivery_targets": [dict(t) for t in (entry.delivery_targets or [])],
             "session_ttl_seconds": entry.session_ttl_seconds,
+            "session_mode": entry.session_mode,
+            "session_id": entry.session_id,
+            "session_ids": list(entry.session_ids or []),
         }
         return {k: v for k, v in out.items() if v is not None}
 

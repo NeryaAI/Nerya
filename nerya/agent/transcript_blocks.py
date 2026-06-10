@@ -120,6 +120,7 @@ class ToolResultBlock:
     elapsed_ms: float = 0.0
     completed_at: float = 0.0
     recovery: Optional[dict[str, Any]] = None
+    compaction: Optional[dict[str, Any]] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +137,7 @@ class ToolResultBlock:
             "elapsed_ms": self.elapsed_ms,
             "completed_at": self.completed_at,
             "recovery": self.recovery,
+            "compaction": self.compaction,
         }
 
 

@@ -16,7 +16,13 @@ from nerya.evolution.strategy_code_generator import (
 from nerya.strategies import performance as performance_mod
 from nerya.strategies.package import load_package
 from nerya.strategies.performance import build_snapshot
-from nerya.tools.native.strategy_runtime import strategy_promote_handler
+from nerya.strategies.agent_task import StrategyAgentTask
+from nerya.tools.native.strategy_runtime import (
+    STRATEGY_GENERATE_PROPOSAL_SCHEMA,
+    _request_from_args,
+    _with_inferred_news_sources,
+    strategy_promote_handler,
+)
 from nerya.tools.types import ToolCall
 
 pytestmark = pytest.mark.smoke
@@ -66,6 +72,574 @@ def test_strategy_generator_routes_tuning_to_medium_tier(tmp_path):
 
     manifest = yaml_io.loads(out.files["strategy.yml"])
     assert manifest["tuning"]["subagent"]["tier"] == "medium"
+
+
+def test_strategy_generator_news_template_gates_news_surface_in_backtest(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="tsla_news_alpha",
+        strategy_class="news",
+        execution_mode="script",
+        markets=("yahoo:TSLA",),
+        accounts=("paper_main",),
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    gate_pos = main_py.index("if getattr(ctx, 'runmode', '') == 'backtest':")
+    news_pos = main_py.index("ctx.news.fetch")
+    assert gate_pos < news_pos
+    assert "def _backtest_news_result" in main_py
+    assert "news surface disabled in OHLCV backtest" in main_py
+
+
+def test_strategy_generator_normalizes_agent_authored_overrides(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="solana_smartmoney_meme",
+        strategy_class="agent",
+        execution_mode="agent_task",
+        markets=("SOLANA",),
+        accounts=("paper",),
+        files={
+            "strategy.yml": """
+strategy_id: solana_smartmoney_meme
+title: Solana Smart Money Meme Alpha
+version: 1
+markets:
+  - SOLANA
+accounts:
+  - paper
+mode: paper
+schedule:
+  cron: "*/30 * * * *"
+llm_policy:
+  tier: core
+tuning:
+  enabled: true
+""",
+            "main.py": """
+from nerya.strategies.context import StrategyContext
+from nerya.strategies.result import StrategyResult, StrategyAgentTask
+
+def run(ctx: StrategyContext) -> StrategyResult:
+    default_order = ctx.config.policy.get("default_order_usd", 50)
+    return ctx.result.hold(reason="no qualifying signal")
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    manifest = yaml_io.loads(out.files["strategy.yml"])
+    assert out.validation is not None
+    assert out.validation.ok
+    assert manifest["schedule"] == {
+        "cron": "*/30 * * * *",
+        "enabled": True,
+        "type": "cron",
+    }
+    assert manifest["tuning"]["schedule"] == {
+        "cron": "0 */6 * * *",
+        "enabled": True,
+        "type": "cron",
+    }
+    assert manifest["llm_policy"]["default_tier"] == "medium"
+    assert "from nerya.strategies import StrategyResult, StrategyAgentTask" in out.files["main.py"]
+    assert "ctx.config.policy" not in out.files["main.py"]
+    assert "ctx.policy.get" in out.files["main.py"]
+
+
+def test_strategy_generator_normalizes_common_agent_task_sdk_mistakes(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="solana_smartmoney_meme",
+        strategy_class="agent",
+        execution_mode="agent_task",
+        markets=("XAGT_ONCHAIN:solana",),
+        accounts=("paper",),
+        files={
+            "main.py": """
+from nerya.strategies import StrategyAgentTask, StrategyContext
+
+def run(ctx: StrategyContext):
+    task = StrategyAgentTask.dispatch(
+        prompt="inspect wallet flow",
+        context={"route": "XAGT_ONCHAIN:solana"},
+        reason="smart money scan",
+    )
+    return ctx.result.agent_task(task)
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert "context=" not in main_py
+    assert "metadata=" in main_py
+    assert "ctx.result.agent_task" not in main_py
+    assert "return task" in main_py
+
+
+def test_strategy_generator_replaces_legacy_bar_main_for_agent_team(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="sol_short_term_scalping_v1",
+        strategy_class="scalping",
+        execution_mode="agent_team",
+        markets=("binance:SOLUSDT",),
+        accounts=("paper",),
+        files={
+            "main.py": """
+from nerya.strategies import StrategyContext, StrategyResult
+
+class SolShortTermStrategy:
+    def on_bar(self, bar):
+        result = StrategyResult()
+        result.hold()
+        return result
+
+def run(context: StrategyContext):
+    bar = context.get_current_bar()
+    if bar is None:
+        context.result.hold()
+        return
+    return SolShortTermStrategy().on_bar(bar)
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert out.validation is not None
+    assert out.validation.ok
+    assert "get_current_bar" not in main_py
+    assert "StrategyResult()" not in main_py
+    assert "StrategyAgentTask.dispatch" in main_py
+    assert "team_run" in main_py
+
+
+def test_strategy_generator_normalizes_agent_task_constructor_kwargs(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="btc_bb_squeeze_agent",
+        strategy_class="agent",
+        execution_mode="agent_task",
+        markets=("BINANCE:BTCUSDT",),
+        accounts=("paper_main",),
+        files={
+            "main.py": """
+from nerya.strategies import StrategyAgentTask, StrategyContext
+
+def run(ctx: StrategyContext):
+    return StrategyAgentTask(
+        prompt="Assess the Bollinger squeeze breakout before any paper order.",
+        symbol="BTCUSDT",
+        timeframe="15m",
+        indicators=["bollinger_bandwidth", "breakout_direction"],
+        reason="squeeze_detected",
+    )
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert out.validation is not None
+    assert out.validation.ok
+    assert "StrategyAgentTask.dispatch(" in main_py
+    assert "metadata={" in main_py
+    assert "symbol=" not in main_py
+    assert "timeframe=" not in main_py
+    assert "indicators=" not in main_py
+
+
+def test_strategy_generator_normalizes_agent_dispatch_skip_to_agent_task_skip(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="consensus_4filter_agent",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("binance:BTCUSDT",),
+        accounts=("paper_main",),
+        files={
+            "main.py": """
+from nerya.strategies.result import StrategyResult
+
+def run(ctx):
+    if not ctx.trigger.get("all_pass"):
+        return StrategyResult.skip(
+            reason="filters_failed",
+            metadata={"failed_filters": ["macd"]},
+        )
+    from nerya.strategies import StrategyAgentTask
+
+    return StrategyAgentTask.dispatch(
+        prompt="all filters passed; decide sizing",
+        metadata={"gate": "confluence"},
+    )
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert "return StrategyAgentTask.skip(" in main_py
+    assert "StrategyResult.skip" not in main_py
+    assert "from nerya.strategies import StrategyAgentTask" in main_py
+    assert out.validation is not None
+    assert out.validation.ok
+
+
+def test_strategy_generator_normalizes_agent_candle_facade_aliases(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="spy_confluence_agent",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("yahoo:SPY",),
+        accounts=("paper_main",),
+        files={
+            "main.py": """
+from __future__ import annotations
+
+import numpy as np
+
+from nerya.strategies import StrategyAgentTask, StrategyContext
+
+RESISTANCE_LOOKBACK = 60
+
+
+def run(ctx: StrategyContext):
+    candles = ctx.market.candles(interval="1d", count=RESISTANCE_LOOKBACK + 50)
+    if not candles:
+        return StrategyAgentTask.skip(reason="no_data")
+    closes = np.array([c.close for c in candles], dtype=float)
+    volumes = np.array([c.volume for c in candles], dtype=float)
+    if float(closes[-1]) <= 0 or float(volumes[-1]) <= 0:
+        return StrategyAgentTask.skip(reason="bad_data")
+    return StrategyAgentTask.dispatch(prompt="decide", metadata={"close": float(closes[-1])})
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert 'ctx.market.candles(ctx.config.markets[0], timeframe="1d", limit=RESISTANCE_LOOKBACK + 50)' in main_py
+    assert "interval=" not in main_py
+    assert "count=RESISTANCE_LOOKBACK" not in main_py
+    assert 'c["close"]' in main_py
+    assert 'c["volume"]' in main_py
+    assert ".close" not in main_py
+    assert ".volume" not in main_py
+    assert out.validation is not None
+    assert out.validation.ok
+
+
+def test_strategy_generator_normalizes_indexed_candle_row_aliases(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="tsla_pullback",
+        strategy_class="trend",
+        execution_mode="script",
+        markets=("yahoo:TSLA",),
+        accounts=("paper_main",),
+        files={
+            "main.py": """
+from nerya.strategies import StrategyContext, StrategyResult
+
+
+def run(ctx: StrategyContext) -> StrategyResult:
+    candles = ctx.market.candles(interval="1d", count=120)
+    last = candles[-1]
+    prev = candles[-2]
+    if last.close < prev.close:
+        return ctx.result.hold(reason="pullback")
+    return ctx.result.hold(reason="no_signal")
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert 'ctx.market.candles(ctx.config.markets[0], timeframe="1d", limit=120)' in main_py
+    assert 'last["close"]' in main_py
+    assert 'prev["close"]' in main_py
+    assert ".close" not in main_py
+    assert out.validation is not None
+    assert out.validation.ok
+
+
+def test_strategy_generator_normalizes_result_builder_positional_reasons(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="tsla_result_contract",
+        strategy_class="trend",
+        execution_mode="script",
+        markets=("yahoo:TSLA",),
+        accounts=("paper_main",),
+        files={
+            "main.py": """
+from nerya.strategies import StrategyContext, StrategyResult
+
+
+def run(ctx: StrategyContext) -> StrategyResult:
+    candles = ctx.market.candles(ctx.config.markets[0], timeframe="1d", limit=120)
+    if not candles:
+        return ctx.result.skip("insufficient_history")
+    if ctx.trigger.get("bookkeeping"):
+        return ctx.result.ok("bookkeeping_done")
+    return ctx.result.hold("no_signal", {"bars": len(candles)})
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert 'ctx.result.skip(reason="insufficient_history")' in main_py
+    assert 'ctx.result.ok(reason="bookkeeping_done")' in main_py
+    assert 'ctx.result.hold(reason="no_signal", metadata={"bars": len(candles)})' in main_py
+    assert out.validation is not None
+    assert out.validation.ok
+
+
+def test_strategy_generator_normalizes_agent_task_factory_positional_metadata(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="btc_mtf_agent_task",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("BINANCE:BTCUSDT",),
+        accounts=("paper_main",),
+        files={
+            "main.py": """
+from nerya.strategies import StrategyAgentTask, StrategyContext
+
+
+def run(ctx: StrategyContext):
+    candles = ctx.market.candles(ctx.config.markets[0], timeframe="1h", limit=120)
+    if len(candles) < 30:
+        return StrategyAgentTask.error("insufficient_history", {"bars": len(candles)})
+    if candles[-1]["close"] < candles[-2]["close"]:
+        return StrategyAgentTask.skip("trend_filter_failed", {"close": candles[-1]["close"]})
+    return StrategyAgentTask.dispatch(prompt="Review confluence before entry.")
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert 'StrategyAgentTask.error(reason="insufficient_history", metadata={"bars": len(candles)})' in main_py
+    assert 'StrategyAgentTask.skip(reason="trend_filter_failed", metadata={"close": candles[-1]["close"]})' in main_py
+    assert out.validation is not None
+    assert out.validation.ok
+
+
+def test_strategy_generator_normalizes_strategy_sdk_imports(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="btc_funding_short_arb",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("binance_perpetual:BTC/USDT:USDT",),
+        accounts=("paper_main",),
+        files={
+            "main.py": """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from strategy_sdk import StrategyContext
+
+
+def run(ctx: "StrategyContext") -> Any:
+    from strategy_sdk import StrategyAgentTask
+
+    candles = ctx.market.candles(ctx.config.markets[0], timeframe="1h", limit=50)
+    if not candles:
+        return StrategyAgentTask.skip(reason="no_data")
+    return StrategyAgentTask.dispatch(prompt="decide funding arb")
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert "strategy_sdk" not in main_py
+    assert "from nerya.strategies import StrategyContext" in main_py
+    assert "from nerya.strategies import StrategyAgentTask" in main_py
+    assert out.validation is not None
+    assert out.validation.ok
+
+
+def test_strategy_generator_normalizes_market_facade_aliases(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="btc_funding_short_arb",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("binance_perpetual:BTC/USDT:USDT",),
+        accounts=("paper_main",),
+        files={
+            "main.py": """
+from nerya.strategies import StrategyAgentTask, StrategyContext
+
+
+def run(ctx: StrategyContext):
+    market = ctx.market
+    ticker = market.ticker(symbol="BTCUSDT")
+    candles_1h = market.candles("1h", limit=24)
+    closes = [c.close for c in candles_1h]
+    features = market.features()
+    funding_history = market.features(
+        ctx.config.markets[0],
+        symbol="BTCUSDT",
+        feature="funding_history",
+        lookback=50,
+    )
+    positions = ctx.portfolio.positions or []
+    return StrategyAgentTask.dispatch(
+        prompt="decide",
+        metadata={
+            "close": closes[-1] if closes else 0,
+            "features": features,
+            "funding_history": funding_history,
+            "positions": positions,
+            "ticker": ticker,
+        },
+    )
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert 'market.ticker(ctx.config.markets[0])' in main_py
+    assert 'market.candles(ctx.config.markets[0], timeframe="1h", limit=24)' in main_py
+    assert "market.features(ctx.config.markets[0])" in main_py
+    assert "market.features(ctx.config.markets[0], lookback=50)" in main_py
+    assert "symbol=" not in main_py
+    assert "feature=" not in main_py
+    assert "ctx.portfolio.positions(ctx.config.markets[0]) or []" in main_py
+    assert 'c["close"]' in main_py
+    assert ".close" not in main_py
+    assert out.validation is not None
+    assert out.validation.ok
+
+
+def test_strategy_agent_task_accepts_string_session_key_for_generated_code() -> None:
+    task = StrategyAgentTask.dispatch(
+        prompt="inspect wallet flow",
+        session_key="smartmoney_XAGT_ONCHAIN_solana",
+        metadata={"market": "XAGT_ONCHAIN:solana"},
+    )
+
+    assert task.session_key == {"key": "smartmoney_XAGT_ONCHAIN_solana"}
+    assert task.metadata == {"market": "XAGT_ONCHAIN:solana"}
+
+
+def test_strategy_generator_normalizes_legacy_execution_schedule(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="solana_smartmoney_meme",
+        strategy_class="agent",
+        execution_mode="agent_task",
+        markets=("XAGT_ONCHAIN:solana:token",),
+        accounts=("paper_main",),
+        files={
+            "strategy.yml": """
+id: solana_smartmoney_meme
+title: Solana Smart Money Meme Alpha
+version: 1
+markets:
+  - XAGT_ONCHAIN:solana:token
+accounts:
+  - paper_main
+mode: paper
+execution:
+  execution_mode: agent_task
+  schedule:
+    cron: "*/30 * * * *"
+""",
+            "main.py": "def run(ctx):\n    return ctx.result.hold(reason='no signal')\n",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=True,
+        create_proposal_record=False,
+    )
+
+    manifest = yaml_io.loads(out.files["strategy.yml"])
+    assert out.validation is not None
+    assert out.validation.ok
+    assert manifest["schedule"] == {
+        "cron": "*/30 * * * *",
+        "enabled": True,
+        "type": "cron",
+    }
+
+
+def test_strategy_generate_request_accepts_agent_task_class_alias() -> None:
+    req = _request_from_args({
+        "strategy_id": "solana_smartmoney_meme",
+        "strategy_class": "agent_task",
+        "markets": ["XAGT_ONCHAIN:solana:token"],
+        "accounts": ["paper_main"],
+    })
+
+    enum = STRATEGY_GENERATE_PROPOSAL_SCHEMA["properties"]["strategy_class"]["enum"]
+    assert "agent_task" in enum
+    assert req.strategy_class == "agent"
+    assert req.execution_mode == "agent_task"
 
 
 def test_strategy_generator_agent_team_uses_agent_task_runtime(tmp_path):
@@ -147,6 +721,190 @@ def test_strategy_generator_explicit_agent_mode_builds_script_to_agent_task(tmp_
     assert "StrategyAgentTask.dispatch" in main_py
     assert "Recent K-line tail JSON" in main_py
     assert "team_run" not in main_py
+
+
+def test_strategy_generator_agent_mode_preserves_news_social_context(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="eth_macd_agent",
+        title="ETH MACD News Agent",
+        description="Agent reviews technical signal plus recent news/social context.",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("binance:ETHUSDT",),
+        accounts=("paper_main",),
+        news_sources=("crypto", "social"),
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=False,
+        create_proposal_record=False,
+    )
+
+    manifest = yaml_io.loads(out.files["strategy.yml"])
+    assert "news_social" in manifest["agent_profile"]["attached_skills"]
+    main_py = out.files["main.py"]
+    assert "news_social" in main_py
+    assert "_NEWS_SOCIAL_SOURCES" in main_py
+    assert "ctx.news.fetch(sources=_NEWS_SOCIAL_SOURCES" in main_py
+
+
+def test_strategy_request_infers_news_social_context_from_operator_prompt(tmp_path):
+    req = _request_from_args({
+        "strategy_id": "eth_macd_news_agent",
+        "title": "ETH MACD Agent",
+        "strategy_class": "agent",
+        "execution_mode": "agent",
+        "markets": ["binance:ETHUSDT"],
+        "accounts": ["paper_main"],
+    })
+
+    inferred = _with_inferred_news_sources(
+        req,
+        operator_prompt="ETH 1h MACD 金叉触发时先查最近 6 小时新闻和大宗事件再决策",
+    )
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        inferred,
+        validate=False,
+        create_proposal_record=False,
+    )
+
+    manifest = yaml_io.loads(out.files["strategy.yml"])
+    assert inferred.news_sources == ("crypto",)
+    assert "news_social" in manifest["agent_profile"]["attached_skills"]
+    assert "news_social" in out.files["main.py"]
+
+
+def test_strategy_generator_news_sources_add_hook_to_inline_main_override(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="eth_custom_agent",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("binance:ETHUSDT",),
+        accounts=("paper_main",),
+        news_sources=("crypto",),
+        files={
+            "main.py": (
+                "from nerya.strategies import StrategyContext\n\n"
+                "def run(ctx: StrategyContext):\n"
+                "    return ctx.result.hold(reason='custom draft')\n"
+            ),
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=False,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert "custom draft" in main_py
+    assert "news_social: generated audit hook" in main_py
+    assert "_NEWS_SOCIAL_SOURCES = [\"crypto\"]" in main_py
+    assert "def _news_social_sources" in main_py
+
+
+def test_strategy_generator_records_confluence_semantic_tag(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="btc_four_gate_agent",
+        title="BTC 四条件 Agent 仲裁",
+        description="MACD, RSI, volume, and resistance gates before Agent dispatch.",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("binance:BTCUSDT",),
+        accounts=("paper_main",),
+        files={
+            "main.py": (
+                "from nerya.strategies import StrategyAgentTask, StrategyContext\n\n"
+                "def run(ctx: StrategyContext):\n"
+                "    macd_ok = True\n"
+                "    rsi_ok = True\n"
+                "    volume_ok = True\n"
+                "    resistance_clear = True\n"
+                "    if not (macd_ok and rsi_ok and volume_ok and resistance_clear):\n"
+                "        return StrategyAgentTask.skip('gate failed')\n"
+                "    return StrategyAgentTask.dispatch(prompt='review signal')\n"
+            ),
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=False,
+        create_proposal_record=True,
+    )
+
+    assert out.proposal is not None
+    assert "confluence" in (out.proposal.metadata or {}).get("semantic_tags", [])
+
+
+def test_strategy_generator_records_mtf_semantic_tag(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="btc_long_agent",
+        title="BTC 保守长线 Agent",
+        description="1d MACD, 4h RSI, and 1h EMA200 must align before dispatch.",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("binance:BTCUSDT",),
+        accounts=("paper_main",),
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=False,
+        create_proposal_record=True,
+    )
+
+    assert out.proposal is not None
+    assert "mtf" in (out.proposal.metadata or {}).get("semantic_tags", [])
+
+
+def test_strategy_generator_inline_manifest_preserves_agent_execution_defaults(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="btc_bollinger_agent",
+        title="BTC Bollinger Agent",
+        description="Custom script detects Bollinger squeeze, then Agent decides.",
+        strategy_class="agent",
+        execution_mode="agent",
+        markets=("binance:BTCUSDT",),
+        accounts=("paper",),
+        files={
+            "strategy.yml": """
+strategy_id: btc_bollinger_agent
+title: BTC Bollinger Agent
+markets:
+  - binance:BTCUSDT
+accounts:
+  - paper
+mode: paper
+policy:
+  default_order_usd: 25
+""",
+            "main.py": """
+from nerya.strategies import StrategyAgentTask, StrategyContext
+
+def run(ctx: StrategyContext):
+    return StrategyAgentTask.dispatch(
+        prompt="Bollinger squeeze breakout detected; decide whether to chase.",
+        metadata={"indicator": "bollinger"},
+    )
+""",
+        },
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=False,
+        create_proposal_record=False,
+    )
+
+    manifest = yaml_io.loads(out.files["strategy.yml"])
+    assert manifest["execution_mode"] == "agent"
+    assert manifest["agent_task"] == {"enabled": True, "mode": "agent"}
+    assert manifest["agent_profile"]["allowed_tools"]
+    assert manifest["policy"]["allow_direct_order"] is False
+    assert manifest["policy"]["default_order_usd"] == 25
 
 
 def test_strategy_generator_trend_template_uses_ma_crosses(tmp_path):

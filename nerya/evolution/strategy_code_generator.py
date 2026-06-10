@@ -47,6 +47,7 @@ files and copies them into the workspace on approval.
 
 from __future__ import annotations
 
+import ast
 import logging
 import re
 import json
@@ -90,6 +91,37 @@ _VALID_TUNING_OBJECTIVES: frozenset[str] = frozenset({
     "sharpe",
     "sortino",
 })
+_TECHNICAL_FACTOR_TERMS: dict[str, tuple[str, ...]] = {
+    "atr": ("atr",),
+    "bollinger": ("bollinger", "布林"),
+    "cvd": ("cvd",),
+    "donchian": ("donchian",),
+    "ema": ("ema",),
+    "funding": ("funding", "资金费率"),
+    "kdj": ("kdj",),
+    "macd": ("macd",),
+    "portfolio": ("portfolio", "risk budget", "风险预算"),
+    "resistance": ("resistance", "阻力", "前高"),
+    "rsi": ("rsi",),
+    "support": ("support", "支撑", "fibonacci"),
+    "volume": ("volume", "成交量", "量能"),
+    "whale": ("whale", "巨鲸", "大鲸"),
+}
+_TIMEFRAME_TERMS: tuple[str, ...] = (
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+    "1w",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +261,7 @@ class StrategyCodeGenerator:
                 target=f"strategies/{request.strategy_id}",
                 extra_files=extra_files,
                 initial_state="pending_review",
+                metadata=_proposal_metadata(request, files),
             )
 
         return StrategyGenerationResult(
@@ -307,7 +340,14 @@ class StrategyCodeGenerator:
                 raise NeryaError(
                     f"file path escapes strategy package: {rel!r}"
                 )
-            files[rel_norm] = str(content)
+            _ensure_package_file_path_available(files.keys(), rel_norm)
+            files[rel_norm] = _normalize_inline_strategy_file(rel_norm, str(content), req)
+        if "main.py" in files:
+            files["main.py"] = _ensure_news_social_main_hook(files["main.py"], req)
+        files["strategy.yml"] = _merge_manifest_defaults(
+            files["strategy.yml"],
+            manifest,
+        )
         return files
 
     @staticmethod
@@ -424,6 +464,985 @@ class StrategyCodeGenerator:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_inline_strategy_file(
+    rel_path: str,
+    content: str,
+    req: StrategyGenerationRequest,
+) -> str:
+    """Apply schema/SDK compatibility fixes to agent-authored overrides."""
+
+    if rel_path == "strategy.yml":
+        return _normalize_inline_manifest(content)
+    if rel_path == "main.py":
+        return _normalize_inline_main_py(content, req)
+    return content
+
+
+def _ensure_package_file_path_available(
+    existing_paths: Iterable[str],
+    rel_norm: str,
+) -> None:
+    parts = rel_norm.split("/")
+    if rel_norm in {".", ".."} or rel_norm.endswith("/") or any(
+        part in {"", "."} for part in parts
+    ):
+        raise NeryaError(f"invalid package file path: {rel_norm!r}")
+    existing = {
+        str(path).replace("\\", "/").lstrip("/")
+        for path in existing_paths
+    }
+    parent = ""
+    for part in parts[:-1]:
+        parent = f"{parent}/{part}" if parent else part
+        if parent in existing:
+            raise NeryaError(
+                "file path collides with an existing package file: "
+                f"{rel_norm!r} conflicts with {parent!r}"
+            )
+    child_prefix = f"{rel_norm}/"
+    child = next((path for path in sorted(existing) if path.startswith(child_prefix)), None)
+    if child:
+        raise NeryaError(
+            "file path collides with an existing package directory: "
+            f"{rel_norm!r} conflicts with {child!r}"
+        )
+
+
+def _normalize_inline_manifest(content: str) -> str:
+    try:
+        raw = yaml_io.loads(content)
+    except Exception:
+        return content
+    if not isinstance(raw, dict):
+        return content
+
+    def normalize_schedule(value: Any, *, default_cron: str) -> dict[str, Any]:
+        schedule = value if isinstance(value, dict) else {}
+        if "every_seconds" in schedule or "interval_seconds" in schedule:
+            schedule.setdefault("type", "interval")
+            if "every_seconds" not in schedule and "interval_seconds" in schedule:
+                schedule["every_seconds"] = schedule.get("interval_seconds")
+        else:
+            schedule.setdefault("type", "cron")
+            schedule.setdefault("cron", default_cron)
+        schedule.setdefault("enabled", True)
+        return schedule
+
+    execution = raw.get("execution")
+    execution_schedule = (
+        execution.get("schedule")
+        if isinstance(execution, dict) and isinstance(execution.get("schedule"), dict)
+        else None
+    )
+    if "schedule" in raw:
+        raw["schedule"] = normalize_schedule(
+            raw.get("schedule"),
+            default_cron="*/5 * * * *",
+        )
+    elif "schedule_cron" in raw:
+        raw["schedule"] = normalize_schedule(
+            {"cron": raw.pop("schedule_cron")},
+            default_cron="*/5 * * * *",
+        )
+    elif "schedule_every_seconds" in raw:
+        raw["schedule"] = normalize_schedule(
+            {"every_seconds": raw.pop("schedule_every_seconds")},
+            default_cron="*/5 * * * *",
+        )
+    elif execution_schedule is not None:
+        raw["schedule"] = normalize_schedule(
+            execution_schedule,
+            default_cron="*/5 * * * *",
+        )
+
+    tuning = raw.get("tuning")
+    if isinstance(tuning, dict):
+        if tuning.get("enabled") and not isinstance(tuning.get("schedule"), dict):
+            tuning["schedule"] = {
+                "type": "cron",
+                "cron": "0 */6 * * *",
+                "enabled": True,
+            }
+        elif isinstance(tuning.get("schedule"), dict):
+            tuning["schedule"] = normalize_schedule(
+                tuning.get("schedule"),
+                default_cron="0 */6 * * *",
+            )
+
+    llm_policy = raw.get("llm_policy")
+    if isinstance(llm_policy, dict):
+        tier = str(
+            llm_policy.get("default_tier") or llm_policy.get("tier") or "light"
+        ).strip().lower()
+        if tier == "core":
+            tier = "medium"
+        if tier not in {"light", "medium", "high"}:
+            tier = "light"
+        llm_policy["default_tier"] = tier
+        allowed = llm_policy.get("allowed_tiers")
+        if not isinstance(allowed, list) or not allowed:
+            llm_policy["allowed_tiers"] = [tier]
+        llm_policy.setdefault("max_calls_per_run", 4)
+        llm_policy.pop("tier", None)
+
+    return yaml_io.dumps(raw)
+
+
+def _merge_manifest_defaults(content: str, defaults: dict[str, Any]) -> str:
+    try:
+        raw = yaml_io.loads(content)
+    except Exception:
+        return content
+    if not isinstance(raw, dict):
+        return content
+
+    for key, value in defaults.items():
+        raw.setdefault(key, value)
+
+    default_mode = str(defaults.get("execution_mode") or "").strip().lower()
+    raw_mode = str(raw.get("execution_mode") or "").strip().lower().replace("-", "_")
+    if raw_mode == "agent_task":
+        raw["execution_mode"] = "agent"
+        raw_mode = "agent"
+    elif raw_mode == "team":
+        raw["execution_mode"] = "agent_team"
+        raw_mode = "agent_team"
+    elif not raw_mode and default_mode:
+        raw["execution_mode"] = default_mode
+        raw_mode = default_mode
+
+    if default_mode in {"agent", "agent_team"}:
+        raw["execution_mode"] = default_mode
+        for key in ("agent_task", "agent_session", "agent_profile"):
+            if key in defaults:
+                raw.setdefault(key, defaults[key])
+
+    for key in ("policy", "llm_policy"):
+        if isinstance(defaults.get(key), dict) and isinstance(raw.get(key), dict):
+            merged = dict(defaults[key])
+            merged.update(raw[key])
+            raw[key] = merged
+
+    return yaml_io.dumps(raw)
+
+
+def _normalize_inline_main_py(
+    content: str,
+    req: StrategyGenerationRequest,
+) -> str:
+    replacements = {
+        "from nerya.strategies.result import StrategyResult, StrategyAgentTask": (
+            "from nerya.strategies import StrategyResult, StrategyAgentTask"
+        ),
+        "from nerya.strategies.result import StrategyAgentTask, StrategyResult": (
+            "from nerya.strategies import StrategyAgentTask, StrategyResult"
+        ),
+        "from nerya.strategies.result import StrategyAgentTask": (
+            "from nerya.strategies import StrategyAgentTask"
+        ),
+        "from nerya.strategies.result import StrategyResult": (
+            "from nerya.strategies import StrategyResult"
+        ),
+        "ctx.config.policy": "ctx.policy",
+    }
+    out = content
+    for old, new in replacements.items():
+        out = out.replace(old, new)
+    out = _normalize_strategy_sdk_imports(out)
+    out = _normalize_market_ticker_calls(out, req)
+    out = _normalize_market_candles_calls(out, req)
+    out = _normalize_market_features_calls(out, req)
+    out = _normalize_portfolio_positions_property(out, req)
+    out = _normalize_candle_row_attribute_access(out)
+    out = _normalize_result_factory_positional_args(out)
+    out = _normalize_agent_task_constructor_calls(out)
+    out = _replace_legacy_bar_strategy_main_for_agent_modes(out, req)
+    if "StrategyAgentTask.dispatch" in out and "context=" in out and "metadata=" not in out:
+        out = out.replace("context=", "metadata=")
+    if "StrategyAgentTask.dispatch" in out:
+        out = re.sub(r"return\s+StrategyResult\.skip\(", "return StrategyAgentTask.skip(", out)
+        out = re.sub(r"return\s+ctx\.result\.skip\(", "return StrategyAgentTask.skip(", out)
+        if "StrategyAgentTask.skip(" in out:
+            out = _ensure_strategy_agent_task_import(out)
+    out = re.sub(r"return\s+ctx\.result\.agent_task\(([^)\n]+)\)", r"return \1", out)
+    return out
+
+
+def _replace_legacy_bar_strategy_main_for_agent_modes(
+    content: str,
+    req: StrategyGenerationRequest,
+) -> str:
+    execution_mode = _execution_mode(req)
+    if execution_mode not in {"agent", "agent_team"}:
+        return content
+    legacy_markers = (
+        ".get_current_bar(",
+        "def on_bar(",
+        "StrategyResult()",
+    )
+    if not any(marker in content for marker in legacy_markers):
+        return content
+    if execution_mode == "agent_team":
+        return _agent_team_template(req)
+    return _agent_task_template(req)
+
+
+def _normalize_agent_task_constructor_calls(content: str) -> str:
+    """Convert common generated ``StrategyAgentTask(...)`` calls to dispatch.
+
+    The public strategy SDK exposes ``dispatch/skip/error`` factories.  Some
+    providers emit a dataclass constructor with domain fields such as
+    ``symbol`` or ``timeframe``.  When the call is mechanically safe to map, we
+    keep the prompt and move non-factory fields into metadata.  Ambiguous calls
+    are left for static validation to fail closed.
+    """
+
+    if "StrategyAgentTask(" not in content:
+        return content
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    replacements: list[tuple[int, int, str]] = []
+    passthrough_keys = {
+        "prompt",
+        "session_key",
+        "artifacts",
+        "attached_skills",
+        "reason",
+    }
+    constructor_only_keys = {"status"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _agent_task_call_name(node.func) != "StrategyAgentTask":
+            continue
+        if node.args or any(keyword.arg is None for keyword in node.keywords):
+            continue
+        kwargs = {str(keyword.arg): keyword for keyword in node.keywords}
+        prompt = kwargs.get("prompt")
+        if prompt is None:
+            continue
+        extra_keywords = [
+            keyword
+            for keyword in node.keywords
+            if keyword.arg not in passthrough_keys
+            and keyword.arg != "metadata"
+            and keyword.arg not in constructor_only_keys
+        ]
+        if not extra_keywords:
+            continue
+        start = getattr(node, "lineno", None)
+        end = getattr(node, "end_lineno", None)
+        col = getattr(node, "col_offset", None)
+        end_col = getattr(node, "end_col_offset", None)
+        if None in {start, end, col, end_col}:
+            continue
+        metadata_items = [
+            f"{json.dumps(str(keyword.arg))}: {_source_expr(content, keyword.value)}"
+            for keyword in extra_keywords
+        ]
+        metadata = kwargs.get("metadata")
+        if metadata is not None:
+            metadata_expr = _source_expr(content, metadata.value)
+            metadata_arg = "metadata={**(" + metadata_expr + "), " + ", ".join(metadata_items) + "}"
+        else:
+            metadata_arg = "metadata={" + ", ".join(metadata_items) + "}"
+        dispatch_args: list[str] = []
+        for key in passthrough_keys:
+            keyword = kwargs.get(key)
+            if keyword is not None:
+                dispatch_args.append(f"{key}={_source_expr(content, keyword.value)}")
+        dispatch_args.append(metadata_arg)
+        replacement = "StrategyAgentTask.dispatch(" + ", ".join(dispatch_args) + ")"
+        start_idx, end_idx = _node_span_offsets(content, node)
+        replacements.append((start_idx, end_idx, replacement))
+
+    if not replacements:
+        return content
+    out = content
+    for start_idx, end_idx, replacement in sorted(replacements, reverse=True):
+        out = out[:start_idx] + replacement + out[end_idx:]
+    return out
+
+
+def _agent_task_call_name(node: ast.AST) -> str:
+    parts: list[str] = []
+    current: ast.AST = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+    parts.reverse()
+    return ".".join(parts)
+
+
+def _source_expr(content: str, node: ast.AST) -> str:
+    segment = ast.get_source_segment(content, node)
+    if segment:
+        return segment.strip()
+    return ast.unparse(node)
+
+
+def _node_span_offsets(content: str, node: ast.AST) -> tuple[int, int]:
+    lines = content.splitlines(keepends=True)
+    start = sum(len(line) for line in lines[: node.lineno - 1]) + node.col_offset
+    end = sum(len(line) for line in lines[: node.end_lineno - 1]) + node.end_col_offset
+    return start, end
+
+
+_PUBLIC_STRATEGY_SDK_SYMBOLS = frozenset(
+    {"StrategyAgentTask", "StrategyContext", "StrategyResult"}
+)
+
+
+def _normalize_strategy_sdk_imports(content: str) -> str:
+    """Rewrite legacy/generated strategy_sdk imports to Nerya's public SDK."""
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    replacements: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        module = str(node.module or "")
+        if module != "strategy_sdk" and not module.startswith("strategy_sdk."):
+            continue
+        if not node.names:
+            continue
+        if any(alias.name not in _PUBLIC_STRATEGY_SDK_SYMBOLS for alias in node.names):
+            continue
+        imported = ", ".join(
+            alias.name if alias.asname is None else f"{alias.name} as {alias.asname}"
+            for alias in node.names
+        )
+        start, end = _ast_node_span(content, node)
+        replacements.append(
+            (start, end, f"from nerya.strategies import {imported}")
+        )
+
+    return _apply_source_replacements(content, replacements)
+
+
+_CANDLE_ROW_FIELDS = frozenset({"open", "high", "low", "close", "volume"})
+_RESULT_FACTORY_POSITIONAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "hold": ("reason", "metadata"),
+    "skip": ("reason", "metadata"),
+    "ok": ("reason", "metadata"),
+    "error": ("message", "kind", "metadata"),
+}
+_AGENT_TASK_FACTORY_POSITIONAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "skip": ("reason", "metadata"),
+    "error": ("reason", "metadata"),
+}
+
+
+def _normalize_market_candles_calls(
+    content: str,
+    req: StrategyGenerationRequest,
+) -> str:
+    """Normalize common LLM-authored candle facade aliases to StrategyContext."""
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    market_aliases = _collect_strategy_market_aliases(tree)
+    replacements: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _is_strategy_market_method_call(
+            node,
+            "candles",
+            market_aliases,
+        ):
+            continue
+        if any(keyword.arg is None for keyword in node.keywords):
+            continue
+        aliases_present = any(
+            keyword.arg in {"interval", "count"} for keyword in node.keywords
+        )
+        first_arg_is_timeframe = _first_arg_is_timeframe_literal(node)
+        has_market = (
+            bool(node.args)
+            and not first_arg_is_timeframe
+        ) or any(
+            keyword.arg == "market" for keyword in node.keywords
+        )
+        if not aliases_present and has_market and not first_arg_is_timeframe:
+            continue
+
+        func_src = ast.get_source_segment(content, node.func) or "ctx.market.candles"
+        args = [
+            ast.get_source_segment(content, arg) or ast.unparse(arg)
+            for arg in node.args
+        ]
+        timeframe_from_arg = None
+        if first_arg_is_timeframe and args:
+            timeframe_from_arg = args.pop(0)
+        if not has_market:
+            args.insert(0, _default_strategy_market_expr(req))
+
+        present_keywords = {
+            str(keyword.arg)
+            for keyword in node.keywords
+            if keyword.arg is not None
+        }
+        keyword_parts: list[str] = []
+        if timeframe_from_arg is not None and "timeframe" not in present_keywords:
+            keyword_parts.append(f"timeframe={timeframe_from_arg}")
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                continue
+            name = keyword.arg
+            if name == "interval":
+                if "timeframe" in present_keywords:
+                    continue
+                name = "timeframe"
+            elif name == "count":
+                if "limit" in present_keywords:
+                    continue
+                name = "limit"
+            value_src = ast.get_source_segment(content, keyword.value) or ast.unparse(keyword.value)
+            keyword_parts.append(f"{name}={value_src}")
+
+        start, end = _ast_node_span(content, node)
+        replacements.append((start, end, f"{func_src}({', '.join(args + keyword_parts)})"))
+
+    return _apply_source_replacements(content, replacements)
+
+
+def _normalize_market_ticker_calls(
+    content: str,
+    req: StrategyGenerationRequest,
+) -> str:
+    """Normalize StrategyMarket.ticker calls through ctx.market aliases."""
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    market_aliases = _collect_strategy_market_aliases(tree)
+    replacements: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _is_strategy_market_method_call(
+            node,
+            "ticker",
+            market_aliases,
+        ):
+            continue
+        if any(keyword.arg is None for keyword in node.keywords):
+            continue
+        has_market = bool(node.args) or any(
+            keyword.arg == "market" for keyword in node.keywords
+        )
+        unsupported_keywords = {
+            str(keyword.arg)
+            for keyword in node.keywords
+            if keyword.arg not in {"market", "account"}
+        }
+        if has_market and not unsupported_keywords:
+            continue
+
+        func_src = ast.get_source_segment(content, node.func) or "ctx.market.ticker"
+        args = [
+            ast.get_source_segment(content, arg) or ast.unparse(arg)
+            for arg in node.args
+        ]
+        if not has_market:
+            args.insert(0, _default_strategy_market_expr(req))
+
+        keyword_parts: list[str] = []
+        for keyword in node.keywords:
+            if keyword.arg is None or keyword.arg not in {"market", "account"}:
+                continue
+            value_src = ast.get_source_segment(content, keyword.value) or ast.unparse(keyword.value)
+            keyword_parts.append(f"{keyword.arg}={value_src}")
+
+        start, end = _ast_node_span(content, node)
+        replacements.append((start, end, f"{func_src}({', '.join(args + keyword_parts)})"))
+
+    return _apply_source_replacements(content, replacements)
+
+
+def _normalize_market_features_calls(
+    content: str,
+    req: StrategyGenerationRequest,
+) -> str:
+    """Normalize StrategyMarket.features calls through ctx.market aliases."""
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    market_aliases = _collect_strategy_market_aliases(tree)
+    replacements: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not _is_strategy_market_method_call(
+            node,
+            "features",
+            market_aliases,
+        ):
+            continue
+        if any(keyword.arg is None for keyword in node.keywords):
+            continue
+
+        first_arg_is_timeframe = _first_arg_is_timeframe_literal(node)
+        has_market = (
+            bool(node.args)
+            and not first_arg_is_timeframe
+        ) or any(
+            keyword.arg == "market" for keyword in node.keywords
+        )
+        rewrite_keywords = any(
+            keyword.arg in {"interval", "count", "limit", "symbol", "feature"}
+            for keyword in node.keywords
+        )
+        if has_market and not first_arg_is_timeframe and not rewrite_keywords:
+            continue
+
+        func_src = ast.get_source_segment(content, node.func) or "ctx.market.features"
+        args = [
+            ast.get_source_segment(content, arg) or ast.unparse(arg)
+            for arg in node.args
+        ]
+        timeframe_from_arg = None
+        if first_arg_is_timeframe and args:
+            timeframe_from_arg = args.pop(0)
+        if not has_market:
+            args.insert(0, _default_strategy_market_expr(req))
+
+        present_keywords = {
+            str(keyword.arg)
+            for keyword in node.keywords
+            if keyword.arg is not None
+        }
+        keyword_parts: list[str] = []
+        if timeframe_from_arg is not None and "timeframe" not in present_keywords:
+            keyword_parts.append(f"timeframe={timeframe_from_arg}")
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                continue
+            name = keyword.arg
+            if name in {"symbol", "feature"}:
+                continue
+            if name == "interval":
+                if "timeframe" in present_keywords:
+                    continue
+                name = "timeframe"
+            elif name in {"count", "limit"}:
+                if "lookback" in present_keywords:
+                    continue
+                name = "lookback"
+            value_src = ast.get_source_segment(content, keyword.value) or ast.unparse(keyword.value)
+            keyword_parts.append(f"{name}={value_src}")
+
+        start, end = _ast_node_span(content, node)
+        replacements.append((start, end, f"{func_src}({', '.join(args + keyword_parts)})"))
+
+    return _apply_source_replacements(content, replacements)
+
+
+def _normalize_portfolio_positions_property(
+    content: str,
+    req: StrategyGenerationRequest,
+) -> str:
+    """Turn ctx.portfolio.positions property access into the facade call."""
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    called_attribute_ids = {
+        id(node.func)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    replacements: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and node.attr == "positions"
+            and id(node) not in called_attribute_ids
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "portfolio"
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id in {"ctx", "context"}
+        ):
+            continue
+        owner_src = ast.get_source_segment(content, node.value) or "ctx.portfolio"
+        start, end = _ast_node_span(content, node)
+        replacements.append(
+            (start, end, f"{owner_src}.positions({_default_strategy_market_expr(req)})")
+        )
+
+    return _apply_source_replacements(content, replacements)
+
+
+def _is_strategy_market_method_call(
+    node: ast.Call,
+    method: str,
+    market_aliases: set[str],
+) -> bool:
+    func = node.func
+    if not isinstance(func, ast.Attribute) or func.attr != method:
+        return False
+    owner = func.value
+    if isinstance(owner, ast.Name) and owner.id in market_aliases:
+        return True
+    return (
+        isinstance(owner, ast.Attribute)
+        and owner.attr == "market"
+        and isinstance(owner.value, ast.Name)
+        and owner.value.id in {"ctx", "context"}
+    )
+
+
+def _collect_strategy_market_aliases(tree: ast.AST) -> set[str]:
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "market"
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id in {"ctx", "context"}
+        ):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                aliases.add(target.id)
+    return aliases
+
+
+def _first_arg_is_timeframe_literal(node: ast.Call) -> bool:
+    return bool(node.args) and _looks_like_timeframe_literal(node.args[0])
+
+
+def _looks_like_timeframe_literal(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+        return False
+    text = node.value.strip().lower()
+    return len(text) > 1 and text[-1] in {"m", "h", "d", "w"} and text[:-1].isdigit()
+
+
+def _default_strategy_market_expr(req: StrategyGenerationRequest) -> str:
+    if len(req.markets) == 1:
+        return "ctx.config.markets[0]"
+    return "(ctx.trigger.get('market') or ctx.config.markets[0])"
+
+
+def _normalize_candle_row_attribute_access(content: str) -> str:
+    """Turn candle-row object access into the dict access promised by the SDK."""
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    row_names = _collect_candle_row_alias_names(tree)
+    if not row_names:
+        return content
+
+    replacements: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, ast.Load)
+            and node.attr in _CANDLE_ROW_FIELDS
+            and isinstance(node.value, ast.Name)
+            and node.value.id in row_names
+        ):
+            continue
+        start, end = _ast_node_span(content, node)
+        replacements.append((start, end, f'{node.value.id}["{node.attr}"]'))
+
+    return _apply_source_replacements(content, replacements)
+
+
+def _normalize_result_factory_positional_args(content: str) -> str:
+    """Turn common SDK positional shorthand into keyword calls."""
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+
+    result_aliases = _collect_result_builder_aliases(tree)
+    replacements: list[tuple[int, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        method = _result_factory_method_name(node.func, result_aliases)
+        field_names: tuple[str, ...] | None = None
+        if method is not None:
+            field_names = _RESULT_FACTORY_POSITIONAL_FIELDS[method]
+        else:
+            method = _agent_task_factory_method_name(node.func)
+            if method is not None:
+                field_names = _AGENT_TASK_FACTORY_POSITIONAL_FIELDS[method]
+        if method is None or field_names is None:
+            continue
+        if len(node.args) > len(field_names):
+            continue
+        existing_keywords = {
+            keyword.arg
+            for keyword in node.keywords
+            if keyword.arg is not None
+        }
+        used_fields = field_names[: len(node.args)]
+        if any(field in existing_keywords for field in used_fields):
+            continue
+        func_src = ast.get_source_segment(content, node.func) or ast.unparse(node.func)
+        keyword_parts = [
+            f"{field}={ast.get_source_segment(content, arg) or ast.unparse(arg)}"
+            for field, arg in zip(used_fields, node.args)
+        ]
+        keyword_parts.extend(
+            ast.get_source_segment(content, keyword) or ast.unparse(keyword)
+            for keyword in node.keywords
+        )
+        start, end = _ast_node_span(content, node)
+        replacements.append((start, end, f"{func_src}({', '.join(keyword_parts)})"))
+
+    return _apply_source_replacements(content, replacements)
+
+
+def _agent_task_factory_method_name(func: ast.AST) -> str | None:
+    if not isinstance(func, ast.Attribute):
+        return None
+    method = func.attr
+    if method not in _AGENT_TASK_FACTORY_POSITIONAL_FIELDS:
+        return None
+    owner = func.value
+    if isinstance(owner, ast.Name) and owner.id == "StrategyAgentTask":
+        return method
+    return None
+
+
+def _result_factory_method_name(
+    func: ast.AST,
+    result_aliases: set[str],
+) -> str | None:
+    if not isinstance(func, ast.Attribute):
+        return None
+    method = func.attr
+    if method not in _RESULT_FACTORY_POSITIONAL_FIELDS:
+        return None
+    owner = func.value
+    if isinstance(owner, ast.Name):
+        if owner.id == "StrategyResult" or owner.id in result_aliases:
+            return method
+        return None
+    if not isinstance(owner, ast.Attribute) or owner.attr != "result":
+        return None
+    if isinstance(owner.value, ast.Name) and owner.value.id in {"ctx", "context"}:
+        return method
+    return None
+
+
+def _collect_result_builder_aliases(tree: ast.AST) -> set[str]:
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (
+            isinstance(node.value, ast.Attribute)
+            and node.value.attr == "result"
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id in {"ctx", "context"}
+        ):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                aliases.add(target.id)
+    return aliases
+
+
+def _collect_candle_row_alias_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        generators = getattr(node, "generators", None)
+        if generators is not None:
+            for gen in generators:
+                if _looks_like_candle_iter(gen.iter):
+                    _collect_target_names(gen.target, names)
+        elif isinstance(node, ast.For) and _looks_like_candle_iter(node.iter):
+            _collect_target_names(node.target, names)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                _collect_candle_row_assignment_names(target, node.value, names)
+        elif isinstance(node, ast.AnnAssign):
+            _collect_candle_row_assignment_names(node.target, node.value, names)
+    return names
+
+
+def _collect_candle_row_assignment_names(
+    target: ast.AST,
+    value: ast.AST | None,
+    out: set[str],
+) -> None:
+    if value is None:
+        return
+    if _looks_like_candle_row_expr(value):
+        _collect_target_names(target, out)
+        return
+    if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+        for child_target, child_value in zip(target.elts, value.elts):
+            _collect_candle_row_assignment_names(child_target, child_value, out)
+
+
+def _looks_like_candle_row_expr(node: ast.AST) -> bool:
+    return isinstance(node, ast.Subscript) and _looks_like_candle_iter(node.value)
+
+
+def _looks_like_candle_iter(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        name = node.id.lower()
+        return (
+            name == "candles"
+            or name.startswith("candles_")
+            or name.endswith("_candles")
+            or "_candles_" in name
+        )
+    return False
+
+
+def _collect_target_names(node: ast.AST, out: set[str]) -> None:
+    if isinstance(node, ast.Name):
+        out.add(node.id)
+        return
+    if isinstance(node, (ast.Tuple, ast.List)):
+        for child in node.elts:
+            _collect_target_names(child, out)
+
+
+def _ast_node_span(content: str, node: ast.AST) -> tuple[int, int]:
+    start = _line_col_to_offset(content, node.lineno, node.col_offset)
+    end = _line_col_to_offset(content, node.end_lineno, node.end_col_offset)
+    return start, end
+
+
+def _line_col_to_offset(content: str, line_no: int, utf8_col: int) -> int:
+    lines = content.splitlines(keepends=True)
+    prefix = sum(len(line) for line in lines[: max(0, line_no - 1)])
+    line = lines[line_no - 1] if 0 < line_no <= len(lines) else ""
+    return prefix + len(line.encode("utf-8")[:utf8_col].decode("utf-8", "ignore"))
+
+
+def _apply_source_replacements(
+    content: str,
+    replacements: list[tuple[int, int, str]],
+) -> str:
+    for start, end, replacement in sorted(replacements, reverse=True):
+        content = content[:start] + replacement + content[end:]
+    return content
+
+
+def _ensure_strategy_agent_task_import(content: str) -> str:
+    if re.search(r"(?m)^from\s+nerya\.strategies\s+import\s+.*\bStrategyAgentTask\b", content):
+        return content
+    import_line = "from nerya.strategies import StrategyAgentTask\n"
+    marker = "from __future__ import annotations\n"
+    if marker in content:
+        return content.replace(marker, marker + "\n" + import_line, 1)
+    return import_line + content
+
+
+def _ensure_news_social_main_hook(
+    content: str,
+    req: StrategyGenerationRequest,
+) -> str:
+    sources = [str(s).strip() for s in (req.news_sources or ()) if str(s).strip()]
+    if not sources or "news_social" in content:
+        return content
+    sources_literal = json.dumps(sources, ensure_ascii=False)
+    hook = (
+        "\n\n# news_social: generated audit hook for strategy.yml news_sources.\n"
+        f"_NEWS_SOCIAL_SOURCES = {sources_literal}\n\n"
+        "\n"
+        "def _news_social_sources(ctx):\n"
+        "    configured = tuple(getattr(ctx.config, 'news_sources', ()) or ())\n"
+        "    return configured or tuple(_NEWS_SOCIAL_SOURCES)\n"
+    )
+    return content.rstrip() + hook
+
+
+def _proposal_metadata(
+    req: StrategyGenerationRequest,
+    files: dict[str, str],
+) -> dict[str, Any]:
+    tags = _semantic_tags(req, files)
+    return {
+        "strategy_id": req.strategy_id,
+        "strategy_class": req.strategy_class,
+        "execution_mode": _execution_mode(req),
+        "semantic_tags": tags,
+    }
+
+
+def _semantic_tags(req: StrategyGenerationRequest, files: dict[str, str]) -> list[str]:
+    text = _semantic_tag_text(req, files)
+    tags: set[str] = set()
+    factor_tags = {
+        tag
+        for tag, terms in _TECHNICAL_FACTOR_TERMS.items()
+        if any(term in text for term in terms)
+    }
+    tags.update(factor_tags)
+    if len(factor_tags) >= 3 or "confluence" in text or "共振" in text:
+        tags.add("confluence")
+        tags.add("multi_indicator_confluence")
+    timeframes = {term for term in _TIMEFRAME_TERMS if term in text}
+    if (
+        len(timeframes) >= 2
+        or "mtf" in text
+        or "multi-timeframe" in text
+        or "multi timeframe" in text
+        or "多时间框架" in text
+        or "多周期" in text
+    ):
+        tags.add("mtf")
+        tags.add("multi_timeframe")
+    if "skip" in text or "strategyagenttask.skip" in text:
+        tags.add("skip")
+    if "strategyagenttask.error" in text:
+        tags.add("error")
+    if req.news_sources or "news_social" in text:
+        tags.add("news_social")
+    return sorted(tags)
+
+
+def _semantic_tag_text(
+    req: StrategyGenerationRequest,
+    files: dict[str, str],
+) -> str:
+    chunks: list[str] = [
+        req.strategy_id,
+        req.title,
+        req.description,
+        req.prompt,
+        req.strategy_class,
+        req.execution_mode,
+        *req.markets,
+        *req.accounts,
+        *req.news_sources,
+        *req.subagents,
+    ]
+    chunks.extend(files.values())
+    return "\n".join(str(chunk or "") for chunk in chunks).lower()
+
+
 def _default_description(req: StrategyGenerationRequest) -> str:
     return (
         f"Auto-generated {req.strategy_class} strategy for "
@@ -491,11 +1510,6 @@ def _template_class(req: StrategyGenerationRequest) -> str:
     if req.strategy_class == "agent_team":
         return "trend"
     if req.strategy_class == "agent":
-        text = " ".join([req.strategy_id, req.title, req.description, req.prompt]).lower()
-        if "news" in text or "headline" in text:
-            return "news"
-        if "scalp" in text or "剥头皮" in text:
-            return "scalping"
         return "trend"
     return "scalping"
 
@@ -503,19 +1517,6 @@ def _template_class(req: StrategyGenerationRequest) -> str:
 def _requires_agent_team(req: StrategyGenerationRequest) -> bool:
     if not req.subagents:
         return False
-    text = " ".join([
-        req.strategy_id,
-        req.title,
-        req.description,
-        req.prompt,
-    ]).lower()
-    if (
-        "agent team" in text
-        or "agent_team" in text
-        or "agent-team" in text
-        or "_team_" in text
-    ):
-        return True
     return len(req.subagents) >= 2
 
 
@@ -594,6 +1595,8 @@ def _agent_profile_block(
             "Hold when confidence is below policy or data quality is degraded.",
         ]
         title = f"{req.title or req.strategy_id} Strategy Agent"
+    if req.news_sources and "news_social" not in attached_skills:
+        attached_skills.append("news_social")
     return {
         "title": title,
         "role": role,
@@ -620,9 +1623,8 @@ def _agent_team_roles_for_request(req: StrategyGenerationRequest) -> list[str]:
             "risk_critic",
         ]
     equity_like = any(str(m).lower().startswith("yahoo:") for m in req.markets)
-    text = " ".join([req.strategy_id, req.title, req.description, req.prompt]).lower()
     if (
-        (equity_like or "fundamental" in text or "valuation" in text or "earnings" in text)
+        equity_like
         and not any("fundamental" in r.lower() for r in roles)
     ):
         roles.insert(1 if roles else 0, "fundamentals_analyst")
@@ -998,6 +2000,8 @@ def _news_template(req: StrategyGenerationRequest) -> str:
         "from nerya.strategies import StrategyContext, StrategyResult\n\n"
         "\n"
         "def run(ctx: StrategyContext) -> StrategyResult:\n"
+        "    if getattr(ctx, 'runmode', '') == 'backtest':\n"
+        "        return _backtest_news_result(ctx)\n"
         '    items = ctx.news.fetch(since=ctx.state.get("last_seen"))\n'
         "    if not items:\n"
         '        return ctx.result.hold(reason="no news this tick")\n'
@@ -1031,6 +2035,17 @@ def _news_template(req: StrategyGenerationRequest) -> str:
         '        confidence=float(out.get("confidence", 0.0) or 0.0),\n'
         '        reasoning=out.get("thesis", ""),\n'
         "    )\n"
+        "\n"
+        "\n"
+        "def _backtest_news_result(ctx: StrategyContext) -> StrategyResult:\n"
+        "    market = ctx.config.markets[0]\n"
+        "    timeframe = ctx.trigger.get('timeframe') or ctx.trigger.get('interval') or '1d'\n"
+        "    candles = ctx.market.candles(market, timeframe=timeframe, limit=160)\n"
+        "    if not candles:\n"
+        "        return ctx.result.hold(reason='backtest_no_candles')\n"
+        "    return ctx.result.hold(\n"
+        "        reason='news surface disabled in OHLCV backtest; awaiting event/news replay'\n"
+        "    )\n"
     )
 
 
@@ -1038,6 +2053,19 @@ def _agent_task_template(req: StrategyGenerationRequest) -> str:
     market = req.markets[0]
     account = req.accounts[0]
     style = _template_class(req)
+    news_sources_literal = json.dumps(
+        [str(s).strip() for s in (req.news_sources or ()) if str(s).strip()],
+        ensure_ascii=False,
+    )
+    attached_skills = [
+        "trading",
+        "market_research",
+        "research",
+        "market_data_routing",
+    ]
+    if req.news_sources:
+        attached_skills.append("news_social")
+    attached_skills_literal = json.dumps(attached_skills, ensure_ascii=False)
     return (
         '"""Auto-generated script-to-Agent strategy.\n\n'
         f"Strategy id: {req.strategy_id}\n"
@@ -1049,13 +2077,14 @@ def _agent_task_template(req: StrategyGenerationRequest) -> str:
         f'_DEFAULT_MARKET = "{market}"\n'
         f'_DEFAULT_ACCOUNT = "{account}"\n'
         f'_STRATEGY_STYLE = "{style}"\n\n'
+        f"_NEWS_SOCIAL_SOURCES = {news_sources_literal}\n\n"
         "\n"
         "def run(ctx: StrategyContext) -> StrategyAgentTask | StrategyResult:\n"
         "    if getattr(ctx, 'runmode', '') == 'backtest':\n"
         "        return _backtest_signal_result(ctx)\n"
         "    return build_agent_task(ctx)\n\n"
         "\n"
-        "def _backtest_signal_result(ctx: StrategyContext) -> StrategyResult:\n"
+        "def _backtest_signal_result(ctx: StrategyContext) -> StrategyAgentTask | StrategyResult:\n"
         "    market = ctx.trigger.get('market') or ctx.config.markets[0] or _DEFAULT_MARKET\n"
         "    timeframe = ctx.trigger.get('timeframe') or ctx.trigger.get('interval') or _default_timeframe()\n"
         "    candles = ctx.market.candles(market, timeframe=timeframe, limit=160)\n"
@@ -1098,7 +2127,7 @@ def _agent_task_template(req: StrategyGenerationRequest) -> str:
         "            confidence=0.6,\n"
         "            reasoning_ref=f\"backtest_exit {signal.get('name')}\",\n"
         "        )\n"
-        "    return ctx.result.hold(reason='backtest signal hold', metadata={'signal': signal})\n\n"
+        "    return StrategyAgentTask.skip('backtest signal hold', metadata={'signal': signal})\n\n"
         "\n"
         "def build_agent_task(ctx: StrategyContext) -> StrategyAgentTask:\n"
         "    market = ctx.trigger.get('market') or ctx.config.markets[0] or _DEFAULT_MARKET\n"
@@ -1115,7 +2144,7 @@ def _agent_task_template(req: StrategyGenerationRequest) -> str:
         "    news_items = []\n"
         "    news_error = ''\n"
         "    try:\n"
-        "        news_items = ctx.news.fetch(limit=10)\n"
+        "        news_items = ctx.news.fetch(sources=_NEWS_SOCIAL_SOURCES or None, limit=10)\n"
         "    except Exception as exc:\n"
         "        news_error = f'{type(exc).__name__}: {exc}'\n"
         "    signal = _strategy_signal(candles, features)\n"
@@ -1186,7 +2215,7 @@ def _agent_task_template(req: StrategyGenerationRequest) -> str:
         "            'data_quality': data_quality,\n"
         "            'execution_mode': 'agent',\n"
         "        },\n"
-        "        attached_skills=['trading', 'market_research', 'research', 'market_data_routing'],\n"
+        f"        attached_skills={attached_skills_literal},\n"
         "        reason=f'script-built {_STRATEGY_STYLE} signal dispatched to Agent',\n"
         "    )\n\n"
         "\n"
@@ -1281,7 +2310,7 @@ def _agent_team_template(req: StrategyGenerationRequest) -> str:
         "        return _backtest_basket_result(ctx)\n"
         "    return build_agent_task(ctx)\n\n"
         "\n"
-        "def _backtest_basket_result(ctx: StrategyContext) -> StrategyResult:\n"
+        "def _backtest_basket_result(ctx: StrategyContext) -> StrategyAgentTask | StrategyResult:\n"
         "    markets = list(ctx.config.markets or _DEFAULT_MARKETS)\n"
         "    timeframe = ctx.trigger.get('timeframe') or ctx.trigger.get('interval') or _DEFAULT_TIMEFRAME\n"
         "    open_positions = []\n"
@@ -1304,12 +2333,12 @@ def _agent_team_template(req: StrategyGenerationRequest) -> str:
         "                confidence=0.62,\n"
         "                reasoning_ref=f\"backtest_team_exit score={score['score']:.4f} rsi={score['rsi']:.2f}\",\n"
         "            )\n"
-        "        return ctx.result.hold(reason='backtest team holds open candidate', metadata={'score': score})\n"
+        "        return StrategyAgentTask.skip('backtest team holds open candidate', metadata={'score': score})\n"
         "    ranked = sorted((_technical_score(ctx, m, timeframe) for m in markets), key=lambda row: row['score'], reverse=True)\n"
         "    best = ranked[0] if ranked else {'market': markets[0], 'score': 0.0, 'rsi': 50.0}\n"
         "    confidence = min(0.8, 0.55 + max(0.0, best['score']) * 5.0)\n"
         "    if best['score'] <= 0.008 or confidence < max(0.0, ctx.policy.min_confidence):\n"
-        "        return ctx.result.hold(reason='backtest team no ranked setup', metadata={'ranked': ranked[:4]})\n"
+        "        return StrategyAgentTask.skip('backtest team no ranked setup', metadata={'ranked': ranked[:4]})\n"
         "    return ctx.trading.open_position(\n"
         "        market=best['market'],\n"
         "        side='long',\n"

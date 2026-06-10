@@ -54,15 +54,35 @@ def _workspace_root() -> Path:
 
 _DEFAULT_FETCH_BYTES = 200_000
 _MIN_USEFUL_CHARS = 160
+_MIN_STEP_TIMEOUT = 0.25
 _JINA_READER_PREFIX = "https://r.jina.ai/"
 _BLOCKER_PATTERNS = (
+    "oops, something went wrong",
     "enable javascript",
+    "please enable js",
+    "disable any ad blocker",
+    "security verification",
+    "security checkpoint",
+    "vercel security checkpoint",
+    "404. page not found",
+    "404 page not found",
+    "page not found",
     "just a moment",
     "checking your browser",
+    "verify you are human",
+    "are you a human",
+    "are you a robot",
     "captcha",
+    "cloudflare",
+    "akamai",
+    "pardon our interruption",
+    "unusual traffic",
+    "bot detection",
+    "automated access",
     "access denied",
     "forbidden",
     "request blocked",
+    "temporarily blocked",
 )
 
 
@@ -135,6 +155,36 @@ def _normalize_markdown(text: str) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{4,}", "\n\n\n", text)
     return text.strip()
+
+
+def _remaining_timeout(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _step_timeout(deadline: float) -> float | None:
+    remaining = _remaining_timeout(deadline)
+    if remaining <= _MIN_STEP_TIMEOUT:
+        return None
+    return remaining
+
+
+def _budget_exhausted_result(
+    *,
+    url: str,
+    fallback_errors: list[str],
+    safety: dict[str, Any],
+    started_at: float,
+) -> dict[str, Any]:
+    if not any(err.startswith("budget_exhausted") for err in fallback_errors):
+        fallback_errors.append("budget_exhausted: fetch deadline reached")
+    return {
+        "ok": False,
+        "url": url,
+        "error": "budget_exhausted",
+        "fallback_errors": fallback_errors,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "safety": safety,
+    }
 
 
 def _looks_low_quality(text: str, *, min_chars: int) -> bool:
@@ -302,7 +352,7 @@ def _try_browser_engine(
 
     if not result.get("ok"):
         err = result.get("error") or ""
-        if err and err not in {"no_engine_selected", "engine_not_installed"}:
+        if err:
             fallback_errors.append(
                 f"browser:{result.get('name') or '?'}: {err} "
                 f"{result.get('detail') or ''}".strip()
@@ -426,64 +476,106 @@ def run(
 
     max_bytes = max(1024, min(int(max_bytes), HARD_FETCH_BYTES))
     min_content_chars = max(0, int(min_content_chars))
+    timeout_s = max(_MIN_STEP_TIMEOUT, float(timeout_s or DEFAULT_TIMEOUT))
     started = time.monotonic()
+    deadline = started + timeout_s
     fallback_errors: list[str] = []
 
+    def next_timeout(step: str) -> float | None:
+        value = _step_timeout(deadline)
+        if value is None:
+            fallback_errors.append(f"budget_exhausted: before {step}")
+        return value
+
     if prefer_jina:
+        step_timeout = next_timeout("jina_reader")
+        if step_timeout is None:
+            return _budget_exhausted_result(
+                url=safety.url,
+                fallback_errors=fallback_errors,
+                safety=safety.to_dict(),
+                started_at=started,
+            )
         jina, err = _fetch_jina_reader(
             safe_url=safety.url,
             max_bytes=max_bytes,
-            timeout_s=timeout_s,
+            timeout_s=step_timeout,
         )
-        if jina is not None:
+        if jina is not None and not _looks_low_quality(
+            jina["markdown"], min_chars=min_content_chars,
+        ):
             jina["ok"] = True
             jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
             jina["fallback_errors"] = fallback_errors
             jina["safety"] = safety.to_dict()
             return jina
+        if jina is not None:
+            fallback_errors.append(
+                f"jina_reader: low-quality content ({len(jina['markdown'])} chars)"
+            )
         if err:
             fallback_errors.append(err)
 
+    direct_timeout = next_timeout("direct_fetch")
+    if direct_timeout is None:
+        return _budget_exhausted_result(
+            url=safety.url,
+            fallback_errors=fallback_errors,
+            safety=safety.to_dict(),
+            started_at=started,
+        )
     try:
-        status, headers, body = http_get(safety.url, timeout=timeout_s)
+        status, headers, body = http_get(safety.url, timeout=direct_timeout)
     except Exception as exc:
         fallback_errors.append(f"direct_fetch: {type(exc).__name__}: {exc}")
         if use_jina_fallback:
-            jina, err = _fetch_jina_reader(
-                safe_url=safety.url,
-                max_bytes=max_bytes,
-                timeout_s=timeout_s,
-            )
-            if jina is not None:
-                jina["ok"] = True
-                jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
-                jina["fallback_errors"] = fallback_errors
-                jina["safety"] = safety.to_dict()
-                return jina
-            if err:
-                fallback_errors.append(err)
+            step_timeout = next_timeout("jina_reader")
+            if step_timeout is not None:
+                jina, err = _fetch_jina_reader(
+                    safe_url=safety.url,
+                    max_bytes=max_bytes,
+                    timeout_s=step_timeout,
+                )
+                if jina is not None and not _looks_low_quality(
+                    jina["markdown"], min_chars=min_content_chars,
+                ):
+                    jina["ok"] = True
+                    jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+                    jina["fallback_errors"] = fallback_errors
+                    jina["safety"] = safety.to_dict()
+                    return jina
+                if jina is not None:
+                    fallback_errors.append(
+                        f"jina_reader: low-quality content ({len(jina['markdown'])} chars)"
+                    )
+                if err:
+                    fallback_errors.append(err)
         if use_browser_fallback:
-            br_result = _try_browser_engine(
-                safe_url=safety.url,
-                timeout_s=timeout_s,
-                min_content_chars=min_content_chars,
-                fallback_errors=fallback_errors,
-                safety_dict=safety.to_dict(),
-                started_at=started,
-            )
-            if br_result is not None:
-                return br_result
+            step_timeout = next_timeout("browser_fallback")
+            if step_timeout is not None:
+                br_result = _try_browser_engine(
+                    safe_url=safety.url,
+                    timeout_s=step_timeout,
+                    min_content_chars=min_content_chars,
+                    fallback_errors=fallback_errors,
+                    safety_dict=safety.to_dict(),
+                    started_at=started,
+                )
+                if br_result is not None:
+                    return br_result
         if use_scrapling_fallback:
-            scr_result = _try_scrapling(
-                safe_url=safety.url,
-                timeout_s=timeout_s,
-                min_content_chars=min_content_chars,
-                fallback_errors=fallback_errors,
-                safety_dict=safety.to_dict(),
-                started_at=started,
-            )
-            if scr_result is not None:
-                return scr_result
+            step_timeout = next_timeout("scrapling_fallback")
+            if step_timeout is not None:
+                scr_result = _try_scrapling(
+                    safe_url=safety.url,
+                    timeout_s=step_timeout,
+                    min_content_chars=min_content_chars,
+                    fallback_errors=fallback_errors,
+                    safety_dict=safety.to_dict(),
+                    started_at=started,
+                )
+                if scr_result is not None:
+                    return scr_result
         return {
             "ok": False,
             "url": safety.url,
@@ -529,23 +621,29 @@ def run(
         )
     )
     if should_try_jina:
-        jina, err = _fetch_jina_reader(
-            safe_url=safety.url,
-            max_bytes=max_bytes,
-            timeout_s=timeout_s,
-        )
-        if jina is not None and not _looks_low_quality(
-            jina["markdown"], min_chars=min_content_chars,
-        ):
-            jina["ok"] = True
-            jina["direct_status"] = status
-            jina["direct_fetch_method"] = fetch_method
-            jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
-            jina["fallback_errors"] = fallback_errors
-            jina["safety"] = safety.to_dict()
-            return jina
-        if err:
-            fallback_errors.append(err)
+        step_timeout = next_timeout("jina_reader")
+        if step_timeout is not None:
+            jina, err = _fetch_jina_reader(
+                safe_url=safety.url,
+                max_bytes=max_bytes,
+                timeout_s=step_timeout,
+            )
+            if jina is not None and not _looks_low_quality(
+                jina["markdown"], min_chars=min_content_chars,
+            ):
+                jina["ok"] = True
+                jina["direct_status"] = status
+                jina["direct_fetch_method"] = fetch_method
+                jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+                jina["fallback_errors"] = fallback_errors
+                jina["safety"] = safety.to_dict()
+                return jina
+            if jina is not None:
+                fallback_errors.append(
+                    f"jina_reader: low-quality content ({len(jina['markdown'])} chars)"
+                )
+            if err:
+                fallback_errors.append(err)
 
     # Browser engine tier — only kicks in when Jina also failed or returned
     # low-quality content. Cheap to skip if no engine is selected.
@@ -555,18 +653,20 @@ def run(
         and (status >= 400 or _looks_low_quality(markdown, min_chars=min_content_chars))
     )
     if needs_browser:
-        br_result = _try_browser_engine(
-            safe_url=safety.url,
-            timeout_s=timeout_s,
-            min_content_chars=min_content_chars,
-            fallback_errors=fallback_errors,
-            safety_dict=safety.to_dict(),
-            started_at=started,
-        )
-        if br_result is not None:
-            br_result["direct_status"] = status
-            br_result["direct_fetch_method"] = fetch_method
-            return br_result
+        step_timeout = next_timeout("browser_fallback")
+        if step_timeout is not None:
+            br_result = _try_browser_engine(
+                safe_url=safety.url,
+                timeout_s=step_timeout,
+                min_content_chars=min_content_chars,
+                fallback_errors=fallback_errors,
+                safety_dict=safety.to_dict(),
+                started_at=started,
+            )
+            if br_result is not None:
+                br_result["direct_status"] = status
+                br_result["direct_fetch_method"] = fetch_method
+                return br_result
 
     # Last-resort fallback: Scrapling (Camoufox / Playwright stealth).
     # Only trigger when direct + Jina both produced nothing usable.
@@ -576,22 +676,40 @@ def run(
         and (status >= 400 or _looks_low_quality(markdown, min_chars=min_content_chars))
     )
     if needs_scrapling:
-        scr_result = _try_scrapling(
-            safe_url=safety.url,
-            timeout_s=timeout_s,
-            min_content_chars=min_content_chars,
-            fallback_errors=fallback_errors,
-            safety_dict=safety.to_dict(),
-            started_at=started,
+        step_timeout = next_timeout("scrapling_fallback")
+        if step_timeout is not None:
+            scr_result = _try_scrapling(
+                safe_url=safety.url,
+                timeout_s=step_timeout,
+                min_content_chars=min_content_chars,
+                fallback_errors=fallback_errors,
+                safety_dict=safety.to_dict(),
+                started_at=started,
+            )
+            if scr_result is not None:
+                scr_result["direct_status"] = status
+                scr_result["direct_fetch_method"] = fetch_method
+                return scr_result
+
+    final_low_quality = (
+        strip_html
+        and (
+            "text/html" in content_type
+            or urlparse(safety.url).path.endswith((".html", ".htm"))
         )
-        if scr_result is not None:
-            scr_result["direct_status"] = status
-            scr_result["direct_fetch_method"] = fetch_method
-            return scr_result
+        and _looks_low_quality(markdown, min_chars=min_content_chars)
+    )
+    if final_low_quality and not any(
+        err.startswith("direct_fetch: low-quality") for err in fallback_errors
+    ):
+        fallback_errors.append(
+            f"direct_fetch: low-quality content ({len(markdown)} chars)"
+        )
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    ok = 200 <= status < 400 and not final_low_quality
     return {
-        "ok": 200 <= status < 400,
+        "ok": ok,
         "status": status,
         "url": safety.url,
         "title": title,
@@ -601,6 +719,7 @@ def run(
         "fetch_method": fetch_method,
         "fallback_errors": fallback_errors,
         "elapsed_ms": elapsed_ms,
+        "error": "low_quality_content" if final_low_quality else None,
         "markdown": markdown,
         "text": markdown,
         "safety": safety.to_dict(),

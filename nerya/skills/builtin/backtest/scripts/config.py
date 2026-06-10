@@ -159,8 +159,8 @@ class BacktestConfig:
     def validate(self) -> None:
         if self.initial_capital_usd <= 0:
             raise BacktestConfigError("initial_capital_usd must be positive")
-        if self.window_days < self.min_backtest_days:
-            raise BacktestConfigError("window_days below min_backtest_days")
+        if self.min_backtest_days < 0:
+            raise BacktestConfigError("min_backtest_days must be >= 0")
         if self.window_days <= 0:
             raise BacktestConfigError("window_days must be positive")
         if self.warmup_bars < 0:

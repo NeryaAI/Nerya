@@ -109,7 +109,7 @@ class AnthropicAdapter:
         latency_ms = int((time.time() - started) * 1000)
 
         if status >= 400:
-            err = (doc.get("error") or {}).get("message") or doc.get("raw") or f"http_{status}"
+            err = _provider_error_text(doc, status=status)
             raise LLMError(f"anthropic api error ({status}): {err}")
 
         try:
@@ -161,7 +161,7 @@ class AnthropicAdapter:
         }
         status, doc = self.transport.get_json(url, headers=headers, timeout=self.timeout)
         if status >= 400:
-            err = (doc.get("error") or {}).get("message") or doc.get("raw") or f"http_{status}"
+            err = _provider_error_text(doc, status=status)
             raise LLMError(f"list_models failed ({status}): {err}")
         out: list[ModelInfo] = []
         for item in doc.get("data") or []:
@@ -230,6 +230,20 @@ def _adaptive_effort_for(model: str, effort: str | None) -> str:
     if eff == "minimal":
         return "low"
     return ""
+
+
+def _provider_error_text(doc: dict[str, Any], *, status: int) -> str:
+    err = doc.get("error") if isinstance(doc, dict) else None
+    if isinstance(err, dict):
+        msg = err.get("message")
+        if msg:
+            return str(msg)
+    if err:
+        return str(err)
+    raw = doc.get("raw") if isinstance(doc, dict) else None
+    if raw:
+        return str(raw)
+    return f"http_{status}"
 
 
 __all__ = ["AnthropicAdapter"]

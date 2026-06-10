@@ -96,6 +96,119 @@ def test_data_api_calls_akshare_function_with_bounded_table_result(tmp_path, mon
     assert payload["rows"] == [{"date": "2026-01-01", "close": 10.0}]
 
 
+def test_data_api_lists_financial_datasets_equity_actions(tmp_path) -> None:
+    cfg = _config(tmp_path)
+
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "list",
+                    "provider": "equities",
+                    "query": "sec filing",
+                    "limit": 20,
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    assert payload["provider"] == "financial_datasets"
+    assert payload["requested_provider"] == "equities"
+    actions = {row["action"] for row in payload["actions"]}
+    assert "filings" in actions
+    assert any("sec" in " ".join(row.get("tags") or []) for row in payload["actions"])
+
+
+def test_data_api_financial_datasets_schema_exposes_statement_and_filing_args(tmp_path) -> None:
+    cfg = _config(tmp_path)
+
+    filings = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "schema",
+                    "provider": "financial_datasets",
+                    "action": "filings",
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+    statements = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "schema",
+                    "provider": "financial_datasets",
+                    "action": "income_statements",
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    assert filings["input_schema"]["required"] == ["ticker"]
+    assert filings["input_schema"]["properties"]["form"]["description"]
+    assert statements["input_schema"]["properties"]["period"]["default"] == "annual"
+    assert "financialdatasets.ai" in filings["docs_url"]
+
+
+def test_data_api_calls_financial_datasets_filings_with_bounded_result(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeEquitiesClient:
+        def filings(self, ticker: str, *, form: str | None = None, limit: int = 10):
+            calls.append(("filings", {"ticker": ticker, "form": form, "limit": limit}))
+            return {
+                "data": {
+                    "filings": [
+                        {"ticker": ticker, "form": form, "filing_date": "2026-03-01", "url": "https://sec.example/1"},
+                        {"ticker": ticker, "form": form, "filing_date": "2025-03-01", "url": "https://sec.example/2"},
+                    ]
+                },
+                "_envelope": {"source": "financial_datasets", "mode": "live"},
+                "source_url": "https://api.financialdatasets.ai/filings/?ticker=NVDA",
+            }
+
+    monkeypatch.setattr("nerya.data_api.builtins.EquitiesClient", FakeEquitiesClient)
+
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "call",
+                    "provider": "sec_filings",
+                    "action": "filings",
+                    "args": {"ticker": "NVDA", "form": "10-K", "limit": 2},
+                    "limit": 1,
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    assert calls == [("filings", {"ticker": "NVDA", "form": "10-K", "limit": 2})]
+    assert payload["provider"] == "sec_filings"
+    assert payload["action"] == "filings"
+    assert payload["kind"] == "table"
+    assert payload["row_count"] == 2
+    assert payload["truncated"] is True
+    assert payload["rows"] == [
+        {
+            "ticker": "NVDA",
+            "form": "10-K",
+            "filing_date": "2026-03-01",
+            "url": "https://sec.example/1",
+        }
+    ]
+
+
 def test_data_api_common_aliases_survive_column_projection() -> None:
     payload = compact_data_result(
         "onchainos",
@@ -315,9 +428,40 @@ def test_data_api_wallet_meme_strategy_guide_is_actionable(tmp_path) -> None:
     assert "token_hot_tokens" in text
     assert "security_token_scan" in text
     assert "market_data" in text
+    assert "must_feed_strategy_markets" in text
+    assert "exact chain:token market" in text
     assert "StrategyAgentTask" in text
     assert "Do not use run_shell" in text
     assert "trade_intent_submit" in text
+
+
+def test_data_api_error_detail_includes_provider_and_action(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "self": {"provider": "self_custody", "config": {}},
+        }
+    }
+
+    result = data_api_handler(
+        ToolCall(
+            name="data_api",
+            arguments={
+                "op": "call",
+                "provider": "wallet",
+                "action": "balance",
+                "args": {"chain": "ethereum"},
+            },
+        ),
+        config_like=cfg,
+    )
+
+    assert result.is_error
+    assert result.error is not None
+    assert result.error.kind is ToolErrorKind.SCHEMA_VALIDATION
+    assert result.error.detail["provider"] == "wallet"
+    assert result.error.detail["action"] == "balance"
+    assert result.error.detail["field"] == "address"
 
 
 def test_data_api_wallet_catalog_rejects_limit_expansion(tmp_path) -> None:
@@ -426,16 +570,268 @@ def test_data_api_wallet_meme_strategy_guide_uses_ready_wallet_route(tmp_path, m
     selection = payload["data"]["selection"]
     assert payload["data"]["selected_route"]["canonical"] == "BITGET_ONCHAIN"
     assert payload["data"]["available_route_count"] == 1
-    assert "do not call wallet_install" in payload["data"]["next_required_action"]
+    assert "use selected_route directly" in payload["data"]["next_required_action"]
     assert selection["mode"] == "wallet_binding"
     assert selection["selected_route"]["canonical"] == "BITGET_ONCHAIN"
     assert selection["selected_route"]["market"] == "BITGET_ONCHAIN:base:0xtoken"
     assert selection["fallback"]["active"] is False
+    assert "install" not in selection["fallback"]
     assert any(
         step.get("step") == "fetch_historical_ohlcv"
         and step.get("call", {}).get("venue") == "bitget_onchain"
         for step in payload["data"]["workflow"]
     )
+
+
+def test_data_api_wallet_meme_strategy_guide_honors_preferred_xagt_route(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "okx_main": {
+                "provider": "okx_os",
+                "label": "OKX Web3",
+                "config": {},
+            },
+            "xagt_main": {
+                "provider": "xagt_agent_plugin",
+                "label": "XAgent",
+                "config": {},
+            },
+        }
+    }
+
+    def readiness_report(config, *, workspace=None, vault_passphrase=None):
+        base_caps = {
+            "balance": {"supported": True, "status": "real"},
+            "quote": {"supported": True, "status": "real"},
+            "swap": {"supported": True, "status": "guarded"},
+            "market_data": {"supported": True, "status": "real"},
+            "chains": ["solana"],
+            "execution_profile": "partial",
+        }
+        return [
+            {
+                "id": "okx_os",
+                "label": "OKX Web3",
+                "readiness": {"provider": "okx_os", "ready": True, "installed": True},
+                "capabilities": dict(base_caps),
+                "stability": "partial",
+            },
+            {
+                "id": "xagt_agent_plugin",
+                "label": "XAgent",
+                "readiness": {
+                    "provider": "xagt_agent_plugin",
+                    "ready": True,
+                    "installed": True,
+                },
+                "capabilities": dict(base_caps),
+                "stability": "partial",
+            },
+        ]
+
+    monkeypatch.setattr("nerya.wallet.readiness_report", readiness_report)
+
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "call",
+                    "provider": "wallet",
+                    "action": "meme_strategy_guide",
+                    "args": {
+                        "chain": "solana",
+                        "preferred_provider": "xagt_onchain",
+                    },
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    selection = payload["data"]["selection"]
+    assert payload["data"]["preferred_provider"] == "xagt_agent_plugin"
+    assert payload["data"]["selected_route"]["provider"] == "xagt_agent_plugin"
+    assert payload["data"]["selected_route"]["canonical"] == "XAGT_ONCHAIN"
+    assert payload["data"]["selected_route"]["market"].startswith("XAGT_ONCHAIN:solana:")
+    assert selection["preference"]["matched_ready_route"] is True
+    assert "do not silently substitute" in payload["data"]["next_required_action"]
+    assert "wallet_install" not in str(selection["fallback"])
+    discover_call = payload["data"]["workflow"][0]["call"]
+    assert discover_call["args"]["preferred_provider"] == "xagt_agent_plugin"
+    assert any(
+        step.get("step") == "fetch_historical_ohlcv"
+        and step.get("call", {}).get("venue") == "xagt_onchain"
+        for step in payload["data"]["workflow"]
+    )
+
+
+def test_data_api_wallet_catalog_prefers_ready_xagt_route(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    cfg.data["wallet"] = {
+        "providers": {
+            "okx_main": {"provider": "okx_os", "label": "OKX Web3", "config": {}},
+            "xagt_main": {
+                "provider": "xagt_agent_plugin",
+                "label": "XAgent",
+                "config": {},
+            },
+        }
+    }
+
+    def readiness_report(config, *, workspace=None, vault_passphrase=None):
+        base_caps = {
+            "balance": {"supported": True, "status": "real"},
+            "quote": {"supported": True, "status": "real"},
+            "swap": {"supported": True, "status": "guarded"},
+            "market_data": {"supported": True, "status": "real"},
+            "chains": ["solana"],
+            "execution_profile": "partial",
+        }
+        return [
+            {
+                "id": "okx_os",
+                "label": "OKX Web3",
+                "readiness": {"provider": "okx_os", "ready": True, "installed": True},
+                "capabilities": dict(base_caps),
+            },
+            {
+                "id": "xagt_agent_plugin",
+                "label": "XAgent",
+                "readiness": {
+                    "provider": "xagt_agent_plugin",
+                    "ready": True,
+                    "installed": True,
+                },
+                "capabilities": dict(base_caps),
+            },
+        ]
+
+    monkeypatch.setattr("nerya.wallet.readiness_report", readiness_report)
+
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "call",
+                    "provider": "wallet",
+                    "action": "capability_catalog",
+                    "args": {"topic": "meme", "include_live_status": False},
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    assert payload["data"]["selected_route"]["provider"] == "xagt_agent_plugin"
+    assert payload["data"]["selected_route"]["canonical"] == "XAGT_ONCHAIN"
+
+
+def test_data_api_wallet_readiness_filters_preferred_provider(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+
+    def readiness_report(config, *, workspace=None, vault_passphrase=None):
+        return [
+            {
+                "id": "self_custody",
+                "label": "Self custody",
+                "readiness": {"provider": "self_custody", "ready": False, "installed": False},
+                "capabilities": {},
+            },
+            {
+                "id": "xagt_agent_plugin",
+                "label": "XAgent",
+                "readiness": {
+                    "provider": "xagt_agent_plugin",
+                    "ready": True,
+                    "installed": True,
+                },
+                "capabilities": {
+                    "market_data": {"supported": True, "status": "real"},
+                    "chains": ["solana"],
+                },
+            },
+        ]
+
+    monkeypatch.setattr("nerya.wallet.readiness_report", readiness_report)
+
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "call",
+                    "provider": "wallet",
+                    "action": "readiness",
+                    "args": {"provider": "xagt-plugin"},
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    data = payload["data"]
+    assert data["provider"] == "xagt_agent_plugin"
+    assert data["ready"] is True
+    assert data["count"] == 1
+    assert data["provider_status"][0]["id"] == "xagt_agent_plugin"
+    assert "install_hint" not in data["provider_status"][0]
+    assert "self_custody" not in str(data)
+    assert "do not repeat wallet.readiness" in data["next_required_action"]
+
+
+def test_data_api_wallet_readiness_maps_binance_alias(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+
+    def readiness_report(config, *, workspace=None, vault_passphrase=None):
+        return [
+            {
+                "id": "self_custody",
+                "label": "Self custody",
+                "readiness": {"provider": "self_custody", "ready": False},
+                "capabilities": {},
+            },
+            {
+                "id": "binance_agentic",
+                "label": "Binance Agentic Wallet",
+                "readiness": {
+                    "provider": "binance_agentic",
+                    "ready": False,
+                    "installed": True,
+                    "missing": ["skill:binance-agentic-wallet"],
+                    "reason": "binance-agentic-wallet skill not installed.",
+                },
+                "capabilities": {
+                    "market_data": {"supported": True, "status": "real"},
+                },
+            },
+        ]
+
+    monkeypatch.setattr("nerya.wallet.readiness_report", readiness_report)
+
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "call",
+                    "provider": "wallet",
+                    "action": "readiness",
+                    "args": {"preferred_provider": "binance"},
+                },
+            ),
+            config_like=cfg,
+        )
+    )
+
+    data = payload["data"]
+    assert data["provider"] == "binance_agentic"
+    assert data["ready"] is False
+    assert data["count"] == 1
+    assert data["provider_status"][0]["id"] == "binance_agentic"
+    assert "self_custody" not in str(data)
 
 
 def test_data_api_unknown_provider_returns_recovery_hint(tmp_path) -> None:
@@ -466,7 +862,54 @@ def test_connector_list_points_wallet_backed_sources_to_data_api() -> None:
 
     assert payload["count"] == 0
     assert "data_api" in payload["hint"]
-    assert "xagt_agent_plugin" in payload["hint"]
+    assert "provider-specific data_api surface" in payload["hint"]
+    assert payload["suggested_data_api_checks"][0] == {
+        "op": "list",
+        "provider": "wallet",
+        "query": "meme",
+    }
+    assert "next_required_action" not in payload
+    assert "blocked_until_data_api" not in payload
+
+
+def test_data_api_wallet_list_plain_query_does_not_force_readiness(tmp_path) -> None:
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "list",
+                    "provider": "wallet",
+                    "query": "cryptopanic",
+                },
+            ),
+            config_like=_config(tmp_path),
+        )
+    )
+
+    assert payload["count"] == 0
+    assert "next_required_action" not in payload
+
+
+def test_data_api_wallet_list_wallet_alias_suggests_readiness_followup(tmp_path) -> None:
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={"op": "list", "provider": "wallet", "query": "xagt"},
+            ),
+            config_like=_config(tmp_path),
+        )
+    )
+
+    assert payload["next_required_action"]["tool"] == "data_api"
+    assert payload["next_required_action"]["arguments"] == {
+        "op": "call",
+        "provider": "wallet",
+        "action": "readiness",
+        "args": {"provider": "xagt"},
+    }
+    assert "readiness" in payload["next_required_action"]["message"]
 
 
 def test_data_api_onchainos_allowlisted_action_routes_to_okx_wallet(tmp_path, monkeypatch) -> None:

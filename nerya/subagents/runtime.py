@@ -26,6 +26,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.config import Config
+from ..core.errors import (
+    LLMApprovalRequired,
+    LLMError,
+    LLMScriptQuotaExceeded,
+    LLMStructuredOutputError,
+    LLMTaskNotAllowed,
+    LLMTierDenied,
+)
 from ..core.redaction import redact_display_dict, redact_text
 from ..core.time import now_iso
 from ..llm.gateway import LLMGateway
@@ -93,12 +101,50 @@ CHILD_NATIVE_TOOL_DENY_RISK: tuple[str, ...] = ("dangerous",)
 STOCK_RESEARCH_SUBAGENTS: frozenset[str] = frozenset({
     "technical_analyst",
     "fundamentals_analyst",
+    "valuation_analyst",
+    "sec_analyst",
+    "investor_perspective",
     "sentiment_analyst",
     "bull_researcher",
     "bear_researcher",
     "risk_critic",
     "research_manager",
     "research_editor",
+})
+SUBAGENT_FINALIZATION_RESERVE_SECONDS = 45.0
+
+
+def _spec_profile_name(spec: SubAgentSpec | None) -> str:
+    if spec is None:
+        return ""
+    return str(getattr(spec, "canonical_name", None) or spec.name or "")
+
+
+def _is_stock_research_spec(spec: SubAgentSpec | None) -> bool:
+    if spec is None:
+        return False
+    return spec.name in STOCK_RESEARCH_SUBAGENTS or _spec_profile_name(spec) in STOCK_RESEARCH_SUBAGENTS
+
+_TASK_CONTROL_PAYLOAD_KEYS: frozenset[str] = frozenset({
+    "__team_instructions",
+    "__team_task",
+    "analysis_language",
+    "discussion_language",
+    "internal_language",
+    "original_user_prompt",
+    "original_user_request",
+    "open_work_items",
+    "output_language",
+    "research_requirements",
+    "response_language",
+    "target_language",
+    "task_id",
+    "task_owner",
+    "task_subject",
+    "team_call_id",
+    "team_run_id",
+    "team_template",
+    "working_language",
 })
 
 LEGACY_TOOL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -112,6 +158,113 @@ LEGACY_TOOL_ALIASES: dict[str, tuple[str, ...]] = {
 
 class SubAgentLLMError(RuntimeError):
     """Raised when a child runtime cannot produce any model output."""
+
+
+def _split_task_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Separate trusted parent orchestration from untrusted data payload."""
+
+    task_envelope: dict[str, Any] = {}
+    data_payload: dict[str, Any] = {}
+    for key, value in (payload or {}).items():
+        normalized = str(key)
+        if normalized in _TASK_CONTROL_PAYLOAD_KEYS or normalized.startswith("__team_"):
+            task_envelope[normalized] = value
+        else:
+            data_payload[normalized] = value
+    return task_envelope, data_payload
+
+
+def _render_subagent_task_assignment(
+    *,
+    spec_name: str,
+    task_envelope: dict[str, Any],
+) -> str:
+    lines: list[str] = []
+    role = str(task_envelope.get("task_owner") or spec_name or "").strip()
+    if role:
+        lines.append(f"Role: {redact_text(role)}")
+    mission = str(
+        task_envelope.get("__team_task")
+        or task_envelope.get("task_subject")
+        or ""
+    ).strip()
+    if mission:
+        lines.append(f"Mission: {redact_text(mission)}")
+    original = str(
+        task_envelope.get("original_user_prompt")
+        or task_envelope.get("original_user_request")
+        or ""
+    ).strip()
+    if original and original != mission:
+        lines.append(f"Original user request: {redact_text(original)}")
+    instructions = str(task_envelope.get("__team_instructions") or "").strip()
+    if instructions:
+        lines.append(f"Role instructions: {redact_text(instructions)}")
+    open_work_items = task_envelope.get("open_work_items")
+    if isinstance(open_work_items, list) and open_work_items:
+        lines.append("Open parent work items:")
+        for idx, item in enumerate(open_work_items[:12], start=1):
+            if isinstance(item, dict):
+                content = str(
+                    item.get("content")
+                    or item.get("activeForm")
+                    or item.get("active_form")
+                    or ""
+                ).strip()
+                status = str(item.get("status") or "pending").strip()
+            else:
+                content = str(item or "").strip()
+                status = "pending"
+            if not content:
+                continue
+            lines.append(f"{idx}. [{redact_text(status)}] {redact_text(content)}")
+    requirements = task_envelope.get("research_requirements")
+    if isinstance(requirements, dict):
+        policy = str(requirements.get("policy") or "").strip()
+        if policy:
+            lines.append(f"Requirement policy: {redact_text(policy)}")
+    return "\n".join(lines).strip()
+
+
+_NON_RETRYABLE_SUBAGENT_LLM_ERRORS: tuple[type[Exception], ...] = (
+    LLMTierDenied,
+    LLMTaskNotAllowed,
+    LLMScriptQuotaExceeded,
+    LLMStructuredOutputError,
+    LLMApprovalRequired,
+)
+
+_TRANSIENT_SUBAGENT_LLM_HINTS: tuple[str, ...] = (
+    "(429)",
+    "(500)",
+    "(502)",
+    "(503)",
+    "(504)",
+    "(522)",
+    "(524)",
+    "(529)",
+    "rate_limit",
+    "rate-limit",
+    "rate limit",
+    "timeout",
+    "timed out",
+    "connection",
+    "network",
+    "unreachable",
+    "temporarily unavailable",
+    "temporarily busy",
+    "server busy",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "remote end closed connection",
+    "服务器短暂繁忙",
+    "短暂繁忙",
+    "稍后重试",
+    "ECONN",
+    "ETIMEDOUT",
+    "EAI_AGAIN",
+)
 
 
 @dataclass
@@ -161,7 +314,7 @@ class SubAgentRuntime:
         explicit = self.config.get("agent.subagents.max_iterations", None)
         if explicit is not None:
             return max(1, int(explicit or 1))
-        if spec is not None and spec.name in STOCK_RESEARCH_SUBAGENTS:
+        if _is_stock_research_spec(spec):
             return max(1, int(self.config.get(
                 "agent.subagents.stock_research_max_iterations", 8,
             ) or 8))
@@ -184,14 +337,23 @@ class SubAgentRuntime:
                 return max(5.0, float(explicit or 5))
             except Exception:
                 return 120.0
-        if spec is not None and spec.name in STOCK_RESEARCH_SUBAGENTS:
+        if _is_stock_research_spec(spec):
             try:
                 return max(5.0, float(self.config.get(
-                    "agent.subagents.stock_research_max_wall_seconds", 240,
-                ) or 240))
+                    "agent.subagents.stock_research_max_wall_seconds", 360,
+                ) or 360))
             except Exception:
-                return 240.0
+                return 360.0
         return max(5.0, float(600))
+
+    def _finalization_reserve_seconds(self) -> float:
+        try:
+            return max(5.0, float(self.config.get(
+                "agent.subagents.finalization_reserve_seconds",
+                SUBAGENT_FINALIZATION_RESERVE_SECONDS,
+            ) or SUBAGENT_FINALIZATION_RESERVE_SECONDS))
+        except Exception:
+            return SUBAGENT_FINALIZATION_RESERVE_SECONDS
 
     # ---------------------------------------------------------------- core
     def run(
@@ -247,6 +409,8 @@ class SubAgentRuntime:
         signals_used: list[str] = []
         evidence: list[dict[str, Any]] = []
         uncertainty: float = 0.0
+        task_envelope, data_payload = _split_task_payload(payload)
+        effective_subject_payload = {**task_envelope, **data_payload}
 
         # Emit subagent lifecycle events on the same process-wide
         # streaming bus the parent kernel uses so the dashboard /
@@ -260,18 +424,23 @@ class SubAgentRuntime:
             _bus = None  # type: ignore[assignment]
         team_event_fields = {
             "turn_id": turn_id,
-            "team_run_id": payload.get("team_run_id"),
-            "team_template": payload.get("team_template"),
-            "team_call_id": payload.get("team_call_id") or parent_call_id,
-            "team_task_id": payload.get("task_id"),
-            "team_task_owner": payload.get("task_owner"),
-            "team_task_subject": payload.get("task_subject"),
+            "team_run_id": task_envelope.get("team_run_id"),
+            "team_template": task_envelope.get("team_template"),
+            "team_call_id": task_envelope.get("team_call_id") or parent_call_id,
+            "team_task_id": task_envelope.get("task_id"),
+            "team_task_owner": task_envelope.get("task_owner"),
+            "team_task_subject": task_envelope.get("task_subject")
+            or task_envelope.get("__team_task"),
         }
         try:
-            safe_payload = redact_display_dict(payload)
+            safe_payload = redact_display_dict(data_payload)
         except Exception:
-            safe_payload = payload
-        audit_payload = safe_payload if isinstance(safe_payload, dict) else payload
+            safe_payload = data_payload
+        try:
+            safe_task_envelope = redact_display_dict(task_envelope)
+        except Exception:
+            safe_task_envelope = task_envelope
+        audit_payload = safe_payload if isinstance(safe_payload, dict) else data_payload
 
         def _publish(kind: str, **fields: Any) -> None:
             if _bus is None:
@@ -298,11 +467,15 @@ class SubAgentRuntime:
         max_iter = self._max_iterations(spec)
         max_calls = self._max_skill_calls()
         max_wall_seconds = self._max_wall_seconds(spec)
+        finalization_reserve_seconds = self._finalization_reserve_seconds()
         consecutive_unproductive_batches = 0
+        successful_call_signatures: set[str] = set()
         last_parsed: dict[str, Any] = {}
         last_raw: str = ""
         fatal_llm_error: str | None = None
         close_reason: str | None = None
+        duplicate_recovery_attempted = False
+        unstructured_protocol_retry_attempted = False
         total_tokens = 0
         total_usd = 0.0
         audit_prompts: list[dict[str, Any]] = []
@@ -312,7 +485,9 @@ class SubAgentRuntime:
             "prompt_path": str(spec.prompt_path) if spec.prompt_path else "",
             "role_prompt": redact_text(spec.prompt or ""),
             "payload": safe_payload,
-            "payload_keys": sorted(payload.keys()),
+            "payload_keys": sorted(data_payload.keys()),
+            "task_envelope": safe_task_envelope,
+            "task_envelope_keys": sorted(task_envelope.keys()),
             "allowed_skills": list(spec.allowed_skills or []),
             "callable_skills": callable_skills,
             "native_tools": callable_native_tools,
@@ -324,6 +499,8 @@ class SubAgentRuntime:
             "subagent.start",
             payload_keys=audit_start["payload_keys"],
             payload=audit_start["payload"],
+            task_envelope_keys=audit_start["task_envelope_keys"],
+            task_envelope=audit_start["task_envelope"],
             role_prompt=audit_start["role_prompt"],
             prompt_path=audit_start["prompt_path"],
             allowed_skills=audit_start["allowed_skills"],
@@ -334,7 +511,7 @@ class SubAgentRuntime:
 
         accumulated_obs: list[dict[str, Any]] = []
         for entry in _stock_research_data_prefetch_calls(
-            spec.name,
+            _spec_profile_name(spec),
             payload,
             native_tools=callable_native_tools,
         ):
@@ -352,10 +529,14 @@ class SubAgentRuntime:
                 strategy_id=strategy_id,
                 session_id=session_id,
                 trigger_event_id=trigger_event_id,
+                context_metadata=team_event_fields,
             )
             if record is None:
                 continue
             if record.get("ok"):
+                signature = _skill_call_signature(entry)
+                if signature:
+                    successful_call_signatures.add(signature)
                 skill_calls.append(record)
                 accumulated_obs.append({
                     "iteration": "prefetch",
@@ -402,15 +583,21 @@ class SubAgentRuntime:
                     detail={"max_wall_seconds": max_wall_seconds},
                 ))
                 break
+            remaining_wall_seconds = max_wall_seconds - (time.monotonic() - t_start)
+            if accumulated_obs and remaining_wall_seconds <= finalization_reserve_seconds:
+                close_reason = "subagent_finalization_reserve"
+                break
             prompt = self._render_prompt(
-                spec, payload, base_context, accumulated_obs,
+                spec, data_payload, base_context, accumulated_obs,
                 allowed=preloaded,
                 native_tools=callable_native_tools,
+                task_envelope=task_envelope,
             )
             audit_prompt = self._render_prompt(
                 spec, audit_payload, base_context, accumulated_obs,
                 allowed=preloaded,
                 native_tools=callable_native_tools,
+                task_envelope=safe_task_envelope,
             )
             safe_prompt = redact_text(audit_prompt)
             audit_prompts.append({
@@ -429,25 +616,75 @@ class SubAgentRuntime:
                 payload=safe_payload,
             )
             t0 = time.monotonic()
-            try:
-                result = self.llm.call(
-                    task="subagent_analysis", caller=f"subagent:{spec.name}",
-                    tier=spec.tier, prompt=prompt,
-                )
-            except Exception as exc:
-                err_msg = f"{type(exc).__name__}: {exc}"
-                fatal_llm_error = err_msg
-                steps.append(_StepRecord(
-                    kind="think", iteration=i, status="error",
-                    error=err_msg,
-                    wall_ms=int((time.monotonic() - t0) * 1000),
-                ))
-                _publish(
-                    "subagent.step",
-                    step_kind="think", iteration=i, status="error",
-                    error=err_msg,
-                    wall_ms=int((time.monotonic() - t0) * 1000),
-                )
+            result = None
+            for llm_attempt in range(2):
+                try:
+                    result = self.llm.call(
+                        task="subagent_analysis", caller=f"subagent:{spec.name}",
+                        tier=spec.tier, prompt=prompt,
+                        metadata={
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "iteration": i,
+                            "subagent": spec.name,
+                            "strategy_id": strategy_id,
+                            "trigger_event_id": trigger_event_id,
+                            "parent_call_id": parent_call_id,
+                            "context_scope": "subagent",
+                            "team_run_id": task_envelope.get("team_run_id"),
+                            "llm_attempt": llm_attempt + 1,
+                        },
+                    )
+                    fatal_llm_error = None
+                    break
+                except Exception as exc:
+                    err_msg = f"{type(exc).__name__}: {exc}"
+                    can_retry = (
+                        llm_attempt == 0
+                        and _is_transient_subagent_llm_error(exc)
+                        and time.monotonic() - t_start < max_wall_seconds
+                    )
+                    if can_retry:
+                        steps.append(_StepRecord(
+                            kind="think_retry",
+                            iteration=i,
+                            status="retry",
+                            error=err_msg,
+                            wall_ms=int((time.monotonic() - t0) * 1000),
+                            detail={"llm_attempt": llm_attempt + 1},
+                        ))
+                        _publish(
+                            "subagent.step",
+                            step_kind="think_retry",
+                            iteration=i,
+                            status="retry",
+                            error=err_msg,
+                            wall_ms=int((time.monotonic() - t0) * 1000),
+                            llm_attempt=llm_attempt + 1,
+                        )
+                        continue
+                    fatal_llm_error = err_msg
+                    steps.append(_StepRecord(
+                        kind="think", iteration=i, status="error",
+                        error=err_msg,
+                        wall_ms=int((time.monotonic() - t0) * 1000),
+                        detail={"llm_attempt": llm_attempt + 1},
+                    ))
+                    _publish(
+                        "subagent.step",
+                        step_kind="think", iteration=i, status="error",
+                        error=err_msg,
+                        wall_ms=int((time.monotonic() - t0) * 1000),
+                        llm_attempt=llm_attempt + 1,
+                    )
+                    break
+            if result is None:
+                if (
+                    fatal_llm_error
+                    and close_reason is None
+                    and (skill_calls or accumulated_obs or rejected_actions)
+                ):
+                    close_reason = "llm_error_after_tool_observations"
                 break
 
             total_tokens += int(result.tokens or 0)
@@ -457,6 +694,12 @@ class SubAgentRuntime:
             if legacy_tool_calls and _should_use_legacy_tool_calls(parsed):
                 parsed = {
                     "skill_calls": legacy_tool_calls,
+                    "replan": True,
+                }
+            raw_json_tool_calls = _extract_raw_json_tool_calls(result.raw)
+            if raw_json_tool_calls and _should_use_legacy_tool_calls(parsed):
+                parsed = {
+                    "skill_calls": raw_json_tool_calls,
                     "replan": True,
                 }
             last_parsed = parsed
@@ -514,24 +757,47 @@ class SubAgentRuntime:
             # not denylisted will run. Every attempt is recorded either as a
             # skill_call entry or as a rejected_actions entry.
             actions = _coerce_list(parsed.get("skill_calls") or parsed.get("tool_calls"))
+            settle_after_actions = (
+                bool(actions)
+                and parsed.get("replan") is False
+                and parsed.get("continue") is not True
+                and parsed.get("done") is not True
+                and parsed.get("final") is not True
+            )
             batch_obs: list[dict[str, Any]] = []
             batch_success = False
+            duplicate_actions: list[dict[str, Any]] = []
             for entry in actions:
                 if len(skill_calls) >= max_calls:
                     rejected_actions.append({
                         "entry": entry, "reason": "skill_call_budget_exhausted",
                     })
                     break
+                signature = _skill_call_signature(entry)
+                if signature and signature in successful_call_signatures:
+                    skill, action = _skill_call_name_action(entry)
+                    duplicate_actions.append(entry)
+                    rejected_actions.append({
+                        "entry": entry,
+                        "skill": skill,
+                        "action": action,
+                        "reason": "duplicate_successful_skill_call",
+                        "error": "duplicate_successful_skill_call",
+                    })
+                    continue
                 record = self._dispatch_one(
                     entry, spec_name=spec.name, allowed=callable_skills,
                     allowed_native_tools=callable_native_tools,
                     strategy_id=strategy_id, session_id=session_id,
                     trigger_event_id=trigger_event_id,
+                    context_metadata=team_event_fields,
                 )
                 if record is None:
                     continue
                 if record.get("ok"):
                     batch_success = True
+                    if signature:
+                        successful_call_signatures.add(signature)
                     skill_calls.append(record)
                     batch_obs.append({
                         "iteration": i,
@@ -571,6 +837,76 @@ class SubAgentRuntime:
                     },
                 ))
                 accumulated_obs.extend(batch_obs)
+            if actions and duplicate_actions and not batch_obs:
+                duplicates = []
+                for entry in duplicate_actions:
+                    skill, action = _skill_call_name_action(entry)
+                    duplicates.append({"skill": skill, "action": action})
+                steps.append(_StepRecord(
+                    kind="observe",
+                    iteration=i,
+                    status="ok",
+                    detail={
+                        "duplicate_successful_skill_calls": len(duplicate_actions),
+                    },
+                ))
+                duplicate_observation = {
+                    "iteration": i,
+                    "ok": False,
+                    "reason": "duplicate_successful_skill_call",
+                    "summary": (
+                        "duplicate successful tool request suppressed; produce "
+                        "final analysis from the existing observations instead "
+                        "of requesting the same data again"
+                    ),
+                    "duplicates": duplicates,
+                }
+                if not duplicate_recovery_attempted and i + 1 < max_iter:
+                    duplicate_recovery_attempted = True
+                    accumulated_obs.append(duplicate_observation)
+                    continue
+                close_reason = "duplicate_successful_tool_request"
+                break
+            if batch_obs and settle_after_actions:
+                close_reason = "tool_calls_without_replan_settled"
+                steps.append(_StepRecord(
+                    kind="observe",
+                    iteration=i,
+                    status="ok",
+                    detail={
+                        "settled_after_tool_calls": len(batch_obs),
+                    },
+                ))
+                break
+
+            if (
+                not actions
+                and not batch_obs
+                and not skill_calls
+                and not accumulated_obs
+                and not unstructured_protocol_retry_attempted
+                and i + 1 < max_iter
+                and _is_unstructured_protocol_miss(parsed, result.raw)
+            ):
+                unstructured_protocol_retry_attempted = True
+                accumulated_obs.append({
+                    "iteration": i,
+                    "ok": False,
+                    "reason": "unstructured_output_protocol_retry",
+                    "summary": (
+                        "previous model output did not contain the required "
+                        "JSON tool-call envelope or a final evidence-backed "
+                        "analysis; continue with a valid skill_calls request "
+                        "or return done=true with explicit evidence gaps"
+                    ),
+                })
+                steps.append(_StepRecord(
+                    kind="observe",
+                    iteration=i,
+                    status="retry",
+                    detail={"reason": "unstructured_output_protocol_retry"},
+                ))
+                continue
 
             # Respect an explicit "done" signal; otherwise continue only if
             # the subagent explicitly asked for another pass. When the model
@@ -603,18 +939,164 @@ class SubAgentRuntime:
                 "close_reason": close_reason,
             },
         ))
+        def _try_final_observation_synthesis(reason: str) -> dict[str, Any] | None:
+            if not accumulated_obs:
+                return None
+            remaining = max_wall_seconds - (time.monotonic() - t_start)
+            if remaining < 5.0:
+                return None
+            final_iteration = sum(1 for s in steps if s.kind == "think")
+            prompt = self._render_prompt(
+                spec,
+                data_payload,
+                base_context,
+                accumulated_obs,
+                allowed=preloaded,
+                native_tools=[],
+                task_envelope=task_envelope,
+                finalization_mode=True,
+            )
+            audit_prompt = self._render_prompt(
+                spec,
+                audit_payload,
+                base_context,
+                accumulated_obs,
+                allowed=preloaded,
+                native_tools=[],
+                task_envelope=safe_task_envelope,
+                finalization_mode=True,
+            )
+            safe_prompt = redact_text(audit_prompt)
+            audit_prompts.append({
+                "iteration": f"final:{reason}",
+                "prompt": safe_prompt,
+                "prompt_chars": len(audit_prompt),
+                "redacted": True,
+            })
+            _publish(
+                "subagent.step",
+                step_kind="finalize",
+                iteration=final_iteration,
+                status="sent",
+                prompt=safe_prompt,
+                prompt_chars=len(audit_prompt),
+                close_reason=reason,
+            )
+            t0 = time.monotonic()
+            try:
+                result = self.llm.call(
+                    task="subagent_analysis",
+                    caller=f"subagent:{spec.name}",
+                    tier=spec.tier,
+                    prompt=prompt,
+                    metadata={
+                        "session_id": session_id,
+                        "turn_id": turn_id,
+                        "iteration": final_iteration,
+                        "subagent": spec.name,
+                        "strategy_id": strategy_id,
+                        "trigger_event_id": trigger_event_id,
+                        "parent_call_id": parent_call_id,
+                        "context_scope": "subagent_finalization",
+                        "team_run_id": task_envelope.get("team_run_id"),
+                        "finalization_reason": reason,
+                    },
+                )
+            except Exception as exc:
+                err_msg = redact_text(f"{type(exc).__name__}: {exc}")[:500]
+                steps.append(_StepRecord(
+                    kind="finalize",
+                    iteration=final_iteration,
+                    status="error",
+                    error=err_msg,
+                    wall_ms=int((time.monotonic() - t0) * 1000),
+                    detail={"close_reason": reason},
+                ))
+                _publish(
+                    "subagent.step",
+                    step_kind="finalize",
+                    iteration=final_iteration,
+                    status="error",
+                    error=err_msg,
+                    wall_ms=int((time.monotonic() - t0) * 1000),
+                    close_reason=reason,
+                )
+                return None
+            parsed = result.parsed if isinstance(result.parsed, dict) else {}
+            has_tool_requests = bool(parsed.get("skill_calls") or parsed.get("tool_calls"))
+            raw_text = str(result.raw or "")
+            if "<tool_call" in raw_text or '"skill_calls"' in raw_text or '"tool_calls"' in raw_text:
+                has_tool_requests = True
+            total_tokens_local = int(result.tokens or 0)
+            total_usd_local = float(result.usd or 0.0)
+            nonlocal total_tokens, total_usd
+            total_tokens += total_tokens_local
+            total_usd += total_usd_local
+            output = None if has_tool_requests else _final_subagent_output(parsed, raw_text)
+            if output and not output.get("degraded"):
+                output.setdefault("done", True)
+            else:
+                output = None
+            steps.append(_StepRecord(
+                kind="finalize",
+                iteration=final_iteration,
+                status="ok" if output is not None else "ignored",
+                tokens=total_tokens_local,
+                usd=total_usd_local,
+                wall_ms=int((time.monotonic() - t0) * 1000),
+                detail={
+                    "close_reason": reason,
+                    "accepted": output is not None,
+                    "tool_request_rejected": has_tool_requests,
+                    "keys": sorted(parsed.keys())[:8],
+                },
+            ))
+            _publish(
+                "subagent.step",
+                step_kind="finalize",
+                iteration=final_iteration,
+                status="ok" if output is not None else "ignored",
+                tokens=total_tokens_local,
+                usd=total_usd_local,
+                wall_ms=int((time.monotonic() - t0) * 1000),
+                close_reason=reason,
+                accepted=output is not None,
+                tool_request_rejected=has_tool_requests,
+                parsed_keys=sorted(parsed.keys())[:12],
+            )
+            return output
+
         final_output = _final_subagent_output(last_parsed, last_raw)
-        if final_output.get("degraded") and skill_calls:
-            final_output = _tool_observation_fallback_output(
+        if (
+            close_reason == "tool_calls_without_replan_settled"
+            and skill_calls
+            and not (last_parsed.get("done") is True or last_parsed.get("final") is True)
+        ):
+            final_output = _try_final_observation_synthesis(close_reason) or _tool_observation_fallback_output(
                 spec_name=spec.name,
-                payload=payload,
+                payload=effective_subject_payload,
                 observations=accumulated_obs,
                 skill_calls=skill_calls,
                 rejected_actions=rejected_actions,
                 close_reason=close_reason,
             )
+        elif final_output.get("degraded") and skill_calls:
+            final_output = _try_final_observation_synthesis(
+                close_reason or str(final_output.get("error_kind") or "degraded_output")
+            ) or _tool_observation_fallback_output(
+                spec_name=spec.name,
+                payload=effective_subject_payload,
+                observations=accumulated_obs,
+                skill_calls=skill_calls,
+                rejected_actions=rejected_actions,
+                close_reason=close_reason,
+            )
+        if fatal_llm_error and skill_calls:
+            final_output["llm_error"] = redact_text(fatal_llm_error)[:500]
         final_output = _attach_data_coverage(
             final_output,
+            requested_role=spec.name,
+            role_profile=_spec_profile_name(spec),
             skill_calls=skill_calls,
             rejected_actions=rejected_actions,
         )
@@ -650,7 +1132,7 @@ class SubAgentRuntime:
             }),
         )
 
-        if fatal_llm_error and not last_parsed and not last_raw:
+        if fatal_llm_error and not last_parsed and not last_raw and not skill_calls:
             raise SubAgentLLMError(
                 f"subagent {spec.name} LLM call failed before producing output: "
                 f"{fatal_llm_error}"
@@ -688,7 +1170,10 @@ class SubAgentRuntime:
         *,
         allowed: list[str],
         native_tools: list[str] | None = None,
+        task_envelope: dict[str, Any] | None = None,
+        finalization_mode: bool = False,
     ) -> str:
+        task_envelope = task_envelope or {}
         obs_block = ""
         if observations:
             obs_block = (
@@ -721,12 +1206,38 @@ class SubAgentRuntime:
                 nt_block += "\n" + hints
         output_language = str(
             payload.get("output_language")
+            or task_envelope.get("output_language")
             or payload.get("target_language")
+            or task_envelope.get("target_language")
             or payload.get("response_language")
+            or task_envelope.get("response_language")
+            or ""
+        ).strip()
+        analysis_language = str(
+            payload.get("analysis_language")
+            or task_envelope.get("analysis_language")
+            or payload.get("internal_language")
+            or task_envelope.get("internal_language")
+            or payload.get("working_language")
+            or task_envelope.get("working_language")
+            or payload.get("discussion_language")
+            or task_envelope.get("discussion_language")
             or ""
         ).strip()
         language_block = ""
-        if output_language:
+        if output_language and analysis_language and output_language != analysis_language:
+            language_block = (
+                "=== language contract ===\n"
+                f"Role analysis language: {analysis_language}\n"
+                f"Final report language: {output_language}\n"
+                "Write natural-language JSON values, evidence summaries, "
+                "rationales, and role conclusions in the analysis language. "
+                "The parent team run will translate or synthesize the final "
+                "user-facing report in the final report language. Preserve "
+                "JSON keys, required enum values, proper nouns, tickers, "
+                "source names, code identifiers, URLs, and numeric metrics.\n\n"
+            )
+        elif output_language:
             language_block = (
                 "=== output language ===\n"
                 f"Target user-visible language: {output_language}\n"
@@ -735,20 +1246,31 @@ class SubAgentRuntime:
                 "JSON keys, required enum values, proper nouns, tickers, "
                 "source names, code identifiers, URLs, and numeric metrics.\n\n"
             )
-        allow_note = (
-            "\nYou may request skill calls via JSON "
-            "``{\"skill_calls\": [{\"skill\": <id>, \"action\": <name>, "
-            "\"payload\": {...}}]}``. "
-            f"Preferred callable tools for this role: {allowed or 'none'}. "
-            "Use exact tool names and fields; do not invent legacy names "
-            "such as ``websearch`` / ``news_social`` or guessed actions "
-            "such as ``market_data.get_quote``. If a workspace skill only "
-            "describes a playbook, use it as context and call the native "
-            "tools below rather than guessing action names. "
-            f"{nt_block}"
-            "\nIf you are done, include ``\"done\": true``; to re-plan after "
-            "these calls, include ``\"replan\": true``."
-        )
+        if finalization_mode:
+            allow_note = (
+                "\nFinalization mode: do not request any more tools. "
+                "Produce the role's final evidence-backed analysis from the "
+                "prior observations only. Return strict JSON with "
+                "``\"done\": true`` and a concise ``summary``; include "
+                "``evidence`` / ``risk_flags`` / ``uncertainty`` or explicit "
+                "data gaps when useful. ``skill_calls`` and ``tool_calls`` "
+                "are forbidden in this mode."
+            )
+        else:
+            allow_note = (
+                "\nYou may request skill calls via JSON "
+                "``{\"skill_calls\": [{\"skill\": <id>, \"action\": <name>, "
+                "\"payload\": {...}}]}``. "
+                f"Preferred callable tools for this role: {allowed or 'none'}. "
+                "Use exact tool names and fields; do not invent legacy names "
+                "such as ``websearch`` / ``news_social`` or guessed actions "
+                "such as ``market_data.get_quote``. If a workspace skill only "
+                "describes a playbook, use it as context and call the native "
+                "tools below rather than guessing action names. "
+                f"{nt_block}"
+                "\nIf you are done, include ``\"done\": true``; to re-plan after "
+                "these calls, include ``\"replan\": true``."
+            )
         if observations:
             allow_note += (
                 "\nYou already have tool observations. Prefer producing the "
@@ -756,9 +1278,35 @@ class SubAgentRuntime:
                 "request the same data again; if a field is missing, state "
                 "the evidence gap instead of looping on more tools."
             )
+        assignment_block = _render_subagent_task_assignment(
+            spec_name=spec.name,
+            task_envelope=task_envelope,
+        )
+        assignment_section = (
+            f"=== team assignment ===\n{assignment_block}\n\n"
+            if assignment_block else ""
+        )
+        # Subagent prompts are otherwise date-free, so reasoning models
+        # silently fall back to their training-cutoff worldview (observed:
+        # 2026 team runs describing 2025 events as "upcoming" and citing
+        # remembered TVL/ETF figures as current). One dated line plus an
+        # explicit claim-grounding contract is the cheapest defense.
+        grounding_section = (
+            "=== session facts ===\n"
+            f"Current datetime (UTC): {now_iso()}\n"
+            "Grounding contract: any dated event or numeric market claim "
+            "(prices, TVL, flows, upgrade/launch dates, filings) in your "
+            "output must come from tool results or the provided context of "
+            "THIS run. If you only remember it from training data, verify "
+            "it with a tool first or label it explicitly as 'unverified, "
+            "from memory, may be stale' — never present remembered figures "
+            "or pre-cutoff timelines as current facts.\n\n"
+        )
         return (
             f"You are the {spec.name} subagent.\n"
             f"{spec.prompt or ''}\n\n"
+            f"{grounding_section}"
+            f"{assignment_section}"
             f"=== task payload ===\n"
             f"{wrap_untrusted('payload', json.dumps(payload, ensure_ascii=False, default=str))}\n\n"
             f"{language_block}"
@@ -809,6 +1357,7 @@ class SubAgentRuntime:
         trigger_event_id: str | None,
         strategy_id: str | None,
         session_id: str | None,
+        context_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if not isinstance(entry, dict):
             return {
@@ -845,6 +1394,7 @@ class SubAgentRuntime:
                 spec_name=spec_name,
                 strategy_id=strategy_id, session_id=session_id,
                 trigger_event_id=trigger_event_id,
+                context_metadata=context_metadata,
             )
         if not action:
             return {
@@ -899,6 +1449,7 @@ class SubAgentRuntime:
         strategy_id: str | None,
         session_id: str | None,
         trigger_event_id: str | None,
+        context_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Invoke a parent native tool from inside a subagent.
 
@@ -927,11 +1478,13 @@ class SubAgentRuntime:
         from ..tools.types import ToolCall  # local import to avoid cycles
 
         payload = _normalise_native_payload(tool_name, payload)
+        safe_payload = redact_display_dict(dict(payload or {}))
         call = ToolCall(
             name=tool_name,
             arguments=dict(payload or {}),
             caller=f"subagent:{spec_name}",
             metadata={
+                **(context_metadata or {}),
                 "subagent": spec_name,
                 "strategy_id": strategy_id,
                 "session_id": session_id,
@@ -954,22 +1507,33 @@ class SubAgentRuntime:
             return {
                 "ok": False, "skill": tool_name, "action": "(native)",
                 "error": f"{type(exc).__name__}: {exc}",
+                "payload": safe_payload,
                 "entry": entry,
             }
         # Render the ToolResult into a dict the rest of the runtime
         # (``_summarise``, the journalled metrics block) can consume.
         result_dict = _tool_result_to_dict(raw)
         if result_dict.get("is_error"):
+            error_detail = (
+                result_dict.get("error_detail")
+                if isinstance(result_dict.get("error_detail"), dict)
+                else {}
+            )
             return {
                 "ok": False, "skill": tool_name, "action": "(native)",
                 "error": result_dict.get("error_message")
                 or "native tool returned is_error=true",
+                "error_kind": result_dict.get("error_kind"),
+                "error_detail": error_detail,
+                "retryable": result_dict.get("retryable"),
                 "result": result_dict,
+                "payload": safe_payload,
                 "entry": entry,
             }
         return {
             "ok": True, "skill": tool_name, "action": "(native)",
             "result": result_dict,
+            "payload": safe_payload,
         }
 
 
@@ -1008,8 +1572,16 @@ def _tool_result_to_dict(result: Any) -> dict[str, Any]:
     is_error = bool(raw_dict.get("is_error"))
     error_message = ""
     err = raw_dict.get("error")
+    error_kind = ""
+    error_detail: dict[str, Any] = {}
+    retryable: Any = None
     if isinstance(err, dict):
         error_message = str(err.get("message") or err.get("kind") or "")
+        error_kind = str(err.get("kind") or "")
+        detail = err.get("detail")
+        if isinstance(detail, dict):
+            error_detail = redact_display_dict(detail)
+        retryable = err.get("retryable")
     parts = raw_dict.get("content") or []
     payload: Any = None
     text_parts: list[str] = []
@@ -1030,6 +1602,12 @@ def _tool_result_to_dict(result: Any) -> dict[str, Any]:
         out["text"] = "\n".join(text_parts)
     if error_message and not out.get("text"):
         out["error_message"] = error_message
+    if error_kind:
+        out["error_kind"] = error_kind
+    if error_detail:
+        out["error_detail"] = error_detail
+    if retryable is not None:
+        out["retryable"] = retryable
     return out
 
 
@@ -1073,53 +1651,56 @@ def _native_tool_usage_hints(native_tools: list[str]) -> str:
         lines.append(
             "- market_data: "
             '{"skill":"market_data","payload":{"action":"get_candles",'
-            '"venue":"yahoo","market":"NVDA","interval":"1d","count":90}}; '
+            '"venue":"<venue>","market":"<venue>:<symbol>","interval":"1d","count":90}}; '
             "actions are get_ticker, get_mark_price, get_candles, "
             "calculate_features, summarize_market, compress_context."
         )
     if "data_api" in available:
         lines.append(
             "- data_api: for non-OHLC provider-specific data. For "
-            "on-chain/meme/DEX wallet sources first inspect "
+            "US public-company fundamentals and SEC filings, inspect or call "
+            "provider='financial_datasets' (aliases: equities, financials, "
+            "sec_filings) for statements, metrics, estimates, prices, news, "
+            "company facts, and filings. For "
+            "on-chain/DEX/wallet-signal sources first inspect "
             '{"skill":"data_api","payload":{"op":"list","provider":"wallet"}} '
             "and "
             '{"skill":"data_api","payload":{"op":"list","provider":"onchainos"}}; '
             "aliases include xagt_agent_plugin, xagent, okx_os, okx_onchain. "
-            "For wallet-backed meme strategies, first call "
-            'data_api wallet.capability_catalog with {"topic":"meme"} or '
-            "wallet.meme_strategy_guide so you use the selected route for the "
+            "For wallet-backed strategies, first call the relevant wallet "
+            "capability catalog or strategy guide so you use the selected route for the "
             "installed/logged-in wallet; when none is ready, follow the "
             "GOAT/self_custody fallback and wallet install recommendations."
         )
     if "web_search_fetch" in available:
         lines.append(
             "- web_search_fetch: "
-            '{"skill":"web_search_fetch","payload":{"query":"NVIDIA NVDA '
-            'latest earnings data center revenue guidance","max_results":5,'
+            '{"skill":"web_search_fetch","payload":{"query":"<subject> latest '
+            'filings/news/data","max_results":5,'
             '"fetch_top_n":3}}.'
         )
     elif "web_search" in available:
         lines.append(
             "- web_search: "
-            '{"skill":"web_search","payload":{"query":"NVIDIA NVDA latest '
-            'earnings data center revenue guidance","max_results":5}}.'
+            '{"skill":"web_search","payload":{"query":"<subject> latest '
+            'filings/news/data","max_results":5}}.'
         )
     if "mcp__yahoo__get_stock_info" in available:
         lines.append(
             "- Yahoo MCP direct tools use ticker, not symbol: "
-            '{"skill":"mcp__yahoo__get_stock_info","payload":{"ticker":"NVDA"}}.'
+            '{"skill":"mcp__yahoo__get_stock_info","payload":{"ticker":"<ticker>"}}.'
         )
     if "mcp__yahoo__get_financial_statement" in available:
         lines.append(
             "- Yahoo statements: "
             '{"skill":"mcp__yahoo__get_financial_statement","payload":'
-            '{"ticker":"NVDA","financial_type":"income_stmt"}}; also use '
+            '{"ticker":"<ticker>","financial_type":"income_stmt"}}; also use '
             "balance_sheet or cashflow."
         )
     if any(t.startswith("mcp__edgar__") for t in available):
         lines.append(
             "- Edgar MCP direct tools use identifier, not ticker/cik: "
-            '{"skill":"mcp__edgar__get_company_info","payload":{"identifier":"NVDA"}}.'
+            '{"skill":"mcp__edgar__get_company_info","payload":{"identifier":"<company-or-cik>"}}.'
         )
     if len(lines) == 1:
         return ""
@@ -1156,7 +1737,7 @@ def _stock_research_data_prefetch_calls(
 
     add("market_data", {"action": "get_ticker", "venue": venue, "market": symbol})
 
-    if spec_name in {"risk_critic", "technical_analyst"}:
+    if spec_name == "risk_critic":
         add(
             "market_data",
             {
@@ -1169,12 +1750,44 @@ def _stock_research_data_prefetch_calls(
         )
 
     if spec_name == "fundamentals_analyst":
-        add("mcp__yahoo__get_stock_info", {"ticker": symbol})
-        for financial_type in ("income_stmt", "balance_sheet", "cashflow"):
+        if "data_api" in available:
             add(
-                "mcp__yahoo__get_financial_statement",
-                {"ticker": symbol, "financial_type": financial_type},
+                "data_api",
+                {
+                    "op": "call",
+                    "provider": "financial_datasets",
+                    "action": "all_statements",
+                    "args": {"ticker": symbol, "period": "annual", "limit": 4},
+                    "limit": 12,
+                },
             )
+            add(
+                "data_api",
+                {
+                    "op": "call",
+                    "provider": "financial_datasets",
+                    "action": "metrics_snapshot",
+                    "args": {"ticker": symbol},
+                    "limit": 20,
+                },
+            )
+            add(
+                "data_api",
+                {
+                    "op": "call",
+                    "provider": "financial_datasets",
+                    "action": "filings",
+                    "args": {"ticker": symbol, "form": "10-K", "limit": 3},
+                    "limit": 5,
+                },
+            )
+        else:
+            add("mcp__yahoo__get_stock_info", {"ticker": symbol})
+            for financial_type in ("income_stmt", "balance_sheet", "cashflow"):
+                add(
+                    "mcp__yahoo__get_financial_statement",
+                    {"ticker": symbol, "financial_type": financial_type},
+                )
 
     return calls
 
@@ -1271,20 +1884,24 @@ def _normalise_native_payload(tool_name: str, payload: dict[str, Any]) -> dict[s
 
 def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
     if isinstance(parsed, dict) and parsed:
-        analytical_keys = {
-            "summary", "recommendation", "confidence", "thesis",
-            "invalidation", "risk_flags", "evidence", "done", "final",
-        }
+        if _has_substantive_subagent_output(parsed, raw):
+            return parsed
         raw_text = " ".join(
             str(parsed.get(key) or "")
             for key in ("raw", "text", "message", "content")
         )
-        if not (set(parsed) & analytical_keys) and (
+        if (
             parsed.get("skill_calls") or parsed.get("tool_calls")
             or "<tool_call" in raw_text
             or '"skill_calls"' in raw_text
             or '"tool_calls"' in raw_text
         ):
+            if _raw_has_substantive_subagent_output(raw):
+                return {
+                    "raw": str(raw or ""),
+                    "done": True,
+                    "quality": "raw_substantive_with_tool_request",
+                }
             return {
                 "raw": str(raw or ""),
                 "degraded": True,
@@ -1295,16 +1912,101 @@ def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
                 ),
                 "requested_tools": parsed.get("skill_calls") or parsed.get("tool_calls"),
             }
+        if set(parsed).issubset({"raw", "text", "message", "content"}):
+            return {
+                "raw": str(raw or ""),
+                "degraded": True,
+                "error_kind": "unstructured_output_without_evidence",
+                "summary": (
+                    "subagent produced unstructured text without a final "
+                    "analysis or tool evidence"
+                ),
+            }
         return parsed
     text = str(raw or "")
     if text.strip():
-        return {"raw": text}
+        return {
+            "raw": text,
+            "degraded": True,
+            "error_kind": "unstructured_output_without_evidence",
+            "summary": (
+                "subagent produced unstructured text without a final analysis "
+                "or tool evidence"
+            ),
+        }
     return {
         "raw": "",
         "degraded": True,
         "error_kind": "empty_model_output",
         "summary": "subagent finished without visible final output",
     }
+
+
+def _is_unstructured_protocol_miss(parsed: dict[str, Any], raw: str) -> bool:
+    """Return true for text-only child responses that did not follow protocol."""
+
+    if not isinstance(parsed, dict) or not parsed:
+        return bool(str(raw or "").strip())
+    if parsed.get("skill_calls") or parsed.get("tool_calls"):
+        return False
+    if parsed.get("done") is True or parsed.get("final") is True:
+        return False
+    raw_text = " ".join(
+        str(parsed.get(key) or "")
+        for key in ("raw", "text", "message", "content")
+    ) or str(raw or "")
+    if "<tool_call" in raw_text or '"skill_calls"' in raw_text or '"tool_calls"' in raw_text:
+        return False
+    return set(parsed).issubset({"raw", "text", "message", "content"})
+
+
+def _is_transient_subagent_llm_error(exc: BaseException) -> bool:
+    if not isinstance(exc, LLMError):
+        return False
+    if isinstance(exc, _NON_RETRYABLE_SUBAGENT_LLM_ERRORS):
+        return False
+    msg = str(exc).lower()
+    return any(hint.lower() in msg for hint in _TRANSIENT_SUBAGENT_LLM_HINTS)
+
+
+def _has_substantive_subagent_output(parsed: dict[str, Any], raw: str) -> bool:
+    """Return true when the model produced role analysis, not only tool calls."""
+
+    analytical_keys = {
+        "summary", "recommendation", "confidence", "thesis",
+        "invalidation", "risk_flags", "evidence", "done", "final",
+        "analysis", "findings", "conclusion", "verdict", "report",
+        "status", "role", "data_inventory", "risk_policy",
+        "parameter_table", "fundamentals", "valuation",
+    }
+    if set(parsed) & analytical_keys:
+        return True
+    protocol_keys = {
+        "skill_calls", "tool_calls", "continue", "replan", "raw", "text",
+        "message", "content",
+    }
+    substantive_keys = [
+        key for key, value in parsed.items()
+        if key not in protocol_keys and value not in (None, "", [], {})
+    ]
+    return len(substantive_keys) >= 2
+
+
+def _raw_has_substantive_subagent_output(raw: str) -> bool:
+    text = str(raw or "")
+    if not text.strip():
+        return False
+    if re.search(r'"(?:done|final)"\s*:\s*true\b', text, re.I):
+        return True
+    if re.search(
+        r'"(?:status|summary|recommendation|analysis|findings|conclusion|'
+        r'report|data_inventory|risk_policy|parameter_table|fundamentals|'
+        r'valuation)"\s*:',
+        text,
+        re.I,
+    ):
+        return True
+    return False
 
 
 def _tool_observation_fallback_output(
@@ -1363,6 +2065,8 @@ def _tool_observation_fallback_output(
 def _attach_data_coverage(
     output: dict[str, Any],
     *,
+    requested_role: str = "",
+    role_profile: str = "",
     skill_calls: list[dict[str, Any]],
     rejected_actions: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -1390,18 +2094,102 @@ def _attach_data_coverage(
         for rec in skill_calls
         if rec.get("ok")
     }
+    financial_data_api = any(
+        str(rec.get("skill") or "") == "data_api"
+        and _data_api_financial_statement_observed(rec)
+        for rec in skill_calls
+        if rec.get("ok")
+    )
+    sec_filing_data = any(
+        _sec_filing_observed(rec)
+        for rec in skill_calls
+        if rec.get("ok")
+    )
     coverage = {
         "tools_used": tools_used,
         "tool_errors": tool_errors,
         "has_market_data": "market_data" in skills,
         "has_financial_statement": (
             "mcp__yahoo__get_financial_statement" in skills
+            or financial_data_api
         ),
+        "has_sec_filing": sec_filing_data,
         "has_stock_info": "mcp__yahoo__get_stock_info" in skills,
     }
     merged = dict(output)
+    if requested_role:
+        merged.setdefault("role", requested_role)
+    if role_profile:
+        merged.setdefault("role_profile", role_profile)
     merged["data_coverage"] = coverage
+    contract = _evidence_contract_for_output(
+        merged,
+        role_profile=role_profile,
+        coverage=coverage,
+    )
+    if contract:
+        merged["evidence_contract"] = contract
+        missing = contract.get("missing_evidence") or []
+        if missing:
+            merged["missing_evidence"] = list(missing)
+            merged.setdefault("partial", True)
+            merged.setdefault("quality", "degraded_missing_evidence")
+            merged.setdefault("error_kind", "insufficient_research_evidence")
     return merged
+
+
+def _evidence_contract_for_output(
+    output: dict[str, Any],
+    *,
+    role_profile: str,
+    coverage: dict[str, Any],
+) -> dict[str, Any]:
+    if role_profile != "fundamentals_analyst":
+        return {}
+    required = {
+        "market_snapshot": bool(
+            coverage.get("has_market_data") or coverage.get("has_stock_info")
+        ),
+        "financial_statement": bool(coverage.get("has_financial_statement")),
+    }
+    missing = [name for name, ok in required.items() if not ok]
+    return {
+        "role_profile": role_profile,
+        "status": "complete" if not missing else "degraded",
+        "required_evidence": list(required),
+        "missing_evidence": missing,
+        "error_kind": "insufficient_research_evidence" if missing else None,
+    }
+
+
+def _data_api_financial_statement_observed(rec: dict[str, Any]) -> bool:
+    payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+    result = rec.get("result") if isinstance(rec.get("result"), dict) else {}
+    provider = str(payload.get("provider") or result.get("provider") or "").lower()
+    action = str(payload.get("action") or result.get("action") or "").lower()
+    if provider not in {"financial_datasets", "equities", "financials", "sec_filings"}:
+        return False
+    return action in {
+        "all_statements",
+        "income_statements",
+        "balance_sheets",
+        "cash_flow_statements",
+        "metrics_snapshot",
+        "historical_metrics",
+        "company_facts",
+        "filings",
+    }
+
+
+def _sec_filing_observed(rec: dict[str, Any]) -> bool:
+    skill = str(rec.get("skill") or "")
+    if skill.startswith("mcp__edgar__"):
+        return True
+    payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
+    result = rec.get("result") if isinstance(rec.get("result"), dict) else {}
+    provider = str(payload.get("provider") or result.get("provider") or "").lower()
+    action = str(payload.get("action") or result.get("action") or "").lower()
+    return provider in {"financial_datasets", "equities", "financials", "sec_filings"} and action == "filings"
 
 
 def _coerce_list(v: Any) -> list[Any]:
@@ -1414,6 +2202,61 @@ def _coerce_list(v: Any) -> list[Any]:
     if isinstance(v, dict):
         return [v]
     return []
+
+
+def _skill_call_name_action(entry: Any) -> tuple[str, str]:
+    if not isinstance(entry, dict):
+        return "", ""
+    skill = str(entry.get("skill") or entry.get("skill_id") or "").strip()
+    action = str(entry.get("action") or entry.get("name") or "").strip()
+    payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+    if not action and isinstance(payload, dict):
+        action = str(payload.get("action") or "").strip()
+    return skill, action
+
+
+def _skill_call_signature(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    skill, action = _skill_call_name_action(entry)
+    if not skill:
+        return ""
+    payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+    native_payload = dict(payload or {})
+    if action and "action" not in native_payload:
+        native_payload["action"] = action
+    try:
+        return json.dumps(
+            {"skill": skill, "payload": native_payload},
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
+    except Exception:
+        return f"{skill}\0{action}\0{native_payload!r}"
+
+
+def _extract_raw_json_tool_calls(raw: str) -> list[dict[str, Any]]:
+    """Recover the final JSON tool-call object from mixed assistant text."""
+
+    text = str(raw or "")
+    if '"skill_calls"' not in text and '"tool_calls"' not in text:
+        return []
+    decoder = json.JSONDecoder()
+    candidates: list[list[dict[str, Any]]] = []
+    for match in re.finditer(r"\{", text):
+        try:
+            obj, _end = decoder.raw_decode(text[match.start():])
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        calls = _coerce_list(obj.get("skill_calls") or obj.get("tool_calls"))
+        if calls:
+            candidates.append([entry for entry in calls if isinstance(entry, dict)])
+    if not candidates:
+        return []
+    return candidates[-1]
 
 
 _LEGACY_TOOL_CALL_RE = re.compile(

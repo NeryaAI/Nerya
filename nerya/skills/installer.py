@@ -17,8 +17,8 @@ Install is intentionally not a silent network + exec:
 
 1. We fetch into a quarantine directory.
 2. We validate the manifest with :class:`SkillManifest`.
-3. We static-analyze any sibling ``actions.py`` if one ships with the
-   skill (metadata-only skills skip this step).
+3. We reject legacy definition surfaces such as ``actions.py`` and
+   ``skill.yml``. Executable helpers belong under reviewed ``scripts/``.
 4. We write an ``install_report.json`` describing what was installed.
 5. The skill is staged under ``workspace/skills/pending/<id>/`` and a
    ``skill_install_request`` proposal is emitted. An operator approves
@@ -46,10 +46,54 @@ from urllib.parse import unquote, urlparse
 from ..core import jsonl
 from ..core.errors import SkillActionError
 from ..core.paths import WorkspacePaths
+from ..core.sandbox import sandbox_exec
 from ..core.time import now_iso
 from ..evolution.patch_proposal import create_proposal
-from ..scripts.static_analyzer import analyze_source
 from .manifest import SkillManifest
+
+
+_LEGACY_DEFINITION_SURFACES = {
+    "actions.py",
+    "skill.yml",
+    "skill.yaml",
+    "manifest.yml",
+    "manifest.yaml",
+}
+_SKILL_SCAN_MAX_FILE_BYTES = 1_000_000
+_BLOCKED_BINARY_EXTENSIONS = {
+    ".class",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".jar",
+    ".msi",
+    ".node",
+    ".pyd",
+    ".so",
+    ".wasm",
+}
+_SCRIPT_SCAN_EXTENSIONS = {".bat", ".cmd", ".cjs", ".js", ".mjs", ".ps1", ".py", ".sh", ".ts"}
+_DANGEROUS_SCRIPT_MARKERS = {
+    "base64 -d": "shell-decoder",
+    "chmod -r": "recursive-permission-change",
+    "curl ": "network-shell",
+    "eval(": "dynamic-eval",
+    "exec(": "dynamic-exec",
+    "invoke-webrequest": "powershell-network",
+    "os.system(": "shell-exec",
+    "powershell": "powershell-exec",
+    "rm -rf": "destructive-shell",
+    "socket.": "raw-network",
+    "subprocess.": "subprocess-exec",
+}
+
+
+@dataclass
+class StaticFinding:
+    severity: str
+    rule_id: str
+    path: str
+    message: str
 
 
 @dataclass
@@ -103,7 +147,12 @@ def install_skill(
         skill_dir = _fetch(resolved_kind, source, qdir,
                            subdir=subdir, git_ref=git_ref)
         manifest = _load_manifest(skill_dir)
+        _reject_legacy_definition_surfaces(skill_dir)
         findings = _static_analyze(skill_dir)
+        blocking = [f for f in findings if f.severity == "critical"]
+        if blocking:
+            preview = ", ".join(f"{f.path}:{f.rule_id}" for f in blocking[:3])
+            raise SkillActionError(f"skill static analysis failed: {preview}")
 
         staged = paths.skills_pending / manifest.id
         if staged.exists():
@@ -355,7 +404,14 @@ def _fetch(kind: str, source: str, qdir: Path, *, subdir: str | None,
             cmd.extend(["--branch", git_ref])
         cmd.extend([source, str(dst)])
         try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+            sandbox_exec(
+                cmd,
+                cwd=qdir,
+                root=qdir,
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             raise SkillActionError(f"git clone failed: {e}") from e
         return _pick_skill_dir(dst, subdir=subdir)
@@ -411,21 +467,84 @@ def _load_manifest(skill_dir: Path) -> SkillManifest:
         raise SkillActionError(f"invalid skill manifest {md}: {e}") from e
 
 
-def _static_analyze(skill_dir: Path) -> list:
-    actions_py = skill_dir / "actions.py"
-    if not actions_py.exists():
-        # skill with no actions.py is allowed (metadata-only), but the
-        # installer records that fact so the operator can verify.
-        return []
-    src = actions_py.read_text(encoding="utf-8", errors="ignore")
-    result = analyze_source(src)
-    if not result.is_safe:
-        blocking = [f for f in result.findings if f.severity == "error"]
+def _reject_legacy_definition_surfaces(skill_dir: Path) -> None:
+    legacy = sorted(
+        p.name for p in skill_dir.iterdir()
+        if p.is_file() and p.name in _LEGACY_DEFINITION_SURFACES
+    )
+    if legacy:
         raise SkillActionError(
-            f"static analysis rejected {actions_py}: "
-            f"{[f.message for f in blocking]}"
+            "legacy skill definition surface is not accepted; "
+            "use SKILL.md plus reviewed scripts/ helpers instead "
+            f"(found: {legacy})"
         )
-    return result.findings
+
+
+def _static_analyze(skill_dir: Path) -> list[StaticFinding]:
+    """Scan user-installable skills before staging.
+
+    The scanner is intentionally heuristic. Critical findings block staging;
+    high/medium findings are written into ``install_report.json`` so the
+    operator reviews executable helpers before approving promotion.
+    """
+
+    findings: list[StaticFinding] = []
+    for p in sorted(skill_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(skill_dir).as_posix()
+        try:
+            size = p.stat().st_size
+        except OSError as exc:
+            findings.append(StaticFinding(
+                severity="critical",
+                rule_id="unreadable-file",
+                path=rel,
+                message=f"cannot stat file before staging: {exc}",
+            ))
+            continue
+        if size > _SKILL_SCAN_MAX_FILE_BYTES:
+            findings.append(StaticFinding(
+                severity="critical",
+                rule_id="oversized-file",
+                path=rel,
+                message=(
+                    f"file exceeds scanner limit "
+                    f"({_SKILL_SCAN_MAX_FILE_BYTES} bytes)"
+                ),
+            ))
+        suffix = p.suffix.lower()
+        if suffix in _BLOCKED_BINARY_EXTENSIONS:
+            findings.append(StaticFinding(
+                severity="critical",
+                rule_id="blocked-binary-extension",
+                path=rel,
+                message="binary/native helper files are not accepted in external skills",
+            ))
+            continue
+        if suffix not in _SCRIPT_SCAN_EXTENSIONS:
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            findings.append(StaticFinding(
+                severity="high",
+                rule_id="script-unreadable",
+                path=rel,
+                message=f"cannot read script for static review: {exc}",
+            ))
+            continue
+        lowered = text.lower()
+        for marker, marker_kind in _DANGEROUS_SCRIPT_MARKERS.items():
+            if marker in lowered:
+                findings.append(StaticFinding(
+                    severity="high",
+                    rule_id="dangerous-script-pattern",
+                    path=rel,
+                    message=f"script contains {marker_kind} marker {marker!r}",
+                ))
+                break
+    return findings
 
 
 def _hash_dir(root: Path) -> str:
@@ -439,6 +558,13 @@ def _hash_dir(root: Path) -> str:
 
 
 def _render_rationale(r: InstallReport) -> str:
+    finding_note = (
+        "Static analysis recorded review findings; inspect "
+        "`install_report.json` and every executable helper before approving."
+        if r.static_findings
+        else "Static analysis found no review findings. Operator review the "
+             "staged layout at `skills/pending/` before approving."
+    )
     return (
         f"# Skill install request — {r.skill_id}\n\n"
         f"- source_kind: `{r.source_kind}`\n"
@@ -446,13 +572,13 @@ def _render_rationale(r: InstallReport) -> str:
         f"- sha256: `{r.sha256}`\n"
         f"- files: {len(r.files)}\n"
         f"- static findings: {len(r.static_findings)}\n\n"
-        "Static analysis blocked nothing. Operator review the staged "
-        "layout at `skills/pending/` before approving."
+        f"{finding_note}"
     )
 
 
 __all__ = [
     "InstallReport",
+    "StaticFinding",
     "install_skill",
     "promote_installed",
     "list_installed",

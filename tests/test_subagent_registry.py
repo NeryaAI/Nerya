@@ -1,3 +1,5 @@
+import pytest
+
 from nerya.core import yaml_io
 from nerya.core.paths import WorkspacePaths
 from nerya.security.prompt_injection import flag_suspicious
@@ -30,6 +32,37 @@ def test_default_stock_research_roles_have_market_data_access():
         assert "market_data" in allowed, role
         assert "market_data_routing" in allowed, role
         assert "web_search_fetch" in allowed, role
+
+
+@pytest.mark.smoke
+def test_strategy_registry_preserves_requested_role_with_canonical_profile(tmp_path):
+    registry = StrategySubAgentRegistry(paths=WorkspacePaths(tmp_path))
+
+    spec = registry.get("sec_filing_analyst")
+
+    assert spec.name == "sec_filing_analyst"
+    assert spec.canonical_name == "fundamentals_analyst"
+    assert spec.prompt == DEFAULT_SUBAGENT_PROMPTS["fundamentals_analyst"]
+    assert set(spec.allowed_skills) == set(DEFAULT_SUBAGENT_SKILLS["fundamentals_analyst"])
+
+
+@pytest.mark.smoke
+def test_default_stock_research_aliases_inherit_research_profile(tmp_path):
+    registry = StrategySubAgentRegistry(paths=WorkspacePaths(tmp_path))
+
+    aliases = {
+        "fundamental_analyst": "fundamentals_analyst",
+        "dcf_modeler": "fundamentals_analyst",
+        "sec_filing_analyst": "fundamentals_analyst",
+        "guru_perspective": "fundamentals_analyst",
+    }
+
+    for requested, canonical in aliases.items():
+        spec = registry.get(requested)
+        assert spec.name == requested
+        assert spec.canonical_name == canonical
+        assert "market_data" in spec.allowed_skills
+        assert "web_search_fetch" in spec.allowed_skills
 
 
 def test_risk_critic_prompt_requires_market_data_before_risk_verdict():

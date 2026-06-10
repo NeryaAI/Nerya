@@ -16,6 +16,7 @@ from ..core import yaml_io
 from ..core.atomic_write import atomic_write_text
 from ..core.time import now_iso
 from ..messaging import generic_platform, telegram
+from ..messaging.diagnostics import diagnose_telegram_gateway
 from ..messaging.pipeline import MessagePipeline
 from ..messaging.platforms import (
     all_safe_field_keys,
@@ -2099,7 +2100,7 @@ def gateway_runtime_status(client) -> dict[str, Any]:
                 **base_status,
                 "kind": "telegram",
                 "bot_token_ref_configured": bool(token_ref),
-                "chat_id_configured": bool(cfg.get("chat_id")),
+                "chat_id_configured": bool(cfg.get("chat_id") or cfg.get("chat_id_ref")),
                 "polling_enabled": polling_enabled,
                 "poller_alive": poller_alive,
                 "mode": mode,
@@ -3144,50 +3145,11 @@ def routes():
         # without poking around in the logs.
         body = payload if isinstance(payload, dict) else {}
         channel = str(body.get("channel") or "telegram")
-        cfg = _telegram_cfg(client, channel)
-        token_ref = cfg.get("bot_token_ref") or cfg.get("token_ref")
-        chat_id = str(body.get("chat_id") or cfg.get("chat_id") or "")
-        out: dict[str, Any] = {
-            "ok": True,
-            "channel": channel,
-            "configured": {
-                "bot_token_ref": bool(token_ref),
-                "chat_id": chat_id or None,
-            },
-        }
-        if not token_ref:
-            out["ok"] = False
-            out["error"] = "telegram: missing bot_token_ref"
-            out["hint"] = "Save your bot token under /settings → Gateway first."
-            return out
-        resolver = _secret_resolver(client)
-        bot = telegram.get_me(channel_cfg=cfg, resolve_secret=resolver)
-        out["bot"] = bot
-        if not bot.get("ok"):
-            out["ok"] = False
-            out["error"] = bot.get("error") or "telegram: getMe failed"
-            out["hint"] = (
-                "Telegram rejected the bot token. Generate a fresh token via @BotFather "
-                "(/revoke + /newbot or /token) and re-save under /settings → Gateway."
-            )
-            return out
-        if chat_id:
-            chat = telegram.get_chat(
-                channel_cfg=cfg,
-                chat_id=chat_id,
-                resolve_secret=resolver,
-            )
-            out["chat"] = chat
-            if not chat.get("ok"):
-                out["ok"] = False
-                out["error"] = chat.get("error") or "telegram: getChat failed"
-                out["hint"] = (
-                    "The bot can't see this chat. For a DM: open the bot in Telegram and "
-                    "send /start. For a group: add the bot to the group AND send any "
-                    "message there. Group chat_ids are negative numbers like -100123… — "
-                    "use @userinfobot inside the group to get the right id."
-                )
-                return out
+        out = diagnose_telegram_gateway(
+            client.config.paths,
+            channel=channel,
+            chat_id=body.get("chat_id"),
+        )
         # Live runtime info — is the poller up? When was the last poll?
         thread = _TELEGRAM_POLLER_THREADS.get(channel)
         state = _load_state(client)

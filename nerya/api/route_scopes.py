@@ -142,6 +142,7 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/agent/session/delete", "write:config", ""),
     RouteRule("GET", "/agent/stream/events", "read:sessions", ""),
     RouteRule("POST", "/agent/interrupt", "write:chat", ""),
+    RouteRule("POST", "/agent/steer", "write:chat", ""),
     # workspace-native tool registry view.
     RouteRule("GET", "/agent/tools", "read:runtime", ""),
 
@@ -249,6 +250,7 @@ _RULES: tuple[RouteRule, ...] = (
     # llm
     RouteRule("POST", "/llm/classify", "write:chat", ""),
     RouteRule("POST", "/llm/extract_json", "write:chat", ""),
+    RouteRule("POST", "/llm/messages/probe", "write:chat", ""),
     RouteRule(None, "/llm/capabilities", "read:runtime", ""),
     RouteRule("GET", "/llm/providers", "read:runtime", ""),
     RouteRule("GET", "/llm/tiers", "read:runtime", ""),

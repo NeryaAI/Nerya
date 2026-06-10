@@ -92,6 +92,28 @@ def dependency_available() -> bool:
     return importlib.util.find_spec("memsearch") is not None
 
 
+def _is_local_milvus_uri(uri: str) -> bool:
+    u = str(uri or "").strip().lower()
+    return not u.startswith(("http://", "https://", "tcp://", "grpc://"))
+
+
+def runtime_dependency_gap(config: Config) -> str:
+    """Return '' when search/index can actually run, else a short reason.
+
+    ``memsearch`` alone is not enough: a local (file-based) Milvus URI
+    additionally needs ``milvus_lite``, which has no Windows wheels — on
+    such hosts a bare import check passes but every search raises deep
+    inside pymilvus. Detect that up front so callers get a clean
+    ``dependency_missing`` instead of a stack trace.
+    """
+    if importlib.util.find_spec("memsearch") is None:
+        return "memsearch_not_installed"
+    uri = str(_milvus_cfg(config).get("uri") or "~/.memsearch/milvus.db")
+    if _is_local_milvus_uri(uri) and importlib.util.find_spec("milvus_lite") is None:
+        return "milvus_lite_not_installed"
+    return ""
+
+
 def _resolve_vault_key(config: Config, ref: str) -> str:
     """Resolve a ``vault://<name>`` ref through the workspace SecretVault.
 
@@ -132,6 +154,7 @@ def status(config: Config) -> dict[str, Any]:
         "enabled": bool(cfg.get("enabled", False)),
         "backend": cfg.get("backend") or "memsearch",
         "dependency_available": dependency_available(),
+        "dependency_gap": runtime_dependency_gap(config),
         "install_package": cfg.get("install_package") or "memsearch",
         "watch_enabled": bool(cfg.get("watch_enabled", False)),
         "watcher_running": process_running,
@@ -351,10 +374,21 @@ def _require_ready(config: Config) -> tuple[bool, dict[str, Any] | None]:
         return False, {"ok": False, "error": "vector_search_disabled"}
     if str(cfg.get("backend") or "memsearch") != "memsearch":
         return False, {"ok": False, "error": "unsupported_backend"}
-    if not dependency_available():
+    gap = runtime_dependency_gap(config)
+    if gap:
+        detail = ""
+        if gap == "milvus_lite_not_installed":
+            detail = (
+                "milvus-lite is required for the local Milvus URI but is "
+                "not installed (no Windows wheels exist). Point "
+                "memory.vector_search.milvus.uri at a remote Milvus server "
+                "(http://...) or disable vector search."
+            )
         return False, {
             "ok": False,
             "error": "dependency_missing",
+            "dependency_gap": gap,
+            "detail": detail,
             "install_package": cfg.get("install_package") or "memsearch",
         }
     return True, None
@@ -440,7 +474,14 @@ def reindex(config: Config, *, force: bool = False) -> dict[str, Any]:
     if not ready:
         return error or {"ok": False}
     paths = source_paths(config)
-    result = asyncio.run(_index_async(config, paths, force=force))
+    try:
+        result = asyncio.run(_index_async(config, paths, force=force))
+    except Exception as exc:  # noqa: BLE001 — surface a clean API error
+        return {
+            "ok": False,
+            "error": "vector_backend_error",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
     return {
         "ok": True,
         "indexed": True,
@@ -459,9 +500,16 @@ def search(config: Config, *, query: str, top_k: int = 5) -> dict[str, Any]:
         return {"ok": False, "error": "query_required"}
     import time as _time
     started = _time.time()
-    rows = asyncio.run(
-        _search_async(config, source_paths(config), clean, top_k=max(1, top_k))
-    )
+    try:
+        rows = asyncio.run(
+            _search_async(config, source_paths(config), clean, top_k=max(1, top_k))
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean API error
+        return {
+            "ok": False,
+            "error": "vector_backend_error",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
     latency_ms = int((_time.time() - started) * 1000)
     # Emit a search event into the activity log so the dashboard's
     # live-feed shows operator searches as they happen. Best-effort —

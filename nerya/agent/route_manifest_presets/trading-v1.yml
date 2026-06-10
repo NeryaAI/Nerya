@@ -1,0 +1,25 @@
+id: trading-v1
+name: Trading default
+description: Nerya trading workspace preset loaded from a declarative package resource.
+version: 1
+mode: trading
+capabilities:
+  - market_data
+  - portfolio
+  - trading
+  - risk
+  - news_social
+  - websearch
+  - onchain
+  - strategy
+  - strategy_review
+  - subagent
+  - trace
+  - memory
+  - message
+  - workspace
+  - market_data_routing
+  - market_research
+  - quant_research
+  - research_report
+fallback: generic
