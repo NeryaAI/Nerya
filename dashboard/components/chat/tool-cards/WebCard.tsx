@@ -1,8 +1,9 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useState } from "react";
 import type { NativeBlock } from "../../../lib/chat";
-import { Tag } from "./atoms";
+import { Tag, ToolRowCard } from "./atoms";
 import { recordOf } from "./helpers";
 
 function parseEmbeddedJson(text: string): Record<string, unknown> {
@@ -167,6 +168,7 @@ export function WebCard({
   variant: "use" | "result";
   pending?: boolean;
 }) {
+  const t = useTranslations("webToolCard");
   const action = String(block.action || "").toLowerCase();
   const payload = recordOf(block.payload);
   const result = parseJsonRecord(block.result);
@@ -199,37 +201,38 @@ export function WebCard({
   const previewLines = content.split("\n").slice(0, 6).join("\n");
   const hasMoreContent = content.length > previewLines.length;
 
+  const label =
+    action === "web_search"
+      ? t("webSearch")
+      : action === "web_fetch"
+      ? t("fetchUrl")
+      : t("searchAndFetch");
+
   return (
-    <div className="rounded-2xl border border-brand-500/15 bg-brand-500/[0.04] px-4 py-3 space-y-2.5">
-      <div className="flex items-center justify-between gap-3 min-w-0">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="inline-flex items-center justify-center w-7 h-7 rounded-xl bg-brand-500/10 border border-brand-500/25 text-brand-200">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M3 12h18" />
-              <path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z" />
-            </svg>
-          </span>
-          <div className="min-w-0">
-            <div className="text-[11px] text-ink-500 font-medium">
-              {action === "web_search"
-                ? "Web search"
-                : action === "web_fetch"
-                ? "Fetch URL"
-                : "Search + fetch"}
-              {pending ? (
-                <span className="ml-2 inline-flex items-center gap-1 text-fluid-400 normal-case tracking-normal">
-                  <span className="typing-dot" />
-                  <span>fetching</span>
-                </span>
-              ) : null}
-            </div>
-            <div className="text-[12.5px] text-ink-100 truncate">
-              {query || url || "\u2014"}
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+    <ToolRowCard
+      icon={
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18" />
+          <path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18z" />
+        </svg>
+      }
+      title={
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span>{label}</span>
+          {pending ? (
+            <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
+              <span className="typing-dot" />
+              <span>{t("fetching")}</span>
+            </span>
+          ) : null}
+        </span>
+      }
+      subtitle={query || url || "\u2014"}
+      tone={ok ? "neutral" : "err"}
+      defaultOpen={pending}
+      meta={
+        <>
           {isResult ? (
             ok ? (
               <Tag tone={hits > 0 ? "ok" : "warn"}>{`${hits} hit${
@@ -240,8 +243,9 @@ export function WebCard({
             )
           ) : null}
           {typeof block.elapsed_ms === "number" ? <Tag>{block.elapsed_ms}ms</Tag> : null}
-        </div>
-      </div>
+        </>
+      }
+    >
 
       {isResult && isSearch && results.length ? (
         <ul className="space-y-1.5 max-h-72 overflow-auto pr-1">
@@ -303,7 +307,7 @@ export function WebCard({
               onClick={() => setExpanded((v) => !v)}
               className="mt-2 text-[12px] text-brand-300 hover:text-brand-200 cursor-pointer transition-colors"
             >
-              {expanded ? "\u25BE collapse" : "\u25B8 expand full content"}
+              {expanded ? t("collapse") : t("expandFull")}
             </button>
           ) : null}
         </div>
@@ -317,6 +321,6 @@ export function WebCard({
           {errors.join(" | ")}
         </div>
       ) : null}
-    </div>
+    </ToolRowCard>
   );
 }

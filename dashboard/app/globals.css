@@ -139,6 +139,10 @@ body::after {
     border-color: var(--line);
     background: var(--card);
     box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+    /* Long machine strings (paths, ids, hashes, addresses) wrap inside the
+       card rather than spilling past its edge or forcing page-wide scroll.
+       Inherited, so it only affects text that would actually overflow. */
+    overflow-wrap: anywhere;
   }
   html.light .card {
     background: var(--card);
@@ -168,12 +172,14 @@ body::after {
     border-color: var(--line);
     background: var(--card);
     box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+    overflow-wrap: anywhere;
   }
   .glass-hi {
     @apply rounded-xl border;
     border-color: var(--line-hi);
     background: var(--card);
     box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+    overflow-wrap: anywhere;
   }
   html.light .glass,
   html.light .glass-hi {
@@ -192,13 +198,13 @@ body::after {
         rgba(139, 92, 246, 0) 360deg);
   }
   .card-head {
-    @apply flex items-center justify-between px-5 py-4 border-b border-brand-500/10;
+    @apply flex items-center justify-between px-4 py-3 border-b border-brand-500/10;
   }
   html.light .card-head {
     @apply border-b-[rgba(109,40,217,0.08)];
   }
   .card-title {
-    @apply text-[15px] font-medium;
+    @apply text-[14px] font-medium;
     color: var(--text-base);
     letter-spacing: 0;
   }
@@ -220,12 +226,14 @@ body::after {
   .stat-delta-down { @apply text-rose-500 text-[12px] font-medium; }
 
   .pill {
-    @apply inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-medium;
+    @apply inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-medium;
     border-color: var(--line-hi);
     background: var(--card);
     color: var(--text-muted);
     letter-spacing: 0;
     text-transform: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
   .pill-ok { @apply border-emerald-500/30 bg-emerald-500/10 text-emerald-500; }
   .pill-warn { @apply border-amber-500/30 bg-amber-500/10 text-amber-500; }
@@ -254,6 +262,19 @@ body::after {
     @apply border-b border-brand-500/10 py-3 px-3 align-top;
   }
   .table tr:hover td { @apply bg-brand-500/5; }
+
+  /* Compact table — Codex-density variant for overview/cockpit lists.
+     Tighter rows + smaller type so holdings / trades read as a dense
+     list rather than a roomy data grid. */
+  .table-compact {
+    @apply text-[12.5px];
+  }
+  .table-compact th {
+    @apply py-1.5 px-2.5 text-[11px];
+  }
+  .table-compact td {
+    @apply py-1.5 px-2.5;
+  }
 
   .embedded-scroll {
     @apply overflow-auto overscroll-contain;
@@ -338,7 +359,7 @@ body::after {
   }
 
   .sidebar-item {
-    @apply flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all;
+    @apply flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition-all;
   }
   .sidebar-item-idle {
     @apply text-ink-300 hover:bg-brand-500/10;
@@ -481,6 +502,10 @@ body::after {
     background: rgba(139, 92, 246, 0.12);
     color: var(--text-base);
     box-shadow: 0 1px 2px rgba(2, 6, 23, 0.04);
+    /* Keep long, unbreakable tokens (file paths, URLs, hashes) inside the
+       card instead of overflowing past its rounded edge. */
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   html.light .bubble-user {
     background: rgba(139, 92, 246, 0.08);
@@ -495,6 +520,10 @@ body::after {
     background: var(--card);
     color: var(--text-base);
     box-shadow: 0 1px 2px rgba(2, 6, 23, 0.04);
+    /* Keep long, unbreakable tokens (file paths, URLs, hashes) inside the
+       card instead of overflowing past its rounded edge. */
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   html.light .bubble-ai {
     background: var(--card);
@@ -632,4 +661,205 @@ body::after {
 @keyframes typewriter-blink {
   from, to { opacity: 1; }
   50% { opacity: 0; }
+}
+
+/* highlight.js dark theme — shared by the chat markdown renderer and the
+   workspace canvas code view. The token class names are highlight.js-specific
+   (emitted by rehype-highlight), so these rules are intentionally global.
+   Palette tracks the ink/brand scheme: violet keywords, cyan types, emerald
+   strings, amber numbers. */
+.hljs { color: #cdd6e4; background: transparent; }
+.hljs-comment,
+.hljs-quote { color: #6b7689; font-style: italic; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-name,
+.hljs-tag,
+.hljs-selector-id,
+.hljs-selector-class { color: #c4a3ff; }
+.hljs-built_in,
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-title.class_ { color: #7dd3fc; }
+.hljs-title,
+.hljs-title.function_,
+.hljs-function .hljs-title { color: #93c5fd; }
+.hljs-string,
+.hljs-attr,
+.hljs-addition,
+.hljs-meta-string,
+.hljs-template-tag { color: #6ee7b7; }
+.hljs-number,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-regexp { color: #fcd34d; }
+.hljs-symbol,
+.hljs-bullet,
+.hljs-meta,
+.hljs-attribute,
+.hljs-link { color: #f0abfc; }
+.hljs-deletion { color: #fca5a5; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* ── Codex-style shell (2026-06) ───────────────────────────────────
+   Left command rail + ⌘K palette + command-home composer. Flat, calm
+   surfaces; keeps the Nerya violet accent for active/focus states. */
+@layer components {
+  .nerya-sidebar {
+    backdrop-filter: blur(18px);
+  }
+  .nerya-settings-shell {
+    --bg-deep: #04040d;
+    --bg: #0a0b1a;
+    --card: rgba(19, 20, 38, 0.76);
+    --card-hi: rgba(30, 30, 48, 0.88);
+    --line: rgba(139, 92, 246, 0.14);
+    --line-hi: rgba(139, 92, 246, 0.32);
+    --panel-bg: rgba(4, 4, 13, 0.72);
+    --text-base: #e6e5f1;
+    --text-muted: #9c98ba;
+    --scrollbar-track: #0a0b1a;
+    --scrollbar-thumb: #2a2a3e;
+    --scrollbar-thumb-hover: #454560;
+  }
+  .nerya-settings-shell main {
+    background: var(--bg-deep);
+  }
+  .nerya-settings-shell .grid-bg {
+    display: none;
+  }
+  .nerya-settings-shell .sidebar-item-active {
+    background: rgba(139, 92, 246, 0.16);
+    color: var(--text-base);
+    font-weight: 600;
+  }
+  .nerya-settings-shell .input-dark {
+    border-color: var(--line);
+    background: var(--card-hi);
+    color: var(--text-base);
+  }
+  .nerya-settings-shell .input-dark::placeholder {
+    color: var(--text-muted);
+  }
+  .nerya-settings-shell .btn-ghost {
+    border-color: var(--line);
+    background: var(--card-hi);
+    color: var(--text-base);
+  }
+  .nerya-settings-shell .btn-ghost:hover {
+    border-color: var(--line-hi);
+    background: rgba(139, 92, 246, 0.10);
+  }
+  .nerya-sidebar .sidebar-item {
+    @apply rounded-lg px-2.5 py-1.5 text-[13px];
+  }
+
+  .cmdk-panel {
+    @apply rounded-2xl border;
+    border-color: var(--line-hi);
+    background: var(--card-hi);
+    box-shadow: 0 24px 60px -12px rgba(2, 6, 23, 0.55);
+  }
+  html.light .cmdk-panel {
+    background: #fcfbff;
+    border-color: rgba(109, 40, 217, 0.16);
+    box-shadow: 0 24px 60px -12px rgba(76, 29, 149, 0.18);
+  }
+  .cmdk-kbd {
+    @apply inline-flex h-5 min-w-[20px] items-center justify-center rounded border px-1 text-[10px] font-medium;
+    border-color: var(--line);
+    color: var(--text-muted);
+    background: var(--card);
+    font-family: inherit;
+  }
+
+  /* Command-home composer — the centred "what should we build?" box. */
+  .composer-shell {
+    @apply rounded-2xl border transition-colors;
+    border-color: var(--line-hi);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(2, 6, 23, 0.06);
+  }
+  .composer-shell:focus-within {
+    border-color: var(--violet);
+  }
+  html.light .composer-shell {
+    background: #fcfbff;
+    border-color: rgba(109, 40, 217, 0.14);
+  }
+  .composer-chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] transition-colors;
+    border-color: var(--line);
+    color: var(--text-muted);
+    background: var(--card);
+  }
+  .composer-chip:hover {
+    color: var(--text-base);
+    border-color: var(--line-hi);
+  }
+  .nerya-app-shell:has(.command-home-root) {
+    --bg-deep: #04040d;
+    --bg: #0a0b1a;
+    --card: rgba(19, 20, 38, 0.72);
+    --card-hi: rgba(30, 30, 48, 0.86);
+    --line: rgba(139, 92, 246, 0.14);
+    --line-hi: rgba(139, 92, 246, 0.32);
+    --panel-bg: rgba(4, 4, 13, 0.55);
+    --text-base: #e6e5f1;
+    --text-muted: #9c98ba;
+    --scrollbar-track: #0a0b1a;
+    --scrollbar-thumb: #2a2a3e;
+    --scrollbar-thumb-hover: #454560;
+  }
+  .command-home-root {
+    background: #04040d;
+    color: #f4f4f4;
+  }
+  .nerya-app-shell:has(.command-home-root) main {
+    background: #04040d;
+  }
+  .nerya-app-shell:has(.command-home-root) .grid-bg {
+    display: none;
+  }
+
+  /* Compact settings (Codex-style) — low-contrast grouped rows, neutral
+     surfaces, and restrained card frames. */
+  .settings-flat .card {
+    border: 1px solid var(--line);
+    background: var(--card);
+    box-shadow: none;
+    border-radius: 10px;
+  }
+  html.light .settings-flat .card {
+    border: 1px solid rgba(109, 40, 217, 0.10);
+    background: var(--card);
+    box-shadow: none;
+  }
+  .settings-flat .card-head {
+    padding: 10px 12px;
+    border-bottom-color: var(--line);
+  }
+  .settings-flat .card-title {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .settings-flat .card-subtle {
+    font-size: 11.5px;
+    line-height: 1.35;
+  }
+  .settings-flat .card-padded > div:last-child {
+    padding: 10px 12px;
+  }
+  .settings-row {
+    border-color: var(--line);
+  }
+  .settings-group-panel {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+  }
 }

@@ -1,8 +1,9 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { ReactNode, useState } from "react";
 import type { NativeBlock } from "../../../lib/chat";
-import { CopyButton, Tag } from "./atoms";
+import { CopyButton, Tag, ToolRowCard } from "./atoms";
 import { arrayOfRecords, recordOf } from "./helpers";
 
 function fileIconFor(action: string): ReactNode {
@@ -144,6 +145,7 @@ export function FileOpCard({
   variant: "use" | "result";
   pending?: boolean;
 }) {
+  const t = useTranslations("fileOpCard");
   const [expanded, setExpanded] = useState(false);
   const action = String(block.action || "").toLowerCase();
   const label = fileLabelFor(action);
@@ -178,42 +180,43 @@ export function FileOpCard({
   const hasMore = lines.length > previewLineCount;
 
   return (
-    <div className="rounded-2xl border border-brand-500/15 bg-brand-500/[0.04] px-4 py-3 space-y-2.5">
-      <div className="flex items-center justify-between gap-3 min-w-0">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="inline-flex items-center justify-center w-7 h-7 rounded-xl bg-brand-500/10 border border-brand-500/25 text-brand-200">
-            {fileIconFor(action)}
-          </span>
-          <div className="min-w-0">
-            <div className="text-[11px] text-ink-500 font-medium">
-              {isResult ? `${label} \u00B7 result` : label}
-              {pending ? (
-                <span className="ml-2 inline-flex items-center gap-1 text-fluid-400 normal-case tracking-normal">
-                  <span className="typing-dot" />
-                  <span>running</span>
-                </span>
-              ) : null}
-            </div>
-            <div className="text-[12.5px] font-mono text-ink-100 truncate">
-              {path || (action === "grep" ? String(payload.pattern || "") : "\u2014")}
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+    <ToolRowCard
+      icon={fileIconFor(action)}
+      title={
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span>{isResult ? label : label}</span>
+          {pending ? (
+            <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
+              <span className="typing-dot" />
+              <span>{t("running")}</span>
+            </span>
+          ) : null}
+        </span>
+      }
+      subtitle={
+        <span className="font-mono">
+          {path || (action === "grep" ? String(payload.pattern || "") : "\u2014")}
+        </span>
+      }
+      tone={ok ? "neutral" : "err"}
+      defaultOpen={pending}
+      meta={
+        <>
           {isResult ? (
             ok ? (
               <Tag tone="ok">
-                {action === "edit_file" || action === "write_file" ? "applied" : "ok"}
+                {action === "edit_file" || action === "write_file" ? t("applied") : t("ok")}
               </Tag>
             ) : (
               <Tag tone="err">{(block.error_kind as string | undefined) || "error"}</Tag>
             )
           ) : null}
           {previewBytes ? <Tag>{previewBytes}</Tag> : null}
-          {truncated ? <Tag tone="warn">truncated</Tag> : null}
+          {truncated ? <Tag tone="warn">{t("truncated")}</Tag> : null}
           {typeof block.elapsed_ms === "number" ? <Tag>{block.elapsed_ms}ms</Tag> : null}
-        </div>
-      </div>
+        </>
+      }
+    >
 
       {!isResult && lineRange ? (
         <div className="text-[11px] text-ink-400 font-mono">{lineRange}</div>
@@ -222,7 +225,7 @@ export function FileOpCard({
       {!isResult && action === "grep" && payload.pattern ? (
         <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 px-3 py-1.5">
           <div className="text-[11px] text-ink-500 font-medium mb-0.5">
-            pattern
+            {t("pattern")}
           </div>
           <div className="text-[12px] text-ink-100 font-mono break-words">
             {String(payload.pattern || "")}
@@ -240,7 +243,7 @@ export function FileOpCard({
         <div className="rounded-xl border border-brand-500/15 bg-ink-900/40 overflow-hidden">
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-brand-500/10">
             <span className="text-[11px] text-ink-500 font-medium">
-              file contents
+              {t("fileContents")}
             </span>
             <CopyButton text={body} />
           </div>
@@ -257,7 +260,7 @@ export function FileOpCard({
               onClick={() => setExpanded((v) => !v)}
               className="w-full text-[12px] text-brand-300 hover:text-brand-200 cursor-pointer transition-colors py-1.5 border-t border-brand-500/10"
             >
-              {expanded ? "\u25BE collapse" : `\u25B8 show all ${lines.length} lines`}
+              {expanded ? t("collapse") : t("showAllLines", { count: lines.length })}
             </button>
           ) : null}
         </div>
@@ -266,7 +269,7 @@ export function FileOpCard({
       {isResult && (action === "list_dir" || action === "glob") && entries.length ? (
         <div className="rounded-xl border border-brand-500/15 bg-ink-900/40 px-3 py-2 max-h-56 overflow-auto">
           <div className="text-[11px] text-ink-500 font-medium mb-1.5">
-            {entries.length} {entries.length === 1 ? "entry" : "entries"}
+            {t("entriesCount", { count: entries.length })}
           </div>
           <ul className="space-y-0.5 font-mono text-[11px] text-ink-200">
             {entries.slice(0, 200).map((entry, i) => {
@@ -290,7 +293,7 @@ export function FileOpCard({
       {isResult && action === "grep" && matches.length ? (
         <div className="rounded-xl border border-brand-500/15 bg-ink-900/40 px-3 py-2 max-h-72 overflow-auto">
           <div className="text-[11px] text-ink-500 font-medium mb-1.5">
-            {matches.length} {matches.length === 1 ? "match" : "matches"}
+            {t("matchesCount", { count: matches.length })}
           </div>
           <ul className="space-y-1 font-mono text-[11px]">
             {matches.slice(0, 100).map((m, i) => (
@@ -307,6 +310,6 @@ export function FileOpCard({
           </ul>
         </div>
       ) : null}
-    </div>
+    </ToolRowCard>
   );
 }

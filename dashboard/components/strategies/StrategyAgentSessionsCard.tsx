@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -611,6 +612,7 @@ export function StrategyAgentSessionsCard({
   strategyId: string;
   workspace: StrategyWorkspaceEnvelope | null;
 }) {
+  const t = useTranslations("strategyAgentSessions");
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [tasksEnv, setTasksEnv] = useState<AgentTasksEnvelope | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -716,8 +718,8 @@ export function StrategyAgentSessionsCard({
 
   return (
     <Card
-      title="Agent sessions"
-      description="Read-only strategy Agent Workspace: trigger runs, scheduled sessions, reflections, turn input/output, tools, and trace."
+      title={t("title")}
+      description={t("description")}
       actions={
         <div className="flex items-center gap-2">
           {selectedId ? (
@@ -725,7 +727,7 @@ export function StrategyAgentSessionsCard({
               href={`/chat/${encodeURIComponent(selectedId)}`}
               className="btn-ghost text-xs"
             >
-              Open in chat
+              {t("openInChat")}
             </Link>
           ) : null}
           <button
@@ -734,7 +736,7 @@ export function StrategyAgentSessionsCard({
             disabled={loading}
             className="btn-ghost text-xs"
           >
-            {loading ? "Refreshing..." : "Refresh"}
+            {loading ? t("refreshing") : t("refresh")}
           </button>
         </div>
       }
@@ -746,18 +748,18 @@ export function StrategyAgentSessionsCard({
           <div className="rounded-lg border border-brand-500/10 bg-ink-950/20">
             <div className="border-b border-brand-500/10 px-3 py-2">
               <div className="text-[12px] font-medium text-ink-300">
-                Sessions
+                {t("sessionsTitle")}
               </div>
               <div className="mt-1 text-[11px] text-ink-500">
-                {candidates.length} strategy-scoped sessions
+                {t("sessionsCount", { count: candidates.length })}
               </div>
             </div>
             {loading && candidates.length === 0 ? (
-              <Empty label="Loading sessions..." />
+              <Empty label={t("loading")} />
             ) : candidates.length === 0 ? (
               <Empty
-                title="No strategy sessions"
-                subtitle="Runs, trigger ledgers, and agent tasks will appear here after the strategy executes."
+                title={t("emptyTitle")}
+                subtitle={t("emptySubtitle")}
               />
             ) : (
               <div className="embedded-list-scroll-lg">
@@ -784,16 +786,16 @@ export function StrategyAgentSessionsCard({
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-ink-500">
                         <span className="font-mono">{selected.id}</span>
-                        <span>source: {sourceLabel(selected)}</span>
-                        <span>updated: {formatTime(selected.updatedAt || selected.createdAt || "")}</span>
+                        <span>{t("source")}: {sourceLabel(selected)}</span>
+                        <span>{t("updated")}: {formatTime(selected.updatedAt || selected.createdAt || "")}</span>
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       <Pill tone={STATUS_TONE[selected.status] ?? "neutral"}>
                         {selected.status.replace("_", " ")}
                       </Pill>
-                      <Pill tone="brand">{selected.triggerCount} triggers</Pill>
-                      <Pill tone="warn">{selected.reviewCount} reflections</Pill>
+                      <Pill tone="brand">{t("triggersCount", { count: selected.triggerCount })}</Pill>
+                      <Pill tone="warn">{t("reflectionsCount", { count: selected.reviewCount })}</Pill>
                     </div>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-1.5">
@@ -810,12 +812,12 @@ export function StrategyAgentSessionsCard({
                         ].join(" ")}
                       >
                         {view === "chat"
-                          ? "Chat transcript"
+                          ? t("viewChat")
                           : view === "trace"
-                            ? "Agent trace"
+                            ? t("viewTrace")
                             : view === "ledgers"
-                              ? "Triggers / reflections"
-                              : "Artifacts"}
+                              ? t("viewLedgers")
+                              : t("viewArtifacts")}
                       </button>
                     ))}
                   </div>
@@ -833,7 +835,7 @@ export function StrategyAgentSessionsCard({
                 {activeView === "artifacts" ? <ArtifactsPane artifacts={artifacts} /> : null}
               </>
             ) : (
-              <Empty label="Select a session to inspect the Agent path." />
+              <Empty label={t("selectSession")} />
             )}
           </div>
         </div>

@@ -293,10 +293,18 @@ export function TopNav() {
     browser_session: browserSessionCount ?? undefined,
   };
 
-  // Settings reaches via the gear icon on the right cluster, and the
-  // action inbox reaches via the bell icon — both are removed from the
-  // pill bar to keep the rail focused on workspace destinations.
-  const HIDDEN_FROM_RAIL = new Set(["settings", "inbox"]);
+  // Settings reaches via the gear icon / settings rail, and the action
+  // inbox reaches via the bell icon. Settings-owned tools stay out of
+  // "More" so the same page never has two navigation buttons.
+  const HIDDEN_FROM_RAIL = new Set([
+    "settings",
+    "inbox",
+    "memory",
+    "web_search",
+    "browsers",
+    "env_vault",
+    "gateway",
+  ]);
   const railPrimary = data.primary.filter((item) => !HIDDEN_FROM_RAIL.has(item.id));
   const moreItems = data.advanced.filter((item) => !HIDDEN_FROM_RAIL.has(item.id));
 

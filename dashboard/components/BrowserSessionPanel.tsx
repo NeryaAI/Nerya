@@ -28,6 +28,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
 
 import { Card, Pill } from "./Page";
 import { Select } from "./Select";
@@ -60,6 +61,7 @@ function fmtTs(ts?: string): string {
 }
 
 export function BrowserSessionPanel() {
+  const t = useTranslations("browserSession");
   const [browsers, setBrowsers] = useState<BrowsersStatus | null>(null);
   const [sessions, setSessions] = useState<BrowserSessionListResponse | null>(
     null,
@@ -160,7 +162,7 @@ export function BrowserSessionPanel() {
       >) => void,
     ) => {
       if (!activeSessionId) {
-        toast({ tone: "warn", message: "Open a session first." });
+        toast({ tone: "warn", message: t("openSessionFirst") });
         return;
       }
       setBusy(busyKey);
@@ -218,7 +220,10 @@ export function BrowserSessionPanel() {
       await Promise.all([refreshSessions(), refreshActive(res.session_id)]);
       toast({
         tone: "ok",
-        message: `Session ${res.session_id} → ${res.current_url || urlDraft}`,
+        message: t("sessionAt", {
+          sid: res.session_id,
+          url: res.current_url || urlDraft,
+        }),
       });
     } catch (e) {
       toast({
@@ -254,7 +259,7 @@ export function BrowserSessionPanel() {
           tone: "error",
           message:
             [res.error, res.detail, res.stderr_tail].filter(Boolean).join(" · ") ||
-            "screenshot failed",
+            t("screenshotFailed"),
         });
         return;
       }
@@ -281,7 +286,7 @@ export function BrowserSessionPanel() {
       setConsoleEvents([]);
       setNetworkEvents([]);
       await refreshSessions();
-      toast({ tone: "ok", message: `Session ${closedSid} closed.` });
+      toast({ tone: "ok", message: t("sessionClosedWithId", { sid: closedSid }) });
     } catch (e) {
       toast({
         tone: "error",
@@ -318,7 +323,7 @@ export function BrowserSessionPanel() {
       } else {
         toast({
           tone: "error",
-          message: res.error || "console fetch failed",
+            message: res.error || t("consoleFetchFailed"),
         });
       }
     } catch (e) {
@@ -345,7 +350,7 @@ export function BrowserSessionPanel() {
       } else {
         toast({
           tone: "error",
-          message: res.error || "network fetch failed",
+            message: res.error || t("networkFetchFailed"),
         });
       }
     } catch (e) {
@@ -380,22 +385,22 @@ export function BrowserSessionPanel() {
       {/* Sticky session-picker bar */}
       <Card
         featured
-        title="Active session"
+        title={t("activeSessionTitle")}
         description={
           activeSessionId
-            ? `Driving session ${activeSessionId}. CDP mode is always on; every action below targets this session.`
-            : "Pick a session from the left sidebar or open a new one to start driving the browser."
+            ? t("activeSessionDesc", { sid: activeSessionId })
+            : t("activeSessionEmptyDesc")
         }
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Pill tone={browsers?.selected ? "ok" : "warn"}>
               {browsers?.selected
-                ? `Engine · ${browsers.selected}`
-                : "No engine selected"}
+                ? t("selectedEngine", { name: browsers.selected })
+                : t("noEngineSelected")}
             </Pill>
             {sessions ? (
               <Pill tone={sessions.count > 0 ? "brand" : "neutral"}>
-                {sessions.count} session(s)
+                {t("openSessions", { count: sessions.count })}
               </Pill>
             ) : null}
             <label className="flex items-center gap-1 text-[11px] text-ink-300">
@@ -404,7 +409,7 @@ export function BrowserSessionPanel() {
                 checked={autoRefresh}
                 onChange={(e) => setAutoRefresh(e.target.checked)}
               />
-              auto-refresh
+              {t("autoRefresh")}
             </label>
           </div>
         }
@@ -413,7 +418,7 @@ export function BrowserSessionPanel() {
           {/* Left: sessions sidebar */}
           <div className="space-y-2">
             <div className="text-[12px] text-ink-400 font-medium">
-              Open sessions
+              {t("sessionsTitle")}
             </div>
             {(sessions?.sessions || []).map((s) => {
               const active = s.session_id === activeSessionId;
@@ -449,14 +454,13 @@ export function BrowserSessionPanel() {
             {(!sessions || !sessions.sessions || sessions.sessions.length === 0)
               ? (
                 <div className="rounded-md border border-brand-500/10 bg-ink-950/30 px-3 py-2 text-[11px] text-ink-400">
-                  No open sessions yet. Use the URL bar on the right to open
-                  one.
+                  {t("noSessions")}
                 </div>
               )
               : null}
             <div className="pt-2">
               <div className="text-[12px] text-ink-400 font-medium">
-                Engine for new sessions
+                {t("engineTitle")}
               </div>
               <Select
                 value={engineDraft}
@@ -464,7 +468,9 @@ export function BrowserSessionPanel() {
                 options={[
                   {
                     value: "",
-                    label: `Use selected (${browsers?.selected || "none"})`,
+                    label: t("engineUseSelected", {
+                      name: browsers?.selected || t("none"),
+                    }),
                   },
                   ...installedEngines.map((e) => ({
                     value: e.name,
@@ -472,13 +478,14 @@ export function BrowserSessionPanel() {
                   })),
                 ]}
                 size="sm"
-                ariaLabel="Engine for new sessions"
+                ariaLabel={t("engineTitle")}
               />
               {noEnginesInstalled
                 ? (
                   <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-100">
-                    No engines installed yet. Switch to the Engines tab to install
-                    one.
+                    {t("noEnginesInstalledBanner", {
+                      settingsLink: t("settingsLink"),
+                    })}
                   </div>
                 )
                 : null}
@@ -509,10 +516,10 @@ export function BrowserSessionPanel() {
                     noEnginesInstalled}
                 >
                   {busy === "start"
-                    ? "Opening…"
+                    ? t("opening")
                     : activeSessionId
-                    ? "Open new"
-                    : "Open"}
+                    ? t("openNew")
+                    : t("open")}
                 </button>
                 <button
                   type="button"
@@ -520,7 +527,7 @@ export function BrowserSessionPanel() {
                   onClick={() => void handleNavigate()}
                   disabled={Boolean(busy) || !urlDraft.trim()}
                 >
-                  {busy === "navigate" ? "Loading…" : "Navigate"}
+                  {busy === "navigate" ? t("loading") : t("navigate")}
                 </button>
                 <button
                   type="button"
@@ -528,7 +535,7 @@ export function BrowserSessionPanel() {
                   onClick={() => void runAction("reload", undefined, "reload")}
                   disabled={Boolean(busy) || !activeSessionId}
                 >
-                  Reload
+                  {t("reload")}
                 </button>
                 <button
                   type="button"
@@ -553,7 +560,7 @@ export function BrowserSessionPanel() {
                   onClick={() => void handleScreenshot()}
                   disabled={Boolean(busy) || !activeSessionId}
                 >
-                  {busy === "screenshot" ? "Snapping…" : "Screenshot"}
+                  {busy === "screenshot" ? t("snapping") : t("screenshot")}
                 </button>
                 <button
                   type="button"
@@ -561,19 +568,19 @@ export function BrowserSessionPanel() {
                   onClick={() => void handleClose()}
                   disabled={Boolean(busy) || !activeSessionId}
                 >
-                  Close
+                  {t("close")}
                 </button>
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-3 text-[11px] text-ink-400">
               <span>
-                URL:{" "}
+                {t("current")}:{" "}
                 <span className="font-mono text-ink-200 break-all">
                   {activeRecord?.current_url || "–"}
                 </span>
               </span>
               <span>
-                engine:{" "}
+                {t("engine")}:{" "}
                 <span className="font-mono text-ink-200">
                   {activeRecord?.engine || "–"}
                 </span>
@@ -590,15 +597,15 @@ export function BrowserSessionPanel() {
       {/* Latest screenshot */}
       {activeSessionId
         ? (
-          <Card
-            title="Latest screenshot"
+            <Card
+            title={t("screenshotTitle")}
             description={activeRecord?.last_screenshot
               ? `${
                 activeRecord.last_screenshot.fetch_method || "–"
               } · ${
                 summariseBytes(activeRecord.last_screenshot.bytes)
               } · ${activeRecord.last_screenshot.elapsed_ms ?? 0}ms`
-              : "No screenshot yet. Click the Screenshot button above."}
+              : t("screenshotEmpty")}
           >
             {activeRecord?.last_screenshot?.data_uri
               ? (
@@ -610,14 +617,14 @@ export function BrowserSessionPanel() {
                 >
                   <img
                     src={activeRecord.last_screenshot.data_uri}
-                    alt="Latest screenshot"
+                    alt={t("screenshotTitle")}
                     className="max-h-[55vh] w-full rounded-md border border-brand-500/10 bg-ink-950 object-contain"
                   />
                 </a>
               )
               : (
                 <div className="rounded-md border border-brand-500/10 bg-ink-950/30 px-3 py-2 text-[11px] text-ink-400">
-                  Take a screenshot to see the live page rendering.
+                  {t("screenshotEmptyHint")}
                 </div>
               )}
           </Card>
@@ -626,8 +633,8 @@ export function BrowserSessionPanel() {
 
       {/* Interaction toolbox */}
       <Card
-        title="Interact"
-        description="Move the mouse, send keystrokes, scroll. All actions target the active session."
+        title={t("cdpTitle")}
+        description={t("cdpDesc")}
       >
         <div className="space-y-3">
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-[120px_120px_auto_auto]">
@@ -657,7 +664,7 @@ export function BrowserSessionPanel() {
                   "click_xy",
                 )}
             >
-              {busy === "click_xy" ? "Clicking…" : "Click @ (x, y)"}
+              {busy === "click_xy" ? t("cdpRunning") : t("cdpClickXY")}
             </button>
             <div className="flex items-center gap-2">
               <input
@@ -688,7 +695,7 @@ export function BrowserSessionPanel() {
                     "scroll",
                   )}
               >
-                {busy === "scroll" ? "Scrolling…" : "Scroll"}
+                {busy === "scroll" ? t("cdpRunning") : t("cdpScroll")}
               </button>
             </div>
           </div>
@@ -696,7 +703,7 @@ export function BrowserSessionPanel() {
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_auto]">
             <input
               className="input-dark text-xs font-mono"
-              placeholder="CSS selector, e.g. button.primary"
+              placeholder={t("cdpSelectorPlaceholder")}
               value={selector}
               onChange={(e) => setSelector(e.target.value)}
               disabled={!activeSessionId}
@@ -713,7 +720,7 @@ export function BrowserSessionPanel() {
                   "click_selector",
                 )}
             >
-              {busy === "click_selector" ? "Clicking…" : "Click selector"}
+              {busy === "click_selector" ? t("cdpRunning") : t("cdpClickSelector")}
             </button>
             <button
               type="button"
@@ -728,23 +735,23 @@ export function BrowserSessionPanel() {
                   },
                   "type",
                 )}
-              title="Types into the selector if provided, else focused element."
+              title={t("cdpTypeHint")}
             >
-              {busy === "type" ? "Typing…" : "Type"}
+              {busy === "type" ? t("cdpRunning") : t("cdpType")}
             </button>
           </div>
 
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_140px_auto]">
             <input
               className="input-dark text-xs font-mono"
-              placeholder="Text to type"
+              placeholder={t("cdpTextPlaceholder")}
               value={typeText}
               onChange={(e) => setTypeText(e.target.value)}
               disabled={!activeSessionId}
             />
             <input
               className="input-dark text-xs font-mono"
-              placeholder="Enter"
+              placeholder={t("cdpKeyPlaceholder")}
               value={pressKey}
               onChange={(e) => setPressKey(e.target.value)}
               disabled={!activeSessionId}
@@ -760,7 +767,7 @@ export function BrowserSessionPanel() {
                   "press",
                 )}
             >
-              {busy === "press" ? "Pressing…" : "Press key"}
+              {busy === "press" ? t("cdpRunning") : t("cdpPress")}
             </button>
           </div>
         </div>
@@ -768,8 +775,8 @@ export function BrowserSessionPanel() {
 
       {/* Page body (text) */}
       <Card
-        title="Page text"
-        description="Latest text snapshot from the active session. Use Reload above to refresh."
+        title={t("pageTextTitle")}
+        description={t("pageTextDesc")}
       >
         <div
           className="max-h-[40vh] overflow-auto rounded-md border border-brand-500/10 bg-ink-950/40 p-3 font-mono text-[11px] text-ink-200 whitespace-pre-wrap"
@@ -777,22 +784,22 @@ export function BrowserSessionPanel() {
         >
           {renderBody ||
             (activeSessionId
-              ? "No body captured yet. Hit Reload."
-              : "Open a session to inspect the page text.")}
+              ? t("pageTextEmpty")
+              : t("pageTextNoSession"))}
         </div>
       </Card>
 
       {/* Console viewer */}
       <Card
-        title="Console"
-        description="Live console output from the page (log/info/warn/error)."
+        title={t("consoleTitle")}
+        description={t("consoleDesc")}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Select
               value={consoleFilter}
               onChange={(value) => setConsoleFilter(value)}
               options={[
-                { value: "", label: "All levels" },
+                { value: "", label: t("allLevels") },
                 { value: "log", label: "log" },
                 { value: "info", label: "info" },
                 { value: "warn", label: "warn" },
@@ -800,7 +807,7 @@ export function BrowserSessionPanel() {
                 { value: "debug", label: "debug" },
               ]}
               size="sm"
-              ariaLabel="Filter console events by level"
+              ariaLabel={t("consoleFilterAria")}
             />
             <button
               type="button"
@@ -808,16 +815,16 @@ export function BrowserSessionPanel() {
               onClick={() => void refreshConsole(false)}
               disabled={!activeSessionId}
             >
-              Refresh
+              {t("refresh")}
             </button>
             <button
               type="button"
               className="btn btn-ghost"
               onClick={() => void refreshConsole(true)}
               disabled={!activeSessionId || consoleEvents.length === 0}
-              title="Clear after fetching"
+              title={t("clearAfterFetch")}
             >
-              Clear
+              {t("clear")}
             </button>
           </div>
         }
@@ -825,14 +832,13 @@ export function BrowserSessionPanel() {
         {!activeSessionId
           ? (
             <div className="rounded-md border border-brand-500/10 bg-ink-950/30 px-3 py-2 text-[11px] text-ink-400">
-              Open a session to capture console output.
+              {t("consoleNoSession")}
             </div>
           )
           : consoleEvents.length === 0
           ? (
             <div className="rounded-md border border-brand-500/10 bg-ink-950/30 px-3 py-2 text-[11px] text-ink-400">
-              No console events captured yet. Trigger an action on the page,
-              then click Refresh.
+              {t("consoleEmpty")}
             </div>
           )
           : (
@@ -874,8 +880,8 @@ export function BrowserSessionPanel() {
 
       {/* Network viewer */}
       <Card
-        title="Network requests"
-        description="Requests issued by the page (XHR/fetch/document/etc)."
+        title={t("networkTitle")}
+        description={t("networkDesc")}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-1 text-[11px] text-ink-300">
@@ -884,7 +890,7 @@ export function BrowserSessionPanel() {
                 checked={networkApiOnly}
                 onChange={(e) => setNetworkApiOnly(e.target.checked)}
               />
-              API only (XHR/fetch)
+              {t("networkApiOnly")}
             </label>
             <button
               type="button"
@@ -892,16 +898,16 @@ export function BrowserSessionPanel() {
               onClick={() => void refreshNetwork(false)}
               disabled={!activeSessionId}
             >
-              Refresh
+              {t("refresh")}
             </button>
             <button
               type="button"
               className="btn btn-ghost"
               onClick={() => void refreshNetwork(true)}
               disabled={!activeSessionId || networkEvents.length === 0}
-              title="Clear after fetching"
+              title={t("clearAfterFetch")}
             >
-              Clear
+              {t("clear")}
             </button>
           </div>
         }
@@ -909,14 +915,13 @@ export function BrowserSessionPanel() {
         {!activeSessionId
           ? (
             <div className="rounded-md border border-brand-500/10 bg-ink-950/30 px-3 py-2 text-[11px] text-ink-400">
-              Open a session to capture network traffic.
+              {t("networkNoSession")}
             </div>
           )
           : networkEvents.length === 0
           ? (
             <div className="rounded-md border border-brand-500/10 bg-ink-950/30 px-3 py-2 text-[11px] text-ink-400">
-              No requests captured yet. Trigger navigation or interactions on
-              the page, then click Refresh.
+              {t("networkEmpty")}
             </div>
           )
           : (
@@ -924,10 +929,10 @@ export function BrowserSessionPanel() {
               <table className="w-full table-fixed text-[11px]">
                 <thead className="sticky top-0 bg-ink-950/80 text-left text-ink-400">
                   <tr>
-                    <th className="w-[80px] px-2 py-1 font-medium">Time</th>
-                    <th className="w-[60px] px-2 py-1 font-medium">Method</th>
-                    <th className="w-[60px] px-2 py-1 font-medium">Status</th>
-                    <th className="px-2 py-1 font-medium">URL</th>
+                    <th className="w-[80px] px-2 py-1 font-medium">{t("colTime")}</th>
+                    <th className="w-[60px] px-2 py-1 font-medium">{t("colMethod")}</th>
+                    <th className="w-[60px] px-2 py-1 font-medium">{t("colStatus")}</th>
+                    <th className="px-2 py-1 font-medium">{t("colUrl")}</th>
                     <th className="w-[70px] px-2 py-1 font-medium text-right">
                       ms
                     </th>

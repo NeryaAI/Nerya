@@ -113,9 +113,9 @@ export function Select<T extends string = string>({
         }}
         className={[
           "inline-flex w-full items-center justify-between gap-2 rounded-lg",
-          "border border-brand-500/15 bg-ink-900/40 hover:border-brand-500/35",
-          "text-ink-100 transition-colors backdrop-blur-soft",
-          dropdown.open ? "border-brand-500/45 bg-ink-900/55" : "",
+          "border border-[color:var(--line)] bg-[color:var(--card-hi)] hover:border-[color:var(--line-hi)]",
+          "text-[color:var(--text-base)] transition-colors backdrop-blur-soft",
+          dropdown.open ? "border-brand-500/45 bg-[color:var(--card-hi)]" : "",
           disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer",
           sizeCls,
           className ?? "",
@@ -127,13 +127,13 @@ export function Select<T extends string = string>({
             : active
             ? active.label
             : (
-              <span className="text-ink-500">{placeholder ?? "–"}</span>
+              <span className="text-[color:var(--text-muted)]">{placeholder ?? "–"}</span>
             )}
         </span>
         <ChevronDownIcon
           size={14}
           className={[
-            "shrink-0 text-ink-400 transition-transform",
+            "shrink-0 text-[color:var(--text-muted)] transition-transform",
             dropdown.open ? "rotate-180" : "",
           ].join(" ")}
         />
@@ -170,7 +170,7 @@ export function Select<T extends string = string>({
                       option.disabled
                         ? "cursor-not-allowed opacity-50"
                         : "cursor-pointer hover:bg-brand-500/12",
-                      selected ? "bg-brand-500/14 text-white" : "text-ink-200",
+                      selected ? "bg-brand-500/14 text-[color:var(--text-base)]" : "text-[color:var(--text-base)]",
                     ].join(" ")}
                   >
                     <span className="min-w-0 flex-1 truncate">

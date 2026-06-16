@@ -221,13 +221,21 @@ export type ReasoningEffort =
   | "xhigh";
 
 export type PermissionMode = "default" | "yolo";
+export type ModelContextWindow = 131072 | 262144 | 1048576;
+
+export type ChatModelOverride = {
+  reasoning_effort?: ReasoningEffort;
+  model_context_window?: ModelContextWindow;
+};
 
 export type ChatRunSettings = {
   reasoning_effort: ReasoningEffort;
   permission_mode: PermissionMode;
+  model_context_window: ModelContextWindow;
   model_tier: string;
   model_provider: string;
   model_id: string;
+  model_overrides?: Record<string, ChatModelOverride>;
   max_iterations: number;
   max_total_tool_calls: number;
   max_wall_seconds: number;
@@ -241,7 +249,144 @@ export type ChatModelOption = {
   provider: string;
   model: string;
   source: "tier" | "catalog";
+  reasoning_effort?: ReasoningEffort;
 };
+
+type LlmRouteLike = {
+  provider?: string | null;
+  model?: string | string[] | null;
+  models?: string[] | null;
+};
+
+type LlmTierLike = LlmRouteLike & {
+  tier?: string | null;
+  reasoning_effort?: string | null;
+  routes?: LlmRouteLike[] | null;
+};
+
+type LlmTiersLike = {
+  tiers?: LlmTierLike[] | null;
+};
+
+type LlmConfigLike = {
+  tiers?: LlmTierLike[] | null;
+};
+
+type LlmModelsLike = {
+  providers?: Record<string, Array<Record<string, unknown>>> | null;
+};
+
+function splitModelValues(value: unknown): string[] {
+  if (!value) return [];
+  const raw = Array.isArray(value) ? value : String(value).split(/[\n,]/);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    const text = String(item || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
+function modelIdFromCatalogRow(row: Record<string, unknown>): string {
+  return String(row.id || row.model || row.name || row.model_id || "").trim();
+}
+
+function normaliseReasoningEffort(value: unknown): ReasoningEffort | undefined {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return undefined;
+  if (raw === "none") return "off";
+  if (raw === "extra_high" || raw === "extra-high" || raw === "max") return "xhigh";
+  if (["off", "minimal", "low", "medium", "high", "xhigh"].includes(raw)) {
+    return raw as ReasoningEffort;
+  }
+  return undefined;
+}
+
+export function buildChatModelOptions({
+  tiers,
+  config,
+  models,
+}: {
+  tiers?: LlmTiersLike | null;
+  config?: LlmConfigLike | null;
+  models?: LlmModelsLike | null;
+}): ChatModelOption[] {
+  const options: ChatModelOption[] = [];
+  const seenExact = new Set<string>();
+  const seenProviderModel = new Set<string>();
+
+  function addTierOption(
+    tierRaw: unknown,
+    providerRaw: unknown,
+    modelRaw: unknown,
+    reasoningRaw?: unknown,
+  ) {
+    const tier = String(tierRaw || "").trim();
+    const provider = String(providerRaw || "").trim().toLowerCase();
+    const reasoning = normaliseReasoningEffort(reasoningRaw);
+    if (!tier || !provider) return;
+    for (const model of splitModelValues(modelRaw)) {
+      const exact = `${provider}:${model}:${tier}`;
+      if (seenExact.has(exact)) continue;
+      seenExact.add(exact);
+      seenProviderModel.add(`${provider}:${model}`);
+      options.push({
+        key: `tier:${tier}:${provider}:${model}`,
+        label: `${tier}: ${provider}/${model}`,
+        tier,
+        provider,
+        model,
+        source: "tier",
+        reasoning_effort: reasoning,
+      });
+    }
+  }
+
+  for (const row of tiers?.tiers ?? []) {
+    addTierOption(
+      row.tier,
+      row.provider,
+      row.models?.length ? row.models : row.model,
+      row.reasoning_effort,
+    );
+  }
+
+  for (const row of config?.tiers ?? []) {
+    const routes = Array.isArray(row.routes) && row.routes.length ? row.routes : [row];
+    for (const route of routes) {
+      addTierOption(
+        row.tier,
+        route.provider,
+        route.models?.length ? route.models : route.model,
+        row.reasoning_effort,
+      );
+    }
+  }
+
+  for (const [providerRaw, rows] of Object.entries(models?.providers ?? {})) {
+    const provider = providerRaw.trim().toLowerCase();
+    if (!provider) continue;
+    for (const row of rows.slice(0, 160)) {
+      const model = modelIdFromCatalogRow(row);
+      if (!model) continue;
+      const providerModel = `${provider}:${model}`;
+      if (seenProviderModel.has(providerModel)) continue;
+      seenProviderModel.add(providerModel);
+      options.push({
+        key: `catalog:${provider}:${model}`,
+        label: `${provider}/${model}`,
+        provider,
+        model,
+        source: "catalog",
+      });
+    }
+  }
+
+  return options.slice(0, 320);
+}
 
 export type ChatThread = {
   id: string;
@@ -277,6 +422,7 @@ const DEFAULT_PERMISSION_MODE: PermissionMode =
 export const DEFAULT_CHAT_RUN_SETTINGS: ChatRunSettings = {
   reasoning_effort: "off",
   permission_mode: DEFAULT_PERMISSION_MODE,
+  model_context_window: 262144,
   model_tier: "",
   model_provider: "",
   model_id: "",
@@ -501,6 +647,90 @@ export function saveThreads(threads: ChatThread[]) {
   } catch {
     // ignore quota errors — the UI will keep working with in-memory state.
   }
+  emitThreadsChanged();
+}
+
+// ── Cross-component thread sync ─────────────────────────────────────
+// The Codex shell renders the conversation list in the global sidebar
+// while ChatView owns the live transcript + persistence. Both read the
+// same localStorage key, so we broadcast a same-tab event whenever the
+// store changes (the native ``storage`` event only fires in *other*
+// tabs). Listeners re-read lazily — ``loadThreads`` is a cheap parse.
+export const THREADS_CHANGED_EVENT = "nerya:threads-changed";
+
+export function emitThreadsChanged() {
+  if (!isBrowser()) return;
+  try {
+    window.dispatchEvent(new CustomEvent(THREADS_CHANGED_EVENT));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function subscribeThreadsChanged(cb: () => void): () => void {
+  if (!isBrowser()) return () => {};
+  const handler = (event?: Event) => {
+    if (event && event.type === "storage") {
+      const key = (event as StorageEvent).key;
+      if (key && key !== STORAGE_KEY && key !== DELETED_SESSIONS_KEY) return;
+    }
+    cb();
+  };
+  window.addEventListener(THREADS_CHANGED_EVENT, handler as EventListener);
+  window.addEventListener("storage", handler as EventListener);
+  return () => {
+    window.removeEventListener(THREADS_CHANGED_EVENT, handler as EventListener);
+    window.removeEventListener("storage", handler as EventListener);
+  };
+}
+
+// ── Deleted-session tombstones ─────────────────────────────────────
+// Shared with ChatView (same storage key) so a delete from the global
+// sidebar also stops ChatView's backend-session hydrate from re-importing
+// the conversation the operator just removed.
+export const DELETED_SESSIONS_KEY = "nerya.chat.deletedSessions.v1";
+
+export function loadDeletedSessionIds(): Set<string> {
+  if (!isBrowser()) return new Set();
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DELETED_SESSIONS_KEY) || "[]");
+    return new Set(
+      Array.isArray(parsed)
+        ? parsed.filter((id): id is string => typeof id === "string" && !!id)
+        : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+export function rememberDeletedSession(id: string): Set<string> {
+  const next = loadDeletedSessionIds();
+  next.add(id);
+  if (isBrowser()) {
+    try {
+      localStorage.setItem(
+        DELETED_SESSIONS_KEY,
+        JSON.stringify(Array.from(next).slice(-500)),
+      );
+    } catch {
+      // Ignore quota/privacy-mode failures; the backend delete still runs.
+    }
+  }
+  return next;
+}
+
+/**
+ * Remove a thread from the local store: write a tombstone, drop it from
+ * the persisted list, and broadcast the change. The backend session
+ * delete is fired by the caller so this module stays free of the API
+ * client import (and works even when the backend is offline).
+ */
+export function deleteThreadLocally(id: string): ChatThread[] {
+  rememberDeletedSession(id);
+  const next = loadThreads().filter((t) => t.id !== id);
+  saveThreads(next);
+  return next;
 }
 
 export function loadActiveId(): string | null {
@@ -530,6 +760,43 @@ function saneRunLimit(
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+function saneContextWindow(value: unknown): ModelContextWindow {
+  const raw =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value.replace(/_/g, ""))
+        : NaN;
+  if (raw === 131072 || raw === 128000) return 131072;
+  if (raw === 262144 || raw === 256000) return 262144;
+  if (raw === 1048576 || raw === 1000000) return 1048576;
+  return DEFAULT_CHAT_RUN_SETTINGS.model_context_window;
+}
+
+function saneModelOverrides(value: unknown): Record<string, ChatModelOverride> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out: Record<string, ChatModelOverride> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!key || !raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const row = raw as Record<string, unknown>;
+    const effort = row.reasoning_effort;
+    const override: ChatModelOverride = {};
+    if (
+      typeof effort === "string" &&
+      ["off", "minimal", "low", "medium", "high", "xhigh"].includes(effort)
+    ) {
+      override.reasoning_effort = effort as ReasoningEffort;
+    }
+    if ("model_context_window" in row) {
+      override.model_context_window = saneContextWindow(row.model_context_window);
+    }
+    if (override.reasoning_effort || override.model_context_window) {
+      out[key.slice(0, 220)] = override;
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 export function loadRunSettings(): ChatRunSettings {
   if (!isBrowser()) return DEFAULT_CHAT_RUN_SETTINGS;
   try {
@@ -544,6 +811,7 @@ export function loadRunSettings(): ChatRunSettings {
           ? effort
           : DEFAULT_CHAT_RUN_SETTINGS.reasoning_effort,
       permission_mode: mode === "yolo" ? "yolo" : "default",
+      model_context_window: saneContextWindow(parsed.model_context_window),
       model_tier:
         typeof parsed.model_tier === "string" ? parsed.model_tier.trim() : "",
       model_provider:
@@ -552,6 +820,7 @@ export function loadRunSettings(): ChatRunSettings {
           : "",
       model_id:
         typeof parsed.model_id === "string" ? parsed.model_id.trim() : "",
+      model_overrides: saneModelOverrides(parsed.model_overrides),
       max_iterations: saneRunLimit(
         parsed.max_iterations,
         DEFAULT_CHAT_RUN_SETTINGS.max_iterations,
@@ -639,6 +908,16 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
   const out: NativeBlockEnvelope[] = [];
   let textAccum = "";
   let textIdx: number | null = null;
+
+  function mergeStreamingText(current: string, piece: string): string {
+    if (!current) return piece;
+    // Some backends publish true deltas (" world"), while others publish the
+    // current accumulated block text ("Hello world"). Support both shapes so
+    // the UI never duplicates text during reconnects or adapter changes.
+    if (piece.startsWith(current)) return piece;
+    if (current.endsWith(piece)) return current;
+    return current + piece;
+  }
 
   function flushText() {
     if (textIdx !== null) {
@@ -796,6 +1075,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         team_task_subject: ev.team_task_subject || ev.subject,
         status: memberStatus,
         ok: ev.ok,
+        caveat: ev.caveat ?? asRecord(members[subagent]).caveat,
         error: ev.error,
         summary: ev.summary,
         artifact: ev.artifact || ev.artifact_id,
@@ -1042,7 +1322,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         textIdx = out.length;
         out.push(env);
       } else {
-        textAccum += piece;
+        textAccum = mergeStreamingText(textAccum, piece);
         const env = out[textIdx];
         if (env.block) {
           env.block = { ...env.block, text: textAccum };

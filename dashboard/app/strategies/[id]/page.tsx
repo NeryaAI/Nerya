@@ -94,46 +94,14 @@ type StrategyDetailTab =
   | "history"
   | "debug";
 
-const STRATEGY_DETAIL_TABS: Array<{
-  id: StrategyDetailTab;
-  label: string;
-  description: string;
-}> = [
-  {
-    id: "overview",
-    label: "Overview",
-    description: "Status, definition, binding, and risk posture",
-  },
-  {
-    id: "performance",
-    label: "Performance",
-    description: "Open positions, recent orders, fills, equity curve",
-  },
-  {
-    id: "agent_sessions",
-    label: "Agent Sessions",
-    description: "Read-only Agent Workspace transcript and trace",
-  },
-  {
-    id: "automation",
-    label: "Automation",
-    description: "Schedules, tuning, runs, and proposals",
-  },
-  {
-    id: "files",
-    label: "Files & Prompts",
-    description: "Subagents, source files, and package text",
-  },
-  {
-    id: "history",
-    label: "History",
-    description: "Strategy ledgers and runtime records",
-  },
-  {
-    id: "debug",
-    label: "Raw",
-    description: "Manifest and config fallback editors",
-  },
+const STRATEGY_DETAIL_TABS: StrategyDetailTab[] = [
+  "overview",
+  "performance",
+  "agent_sessions",
+  "automation",
+  "files",
+  "history",
+  "debug",
 ];
 
 export default function StrategyDetailPage({
@@ -650,22 +618,23 @@ function StrategyDetailTabBar({
   onChange: (tab: StrategyDetailTab) => void;
   counts: { runs: number; ledgers: number };
 }) {
+  const t = useTranslations("strategyDetail");
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-950/25 p-2">
       <div className="flex gap-1 overflow-x-auto pb-1">
         {STRATEGY_DETAIL_TABS.map((tab) => {
-          const selected = active === tab.id;
+          const selected = active === tab;
           const badge =
-            tab.id === "automation"
+            tab === "automation"
               ? counts.runs
-              : tab.id === "history"
+              : tab === "history"
                 ? counts.ledgers
                 : null;
           return (
             <button
-              key={tab.id}
+              key={tab}
               type="button"
-              onClick={() => onChange(tab.id)}
+              onClick={() => onChange(tab)}
               className={[
                 "group min-w-[150px] shrink-0 rounded-md border px-3 py-2 text-left transition-colors",
                 selected
@@ -674,7 +643,7 @@ function StrategyDetailTabBar({
               ].join(" ")}
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[12px] font-semibold">{tab.label}</span>
+                <span className="text-[12px] font-semibold">{t(`tabs.${tab}.label`)}</span>
                 {badge !== null ? (
                   <span className="rounded-full border border-brand-500/20 px-1.5 py-0.5 text-[10px] text-ink-300">
                     {badge}
@@ -682,7 +651,7 @@ function StrategyDetailTabBar({
                 ) : null}
               </div>
               <div className="mt-1 line-clamp-2 text-[10.5px] leading-snug text-ink-500 group-hover:text-ink-400">
-                {tab.description}
+                {t(`tabs.${tab}.description`)}
               </div>
             </button>
           );
@@ -693,21 +662,22 @@ function StrategyDetailTabBar({
 }
 
 function StrategyDefinitionCard({ detail }: { detail: StrategyDetail }) {
+  const t = useTranslations("strategyDetail");
   const description =
     typeof detail.strategy_yml.description === "string"
       ? detail.strategy_yml.description
       : "";
   return (
     <Card
-      title="Strategy definition"
-      description={description || "Package fields loaded from strategy.yml."}
+      title={t("definitionTitle")}
+      description={description || t("definitionDescription")}
     >
       <div className="grid gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
-        <DefinitionBlock label="Markets" values={detail.strategy.markets} />
-        <DefinitionBlock label="Triggers" values={detail.strategy.trigger_kinds} />
-        <DefinitionBlock label="Subagents" values={detail.strategy.subagents} />
+        <DefinitionBlock label={t("definitionMarkets")} values={detail.strategy.markets} />
+        <DefinitionBlock label={t("definitionTriggers")} values={detail.strategy.trigger_kinds} />
+        <DefinitionBlock label={t("definitionSubagents")} values={detail.strategy.subagents} />
         <DefinitionBlock
-          label="Mode"
+          label={t("definitionMode")}
           values={[
             `status:${detail.strategy.status}`,
             `mode:${detail.strategy.mode}`,

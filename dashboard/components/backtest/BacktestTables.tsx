@@ -5,53 +5,70 @@ import { Card, Empty } from "../Page";
 import { JsonView } from "../JsonView";
 import { ChevronDownIcon, ChevronRightIcon } from "../icons";
 
+type BacktestTable = { id: string; columns: string[]; rows: unknown[][] };
+
 export function BacktestTables({
   tables,
+  compact = false,
+  maxHeightClass = "max-h-[420px]",
 }: {
-  tables: Array<{ id: string; columns: string[]; rows: unknown[][] }>;
+  tables: BacktestTable[];
+  compact?: boolean;
+  maxHeightClass?: string;
 }) {
   return (
-    <div className="grid grid-cols-1 gap-4">
+    <div className={compact ? "grid grid-cols-1 gap-3" : "grid grid-cols-1 gap-4"}>
       {tables.map((table) => (
-        <Card key={table.id} title={table.id.replace(/_/g, " ")}>
-          {table.rows.length === 0 ? (
-            <Empty label="No rows" />
-          ) : (
-            <div className="embedded-table-scroll max-h-96 overflow-auto rounded-md border border-[color:var(--line)]">
-              <table className="min-w-[720px] w-full text-xs">
-                <thead className="sticky top-0 bg-[color:var(--card-hi)]">
-                  <tr>
-                    {table.columns.map((col) => (
-                      <th
-                        key={col}
-                        className="whitespace-nowrap px-3 py-2 text-left font-medium text-[color:var(--text-muted)]"
-                      >
-                        {col}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {table.rows.map((row, idx) => (
-                    <tr key={idx} className="border-t border-brand-500/10">
-                      {row.map((cell, cellIdx) => (
-                        <td
-                          key={cellIdx}
-                          className="px-3 py-2 align-top font-mono text-[color:var(--text-base)]"
+        <Card key={table.id} title={formatTableTitle(table.id)} padded={false}>
+          <div className={compact ? "px-3 py-2.5" : "px-4 py-3.5"}>
+            {table.rows.length === 0 ? (
+              <Empty label="No rows" />
+            ) : (
+              <div className={`embedded-table-scroll ${maxHeightClass} rounded-md border border-[color:var(--line)]`}>
+                <table className={`min-w-[720px] w-full ${compact ? "text-[11.5px]" : "text-xs"}`}>
+                  <thead className="sticky top-0 bg-[color:var(--card-hi)]">
+                    <tr>
+                      {table.columns.map((col) => (
+                        <th
+                          key={col}
+                          className={`whitespace-nowrap text-left font-medium text-[color:var(--text-muted)] ${
+                            compact ? "px-2.5 py-1.5" : "px-3 py-2"
+                          }`}
                         >
-                          <Cell value={cell} />
-                        </td>
+                          {col}
+                        </th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody>
+                    {table.rows.map((row, idx) => (
+                      <tr key={idx} className="border-t border-brand-500/10">
+                        {row.map((cell, cellIdx) => (
+                          <td
+                            key={cellIdx}
+                            className={`align-top font-mono text-[color:var(--text-base)] ${
+                              compact ? "px-2.5 py-1.5" : "px-3 py-2"
+                            }`}
+                          >
+                            <Cell value={cell} />
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </Card>
       ))}
     </div>
   );
+}
+
+function formatTableTitle(id: string): string {
+  if (/^trades(?:_top\d+)?$/i.test(id)) return "trades";
+  return id.replace(/_/g, " ");
 }
 
 function Cell({ value }: { value: unknown }) {

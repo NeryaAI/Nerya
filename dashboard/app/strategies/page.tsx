@@ -584,6 +584,9 @@ export default function StrategiesPage() {
                   onApproved={async () => {
                     await load();
                   }}
+                  onDeleted={async () => {
+                    await load();
+                  }}
                   onError={setError}
                   onNotice={setNotice}
                 />

@@ -219,5 +219,25 @@ export function summariseRunStatus(run: StrategyRunRecord | null) {
   }
 }
 
+export function localizeRunStatusLabel(
+  label: string,
+  t: ReturnType<typeof useTranslations<"strategyWorkspace">>,
+) {
+  switch (label) {
+    case "no runs yet":
+      return t("statusNoRunsYet");
+    case "submitted":
+      return t("statusSubmitted");
+    case "ok":
+      return t("statusOk");
+    case "hold":
+      return t("statusHold");
+    case "error":
+      return t("statusError");
+    default:
+      return label;
+  }
+}
+
 export type { StrategyWorkspaceEnvelope } from "../../lib/strategyTypes";
 export { Kpi, Pill };

@@ -1,5 +1,9 @@
-import { redirect } from "next/navigation";
+import { CommandHome } from "../components/home/CommandHome";
 
-export default function RootPage(): never {
-  redirect("/dashboard");
+export const metadata = {
+  title: "Nerya",
+};
+
+export default function HomePage() {
+  return <CommandHome />;
 }

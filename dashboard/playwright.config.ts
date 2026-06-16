@@ -25,8 +25,10 @@ const BASE_URL = process.env.NERYA_DASHBOARD_URL ?? `http://127.0.0.1:${PORT}`;
 const RUNTIME_PORT = Number(process.env.NERYA_RUNTIME_PORT ?? 18318);
 const RUNTIME_URL = process.env.NERYA_API ?? `http://127.0.0.1:${RUNTIME_PORT}`;
 const AUTOSTART = process.env.PLAYWRIGHT_AUTOSTART === "1";
+const MOCKED_UI = process.env.NERYA_E2E_MOCKED_UI === "1";
 const AUTOSTART_WORKSPACE = process.env.NERYA_WORKSPACE?.trim() || "dashboard/.nerya-test-workspace";
 const PERMISSION_MODE = process.env.NERYA_PERMISSION_MODE?.trim() || "yolo";
+const PYTHON = process.env.NERYA_PYTHON?.trim() || "python";
 
 process.env.NERYA_API = RUNTIME_URL;
 process.env.PORT = String(PORT);
@@ -79,20 +81,29 @@ export default defineConfig({
     },
   ],
   ...(AUTOSTART && {
-    webServer: [
-      {
-        command:
-          `cd .. && python tools/prepare_isolated_test_workspace.py --target "${AUTOSTART_WORKSPACE}" && python -m nerya.cli.app serve --workspace "${AUTOSTART_WORKSPACE}" --port ${RUNTIME_PORT} --no-dashboard`,
-        port: RUNTIME_PORT,
-        timeout: 120_000,
-        reuseExistingServer: !process.env.CI,
-      },
-      {
-        command: "npm run dev:e2e",
-        port: PORT,
-        timeout: 120_000,
-        reuseExistingServer: !process.env.CI,
-      },
-    ],
+    webServer: MOCKED_UI
+      ? [
+          {
+            command: "npm run dev:e2e",
+            port: PORT,
+            timeout: 120_000,
+            reuseExistingServer: !process.env.CI,
+          },
+        ]
+      : [
+          {
+            command:
+              `cd .. && ${PYTHON} tools/prepare_isolated_test_workspace.py --target "${AUTOSTART_WORKSPACE}" && ${PYTHON} -m nerya.cli.app serve --workspace "${AUTOSTART_WORKSPACE}" --port ${RUNTIME_PORT} --no-dashboard`,
+            port: RUNTIME_PORT,
+            timeout: 120_000,
+            reuseExistingServer: !process.env.CI,
+          },
+          {
+            command: "npm run dev:e2e",
+            port: PORT,
+            timeout: 120_000,
+            reuseExistingServer: !process.env.CI,
+          },
+        ],
   }),
 });

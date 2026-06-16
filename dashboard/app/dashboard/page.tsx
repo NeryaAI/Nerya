@@ -280,7 +280,7 @@ export default function DashboardOverview() {
             Marker is the heading typography itself (no decorative rail). */}
         <section className="min-w-0">
           <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-            <h1 className="text-[24px] leading-[1.2] font-medium tracking-tight text-[color:var(--text-base)]">
+            <h1 className="text-[20px] leading-[1.25] font-medium tracking-tight text-[color:var(--text-base)]">
               {t(greetingKey)}, {operatorName}.
             </h1>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[color:var(--text-muted)]">
@@ -369,7 +369,238 @@ export default function DashboardOverview() {
         {/* Setup checklist — auto-hides when everything is ok. */}
         <SetupReadinessCard collapsed />
 
-        {/* Section 2 — Market (K-line). */}
+        {/* Section 2 — Strategies (cockpit focus: status + P&L + win-rate
+            for every registered strategy, at a glance). */}
+        <Card
+          title={t("activeStrategiesTitle")}
+          actions={
+            <Link
+              href="/strategies"
+              className="text-[12px] text-brand-300 hover:text-brand-200"
+            >
+              {t("viewAll")}
+            </Link>
+          }
+        >
+          {strategies.length === 0 ? (
+            <div className="text-[13px] text-[color:var(--text-muted)] py-3">
+              {t("noStrategies")}
+            </div>
+          ) : (
+            <div className="embedded-table-scroll max-h-80">
+              <table className="table table-compact">
+                <thead>
+                  <tr>
+                    <th>{t("strategyCol")}</th>
+                    <th>{t("statusCol")}</th>
+                    <th>{t("marketCol")}</th>
+                    <th>{t("pnlCol")}</th>
+                    <th>{t("winRateCol")}</th>
+                    <th>{t("openPositions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {strategies.slice(0, 8).map((s) => {
+                    const pnl = Number(s.total_pnl_usd || 0);
+                    const markets = (s.markets || []).filter(Boolean);
+                    return (
+                      <tr key={s.id}>
+                        <td className="min-w-0">
+                          <Link
+                            href={`/strategies/${encodeURIComponent(s.id)}`}
+                            className="block max-w-[220px] truncate text-[12.5px] text-[color:var(--text-base)] hover:text-brand-200"
+                            title={s.title || s.id}
+                          >
+                            {s.title || s.id}
+                          </Link>
+                        </td>
+                        <td>
+                          <Pill tone={strategyPillTone(s.status)}>{s.status || "–"}</Pill>
+                        </td>
+                        <td className="font-mono text-[12px] text-ink-300">
+                          {markets.length
+                            ? markets.slice(0, 2).join(", ") + (markets.length > 2 ? ` +${markets.length - 2}` : "")
+                            : "–"}
+                        </td>
+                        <td className={pnl >= 0 ? "font-mono text-emerald-500" : "font-mono text-rose-500"}>
+                          {fmtSigned(pnl)}
+                        </td>
+                        <td className="font-mono text-ink-200">
+                          {Number.isFinite(s.win_rate_pct) ? `${Math.round(s.win_rate_pct)}%` : "–"}
+                        </td>
+                        <td className="font-mono text-ink-200">{s.open_positions_count ?? 0}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
+        {/* Section 3 — Portfolio (focused account + equity curve + positions + trades). */}
+        <Card
+          title={t("sectionPortfolio")}
+          actions={
+            <Link
+              href="/portfolio"
+              className="text-[12px] text-brand-300 hover:text-brand-200"
+            >
+              {t("viewAll")}
+            </Link>
+          }
+        >
+          <div className="space-y-5">
+            {focusedAccount ? (
+              <FocusedAccountStrip
+                account={focusedAccount}
+                nav={focusedNav}
+                free={focusedFree}
+                reserved={focusedReserved}
+                currency={focusedCurrency}
+              />
+            ) : (
+              <NoFocusedAccountStrip hasAccounts={accounts.length > 0} />
+            )}
+
+            {/* Equity curve */}
+            <Section
+              title={t("equityCurve")}
+              description={t("equityPoints", { count: equity.length })}
+              divider={false}
+            >
+              <div className="h-[120px] relative">
+                <div className="absolute inset-0">
+                  <Sparkline
+                    values={equitySeries}
+                    width={800}
+                    height={120}
+                    tone="brand"
+                    fill
+                  />
+                </div>
+                <div className="absolute top-1 right-1 text-right">
+                  <div className="stat-label">{t("equity")}</div>
+                  <div className="text-brand-300 font-mono text-[14px]">
+                    {fmtMoney(totalEquity)}
+                  </div>
+                </div>
+              </div>
+            </Section>
+
+            {/* Positions */}
+            <Section
+              title={t("positionsTitle")}
+              actions={
+                <Link
+                  href="/portfolio"
+                  className="text-[12px] text-brand-300 hover:text-brand-200"
+                >
+                  {t("viewAll")}
+                </Link>
+              }
+            >
+              {openPositionList.length === 0 ? (
+                <div className="text-[13px] text-[color:var(--text-muted)] py-3">
+                  {t("noOpenPositions")}
+                </div>
+              ) : (
+                <div className="embedded-table-scroll max-h-60">
+                  <table className="table table-compact">
+                    <thead>
+                      <tr>
+                        <th>{t("marketCol")}</th>
+                        <th>{t("sideCol")}</th>
+                        <th>{t("sizeCol")}</th>
+                        <th>{t("entryCol")}</th>
+                        <th>{t("pnlCol")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {openPositionList.slice(0, 5).map((row) => {
+                        const p = row.pos;
+                        const size = Number((p.size as number) || 0);
+                        const isLong = size >= 0;
+                        const openPnl = Number((p.unrealized_pnl_usd as number) || 0);
+                        const entry = Number((p.avg_entry_price as number) || 0);
+                        return (
+                          <tr key={`${row.account_id}:${row.market}`}>
+                            <td className="font-mono text-[12px]">{row.market}</td>
+                            <td>
+                              <Pill tone={isLong ? "ok" : "danger"}>
+                                {isLong ? t("long") : t("short")}
+                              </Pill>
+                            </td>
+                            <td className="text-ink-200 font-mono">{size.toFixed(4)}</td>
+                            <td className="text-ink-200 font-mono">{entry ? entry.toFixed(2) : "–"}</td>
+                            <td className={openPnl >= 0 ? "text-emerald-500 font-mono" : "text-rose-500 font-mono"}>
+                              {fmtSigned(openPnl)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Section>
+
+            {/* Recent trades */}
+            <Section
+              title={t("tradesTitle")}
+              actions={
+                <Link
+                  href="/orders"
+                  className="text-[12px] text-brand-300 hover:text-brand-200"
+                >
+                  {t("viewAll")}
+                </Link>
+              }
+            >
+              {recentTrades.length === 0 ? (
+                <div className="text-[13px] text-[color:var(--text-muted)] py-3">
+                  {t("noFills")}
+                </div>
+              ) : (
+                <div className="embedded-table-scroll max-h-60">
+                  <table className="table table-compact">
+                    <thead>
+                      <tr>
+                        <th>{t("timeCol")}</th>
+                        <th>{t("marketCol")}</th>
+                        <th>{t("sideCol")}</th>
+                        <th>{t("priceCol")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {recentTrades.slice(0, 5).map((tr, i) => {
+                        const side = tr.side?.toLowerCase();
+                        const isBuy = side === "buy";
+                        return (
+                          <tr key={tr.order_id || i}>
+                            <td className="font-mono text-[12px]">{formatTime(tr.ts)}</td>
+                            <td className="font-mono text-[12px]">{tr.market || "–"}</td>
+                            <td>
+                              <Pill tone={isBuy ? "ok" : "danger"}>
+                                {isBuy ? t("buy") : t("sell")}
+                              </Pill>
+                            </td>
+                            <td className="text-ink-200 font-mono">
+                              {tr.price ? Number(tr.price).toFixed(4) : "–"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Section>
+          </div>
+        </Card>
+
+        {/* Section 3.5 — Market (K-line), demoted below the strategy +
+            position cockpit since the overview now leads with those. */}
         <Card
           title={t("sectionMarket")}
           description={t("liveCandles", {
@@ -406,7 +637,7 @@ export default function DashboardOverview() {
                 value={settings.kline.symbol}
                 onChange={(e) => patchSettings({ kline: { ...settings.kline, symbol: e.target.value.toUpperCase() } })}
                 className="bg-ink-900 border border-[color:var(--line)] rounded-md px-2 py-1 text-[12px] text-ink-100 focus:outline-none focus:border-brand-500/60 w-28 font-mono"
-                placeholder="BTCUSDT"
+                placeholder={t("symbolPlaceholder")}
               />
               <div className="flex gap-1">
                 {INTERVAL_OPTIONS.map((opt) => (
@@ -444,173 +675,12 @@ export default function DashboardOverview() {
           <CandleChart
             candles={candles}
             width={960}
-            height={260}
+            height={220}
             mode={settings.chartType}
             showVolume={settings.showVolume}
             loading={candleLoading}
             error={candleError || undefined}
           />
-        </Card>
-
-        {/* Section 3 — Portfolio (focused account + equity curve + positions + trades). */}
-        <Card
-          title={t("sectionPortfolio")}
-          actions={
-            <Link
-              href="/portfolio"
-              className="text-[12px] text-brand-300 hover:text-brand-200"
-            >
-              {t("viewAll")}
-            </Link>
-          }
-        >
-          <div className="space-y-6">
-            {focusedAccount ? (
-              <FocusedAccountStrip
-                account={focusedAccount}
-                nav={focusedNav}
-                free={focusedFree}
-                reserved={focusedReserved}
-                currency={focusedCurrency}
-              />
-            ) : (
-              <NoFocusedAccountStrip hasAccounts={accounts.length > 0} />
-            )}
-
-            {/* Equity curve */}
-            <Section
-              title={t("equityCurve")}
-              description={t("equityPoints", { count: equity.length })}
-              divider={false}
-            >
-              <div className="h-[160px] relative">
-                <div className="absolute inset-0">
-                  <Sparkline
-                    values={equitySeries}
-                    width={800}
-                    height={160}
-                    tone="brand"
-                    fill
-                  />
-                </div>
-                <div className="absolute top-1 right-1 text-right">
-                  <div className="stat-label">{t("equity")}</div>
-                  <div className="text-brand-300 font-mono text-[14px]">
-                    {fmtMoney(totalEquity)}
-                  </div>
-                </div>
-              </div>
-            </Section>
-
-            {/* Positions */}
-            <Section
-              title={t("positionsTitle")}
-              actions={
-                <Link
-                  href="/portfolio"
-                  className="text-[12px] text-brand-300 hover:text-brand-200"
-                >
-                  {t("viewAll")}
-                </Link>
-              }
-            >
-              {openPositionList.length === 0 ? (
-                <div className="text-[13px] text-[color:var(--text-muted)] py-3">
-                  {t("noOpenPositions")}
-                </div>
-              ) : (
-                <div className="embedded-table-scroll max-h-60">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>{t("marketCol")}</th>
-                        <th>{t("sideCol")}</th>
-                        <th>{t("sizeCol")}</th>
-                        <th>{t("entryCol")}</th>
-                        <th>{t("pnlCol")}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {openPositionList.slice(0, 5).map((row) => {
-                        const p = row.pos;
-                        const size = Number((p.size as number) || 0);
-                        const isLong = size >= 0;
-                        const openPnl = Number((p.unrealized_pnl_usd as number) || 0);
-                        const entry = Number((p.avg_entry_price as number) || 0);
-                        return (
-                          <tr key={`${row.account_id}:${row.market}`}>
-                            <td className="font-mono text-[12px]">{row.market}</td>
-                            <td>
-                              <Pill tone={isLong ? "ok" : "danger"}>
-                                {isLong ? "Long" : "Short"}
-                              </Pill>
-                            </td>
-                            <td className="text-ink-200 font-mono">{size.toFixed(4)}</td>
-                            <td className="text-ink-200 font-mono">{entry ? entry.toFixed(2) : "–"}</td>
-                            <td className={openPnl >= 0 ? "text-emerald-500 font-mono" : "text-rose-500 font-mono"}>
-                              {fmtSigned(openPnl)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </Section>
-
-            {/* Recent trades */}
-            <Section
-              title={t("tradesTitle")}
-              actions={
-                <Link
-                  href="/orders"
-                  className="text-[12px] text-brand-300 hover:text-brand-200"
-                >
-                  {t("viewAll")}
-                </Link>
-              }
-            >
-              {recentTrades.length === 0 ? (
-                <div className="text-[13px] text-[color:var(--text-muted)] py-3">
-                  {t("noFills")}
-                </div>
-              ) : (
-                <div className="embedded-table-scroll max-h-60">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th>{t("timeCol")}</th>
-                        <th>{t("marketCol")}</th>
-                        <th>{t("sideCol")}</th>
-                        <th>{t("priceCol")}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {recentTrades.slice(0, 5).map((tr, i) => {
-                        const side = tr.side?.toLowerCase();
-                        const isBuy = side === "buy";
-                        return (
-                          <tr key={tr.order_id || i}>
-                            <td className="font-mono text-[12px]">{formatTime(tr.ts)}</td>
-                            <td className="font-mono text-[12px]">{tr.market || "–"}</td>
-                            <td>
-                              <Pill tone={isBuy ? "ok" : "danger"}>
-                                {isBuy ? "Buy" : "Sell"}
-                              </Pill>
-                            </td>
-                            <td className="text-ink-200 font-mono">
-                              {tr.price ? Number(tr.price).toFixed(4) : "–"}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </Section>
-          </div>
         </Card>
 
         {/* Section 4 — Attention (only when there are signals). */}
@@ -760,6 +830,14 @@ function NoFocusedAccountStrip({ hasAccounts }: { hasAccounts: boolean }) {
       )}
     </div>
   );
+}
+
+function strategyPillTone(status: string): "ok" | "warn" | "brand" | "neutral" {
+  const s = (status || "").toLowerCase();
+  if (s === "live") return "ok";
+  if (s === "canary") return "warn";
+  if (s === "paper") return "brand";
+  return "neutral";
 }
 
 function fmtMoney(v: number | undefined): string {

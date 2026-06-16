@@ -1,7 +1,7 @@
 "use client";
 
 import type { NativeBlock } from "../../../lib/chat";
-import { CopyButton, Tag } from "./atoms";
+import { CopyButton, Tag, ToolRowCard } from "./atoms";
 import { recordOf } from "./helpers";
 
 function shellOutputs(block: NativeBlock): {
@@ -48,37 +48,37 @@ export function ShellCard({
   const { stdout, stderr, exit, pid, cwd: rcwd } = shellOutputs(block);
   const ranBackground =
     block.metadata && (block.metadata as Record<string, unknown>).background === true;
+  const title = description || "Ran command";
+  const subtitle = command.length > 120 ? `${command.slice(0, 120)}\u2026` : command;
 
   return (
-    <div className="rounded-2xl border border-brand-500/15 bg-brand-500/[0.04] px-4 py-3 space-y-2.5">
-      <div className="flex items-center justify-between gap-3 min-w-0">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="inline-flex items-center justify-center w-7 h-7 rounded-xl bg-ink-900 border border-brand-500/20 text-emerald-300">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="4 17 10 11 4 5" />
-              <line x1="12" y1="19" x2="20" y2="19" />
-            </svg>
-          </span>
-          <div className="min-w-0">
-            <div className="text-[11px] text-ink-500 font-medium">
-              Shell
-              {pending ? (
-                <span className="ml-2 inline-flex items-center gap-1 text-fluid-400 normal-case tracking-normal">
-                  <span className="typing-dot" />
-                  <span>running</span>
-                </span>
-              ) : null}
-            </div>
-            {description ? (
-              <div className="text-[12.5px] text-ink-100 truncate">{description}</div>
-            ) : (
-              <div className="text-[12.5px] text-ink-200 truncate font-mono">
-                {command.length > 120 ? `${command.slice(0, 120)}\u2026` : command}
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+    <ToolRowCard
+      icon={
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="4 17 10 11 4 5" />
+          <line x1="12" y1="19" x2="20" y2="19" />
+        </svg>
+      }
+      title={
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0">Ran command</span>
+          {pending ? (
+            <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
+              <span className="typing-dot" />
+              <span>running</span>
+            </span>
+          ) : null}
+        </span>
+      }
+      subtitle={
+        <span className="font-mono">
+          {title === "Ran command" ? subtitle : `${title} · ${subtitle}`}
+        </span>
+      }
+      tone={ok ? "neutral" : "err"}
+      defaultOpen={pending}
+      meta={
+        <>
           {ranBackground ? <Tag tone="brand">background</Tag> : null}
           {isResult ? (
             ok ? (
@@ -95,10 +95,11 @@ export function ShellCard({
           ) : null}
           {typeof block.elapsed_ms === "number" ? <Tag>{block.elapsed_ms}ms</Tag> : null}
           {pid !== null ? <Tag>{`pid ${pid}`}</Tag> : null}
-        </div>
-      </div>
-      <div className="rounded-xl border border-brand-500/10 bg-ink-950 overflow-hidden">
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-brand-500/10">
+        </>
+      }
+    >
+      <div className="rounded-lg border border-brand-500/10 bg-ink-950 overflow-hidden">
+        <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-brand-500/10">
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-rose-400/80" />
             <span className="w-2 h-2 rounded-full bg-amber-300/80" />
@@ -109,7 +110,7 @@ export function ShellCard({
           </div>
           <CopyButton text={command} />
         </div>
-        <div className="px-3 py-2.5 font-mono text-[11.5px] leading-relaxed overflow-auto max-h-72">
+        <div className="px-2.5 py-2 font-mono text-[11px] leading-relaxed overflow-auto max-h-72">
           <div className="text-emerald-300">
             <span className="text-ink-500 select-none">$ </span>
             <span className="text-ink-100">{command}</span>
@@ -128,6 +129,6 @@ export function ShellCard({
       {isResult && block.error ? (
         <div className="text-[12px] text-rose-300 break-words">{String(block.error)}</div>
       ) : null}
-    </div>
+    </ToolRowCard>
   );
 }

@@ -12,6 +12,7 @@
     "dev:e2e": "node -e \"const fs=require('fs');fs.rmSync('.next',{recursive:true,force:true});const cp=require('child_process');const port=process.env.PORT||'3001';const permission=process.env.NERYA_PERMISSION_MODE||'yolo';const c=cp.spawn('next',['dev','-p',port],{stdio:'inherit',shell:true,env:{...process.env,NERYA_E2E:'1',NERYA_PERMISSION_MODE:permission,NEXT_PUBLIC_NERYA_PERMISSION_MODE:permission}});c.on('exit',p=>process.exit(p));\"",
     "test:e2e": "playwright test",
     "test:e2e:smoke": "playwright test smoke",
+    "test:e2e:self-evolution-ux": "node -e \"const cp=require('child_process');const env={...process.env,NERYA_E2E_MOCKED_UI:'1',PLAYWRIGHT_AUTOSTART:'1'};const bin=process.platform==='win32'?'playwright.cmd':'playwright';const c=cp.spawn(bin,['test','self-evolution-ux'],{stdio:'inherit',env});c.on('exit',p=>process.exit(p));\"",
     "test:e2e:csv": "playwright test csv-runner",
     "test:e2e:reset": "python ../tools/reset_workspace.py --workspace .nerya-test-workspace",
     "test:e2e:reset:full": "python ../tools/reset_workspace.py --workspace .nerya-test-workspace --full",

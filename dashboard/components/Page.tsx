@@ -21,7 +21,7 @@ export function PageHeader({ title, description, actions, eyebrow }: {
             {eyebrow}
           </div>
         ) : null}
-        <h2 className="text-[22px] leading-[1.2] font-medium text-[color:var(--text-base)]">
+        <h2 className="text-[19px] leading-[1.25] font-medium text-[color:var(--text-base)]">
           {title}
         </h2>
         {description ? (
@@ -194,6 +194,7 @@ export function Card({
     <section
       className={[
         "card card-hover min-w-0 relative",
+        padded ? "card-padded" : "card-unpadded",
         featured ? "card-featured" : "",
       ].join(" ")}
     >
@@ -220,7 +221,7 @@ export function Card({
           ) : null}
         </div>
       )}
-      <div className={padded ? "px-5 py-4" : ""}>{children}</div>
+      <div className={padded ? "px-4 py-3.5" : ""}>{children}</div>
     </section>
   );
 }

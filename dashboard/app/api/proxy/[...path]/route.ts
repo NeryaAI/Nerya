@@ -124,7 +124,7 @@ type ProxyError = Error & { code?: string; cause?: unknown; attempts?: number };
 type ProxyResponse = {
   status: number;
   headers: http.IncomingHttpHeaders;
-  body: string;
+  body: Buffer;
 };
 
 function errorCode(err: unknown): string {
@@ -173,16 +173,15 @@ function nodeForward(
         timeout: init.timeoutMs,
       },
       (res) => {
-        res.setEncoding("utf8");
-        const chunks: string[] = [];
-        res.on("data", (chunk: string) => {
-          chunks.push(chunk);
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer | string) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         });
         res.on("end", () => {
           resolve({
             status: res.statusCode || 502,
             headers: res.headers,
-            body: chunks.join(""),
+            body: Buffer.concat(chunks),
           });
         });
       },

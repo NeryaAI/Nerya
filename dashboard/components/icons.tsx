@@ -481,6 +481,18 @@ export function FileIcon(props: IconProps) {
   );
 }
 
+export function DiffIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M6 3v6" />
+      <path d="M3 6h6" />
+      <path d="M6 13v3a3 3 0 0 0 3 3h3" />
+      <path d="M18 11V8a3 3 0 0 0-3-3h-3" />
+      <path d="M15 18h6" />
+    </svg>
+  );
+}
+
 export function ImageIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
@@ -529,6 +541,53 @@ export function LanguagesIcon(props: IconProps) {
       <path d="M5 9c0 3 2.5 6 6 7" />
       <path d="M13 21l4-9 4 9" />
       <path d="M14.5 18h5" />
+    </svg>
+  );
+}
+
+export function ComposeIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" />
+      <path d="M18.4 2.6a2 2 0 0 1 2.8 2.8L12 14.6 8 16l1.4-4z" />
+    </svg>
+  );
+}
+
+export function PuzzleIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M9 4.5a2 2 0 1 1 4 0V6h2a1.5 1.5 0 0 1 1.5 1.5v2H18a2 2 0 1 1 0 4h-1.5V16A1.5 1.5 0 0 1 15 17.5h-2.2V19a2 2 0 1 1-4 0v-1.5H6.5A1.5 1.5 0 0 1 5 16v-2.3H4a2 2 0 1 1 0-4h1V7.5A1.5 1.5 0 0 1 6.5 6H9z" />
+    </svg>
+  );
+}
+
+export function CommandIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="9" y="9" width="6" height="6" rx="1" />
+      <path d="M9 9V7a2 2 0 1 0-2 2h2z" />
+      <path d="M15 9V7a2 2 0 1 1 2 2h-2z" />
+      <path d="M9 15v2a2 2 0 1 1-2-2h2z" />
+      <path d="M15 15v2a2 2 0 1 0 2-2h-2z" />
+    </svg>
+  );
+}
+
+export function PanelLeftIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M9 4v16" />
+    </svg>
+  );
+}
+
+export function ClockIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
     </svg>
   );
 }

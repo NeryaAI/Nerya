@@ -134,7 +134,7 @@ export function Markdown({
   className?: string;
 }) {
   return (
-    <div className={`nerya-markdown ${className}`}>
+    <div className={`nerya-markdown min-w-0 break-words ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}

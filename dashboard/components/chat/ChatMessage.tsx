@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import type {
   AssistantMessage,
@@ -10,8 +10,19 @@ import type {
 } from "../../lib/chat";
 import { liveEventsToBlocks, topLevelDecisionText } from "../../lib/chat";
 import type { ApprovalCard } from "../../lib/clientApi";
-import { NativeBlocksTrack, TurnBlocks } from "./TurnBlocks";
-import { Markdown } from "./Markdown";
+import {
+  AgentSegmentBlock,
+  type AgentSegmentInfo,
+  LiveAgentTranscriptBlock,
+  type MemberStep,
+  NativeBlocksTrack,
+  StrategyProposalsHoist,
+  StreamedMarkdown,
+  TurnBlocks,
+  activeProposalsFromTurn,
+  collectAgentSegments,
+  collectLiveAgentSegments,
+} from "./TurnBlocks";
 import { formatTime as formatTimeWithTz } from "../../lib/format";
 import {
   CheckIcon,
@@ -83,6 +94,38 @@ function mergeActivityEvents(
     out.push(ev);
   }
   return out;
+}
+
+function useReplyStreamActive(msg: AssistantMessage, text: string): boolean {
+  const [activeUntil, setActiveUntil] = useState(0);
+  const wasLoadingRef = useRef(Boolean(msg.loading));
+  const justSettled =
+    wasLoadingRef.current && !msg.loading && !msg.error && Boolean(text.trim());
+
+  useEffect(() => {
+    const wasLoading = wasLoadingRef.current;
+    const isLoading = Boolean(msg.loading);
+
+    if (isLoading || msg.error) {
+      wasLoadingRef.current = isLoading;
+      setActiveUntil(0);
+      return;
+    }
+    if (!wasLoading || !text.trim()) {
+      wasLoadingRef.current = isLoading;
+      return;
+    }
+
+    const chars = Array.from(text).length;
+    const timeoutMs = Math.min(12_000, Math.max(1_600, chars * 18));
+    const until = Date.now() + timeoutMs;
+    wasLoadingRef.current = isLoading;
+    setActiveUntil(until);
+    const timer = window.setTimeout(() => setActiveUntil(0), timeoutMs);
+    return () => window.clearTimeout(timer);
+  }, [msg.error, msg.loading, msg.id, text]);
+
+  return justSettled || activeUntil > Date.now();
 }
 
 function classifyError(raw: string): {
@@ -217,6 +260,68 @@ function StreamingDots() {
       <span className="typing-dot" />
       <span className="typing-dot" />
     </span>
+  );
+}
+
+// Shared "Nerya is speaking" row: avatar + name + optional streaming /
+// elapsed chrome, wrapping a single ``bubble-ai`` body. Used by the
+// multi-bubble team layouts (live + committed) so every Nerya turn reads
+// like a distinct speaker in the thread.
+function NeryaSpeaker({
+  streaming = false,
+  elapsedMs,
+  children,
+  footer,
+}: {
+  streaming?: boolean;
+  elapsedMs?: number | null;
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
+  return (
+    <div className="flex justify-start">
+      <div className="max-w-[92%] min-w-[200px] w-full">
+        <div className="flex items-center gap-2 mb-1.5">
+          <div className="relative h-8 w-8 shrink-0">
+            {streaming ? (
+              <span
+                className="absolute -inset-0.5 rounded-full ring-ai opacity-80 animate-spin"
+                style={{ animationDuration: "8s" }}
+              />
+            ) : null}
+            <div className="relative h-8 w-8 rounded-full overflow-hidden ring-1 ring-brand-500/40 shadow-glow bg-black/20 flex items-center justify-center">
+              <NeryaAvatar size={32} />
+            </div>
+            <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-accent-500 ring-2 ring-[var(--bg-deep)]" />
+          </div>
+          <div className="text-[12px] text-ink-200 font-semibold tracking-tight">
+            Nerya
+          </div>
+          {streaming ? (
+            <div className="flex items-center gap-1.5 text-[10px] text-fluid-400">
+              <StreamingDots />
+              <span className="text-ink-400">thinking…</span>
+            </div>
+          ) : null}
+          {elapsedMs ? (
+            <div className="text-[10px] text-ink-500 font-mono">{elapsedMs}ms</div>
+          ) : null}
+        </div>
+        <div className="bubble-ai space-y-2">{children}</div>
+        {footer}
+      </div>
+    </div>
+  );
+}
+
+function AnswerPanel({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-ink-700/70 bg-ink-800/55 px-3 py-2.5">
+      <div className="mb-1.5 text-[12px] font-semibold leading-none text-ink-400">
+        Answer
+      </div>
+      <div className="leading-relaxed text-ink-100">{children}</div>
+    </div>
   );
 }
 
@@ -531,6 +636,168 @@ export function AssistantBubble({
     (ev) => ev.kind.startsWith("subagent.") || ev.kind.startsWith("team."),
   );
   const replayEvents = liveEvents.filter((ev) => ev.kind === "tool.complete");
+  // Strategy proposals are hoisted to the BOTTOM of the bubble (under the
+  // reply/verdict) rather than the top of the trace, so the operator reads what
+  // the agent did and its recommendation before approving/adding. The in-trace
+  // duplicates stay suppressed via ``suppressTopProposalHoist``.
+  const bottomProposals =
+    !msg.loading && !msg.error && msg.turn
+      ? activeProposalsFromTurn(msg.turn)
+      : [];
+  // Multi-agent turns (team_run / subagent_run) are broken out of the
+  // single Nerya bubble: each sub-agent becomes its own avatar + bubble
+  // ("speaker") and their generic tool cards are suppressed from the
+  // trace. Only applies to committed, non-error turns.
+  const agentSegments =
+    !msg.loading && !msg.error && msg.turn
+      ? collectAgentSegments(msg.turn)
+      : { segments: [], suppressedCallIds: new Set<string>() };
+  // While the turn is still streaming, hoist the live team/subagent snapshot
+  // into a single group-chat transcript: A says a step, then B says a step,
+  // in event order. The settled turn can still render a tidy final summary.
+  const liveAgentSegments =
+    msg.loading && !msg.error
+      ? collectLiveAgentSegments(liveBlocks).segments
+      : [];
+  // Committed multi-agent turns lose the per-member step stream: the
+  // ``team_run`` result is compacted for the model down to
+  // output/tokens/usd. The rehydrated ``activity_events`` (subagent.step /
+  // team.member.*) still carry the full trace, so rebuild the per-member
+  // timeline with the same reducer the live view uses and merge it back so a
+  // settled team renders the same step-by-step progress instead of one card.
+  const committedSegments: AgentSegmentInfo[] = (() => {
+    const base = agentSegments.segments;
+    if (msg.loading || !base.length || !liveBlocks.length) return base;
+    const stepsByName = new Map<string, MemberStep[]>();
+    for (const seg of collectLiveAgentSegments(liveBlocks).segments) {
+      for (const m of seg.members) {
+        if (m.steps?.length && !stepsByName.has(m.name)) {
+          stepsByName.set(m.name, m.steps);
+        }
+      }
+    }
+    if (!stepsByName.size) return base;
+    return base.map((seg) => ({
+      ...seg,
+      members: seg.members.map((m) =>
+        m.steps?.length
+          ? m
+          : { ...m, steps: stepsByName.get(m.name) ?? m.steps },
+      ),
+    }));
+  })();
+  const streamFinalReply = useReplyStreamActive(msg, reasoning);
+
+  // --- LIVE multi-agent layout -------------------------------------------
+  // Nerya streams in its own bubble (team traces hoisted out), followed by one
+  // chronological group-chat transcript for the sub-agents.
+  if (msg.loading && !msg.error && liveAgentSegments.length > 0) {
+    return (
+      <div
+        className="space-y-5"
+        data-turn-role="assistant"
+        data-turn-id={msg.id}
+        data-turn-loading="true"
+      >
+        <NeryaSpeaker streaming>
+          {liveBlocks.length ? (
+            <div data-turn-section="blocks">
+              <NativeBlocksTrack
+                envelopes={liveBlocks}
+                live
+                hoistTeamTraces
+                label="agent transcript"
+                pendingApprovals={pendingApprovals}
+                onApprovalAction={onApprovalAction}
+                resolvingApprovalIds={resolvingApprovalIds}
+              />
+            </div>
+          ) : (
+            <div className="text-ink-400 text-xs italic" data-turn-section="pending">
+              {/* team dispatched but Nerya has no other inline activity yet */}
+              <PendingTrail />
+            </div>
+          )}
+        </NeryaSpeaker>
+
+        <LiveAgentTranscriptBlock segments={liveAgentSegments} />
+      </div>
+    );
+  }
+
+  if (agentSegments.segments.length > 0 && msg.turn) {
+    const turn = msg.turn;
+    return (
+      <div
+        className="space-y-5"
+        data-turn-role="assistant"
+        data-turn-id={msg.id}
+        data-turn-loading="false"
+      >
+        {/* Nerya — how it planned and dispatched the team */}
+        <NeryaSpeaker elapsedMs={msg.elapsed_ms}>
+          <TurnBlocks
+            turn={turn}
+            pendingApprovals={pendingApprovals}
+            onApprovalAction={onApprovalAction}
+            approvalEvents={approvalEvents}
+            activityEvents={activityEvents}
+            replayEvents={replayEvents}
+            resolvingApprovalIds={resolvingApprovalIds}
+            suppressTopProposalHoist
+            suppressAgentResultCallIds={agentSegments.suppressedCallIds}
+            streamText={streamFinalReply}
+          />
+        </NeryaSpeaker>
+
+        {/* One distinct avatar + bubble per sub-agent */}
+        {committedSegments.map((segment, i) => (
+          <AgentSegmentBlock
+            key={segment.callId || segment.runId || `seg-${i}`}
+            segment={segment}
+          />
+        ))}
+
+        {/* Nerya — final synthesised reply */}
+        {reasoning ? (
+          <NeryaSpeaker
+            footer={
+              <div className="text-[10px] text-ink-400 mt-1">
+                {formatTime(msg.ts)}
+              </div>
+            }
+          >
+            <div data-turn-section="reply">
+              <AnswerPanel>
+                {editing ? (
+                  <InlineEditor
+                    value={editValue}
+                    onChange={onEditChange ?? (() => {})}
+                    onSave={onSaveEdit ?? (() => {})}
+                    onCancel={onCancelEdit ?? (() => {})}
+                  />
+                ) : (
+                  <>
+                    <StreamedMarkdown text={reasoning} active={streamFinalReply} />
+                    <MessageActions
+                      text={reasoning}
+                      onEdit={onEdit}
+                      onDelete={onDelete}
+                    />
+                  </>
+                )}
+              </AnswerPanel>
+            </div>
+            {bottomProposals.length ? (
+              <div data-turn-section="proposal-actions" className="pt-1">
+                <StrategyProposalsHoist proposals={bottomProposals} />
+              </div>
+            ) : null}
+          </NeryaSpeaker>
+        ) : null}
+      </div>
+    );
+  }
   return (
     <div
       className="flex justify-start"
@@ -562,7 +829,7 @@ export function AssistantBubble({
             </div>
           ) : null}
         </div>
-        <div className="bubble-ai space-y-3">
+        <div className="bubble-ai space-y-2">
           {/* When a turn fails before the backend commits ``msg.turn``,
             * the already-streamed live events may be the only surviving
             * record of what happened. Render those partial blocks before
@@ -619,6 +886,8 @@ export function AssistantBubble({
                 activityEvents={activityEvents}
                 replayEvents={replayEvents}
                 resolvingApprovalIds={resolvingApprovalIds}
+                suppressTopProposalHoist
+                streamText={streamFinalReply}
               />
             </div>
           ) : null}
@@ -634,6 +903,7 @@ export function AssistantBubble({
                 pendingApprovals={pendingApprovals}
                 onApprovalAction={onApprovalAction}
                 resolvingApprovalIds={resolvingApprovalIds}
+                suppressTopProposalHoist
               />
             </div>
           ) : null}
@@ -646,36 +916,46 @@ export function AssistantBubble({
             * ``whitespace-pre-wrap`` made tables/lists/code blocks
             * unreadable). */}
           {!msg.error && reasoning ? (
-            <div
-              data-turn-section="reply"
-              className="pt-3 border-t border-ink-700/50 leading-relaxed text-ink-100"
-            >
-              {editing ? (
-                <InlineEditor
-                  value={editValue}
-                  onChange={onEditChange ?? (() => {})}
-                  onSave={onSaveEdit ?? (() => {})}
-                  onCancel={onCancelEdit ?? (() => {})}
-                />
-              ) : (
-                <>
-                  <Markdown>{reasoning}</Markdown>
-                  <MessageActions
-                    text={reasoning}
-                    onEdit={onEdit}
-                    onDelete={onDelete}
+            <div data-turn-section="reply">
+              <AnswerPanel>
+                {editing ? (
+                  <InlineEditor
+                    value={editValue}
+                    onChange={onEditChange ?? (() => {})}
+                    onSave={onSaveEdit ?? (() => {})}
+                    onCancel={onCancelEdit ?? (() => {})}
                   />
-                </>
-              )}
+                ) : (
+                  <>
+                    <StreamedMarkdown text={reasoning} active={streamFinalReply} />
+                    <MessageActions
+                      text={reasoning}
+                      onEdit={onEdit}
+                      onDelete={onDelete}
+                    />
+                  </>
+                )}
+              </AnswerPanel>
             </div>
           ) : null}
 
           {!msg.error && !reasoning && !msg.loading ? (
-            <div
-              data-turn-section="reply"
-              className="text-ink-400 italic text-xs"
-            >
-              (no reply returned)
+            <div data-turn-section="reply">
+              <AnswerPanel>
+                <div className="text-ink-400 italic text-xs">
+                  (no reply returned)
+                </div>
+              </AnswerPanel>
+            </div>
+          ) : null}
+
+          {/* Proposal approve/add card lands at the BOTTOM of the bubble —
+            * under the agent's plain-language verdict — so the operator reads
+            * what happened and the recommendation before acting. The in-trace
+            * duplicates above are suppressed via ``suppressTopProposalHoist``. */}
+          {bottomProposals.length ? (
+            <div data-turn-section="proposal-actions" className="pt-1">
+              <StrategyProposalsHoist proposals={bottomProposals} />
             </div>
           ) : null}
         </div>

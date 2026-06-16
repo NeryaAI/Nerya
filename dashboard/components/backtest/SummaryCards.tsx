@@ -6,24 +6,24 @@ export function SummaryCards({
   cards: Array<Record<string, unknown>>;
 }) {
   return (
-    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,9.5rem),1fr))] gap-3">
+    <div className="flex flex-wrap gap-2">
       {cards.map((card) => {
         const label = String(card.label ?? "metric");
         const value = formatValue(card.value, label);
         return (
           <div
             key={label}
-            className="min-w-0 rounded-lg border border-[color:var(--line)] bg-[color:var(--card)] px-4 py-3.5 shadow-sm"
+            className="w-full min-w-0 rounded-md border border-[color:var(--line)] bg-[color:var(--card)] px-3 py-2 sm:w-[10.5rem]"
           >
             <div
               title={label}
-              className="min-h-9 break-words text-[13px] font-semibold leading-5 text-[color:var(--text-muted)]"
+              className="break-words text-[11px] font-medium leading-4 text-[color:var(--text-muted)]"
             >
               {label}
             </div>
             <div
               title={rawTitle(card.value)}
-              className={`mt-2 min-w-0 break-words font-semibold leading-tight ${valueSizeClass(
+              className={`mt-1 min-w-0 break-words font-mono font-semibold leading-tight tabular-nums ${valueSizeClass(
                 value,
               )} ${toneClass(String(card.tone || "neutral"))}`}
             >
@@ -70,14 +70,13 @@ function compactFormatter(value: number): Intl.NumberFormat {
 }
 
 function valueSizeClass(value: string): string {
-  if (value.length > 14) return "text-lg";
-  if (value.length > 9) return "text-xl";
-  if (value.length > 6) return "text-2xl";
-  return "text-3xl";
+  if (value.length > 14) return "text-[13px]";
+  if (value.length > 9) return "text-[15px]";
+  if (value.length > 6) return "text-[17px]";
+  return "text-[19px]";
 }
 
 function rawTitle(value: unknown): string {
   if (typeof value === "number") return Number.isFinite(value) ? String(value) : "inf";
   return String(value ?? "null");
 }
-

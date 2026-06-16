@@ -143,9 +143,9 @@ function Metric({
   detail?: string;
 }) {
   return (
-    <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
+    <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-2.5">
       <div className="text-[11px] text-ink-500 font-medium">{label}</div>
-      <div className="mt-1 text-xl font-semibold text-white">{value}</div>
+      <div className="mt-1 text-[15px] font-semibold text-white">{value}</div>
       {detail ? <div className="mt-0.5 text-[11px] text-ink-500">{detail}</div> : null}
     </div>
   );
@@ -577,7 +577,7 @@ export default function SkillsPage() {
 
               <section>
                 <div className="mb-2 flex items-center justify-between gap-3">
-                  <div className="text-[12px] font-medium text-ink-200">SKILL.md</div>
+                  <div className="text-[12px] font-medium text-ink-200">{t("skillMdTitle")}</div>
                   {detail?.editable ? (
                     <button
                       type="button"

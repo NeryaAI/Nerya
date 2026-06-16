@@ -1,7 +1,8 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import type { NativeBlock } from "../../../lib/chat";
-import { Tag } from "./atoms";
+import { Tag, ToolRowCard } from "./atoms";
 import { recordOf } from "./helpers";
 
 export type TodoStatus =
@@ -48,7 +49,15 @@ export function todosFromBlock(block: NativeBlock): TodoItemShape[] {
   return [];
 }
 
-function todoStatusMeta(status: TodoStatus): {
+function todoStatusMeta(
+  status: TodoStatus,
+  labels: {
+    done: string;
+    inProgress: string;
+    cancelled: string;
+    pending: string;
+  },
+): {
   label: string;
   tone: "neutral" | "ok" | "warn" | "err" | "brand";
   glyph: string;
@@ -58,7 +67,7 @@ function todoStatusMeta(status: TodoStatus): {
   switch (status) {
     case "completed":
       return {
-        label: "done",
+        label: labels.done,
         tone: "ok",
         glyph: "\u2713",
         ring: "border-emerald-400/50",
@@ -66,7 +75,7 @@ function todoStatusMeta(status: TodoStatus): {
       };
     case "in_progress":
       return {
-        label: "in progress",
+        label: labels.inProgress,
         tone: "brand",
         glyph: "\u25B6",
         ring: "border-brand-400/60",
@@ -74,7 +83,7 @@ function todoStatusMeta(status: TodoStatus): {
       };
     case "cancelled":
       return {
-        label: "cancelled",
+        label: labels.cancelled,
         tone: "warn",
         glyph: "/",
         ring: "border-ink-500/60",
@@ -83,7 +92,7 @@ function todoStatusMeta(status: TodoStatus): {
     case "pending":
     default:
       return {
-        label: "pending",
+        label: labels.pending,
         tone: "neutral",
         glyph: "",
         ring: "border-brand-500/25",
@@ -99,39 +108,56 @@ export function TodoChecklistCard({
   todos: TodoItemShape[];
   pending?: boolean;
 }) {
+  const t = useTranslations("todoChecklistCard");
   const total = todos.length;
   const completed = todos.filter((t) => t.status === "completed").length;
   const inProgress = todos.find((t) => t.status === "in_progress");
   const progress = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const statusLabels = {
+    done: t("statusDone"),
+    inProgress: t("statusInProgress"),
+    cancelled: t("statusCancelled"),
+    pending: t("statusPending"),
+  };
   return (
-    <div className="rounded-md border border-brand-500/15 bg-brand-500/[0.05] px-4 py-3.5 space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="inline-flex items-center justify-center w-6 h-6 rounded-lg bg-brand-500/15 border border-brand-500/30 text-brand-200">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 11l3 3L22 4" />
-              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-            </svg>
-          </span>
-          <span className="text-[13px] font-semibold text-ink-100 tracking-tight">
-            Todo list
-          </span>
+    <ToolRowCard
+      icon={
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M9 11l3 3L22 4" />
+          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+        </svg>
+      }
+      title={
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span>{t("title")}</span>
           {pending ? (
             <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
               <span className="typing-dot" />
-              <span>updating</span>
+              <span>{t("updating")}</span>
             </span>
           ) : null}
-        </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          <Tag tone="brand">{`${completed}/${total} done`}</Tag>
+        </span>
+      }
+      subtitle={
+        inProgress?.activeForm || inProgress?.active_form
+          ? String(inProgress.activeForm || inProgress.active_form)
+          : total > 0
+          ? `${completed}/${total}`
+          : t("empty")
+      }
+      tone="brand"
+      defaultOpen={pending}
+      meta={
+        <>
+          <Tag tone="brand">{t("doneCount", { completed, total })}</Tag>
           {inProgress?.activeForm || inProgress?.active_form ? (
             <Tag tone="brand">
               {String(inProgress.activeForm || inProgress.active_form).slice(0, 32)}
             </Tag>
           ) : null}
-        </div>
-      </div>
+        </>
+      }
+    >
       {total > 0 ? (
         <div className="h-1.5 rounded-full bg-ink-900/70 border border-brand-500/10 overflow-hidden">
           <div
@@ -142,10 +168,10 @@ export function TodoChecklistCard({
       ) : null}
       <ul className="space-y-1.5">
         {todos.length === 0 ? (
-          <li className="text-[12px] text-ink-400 italic">(no todos yet)</li>
+          <li className="text-[12px] text-ink-400 italic">{t("empty")}</li>
         ) : null}
         {todos.map((todo, i) => {
-          const meta = todoStatusMeta(String(todo.status || "pending"));
+          const meta = todoStatusMeta(String(todo.status || "pending"), statusLabels);
           return (
             <li
               key={String(todo.id || i)}
@@ -186,6 +212,6 @@ export function TodoChecklistCard({
           );
         })}
       </ul>
-    </div>
+    </ToolRowCard>
   );
 }

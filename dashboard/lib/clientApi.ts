@@ -66,8 +66,10 @@ import type {
 } from "./operatorTypes";
 import type {
   EvolutionAssetsEnvelope,
+  EvolutionEvidenceResolveEnvelope,
   EvolutionEventsEnvelope,
   EvolutionPeriodicReflectionSchedule,
+  EvolutionProposalDetail,
   EvolutionSignalsEnvelope,
   EvolutionTimelineEnvelope,
 } from "./evolutionTypes";
@@ -2692,10 +2694,47 @@ export const clientApi = {
     post<Record<string, unknown>>("/messages/send", body),
   proposalsList: () =>
     post<{ proposals: EvolutionProposal[] }>("/evolution/proposals", {}),
+  proposalDetail: (proposal_id: string) =>
+    post<EvolutionProposalDetail>(
+      `/evolution/proposals/${encodeURIComponent(proposal_id)}`,
+      { proposal_id },
+    ),
+  proposalApprove: (proposal_id: string) =>
+    post<EvolutionProposalDetail>(
+      `/evolution/proposals/${encodeURIComponent(proposal_id)}/approve`,
+      { proposal_id },
+    ),
+  proposalReject: (proposal_id: string, note?: string) =>
+    post<EvolutionProposalDetail>(
+      `/evolution/proposals/${encodeURIComponent(proposal_id)}/reject`,
+      { proposal_id, note },
+    ),
   proposalApply: (proposal_id: string) =>
     post<Record<string, unknown>>("/evolution/apply", { proposal_id }),
   proposalRollback: (proposal_id: string) =>
     post<Record<string, unknown>>("/evolution/rollback", { proposal_id }),
+  proposalPostApplyObservation: (body: {
+    proposal_id: string;
+    status?: string;
+    summary?: string;
+    source?: string;
+    evidence_refs?: string[];
+    metrics?: Record<string, unknown>;
+    backtest_result?: Record<string, unknown>;
+    run_id?: string;
+    operator?: string;
+    metadata?: Record<string, unknown>;
+  }) =>
+    post<Record<string, unknown>>("/evolution/post_apply_observation", body),
+  proposalDelete: (proposal_id: string, force = false) =>
+    post<{
+      ok?: boolean;
+      deleted?: boolean;
+      proposal_id?: string;
+      error?: string;
+      reason?: string;
+      state?: string;
+    }>("/evolution/proposals/delete", { proposal_id, force }),
   evolutionReflect: () =>
     post<Record<string, unknown>>("/evolution/reflect", {}),
   evolutionReflectionSchedule: () =>
@@ -2721,6 +2760,8 @@ export const clientApi = {
     post<Record<string, unknown>>("/evolution/rank", body),
   evolutionEvidence: (strategy_id: string) =>
     post<Record<string, unknown>>("/evolution/evidence", { strategy_id }),
+  evolutionEvidenceResolve: (body: { ref?: string; refs?: string[] }) =>
+    post<EvolutionEvidenceResolveEnvelope>("/evolution/evidence/resolve", body),
   evolutionSignals: (body: {
     source?: string;
     strategy_id?: string;

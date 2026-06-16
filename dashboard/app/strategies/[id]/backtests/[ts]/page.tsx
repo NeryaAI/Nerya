@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 import { BacktestChart } from "../../../../../components/backtest/BacktestChart";
 import { Card, PageBody, PageHeader } from "../../../../../components/Page";
 import { SectionTabs } from "../../../../../components/SectionTabs";
@@ -23,19 +24,20 @@ export default function StrategyBacktestDetailPage({
 }) {
   const strategyId = decodeURIComponent(params.id);
   const ts = decodeURIComponent(params.ts);
+  const t = useTranslations("strategyBacktests");
   return (
     <div>
       <PageHeader
         title={ts}
-        eyebrow={`${strategyId} backtest`}
-        description="Price, trade markers, equity, drawdown, RSI, missed-profit episodes, and downloadable artifacts."
+        eyebrow={t("detailEyebrow", { id: strategyId })}
+        description={t("detailDescription")}
         actions={
           <div className="flex items-center gap-2">
             <Link href={`/strategies/${encodeURIComponent(strategyId)}/backtests`} className="btn-ghost text-xs">
-              Runs
+              {t("runsTitle")}
             </Link>
             <Link href={`/strategies/${encodeURIComponent(strategyId)}`} className="btn-ghost text-xs">
-              Strategy
+              {t("strategy")}
             </Link>
           </div>
         }
@@ -43,7 +45,7 @@ export default function StrategyBacktestDetailPage({
       <SectionTabs section="strategy" />
       <PageBody>
         <BacktestChart strategyId={strategyId} ts={ts} />
-        <Card title="Artifacts">
+        <Card title={t("artifactsTitle")}>
           <div className="flex flex-wrap gap-2">
             {FILES.map((name) => (
               <a
@@ -76,4 +78,3 @@ async function downloadArtifact(strategyId: string, ts: string, name: string) {
   a.click();
   URL.revokeObjectURL(url);
 }
-

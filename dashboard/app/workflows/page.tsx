@@ -728,6 +728,7 @@ function ScheduleListItem({
   const paused = isPaused(schedule);
   const kind = scheduleKind(schedule);
   const cadenceLabel = useCadenceLabel();
+  const t = useTranslations("workflows");
   return (
     <li
       className={[
@@ -745,7 +746,7 @@ function ScheduleListItem({
           <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">
             {titleFor(schedule)}
           </span>
-          <Pill tone={paused ? "brand" : "ok"}>{paused ? "paused" : "active"}</Pill>
+          <Pill tone={paused ? "brand" : "ok"}>{paused ? t("paused") : t("active")}</Pill>
         </div>
         <div className="mt-1 flex min-w-0 items-center gap-2 text-[10.5px] text-ink-500">
           <span className="font-mono truncate">{schedule.id}</span>
@@ -761,7 +762,7 @@ function ScheduleListItem({
           className="btn-ghost px-2 py-0.5 text-[11px]"
           disabled={busy === `run:${schedule.id}`}
           onClick={onRun}
-          title="Run now"
+          title={t("runNow")}
         >
           <SendIcon size={12} />
         </button>
@@ -770,7 +771,7 @@ function ScheduleListItem({
           className="btn-ghost px-2 py-0.5 text-[11px]"
           disabled={busy === `toggle:${schedule.id}`}
           onClick={onToggle}
-          title={paused ? "Resume" : "Pause"}
+          title={paused ? t("resume") : t("pause")}
         >
           <PauseIcon size={12} />
         </button>

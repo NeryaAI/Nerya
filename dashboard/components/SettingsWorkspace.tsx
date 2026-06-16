@@ -11,7 +11,12 @@ import { SwitchControl } from "./SwitchControl";
 import { Select as PortalSelect, type SelectOption as PortalSelectOption } from "./Select";
 import { PortalDropdown, useDropdown } from "./PortalDropdown";
 import { CheckIcon, ChevronDownIcon, PlusIcon, RefreshIcon, SearchIcon, SettingsIcon, SparkIcon, TrashIcon } from "./icons";
-import { DEFAULT_SETTINGS, useUiSettings } from "../lib/settings";
+import {
+  DEFAULT_SETTINGS,
+  useUiSettings,
+  type LanguagePreference,
+  type ThemeMode,
+} from "../lib/settings";
 import {
   clientApi,
   type GatewayChannelConfig,
@@ -474,13 +479,49 @@ function Row({
   children: ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-brand-500/10 py-3 last:border-b-0">
+    <div className="settings-row flex items-center justify-between gap-3 border-b py-2.5 last:border-b-0">
       <div className="min-w-0 flex-1">
-        <div className="text-[13px] text-ink-100">{label}</div>
-        {desc ? <div className="mt-0.5 text-[11px] text-ink-400">{desc}</div> : null}
+        <div className="text-[12.5px] font-medium text-[color:var(--text-base)]">{label}</div>
+        {desc ? (
+          <div className="mt-0.5 text-[11px] leading-snug text-[color:var(--text-muted)] [overflow-wrap:anywhere]">{desc}</div>
+        ) : null}
       </div>
-      <div className="shrink-0">{children}</div>
+      {/* Cap the value slot so a long, unbreakable value (URI, path, model
+          id) wraps within the row instead of spilling past the card edge.
+          Narrow controls (switch / pill / select) sit well under the cap so
+          they are visually unaffected. */}
+      <div className="max-w-[56%] shrink-0 text-right [overflow-wrap:anywhere]">{children}</div>
     </div>
+  );
+}
+
+/**
+ * `<SettingsGroup>` — flat, un-boxed settings section (Codex-style).
+ * Replaces the heavier `<Card>` frame for preference panels: a compact
+ * group label + hairline divider, then divided `<Row>`s directly
+ * beneath. Use this instead of `<Card>` for simple toggle/select
+ * preference groups so the page reads as flat grouped rows rather than
+ * a stack of boxes.
+ */
+function SettingsGroup({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="min-w-0">
+      <div className="mb-2 px-0.5">
+        <h3 className="text-[13px] font-semibold text-[color:var(--text-base)]">{title}</h3>
+        {description ? (
+          <p className="mt-0.5 text-[11.5px] leading-snug text-[color:var(--text-muted)]">{description}</p>
+        ) : null}
+      </div>
+      <div className="settings-group-panel">{children}</div>
+    </section>
   );
 }
 
@@ -516,14 +557,14 @@ function Metric({
   icon: ReactNode;
 }) {
   return (
-    <div className="rounded-lg border border-[color:var(--line)] p-3">
+    <div className="rounded-lg border border-[color:var(--line)] p-2.5">
       <div className="flex items-center justify-between gap-3">
-        <span className="text-[12px] text-ink-400 font-medium">
+        <span className="text-[11px] text-ink-400 font-medium">
           {label}
         </span>
         <span className="text-brand-300">{icon}</span>
       </div>
-      <div className="mt-2 text-xl font-medium text-white tabular-nums">{value}</div>
+      <div className="mt-1 text-[15px] font-medium text-white tabular-nums">{value}</div>
       {detail ? <div className="mt-0.5 text-[11px] text-ink-500">{detail}</div> : null}
     </div>
   );
@@ -539,7 +580,7 @@ function Select({
   options: { value: string; label: string }[];
 }) {
   return (
-    <div className="min-w-[180px] inline-block">
+    <div className="inline-block min-w-[160px]">
       <PortalSelect
         value={value}
         onChange={(next) => onChange(next)}
@@ -705,8 +746,14 @@ function SettingsModuleTabs({
   onChange: (tab: SettingsTabKey) => void;
 }) {
   return (
-    <nav aria-label={ariaLabel} className="mb-5">
-      <div role="tablist" className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-7">
+    <nav
+      aria-label={ariaLabel}
+      className="shrink-0 md:sticky md:top-2 md:w-52 md:self-start"
+    >
+      <div
+        role="tablist"
+        className="flex gap-1 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0"
+      >
         {items.map((item) => {
           const selected = item.key === active;
           return (
@@ -717,19 +764,16 @@ function SettingsModuleTabs({
               role="tab"
               aria-selected={selected}
               aria-controls={settingsPanelId(item.key)}
+              title={item.description}
               className={[
-                "rounded-lg border px-3 py-3 text-left transition-colors",
+                "flex shrink-0 items-center rounded-lg px-3 py-2 text-left text-[13px] transition-colors md:w-full",
                 selected
-                  ? "border-brand-400/50 bg-brand-500/10 text-white"
-                  : "border-[color:var(--line)] text-ink-300 hover:border-brand-500/25 hover:text-ink-100",
+                  ? "bg-brand-500/12 font-medium text-[color:var(--text-base)]"
+                  : "text-[color:var(--text-muted)] hover:bg-brand-500/8 hover:text-[color:var(--text-base)]",
               ].join(" ")}
               onClick={() => onChange(item.key)}
             >
-              <span className="block text-[14px] font-medium">{item.label}</span>
-              <span className="mt-1 block text-[12px] leading-5 text-ink-500">{item.description}</span>
-              <span className="mt-2 inline-flex rounded-md border border-[color:var(--line)] px-2 py-0.5 text-[11px] text-ink-400 font-mono">
-                {item.meta}
-              </span>
+              <span className="truncate">{item.label}</span>
             </button>
           );
         })}
@@ -846,6 +890,13 @@ export interface SettingsPageProps {
    * with 4 tier rows on first contact.
    */
   compactLlm?: boolean;
+  /**
+   * Hide the in-page section tab strip. The Codex-style settings
+   * takeover moves section navigation into the left rail
+   * (SettingsSidebar), so `/settings` mounts with this set — the page
+   * body then renders just the active panel at full width.
+   */
+  hideSectionNav?: boolean;
 }
 
 export function SettingsWorkspace({
@@ -853,12 +904,17 @@ export function SettingsWorkspace({
   forceSection: forceSectionProp,
   topBanner,
   compactLlm = false,
+  hideSectionNav = false,
 }: SettingsPageProps) {
   // Normalise the two equivalent prop shapes into a single value the
   // rest of the component reads. `forceSection` wins if both are set.
   const forceSection: ForceSectionKey | undefined =
     forceSectionProp ?? (forceMemoryOnly ? "memory" : undefined);
   const inSectionMode = forceSection !== undefined;
+  // The in-page tab strip is shown only on the legacy full /settings
+  // page. Section-mode mounts (/memory etc.) and the Codex takeover
+  // (`hideSectionNav`, nav lives in the left rail) both suppress it.
+  const showSectionNav = !inSectionMode && !hideSectionNav;
   const [uiSettings, patchUi] = useUiSettings();
   const t = useTranslations("settings");
   const tProvider = useTranslations("settings.providerCard");
@@ -871,6 +927,7 @@ export function SettingsWorkspace({
   const tGateway = useTranslations("settings.gatewayCard");
   const tDisplay = useTranslations("settings.displayCard");
   const tChart = useTranslations("settings.chartCard");
+  const tAppearance = useTranslations("settings.appearance");
   const tAuth = useTranslations("settings.authCard");
   const tTabs = useTranslations("settings.tabs");
   const tCommon = useTranslations("common");
@@ -3652,14 +3709,16 @@ export function SettingsWorkspace({
           section mode (/memory, /access, /web-search, /browsers) —
           each standalone page owns its own top-level header and
           doesn't need the full Settings tab bar above it. */}
-      {inSectionMode ? null : (
-        <SettingsModuleTabs
-          active={activeSettingsTab}
-          ariaLabel={tTabs("ariaLabel")}
-          items={settingsTabs}
-          onChange={selectSettingsTab}
-        />
-      )}
+      <div className={showSectionNav ? "flex flex-col gap-6 md:flex-row md:items-start" : ""}>
+        {showSectionNav ? (
+          <SettingsModuleTabs
+            active={activeSettingsTab}
+            ariaLabel={tTabs("ariaLabel")}
+            items={settingsTabs}
+            onChange={selectSettingsTab}
+          />
+        ) : null}
+        <div className={showSectionNav ? "settings-flat min-w-0 flex-1 space-y-6" : "settings-flat space-y-6"}>
 
       {effectiveSettingsTab === "models" && (!inSectionMode || forceSection === "models") ? (
         <div
@@ -3669,7 +3728,6 @@ export function SettingsWorkspace({
           className="space-y-5"
         >
           <Card
-            featured
             title={tProvider("title")}
             description={tProvider("description")}
             actions={
@@ -4164,7 +4222,6 @@ export function SettingsWorkspace({
 
           {compactLlm ? null : (
           <Card
-            featured
             title={
               <span className="inline-flex items-center gap-2">
                 <SparkIcon size={16} className="text-fluid-300" />
@@ -4184,25 +4241,25 @@ export function SettingsWorkspace({
                 label={tModel("defaultLabel")}
                 value={<span className="font-mono">{defaultTier}</span>}
                 detail={tModel("agentTurns")}
-                icon={<SparkIcon size={16} />}
+                icon={<SparkIcon size={14} />}
               />
               <Metric
                 label={tModel("intentLabel")}
                 value={<span className="font-mono">{intentTier}</span>}
                 detail={tModel("classification")}
-                icon={<SearchIcon size={16} />}
+                icon={<SearchIcon size={14} />}
               />
               <Metric
                 label={tModel("configuredLabel")}
                 value={`${configuredTierCount}/${tierRows.length}`}
                 detail={tModel("providerModel")}
-                icon={<CheckIcon size={16} />}
+                icon={<CheckIcon size={14} />}
               />
               <Metric
                 label={tModel("providersLabel")}
                 value={`${readyProviderCount}/${providers.length || providerOptions.length}`}
                 detail={tModel("credentialReady")}
-                icon={<SettingsIcon size={16} />}
+                icon={<SettingsIcon size={14} />}
               />
             </div>
 
@@ -4598,8 +4655,8 @@ export function SettingsWorkspace({
                 ) : null}
               </div>
               <Field
-                label="API key(s)"
-                hint="comma-separated · leave blank to keep existing"
+                label={tProxy("apiKeys")}
+                hint={tProxy("apiKeysHint")}
               >
                 <input
                   className="input-dark font-mono text-xs"
@@ -4609,13 +4666,13 @@ export function SettingsWorkspace({
                   placeholder="k1,k2,k3"
                 />
               </Field>
-              <Field label="Storage" hint="vault is encrypted at rest">
+              <Field label={tProxy("storage")} hint={tProxy("storageHint")}>
                 <Select
                   value={fdStore}
                   onChange={(v) => setFdStore(v === "workspace" ? "workspace" : "vault")}
                   options={[
-                    { value: "vault", label: "SecretVault (encrypted)" },
-                    { value: "workspace", label: "Workspace JSON (plaintext, dev only)" },
+                    { value: "vault", label: tProxy("storageVault") },
+                    { value: "workspace", label: tProxy("storageWorkspace") },
                   ]}
                 />
               </Field>
@@ -4626,7 +4683,7 @@ export function SettingsWorkspace({
                   onClick={() => void clearFinancialDatasetsKeys()}
                   disabled={Boolean(fdBusy) || (fdStatus?.total_keys ?? 0) === 0}
                 >
-                  {fdBusy === "clear" ? tCommon("saving") : "clear"}
+                  {fdBusy === "clear" ? tCommon("saving") : tProxy("clearLower")}
                 </button>
                 <button
                   type="button"
@@ -4644,7 +4701,7 @@ export function SettingsWorkspace({
                   disabled={Boolean(fdBusy) || !fdKeysDraft.trim()}
                 >
                   <CheckIcon size={14} />
-                  {fdBusy === "save" ? tCommon("saving") : "save key(s)"}
+                  {fdBusy === "save" ? tCommon("saving") : tProxy("apiKeysSave")}
                 </button>
               </div>
               {fdStatus?.documentation ? (
@@ -4654,7 +4711,7 @@ export function SettingsWorkspace({
                   target="_blank"
                   rel="noreferrer"
                 >
-                  Financial Datasets API docs ↗
+                  {tProxy("docsFinancialDatasets")}
                 </a>
               ) : null}
             </div>
@@ -4682,7 +4739,6 @@ export function SettingsWorkspace({
         >
           <div className="xl:col-span-2">
             <Card
-              featured
               title={tProxy("title")}
               description={tProxy("description")}
               actions={
@@ -4694,28 +4750,28 @@ export function SettingsWorkspace({
               <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                    <Row label="Enable proxy" desc="Updates runtime env and urllib immediately after save.">
+                    <Row label={tProxy("enableProxy")} desc={tProxy("enableProxyDesc")}>
                       <SwitchControl
                         checked={proxyEnabled}
-                        label={proxyEnabled ? "Enabled" : "Disabled"}
+                        label={proxyEnabled ? tProxy("enabled") : tProxy("disabled")}
                         onCheckedChange={(v) => setProxyEnabled(v)}
                       />
                     </Row>
-                    <Field label="Mode">
+                    <Field label={tProxy("mode")}>
                       <Select
                         value={proxyMode}
                         onChange={(v) => setProxyMode(v === "pool" ? "pool" : "direct")}
                         options={[
-                          { value: "direct", label: "Direct proxy" },
-                          { value: "pool", label: "Proxy pool" },
+                          { value: "direct", label: tProxy("modeDirect") },
+                          { value: "pool", label: tProxy("modePool") },
                         ]}
                       />
                     </Field>
-                    <Field label="Preset" hint="Open-source/local pool defaults">
+                    <Field label={tProxy("preset")} hint={tProxy("presetHint")}>
                       <Select
                         value={proxyPreset}
                         onChange={applyProxyPreset}
-                        options={(proxyPresets.length ? proxyPresets : [{ id: "custom", label: "Custom proxy" }]).map((row) => ({
+                        options={(proxyPresets.length ? proxyPresets : [{ id: "custom", label: tProxy("customProxy") }]).map((row) => ({
                           value: row.id,
                           label: row.label,
                         }))}
@@ -4726,8 +4782,8 @@ export function SettingsWorkspace({
                   {proxyMode === "direct" ? (
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                       <Field
-                        label="All proxy"
-                        hint={proxyRefs.all_url_ref ? `stored ${proxyStatus?.config?.all_url_preview || proxyRefs.all_url_ref}` : "Used for HTTP and HTTPS when specific fields are blank"}
+                        label={tProxy("allProxy")}
+                        hint={proxyRefs.all_url_ref ? `stored ${proxyStatus?.config?.all_url_preview || proxyRefs.all_url_ref}` : tProxy("allProxyHint")}
                       >
                         <input
                           className="input-dark font-mono text-xs"
@@ -4743,8 +4799,8 @@ export function SettingsWorkspace({
                         />
                       </Field>
                       <Field
-                        label="HTTP proxy"
-                        hint={proxyRefs.http_url_ref ? `stored ${proxyStatus?.config?.http_url_preview || proxyRefs.http_url_ref}` : "Optional"}
+                        label={tProxy("httpProxy")}
+                        hint={proxyRefs.http_url_ref ? `stored ${proxyStatus?.config?.http_url_preview || proxyRefs.http_url_ref}` : tProxy("optional")}
                       >
                         <input
                           className="input-dark font-mono text-xs"
@@ -4760,8 +4816,8 @@ export function SettingsWorkspace({
                         />
                       </Field>
                       <Field
-                        label="HTTPS proxy"
-                        hint={proxyRefs.https_url_ref ? `stored ${proxyStatus?.config?.https_url_preview || proxyRefs.https_url_ref}` : "Optional"}
+                        label={tProxy("httpsProxy")}
+                        hint={proxyRefs.https_url_ref ? `stored ${proxyStatus?.config?.https_url_preview || proxyRefs.https_url_ref}` : tProxy("optional")}
                       >
                         <input
                           className="input-dark font-mono text-xs"
@@ -4780,8 +4836,8 @@ export function SettingsWorkspace({
                   ) : (
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_220px]">
                       <Field
-                        label="Pool API URL"
-                        hint={proxyRefs.pool_url_ref ? `stored ${proxyStatus?.config?.pool_url_preview || proxyRefs.pool_url_ref}` : "Endpoint returning one proxy"}
+                        label={tProxy("poolApiUrl")}
+                        hint={proxyRefs.pool_url_ref ? `stored ${proxyStatus?.config?.pool_url_preview || proxyRefs.pool_url_ref}` : tProxy("poolApiUrlHint")}
                       >
                         <input
                           className="input-dark font-mono text-xs"
@@ -4796,23 +4852,23 @@ export function SettingsWorkspace({
                           spellCheck={false}
                         />
                       </Field>
-                      <Field label="Response format">
+                      <Field label={tProxy("responseFormat")}>
                         <Select
                           value={proxyPoolFormat}
                           onChange={setProxyPoolFormat}
                           options={[
-                            { value: "auto", label: "Auto" },
+                            { value: "auto", label: tProxy("formatAuto") },
                             { value: "jhao_json", label: "jhao JSON" },
-                            { value: "smart_json", label: "Smart JSON" },
-                            { value: "json", label: "Generic JSON" },
-                            { value: "text", label: "Plain text" },
+                            { value: "smart_json", label: tProxy("formatSmartJson") },
+                            { value: "json", label: tProxy("formatGenericJson") },
+                            { value: "text", label: tProxy("formatPlainText") },
                           ]}
                         />
                       </Field>
                     </div>
                   )}
 
-                  <Field label="NO_PROXY" hint="Keep local dashboard/API and loopback services off the proxy">
+                  <Field label="NO_PROXY" hint={tProxy("noProxyHint")}>
                     <input
                       className="input-dark font-mono text-xs"
                       value={proxyNoProxy}
@@ -4832,7 +4888,7 @@ export function SettingsWorkspace({
                       disabled={Boolean(proxyBusy)}
                     >
                       <CheckIcon size={14} />
-                      {proxyBusy === "save" ? tCommon("saving") : "Save proxy"}
+                      {proxyBusy === "save" ? tCommon("saving") : tProxy("saveProxy")}
                     </button>
                     <button
                       type="button"
@@ -4851,7 +4907,7 @@ export function SettingsWorkspace({
 
                 <div className="space-y-3 rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
                   <div>
-                    <div className="text-[11px] text-ink-500 font-medium">Effective env</div>
+                    <div className="text-[11px] text-ink-500 font-medium">{tProxy("effectiveEnv")}</div>
                     <div className="mt-2 embedded-list-scroll-sm rounded-lg border border-brand-500/10 bg-ink-950/40">
                       {Object.entries(proxyStatus?.applied?.env || {}).length ? (
                         Object.entries(proxyStatus?.applied?.env || {}).map(([key, value]) => (
@@ -4862,13 +4918,13 @@ export function SettingsWorkspace({
                         ))
                       ) : (
                         <div className="px-3 py-6 text-center text-[12px] text-ink-500">
-                          No managed proxy env applied.
+                          {tProxy("noManagedEnv")}
                         </div>
                       )}
                     </div>
                   </div>
 
-                  <Field label="Probe URL">
+                  <Field label={tProxy("probeUrl")}>
                     <input
                       className="input-dark font-mono text-xs"
                       value={proxyTestUrl}
@@ -4885,7 +4941,7 @@ export function SettingsWorkspace({
                       disabled={Boolean(proxyBusy) || !proxyEnabled}
                     >
                       <SearchIcon size={14} />
-                      {proxyBusy === "test" ? "Testing" : "Test proxy"}
+                      {proxyBusy === "test" ? tProxy("testing") : tProxy("testProxy")}
                     </button>
                     {proxyTestResult ? (
                       <span className={`font-mono text-[11px] ${proxyTestResult.startsWith("ok") ? "text-emerald-300" : "text-rose-300"}`}>
@@ -5209,7 +5265,6 @@ export function SettingsWorkspace({
           className="grid grid-cols-1 gap-5 xl:grid-cols-2"
         >
           <Card
-            featured
             title="Runtime environment"
             description="Encrypted variables injected into run_shell, skill script subprocesses, and stdio MCP servers."
             actions={<Pill tone={runtimeEnv.length ? "ok" : "warn"}>{runtimeEnv.length} configured</Pill>}
@@ -5388,7 +5443,6 @@ export function SettingsWorkspace({
           className="space-y-5"
         >
           <Card
-            featured
             title={tSearch("cardTitle")}
             description={tSearch("cardDesc")}
             actions={
@@ -5636,7 +5690,6 @@ export function SettingsWorkspace({
           className="space-y-5"
         >
           <Card
-            featured
             title={tBrowsers("cardTitle")}
             description={tBrowsers("cardDesc")}
             actions={
@@ -7179,9 +7232,33 @@ export function SettingsWorkspace({
           id={settingsPanelId("interface")}
           role="tabpanel"
           aria-labelledby={settingsTabId("interface")}
-          className="grid grid-cols-1 gap-5 xl:grid-cols-2"
+          className="space-y-5"
         >
-          <Card title={tDisplay("title")} description={tDisplay("description")}>
+          <SettingsGroup title={tAppearance("title")} description={tAppearance("description")}>
+            <Row label={tAppearance("theme")} desc={tAppearance("themeDesc")}>
+              <Select
+                value={uiSettings.darkMode}
+                onChange={(v) => patchUi({ darkMode: v as ThemeMode })}
+                options={[
+                  { value: "system", label: tAppearance("themeSystem") },
+                  { value: "light", label: tAppearance("themeLight") },
+                  { value: "dark", label: tAppearance("themeDark") },
+                ]}
+              />
+            </Row>
+            <Row label={tAppearance("language")} desc={tAppearance("languageDesc")}>
+              <Select
+                value={uiSettings.language === "zh" ? "zh" : "en"}
+                onChange={(v) => patchUi({ language: v as LanguagePreference })}
+                options={[
+                  { value: "en", label: "English" },
+                  { value: "zh", label: "中文" },
+                ]}
+              />
+            </Row>
+          </SettingsGroup>
+
+          <SettingsGroup title={tDisplay("title")} description={tDisplay("description")}>
             <Row label={tDisplay("timezone")} desc={tDisplay("timezoneDesc")}>
               <Select
                 value={uiSettings.timezone}
@@ -7216,9 +7293,9 @@ export function SettingsWorkspace({
                 onCheckedChange={(v) => patchUi({ compact: v })}
               />
             </Row>
-          </Card>
+          </SettingsGroup>
 
-          <Card title={tChart("title")} description={tChart("description")}>
+          <SettingsGroup title={tChart("title")} description={tChart("description")}>
             <Row label={tChart("venue")} desc={tChart("venueDesc")}>
               {venues.length ? (
                 <Select
@@ -7234,7 +7311,7 @@ export function SettingsWorkspace({
               <input
                 value={uiSettings.kline.symbol}
                 onChange={(e) => patchUi({ kline: { ...uiSettings.kline, symbol: e.target.value.toUpperCase() } })}
-                className="min-w-[180px] rounded-md border border-brand-500/20 bg-ink-900 px-3 py-1.5 font-mono text-xs text-ink-100 focus:border-brand-500/60 focus:outline-none"
+                className="h-8 min-w-[160px] rounded-lg border border-[color:var(--line)] bg-[color:var(--card-hi)] px-2.5 font-mono text-xs text-[color:var(--text-base)] focus:border-brand-500/55 focus:outline-none"
                 placeholder="BTCUSDT"
               />
             </Row>
@@ -7277,9 +7354,11 @@ export function SettingsWorkspace({
                 {tCommon("reset")}
               </button>
             </Row>
-          </Card>
+          </SettingsGroup>
         </div>
       ) : null}
+        </div>
+      </div>
     </PageBody>
   );
 }

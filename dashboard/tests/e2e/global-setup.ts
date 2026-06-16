@@ -25,6 +25,17 @@ import { mkdirSync, existsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const DEFAULT_RUNTIME_API = "http://127.0.0.1:18318";
+const PYTHON = process.env.NERYA_PYTHON?.trim() || "python";
+const MOCKED_UI = process.env.NERYA_E2E_MOCKED_UI === "1";
+
+function splitCommand(command: string): string[] {
+  return command.split(/\s+/).filter(Boolean);
+}
+
+function spawnPython(args: string[]) {
+  const [cmd, ...prefix] = splitCommand(PYTHON);
+  return spawnSync(cmd, [...prefix, ...args], { stdio: "inherit" });
+}
 
 function defaultTestWorkspace(): string {
   const here = resolve(__dirname, "..", "..");
@@ -57,6 +68,16 @@ export default async function globalSetup() {
   process.env.NEXT_PUBLIC_NERYA_PERMISSION_MODE =
     process.env.NEXT_PUBLIC_NERYA_PERMISSION_MODE?.trim() ||
     process.env.NERYA_PERMISSION_MODE;
+
+  if (MOCKED_UI) {
+    const uiPort = process.env.NERYA_DASHBOARD_PORT ?? process.env.PORT ?? "3001";
+    const ui = process.env.NERYA_DASHBOARD_URL ?? `http://127.0.0.1:${uiPort}`;
+    await pingUrl(`${ui}/`, "dashboard", 60_000);
+    console.log("[setup] NERYA_E2E_MOCKED_UI=1, skipping runtime workspace gates");
+    console.log(`[setup] ui=${ui}`);
+    return;
+  }
+
   const workspace =
     process.env.NERYA_WORKSPACE && process.env.NERYA_WORKSPACE.trim()
       ? process.env.NERYA_WORKSPACE
@@ -89,8 +110,8 @@ export default async function globalSetup() {
       "--log",
       join(workspace, ".reset-log.json"),
     ];
-    console.log(`[setup] python ${args.join(" ")}`);
-    const r = spawnSync("python", args, { stdio: "inherit" });
+    console.log(`[setup] ${PYTHON} ${args.join(" ")}`);
+    const r = spawnPython(args);
     if (r.status !== 0) {
       throw new Error(
         `[setup] reset_workspace.py exited ${r.status}. Aborting test run.`,

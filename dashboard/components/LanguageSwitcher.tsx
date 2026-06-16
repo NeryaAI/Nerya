@@ -1,9 +1,11 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { useUiSettings } from "../lib/settings";
 import { LOCALE_LABELS, LOCALES } from "../lib/i18n";
 
 export function LanguageSwitcher({ collapsed }: { collapsed?: boolean }) {
+  const t = useTranslations("languageSwitcher");
   const [settings, patch] = useUiSettings();
   const current = settings.language === "zh" ? "zh" : "en";
 
@@ -12,7 +14,7 @@ export function LanguageSwitcher({ collapsed }: { collapsed?: boolean }) {
       <button
         onClick={() => patch({ language: current === "zh" ? "en" : "zh" })}
         className="w-full flex items-center justify-center rounded-lg px-0 py-2 text-xs text-ink-300 hover:bg-brand-500/10 hover:text-white transition-colors"
-        title={current === "zh" ? "Switch to English" : "切换为中文"}
+        title={current === "zh" ? t("switchToEnglish") : t("switchToChinese")}
       >
         <span className="font-mono text-[11px] font-semibold">
           {current.toUpperCase()}

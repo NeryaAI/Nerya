@@ -11,8 +11,9 @@ import {
 } from "../../lib/clientApi";
 import type { StrategyValidationReport } from "../../lib/strategyTypes";
 import { formatTsShort } from "../../lib/format";
+import { confirm, toast } from "../../lib/dialogs";
 import { Pill } from "../Page";
-import { ShieldCheckIcon, StrategiesIcon } from "../icons";
+import { ShieldCheckIcon, StrategiesIcon, TrashIcon } from "../icons";
 
 export type StrategyProposalView = {
   id: string;
@@ -25,6 +26,10 @@ export type StrategyProposalView = {
   validation?: unknown;
   files?: unknown;
   metadata?: Record<string, unknown> | null;
+  // Latest backtest verdict for this proposal (PASS / WARN / FAIL), attached by
+  // ``activeProposalsFromTurn`` so the card can warn before approving a strategy
+  // that failed its backtest.
+  backtest_verdict?: string;
   [key: string]: unknown;
 };
 
@@ -180,11 +185,25 @@ export function isActiveStrategyProposal(
   return kind === "strategy_package_proposal" && ACTIVE_STATES.has(state);
 }
 
+// A draft proposal is still being authored (the agent is editing the staged
+// files). It should NOT pop up an approve/delete card in chat yet — only once
+// it has been submitted into the review queue. The chat hoist uses this; the
+// strategies page keeps showing drafts via isActiveStrategyProposal.
+export function isHoistableStrategyProposal(
+  proposal: EvolutionProposal | StrategyProposalView,
+): boolean {
+  return (
+    isActiveStrategyProposal(proposal) &&
+    stringValue(proposal.state || "draft") !== "draft"
+  );
+}
+
 export function StrategyProposalApprovalCard({
   proposal,
   compact = false,
   approveNote = "approved from dashboard",
   onApproved,
+  onDeleted,
   onError,
   onNotice,
 }: {
@@ -192,6 +211,7 @@ export function StrategyProposalApprovalCard({
   compact?: boolean;
   approveNote?: string;
   onApproved?: (result: StrategyRuntimePromotionResult) => Promise<void> | void;
+  onDeleted?: (proposalId: string) => Promise<void> | void;
   onError?: (message: string | null) => void;
   onNotice?: (message: string | null) => void;
 }) {
@@ -199,6 +219,8 @@ export function StrategyProposalApprovalCard({
   const tCommon = useTranslations("common");
   const normalized = strategyProposalFromToolResult(proposal) ?? proposal;
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [removed, setRemoved] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [localNotice, setLocalNotice] = useState<string | null>(null);
   const [appliedStrategyId, setAppliedStrategyId] = useState<string | null>(null);
@@ -221,6 +243,14 @@ export function StrategyProposalApprovalCard({
   const validation = recordOf(effectiveValidation);
   const validationOk = validation.ok === true;
   const hasBlockers = blockers.length > 0 || validation.ok === false;
+  const backtestVerdict = stringValue(normalized.backtest_verdict).toUpperCase();
+  const verdictFailed = backtestVerdict === "FAIL";
+  const verdictTone =
+    backtestVerdict === "PASS"
+      ? "ok"
+      : backtestVerdict === "WARN"
+      ? "warn"
+      : "danger";
   const shouldValidate =
     !!proposalId &&
     !normalized.validation &&
@@ -270,6 +300,21 @@ export function StrategyProposalApprovalCard({
 
   async function approve() {
     if (!proposalId) return;
+    // Soft-gate: the package can be code-valid ("validation ok") while the
+    // strategy still FAILED its backtest. Make the operator explicitly confirm
+    // before adding a strategy the agent judged a failure.
+    if (verdictFailed) {
+      const proceed = await confirm({
+        title: t("backtestFailConfirmTitle"),
+        message: t("backtestFailConfirmMessage", {
+          strategy: strategyId || proposalId,
+        }),
+        okLabel: t("backtestFailConfirmOk"),
+        cancelLabel: tCommon("cancel"),
+        tone: "danger",
+      });
+      if (!proceed) return;
+    }
     setBusy(true);
     setLocalError(null);
     onError?.(null);
@@ -299,12 +344,63 @@ export function StrategyProposalApprovalCard({
     }
   }
 
+  async function remove() {
+    if (!proposalId) return;
+    const ok = await confirm({
+      title: t("deleteConfirmTitle"),
+      message: t("deleteConfirmMessage", { strategy: strategyId || proposalId }),
+      okLabel: t("deleteConfirmOk"),
+      cancelLabel: tCommon("cancel"),
+      tone: "danger",
+    });
+    if (!ok) return;
+    setDeleting(true);
+    setLocalError(null);
+    onError?.(null);
+    try {
+      const out = await clientApi.proposalDelete(proposalId);
+      if (!out.ok && !out.deleted) {
+        throw new Error(out.error || out.reason || "strategy_delete_failed");
+      }
+      setRemoved(true);
+      const msg = t("deletedNotice", { strategy: strategyId || proposalId });
+      setLocalNotice(msg);
+      onNotice?.(msg);
+      toast({ message: msg, tone: "ok" });
+      await onDeleted?.(proposalId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setLocalError(msg);
+      onError?.(msg);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   if (!proposalId) return null;
+
+  if (removed) {
+    return (
+      <div
+        className={[
+          "rounded-lg border border-brand-500/15 bg-white/[0.02] text-xs text-ink-400",
+          compact ? "p-3" : "p-4",
+        ].join(" ")}
+        data-proposal-id={proposalId}
+        data-proposal-removed="true"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <TrashIcon size={14} className="text-ink-500" />
+          <span>{t("deletedNotice", { strategy: strategyId || proposalId })}</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
       className={[
-        "rounded-lg border border-warn/30 bg-warn/[0.055] text-xs",
+        "rounded-lg border border-warn/30 bg-warn/[0.055] text-xs [overflow-wrap:anywhere]",
         compact ? "p-3" : "p-4",
       ].join(" ")}
       data-proposal-id={proposalId}
@@ -317,6 +413,11 @@ export function StrategyProposalApprovalCard({
               {strategyId || proposalId}
             </span>
             <Pill tone={stateTone(state)}>{state}</Pill>
+            {backtestVerdict ? (
+              <Pill tone={verdictTone}>
+                {t("backtestVerdict", { verdict: backtestVerdict })}
+              </Pill>
+            ) : null}
             {validationOk ? <Pill tone="ok">{t("validationOk")}</Pill> : null}
             {validating || validationPending ? <Pill tone="brand">{t("validating")}</Pill> : null}
             {hasBlockers ? <Pill tone="danger">{t("blocked")}</Pill> : null}
@@ -351,10 +452,27 @@ export function StrategyProposalApprovalCard({
           ) : null}
           {!TERMINAL_STATES.has(state) ? (
             <button
+              onClick={() => void remove()}
+              disabled={busy || deleting}
+              className="btn btn-ghost cursor-pointer text-xs text-rose-300 hover:text-rose-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              title={t("deleteConfirmOk")}
+            >
+              <TrashIcon size={14} />
+              {deleting ? tCommon("working") : t("delete")}
+            </button>
+          ) : null}
+          {!TERMINAL_STATES.has(state) ? (
+            <button
               onClick={() => void approve()}
-              disabled={!canApprove || busy}
+              disabled={!canApprove || busy || deleting}
               className="btn btn-primary cursor-pointer text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-              title={hasBlockers ? t("blocked") : undefined}
+              title={
+                hasBlockers
+                  ? t("blocked")
+                  : verdictFailed
+                  ? t("backtestFailConfirmTitle")
+                  : undefined
+              }
             >
               <ShieldCheckIcon size={14} />
               {busy ? tCommon("working") : t("approveAdd")}

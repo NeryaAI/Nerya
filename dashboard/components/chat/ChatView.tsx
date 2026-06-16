@@ -17,6 +17,7 @@ import {
   ChatRunSettings,
   ChatThread,
   DEFAULT_CHAT_RUN_SETTINGS,
+  buildChatModelOptions,
   cacheThreadTranscript,
   LiveEvent,
   TurnPayload,
@@ -27,13 +28,14 @@ import {
   newThread,
   saveRunSettings,
   saveThreads,
+  subscribeThreadsChanged,
   upsertThread,
   uuid,
 } from "../../lib/chat";
 import { AssistantBubble, UserBubble } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
-import { ChatSidebar } from "./ChatSidebar";
 import { WorkspaceCanvas, hasWorkspaceCanvas } from "./WorkspaceCanvas";
+import { takeComposeDraft } from "../../lib/composeDraft";
 
 function parseTs(ts: string | undefined | null): number | null {
   if (!ts) return null;
@@ -44,6 +46,8 @@ function parseTs(ts: string | undefined | null): number | null {
 const DELETED_SESSIONS_KEY = "nerya.chat.deletedSessions.v1";
 const SESSION_PAGE_SIZE = 20;
 const CANVAS_PANEL_KEY = "nerya.chat.canvasPanel.open.v1";
+const LIVE_EVENT_POLL_MS = 160;
+const LIVE_SCROLL_SYNC_MS = 180;
 
 type PendingFirstMessage = {
   threadId: string;
@@ -197,29 +201,65 @@ function mergeAuthoritativeThread(
   authoritative: ChatThread,
 ): ChatThread {
   if (!current) return authoritative;
+  const currentByBackendId = new Map(
+    current.messages
+      .filter((m) => typeof m.backend_message_id === "string" && !!m.backend_message_id)
+      .map((m) => [m.backend_message_id as string, m]),
+  );
+  const authoritativeMessages = authoritative.messages.map((message) => {
+    const backendId = message.backend_message_id;
+    const prior = backendId ? currentByBackendId.get(backendId) : null;
+    if (!prior || prior.role !== message.role) return message;
+    if (message.role === "user" && prior.role === "user") {
+      return {
+        ...message,
+        id: prior.id,
+        attachments: prior.attachments?.length
+          ? prior.attachments
+          : message.attachments,
+      };
+    }
+    if (message.role === "assistant" && prior.role === "assistant") {
+      return {
+        ...message,
+        id: prior.id,
+        live_events: prior.live_events?.length
+          ? prior.live_events
+          : message.live_events,
+        live_cursor: prior.live_cursor ?? message.live_cursor,
+        started_ms: prior.started_ms ?? message.started_ms,
+        elapsed_ms: prior.elapsed_ms ?? message.elapsed_ms,
+      };
+    }
+    return message;
+  });
+  const stableAuthoritative = {
+    ...authoritative,
+    messages: authoritativeMessages,
+  };
   const backendMessageIds = new Set(
-    authoritative.messages
+    stableAuthoritative.messages
       .map((m) => m.backend_message_id)
       .filter((id): id is string => typeof id === "string" && !!id),
   );
   const pending = current.messages.filter((message) => {
     if (message.backend_message_id) {
-      return !backendMessageIds.has(message.backend_message_id) && message.ts > authoritative.updated_ts + 1000;
+      return !backendMessageIds.has(message.backend_message_id) && message.ts > stableAuthoritative.updated_ts + 1000;
     }
-    if (message.ts <= authoritative.updated_ts + 1000) return false;
+    if (message.ts <= stableAuthoritative.updated_ts + 1000) return false;
     const text = chatMessageTextForMerge(message).trim();
     if (!text) return true;
-    return !authoritative.messages.some(
+    return !stableAuthoritative.messages.some(
       (candidate) =>
         candidate.role === message.role &&
         chatMessageTextForMerge(candidate).trim() === text,
     );
   });
-  if (!pending.length) return authoritative;
+  if (!pending.length) return stableAuthoritative;
   return {
-    ...authoritative,
-    updated_ts: Math.max(authoritative.updated_ts, ...pending.map((m) => m.ts)),
-    messages: [...authoritative.messages, ...pending],
+    ...stableAuthoritative,
+    updated_ts: Math.max(stableAuthoritative.updated_ts, ...pending.map((m) => m.ts)),
+    messages: [...stableAuthoritative.messages, ...pending],
     imported: false,
   };
 }
@@ -325,72 +365,20 @@ function pendingApprovalIdsForThread(
   );
 }
 
-function EmptyState({ onPrompt }: { onPrompt: (s: string) => void }) {
-  const t = useTranslations("chat");
-  const suggestions: { title: string; body: string; prompt: string }[] = [
-    {
-      title: t("starterBtcScalpTitle"),
-      body: t("starterBtcScalpBody"),
-      prompt: t("starterBtcScalpPrompt"),
-    },
-    {
-      title: t("starterNvdaTeamTitle"),
-      body: t("starterNvdaTeamBody"),
-      prompt: t("starterNvdaTeamPrompt"),
-    },
-    {
-      title: t("starterCryptoStrategyTitle"),
-      body: t("starterCryptoStrategyBody"),
-      prompt: t("starterCryptoStrategyPrompt"),
-    },
-    {
-      title: t("starterMacroNewsTitle"),
-      body: t("starterMacroNewsBody"),
-      prompt: t("starterMacroNewsPrompt"),
-    },
-  ];
-  return (
-    <div className="max-w-3xl mx-auto px-6 py-16">
-      <div className="text-center mb-10">
-        <div className="text-[12px] tracking-[0.18em] uppercase text-brand-300 font-medium mb-3">
-          {t("emptyEyebrow")}
-        </div>
-        <h1 className="text-[34px] leading-[1.1] font-semibold tracking-tight text-[color:var(--text-base)]">
-          {t("emptyHeadline")}
-        </h1>
-        <p className="mt-4 text-[color:var(--text-muted)] text-sm max-w-xl mx-auto leading-relaxed">
-          {t("emptySubheadline")}
-        </p>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {suggestions.map((s) => (
-          <button
-            key={s.title}
-            onClick={() => onPrompt(s.prompt)}
-            className="card card-hover group text-left px-4 py-3.5 cursor-pointer"
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="text-sm font-medium text-[color:var(--text-base)]">
-                {s.title}
-              </div>
-              <span className="text-brand-300/60 group-hover:text-brand-200 transition-colors text-xs leading-none">
-                →
-              </span>
-            </div>
-            <div className="text-xs text-[color:var(--text-muted)] mt-1.5 leading-relaxed">
-              {s.body}
-            </div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const router = useRouter();
   const t = useTranslations("chat");
+  const tHome = useTranslations("commandHome");
   const cancelledReply = t("cancelNotice");
+  const heroSuggestions = useMemo(
+    () => [
+      { title: t("starterBtcScalpTitle"), prompt: t("starterBtcScalpPrompt") },
+      { title: t("starterNvdaTeamTitle"), prompt: t("starterNvdaTeamPrompt") },
+      { title: t("starterCryptoStrategyTitle"), prompt: t("starterCryptoStrategyPrompt") },
+      { title: t("starterMacroNewsTitle"), prompt: t("starterMacroNewsPrompt") },
+    ],
+    [t],
+  );
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -412,6 +400,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const abortRef = useRef<AbortController | null>(null);
   const inFlightSessionRef = useRef<string | null>(null);
   const turnInFlightRef = useRef(false);
+  const draftConsumedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Live-event poller handle. We track it so ``cancel`` and unmount
   // can stop the timer; without this guard a fast click-and-cancel
@@ -480,58 +469,49 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Hand-off from the Codex command home: when the new-chat route mounts
+  // with a stashed composer draft, drop it into the input and auto-run the
+  // turn so the home box behaves like Codex's "what should we build?" entry.
+  useEffect(() => {
+    if (!hydrated || draftConsumedRef.current || sessionId) return;
+    const draft = takeComposeDraft();
+    if (!draft.trim()) return;
+    draftConsumedRef.current = true;
+    setInput(draft);
+    void send(draft);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, sessionId]);
+
+  // The conversation list now lives in the global Codex sidebar. If the
+  // active chat is deleted from there (tombstoned), leave the dead route.
+  useEffect(() => {
+    if (!hydrated) return;
+    return subscribeThreadsChanged(() => {
+      if (!sessionId || !loadDeletedSessionIds().has(sessionId)) return;
+      setThreads((prev) =>
+        prev.some((t) => t.id === sessionId)
+          ? prev.filter((t) => t.id !== sessionId)
+          : prev,
+      );
+      router.replace("/chat");
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, sessionId]);
+
   async function hydrateModelOptions() {
     try {
-      const [tiersResp, modelsResp] = await Promise.allSettled([
+      const [tiersResp, modelsResp, configResp] = await Promise.allSettled([
         clientApi.llmTiers(),
         clientApi.llmModels(),
+        clientApi.llmConfig(),
       ]);
-      const options: ChatModelOption[] = [];
-      const seen = new Set<string>();
-
-      if (tiersResp.status === "fulfilled") {
-        for (const tier of tiersResp.value?.tiers ?? []) {
-          const provider = String(tier.provider || "").trim().toLowerCase();
-          const model = String(tier.model || "").trim();
-          if (!provider || !model) continue;
-          const key = `tier:${tier.tier}:${provider}:${model}`;
-          seen.add(`${provider}:${model}:${tier.tier || ""}`);
-          options.push({
-            key,
-            label: `${tier.tier}: ${provider}/${model}`,
-            tier: tier.tier,
-            provider,
-            model,
-            source: "tier",
-          });
-        }
-      }
-
-      if (modelsResp.status === "fulfilled") {
-        const providers = modelsResp.value?.providers ?? {};
-        for (const [providerRaw, rows] of Object.entries(providers)) {
-          const provider = providerRaw.trim().toLowerCase();
-          if (!provider) continue;
-          for (const row of rows.slice(0, 120)) {
-            const model = String(
-              row.id || row.model || row.name || row.model_id || "",
-            ).trim();
-            if (!model) continue;
-            const dedupe = `${provider}:${model}:`;
-            if (seen.has(dedupe)) continue;
-            seen.add(dedupe);
-            options.push({
-              key: `catalog:${provider}:${model}`,
-              label: `${provider}/${model}`,
-              provider,
-              model,
-              source: "catalog",
-            });
-          }
-        }
-      }
-
-      setModelOptions(options.slice(0, 240));
+      setModelOptions(
+        buildChatModelOptions({
+          tiers: tiersResp.status === "fulfilled" ? tiersResp.value : null,
+          models: modelsResp.status === "fulfilled" ? modelsResp.value : null,
+          config: configResp.status === "fulfilled" ? configResp.value : null,
+        }),
+      );
     } catch {
       // The chat still works with the runtime default model.
     }
@@ -1004,6 +984,20 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     });
   }, [active?.messages.length, active?.id, activeLiveEventCount, activeApprovalKey]);
 
+  useEffect(() => {
+    const hasLoadingAssistant =
+      active?.messages.some((m) => m.role === "assistant" && m.loading) ?? false;
+    if (!hasLoadingAssistant && !sending) return;
+    const timer = window.setInterval(() => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom > 260) return;
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }, LIVE_SCROLL_SYNC_MS);
+    return () => window.clearInterval(timer);
+  }, [active?.id, active?.messages.length, sending]);
+
   function createThread(seedText?: string, id?: string): ChatThread {
     const t = id ? { ...newThread(seedText), id } : newThread(seedText);
     setThreads((prev) => upsertThread(prev, t));
@@ -1315,52 +1309,65 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
 
     const handle = livePollRef.current;
 
+    let pollInFlight: Promise<void> | null = null;
+
     async function pollOnce(): Promise<void> {
       if (handle.stop) return;
-      try {
-        const resp = await clientApi.streamEvents(cursor, {
-          limit: 500,
-          session_id: threadId,
-        });
-        const fresh: LiveEvent[] = Array.isArray(resp?.events)
-          ? (resp.events as LiveEvent[])
-          : [];
-        if (fresh.length > 0) {
-          const maxSeq = fresh.reduce(
-            (acc, ev) =>
-              typeof ev.seq === "number" && ev.seq > acc ? ev.seq : acc,
-            cursor,
-          );
-          cursor = maxSeq;
-          updateThread(threadId, (t) => ({
-            ...t,
-            messages: t.messages.map((m) =>
-              m.id === assistantId && m.role === "assistant"
-                ? {
-                    ...m,
-                    live_events: [...(m.live_events ?? []), ...fresh],
-                    live_cursor: maxSeq,
-                  }
-                : m,
-            ),
-          }));
-        } else if (typeof resp?.latest_seq === "number") {
-          // Even when no events match the cursor still advances — the
-          // bus may have rolled the ring. Pin to whichever is larger.
-          cursor = Math.max(cursor, resp.latest_seq);
+      if (pollInFlight) {
+        await pollInFlight;
+        return;
+      }
+      pollInFlight = (async () => {
+        try {
+          const resp = await clientApi.streamEvents(cursor, {
+            limit: 500,
+            session_id: threadId,
+          });
+          const fresh: LiveEvent[] = Array.isArray(resp?.events)
+            ? (resp.events as LiveEvent[])
+            : [];
+          if (fresh.length > 0) {
+            const maxSeq = fresh.reduce(
+              (acc, ev) =>
+                typeof ev.seq === "number" && ev.seq > acc ? ev.seq : acc,
+              cursor,
+            );
+            cursor = maxSeq;
+            updateThread(threadId, (t) => ({
+              ...t,
+              messages: t.messages.map((m) =>
+                m.id === assistantId && m.role === "assistant"
+                  ? {
+                      ...m,
+                      live_events: [...(m.live_events ?? []), ...fresh],
+                      live_cursor: maxSeq,
+                    }
+                  : m,
+              ),
+            }));
+          } else if (typeof resp?.latest_seq === "number") {
+            // Even when no events match the cursor still advances — the
+            // bus may have rolled the ring. Pin to whichever is larger.
+            cursor = Math.max(cursor, resp.latest_seq);
+          }
+        } catch {
+          // Network blips are non-fatal — the next tick will retry. We
+          // intentionally swallow errors so a transient 502 from the
+          // local server doesn't terminate the whole chat thread.
         }
-      } catch {
-        // Network blips are non-fatal — the next tick will retry. We
-        // intentionally swallow errors so a transient 502 from the
-        // local server doesn't terminate the whole chat thread.
+      })();
+      try {
+        await pollInFlight;
+      } finally {
+        pollInFlight = null;
       }
     }
 
     handle.timer = setInterval(() => {
       pollOnce();
-    }, 600);
-    // Fire one poll immediately so the UI doesn't sit blank for the
-    // first 600ms while the agent is already churning.
+    }, LIVE_EVENT_POLL_MS);
+    // Fire one poll immediately so the UI doesn't sit blank while the
+    // agent is already churning.
     pollOnce();
 
     function stopPoller(): void {
@@ -1402,6 +1409,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           model_tier: settings.model_tier || undefined,
           model_provider: settings.model_provider || undefined,
           model_id: settings.model_id || undefined,
+          model_context_window: settings.model_context_window,
           max_iterations: settings.max_iterations,
           max_total_tool_calls: settings.max_total_tool_calls,
           max_wall_seconds: settings.max_wall_seconds,
@@ -1564,107 +1572,137 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     );
   }
 
+  const conversationEmpty = !active || active.messages.length === 0;
+  const showMissing = Boolean(sessionId && missingSession && conversationEmpty);
+  const showLoading = conversationEmpty && !showMissing && activeTranscriptLoading;
+  // Codex-style new-chat surface: a centred composer in the middle of
+  // the canvas instead of a docked input + suggestion page.
+  const showHero = conversationEmpty && !showMissing && !showLoading;
+
+  const composerProps = {
+    value: input,
+    onChange: setInput,
+    onSend: () => send(input),
+    onCancel: cancel,
+    sending,
+    locked: awaitingApproval,
+    lockMessage: t("approvalPaused"),
+    settings,
+    onSettingsChange: setSettings,
+    modelOptions,
+    attachments,
+    onAttachmentsChange: setAttachments,
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col md:flex-row">
-      <ChatSidebar
-        threads={threads}
-        activeId={sessionId ?? null}
-        hasMore={sessionHasMore}
-        loadingMore={sessionLoading}
-        onPick={(id) => router.push(`/chat/${id}`)}
-        onNew={() => router.push("/chat")}
-        onDelete={deleteThread}
-        onLoadMore={loadMoreBackendSessions}
-      />
       <div className="flex min-h-0 flex-1 flex-col min-w-0">
-        <div ref={scrollRef} className="flex-1 overflow-y-auto">
-          {sessionId && missingSession && (!active || active.messages.length === 0) ? (
-            <div className="max-w-xl mx-auto px-6 py-16 text-center">
-              <h2 className="text-lg text-white font-semibold mb-2">
-                Session not found
-              </h2>
-              <p className="text-sm text-ink-400 mb-6">
-                The conversation <span className="font-mono">{sessionId}</span>{" "}
-                isn't available locally and the backend has no transcript for
-                it.
+        {showHero ? (
+          <div className="flex-1 overflow-y-auto">
+            <div className="mx-auto flex min-h-full w-full max-w-[760px] flex-col justify-center px-4 py-10 lg:px-5">
+              <h1 className="text-center text-[30px] font-semibold leading-[1.15] tracking-tight text-[color:var(--text-base)]">
+                {tHome("title")}
+              </h1>
+              <p className="mx-auto mt-2.5 max-w-lg text-center text-[13px] leading-relaxed text-[color:var(--text-muted)]">
+                {tHome("subtitle")}
               </p>
-              <button
-                onClick={() => router.push("/chat")}
-                className="glass hover:bg-white/[0.05] hover:border-brand-500/30 px-4 py-2 text-sm text-white transition-colors"
-              >
-                Start a new chat
-              </button>
-            </div>
-          ) : !active || active.messages.length === 0 ? (
-            activeTranscriptLoading ? (
-              <div className="h-full flex items-center justify-center text-ink-500 text-sm">
-                Loading conversation…
+              <div className="mt-8">
+                <ChatInput {...composerProps} variant="hero" />
               </div>
-            ) : (
-              <EmptyState onPrompt={(p) => setInput(p)} />
-            )
-          ) : (
-            <div className="max-w-4xl mx-auto px-4 py-6 space-y-5">
-              {active.messages.map((m) =>
-                m.role === "user" ? (
-                  <UserBubble
-                    key={m.id}
-                    msg={m}
-                    onEdit={() => startEditMessage(m.id)}
-                    onDelete={() => deleteMessage(m.id)}
-                    editing={editingMessageId === m.id}
-                    editValue={editingMessageId === m.id ? editDraft : ""}
-                    onEditChange={setEditDraft}
-                    onSaveEdit={() => saveEditedMessage(m.id)}
-                    onCancelEdit={cancelEditMessage}
-                  />
-                ) : (
-                  <AssistantBubble
-                    key={m.id}
-                    msg={m}
-                    pendingApprovals={pendingApprovals}
-                    onApprovalAction={resolveApproval}
-                    resolvingApprovalIds={resolvingApprovalIds}
-                    onEdit={() => startEditMessage(m.id)}
-                    onDelete={() => deleteMessage(m.id)}
-                    editing={editingMessageId === m.id}
-                    editValue={editingMessageId === m.id ? editDraft : ""}
-                    onEditChange={setEditDraft}
-                    onSaveEdit={() => saveEditedMessage(m.id)}
-                    onCancelEdit={cancelEditMessage}
-                  />
-                )
-              )}
-            </div>
-          )}
-        </div>
-        {awaitingApproval ? (
-          <div
-            className="border-t border-warn/25 bg-warn/[0.06] px-4 py-2 text-xs text-amber-200"
-            role="status"
-          >
-            <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
-              <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
-              <span className="font-mono text-[10px] text-warn/80">
-                {activeApprovalIds[0]?.slice(0, 18)}
-              </span>
+              <div className="mt-6">
+                {heroSuggestions.map((s, index) => (
+                  <button
+                    key={s.title}
+                    type="button"
+                    onClick={() => setInput(s.prompt)}
+                    className={`group flex h-10 w-full items-center gap-2.5 px-4 text-left text-[14px] text-[color:var(--text-muted)] transition-colors hover:bg-brand-500/8 hover:text-[color:var(--text-base)] ${
+                      index > 0 ? "border-t border-[color:var(--line)]" : ""
+                    }`}
+                  >
+                    <span className="flex-1 truncate">{s.title}</span>
+                    <span className="shrink-0 text-[18px] text-brand-300/40 transition-colors group-hover:text-brand-300">
+                      →
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
-        ) : null}
-        <ChatInput
-          value={input}
-          onChange={setInput}
-          onSend={() => send(input)}
-          onCancel={cancel}
-          sending={sending}
-          locked={awaitingApproval}
-          lockMessage={t("approvalPaused")}
-          settings={settings}
-          onSettingsChange={setSettings}
-          modelOptions={modelOptions}
-          attachments={attachments}
-          onAttachmentsChange={setAttachments}
-        />
+        ) : (
+          <>
+            <div ref={scrollRef} className="flex-1 overflow-y-auto">
+              {showMissing ? (
+                <div className="max-w-xl mx-auto px-6 py-16 text-center">
+                  <h2 className="text-lg text-white font-semibold mb-2">
+                    Session not found
+                  </h2>
+                  <p className="text-sm text-ink-400 mb-6">
+                    The conversation <span className="font-mono">{sessionId}</span>{" "}
+                    isn't available locally and the backend has no transcript for
+                    it.
+                  </p>
+                  <button
+                    onClick={() => router.push("/chat")}
+                    className="glass hover:bg-white/[0.05] hover:border-brand-500/30 px-4 py-2 text-sm text-white transition-colors"
+                  >
+                    Start a new chat
+                  </button>
+                </div>
+              ) : showLoading ? (
+                <div className="h-full flex items-center justify-center text-ink-500 text-sm">
+                  Loading conversation…
+                </div>
+              ) : (
+                <div className="max-w-4xl mx-auto px-4 py-6 space-y-5">
+                  {active!.messages.map((m) =>
+                    m.role === "user" ? (
+                      <UserBubble
+                        key={m.id}
+                        msg={m}
+                        onEdit={() => startEditMessage(m.id)}
+                        onDelete={() => deleteMessage(m.id)}
+                        editing={editingMessageId === m.id}
+                        editValue={editingMessageId === m.id ? editDraft : ""}
+                        onEditChange={setEditDraft}
+                        onSaveEdit={() => saveEditedMessage(m.id)}
+                        onCancelEdit={cancelEditMessage}
+                      />
+                    ) : (
+                      <AssistantBubble
+                        key={m.id}
+                        msg={m}
+                        pendingApprovals={pendingApprovals}
+                        onApprovalAction={resolveApproval}
+                        resolvingApprovalIds={resolvingApprovalIds}
+                        onEdit={() => startEditMessage(m.id)}
+                        onDelete={() => deleteMessage(m.id)}
+                        editing={editingMessageId === m.id}
+                        editValue={editingMessageId === m.id ? editDraft : ""}
+                        onEditChange={setEditDraft}
+                        onSaveEdit={() => saveEditedMessage(m.id)}
+                        onCancelEdit={cancelEditMessage}
+                      />
+                    )
+                  )}
+                </div>
+              )}
+            </div>
+            {awaitingApproval ? (
+              <div
+                className="border-t border-warn/25 bg-warn/[0.06] px-4 py-2 text-xs text-amber-200"
+                role="status"
+              >
+                <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
+                  <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
+                  <span className="font-mono text-[10px] text-warn/80">
+                    {activeApprovalIds[0]?.slice(0, 18)}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+            <ChatInput {...composerProps} variant="docked" />
+          </>
+        )}
       </div>
       {activeHasCanvas ? (
         <WorkspaceCanvas

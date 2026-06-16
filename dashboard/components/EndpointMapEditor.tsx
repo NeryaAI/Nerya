@@ -13,6 +13,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslations } from "next-intl";
 
 import { TrashIcon, PlusIcon } from "./icons";
 import { Select } from "./Select";
@@ -84,6 +85,7 @@ function rowsToMap(rows: EndpointRow[]): Record<string, Record<string, unknown>>
 }
 
 export function EndpointMapEditor({ value, onChange, disabled = false }: Props) {
+  const t = useTranslations("endpointMapEditor");
   const [rows, setRows] = useState<EndpointRow[]>(() => rowsFromMap(value));
   const initialRef = useRef<string>("");
   const fingerprint = useMemo(() => {
@@ -132,17 +134,17 @@ export function EndpointMapEditor({ value, onChange, disabled = false }: Props) 
     <div className="space-y-2">
       {rows.length === 0 ? (
         <div className="text-[12px] text-ink-500 italic px-1 py-2">
-          No endpoints yet. Add at least one (e.g. <code className="font-mono">markets</code>{" "}
+          {t("emptyPrefix")} <code className="font-mono">markets</code>{" "}
           <code className="font-mono">GET /api/markets</code>).
         </div>
       ) : (
         <div className="space-y-1.5">
           <div className="grid grid-cols-[minmax(0,140px)_90px_minmax(0,1fr)_auto_auto] gap-2 px-2 text-[11px] text-ink-500 font-medium">
-            <span>Name</span>
-            <span>Method</span>
-            <span>Path</span>
-            <span className="text-center">Auth</span>
-            <span className="sr-only">Actions</span>
+            <span>{t("name")}</span>
+            <span>{t("method")}</span>
+            <span>{t("path")}</span>
+            <span className="text-center">{t("auth")}</span>
+            <span className="sr-only">{t("actions")}</span>
           </div>
           {rows.map((row) => (
             <div
@@ -152,7 +154,7 @@ export function EndpointMapEditor({ value, onChange, disabled = false }: Props) 
               <input
                 value={row.name}
                 onChange={(e) => update(row.id, { name: e.target.value.trim() })}
-                placeholder="markets"
+                placeholder={t("namePlaceholder")}
                 disabled={disabled}
                 className="input-dark font-mono text-[12px]"
               />
@@ -161,13 +163,13 @@ export function EndpointMapEditor({ value, onChange, disabled = false }: Props) 
                 onChange={(method) => update(row.id, { method })}
                 options={METHOD_OPTIONS}
                 size="sm"
-                ariaLabel="HTTP method"
+                ariaLabel={t("httpMethod")}
                 disabled={disabled}
               />
               <input
                 value={row.path}
                 onChange={(e) => update(row.id, { path: e.target.value })}
-                placeholder="/api/markets"
+                placeholder={t("pathPlaceholder")}
                 disabled={disabled}
                 className="input-dark font-mono text-[12px]"
               />
@@ -185,13 +187,13 @@ export function EndpointMapEditor({ value, onChange, disabled = false }: Props) 
                   onChange={(e) => update(row.id, { authRequired: e.target.checked })}
                   disabled={disabled}
                 />
-                {row.authRequired ? "yes" : "no"}
+                {row.authRequired ? t("yes") : t("no")}
               </label>
               <button
                 type="button"
                 onClick={() => remove(row.id)}
                 disabled={disabled}
-                aria-label="remove endpoint"
+                aria-label={t("removeEndpoint")}
                 className="cursor-pointer inline-flex h-7 w-7 items-center justify-center rounded-md border border-rose-500/20 text-rose-300/80 hover:bg-rose-500/10 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <TrashIcon className="h-3.5 w-3.5" />
@@ -208,7 +210,7 @@ export function EndpointMapEditor({ value, onChange, disabled = false }: Props) 
           className="cursor-pointer inline-flex items-center gap-1 rounded-md border border-brand-500/25 bg-brand-500/10 px-2.5 py-1 text-[11px] text-brand-100 hover:bg-brand-500/15"
         >
           <PlusIcon className="h-3 w-3" />
-          Add endpoint
+          {t("addEndpoint")}
         </button>
       ) : null}
     </div>

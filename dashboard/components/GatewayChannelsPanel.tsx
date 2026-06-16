@@ -413,7 +413,7 @@ export function GatewayChannelsPanel() {
               onChange={(e) =>
                 setDraft((cur) => ({ ...cur, channel: e.target.value.toLowerCase() }))
               }
-              placeholder="telegram"
+              placeholder={t("channelPlaceholder")}
             />
           </Field>
 
@@ -454,7 +454,7 @@ export function GatewayChannelsPanel() {
                 onChange={(e) =>
                   setDraft((cur) => ({ ...cur, topicsCsv: e.target.value }))
                 }
-                placeholder="trades, approvals"
+                placeholder={t("topicsPlaceholder")}
               />
             </Field>
           </div>
@@ -500,7 +500,7 @@ export function GatewayChannelsPanel() {
                   onChange={(e) =>
                     setDraft((cur) => ({ ...cur, allowedUserIdsCsv: e.target.value }))
                   }
-                  placeholder="user-1, user-2"
+                  placeholder={t("allowedUsersPlaceholder")}
                 />
               </Field>
               <Field label={t("allowedChats")} hint={t("csvHint")}>
@@ -510,7 +510,7 @@ export function GatewayChannelsPanel() {
                   onChange={(e) =>
                     setDraft((cur) => ({ ...cur, allowedChatIdsCsv: e.target.value }))
                   }
-                  placeholder="chat-1, room-2"
+                  placeholder={t("allowedChatsPlaceholder")}
                 />
               </Field>
               <Field label={t("deniedUsers")} hint={t("csvHint")}>
@@ -520,7 +520,7 @@ export function GatewayChannelsPanel() {
                   onChange={(e) =>
                     setDraft((cur) => ({ ...cur, deniedUserIdsCsv: e.target.value }))
                   }
-                  placeholder="blocked-user"
+                  placeholder={t("deniedUsersPlaceholder")}
                 />
               </Field>
             </div>
@@ -639,8 +639,8 @@ export function GatewayChannelsPanel() {
                       }))
                     }
                     options={[
-                      { value: "polling", label: "polling" },
-                      { value: "webhook", label: "webhook" },
+                      { value: "polling", label: t("polling") },
+                      { value: "webhook", label: t("webhookMode") },
                     ]}
                   />
                 </Field>
@@ -665,7 +665,7 @@ export function GatewayChannelsPanel() {
                     className="input-dark text-xs"
                     value={draft.username}
                     onChange={(e) => setDraft((cur) => ({ ...cur, username: e.target.value }))}
-                    placeholder="Nerya"
+                    placeholder={t("usernamePlaceholder")}
                   />
                 </Field>
                 <Field label={t("timeout")} hint="sec">
@@ -673,7 +673,7 @@ export function GatewayChannelsPanel() {
                     className="input-dark font-mono text-xs"
                     value={draft.timeout_s}
                     onChange={(e) => setDraft((cur) => ({ ...cur, timeout_s: e.target.value }))}
-                    placeholder="10"
+                    placeholder={t("timeoutPlaceholder")}
                   />
                 </Field>
               </div>
