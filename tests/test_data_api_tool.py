@@ -281,7 +281,7 @@ def test_data_api_provider_aliases_route_to_wallet_and_onchainos(tmp_path) -> No
         data_api_handler(
             ToolCall(
                 name="data_api",
-                arguments={"op": "list", "provider": "xagt_agent_plugin", "limit": 5},
+                arguments={"op": "list", "provider": "byreal", "limit": 5},
             ),
             config_like=cfg,
         )
@@ -297,7 +297,7 @@ def test_data_api_provider_aliases_route_to_wallet_and_onchainos(tmp_path) -> No
     )
 
     assert wallet["provider"] == "wallet"
-    assert wallet["requested_provider"] == "xagt_agent_plugin"
+    assert wallet["requested_provider"] == "byreal"
     assert any(row["action"] == "list_sources" for row in wallet["actions"])
     assert onchainos["provider"] == "onchainos"
     assert onchainos["requested_provider"] == "okx_os"
@@ -322,7 +322,7 @@ def test_connector_view_omits_source_by_default_for_token_efficiency() -> None:
     assert viewed["found"] is True
     assert viewed["source_omitted"] is True
     assert "source" not in viewed
-    assert "strategy_generate_proposal" in viewed["source_hint"]
+    assert "strategy_draft_proposal" in viewed["source_hint"]
 
 
 def test_data_api_onchainos_exposes_meme_and_signal_sources(tmp_path) -> None:
@@ -358,10 +358,10 @@ def test_data_api_wallet_capability_catalog_surfaces_logged_in_usage(tmp_path) -
                 "label": "OKX Web3",
                 "config": {"account_id": "acct_1", "api_key_ref": "vault://wallet/okx/key"},
             },
-            "xagt_main": {
-                "provider": "xagt_agent_plugin",
-                "label": "XAgent",
-                "config": {"plugin_path": "C:/xagt", "access_token_ref": "vault://wallet/xagt/access"},
+            "byreal_main": {
+                "provider": "byreal",
+                "label": "Byreal Solana",
+                "config": {"cli_path": "/usr/local/bin/byreal-cli"},
             },
         }
     }
@@ -390,7 +390,7 @@ def test_data_api_wallet_capability_catalog_surfaces_logged_in_usage(tmp_path) -
     assert "Do not repeat" in str(data["rules"])
     assert data["available_route_count"] >= 1
     assert any(row["provider"] == "okx_os" for row in data["provider_summary"])
-    assert {row["wallet_id"] for row in data["bindings"]} == {"okx_main", "xagt_main"}
+    assert {row["wallet_id"] for row in data["bindings"]} == {"okx_main", "byreal_main"}
     assert "vault://wallet/okx/key" not in str(payload)
     onchain_actions = {row["action"] for row in data["callable_read_actions"]["onchainos"]}
     assert {"token_hot_tokens", "memepump_tokens", "token_report"}.issubset(onchain_actions)
@@ -423,7 +423,7 @@ def test_data_api_wallet_meme_strategy_guide_is_actionable(tmp_path) -> None:
 
     text = str(payload["data"])
     assert payload["data"]["authoring_contract"]["skill"] == "strategy_author"
-    assert "strategy_generate_proposal" in payload["data"]["next_required_action"]
+    assert "strategy_draft_proposal" in payload["data"]["next_required_action"]
     assert payload["data"]["bounded_sequence"][0]["call"]["skill_id"] == "strategy_author"
     assert "token_hot_tokens" in text
     assert "security_token_scan" in text
@@ -484,7 +484,7 @@ def test_data_api_wallet_catalog_rejects_limit_expansion(tmp_path) -> None:
     assert result.is_error is True
     assert result.error is not None
     assert result.error.kind == ToolErrorKind.SCHEMA_VALIDATION
-    assert "strategy_generate_proposal" in result.text()
+    assert "strategy_draft_proposal" in result.text()
 
 
 def test_data_api_wallet_capability_catalog_falls_back_to_goat_without_wallet(tmp_path) -> None:
@@ -583,7 +583,7 @@ def test_data_api_wallet_meme_strategy_guide_uses_ready_wallet_route(tmp_path, m
     )
 
 
-def test_data_api_wallet_meme_strategy_guide_honors_preferred_xagt_route(tmp_path, monkeypatch) -> None:
+def test_data_api_wallet_meme_strategy_guide_honors_preferred_byreal_route(tmp_path, monkeypatch) -> None:
     cfg = _config(tmp_path)
     cfg.data["wallet"] = {
         "providers": {
@@ -592,9 +592,9 @@ def test_data_api_wallet_meme_strategy_guide_honors_preferred_xagt_route(tmp_pat
                 "label": "OKX Web3",
                 "config": {},
             },
-            "xagt_main": {
-                "provider": "xagt_agent_plugin",
-                "label": "XAgent",
+            "byreal_main": {
+                "provider": "byreal",
+                "label": "Byreal Solana",
                 "config": {},
             },
         }
@@ -618,10 +618,10 @@ def test_data_api_wallet_meme_strategy_guide_honors_preferred_xagt_route(tmp_pat
                 "stability": "partial",
             },
             {
-                "id": "xagt_agent_plugin",
-                "label": "XAgent",
+                "id": "byreal",
+                "label": "Byreal Solana",
                 "readiness": {
-                    "provider": "xagt_agent_plugin",
+                    "provider": "byreal",
                     "ready": True,
                     "installed": True,
                 },
@@ -642,7 +642,7 @@ def test_data_api_wallet_meme_strategy_guide_honors_preferred_xagt_route(tmp_pat
                     "action": "meme_strategy_guide",
                     "args": {
                         "chain": "solana",
-                        "preferred_provider": "xagt_onchain",
+                        "preferred_provider": "byreal_onchain",
                     },
                 },
             ),
@@ -651,30 +651,30 @@ def test_data_api_wallet_meme_strategy_guide_honors_preferred_xagt_route(tmp_pat
     )
 
     selection = payload["data"]["selection"]
-    assert payload["data"]["preferred_provider"] == "xagt_agent_plugin"
-    assert payload["data"]["selected_route"]["provider"] == "xagt_agent_plugin"
-    assert payload["data"]["selected_route"]["canonical"] == "XAGT_ONCHAIN"
-    assert payload["data"]["selected_route"]["market"].startswith("XAGT_ONCHAIN:solana:")
+    assert payload["data"]["preferred_provider"] == "byreal"
+    assert payload["data"]["selected_route"]["provider"] == "byreal"
+    assert payload["data"]["selected_route"]["canonical"] == "BYREAL_ONCHAIN"
+    assert payload["data"]["selected_route"]["market"].startswith("BYREAL_ONCHAIN:solana:")
     assert selection["preference"]["matched_ready_route"] is True
     assert "do not silently substitute" in payload["data"]["next_required_action"]
     assert "wallet_install" not in str(selection["fallback"])
     discover_call = payload["data"]["workflow"][0]["call"]
-    assert discover_call["args"]["preferred_provider"] == "xagt_agent_plugin"
+    assert discover_call["args"]["preferred_provider"] == "byreal"
     assert any(
         step.get("step") == "fetch_historical_ohlcv"
-        and step.get("call", {}).get("venue") == "xagt_onchain"
+        and step.get("call", {}).get("venue") == "byreal_onchain"
         for step in payload["data"]["workflow"]
     )
 
 
-def test_data_api_wallet_catalog_prefers_ready_xagt_route(tmp_path, monkeypatch) -> None:
+def test_data_api_wallet_catalog_prefers_ready_byreal_route(tmp_path, monkeypatch) -> None:
     cfg = _config(tmp_path)
     cfg.data["wallet"] = {
         "providers": {
             "okx_main": {"provider": "okx_os", "label": "OKX Web3", "config": {}},
-            "xagt_main": {
-                "provider": "xagt_agent_plugin",
-                "label": "XAgent",
+            "byreal_main": {
+                "provider": "byreal",
+                "label": "Byreal Solana",
                 "config": {},
             },
         }
@@ -697,10 +697,10 @@ def test_data_api_wallet_catalog_prefers_ready_xagt_route(tmp_path, monkeypatch)
                 "capabilities": dict(base_caps),
             },
             {
-                "id": "xagt_agent_plugin",
-                "label": "XAgent",
+                "id": "byreal",
+                "label": "Byreal Solana",
                 "readiness": {
-                    "provider": "xagt_agent_plugin",
+                    "provider": "byreal",
                     "ready": True,
                     "installed": True,
                 },
@@ -725,8 +725,8 @@ def test_data_api_wallet_catalog_prefers_ready_xagt_route(tmp_path, monkeypatch)
         )
     )
 
-    assert payload["data"]["selected_route"]["provider"] == "xagt_agent_plugin"
-    assert payload["data"]["selected_route"]["canonical"] == "XAGT_ONCHAIN"
+    assert payload["data"]["selected_route"]["provider"] == "byreal"
+    assert payload["data"]["selected_route"]["canonical"] == "BYREAL_ONCHAIN"
 
 
 def test_data_api_wallet_readiness_filters_preferred_provider(tmp_path, monkeypatch) -> None:
@@ -741,10 +741,10 @@ def test_data_api_wallet_readiness_filters_preferred_provider(tmp_path, monkeypa
                 "capabilities": {},
             },
             {
-                "id": "xagt_agent_plugin",
-                "label": "XAgent",
+                "id": "byreal",
+                "label": "Byreal Solana",
                 "readiness": {
-                    "provider": "xagt_agent_plugin",
+                    "provider": "byreal",
                     "ready": True,
                     "installed": True,
                 },
@@ -765,7 +765,7 @@ def test_data_api_wallet_readiness_filters_preferred_provider(tmp_path, monkeypa
                     "op": "call",
                     "provider": "wallet",
                     "action": "readiness",
-                    "args": {"provider": "xagt-plugin"},
+                    "args": {"provider": "byreal-cli"},
                 },
             ),
             config_like=cfg,
@@ -773,10 +773,10 @@ def test_data_api_wallet_readiness_filters_preferred_provider(tmp_path, monkeypa
     )
 
     data = payload["data"]
-    assert data["provider"] == "xagt_agent_plugin"
+    assert data["provider"] == "byreal"
     assert data["ready"] is True
     assert data["count"] == 1
-    assert data["provider_status"][0]["id"] == "xagt_agent_plugin"
+    assert data["provider_status"][0]["id"] == "byreal"
     assert "install_hint" not in data["provider_status"][0]
     assert "self_custody" not in str(data)
     assert "do not repeat wallet.readiness" in data["next_required_action"]
@@ -896,7 +896,7 @@ def test_data_api_wallet_list_wallet_alias_suggests_readiness_followup(tmp_path)
         data_api_handler(
             ToolCall(
                 name="data_api",
-                arguments={"op": "list", "provider": "wallet", "query": "xagt"},
+                arguments={"op": "list", "provider": "wallet", "query": "byreal"},
             ),
             config_like=_config(tmp_path),
         )
@@ -907,7 +907,7 @@ def test_data_api_wallet_list_wallet_alias_suggests_readiness_followup(tmp_path)
         "op": "call",
         "provider": "wallet",
         "action": "readiness",
-        "args": {"provider": "xagt"},
+        "args": {"provider": "byreal"},
     }
     assert "readiness" in payload["next_required_action"]["message"]
 

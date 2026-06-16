@@ -35,8 +35,12 @@ from ...subagents.dispatcher import SubAgentDispatcher
 from ...subagents.registry import (
     DEFAULT_SUBAGENT_SKILLS,
     DEFAULT_TIERS,
+    GENERIC_ADHOC_SKILLS,
+    build_inline_spec,
+    canonical_subagent_name,
     delete_role,
     describe_role,
+    generic_role_prompt,
     list_roles,
     load_registry,
     save_role,
@@ -56,6 +60,47 @@ from ..types import (
 def _call_meta(call: ToolCall, key: str) -> Any:
     meta = call.metadata if isinstance(call.metadata, dict) else {}
     return meta.get(key)
+
+
+def _build_inline_role_spec(
+    config: Config,
+    *,
+    name: str,
+    prompt: Any = None,
+    allowed_skills: Any = None,
+    tier: Any = None,
+):
+    """Build an ephemeral :class:`SubAgentSpec` from inline tool args, or None.
+
+    Returns ``None`` when the caller supplied no inline role fields — the
+    dispatcher then resolves ``name`` through the registry, which already
+    synthesises a capable generic role for unknown names. When any inline
+    field is present we honour it so the lead agent can define a *temporary*
+    role on the fly (no ``role_save`` round-trip, nothing written to disk).
+    """
+
+    prompt_str = prompt.strip() if isinstance(prompt, str) else ""
+    skills_list = (
+        [str(s).strip() for s in allowed_skills if str(s).strip()]
+        if isinstance(allowed_skills, list)
+        else []
+    )
+    tier_str = tier.strip() if isinstance(tier, str) else ""
+    if not (prompt_str or skills_list or tier_str):
+        return None
+    paths = getattr(config, "paths", None)
+    if paths is None:
+        return None
+    try:
+        return build_inline_spec(
+            paths,
+            name=name,
+            prompt=prompt_str or None,
+            allowed_skills=skills_list or None,
+            tier=tier_str or None,
+        )
+    except Exception:
+        return None
 
 
 def _publish_team_event(kind: str, **payload: Any) -> None:
@@ -500,6 +545,12 @@ _TEAM_RUN_TURN_CACHE_LOCK = Lock()
 _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS = 120.0
 _TEAM_RUN_PARENT_MIN_FINAL_RESERVE_SECONDS = 30.0
 _TEAM_RUN_PARENT_RESERVE_SLACK_SECONDS = 15.0
+# Even a shallow single-wave team needs enough wall time for one round of
+# (web) research plus a synthesis round per member. Observed research members
+# run ~90s, so a model-authored ``timeout_s`` smaller than this silently kills
+# members mid-research and returns an empty "timeout" team. We lift such a
+# too-small timeout to this floor (unless the operator carried a hard deadline).
+_TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS = 180.0
 _OUTPUT_LANGUAGE_KEYS = (
     "output_language",
     "target_language",
@@ -815,14 +866,22 @@ def _effective_team_timeout_seconds(
     if explicit_candidates:
         timeout = max(30.0, min(explicit_candidates))
         auto_floor = _team_timeout_floor_seconds(args)
-        if (
-            auto_floor > timeout
-            and not _has_operator_team_time_budget(
-                args=args,
-                shared_payload=shared_payload,
-            )
-        ):
+        has_operator_budget = _has_operator_team_time_budget(
+            args=args,
+            shared_payload=shared_payload,
+        )
+        if auto_floor > timeout and not has_operator_budget:
             timeout = auto_floor
+        # A model-authored ``timeout_s`` is a hint, not a hard deadline. Single
+        # wave teams have no structural floor, so a too-small value (e.g. 60s)
+        # starves research members that need ~90s+ and yields an empty
+        # "timeout" team. Lift it to the shallow-research floor unless the
+        # operator carried an explicit hard time budget (which always wins).
+        if (
+            _TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS > timeout
+            and not has_operator_budget
+        ):
+            timeout = _TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS
         return _apply_parent_wall_budget_cap(
             timeout,
             parent_remaining_wall_seconds=parent_remaining_wall_seconds,
@@ -1067,34 +1126,107 @@ def _compact_member_entry(entry: dict[str, Any]) -> dict[str, Any]:
         out["error"] = _compact_text(entry.get("error"), limit=1000)
     if entry.get("error_kind"):
         out["error_kind"] = entry.get("error_kind")
+    if entry.get("caveat"):
+        out["caveat"] = entry.get("caveat")
     return out
+
+
+def _member_has_substantive_evidence(output: Any) -> bool:
+    """True when a member produced real, sourced findings.
+
+    Used to soften the evidence gate: a member that gathered actual evidence
+    (a populated ``evidence`` / ``sources`` list, or successful tool calls in
+    ``data_coverage.tools_used``) is a *caveated success*, not a team failure —
+    even if an evidence contract flags missing inputs. This is the common
+    private-company / estimate-heavy case where some required figures (SEC
+    filings, a public market snapshot) legitimately do not exist. Mere
+    intermediate ``observations`` or tool *errors* do not count as evidence.
+    """
+
+    if not isinstance(output, dict):
+        return False
+    evidence = output.get("evidence")
+    if isinstance(evidence, list):
+        for item in evidence:
+            if isinstance(item, dict):
+                if str(
+                    item.get("source")
+                    or item.get("claim")
+                    or item.get("url")
+                    or ""
+                ).strip():
+                    return True
+            elif isinstance(item, str) and item.strip():
+                return True
+    for key in ("sources", "citations", "references"):
+        seq = output.get(key)
+        if isinstance(seq, list):
+            for s in seq:
+                if isinstance(s, dict):
+                    if str(s.get("source") or s.get("url") or s.get("title") or "").strip():
+                        return True
+                elif isinstance(s, str) and s.strip():
+                    return True
+    coverage = output.get("data_coverage")
+    if isinstance(coverage, dict):
+        tools_used = coverage.get("tools_used")
+        if isinstance(tools_used, list) and any(
+            isinstance(t, dict) and t.get("ok") for t in tools_used
+        ):
+            return True
+    return False
+
+
+def _member_soft_quality_kind(output: dict) -> str | None:
+    """Return the degraded/partial/missing-evidence kind, or ``None`` if clean.
+
+    Distilled from the contract + self-report flags. ``status == "failed"`` is
+    excluded here because that is a *hard* failure, handled separately.
+    """
+
+    contract = output.get("evidence_contract")
+    contract_status = ""
+    contract_missing = None
+    if isinstance(contract, dict):
+        contract_status = str(contract.get("status") or "").strip()
+        contract_missing = contract.get("missing_evidence")
+    quality = str(output.get("quality") or "").strip()
+    if contract_status in {"degraded", "partial"} or bool(contract_missing):
+        return str(
+            (contract.get("error_kind") if isinstance(contract, dict) else None)
+            or output.get("error_kind")
+            or "insufficient_research_evidence"
+        )
+    if bool(output.get("degraded")):
+        return str(output.get("error_kind") or quality or "degraded_output")
+    if quality == "tool_observation_fallback":
+        return "tool_observation_fallback"
+    if bool(output.get("partial")) or quality == "degraded_missing_evidence":
+        return str(output.get("error_kind") or quality or "partial_output")
+    return None
 
 
 def _member_output_failure_kind(output: Any) -> str | None:
     if not isinstance(output, dict):
         return None
     contract = output.get("evidence_contract")
-    if isinstance(contract, dict):
-        status = str(contract.get("status") or "").strip()
-        missing = contract.get("missing_evidence")
-        if status in {"degraded", "failed", "partial"} or missing:
-            return str(
-                contract.get("error_kind")
-                or output.get("error_kind")
-                or "insufficient_research_evidence"
-            )
-    if bool(output.get("degraded")):
+    # Hard failure: the contract explicitly failed -> no usable result, fail
+    # regardless of any partial evidence.
+    if isinstance(contract, dict) and str(contract.get("status") or "").strip() == "failed":
         return str(
-            output.get("error_kind")
-            or output.get("quality")
-            or "degraded_output"
+            contract.get("error_kind")
+            or output.get("error_kind")
+            or "insufficient_research_evidence"
         )
-    quality = str(output.get("quality") or "").strip()
-    if quality == "tool_observation_fallback":
-        return "tool_observation_fallback"
-    if bool(output.get("partial")):
-        return str(output.get("error_kind") or quality or "partial_output")
-    return None
+    soft_kind = _member_soft_quality_kind(output)
+    if soft_kind is None:
+        return None
+    # Caveated success: still produced substantive, sourced findings. Keep the
+    # quality caveat on the output (so synthesis marks estimates) but do not
+    # fail the member.
+    if _member_has_substantive_evidence(output):
+        return None
+    return soft_kind
 
 
 def _apply_member_evidence_contract(output: Any) -> Any:
@@ -1317,9 +1449,13 @@ SUBAGENT_RUN_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Subagent name (e.g. 'market_analyst', 'risk_critic', "
-                "'coding_agent'). Must match a spec on disk under "
-                "<workspace>/subagents/<name>.agent.md or one of the "
-                "DEFAULT_SUBAGENT_SKILLS keys."
+                "'coding_agent'). Prefer a registered spec (workspace "
+                "<workspace>/subagents/<name>.agent.md or a "
+                "DEFAULT_SUBAGENT_SKILLS key). If none fits, you may invent "
+                "a new name and define it inline via the ``prompt`` / "
+                "``allowed_skills`` fields below — no role_save needed. Even "
+                "with no inline prompt, an unknown name runs as a capable "
+                "generic researcher rather than failing."
             ),
         },
         "payload": {
@@ -1328,6 +1464,29 @@ SUBAGENT_RUN_SCHEMA: dict[str, Any] = {
                 "Arbitrary JSON handed to the child runtime as the task "
                 "payload. The child reads it under '=== task payload ==='."
             ),
+        },
+        "prompt": {
+            "type": "string",
+            "description": (
+                "Optional inline role prompt (Markdown). Supply this to spin "
+                "up a temporary ad-hoc role for this run without persisting "
+                "it via role_save. Describe the role's expertise, output "
+                "schema, and constraints. Ephemeral: not written to disk."
+            ),
+        },
+        "allowed_skills": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Optional skills for an inline ad-hoc role. The dispatcher "
+                "denylist still blocks live-trading / wallet surfaces. "
+                "Defaults to a safe research/analysis set when omitted."
+            ),
+        },
+        "tier": {
+            "type": "string",
+            "enum": ["light", "medium", "high"],
+            "description": "Optional LLM tier for an inline ad-hoc role.",
         },
         "strategy_id": {
             "type": "string",
@@ -1417,6 +1576,13 @@ def subagent_run_handler(
         or _call_meta(call, "trigger_event_id")
         or None
     )
+    inline_spec = _build_inline_role_spec(
+        config,
+        name=name,
+        prompt=args.get("prompt"),
+        allowed_skills=args.get("allowed_skills"),
+        tier=args.get("tier"),
+    )
     cached_team = _get_cached_team_run_summary(_team_run_turn_key(call, args))
     if cached_team is not None and cached_team.get("ok") is True:
         _publish_team_event(
@@ -1466,6 +1632,7 @@ def subagent_run_handler(
             session_id=session_id,
             turn_id=call.turn_id,
             parent_call_id=call.id,
+            inline_spec=inline_spec,
         )
     except Exception as exc:
         return ToolResult.from_error(
@@ -1515,14 +1682,21 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
             "minItems": 1,
             "description": (
                 "List of roles to spawn in parallel. Each entry is "
-                "{name: <role>, payload: {...}}. ``name`` must match a "
-                "registered subagent (workspace or default). ``payload`` "
-                "is merged on top of the shared ``shared_payload``. A "
-                "role payload field named ``language`` or ``locale`` means "
-                "the role's working/analysis language; use top-level "
-                "``output_language`` for the final user-visible report "
-                "language. Pass this as a real JSON array, not a stringified "
-                "JSON array."
+                "{name: <role>, payload: {...}}. ``name`` SHOULD match a "
+                "registered subagent (workspace or default) when one fits — "
+                "but you are NOT limited to the registry: if no registered "
+                "role matches the task, invent a descriptive name and define "
+                "the role inline with ``prompt`` (and optional "
+                "``allowed_skills`` / ``tier``). No role_save is required and "
+                "nothing is persisted. Even a bare unknown name runs as a "
+                "capable generic researcher rather than failing, so prefer "
+                "defining the team you actually need over forcing the task "
+                "onto ill-fitting registered roles. ``payload`` is merged on "
+                "top of the shared ``shared_payload``. A role payload field "
+                "named ``language`` or ``locale`` means the role's "
+                "working/analysis language; use top-level ``output_language`` "
+                "for the final user-visible report language. Pass this as a "
+                "real JSON array, not a stringified JSON array."
             ),
             "items": {
                 "type": "object",
@@ -1534,6 +1708,32 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
                         "description": (
                             "Optional per-role instruction prepended to "
                             "the role's prompt for this run."
+                        ),
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "Optional inline role prompt (Markdown). Supply "
+                            "this to define a temporary ad-hoc role for this "
+                            "run without role_save. Ephemeral: not written "
+                            "to disk."
+                        ),
+                    },
+                    "allowed_skills": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional skills for an inline ad-hoc role. The "
+                            "dispatcher denylist still blocks live-trading / "
+                            "wallet surfaces. Defaults to a safe "
+                            "research/analysis set when omitted."
+                        ),
+                    },
+                    "tier": {
+                        "type": "string",
+                        "enum": ["light", "medium", "high"],
+                        "description": (
+                            "Optional LLM tier for an inline ad-hoc role."
                         ),
                     },
                 },
@@ -1734,6 +1934,7 @@ def team_run_handler(
     role_names: list[str] = []
     role_payloads: dict[str, dict[str, Any]] = {}
     role_assignment_prompts: dict[str, str] = {}
+    inline_specs: dict[str, Any] = {}
     for entry in raw_roles:
         if not isinstance(entry, dict):
             return ToolResult.from_error(
@@ -1782,6 +1983,15 @@ def team_run_handler(
         if instructions:
             merged["__team_instructions"] = instructions
         role_payloads[role_name] = merged
+        inline_spec = _build_inline_role_spec(
+            config,
+            name=role_name,
+            prompt=entry.get("prompt"),
+            allowed_skills=entry.get("allowed_skills"),
+            tier=entry.get("tier"),
+        )
+        if inline_spec is not None:
+            inline_specs[role_name] = inline_spec
         role_assignment_prompts[role_name] = _team_assignment_prompt(
             task=task,
             role_name=role_name,
@@ -1938,6 +2148,7 @@ def team_run_handler(
             session_id=session_id,
             turn_id=call.turn_id,
             parent_call_id=call.id,
+            inline_spec=inline_specs.get(r),
         ): r
         for r in role_names
     }
@@ -1980,6 +2191,11 @@ def team_run_handler(
             output = _apply_member_evidence_contract(envelope.get("output") or {})
             failure_kind = _member_output_failure_kind(output)
             ok = bool(envelope.get("ok", True)) and failure_kind is None
+            # A member that succeeded only because the evidence gate was
+            # softened (sourced findings but a flagged evidence gap) is marked
+            # as a *caveated* success so the UI and synthesis can show "done
+            # with caveats" instead of hiding the gap.
+            caveat_kind = _member_soft_quality_kind(output) if ok else None
             usd = float(envelope.get("usd") or 0.0)
             entry = {
                 "subagent": role_name,
@@ -1995,6 +2211,7 @@ def team_run_handler(
                 or (output.get("summary") if failure_kind else None),
                 "error_kind": envelope.get("error_kind")
                 or failure_kind,
+                "caveat": caveat_kind,
             }
             if ok:
                 results.append(entry)
@@ -2006,6 +2223,7 @@ def team_run_handler(
                 role=role_name,
                 status="completed" if ok else "error",
                 ok=ok,
+                caveat=caveat_kind,
                 error=entry.get("error"),
                 error_kind=entry.get("error_kind"),
                 tokens=entry.get("tokens"),
@@ -2166,15 +2384,45 @@ def role_get_handler(
         )
     record = describe_role(config.paths, name)
     if record is None:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.NOT_FOUND,
-                message=f"role not found: {name}",
-                retryable=False,
+        # No saved/default role matched. Instead of hard-failing with
+        # ``not_found`` — which used to push the lead agent into a recovery
+        # detour and frequently surfaced a scary "role not found" — synthesise
+        # the exact capable generic ad-hoc role the dispatcher would run for
+        # this name. ``role_get`` never blocks dispatch: the lead agent can use
+        # this as-is, override ``prompt`` / ``allowed_skills`` inline on
+        # team_run / subagent_run, or persist a reusable version via role_save.
+        try:
+            available = [
+                str(role.get("name"))
+                for role in list_roles(config.paths)
+                if role.get("name")
+            ]
+        except Exception:
+            available = []
+        try:
+            canonical = canonical_subagent_name(name)
+        except Exception:
+            canonical = name
+        record = {
+            "name": name,
+            "tier": DEFAULT_TIERS.get(canonical, "medium"),
+            "allowed_skills": list(GENERIC_ADHOC_SKILLS),
+            "persistent": False,
+            "source": "generated",
+            "generated": True,
+            "canonical_name": canonical or name,
+            "prompt_path": None,
+            "prompt": generic_role_prompt(name),
+            "note": (
+                f"No role named '{name}' is registered, so this is an "
+                "auto-generated generic ad-hoc researcher (read-only research "
+                "skills). Dispatch it directly via team_run / subagent_run — "
+                "optionally pass an inline ``prompt`` / ``allowed_skills`` to "
+                "tailor it, or call role_save to persist a reusable version. "
+                "You do NOT need role_get to succeed before dispatching."
             ),
-        )
+            "available_roles": available[:40],
+        }
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,

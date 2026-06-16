@@ -276,6 +276,10 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("GET", "/evolution/assets", "read:runtime", ""),
     RouteRule("POST", "/evolution/assets", "read:runtime", ""),
     RouteRule("POST", "/evolution/validation/run", "read:runtime", ""),
+    RouteRule("POST", "/evolution/proposals/{proposal_id}/approve", "write:skills", ""),
+    RouteRule("POST", "/evolution/proposals/{proposal_id}/reject", "write:skills", ""),
+    RouteRule("POST", "/evolution/post_apply_observation", "write:skills", ""),
+    RouteRule("POST", "/evolution/proposals/{proposal_id}/post_apply_observation", "write:skills", ""),
     RouteRule(None, "/evolution/", "write:skills", ""),
 
     # market / discovery

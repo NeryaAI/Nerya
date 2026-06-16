@@ -106,7 +106,7 @@ def test_run_shell_redirects_native_strategy_data_discovery(tmp_path):
     assert result.error is not None
     assert result.error.kind is ToolErrorKind.PERMISSION_DENIED
     assert "strategy_author" in result.text()
-    assert "strategy_generate_proposal" in result.text()
+    assert "strategy_draft_proposal" in result.text()
 
 
 def test_run_shell_redirects_workspace_file_enumeration(tmp_path):

@@ -83,7 +83,7 @@ def test_edit_file_refuses_live_strategy_and_points_to_strategy_proposal(tmp_pat
         file_state=None,
     )
 
-    assert _next_tool(result) == "strategy_generate_proposal"
+    assert _next_tool(result) == "strategy_draft_proposal"
     assert strategy_file.read_text(encoding="utf-8") == "OLD = 1\n"
 
 
@@ -147,5 +147,5 @@ def test_run_shell_refuses_proposal_only_strategy_mutation(tmp_path):
         root=tmp_path,
     )
 
-    assert _next_tool(result) == "strategy_generate_proposal"
+    assert _next_tool(result) == "strategy_draft_proposal"
     assert strategy_file.read_text(encoding="utf-8") == "OLD = 1\n"

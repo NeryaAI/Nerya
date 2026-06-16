@@ -40,7 +40,12 @@ from typing import Any, Optional
 from ...core import yaml_io
 from ...core.config import Config
 from ...core.errors import NeryaError, TradingError
-from ...evolution.patch_proposal import list_proposals, set_state
+from ...evolution.patch_proposal import (
+    create_proposal,
+    delete_proposal,
+    list_proposals,
+    set_state,
+)
 from ...evolution.promotion import apply_proposal
 from ...evolution.strategy_code_generator import (
     StrategyCodeGenerator,
@@ -52,6 +57,7 @@ from ...evolution.strategy_tuning_generator import (
 )
 from ...strategies.evolution import StrategyEvolutionRunner
 from ...strategies.package import load_package
+from ...trading.accounts import load_account_profiles
 from ...strategies.proposal_files import read_proposal_strategy_files
 from ...strategies.scheduler_bridge import apply_strategy_schedules
 from ...strategies.performance import build_snapshot
@@ -66,6 +72,7 @@ from ...strategies.performance import build_snapshot
 # from ...strategies.runner import StrategyRunner  # noqa: ERA001 (lazy import)
 from ...strategies.state import StrategyKillSwitch, StrategyRunStore
 from ...strategies.validator import (
+    StrategyValidation,
     validate_proposal_files,
     validate_strategy_package,
 )
@@ -112,7 +119,15 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
             "enum": ["paper", "shadow", "live"],
             "default": "paper",
         },
-        "markets": {"type": "array", "items": {"type": "string"}},
+        "markets": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "VENUE:SYMBOL market ids. Use BYBIT_PERPETUAL:SOLUSDT for "
+                "Bybit linear/perpetual/swap/futures contracts; use "
+                "BYBIT:SOLUSDT only for Bybit spot."
+            ),
+        },
         "accounts": {"type": "array", "items": {"type": "string"}},
         "files.main.py": {
             "type": "string",
@@ -213,6 +228,129 @@ STRATEGY_VALIDATE_SCHEMA: dict[str, Any] = {
             ),
         },
     },
+}
+
+
+STRATEGY_DELETE_PROPOSAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "proposal_id": {
+            "type": "string",
+            "description": (
+                "The prp_* id of the pending strategy package (or tuning) "
+                "proposal to delete."
+            ),
+        },
+        "force": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Delete even an already-applied proposal record. Off by "
+                "default; applied proposals are the audit trail of a change "
+                "that already landed in the workspace."
+            ),
+        },
+    },
+    "required": ["proposal_id"],
+}
+
+
+STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "strategy_id": {
+            "type": "string",
+            "description": "Lowercase identifier; matches ^[a-z][a-z0-9_]+$.",
+        },
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "prompt": {
+            "type": "string",
+            "description": (
+                "Concise operator brief; lands in strategy.md. Keep it short — "
+                "you will author the runnable logic by editing the scaffolded "
+                "files, not by passing code here."
+            ),
+        },
+        "strategy_class": {
+            "type": "string",
+            "enum": ["scalping", "trend", "news", "agent", "agent_task", "agent_team"],
+            "default": "scalping",
+            "description": (
+                "Strategy family used to pick the scaffold template. "
+                "`agent_task` is an alias for `strategy_class=agent` plus "
+                "`execution_mode=agent_task`."
+            ),
+        },
+        "execution_mode": {
+            "type": "string",
+            "enum": ["script", "agent", "agent_task", "agent_team", "team"],
+            "description": (
+                "Explicit runtime mode for the scaffold. `script` runs main.py "
+                "directly; `agent` lets main.py build a StrategyAgentTask; "
+                "`agent_team` schedules the Agent Team path."
+            ),
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["paper", "shadow", "live"],
+            "default": "paper",
+        },
+        "markets": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "VENUE:SYMBOL market ids. Use BYBIT_PERPETUAL:SOLUSDT for "
+                "Bybit linear/perpetual/swap/futures contracts; use "
+                "BYBIT:SOLUSDT only for Bybit spot."
+            ),
+        },
+        "accounts": {"type": "array", "items": {"type": "string"}},
+        "schedule_cron": {"type": "string"},
+        "schedule_every_seconds": {"type": "integer", "minimum": 1},
+        "news_sources": {"type": "array", "items": {"type": "string"}},
+        "subagents": {"type": "array", "items": {"type": "string"}},
+        "policy_overrides": {"type": "object"},
+        "llm_policy_overrides": {"type": "object"},
+        "create_tuning": {"type": "boolean", "default": True},
+        "tuning_prompt": {"type": "string"},
+        "tuning_cron": {"type": "string"},
+        "tuning_objectives": {"type": "array", "items": {"type": "string"}},
+        "extra_subagent_prompts": {
+            "type": "object",
+            "description": "Map of subagent name -> agent.md body.",
+        },
+        "from_strategy_id": {
+            "type": "string",
+            "description": (
+                "Seed the draft from an already-promoted strategy package "
+                "instead of stock templates. Use this to iterate on an "
+                "existing strategy: the live files are copied into the "
+                "proposal's after/strategies/<id>/ tree so you can edit and "
+                "re-submit them without mutating the live workspace."
+            ),
+        },
+    },
+    "required": ["strategy_id"],
+}
+
+
+STRATEGY_SUBMIT_PROPOSAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "proposal_id": {
+            "type": "string",
+            "description": (
+                "The prp_* id of the draft strategy proposal whose "
+                "after/strategies/<id>/ files you have finished editing."
+            ),
+        },
+        "note": {
+            "type": "string",
+            "description": "Optional reviewer note recorded on the proposal.",
+        },
+    },
+    "required": ["proposal_id"],
 }
 
 
@@ -409,6 +547,49 @@ def _execution_error(call: ToolCall, message: str) -> ToolResult:
     )
 
 
+def _strategy_validation_blockers_error(
+    call: ToolCall,
+    *,
+    strategy_id: str,
+    validation: StrategyValidation,
+    files: list[str],
+) -> ToolResult:
+    """Return the create-time validation blockers without a pending proposal.
+
+    The package failed validation, so no proposal was written. We hand the
+    structured blockers back to the agent as a schema-validation error so the
+    loop fixes ``files`` and re-calls ``strategy_generate_proposal``; the
+    proposal only enters the pending-review queue once validation passes.
+    """
+
+    blockers = validation.blockers
+    lines: list[str] = []
+    for issue in blockers:
+        where = f" [{issue.where}]" if issue.where else ""
+        lines.append(f"- {issue.message}{where}")
+    detail = "\n".join(lines) if lines else "- (no blocker detail reported)"
+    message = (
+        "strategy_generate_proposal did not create a pending proposal: the "
+        f"generated package for {strategy_id!r} has {len(blockers)} validation "
+        "blocker(s). Fix the strategy files and call strategy_generate_proposal "
+        "again with the corrected `files`; the proposal only enters the "
+        "pending-review queue once validation passes.\n"
+        f"Blockers:\n{detail}"
+    )
+    return _usage_error(
+        call,
+        message,
+        recovery_hint={
+            "action": "fix_validation_blockers_and_retry",
+            "tool_name": "strategy_generate_proposal",
+            "strategy_id": strategy_id,
+            "files": files,
+            "validation": validation.asdict(),
+            "blockers": [issue.asdict() for issue in blockers],
+        },
+    )
+
+
 def _manifest_execution_mode(content: str) -> str:
     try:
         raw = yaml_io.loads(content, default={}) or {}
@@ -419,8 +600,111 @@ def _manifest_execution_mode(content: str) -> str:
     return str(raw.get("execution_mode") or "").strip().lower().replace("-", "_")
 
 
+def _auto_bind_default_accounts(
+    paths: Any, request: StrategyGenerationRequest
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    """Resolve default accounts for a new draft when the caller omitted them.
+
+    Returns ``(resolved_account_ids, available_accounts)``. We auto-bind every
+    *active, non-real-money* account whose mode matches the request and whose
+    venue matches one of the requested markets — this saves the agent an extra
+    ``account_list`` round-trip on the common paper-draft flow. Real-money
+    modes (live/canary) are never auto-bound; the caller falls back to a
+    directive error that lists the available accounts so the agent can pick in
+    a single step. ``available_accounts`` is always returned (even on success)
+    so callers can surface it in recovery hints.
+    """
+    try:
+        profiles = load_account_profiles(paths)
+    except Exception:  # pragma: no cover - defensive: missing/corrupt roster
+        return (), []
+    req_mode = (request.mode or "paper").strip().lower()
+    venues = {
+        str(market).split(":")[0].strip().lower()
+        for market in request.markets
+        if str(market).strip()
+    }
+    venues.discard("")
+    available: list[dict[str, str]] = []
+    matches: list[str] = []
+
+    def venue_matches(profile_venue: str) -> bool:
+        if not venues:
+            return True
+        if profile_venue in venues:
+            return True
+        if profile_venue == "bybit" and venues.intersection(
+            {"bybit_perpetual", "bybit_perp", "bybit_linear"}
+        ):
+            return True
+        return False
+
+    for profile in profiles.values():
+        if str(getattr(profile, "status", "")).strip().lower() != "active":
+            continue
+        p_mode = str(getattr(profile, "mode", "")).strip().lower()
+        p_venue = str(getattr(profile, "venue", "")).strip().lower()
+        available.append({"id": profile.id, "venue": p_venue, "mode": p_mode})
+        # Only auto-bind safe, mode-matched accounts whose venue is in scope.
+        if getattr(profile, "is_real_money", False):
+            continue
+        if p_mode != req_mode:
+            continue
+        if not venue_matches(p_venue):
+            continue
+        matches.append(profile.id)
+    matches.sort()
+    available.sort(key=lambda row: str(row.get("id") or ""))
+    return tuple(matches), available
+
+
+def _missing_account_error(
+    call: ToolCall,
+    *,
+    request: StrategyGenerationRequest,
+    available: list[dict[str, str]],
+) -> ToolResult:
+    req_mode = (request.mode or "paper").strip().lower()
+    venues = sorted(
+        {
+            str(market).split(":")[0].strip().lower()
+            for market in request.markets
+            if str(market).strip()
+        }
+        - {""}
+    )
+    if available:
+        listing = ", ".join(
+            f"{row['id']} ({row['venue']}/{row['mode']})" for row in available[:8]
+        )
+        avail_text = f"Available accounts: {listing}."
+    else:
+        avail_text = (
+            "No accounts are configured yet — create a paper one with "
+            "account_upsert."
+        )
+    venue_text = f" for venue(s) {venues}" if venues else ""
+    return _usage_error(
+        call,
+        (
+            "strategy_draft_proposal needs an account for the new strategy. No "
+            f"active {req_mode} account matched the requested market(s){venue_text}. "
+            f"{avail_text} Pass accounts=[...] (or from_strategy_id to iterate "
+            "an existing strategy)."
+        ),
+        recovery_hint={
+            "action": "select_account_and_retry",
+            "tool_name": "strategy_draft_proposal",
+            "requested_mode": req_mode,
+            "requested_venues": venues,
+            "available_accounts": available,
+        },
+    )
+
+
 def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
     args = _normalise_raw_strategy_args(args)
+    args = _normalise_strategy_market_venues(args)
     strategy_class = str(args.get("strategy_class") or "scalping").strip().lower()
     execution_mode = str(args.get("execution_mode") or "").strip().lower()
     if strategy_class == "agent_task":
@@ -466,6 +750,82 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
             if isinstance(k, str)
         },
     )
+
+
+def _normalise_strategy_market_venues(args: dict[str, Any]) -> dict[str, Any]:
+    markets = args.get("markets")
+    if not isinstance(markets, list):
+        return args
+    text = " ".join(
+        str(args.get(key) or "")
+        for key in ("title", "description", "prompt", "strategy_id")
+    ).lower()
+    wants_bybit_perp = (
+        "bybit" in text
+        and any(token in text for token in ("perp", "perpetual", "linear", "swap", "futures", "contract"))
+    )
+    changed = False
+    fixed: list[str] = []
+    for market in markets:
+        value = str(market)
+        if wants_bybit_perp and value.upper().startswith("BYBIT:"):
+            fixed.append("BYBIT_PERPETUAL:" + value.split(":", 1)[1])
+            changed = True
+        elif value.upper().startswith("BYREAL:"):
+            fixed_value = _normalise_byreal_market(value)
+            fixed.append(fixed_value)
+            changed = changed or fixed_value != value
+        else:
+            fixed.append(value)
+    if not changed:
+        return args
+    out = dict(args)
+    out["markets"] = fixed
+    return out
+
+
+_BYREAL_GENERIC_MARKET_TAILS = {
+    "",
+    "sol",
+    "solana",
+    "meme",
+    "memes",
+    "meme_pool",
+    "meme_pools",
+    "sol_meme_pool",
+    "sol_memepool",
+    "new_pool",
+    "new_pools",
+    "new-pool",
+    "new-pools",
+    "pool",
+    "pools",
+    "scan",
+    "scanner",
+    "universe",
+}
+
+
+def _normalise_byreal_market(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    upper = raw.upper()
+    if upper.startswith("BYREAL_ONCHAIN:"):
+        return "BYREAL_ONCHAIN:" + raw.split(":", 1)[1]
+    if not upper.startswith("BYREAL:"):
+        return raw
+    tail = raw.split(":", 1)[1].strip() if ":" in raw else ""
+    tail_key = tail.strip().lower().replace("-", "_")
+    if (
+        tail_key in _BYREAL_GENERIC_MARKET_TAILS
+        or "meme_pool" in tail_key
+        or "new_pool" in tail_key
+    ):
+        return "BYREAL_ONCHAIN:solana"
+    if tail.lower().startswith("solana:"):
+        return "BYREAL_ONCHAIN:" + tail
+    return "BYREAL_ONCHAIN:solana:" + tail
 
 
 def _normalise_raw_strategy_args(args: dict[str, Any]) -> dict[str, Any]:
@@ -841,6 +1201,76 @@ def _read_proposal_files(
     return read_proposal_strategy_files(paths, proposal_id)
 
 
+def _normalise_bybit_perpetual_manifest_files(
+    paths,
+    *,
+    proposal_id: str,
+    strategy_id: str,
+    files: dict[str, str],
+) -> dict[str, str]:
+    manifest_text = files.get("strategy.yml")
+    if not manifest_text:
+        return files
+    try:
+        manifest = yaml_io.loads(manifest_text, default={}) or {}
+    except Exception:
+        return files
+    if not isinstance(manifest, dict):
+        return files
+    text = " ".join(
+        str(manifest.get(key) or "")
+        for key in ("strategy_id", "title", "description", "strategy_class", "execution_mode")
+    )
+    strategy_md = files.get("strategy.md")
+    if strategy_md:
+        text += " " + strategy_md
+    lowered = text.lower()
+    wants_bybit_perp = (
+        "bybit" in lowered
+        and any(token in lowered for token in ("perp", "perpetual", "linear", "swap", "futures", "contract"))
+    )
+    markets = manifest.get("markets")
+    if isinstance(markets, str):
+        values = [markets]
+    elif isinstance(markets, list):
+        values = [str(item) for item in markets]
+    else:
+        values = []
+    changed = False
+    fixed: list[str] = []
+    for market in values:
+        if wants_bybit_perp and market.upper().startswith("BYBIT:"):
+            fixed.append("BYBIT_PERPETUAL:" + market.split(":", 1)[1])
+            changed = True
+        elif market.upper().startswith("BYREAL:"):
+            fixed_value = _normalise_byreal_market(market)
+            fixed.append(fixed_value)
+            changed = changed or fixed_value != market
+        else:
+            fixed.append(market)
+    if not changed:
+        return files
+    manifest["markets"] = fixed
+    updated = yaml_io.dumps(manifest)
+    out = dict(files)
+    out["strategy.yml"] = updated
+    manifest_path = (
+        paths.evolution
+        / "proposals"
+        / proposal_id
+        / "after"
+        / "strategies"
+        / strategy_id
+        / "strategy.yml"
+    )
+    try:
+        if manifest_path.exists():
+            manifest_path.write_text(updated, encoding="utf-8")
+    except Exception:
+        _LOG.debug("failed to persist normalized strategy market", exc_info=True)
+    return out
+
+
 _FREEFORM_BACKTEST_KINDS = {
     "freeform_backtest",
     "custom_backtest",
@@ -897,8 +1327,8 @@ _MEME_OR_ONCHAIN_MARKERS = (
     "on-chain",
     "onchainos",
     "okx_onchain",
-    "xagent",
-    "x_agent",
+    "byreal",
+    "byreal_onchain",
     "goat",
     "dex",
     "dexscreener",
@@ -1129,7 +1559,7 @@ def _proposal_generic_onchain_markets(files: dict[str, str]) -> list[str]:
     for market in values:
         parts = str(market or "").split(":")
         venue = parts[0].upper() if parts else ""
-        if venue in {"XAGT_ONCHAIN", "OKX_ONCHAIN", "BITGET_ONCHAIN", "ONCHAIN"} and len(parts) == 2:
+        if venue in {"BYREAL_ONCHAIN", "OKX_ONCHAIN", "BITGET_ONCHAIN", "ONCHAIN"} and len(parts) == 2:
             generic.append(market)
     return generic
 
@@ -1522,6 +1952,40 @@ def _proposal_backtest_next_action(proposal_id: str) -> dict[str, Any]:
     }
 
 
+def _proposal_requires_standard_backtest(
+    strategy_id: str | None,
+    files: dict[str, str],
+) -> bool:
+    try:
+        manifest = yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}
+    except Exception:
+        manifest = {}
+    markets = manifest.get("markets") if isinstance(manifest, dict) else None
+    if isinstance(markets, str):
+        market_values = [markets]
+    elif isinstance(markets, list):
+        market_values = [str(item) for item in markets if str(item).strip()]
+    else:
+        market_values = []
+    if not market_values:
+        return False
+    if _proposal_is_meme_or_onchain(strategy_id, files):
+        return False
+    return True
+
+
+def _proposal_nonstandard_replay_next_action() -> dict[str, Any]:
+    return {
+        "type": "paper_replay_or_custom_evidence",
+        "message": (
+            "This strategy is for meme/on-chain/new-pool discovery, so a "
+            "standard OHLCV backtest is not required before review. Provide "
+            "a paper replay plan or custom replay evidence from real pool, "
+            "wallet, liquidity, concentration, and slippage observations."
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -1600,12 +2064,31 @@ def strategy_generate_proposal_handler(
             request,
             validate=do_validate,
             create_proposal_record=True,
+            # Validate immediately on create: when blockers exist we do not
+            # leave a pending proposal behind, we hand the blockers straight
+            # back to the agent so it can fix the package and call this tool
+            # again. A proposal only enters the pending-review queue once the
+            # generated files pass validation.
+            require_valid=do_validate,
         )
     except NeryaError as exc:
         return _usage_error(call, str(exc))
     except Exception as exc:
         return _execution_error(
             call, f"generator failed: {type(exc).__name__}: {exc}"
+        )
+
+    if (
+        do_validate
+        and result.proposal is None
+        and result.validation is not None
+        and not result.validation.ok
+    ):
+        return _strategy_validation_blockers_error(
+            call,
+            strategy_id=result.request.strategy_id,
+            validation=result.validation,
+            files=list(result.files.keys()),
         )
 
     payload = {
@@ -1627,8 +2110,405 @@ def strategy_generate_proposal_handler(
             request.strategy_id,
         )
     if result.proposal and result.validation is not None and result.validation.ok:
+        standard_backtest_required = _proposal_requires_standard_backtest(
+            result.request.strategy_id,
+            result.files,
+        )
         payload["backtest_required"] = True
-        payload["next_required_action"] = _proposal_backtest_next_action(result.proposal.id)
+        if standard_backtest_required:
+            payload["next_required_action"] = _proposal_backtest_next_action(result.proposal.id)
+        else:
+            payload["backtest_required"] = False
+            payload["next_required_action"] = _proposal_nonstandard_replay_next_action()
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+
+
+# ---------------------------------------------------------------------------
+# File-authoring lane: strategy_draft_proposal + strategy_submit_proposal
+#
+# Instead of dumping every package file inline through one large tool call
+# (high-context and brittle), the agent scaffolds a *draft* proposal, edits
+# the staged files in place with read_file/edit_file/write_file (they live
+# under evolution/proposals/<pid>/after/strategies/<id>/ which the workspace
+# mutation guard allows), validates, and submits. A proposal only enters the
+# pending-review queue once it passes validation.
+# ---------------------------------------------------------------------------
+
+
+_DRAFT_SEED_SKIP_DIRS = {"runs", "logs", "state", "versions", "backtests"}
+
+
+def _draft_next_steps(proposal_id: str, paths_map: dict[str, str]) -> list[str]:
+    main_path = paths_map.get("main_path") or "<proposal>/after/strategies/<id>/main.py"
+    return [
+        (
+            "The scaffold is a GENERIC momentum example, not your strategy yet. "
+            f"Edit the staged files in place with edit_file (e.g. {main_path}); "
+            "they live under the proposal's after/strategies tree and are NOT "
+            "live. Keep the contract scaffolding (the run() signature, the "
+            "open_position / close_position calls, the signed-position handling "
+            "and indicator helpers) and replace just the signal/indicator logic "
+            "to match the requested idea — that is far faster than rewriting the "
+            "whole file."
+        ),
+        (
+            "Author real SDK logic in main.py using StrategyContext / "
+            "StrategyResult (and StrategyAgentTask for agent decisions). Read "
+            "positions via ctx.portfolio.positions(market) — it returns a list, "
+            "so iterate or select a row, never call .get on it — and the "
+            "configured account via ctx.config.accounts[0] (there is no "
+            "ctx.account_id)."
+        ),
+        (
+            f'Run strategy_validate({{"proposal_id": "{proposal_id}"}}) and fix '
+            "any blockers by editing the files."
+        ),
+        (
+            "When validation passes, call "
+            f'strategy_submit_proposal({{"proposal_id": "{proposal_id}"}}) to '
+            "move it into the pending-review queue."
+        ),
+    ]
+
+
+def _read_promoted_strategy_files(paths, strategy_id: str) -> dict[str, str]:
+    """Return ``rel_path -> content`` for a promoted strategy package.
+
+    Runtime artifacts (runs/, logs/, state/, versions/, backtests/) and the
+    cached validation report are skipped so the seeded draft only contains the
+    authored package, not per-run output.
+    """
+
+    root = paths.strategies / strategy_id
+    if not root.exists() or not root.is_dir():
+        return {}
+    files: dict[str, str] = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root)
+        top = rel.parts[0] if rel.parts else ""
+        if top in _DRAFT_SEED_SKIP_DIRS:
+            continue
+        if rel.name == "validation_report.json":
+            continue
+        try:
+            content = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        files[rel.as_posix()] = content
+    return files
+
+
+def _draft_from_promoted(
+    call: ToolCall,
+    paths,
+    *,
+    strategy_id: str,
+    from_strategy_id: str,
+    args: dict[str, Any],
+) -> ToolResult:
+    seed = _read_promoted_strategy_files(paths, from_strategy_id)
+    if not seed:
+        return _usage_error(
+            call,
+            (
+                f"cannot iterate: promoted strategy {from_strategy_id!r} has no "
+                f"files under strategies/{from_strategy_id}/. Promote it first, "
+                "or omit from_strategy_id to scaffold a brand-new strategy."
+            ),
+        )
+    try:
+        validation: Optional[StrategyValidation] = validate_proposal_files(
+            strategy_id=strategy_id, files=seed
+        )
+    except Exception:
+        validation = None
+    extra_files: dict[str, str] = {}
+    for rel, content in seed.items():
+        extra_files[f"after/strategies/{strategy_id}/{rel}"] = content
+    if validation is not None:
+        extra_files["validation_report.json"] = json.dumps(
+            validation.asdict(), indent=2, ensure_ascii=False
+        )
+    title = str(args.get("title") or "").strip() or f"Iterate strategy {strategy_id}"
+    try:
+        proposal = create_proposal(
+            paths,
+            kind="strategy_package_proposal",
+            summary=title,
+            rationale=(
+                f"# {title}\n\nSeeded from promoted strategy "
+                f"`{from_strategy_id}` for edit-based iteration.\n"
+            ),
+            test_plan=(
+                "# Test plan\n\nValidate + backtest the edited package before "
+                "promotion.\n"
+            ),
+            rollback=(
+                f"# Rollback\n\nThe promoted `{from_strategy_id}` package stays "
+                "live until this proposal is promoted.\n"
+            ),
+            target=f"strategies/{strategy_id}",
+            extra_files=extra_files,
+            initial_state="draft",
+            metadata={
+                "strategy_id": strategy_id,
+                "iterated_from": from_strategy_id,
+                "seeded_from": "promoted",
+            },
+        )
+    except NeryaError as exc:
+        return _usage_error(call, str(exc))
+    except Exception as exc:
+        return _execution_error(
+            call, f"draft scaffold failed: {type(exc).__name__}: {exc}"
+        )
+    paths_map = _proposal_strategy_paths(paths, proposal.id, strategy_id)
+    payload = {
+        "action": "strategy_draft_proposal",
+        "proposal_id": proposal.id,
+        "strategy_id": strategy_id,
+        "state": "draft",
+        "kind": "strategy_package_proposal",
+        "seeded_from": "promoted",
+        "iterated_from": from_strategy_id,
+        "files": sorted(seed.keys()),
+        "validation": validation.asdict() if validation is not None else None,
+        "proposal_paths": paths_map,
+        "next_steps": _draft_next_steps(proposal.id, paths_map),
+    }
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+
+
+def strategy_draft_proposal_handler(
+    call: ToolCall, *, config: Config
+) -> ToolResult:
+    args = _normalise_raw_strategy_args(call.arguments or {})
+    strategy_id = str(args.get("strategy_id") or "").strip()
+    from_strategy_id = str(args.get("from_strategy_id") or "").strip()
+    if not strategy_id:
+        return _usage_error(call, "strategy_draft_proposal requires strategy_id")
+
+    paths = config.paths
+    if from_strategy_id:
+        return _draft_from_promoted(
+            call,
+            paths,
+            strategy_id=strategy_id,
+            from_strategy_id=from_strategy_id,
+            args=args,
+        )
+
+    try:
+        request = _request_from_args(args)
+    except Exception as exc:
+        return _usage_error(call, f"invalid request: {type(exc).__name__}: {exc}")
+    if not request.markets:
+        return _usage_error(
+            call,
+            (
+                "strategy_draft_proposal requires at least one market for a new "
+                "strategy (or pass from_strategy_id to iterate an existing one)."
+            ),
+        )
+    auto_selected_accounts: list[str] = []
+    if not request.accounts:
+        resolved, available = _auto_bind_default_accounts(paths, request)
+        if resolved:
+            request = replace(request, accounts=resolved)
+            auto_selected_accounts = list(resolved)
+        else:
+            return _missing_account_error(
+                call, request=request, available=available
+            )
+
+    try:
+        generator = StrategyCodeGenerator(paths)
+        gen = generator.generate(
+            request,
+            validate=True,
+            create_proposal_record=True,
+            require_valid=False,
+            initial_state="draft",
+        )
+    except NeryaError as exc:
+        return _usage_error(call, str(exc))
+    except Exception as exc:
+        return _execution_error(
+            call, f"draft scaffold failed: {type(exc).__name__}: {exc}"
+        )
+
+    proposal = gen.proposal
+    if proposal is None:
+        return _execution_error(call, "draft proposal was not created")
+    paths_map = _proposal_strategy_paths(paths, proposal.id, strategy_id)
+    payload = {
+        "action": "strategy_draft_proposal",
+        "proposal_id": proposal.id,
+        "strategy_id": strategy_id,
+        "state": "draft",
+        "kind": "strategy_package_proposal",
+        "seeded_from": "template",
+        "strategy_class": gen.request.strategy_class,
+        "files": list(gen.files.keys()),
+        "validation": gen.validation.asdict() if gen.validation is not None else None,
+        "proposal_paths": paths_map,
+        "next_steps": _draft_next_steps(proposal.id, paths_map),
+    }
+    if auto_selected_accounts:
+        payload["auto_selected_accounts"] = auto_selected_accounts
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+
+
+def _strategy_submit_validation_blockers_error(
+    call: ToolCall,
+    *,
+    proposal_id: str,
+    strategy_id: str,
+    validation: StrategyValidation,
+    files: list[str],
+    paths_map: dict[str, str],
+) -> ToolResult:
+    blockers = validation.blockers
+    lines: list[str] = []
+    for issue in blockers:
+        where = f" [{issue.where}]" if issue.where else ""
+        lines.append(f"- {issue.message}{where}")
+    detail = "\n".join(lines) if lines else "- (no blocker detail reported)"
+    main_path = paths_map.get("main_path") or "the after/strategies files"
+    message = (
+        f"strategy_submit_proposal kept proposal {proposal_id!r} in draft: the "
+        f"package for {strategy_id!r} still has {len(blockers)} validation "
+        f"blocker(s). Edit the staged files (e.g. {main_path}) with "
+        "edit_file / write_file, re-run strategy_validate, and call "
+        "strategy_submit_proposal again once validation passes. The proposal "
+        "only enters the pending-review queue when validation is clean.\n"
+        f"Blockers:\n{detail}"
+    )
+    return _usage_error(
+        call,
+        message,
+        recovery_hint={
+            "action": "fix_validation_blockers_and_resubmit",
+            "tool_name": "strategy_submit_proposal",
+            "proposal_id": proposal_id,
+            "strategy_id": strategy_id,
+            "proposal_paths": paths_map,
+            "files": files,
+            "validation": validation.asdict(),
+            "blockers": [issue.asdict() for issue in blockers],
+        },
+    )
+
+
+def strategy_submit_proposal_handler(
+    call: ToolCall, *, config: Config
+) -> ToolResult:
+    args = call.arguments or {}
+    proposal_id = str(args.get("proposal_id") or "").strip()
+    note = str(args.get("note") or "").strip()
+    if not proposal_id:
+        return _usage_error(call, "strategy_submit_proposal requires proposal_id")
+
+    paths = config.paths
+    target = None
+    for proposal in list_proposals(paths):
+        if proposal.id == proposal_id:
+            target = proposal
+            break
+    if target is None:
+        return _usage_error(
+            call,
+            f"proposal {proposal_id!r} not found",
+            recovery_hint={"action": "strategy_draft_proposal"},
+        )
+    if target.kind != "strategy_package_proposal":
+        return _usage_error(
+            call,
+            (
+                f"proposal {proposal_id!r} is a {target.kind}, not a strategy "
+                "package proposal; strategy_submit_proposal only submits "
+                "strategy packages."
+            ),
+        )
+
+    try:
+        sid, files = _read_proposal_files(paths, proposal_id)
+    except Exception as exc:
+        return _execution_error(
+            call, f"failed to read proposal files: {type(exc).__name__}: {exc}"
+        )
+    if not files:
+        return _usage_error(
+            call,
+            (
+                f"proposal {proposal_id!r} has no after/strategies/* files to "
+                "submit. Scaffold it with strategy_draft_proposal first, then "
+                "edit the staged files."
+            ),
+        )
+    strategy_id = sid or "unknown"
+    files = _normalise_bybit_perpetual_manifest_files(
+        paths,
+        proposal_id=proposal_id,
+        strategy_id=strategy_id,
+        files=files,
+    )
+
+    try:
+        validation = validate_proposal_files(strategy_id=strategy_id, files=files)
+    except Exception as exc:
+        return _execution_error(
+            call, f"validation failed: {type(exc).__name__}: {exc}"
+        )
+
+    paths_map = _proposal_strategy_paths(paths, proposal_id, strategy_id)
+    if not validation.ok:
+        return _strategy_submit_validation_blockers_error(
+            call,
+            proposal_id=proposal_id,
+            strategy_id=strategy_id,
+            validation=validation,
+            files=sorted(files.keys()),
+            paths_map=paths_map,
+        )
+
+    try:
+        (target.path / "validation_report.json").write_text(
+            json.dumps(validation.asdict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:  # pragma: no cover - report write is best-effort
+        pass
+    set_state(
+        paths,
+        proposal_id,
+        "pending_review",
+        note=note or "submitted for review via strategy_submit_proposal",
+    )
+
+    standard_backtest_required = _proposal_requires_standard_backtest(
+        strategy_id,
+        files,
+    )
+    payload = {
+        "action": "strategy_submit_proposal",
+        "proposal_id": proposal_id,
+        "strategy_id": strategy_id,
+        "kind": "strategy_package_proposal",
+        "state": "pending_review",
+        "summary": target.summary,
+        "validation": validation.asdict(),
+        "files": sorted(files.keys()),
+        "proposal_paths": paths_map,
+        "backtest_required": standard_backtest_required,
+        "next_required_action": (
+            _proposal_backtest_next_action(proposal_id)
+            if standard_backtest_required
+            else _proposal_nonstandard_replay_next_action()
+        ),
+    }
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
 
 
@@ -1647,6 +2527,12 @@ def strategy_validate_handler(call: ToolCall, *, config: Config) -> ToolResult:
                     call, f"proposal {proposal_id!r} has no after/strategies/* tree"
                 )
             target_sid = strategy_id or sid or "unknown"
+            files = _normalise_bybit_perpetual_manifest_files(
+                config.paths,
+                proposal_id=proposal_id,
+                strategy_id=target_sid,
+                files=files,
+            )
             validation = validate_proposal_files(
                 strategy_id=target_sid, files=files
             )
@@ -1667,6 +2553,24 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
     args = call.arguments or {}
     strategy_id = (args.get("strategy_id") or "").strip() or None
     proposal_id = (args.get("proposal_id") or "").strip() or None
+    # Agents frequently pass BOTH ids right after submitting a proposal
+    # (they now know each). Both point at the same staged strategy, so
+    # prefer the in-flight proposal and drop the redundant strategy_id
+    # rather than failing run_strategy_backtest's "exactly one" guard.
+    if strategy_id and proposal_id:
+        strategy_id = None
+    if proposal_id:
+        try:
+            sid, files = _read_proposal_files(config.paths, proposal_id)
+            if files:
+                _normalise_bybit_perpetual_manifest_files(
+                    config.paths,
+                    proposal_id=proposal_id,
+                    strategy_id=sid or strategy_id or "unknown",
+                    files=files,
+                )
+        except Exception:
+            _LOG.debug("pre-backtest proposal normalization failed", exc_info=True)
     if strategy_id and not proposal_id:
         matching_proposals = _matching_proposal_strategy_candidates(config.paths, strategy_id)
         if matching_proposals and _promoted_strategy_has_placeholder_market(
@@ -1753,7 +2657,7 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
                         ),
                         "repair_hint": (
                             "Use the exact concrete market from the successful "
-                            "market_data result, e.g. XAGT_ONCHAIN:solana:<token_contract>."
+                            "market_data result, e.g. BYREAL_ONCHAIN:solana:<pool_address>."
                         ),
                     }
                 elif _proposal_is_meme_or_onchain(sid or strategy_id, files):
@@ -1885,8 +2789,10 @@ def _model_facing_backtest_result(result: dict[str, Any]) -> dict[str, Any]:
     out["raw_metrics_file"] = result.get("metrics_path")
     out["metrics_are_display_strings"] = True
     out["metrics_note"] = (
-        "Use metrics/operator_summary strings exactly in the final answer. "
-        "Raw numeric metrics are only in raw_metrics_file."
+        "Summarise the backtest in plain language for the user. Reuse the "
+        "exact numbers from metrics/operator_summary, but do not copy their "
+        "field labels or any internal notes verbatim. Raw numeric metrics "
+        "are only in raw_metrics_file."
     )
     return out
 
@@ -1929,6 +2835,13 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
                 "validation": validation.asdict(),
             },
         )
+    try:
+        (paths.evolution / "proposals" / pid / "validation_report.json").write_text(
+            json.dumps(validation.asdict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
     backtests = _proposal_backtest_artifacts(paths, pid, sid)
     nonstandard_backtests = _proposal_nonstandard_backtest_artifacts(paths, pid, sid)
@@ -2141,6 +3054,52 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
             "promotion": outcome,
             "schedules": schedule_outcome,
         },
+    )
+
+
+def strategy_delete_proposal_handler(
+    call: ToolCall, *, config: Config
+) -> ToolResult:
+    """Delete a pending strategy package/tuning proposal.
+
+    Lets the agent (and, via the API route, the chat UI) drop a proposal that
+    should not stay in the pending-review queue. Already-applied proposals are
+    the audit trail of a landed change, so removing one needs ``force=true``.
+    """
+
+    args = call.arguments or {}
+    pid = (args.get("proposal_id") or "").strip()
+    if not pid:
+        return _usage_error(call, "proposal_id is required")
+    force = bool(args.get("force", False))
+    note = str(args.get("note") or "")
+
+    try:
+        result = delete_proposal(config.paths, pid, force=force, note=note)
+    except Exception as exc:
+        return _execution_error(
+            call, f"delete_proposal failed: {type(exc).__name__}: {exc}"
+        )
+
+    if not result.get("ok"):
+        reason = str(result.get("reason") or "")
+        if reason == "not_found":
+            return _usage_error(call, f"proposal {pid!r} not found")
+        if reason == "applied_requires_force":
+            return _usage_error(
+                call,
+                f"proposal {pid!r} is already applied; pass force=true to "
+                "delete its record (this does not roll back the applied "
+                "change — use strategy rollback for that).",
+            )
+        return _execution_error(
+            call, f"could not delete proposal {pid!r}: {reason}"
+        )
+
+    return ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data=result,
     )
 
 
@@ -2372,22 +3331,28 @@ def strategy_tuning_snapshot_handler(
 
 __all__ = [
     "STRATEGY_BACKTEST_SCHEMA",
+    "STRATEGY_DELETE_PROPOSAL_SCHEMA",
+    "STRATEGY_DRAFT_PROPOSAL_SCHEMA",
     "STRATEGY_GENERATE_PROPOSAL_SCHEMA",
     "STRATEGY_KILL_SWITCH_SCHEMA",
     "STRATEGY_PROMOTE_SCHEMA",
     "STRATEGY_RUN_HISTORY_SCHEMA",
     "STRATEGY_RUN_TICK_SCHEMA",
+    "STRATEGY_SUBMIT_PROPOSAL_SCHEMA",
     "STRATEGY_TUNING_GENERATE_SCHEMA",
     "STRATEGY_TUNING_RUN_SCHEMA",
     "STRATEGY_TUNING_SNAPSHOT_SCHEMA",
     "STRATEGY_TUNING_STATUS_SCHEMA",
     "STRATEGY_VALIDATE_SCHEMA",
     "strategy_backtest_handler",
+    "strategy_delete_proposal_handler",
+    "strategy_draft_proposal_handler",
     "strategy_generate_proposal_handler",
     "strategy_kill_switch_handler",
     "strategy_promote_handler",
     "strategy_run_history_handler",
     "strategy_run_tick_handler",
+    "strategy_submit_proposal_handler",
     "strategy_tuning_generate_handler",
     "strategy_tuning_run_handler",
     "strategy_tuning_snapshot_handler",

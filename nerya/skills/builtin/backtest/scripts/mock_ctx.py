@@ -306,19 +306,29 @@ class MockTrading:
         cp_side = str(side or "long").lower()
         legacy_side = "buy" if cp_side in ("long", "buy") else "sell"
         sizing_d = dict(sizing) if isinstance(sizing, dict) else {}
-        method = str(sizing_d.get("method") or "fixed_usd")
+        method = str(sizing_d.get("method") or "fixed_usd").lower()
         if method == "fixed_usd":
             size = float(sizing_d.get("fixed_usd") or 0.0)
             size_unit = "usd"
         elif method == "fixed_base":
             size = float(sizing_d.get("fixed_base") or 0.0)
             size_unit = "base"
+        elif method in {"pct_nav", "pct", "percent", "nav_pct", "percent_nav", "equity_pct"}:
+            # Percentage-of-NAV sizing: carry the fraction through so the
+            # engine can resolve it against live portfolio equity at fill
+            # time. Accept the value under a few common keys.
+            pct_val = sizing_d.get("pct_nav")
+            for alt in ("pct", "percent", "value", "fraction"):
+                if pct_val is None:
+                    pct_val = sizing_d.get(alt)
+            size = float(pct_val or 0.0)
+            size_unit = "pct_nav"
         else:
-            # close_all / reduce_pct / pct_nav / risk_to_stop:
-            # Backtest harness sees these only in close_position which
-            # has its own placeholder; for unfamiliar open methods,
-            # fall back to the policy's default order USD.
-            size = float(sizing_d.get("fixed_usd") or 0.0)
+            # Unsupported open sizing (risk_to_stop, close_all, ...): prefer an
+            # explicit fixed_usd if present, otherwise leave the engine's
+            # cash-fraction fallback to size it (never silently zero).
+            fixed = sizing_d.get("fixed_usd")
+            size = float(fixed) if fixed else 0.0
             size_unit = "usd"
         record = {
             "intent_id": intent_id,
@@ -563,17 +573,90 @@ class MockPortfolio:
             qty = float(value.get("qty", 0.0) or 0.0)
             if abs(qty) <= 1e-12:
                 continue
+            entry = float(value.get("avg_price", 0.0) or 0.0)
+            # Signed size mirrors the live merged-position contract
+            # (negative = short) so generated strategies that read the
+            # signed size compute side-aware PnL/exits correctly.
             out.append({
                 "market": pos_market,
-                "size": abs(qty),
-                "quantity": abs(qty),
-                "entry_price": float(value.get("avg_price", 0.0) or 0.0),
+                "size": qty,
+                "quantity": qty,
+                "qty": qty,
+                "avg_price": entry,
+                "entry_price": entry,
                 "side": "long" if qty > 0 else "short",
             })
         return out
 
     def open_positions(self, market: str | None = None) -> list[dict[str, Any]]:
         return self.positions(market=market)
+
+    def _nav(self) -> dict[str, float]:
+        raw = self.state.get("__portfolio_nav__") if hasattr(self.state, "get") else None
+        return raw if isinstance(raw, dict) else {}
+
+    @property
+    def equity_usd(self) -> float:
+        nav = self._nav()
+        return float(nav.get("equity") or nav.get("nav") or 0.0)
+
+    @property
+    def cash_usd(self) -> float:
+        return float(self._nav().get("cash") or 0.0)
+
+    def summary(self) -> dict[str, Any]:
+        """Mirror the live ``StrategyPortfolio.summary`` shape.
+
+        Backed by the NAV the engine mirrors into ``MockState`` each bar,
+        so backtest NAV reads match the live contract.
+        """
+        nav = self._nav()
+        equity = float(nav.get("equity") or nav.get("nav") or 0.0)
+        cash = float(nav.get("cash") or 0.0)
+        return {"totals": {"equity_usd": equity, "cash_usd": cash, "nav_usd": equity}}
+
+    def ledger(self, account_id: str | None = None) -> dict[str, Any]:
+        """Compatibility accessor for strategies that read NAV via a ledger.
+
+        Returns the same ``{equity, nav, cash}`` view in backtest and live
+        (see ``StrategyPortfolio.ledger``) so a strategy that backtests
+        behaves identically when promoted.
+        """
+        nav = self._nav()
+        equity = float(nav.get("equity") or nav.get("nav") or 0.0)
+        cash = float(nav.get("cash") or 0.0)
+        return {"equity": equity, "nav": equity, "cash": cash, "account_id": account_id or ""}
+
+
+@dataclass
+class MockPnL:
+    """Mirror the live ``StrategyPnL.summary`` shape during backtest.
+
+    Backed by the NAV the engine mirrors into ``MockState`` each bar, so
+    legacy strategy templates that read ``ctx.pnl.summary()`` don't crash
+    in backtest (the live facade exists; the mock previously did not).
+    """
+
+    state: MockState
+
+    def _nav(self) -> dict[str, float]:
+        raw = self.state.get("__portfolio_nav__") if hasattr(self.state, "get") else None
+        return raw if isinstance(raw, dict) else {}
+
+    def summary(self) -> dict[str, Any]:
+        nav = self._nav()
+        equity = float(nav.get("equity") or nav.get("nav") or 0.0)
+        realized = float(nav.get("realized_pnl") or 0.0)
+        return {
+            "equity_usd": equity,
+            "pnl_total_usd": realized,
+            "realized_pnl": realized,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "max_drawdown_usd": 0.0,
+            "drawdown_pct": 0.0,
+        }
 
 
 @dataclass
@@ -674,6 +757,7 @@ class MockCtx:
         self.clock = MockClock(int(self.current_bar.get("ts", 0)))
         self.dedupe = MockDedupe()
         self.portfolio = MockPortfolio(self.state)
+        self.pnl = MockPnL(self.state)
         self.news = MockNews("news", self.config_obj.mock_surfaces["news"])
         self.llm = MockLLM("llm", self.config_obj.mock_surfaces["llm"])
         self.subagents = MockSubAgents("subagents", self.config_obj.mock_surfaces["subagents"])

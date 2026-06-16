@@ -173,16 +173,24 @@ def refresh_account_marks(
             "errors": errors,
         })
 
+    # Release the book's SQLite connection as soon as the mark loop is
+    # done. This runs on the 60s background loop, so a leak here also
+    # exhausts the process fd limit over time.
+    book.close()
+
     executors_touched = 0
     if run_executors:
+        orchestrator = ExecutorOrchestrator(config)
         try:
-            executors_touched = ExecutorOrchestrator(config).run_once()
+            executors_touched = orchestrator.run_once()
         except Exception as exc:  # pragma: no cover - background loop guard
             log.exception("account refresh executor tick failed")
             account_rows.append({
                 "account_id": account_id or "*",
                 "errors": [{"market": "*", "error": f"executor_tick_failed: {exc}"}],
             })
+        finally:
+            orchestrator.close()
 
     snapshots: dict[str, dict[str, Any]] = {}
     for profile in selected:

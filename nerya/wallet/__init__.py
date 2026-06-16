@@ -10,7 +10,7 @@ Supported backends (all optional, all lazy-loaded):
 * ``okx_os``       — OKX On-Chain OS (https://web3.okx.com) REST API.
 * ``bitget``       — bitget-wallet-skill (Node/TS skill invoked via subprocess).
 * ``binance_agentic`` — binance-web3/binance-agentic-wallet skill (Node/TS).
-* ``xagt_agent_plugin`` — @xagt/agent-plugin login + OKX OnchainOS skill setup.
+* ``byreal``       — Byreal CLMM DEX on Solana via the @byreal-io/byreal-cli CLI.
 
 Nothing in this package performs ``pip install`` or ``npm install`` on its
 own — each provider raises a :class:`WalletDependencyError` containing the

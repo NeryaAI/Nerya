@@ -54,6 +54,8 @@ class SubAgentResult:
     ok: bool
     subagent: str
     tier: str = "medium"
+    provider: str = ""
+    model: str = ""
     output: dict[str, Any] = field(default_factory=dict)
     tokens: int = 0
     usd: float = 0.0
@@ -115,11 +117,16 @@ class SubAgentDispatcher:
         session_id: str | None,
         turn_id: str | None = None,
         parent_call_id: str | None = None,
+        inline_spec: SubAgentSpec | None = None,
     ) -> SubAgentResult:
         import time as _t
         t0 = _t.monotonic()
         try:
-            spec = self._resolve_spec(name, strategy_id=strategy_id)
+            # An inline spec lets the lead agent define a temporary role
+            # on the fly (no registered role, no save_role round-trip).
+            # The denylist below still applies, so an ad-hoc role can never
+            # grant itself a live-trading / wallet surface.
+            spec = inline_spec or self._resolve_spec(name, strategy_id=strategy_id)
             _assert_allowed_skills(spec)
             runtime = SubAgentRuntime(
                 config=self.config, skills=self.skills,
@@ -137,6 +144,8 @@ class SubAgentDispatcher:
                 ok=True,
                 subagent=name,
                 tier=str(raw.get("tier", spec.tier)),
+                provider=str(raw.get("provider") or ""),
+                model=str(raw.get("model") or ""),
                 output=raw.get("output") or {},
                 tokens=int(raw.get("tokens", 0) or 0),
                 usd=float(raw.get("usd", 0.0) or 0.0),
@@ -168,10 +177,15 @@ class SubAgentDispatcher:
             "trigger_event_id": trigger_event_id,
             "strategy_id": strategy_id, "session_id": session_id,
             "ok": res.ok,
-            "tier": res.tier, "tokens": res.tokens, "usd": res.usd,
+            "tier": res.tier,
+            "provider": res.provider,
+            "model": res.model,
+            "tokens": res.tokens,
+            "usd": res.usd,
             "wall_ms": res.wall_ms,
             "error": res.error, "error_kind": res.error_kind,
             "metrics": res.metrics,
+            "model_calls": (res.audit or {}).get("model_calls") or [],
             "steps_count": len(res.steps),
         })
         if strategy_id and res.ok:
@@ -190,6 +204,7 @@ class SubAgentDispatcher:
         session_id: str | None = None,
         turn_id: str | None = None,
         parent_call_id: str | None = None,
+        inline_spec: SubAgentSpec | None = None,
     ) -> dict[str, Any]:
         if not target.startswith("subagent:"):
             return {"ok": False, "reason": "not_subagent_target"}
@@ -200,6 +215,7 @@ class SubAgentDispatcher:
             strategy_id=strategy_id, session_id=session_id,
             turn_id=turn_id,
             parent_call_id=parent_call_id,
+            inline_spec=inline_spec,
         )
         self._journal(
             res,
@@ -210,6 +226,7 @@ class SubAgentDispatcher:
             # Backwards-compatible shape for existing callers.
             return {
                 "subagent": name, "output": {}, "tier": res.tier,
+                "provider": res.provider, "model": res.model,
                 "tokens": 0, "usd": 0.0, "wall_ms": res.wall_ms,
                 "metrics": res.metrics, "steps": res.steps,
                 "audit": res.audit,
@@ -217,6 +234,7 @@ class SubAgentDispatcher:
             }
         return {
             "subagent": name, "output": res.output, "tier": res.tier,
+            "provider": res.provider, "model": res.model,
             "tokens": res.tokens, "usd": res.usd, "wall_ms": res.wall_ms,
             "metrics": res.metrics, "steps": res.steps, "audit": res.audit,
             "ok": True,

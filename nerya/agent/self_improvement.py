@@ -1,6 +1,7 @@
 """Self-improvement hooks.
 
-* `evolve(config)` — run reflection + create a `learning_update` proposal.
+* `evolve(config)` — compatibility wrapper for
+  :func:`nerya.evolution.runner.evolve`.
 * `maybe_propose_from_turn(config, turn)` — lightweight per-turn hook that
   detects repeated patterns (e.g. N consecutive no-op turns, unusually many
   errors) and emits a proposal. Never writes to active limits or signer
@@ -16,9 +17,7 @@ from ..core import jsonl
 from ..core.config import Config
 from ..core.time import now
 from ..data import indicators as _indicators
-from ..evolution.journal_analyzer import summarize_errors, summarize_risk
 from ..evolution.patch_proposal import create_proposal
-from ..evolution.reflection_engine import run_reflection
 from ..llm.capability_matrix import summary as capability_summary
 from ..trading import strategy_versions as _versions
 
@@ -28,70 +27,17 @@ _DEFAULT_NOOP_AUTO_PROPOSAL_COOLDOWN_SECONDS = 10 * 60
 
 
 def evolve(config: Config) -> dict[str, Any]:
-    """Run reflection + auto-create a minimal `learning_update` proposal."""
-    reflect = run_reflection(config.paths)
-    err = summarize_errors(config.paths)
-    ranked = rank_proposal_seeds(reflect)
-    strategies = list((reflect or {}).get("strategies", {}).keys())
-    risk: dict[str, Any] = {"per_strategy": {}}
-    for sid in strategies:
-        try:
-            risk["per_strategy"][sid] = summarize_risk(config.paths, sid)
-        except Exception:
-            continue
-    summary = (
-        f"Reflection tick. errors={err.get('count', 0)}, "
-        f"strategies={len(strategies)}, seeds={len(ranked)}."
-    )
-    rationale_lines = [
-        "# Learning update",
-        "",
-        "## Evidence",
-        f"- errors summary: {err}",
-        f"- risk summary: {risk}",
-        "",
-        "## Top proposal seeds (ranked by evidence)",
-    ]
-    if ranked:
-        for i, seed in enumerate(ranked[:5], 1):
-            rationale_lines.append(
-                f"{i}. **{seed['kind']}** (score={seed['score']:.2f}) — "
-                f"{seed.get('reason', '')} "
-                f"[strategy={seed.get('strategy_id')}, session={seed.get('session_id')}]"
-            )
-    else:
-        rationale_lines.append("- no seeds surfaced this tick")
-    rationale_lines += [
-        "",
-        "## Rollback plan",
-        "- learning_update proposals never mutate live config. Discard the",
-        "  proposal to roll back; protected scopes remain untouched.",
-        "",
-        "## Test plan",
-        "- review attribution evidence for each seed before promoting it",
-        "  to a higher-risk kind (strategy_config_patch / trigger_route_patch).",
-        "",
-        "See `memory/global.md` for the corresponding learning note.",
-    ]
-    extra = {"reflection.json": str(reflect)}
-    if ranked:
-        import json as _json
-        extra["ranked_seeds.json"] = _json.dumps(ranked, indent=2, default=str)
-    extra["provider_capabilities.json"] = _capability_snapshot()
-    # feed proposal with strategy version + indicator state so
-    # reviewers see exactly which snapshot and which indicator backend
-    # was active when the seeds were ranked.
-    extra["strategy_versions.json"] = _strategy_version_snapshot(
-        config, strategies)
-    extra["indicator_state.json"] = _indicator_snapshot()
-    prop = create_proposal(
-        config.paths,
-        kind="learning_update",
-        summary=summary,
-        rationale="\n".join(rationale_lines),
-        extra_files=extra,
-    )
-    return {"reflection": reflect, "proposal": prop.asdict(), "ranked": ranked}
+    """Run the canonical workspace evolution runner.
+
+    This module still owns the conservative per-turn auto-proposal hook, but
+    reflection ticks live in :mod:`nerya.evolution.runner` so API, scheduled,
+    CLI, and native-tool entrypoints produce the same signals, events,
+    selected assets, validation plan, and proposal shape.
+    """
+
+    from ..evolution.runner import evolve as canonical_evolve
+
+    return canonical_evolve(config)
 
 
 def rank_proposal_seeds(reflection: dict[str, Any]) -> list[dict[str, Any]]:

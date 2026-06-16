@@ -22,6 +22,8 @@ with three groups of metrics:
 * **Trade metrics** — submitted intents, filled orders, cumulative PnL,
   drawdown floor, win rate, average slippage.
 * **Cost metrics** — risk rejects, subagent counts, last review timestamp.
+* **Evolution context** — recent post-apply observations produced by
+  validation, paper/shadow/live ticks, and operator feedback.
 
 The snapshot is intentionally *flat* and JSON-serialisable so a tuning
 subagent can be prompted with ``json.dumps(snapshot.asdict(), …)``
@@ -45,6 +47,7 @@ from typing import Any, Iterable, Optional
 from urllib.parse import quote as url_quote
 
 from ..connectors.http import UrllibHttp
+from ..core import jsonl
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
 from ..core.truth import live_envelope, mock_envelope, resolve_allow_mock
@@ -52,6 +55,11 @@ from ..data.candles import fetch_candles, mock_candles
 from ..data.equities import EquitiesClient
 from ..data.features import compute_features
 from ..data.news import fetch_news, mock_news
+from ..evolution.observation_summary import (
+    POST_APPLY_HEALTHY_STATUSES,
+    POST_APPLY_NEGATIVE_STATUSES,
+    summarize_observation_weights,
+)
 from ..strategy_history import store as history_store
 from .package import StrategyPackage, load_package
 from .state import StrategyRunRecord, StrategyRunStore
@@ -81,6 +89,7 @@ class StrategyPerformanceSnapshot:
     risk_metrics: dict[str, Any] = field(default_factory=dict)
     market_context: dict[str, Any] = field(default_factory=dict)
     news_context: dict[str, Any] = field(default_factory=dict)
+    evolution_context: dict[str, Any] = field(default_factory=dict)
     last_run_at: Optional[str] = None
     last_review_at: Optional[str] = None
     notes: list[str] = field(default_factory=list)
@@ -131,6 +140,7 @@ def build_snapshot(
     cost_metrics = _summarise_costs(subagent_rows)
     market_context = _build_market_context(pkg, config_like=config_like)
     news_context = _build_news_context(pkg, config_like=config_like)
+    evolution_context = _build_evolution_context(paths, strategy_id)
 
     last_review_at = None
     if reviews:
@@ -155,6 +165,7 @@ def build_snapshot(
         risk_metrics=risk_metrics,
         market_context=market_context,
         news_context=news_context,
+        evolution_context=evolution_context,
         last_run_at=last_run_at,
         last_review_at=last_review_at,
         notes=notes,
@@ -174,6 +185,105 @@ def _read(
     except Exception:
         _LOG.exception("read_ledger %s failed for %s", name, strategy_id)
         return []
+
+
+def _build_evolution_context(
+    paths: WorkspacePaths,
+    strategy_id: str,
+    *,
+    limit: int = 20,
+) -> dict[str, Any]:
+    rows = [
+        row for row in jsonl.read_all(paths.journal("evolution"))
+        if row.get("kind") == "proposal.post_apply_observation"
+        and str(row.get("strategy_id") or "") == strategy_id
+    ]
+    rows.sort(key=lambda row: str(row.get("observed_at") or row.get("ts") or ""))
+    recent = rows[-max(1, int(limit)) :]
+    summary = summarize_observation_weights(recent)
+    by_status = summary["by_status"]
+    by_source = summary["by_source"]
+    evidence_refs: list[str] = []
+    for row in recent:
+        evidence_refs.extend(_str_list(row.get("evidence_refs")))
+    return {
+        "post_apply_observation_count": len(rows),
+        "recent_count": len(recent),
+        "by_status": by_status,
+        "by_source": by_source,
+        "negative_count": sum(
+            by_status.get(status, 0) for status in POST_APPLY_NEGATIVE_STATUSES
+        ),
+        "healthy_count": sum(
+            by_status.get(status, 0) for status in POST_APPLY_HEALTHY_STATUSES
+        ),
+        "observing_count": by_status.get("observing", 0) + by_status.get("pending", 0),
+        "decay": summary["decay"],
+        "weighted_by_status": summary["weighted_by_status"],
+        "uncapped_weighted_by_status": summary["uncapped_weighted_by_status"],
+        "weighted_by_source": summary["weighted_by_source"],
+        "weighted_negative_count": summary["weighted_negative_count"],
+        "weighted_healthy_count": summary["weighted_healthy_count"],
+        "weighted_observing_count": summary["weighted_observing_count"],
+        "dominant_sources": summary["dominant_sources"],
+        "last_observed_at": (
+            recent[-1].get("observed_at") or recent[-1].get("ts")
+            if recent else None
+        ),
+        "recent_observations": [_compact_observation(row) for row in recent[-8:]],
+        "evidence_refs": _unique_strings(evidence_refs)[-12:],
+        "notes": [
+            "recent_observations are post-apply evidence available to strategy_tuner",
+            "observing paper/live/shadow ticks are evidence, not proof of improvement",
+            "weighted counts use recency decay and source caps so high-frequency ticks do not dominate tuning",
+        ],
+    }
+
+
+def _compact_observation(row: dict[str, Any]) -> dict[str, Any]:
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    compact_metrics = {
+        key: metrics.get(key)
+        for key in (
+            "mode", "run_status", "duration_ms", "llm_calls",
+            "subagent_calls", "result_status", "has_intent", "has_order",
+            "total_return_pct", "max_drawdown_pct", "verdict",
+        )
+        if key in metrics
+    }
+    return {
+        "id": row.get("id"),
+        "proposal_id": row.get("proposal_id"),
+        "status": row.get("status"),
+        "source": row.get("source"),
+        "observed_at": row.get("observed_at") or row.get("ts"),
+        "run_id": row.get("run_id"),
+        "summary": str(row.get("summary") or "")[:500],
+        "metrics": compact_metrics,
+        "evidence_refs": _str_list(row.get("evidence_refs"))[:6],
+    }
+
+
+def _str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
 
 
 def _build_market_context(

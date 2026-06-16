@@ -122,6 +122,8 @@ def _source_fetch(
             interval=tf,
             allow_mock=allow_mock,
             config_like=config_like,
+            start=start,
+            end=end,
         )
         or []
     )
@@ -298,4 +300,3 @@ def _is_mock_result(market: str, rows: list[dict[str, Any]]) -> bool:
     if _venue_of(market) in {"MOCK", "PAPER"}:
         return False
     return bool(rows and isinstance(rows[0], dict) and rows[0].get("_envelope", {}).get("truth") == "mock")
-

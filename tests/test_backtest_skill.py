@@ -61,7 +61,8 @@ def _bar(ts: int, close: float) -> dict:
 def test_backtest_config_default_and_validation():
     cfg = load_config(preset="default", markets=["MOCK:BTCUSDT"])
     assert cfg.initial_capital_usd == 10000
-    assert cfg.window_days == 45
+    assert cfg.window_days == 180
+    assert cfg.short_lived_window_days == 7
     assert cfg.timeframes == ["1h"]
     assert cfg.markets == ["MOCK:BTCUSDT"]
     cfg = load_config(preset="default", markets=["MOCK:BTCUSDT"], overrides={"tf": "5m", "timeframes": ["1h"]})
@@ -69,9 +70,11 @@ def test_backtest_config_default_and_validation():
     assert cfg.timeframes == ["5m", "1h"]
     cfg = load_config(preset="default", overrides={"window_days": 10})
     assert cfg.window_days == 10
-    assert cfg.min_backtest_days == 30
+    assert cfg.min_backtest_days == 0
     with pytest.raises(BacktestConfigError):
         load_config(preset="default", overrides={"min_backtest_days": -1})
+    with pytest.raises(BacktestConfigError):
+        load_config(preset="default", overrides={"short_lived_window_days": 0})
     with pytest.raises(BacktestConfigError):
         load_config(
             preset="default",
@@ -275,7 +278,13 @@ def test_backtest_run_accepts_in_flight_strategy_proposal(tmp_path: Path):
     assert "metrics_display" in out
     assert "operator_summary" in out
     assert "operator_summary_text" in out
-    assert "0.0274 means 0.0274%" in out["operator_summary_text"]
+    # operator_summary_text must be clean, copy-safe display values only:
+    # internal meta-instructions used to leak verbatim into the final reply.
+    assert "Copy these display values exactly" not in out["operator_summary_text"]
+    assert "0.0274 means 0.0274%" not in out["operator_summary_text"]
+    assert "Primary timeframe:" in out["operator_summary_text"]
+    # Unit/formatting guidance for the model lives in dedicated fields instead.
+    assert "0.0274 is 0.0274%" in out["unit_warning"]
     assert out["operator_summary"]["unit_warning"].endswith(
         "never multiply them by 100."
     )
@@ -356,6 +365,21 @@ def test_backtest_marks_short_loaded_coverage_as_recommendation() -> None:
     assert "short-window real-data backtest" in metrics["coverage_message"]
 
 
+def test_backtest_default_has_no_minimum_coverage_gate() -> None:
+    metrics = {
+        "backtest_days": 7.0,
+        "flags": [],
+        "verdict": "PASS",
+    }
+    _apply_coverage_gate(metrics, BacktestConfig(min_backtest_days=0, window_days=180))
+
+    assert metrics["coverage_ok"] is True
+    assert metrics["recommended_coverage_ok"] is True
+    assert metrics["verdict"] == "PASS"
+    assert metrics["flags"] == []
+    assert "Loaded 7.00d of real candle coverage" in metrics["coverage_message"]
+
+
 def test_backtest_falls_back_to_available_short_real_timeframe(
     monkeypatch,
     tmp_path: Path,
@@ -365,10 +389,10 @@ def test_backtest_falls_back_to_available_short_real_timeframe(
     paths = WorkspacePaths(root=tmp_path)
     generated = StrategyCodeGenerator(paths).generate(
         StrategyGenerationRequest(
-            strategy_id="xagt_short_window_fallback",
-            title="XAgent Short Window Fallback",
+            strategy_id="byreal_short_window_fallback",
+            title="Byreal Short Window Fallback",
             prompt="Backtest a short-window on-chain meme strategy.",
-            markets=("XAGT_ONCHAIN:solana",),
+            markets=("BYREAL_ONCHAIN:solana",),
             accounts=("paper_main",),
             schedule_cron="*/5 * * * *",
             files={
@@ -386,6 +410,8 @@ def test_backtest_falls_back_to_available_short_real_timeframe(
     assert generated.proposal is not None
 
     seen_intervals: list[str] = []
+    seen_counts: list[int] = []
+    seen_starts: list[int] = []
 
     def fake_fetch_candles(
         market,
@@ -396,8 +422,11 @@ def test_backtest_falls_back_to_available_short_real_timeframe(
         config_like=None,
         **_kwargs,
     ):
-        del market, count, allow_mock, config_like
+        del market, allow_mock, config_like
         seen_intervals.append(interval)
+        seen_counts.append(int(count))
+        if _kwargs.get("start") is not None:
+            seen_starts.append(int(_kwargs["start"]))
         if interval == "1h":
             return []
         if interval == "5m":
@@ -415,13 +444,16 @@ def test_backtest_falls_back_to_available_short_real_timeframe(
 
     assert out["ok"] is True
     assert out["coverage_ok"] is True
-    assert out["recommended_coverage_ok"] is False
+    assert out["recommended_coverage_ok"] is True
     assert out["primary_timeframe"] == "5m"
     assert out["requested_primary_timeframe"] == "1h"
     assert out["attempted_timeframes"] == ["1h", "5m"]
     assert out["timeframe_fallback"] is True
     assert seen_intervals == ["1h", "5m"]
-    assert "short-window real-data backtest" in out["coverage_message"]
+    assert seen_counts[0] < 300
+    assert seen_starts
+    assert out["requested_window_days"] == 7.0
+    assert "Short-lived meme/on-chain window policy applied" in out["coverage_message"]
     assert "Requested primary timeframe 1h" in out["coverage_message"]
 
 
@@ -434,10 +466,10 @@ def test_backtest_falls_back_when_primary_timeframe_cannot_pass_warmup(
     paths = WorkspacePaths(root=tmp_path)
     generated = StrategyCodeGenerator(paths).generate(
         StrategyGenerationRequest(
-            strategy_id="xagt_short_window_warmup",
-            title="XAgent Short Window Warmup",
+            strategy_id="byreal_short_window_warmup",
+            title="Byreal Short Window Warmup",
             prompt="Backtest a short-window on-chain meme strategy.",
-            markets=("XAGT_ONCHAIN:solana:token",),
+            markets=("BYREAL_ONCHAIN:solana:token",),
             accounts=("paper_main",),
             schedule_cron="*/5 * * * *",
             files={
@@ -517,7 +549,7 @@ def test_backtest_candle_cache_passes_workspace_config_to_wallet_sources(
     monkeypatch.setattr(data_cache, "fetch_candles", fake_fetch_candles)
 
     rows = data_cache.get_candles(
-        "XAGT_ONCHAIN:solana:token",
+        "BYREAL_ONCHAIN:solana:token",
         "1h",
         1_699_999_999,
         1_700_004_000,
@@ -573,7 +605,7 @@ def test_strategy_backtest_handler_flags_generic_onchain_market_before_waiver(
             "after/strategies/s1/strategy.yml": (
                 "strategy_id: s1\n"
                 "markets:\n"
-                "  - XAGT_ONCHAIN:solana\n"
+                "  - BYREAL_ONCHAIN:solana\n"
             ),
             "after/strategies/s1/strategy.md": "Solana meme scanner with short K-line evidence.",
             "after/strategies/s1/main.py": "def run(ctx):\n    return ctx.result.hold(reason='smoke')\n",
@@ -581,7 +613,7 @@ def test_strategy_backtest_handler_flags_generic_onchain_market_before_waiver(
     )
 
     def fail_missing_history(**_kwargs):
-        raise NoHistoricalDataError("no historical candles for XAGT_ONCHAIN:solana")
+        raise NoHistoricalDataError("no historical candles for BYREAL_ONCHAIN:solana")
 
     monkeypatch.setattr(backtest_run, "run_strategy_backtest", fail_missing_history)
     result = strategy_backtest_handler(
@@ -596,7 +628,7 @@ def test_strategy_backtest_handler_flags_generic_onchain_market_before_waiver(
     assert data["ok"] is False
     assert data["next_required_action"]["type"] == "repair_concrete_market_and_rerun"
     assert "not proof that standard OHLCV is unavailable" in data["next_required_action"]["message"]
-    assert "XAGT_ONCHAIN:solana:<token_contract>" in data["next_required_action"]["repair_hint"]
+    assert "BYREAL_ONCHAIN:solana:<pool_address>" in data["next_required_action"]["repair_hint"]
 
 
 def test_backtest_cli_structures_missing_history(monkeypatch, capsys) -> None:
@@ -671,7 +703,7 @@ def test_strategy_backtest_handler_surfaces_custom_replay_report(
                 "strategy_id: s1\n"
                 "strategy_class: agent\n"
                 "markets:\n"
-                "  - XAGT_ONCHAIN:solana:token\n"
+                "  - BYREAL_ONCHAIN:solana:token\n"
             ),
             "after/strategies/s1/strategy.md": "Solana meme smart-money strategy.",
             "after/strategies/s1/main.py": "# uses StrategyAgentTask for smart_money replay\n",
@@ -681,7 +713,7 @@ def test_strategy_backtest_handler_surfaces_custom_replay_report(
     (strategy_root / "custom_replay_report.json").write_text(
         json.dumps(
             {
-                "data_source": "xagt_onchain",
+                "data_source": "byreal_onchain",
                 "results": [
                     {
                         "symbol": "SPCX",
@@ -758,7 +790,7 @@ def test_strategy_backtest_handler_prefers_freeform_sdk_backtest(
                 "mode: paper\n"
                 "entrypoint: main.py:run\n"
                 "markets:\n"
-                "  - XAGT_ONCHAIN:solana:token\n"
+                "  - BYREAL_ONCHAIN:solana:token\n"
                 "accounts:\n"
                 "  - paper_main\n"
                 "schedule:\n"
@@ -821,7 +853,7 @@ def test_freeform_backtest_accepts_stdout_json_payload(tmp_path: Path) -> None:
             strategy_id="stdout_freeform_smoke",
             title="Stdout Freeform Smoke",
             prompt="Emit freeform result over stdout.",
-            markets=("XAGT_ONCHAIN:solana:token",),
+            markets=("BYREAL_ONCHAIN:solana:token",),
             accounts=("paper_main",),
             schedule_cron="*/5 * * * *",
             files={
@@ -878,7 +910,7 @@ def test_freeform_backtest_accepts_pretty_stdout_numeric_equity_curve(
             strategy_id="pretty_stdout_freeform_smoke",
             title="Pretty Stdout Freeform Smoke",
             prompt="Emit pretty JSON over stdout.",
-            markets=("XAGT_ONCHAIN:solana:token",),
+            markets=("BYREAL_ONCHAIN:solana:token",),
             accounts=("paper_main",),
             schedule_cron="*/5 * * * *",
             files={
@@ -928,7 +960,7 @@ def test_freeform_backtest_accepts_fresh_script_dir_artifacts(
             strategy_id="script_dir_freeform_smoke",
             title="Script Dir Freeform Smoke",
             prompt="Write freeform artifacts beside the script.",
-            markets=("XAGT_ONCHAIN:solana:token",),
+            markets=("BYREAL_ONCHAIN:solana:token",),
             accounts=("paper_main",),
             schedule_cron="*/5 * * * *",
             files={
@@ -972,7 +1004,7 @@ def test_freeform_backtest_closes_stdin_for_scripts_that_read(tmp_path: Path) ->
             strategy_id="stdin_freeform_smoke",
             title="Stdin Freeform Smoke",
             prompt="Read stdin before emitting a freeform result.",
-            markets=("XAGT_ONCHAIN:solana:token",),
+            markets=("BYREAL_ONCHAIN:solana:token",),
             accounts=("paper_main",),
             schedule_cron="*/5 * * * *",
             files={
@@ -1157,7 +1189,7 @@ def test_strategy_generate_proposal_handler_reports_truncated_custom_files_paylo
         '"strategy_class":"agent",'
         '"execution_mode":"agent_task",'
         '"mode":"paper",'
-        '"markets":["XAGT_ONCHAIN:bsc:0x<meme_token_contract>"],'
+        '"markets":["ONCHAIN:bsc:0x<meme_token_contract>"],'
         '"accounts":["paper_main"],'
         '"files": '
     )
@@ -1307,7 +1339,7 @@ def test_strategy_backtest_handler_rejects_placeholder_promoted_strategy_when_pr
     (strategy_root / "strategy.yml").write_text(
         "strategy_id: solana_smart_money_meme\n"
         "markets:\n"
-        "  - XAGT_ONCHAIN:solana:unknown\n",
+        "  - BYREAL_ONCHAIN:solana:unknown\n",
         encoding="utf-8",
     )
     proposal = create_proposal(
@@ -1318,7 +1350,7 @@ def test_strategy_backtest_handler_rejects_placeholder_promoted_strategy_when_pr
             "after/strategies/solana_smartmoney_meme/strategy.yml": (
                 "strategy_id: solana_smartmoney_meme\n"
                 "markets:\n"
-                "  - XAGT_ONCHAIN:solana:real-token\n"
+                "  - BYREAL_ONCHAIN:solana:real-token\n"
             ),
         },
     )
@@ -1390,6 +1422,137 @@ def test_portfolio_sell_fill_adds_cash():
     assert portfolio.snapshot()["equity"] == 1010
 
 
+def test_backtest_default_preset_allows_short():
+    """A faithful long/short backtest must permit shorts out of the box."""
+    cfg = load_config(preset="default", markets=["MOCK:BTCUSDT"])
+    assert cfg.allow_short is True
+    assert BacktestConfig().allow_short is True
+
+
+def _flat_rows(n: int = 4, price: float = 100.0) -> list[dict]:
+    return [_bar(1_700_000_000 + i * 3600, price) for i in range(n)]
+
+
+def test_backtest_pct_nav_entry_sizes_against_nav():
+    """``sizing={'method':'pct_nav'}`` must resolve to a fraction of NAV.
+
+    Regression: the control-plane shim used to drop pct_nav to size=0,
+    and the engine then over-sized to 100% of cash and rejected the
+    entry with ``insufficient_cash``.
+    """
+
+    def strat(ctx):
+        market = ctx.config.markets[0]
+        if not ctx.portfolio.positions(market):
+            return ctx.trading.open_position(
+                market=market,
+                side="long",
+                sizing={"method": "pct_nav", "pct_nav": 0.25},
+                confidence=0.6,
+                reasoning_ref="pct entry",
+            )
+        return ctx.result.hold(reason="hold")
+
+    cfg = load_config(
+        preset="default",
+        markets=["MOCK:BTCUSDT"],
+        overrides={"warmup_bars": 0, "window_days": 30},
+    )
+    result = run_backtest(
+        None,
+        cfg,
+        candles_by_market={"MOCK:BTCUSDT": _flat_rows()},
+        run_fn=strat,
+        strategy_config={"strategy_id": "pct_long", "markets": ["MOCK:BTCUSDT"]},
+    )
+
+    entries = [t for t in result.trades if t["side"] == "buy" and not t.get("forced_close")]
+    assert entries, [r.get("reject_reason") for r in result.rejected_signals]
+    # 25% of the $10,000 starting NAV.
+    assert entries[0]["notional"] == pytest.approx(2500.0, rel=0.02)
+    reject_reasons = {r.get("reject_reason") for r in result.rejected_signals}
+    assert "insufficient_cash" not in reject_reasons
+    assert "zero_size" not in reject_reasons
+
+
+def test_backtest_control_plane_short_opens_and_is_visible():
+    """``open_position(side='short')`` must open a real short the strategy can see."""
+
+    seen_positions: list[list[dict]] = []
+
+    def strat(ctx):
+        market = ctx.config.markets[0]
+        pos = ctx.portfolio.positions(market)
+        seen_positions.append(list(pos))
+        if not pos:
+            return ctx.trading.open_position(
+                market=market,
+                side="short",
+                sizing={"method": "pct_nav", "pct_nav": 0.2},
+                confidence=0.6,
+                reasoning_ref="short entry",
+            )
+        return ctx.result.hold(reason="holding short")
+
+    cfg = load_config(
+        preset="default",
+        markets=["MOCK:BTCUSDT"],
+        overrides={"warmup_bars": 0, "window_days": 30},
+    )
+    result = run_backtest(
+        None,
+        cfg,
+        candles_by_market={"MOCK:BTCUSDT": _flat_rows()},
+        run_fn=strat,
+        strategy_config={"strategy_id": "short_strat", "markets": ["MOCK:BTCUSDT"]},
+    )
+
+    short_entries = [t for t in result.trades if t["side"] == "sell" and not t.get("forced_close")]
+    assert short_entries, [r.get("reject_reason") for r in result.rejected_signals]
+    assert short_entries[0]["qty"] > 0
+    assert short_entries[0]["notional"] == pytest.approx(2000.0, rel=0.02)
+
+    visible = [p for p in seen_positions if p]
+    assert visible, "strategy never saw its open short position"
+    assert visible[0][0]["side"] == "short"
+    assert visible[0][0]["size"] < 0  # signed: negative = short
+
+    reject_reasons = {r.get("reject_reason") for r in result.rejected_signals}
+    assert "no_open_position" not in reject_reasons
+    assert "short_not_allowed" not in reject_reasons
+
+
+def test_backtest_short_rejected_when_allow_short_disabled():
+    """With allow_short=false a short entry is rejected with a clear reason."""
+
+    def strat(ctx):
+        market = ctx.config.markets[0]
+        if not ctx.portfolio.positions(market):
+            return ctx.trading.open_position(
+                market=market,
+                side="short",
+                sizing={"method": "pct_nav", "pct_nav": 0.2},
+                reasoning_ref="short entry",
+            )
+        return ctx.result.hold(reason="hold")
+
+    cfg = load_config(
+        preset="default",
+        markets=["MOCK:BTCUSDT"],
+        overrides={"warmup_bars": 0, "window_days": 30, "allow_short": False},
+    )
+    result = run_backtest(
+        None,
+        cfg,
+        candles_by_market={"MOCK:BTCUSDT": _flat_rows()},
+        run_fn=strat,
+        strategy_config={"strategy_id": "short_blocked", "markets": ["MOCK:BTCUSDT"]},
+    )
+
+    assert not [t for t in result.trades if not t.get("forced_close")]
+    assert "short_not_allowed" in [r.get("reject_reason") for r in result.rejected_signals]
+
+
 def test_binance_vision_cache_fallback_reads_daily_zip(monkeypatch, tmp_path: Path):
     import io
     import zipfile
@@ -1430,7 +1593,7 @@ def test_binance_vision_uses_bounded_request_timeout_and_source_fallback(
         seen_timeouts.append(timeout)
         return None
 
-    def fake_fetch_candles(market, *, count, interval, allow_mock, config_like=None):
+    def fake_fetch_candles(market, *, count, interval, allow_mock, config_like=None, **_kwargs):
         del market, count, interval, allow_mock, config_like
         return [
             {"ts": 1_700_000_000, "open": 1, "high": 2, "low": 1, "close": 2, "volume": 10},

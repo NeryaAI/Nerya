@@ -218,8 +218,24 @@ class StrategyCodeGenerator:
         *,
         validate: bool = True,
         create_proposal_record: bool = True,
+        require_valid: bool = False,
+        initial_state: str = "pending_review",
     ) -> StrategyGenerationResult:
-        """Build files for ``request`` and (optionally) write the proposal."""
+        """Build files for ``request`` and (optionally) write the proposal.
+
+        When ``require_valid`` is set, a package that still has validation
+        blockers is **not** persisted as a pending proposal. The caller
+        surfaces the blockers and asks for a fix-and-retry instead, so the
+        pending-review queue only ever contains packages that already pass
+        validation.
+
+        ``initial_state`` controls the lifecycle state the proposal record is
+        created in. The default ``pending_review`` keeps the legacy one-shot
+        behaviour; the file-authoring lane (``strategy_draft_proposal``)
+        passes ``"draft"`` so the agent can edit the scaffolded files in place
+        and only flip the proposal to ``pending_review`` via
+        ``strategy_submit_proposal`` once validation passes.
+        """
 
         self._validate_request(request)
         request = replace(
@@ -236,8 +252,12 @@ class StrategyCodeGenerator:
                 strategy_id=request.strategy_id, files=files
             )
 
+        block_proposal = bool(
+            require_valid and validation is not None and not validation.ok
+        )
+
         proposal: Optional[Proposal] = None
-        if create_proposal_record:
+        if create_proposal_record and not block_proposal:
             extra_files: dict[str, str] = {}
             for rel, content in files.items():
                 # PROMOTION COPIES `after/<rel>` -> `<workspace>/<rel>`.
@@ -260,7 +280,7 @@ class StrategyCodeGenerator:
                 rollback=_rollback(request),
                 target=f"strategies/{request.strategy_id}",
                 extra_files=extra_files,
-                initial_state="pending_review",
+                initial_state=initial_state,
                 metadata=_proposal_metadata(request, files),
             )
 

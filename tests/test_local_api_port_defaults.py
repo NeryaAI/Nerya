@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 import inspect
+import json
+import math
 import threading
 
 import pytest
@@ -36,6 +38,23 @@ def test_local_server_result_status_marker_is_not_returned_in_body():
 
     assert status == 409
     assert body == {"ok": False, "error": "session_turn_in_progress"}
+
+
+def test_local_server_json_safe_replaces_non_finite_numbers():
+    body = local_server._json_safe(
+        {
+            "ok": True,
+            "metric": math.inf,
+            "nested": [{"value": -math.inf}, {"value": math.nan}, {"value": 1.5}],
+        }
+    )
+
+    assert body == {
+        "ok": True,
+        "metric": None,
+        "nested": [{"value": None}, {"value": None}, {"value": 1.5}],
+    }
+    assert "Infinity" not in json.dumps(body, allow_nan=False)
 
 
 def test_local_server_request_clients_are_thread_local(tmp_path):

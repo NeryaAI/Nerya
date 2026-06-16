@@ -162,7 +162,7 @@ def test_strategy_generator_normalizes_common_agent_task_sdk_mistakes(tmp_path):
         strategy_id="solana_smartmoney_meme",
         strategy_class="agent",
         execution_mode="agent_task",
-        markets=("XAGT_ONCHAIN:solana",),
+        markets=("BYREAL_ONCHAIN:solana",),
         accounts=("paper",),
         files={
             "main.py": """
@@ -171,7 +171,7 @@ from nerya.strategies import StrategyAgentTask, StrategyContext
 def run(ctx: StrategyContext):
     task = StrategyAgentTask.dispatch(
         prompt="inspect wallet flow",
-        context={"route": "XAGT_ONCHAIN:solana"},
+        context={"route": "BYREAL_ONCHAIN:solana"},
         reason="smart money scan",
     )
     return ctx.result.agent_task(task)
@@ -578,12 +578,12 @@ def run(ctx: StrategyContext):
 def test_strategy_agent_task_accepts_string_session_key_for_generated_code() -> None:
     task = StrategyAgentTask.dispatch(
         prompt="inspect wallet flow",
-        session_key="smartmoney_XAGT_ONCHAIN_solana",
-        metadata={"market": "XAGT_ONCHAIN:solana"},
+        session_key="smartmoney_BYREAL_ONCHAIN_solana",
+        metadata={"market": "BYREAL_ONCHAIN:solana"},
     )
 
-    assert task.session_key == {"key": "smartmoney_XAGT_ONCHAIN_solana"}
-    assert task.metadata == {"market": "XAGT_ONCHAIN:solana"}
+    assert task.session_key == {"key": "smartmoney_BYREAL_ONCHAIN_solana"}
+    assert task.metadata == {"market": "BYREAL_ONCHAIN:solana"}
 
 
 def test_strategy_generator_normalizes_legacy_execution_schedule(tmp_path):
@@ -591,7 +591,7 @@ def test_strategy_generator_normalizes_legacy_execution_schedule(tmp_path):
         strategy_id="solana_smartmoney_meme",
         strategy_class="agent",
         execution_mode="agent_task",
-        markets=("XAGT_ONCHAIN:solana:token",),
+        markets=("BYREAL_ONCHAIN:solana:token",),
         accounts=("paper_main",),
         files={
             "strategy.yml": """
@@ -599,7 +599,7 @@ id: solana_smartmoney_meme
 title: Solana Smart Money Meme Alpha
 version: 1
 markets:
-  - XAGT_ONCHAIN:solana:token
+  - BYREAL_ONCHAIN:solana:token
 accounts:
   - paper_main
 mode: paper
@@ -632,7 +632,7 @@ def test_strategy_generate_request_accepts_agent_task_class_alias() -> None:
     req = _request_from_args({
         "strategy_id": "solana_smartmoney_meme",
         "strategy_class": "agent_task",
-        "markets": ["XAGT_ONCHAIN:solana:token"],
+        "markets": ["BYREAL_ONCHAIN:solana:token"],
         "accounts": ["paper_main"],
     })
 
@@ -640,6 +640,18 @@ def test_strategy_generate_request_accepts_agent_task_class_alias() -> None:
     assert "agent_task" in enum
     assert req.strategy_class == "agent"
     assert req.execution_mode == "agent_task"
+
+
+def test_strategy_generate_request_maps_bybit_perpetual_market_alias() -> None:
+    req = _request_from_args({
+        "strategy_id": "ema_crossover_sol",
+        "title": "Bybit SOLUSDT linear perpetual EMA",
+        "description": "Paper strategy for a Bybit linear perpetual contract.",
+        "markets": ["BYBIT:SOLUSDT"],
+        "accounts": ["bybit_paper"],
+    })
+
+    assert req.markets == ("BYBIT_PERPETUAL:SOLUSDT",)
 
 
 def test_strategy_generator_agent_team_uses_agent_task_runtime(tmp_path):

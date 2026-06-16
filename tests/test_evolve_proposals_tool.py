@@ -9,11 +9,51 @@ from nerya.evolution.patch_proposal import create_proposal
 from nerya.tools.native.evolve import (
     evolve_core_config_patch_handler,
     evolve_proposals_handler,
+    evolve_reflect_handler,
 )
 from nerya.tools.types import ToolCall, ToolErrorKind
 
 
 pytestmark = pytest.mark.smoke
+
+
+def test_evolve_reflect_uses_canonical_runner_payload(tmp_path, monkeypatch) -> None:
+    paths = WorkspacePaths(root=tmp_path)
+
+    def fake_evolve(config: Config) -> dict:
+        assert config.paths is paths
+        return {
+            "proposal": {
+                "id": "prp_reflect_1",
+                "kind": "learning_update",
+                "validation_plan_id": "vpl_reflect_1",
+            },
+            "ranked": [{"id": "seed_1"}, {"id": "seed_2"}],
+            "signals": [{"id": "sig_1", "evidence_refs": ["journal:agent:0"]}],
+            "selected_assets": {
+                "genes": [{"id": "gene_1"}],
+                "capsules": [{"id": "cap_1"}],
+            },
+            "event": {"id": "evt_1"},
+        }
+
+    monkeypatch.setattr("nerya.evolution.runner.evolve", fake_evolve)
+
+    result = evolve_reflect_handler(
+        ToolCall(name="evolve_reflect", arguments={}),
+        config=Config(paths=paths),
+    )
+
+    assert not result.is_error
+    data = result.content[0].data
+    assert data["proposal"]["id"] == "prp_reflect_1"
+    assert data["validation_plan_id"] == "vpl_reflect_1"
+    assert data["ranked_seeds"] == [{"id": "seed_1"}, {"id": "seed_2"}]
+    assert data["seed_count"] == 2
+    assert data["signals"][0]["id"] == "sig_1"
+    assert data["signal_count"] == 1
+    assert data["selected_assets"]["genes"][0]["id"] == "gene_1"
+    assert data["event"]["id"] == "evt_1"
 
 
 def test_evolve_proposals_supports_exact_lookup_beyond_limit(tmp_path) -> None:

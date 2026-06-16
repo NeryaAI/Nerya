@@ -128,10 +128,10 @@ def _normalize_market(venue: str, market: str) -> str:
         "binance_web3": "BINANCE_ALPHA",
         "coinbase_wallet": "COINBASE_WALLET",
         "coinbase_exchange_wallet": "COINBASE_WALLET",
-        "xagt": "XAGT_ONCHAIN",
-        "xagt_onchain": "XAGT_ONCHAIN",
-        "xagt_agent_plugin": "XAGT_ONCHAIN",
-        "xagt_okx": "XAGT_ONCHAIN",
+        "byreal": "BYREAL_ONCHAIN",
+        "byreal_onchain": "BYREAL_ONCHAIN",
+        "byreal_cli": "BYREAL_ONCHAIN",
+        "byreal_solana": "BYREAL_ONCHAIN",
         "onchain": "ONCHAIN",
     }
     if venue_l in wallet_prefixes:

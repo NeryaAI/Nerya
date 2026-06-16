@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from ..registry import ToolRegistry, make_native_descriptor
 from ..types import (
@@ -224,16 +224,28 @@ def register_skill_tool(
     *,
     skill_index: SkillIndex,
     replace: bool = False,
+    handler_wrapper: Optional[
+        Callable[[Callable[[ToolCall], ToolResult]], Callable[[ToolCall], ToolResult]]
+    ] = None,
 ) -> None:
     """Register the ``Skill`` tool on ``registry``.
 
     Kept separate from :func:`register_native_tools` so callers that
     register a slim subset of native tools (for tests or specialised
     runtimes) can opt in or out without touching the bootstrap.
+
+    ``handler_wrapper`` lets the bootstrap layer decorate the base
+    handler — e.g. to fire native-tool-surface progressive disclosure
+    after a successful skill load — without coupling this leaf module to
+    the tool-surfaces machinery. Both the ``Skill`` descriptor and its
+    lowercase ``skill`` alias share the wrapped handler so whichever
+    casing the model emits unlocks the same surfaces.
     """
 
-    def _handler(call: ToolCall) -> ToolResult:
+    def _base_handler(call: ToolCall) -> ToolResult:
         return skill_tool_handler(call, skill_index=skill_index)
+
+    _handler = handler_wrapper(_base_handler) if handler_wrapper else _base_handler
 
     descriptor = make_native_descriptor(
         name=SKILL_TOOL_NAME,

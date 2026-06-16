@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 import shutil
 import time
@@ -16,6 +17,7 @@ _DEFAULT_PAGE = 500
 _HARD_PAGE = 2000
 _MAX_TEXT_BYTES = 256 * 1024  # editor cap
 _HARD_FILE_BYTES = 1 * 1024 * 1024  # absolute ceiling for a single read
+_MAX_RAW_BYTES = 25 * 1024 * 1024  # preview cap for images/PDF/media
 
 
 def _resolve(client, raw: str, *, must_exist: bool = False) -> Path:
@@ -205,6 +207,60 @@ def routes():
             "truncated": truncated,
         }
 
+    def files_raw(client, payload):
+        params = payload or {}
+        raw = str(params.get("path") or "")
+        if not raw:
+            return {"ok": False, "error": "missing_path"}
+        try:
+            target = _resolve(client, raw, must_exist=True)
+        except FileNotFoundError as exc:
+            return {"ok": False, "error": "not_found", "detail": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
+
+        if target.is_dir():
+            return {"ok": False, "error": "is_directory"}
+
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            return {"ok": False, "error": "stat_failed", "detail": str(exc)}
+
+        if size > _MAX_RAW_BYTES:
+            return {
+                "ok": False,
+                "error": "too_large",
+                "detail": f"file is {size} bytes (cap {_MAX_RAW_BYTES})",
+                "size": size,
+            }
+
+        try:
+            blob = target.read_bytes()
+        except PermissionError as exc:
+            return {"ok": False, "error": "permission_denied", "detail": str(exc)}
+        except OSError as exc:
+            return {"ok": False, "error": "read_failed", "detail": str(exc)}
+
+        from .local_server import BinaryResponse  # avoid import cycle at module load
+
+        mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if mime.startswith("text/") or mime in {
+            "application/javascript",
+            "application/json",
+            "application/xml",
+            "image/svg+xml",
+        }:
+            mime = f"{mime}; charset=utf-8"
+        return BinaryResponse(
+            body=blob,
+            content_type=mime,
+            headers={
+                "Content-Disposition": f'inline; filename="{target.name.replace(chr(34), "")}"',
+                "X-Nerya-Workspace-Path": _rel(client, target),
+            },
+        )
+
     def files_write(client, payload):
         body = payload or {}
         raw = str(body.get("path") or "")
@@ -361,6 +417,8 @@ def routes():
         ("GET", "/workspace", workspace_info),
         ("GET", "/workspace/files", files_list),
         ("GET", "/workspace/file", files_read),
+        ("GET", "/workspace/file/raw", files_raw),
+        ("GET", "/workspace/file/raw/{path...}", files_raw),
         ("POST", "/workspace/file/save", files_write),
         ("POST", "/workspace/file/delete", files_delete),
         ("POST", "/workspace/file/create", files_create),

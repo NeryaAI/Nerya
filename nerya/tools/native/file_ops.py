@@ -132,7 +132,7 @@ def _proposal_required_tools(path: str) -> list[str]:
     if p in _PROPOSAL_ONLY_CONFIG_FILES:
         return ["evolve_core_config_patch"]
     if fnmatch.fnmatchcase(p, "strategies/*") or fnmatch.fnmatchcase(p, "strategies/**/*"):
-        return ["strategy_generate_proposal", "strategy_tuning_generate"]
+        return ["strategy_draft_proposal", "strategy_tuning_generate"]
     return []
 
 

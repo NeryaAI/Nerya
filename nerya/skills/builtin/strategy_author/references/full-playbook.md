@@ -11,8 +11,34 @@ author: Nerya
 # Strategy Author playbook
 
 This skill is the canonical brief for writing Nerya strategies. Read
-it before calling `strategy_generate_proposal` or hand-editing a
-package under `<workspace>/strategies/<id>/`.
+it before scaffolding a draft with `strategy_draft_proposal` and
+editing the staged files under
+`evolution/proposals/<id>/after/strategies/<id>/`.
+
+## Authoring lane (read this first)
+
+Strategy authoring is a **file-editing** lane, not a single big tool
+call. The high-context "dump every file inline" pattern is gone; you
+build the package incrementally with the normal file tools:
+
+1. `strategy_draft_proposal({strategy_id, markets, accounts, ...})`
+   scaffolds a *draft* proposal. It writes stock template files into
+   `evolution/proposals/<id>/after/strategies/<id>/` and returns
+   `proposal_id`, `proposal_paths` (strategy.yml / strategy.md /
+   main.py / tests), and `next_steps`. To iterate an existing
+   promoted strategy, pass `from_strategy_id` so the live files are
+   copied into the draft instead of templates.
+2. Author the real logic by editing those staged files with
+   `read_file` + `edit_file` / `write_file`. The proposal tree is the
+   one place under `strategies/` that the workspace guard lets you
+   edit directly. Never write into the live `strategies/<id>/` tree.
+3. `strategy_validate({proposal_id})` re-checks the edited files. Fix
+   each blocker by editing the files and re-validating.
+4. `strategy_submit_proposal({proposal_id})` re-validates and, only
+   when clean, flips the proposal `draft -> pending_review` so the
+   operator can approve it. A package with blockers stays a draft.
+5. `strategy_backtest({proposal_id})`, then (operator-gated)
+   `strategy_promote({proposal_id})`.
 
 ## Mental model
 
@@ -79,9 +105,10 @@ Add only what the strategy actually uses:
   `cron:` field for time-based runs (`*/1 * * * *` for one-minute
   scalpers, `0 9 * * 1-5` for daily-open trend strategies), or
   `type: interval` with `every_seconds:`. When calling
-  `strategy_generate_proposal`, pass `schedule_cron` or
-  `schedule_every_seconds`; the generator renders the manifest
-  schedule block and the runtime compiles it into trigger schedules.
+  `strategy_draft_proposal`, pass `schedule_cron` or
+  `schedule_every_seconds`; the scaffold renders the manifest
+  schedule block (which you can then edit) and promotion compiles it
+  into trigger schedules.
 - For event/news/on-chain strategies, keep the package manifest small
   and declare only the fields it actually consumes (`news_sources`,
   `subagents`, strategy docs). Cross-reference the `triggers` skill
@@ -111,6 +138,10 @@ def run(ctx) -> dict:
 | Surface              | Use for                                                    |
 | -------------------- | ---------------------------------------------------------- |
 | `ctx.market`         | Price / candle / orderbook reads (cached when stale)       |
+| `ctx.portfolio`      | NAV + positions. `equity_usd` / `cash_usd` (floats),       |
+|                      | `summary()` → `{"totals": {...}}`, `ledger()` →            |
+|                      | `{equity, nav, cash}`, `positions(market=None)`. Identical |
+|                      | shape in backtest and live — do NOT invent other fields.   |
 | `ctx.news`           | News / social / announcements feed                         |
 | `ctx.llm`            | Tiered LLM calls (`tier="light"` for filtering, `"medium"` |
 |                      | for analysis, `"high"` for hard reasoning)                 |
@@ -177,11 +208,12 @@ Rules:
   `Market scope assumption: prior session context is China-listed AI
   companies, so this proposal keeps an equity market scope.`
 - If the scope is ambiguous, ask a short clarification or state a
-  reversible assumption before calling `strategy_generate_proposal`.
-- Use `strategy_generate_proposal` for strategy packages. Avoid direct
-  native file writes into `strategies/<id>/...` unless the operator
-  explicitly asks for raw file editing; proposal-first review is the
-  normal path.
+  reversible assumption before calling `strategy_draft_proposal`.
+- Author strategy packages through the draft proposal tree
+  (`strategy_draft_proposal` + edits under
+  `evolution/proposals/<id>/after/strategies/<id>/`). Never write
+  directly into the live `strategies/<id>/...` tree; proposal-first
+  review is the only path and the workspace guard enforces it.
 
 ## Triggers & schedules
 
@@ -260,7 +292,7 @@ def _load_run():
 
 def test_backtest_no_blowup():
     """Replay 30d of 1h candles; assert no negative drawdown beyond limits."""
-    stats = backtest_replay(_load_run(), markets=["MOCK:BTCUSDT"], window_days=45, tf="1h")
+    stats = backtest_replay(_load_run(), markets=["MOCK:BTCUSDT"], window_days=180, tf="1h")
     assert stats["max_drawdown_pct"] <= 30
 ```
 
@@ -308,43 +340,14 @@ strategy.
 1. Confirm the archetype + triggers + market with the user.
 2. Read `ref/<archetype>.md` and the existing manifests under
    `<workspace>/strategies/` for stylistic consistency.
-3. **Draft the package files in your own context** (the actual
-   `main.py`, `tests/test_main.py`, `strategy.md`, optional
-   `subagents/<name>.agent.md`). The generator's stock templates
-   are a *fallback* — they only fire for files you don't supply,
-   and they will not encode the user's logic on their own.
-   If the strategy depends on custom data, provider-specific reads,
-   wallet/chain-native evidence, event replay, or an archetype the
-   user explicitly distinguished from the stock templates, author the
-   SDK code yourself instead of asking the generator to infer it.
-   Use the Nerya strategy SDK (`StrategyContext`, `StrategyResult`,
-   and optionally `StrategyAgentTask`) so the package remains
-   validator/backtest compatible. In this lane
-   `strategy_generate_proposal` is the packager; your `files` are the
-   implementation.
-4. Call `strategy_generate_proposal` with the drafted files
-   inline. **Every non-trivial strategy must wire** a real
-   `schedule_cron` and a `tuning_prompt` + `tuning_cron` (the
-   generator defaults `create_tuning=true` for you, but you
-   still owe a real tuner rubric). **Subagents are optional**:
-   never add them just to satisfy a strategy-generation rule, because
-   there is no runtime requirement that strategies use subagents
-   before placing orders. Only list a role under `subagents` when
-   `main.py` actually calls `ctx.subagents.run("<role>", ...)` or the
-   team skill through `ctx.subagents.run(...)` at runtime. If the
-   strategy needs Agent/subagent analysis as an input before it decides
-   to trade, suggest the matching `subagents/<role>.agent.md` prompt or
-   explicitly reuse a workspace persona by name. Missing subagent
-   files are allowed: the runtime can use workspace/default personas.
-   Pure indicator-driven, rule-based, or directly LLM-scored
-   strategies should ship with `subagents: []`. The example below is
-   the optional Agent-assisted form:
+3. **Scaffold the draft proposal** with `strategy_draft_proposal`,
+   passing only the manifest knobs (no inline file bodies):
 
    ```jsonc
-   strategy_generate_proposal({
+   strategy_draft_proposal({
      "strategy_id": "btcusdt_intraday_long_zh",
      "title": "BTCUSDT 日内做多 (EMA + RSI)",
-     "prompt": "<full operator brief, lands in strategy.md>",
+     "prompt": "<short operator brief, lands in strategy.md>",
      "strategy_class": "trend",
      "mode": "paper",
      "markets": ["binance:BTCUSDT"],
@@ -352,30 +355,47 @@ strategy.
      "schedule_cron": "*/5 * * * *",
      "subagents": ["market_analyst"],
      "create_tuning": true,
-     "tuning_cron": "0 */6 * * *",
-     "tuning_prompt": "You are the strategy_tuner for `<id>`. \nReview the last 200 ticks under runs/, the closed trades, and \nthe strategy.md objectives. Propose at most one parameter \nchange per cycle (e.g. RSI band, EMA period, max_single_order_usd). \nAlways write a one-paragraph rationale into the proposal note. \nNever flip live_trading_enabled.",
-     "tuning_objectives": [
-       "risk_adjusted_return",
-       "drawdown",
-       "win_rate"
-     ],
-     "files": {
-       "main.py": "# real implementation, not the template ...",
-       "tests/test_main.py": "# real backtest using nerya.strategies.backtest_bridge.backtest_replay ...",
-       "strategy.md": "# overrides the prompt-derived playbook if needed",
-       "subagents/market_analyst.agent.md": "# per-strategy market_analyst prompt ..."
-     }
+     "tuning_cron": "0 */6 * * *"
    })
    ```
 
-   The runtime writes the result under
-   `proposals/<id>/after/strategies/<id>/`. Any path you don't
-   override falls back to the stock template; any path you
-   *do* supply replaces the template wholesale.
+   It returns `proposal_id` + `proposal_paths` and writes stock
+   templates under `evolution/proposals/<id>/after/strategies/<id>/`.
+   To iterate an existing promoted strategy, call it with
+   `from_strategy_id` instead so the live files are copied into the
+   draft.
+4. **Author the package by editing the staged files** with
+   `read_file` + `edit_file` / `write_file` at the returned
+   `proposal_paths` (`main.py`, `tests/test_main.py`, `strategy.md`,
+   optional `subagents/<name>.agent.md`). The templates are a
+   starting point only — they will not encode the user's logic on
+   their own. If the strategy depends on custom data,
+   provider-specific reads, wallet/chain-native evidence, event
+   replay, or an archetype the user explicitly distinguished from the
+   stock templates, author the SDK code yourself. Use the Nerya
+   strategy SDK (`StrategyContext`, `StrategyResult`, and optionally
+   `StrategyAgentTask`) so the package stays validator/backtest
+   compatible. **Every non-trivial strategy must wire** a real
+   `schedule_cron` and a real `tuning_prompt` + `tuning_cron`
+   (the scaffold defaults `create_tuning=true`, but you still owe a
+   real tuner rubric — edit `subagents/strategy_tuner.agent.md`).
+   **Subagents are optional**: never add them just to satisfy a rule,
+   because there is no runtime requirement that strategies use
+   subagents before placing orders. Only list a role under
+   `subagents` when `main.py` actually calls
+   `ctx.subagents.run("<role>", ...)`. If the strategy needs
+   Agent/subagent analysis before it decides to trade, edit the
+   matching `subagents/<role>.agent.md` prompt or reuse a workspace
+   persona by name (missing per-strategy subagent files are allowed:
+   the runtime falls back to workspace/default personas). Pure
+   indicator-driven, rule-based, or directly LLM-scored strategies
+   should ship with `subagents: []`.
 5. Call `strategy_validate({proposal_id})`. Fix any blocker by
-   calling `strategy_generate_proposal` again with corrected
-   `files` (overwriting the proposal) until the validator says
-   `ok=true`.
+   editing the staged files (`edit_file` / `write_file`) and
+   re-running `strategy_validate` until the validator says `ok=true`.
+   Then call `strategy_submit_proposal({proposal_id})` to move the
+   draft into the pending-review queue. If submit reports blockers,
+   the proposal stays a draft — edit and submit again.
 5.5. Backtest gate (REQUIRED).
 
    After `strategy_validate` returns `ok=true`, run a backtest before

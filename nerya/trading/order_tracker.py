@@ -187,6 +187,21 @@ class OrderTracker:
             self._con = connect(self.paths.db)
         return self._con
 
+    def close(self) -> None:
+        """Release the lazily-opened SQLite connection, if any.
+
+        Short-lived trackers (e.g. the 5s background order poller build a
+        fresh instance every tick) must call this each cycle, otherwise
+        the connection's file descriptor leaks until the process exhausts
+        its fd limit and wedges.
+        """
+        con, self._con = self._con, None
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+
     # -- create -----------------------------------------------------------------
     def register(
         self,

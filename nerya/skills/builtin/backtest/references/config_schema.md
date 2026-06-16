@@ -7,8 +7,9 @@ points.
 |---|---|---:|---|
 | `initial_capital_usd` | number | 10000 | Starting cash. |
 | `warmup_bars` | integer | 50 | Bars available before decisions start. |
-| `min_backtest_days` | integer | 30 | Recommended coverage window. Shorter real-data runs are allowed and reported as short-window backtests. |
-| `window_days` | integer | 45 | Replay window. Default is longer than one month because 30d+ evidence is preferred, but new/short-lived markets may use any available real history. |
+| `min_backtest_days` | integer | 0 | Legacy recommendation field only. Default is no minimum gate; any non-empty real-data window is valid. |
+| `window_days` | integer | 180 | General requested replay window. The loader asks for roughly six months by default and uses the maximum real history the source can return when less is available. |
+| `short_lived_window_days` | integer | 7 | Requested replay window for short-lived meme/on-chain/DEX pool strategies when no explicit config is passed. |
 | `tf` | string | `1h` | Candle interval. |
 | `markets` | string[] | [] | Filled from `strategy.yml` by CLI. |
 | `indicators` | map | SMA/EMA/RSI/ATR | Period lists by indicator name. |
@@ -30,7 +31,8 @@ points.
 
 ```yaml
 initial_capital_usd: 10000
-window_days: 45
+window_days: 180
+short_lived_window_days: 7
 tf: "1h"
 markets: ["BINANCE:BTCUSDT"]
 stake_amount:

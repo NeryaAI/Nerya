@@ -22,6 +22,10 @@ import logging
 import re
 
 _LOG = logging.getLogger(__name__)
+_SECRET_REF_CN = (
+    r"(vault|密钥|令牌|(?<![A-Za-z0-9])tokens?(?![A-Za-z0-9])|"
+    r"api\s*key|凭证.{0,8}(内容|明文|原文|值|实际))"
+)
 
 
 def wrap_untrusted(source: str, content: str) -> str:
@@ -50,8 +54,8 @@ _SUSPICIOUS_PATTERNS = [
     re.compile(r"\b(show|send)\s+(me\s+)?(the\s+)?(\.env|environment\s+variables|api\s+key)\b", re.I),
     re.compile(r"\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b.{0,80}\b(vault|secrets?|credentials?|tokens?)\b", re.I | re.S),
     re.compile(r"\b(vault|secrets?|credentials?|tokens?)\b.{0,80}\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b", re.I | re.S),
-    re.compile(r"(读取|查看|展示|输出|打印|泄露|导出).{0,40}(vault|密钥|令牌|token|api\s*key|凭证.{0,8}(内容|明文|原文|值|实际))", re.I | re.S),
-    re.compile(r"(vault|密钥|令牌|token|api\s*key|凭证.{0,8}(内容|明文|原文|值|实际)).{0,40}(读取|查看|展示|输出|打印|泄露|导出)", re.I | re.S),
+    re.compile(rf"(读取|查看|展示|输出|打印|泄露|导出).{{0,40}}{_SECRET_REF_CN}", re.I | re.S),
+    re.compile(rf"{_SECRET_REF_CN}.{{0,40}}(读取|查看|展示|输出|打印|泄露|导出)", re.I | re.S),
     # limits tampering
     re.compile(r"\b(raise|increase|set)\s+(the\s+)?(daily|max|position|notional)\s+limit\b", re.I),
     re.compile(r"\bmodify\s+limits\.yml\b", re.I),
@@ -135,8 +139,8 @@ _BLOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(show|send)\s+(me\s+)?(the\s+)?(\.env|environment\s+variables|api\s+key)\b", re.I),
     re.compile(r"\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b.{0,80}\b(vault|secrets?|credentials?|tokens?)\b", re.I | re.S),
     re.compile(r"\b(vault|secrets?|credentials?|tokens?)\b.{0,80}\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b", re.I | re.S),
-    re.compile(r"(读取|查看|展示|输出|打印|泄露|导出).{0,40}(vault|密钥|令牌|token|api\s*key|凭证.{0,8}(内容|明文|原文|值|实际))", re.I | re.S),
-    re.compile(r"(vault|密钥|令牌|token|api\s*key|凭证.{0,8}(内容|明文|原文|值|实际)).{0,40}(读取|查看|展示|输出|打印|泄露|导出)", re.I | re.S),
+    re.compile(rf"(读取|查看|展示|输出|打印|泄露|导出).{{0,40}}{_SECRET_REF_CN}", re.I | re.S),
+    re.compile(rf"{_SECRET_REF_CN}.{{0,40}}(读取|查看|展示|输出|打印|泄露|导出)", re.I | re.S),
     re.compile(r"\bexecute\s+(this|the)\s+(order|trade)\s+without\b", re.I),
 )
 

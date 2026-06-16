@@ -1,7 +1,8 @@
 initial_capital_usd: 10000
 warmup_bars: 50
-min_backtest_days: 30
-window_days: 45
+min_backtest_days: 0
+window_days: 180
+short_lived_window_days: 7
 tf: "1h"
 markets: []
 indicators:
@@ -22,7 +23,7 @@ slip_bps_by_venue:
   ALPACA: 1
   DEX: 10
 fill_mode: "entry_current_open__exit_next_open"
-allow_short: false
+allow_short: true
 max_open_trades: 1
 stake_amount:
   mode: "unlimited"

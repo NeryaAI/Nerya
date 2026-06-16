@@ -73,8 +73,9 @@ class ThresholdCfg:
 class BacktestConfig:
     initial_capital_usd: float = 10000.0
     warmup_bars: int = 50
-    min_backtest_days: int = 30
-    window_days: int = 45
+    min_backtest_days: int = 0
+    window_days: int = 180
+    short_lived_window_days: int = 7
     tf: str = "1h"
     timeframes: list[str] = field(default_factory=list)
     markets: list[str] = field(default_factory=list)
@@ -99,7 +100,10 @@ class BacktestConfig:
         "DEX": 10.0,
     })
     fill_mode: str = "entry_current_open__exit_next_open"
-    allow_short: bool = False
+    # Default to permitting shorts so a long/short strategy backtests faithfully
+    # (its own open_position(side="short") intents fill). Set false to force
+    # long-only (e.g. spot-only) simulations.
+    allow_short: bool = True
     max_open_trades: int = 1
     kill_switch: bool = False
     max_slippage_bps: float | None = None
@@ -127,8 +131,9 @@ class BacktestConfig:
         cfg = cls(
             initial_capital_usd=float(raw.get("initial_capital_usd", 10000.0)),
             warmup_bars=int(raw.get("warmup_bars", 50)),
-            min_backtest_days=int(raw.get("min_backtest_days", 30)),
-            window_days=int(raw.get("window_days", 45)),
+            min_backtest_days=int(raw.get("min_backtest_days", 0)),
+            window_days=int(raw.get("window_days", 180)),
+            short_lived_window_days=int(raw.get("short_lived_window_days", 7)),
             tf=str(raw.get("tf", "1h")),
             timeframes=_str_list(raw.get("timeframes")),
             markets=[str(m) for m in (raw.get("markets") or [])],
@@ -136,7 +141,7 @@ class BacktestConfig:
             fee_bps_by_venue=_float_map(raw.get("fee_bps_by_venue"), cls().fee_bps_by_venue),
             slip_bps_by_venue=_float_map(raw.get("slip_bps_by_venue"), cls().slip_bps_by_venue),
             fill_mode=str(raw.get("fill_mode", "entry_current_open__exit_next_open")),
-            allow_short=bool(raw.get("allow_short", False)),
+            allow_short=bool(raw.get("allow_short", True)),
             max_open_trades=int(raw.get("max_open_trades", 1)),
             kill_switch=bool(raw.get("kill_switch", False)),
             max_slippage_bps=(
@@ -163,6 +168,8 @@ class BacktestConfig:
             raise BacktestConfigError("min_backtest_days must be >= 0")
         if self.window_days <= 0:
             raise BacktestConfigError("window_days must be positive")
+        if self.short_lived_window_days <= 0:
+            raise BacktestConfigError("short_lived_window_days must be positive")
         if self.warmup_bars < 0:
             raise BacktestConfigError("warmup_bars must be >= 0")
         if self.max_open_trades <= 0:

@@ -22,7 +22,7 @@ def backtest_replay(
     run_fn: Callable[[Any], Any],
     *,
     markets: list[str] | tuple[str, ...] | None = None,
-    window_days: int = 45,
+    window_days: int = 180,
     tf: str = "1h",
     fee_bps: float | None = None,
     slippage_bps: float | None = None,

@@ -19,6 +19,7 @@ def test_evolution_assets_routes_candidate_promote(tmp_path):
         {
             "kind": "gene",
             "summary": "route gene",
+            "evidence_refs": ["turn:t_route_gene"],
             "payload": {
                 "id": "gene_route",
                 "category": "repair",
@@ -37,6 +38,35 @@ def test_evolution_assets_routes_candidate_promote(tmp_path):
 
     assert promoted["ok"] is True
     assert any(row["id"] == "gene_route" for row in listed["assets"])
+
+
+def test_evolution_assets_routes_candidate_promote_requires_evidence(tmp_path):
+    client = SimpleNamespace(config=Config(paths=WorkspacePaths(tmp_path), data={}))
+    route_map = {(method, path): handler for method, path, handler in routes_evolution.routes()}
+
+    candidate = route_map[("POST", "/evolution/assets/candidate")](
+        client,
+        {
+            "kind": "gene",
+            "summary": "route gene without evidence",
+            "payload": {
+                "id": "gene_route_no_evidence",
+                "category": "repair",
+                "signals_match": ["tool_failure_cluster"],
+                "preconditions": [],
+                "strategy": [],
+                "validation": [],
+            },
+        },
+    )
+    promoted = route_map[("POST", "/evolution/assets/promote")](
+        client,
+        {"candidate_id": candidate["id"]},
+    )
+
+    assert promoted["ok"] is False
+    assert promoted["reason"] == "blocked"
+    assert "missing_evidence_refs" in promoted["blocked_reasons"]
 
 
 def test_evolution_apply_route_returns_dict(tmp_path):

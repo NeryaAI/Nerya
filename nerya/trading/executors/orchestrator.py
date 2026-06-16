@@ -64,6 +64,20 @@ class ExecutorOrchestrator:
             self._con = connect(self.paths.db)
         return self._con
 
+    def close(self) -> None:
+        """Release the lazily-opened SQLite connection, if any.
+
+        The account-refresh background loop builds a fresh orchestrator
+        every tick, so it must close it each cycle or the connection's
+        file descriptor leaks until the process exhausts its fd limit.
+        """
+        con, self._con = self._con, None
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+
     def _persist(self, run: ExecutorRun) -> None:
         con = self._con_lazy()
         con.execute(

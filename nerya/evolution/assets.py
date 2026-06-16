@@ -71,6 +71,7 @@ class EvolutionAssetCandidate:
     state: Literal["candidate", "promoted", "rejected"] = "candidate"
     safe_to_promote: bool = True
     blocked_reasons: list[str] = field(default_factory=list)
+    promotion_gates: dict[str, Any] = field(default_factory=dict)
     ts: str = field(default_factory=now_iso)
 
     def asdict(self) -> dict[str, Any]:
@@ -122,6 +123,31 @@ DEFAULT_GENES: tuple[EvolutionGene, ...] = (
         max_files=5,
         confidence=0.72,
         summary="Review strategy degradation with explicit validation gates.",
+    ),
+    EvolutionGene(
+        id="gene_nerya_market_regime_tuning_review",
+        category="strategy",
+        signals_match=[
+            "market_regime_trending",
+            "market_regime_rangebound",
+            "market_regime_high_volatility",
+            "market_news_context",
+            "market_data_degraded",
+        ],
+        preconditions=[
+            "strategy_id_is_known",
+            "performance_snapshot_has_market_context",
+        ],
+        strategy=[
+            "match prior tuning lessons to the current market regime",
+            "treat degraded market/news data as a validation blocker or warning",
+            "keep regime-specific changes proposal-first and backtest-gated",
+        ],
+        validation=["python -m pytest tests/test_strategy_evolution_validation.py -q"],
+        forbidden_scopes=["accounts/*", "vault/*", "strategies/*/limits.yml"],
+        max_files=5,
+        confidence=0.7,
+        summary="Tune strategies using current market regime, news, and data-quality context.",
     ),
     EvolutionGene(
         id="gene_nerya_skill_failure_patch",
@@ -249,6 +275,8 @@ def create_candidate(
     source_event_id: str | None = None,
     strategy_id: str | None = None,
 ) -> dict[str, Any]:
+    payload = dict(payload or {})
+    evidence = list(evidence_refs or [])
     targets = [str(x) for x in payload.get("mutation_scope") or payload.get("targets") or []]
     commands = [str(x) for x in payload.get("validation") or payload.get("validation_commands") or []]
     policy = validate_mutation_scope(targets, max_files=int(payload.get("max_files") or 10))
@@ -256,16 +284,24 @@ def create_candidate(
     reasons = list(policy.reasons)
     if cmd_policy:
         reasons.extend(cmd_policy.reasons)
+    gates = _candidate_promotion_gates(
+        kind=kind,
+        payload=payload,
+        evidence_refs=evidence,
+        policy_reasons=reasons,
+    )
+    reasons = list(gates.get("blockers") or [])
     candidate = EvolutionAssetCandidate(
         id=new_id("eac"),
         kind=kind,  # type: ignore[arg-type]
         summary=summary,
-        payload=dict(payload or {}),
-        evidence_refs=list(evidence_refs or []),
+        payload=payload,
+        evidence_refs=evidence,
         source_event_id=source_event_id,
         strategy_id=strategy_id,
         safe_to_promote=not reasons,
         blocked_reasons=reasons,
+        promotion_gates=gates,
     )
     jsonl.append(paths.evolution_candidates, candidate.asdict(), stamp=False)
     record_event(
@@ -274,8 +310,12 @@ def create_candidate(
         outcome="candidate",
         strategy_id=strategy_id,
         summary=f"Evolution asset candidate: {summary}",
-        evidence_refs=list(evidence_refs or []),
-        metadata={"candidate_id": candidate.id, "asset_kind": kind},
+        evidence_refs=evidence,
+        metadata={
+            "candidate_id": candidate.id,
+            "asset_kind": kind,
+            "promotion_gates": gates,
+        },
     )
     return candidate.asdict()
 
@@ -289,12 +329,24 @@ def promote_candidate(
     candidate = _find_candidate(paths, candidate_id)
     if candidate is None:
         return {"ok": False, "reason": "not_found", "candidate_id": candidate_id}
-    if not candidate.get("safe_to_promote", False):
+    gates = (
+        candidate.get("promotion_gates")
+        if isinstance(candidate.get("promotion_gates"), dict)
+        else _candidate_promotion_gates(
+            kind=str(candidate.get("kind") or ""),
+            payload=dict(candidate.get("payload") or {}),
+            evidence_refs=list(candidate.get("evidence_refs") or []),
+            policy_reasons=list(candidate.get("blocked_reasons") or []),
+        )
+    )
+    blocked_reasons = list(gates.get("blockers") or candidate.get("blocked_reasons") or [])
+    if not candidate.get("safe_to_promote", False) or gates.get("can_promote") is False:
         return {
             "ok": False,
             "reason": "blocked",
             "candidate_id": candidate_id,
-            "blocked_reasons": candidate.get("blocked_reasons") or [],
+            "blocked_reasons": blocked_reasons,
+            "promotion_gates": gates,
         }
     kind = str(candidate.get("kind") or "")
     payload = dict(candidate.get("payload") or {})
@@ -322,7 +374,14 @@ def promote_candidate(
         return {"ok": False, "reason": f"unknown_kind:{kind}", "candidate_id": candidate_id}
     jsonl.append(
         paths.evolution_candidates,
-        {**candidate, "state": "promoted", "promoted_ref": promoted_ref, "operator": operator},
+        {
+            **candidate,
+            "state": "promoted",
+            "decision": "promoted",
+            "decided_at": now_iso(),
+            "promoted_ref": promoted_ref,
+            "operator": operator,
+        },
         stamp=False,
     )
     record_event(
@@ -352,7 +411,14 @@ def reject_candidate(
     candidate = _find_candidate(paths, candidate_id)
     if candidate is None:
         return {"ok": False, "reason": "not_found", "candidate_id": candidate_id}
-    rejected = {**candidate, "state": "rejected", "rejected_reason": reason, "operator": operator}
+    rejected = {
+        **candidate,
+        "state": "rejected",
+        "decision": "rejected",
+        "decided_at": now_iso(),
+        "rejected_reason": reason,
+        "operator": operator,
+    }
     jsonl.append(paths.evolution_candidates, rejected, stamp=False)
     jsonl.append(paths.evolution_rejected, rejected, stamp=False)
     record_event(
@@ -379,9 +445,12 @@ def record_capsule_from_proposal(
     if not meta_path.exists():
         return None
     meta = yaml_io.load(meta_path, default={}) or {}
+    proposal_metadata = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+    capsule_metadata = _capsule_metadata_from_proposal(meta, proposal_metadata, proposal_id)
+    selected_gene_ids = _str_list(capsule_metadata.get("selected_gene_ids"))
     capsule = EvolutionCapsule(
         id=new_id("cap"),
-        gene_id=meta.get("gene_id"),
+        gene_id=meta.get("gene_id") or (selected_gene_ids[0] if selected_gene_ids else None),
         source_event_id=meta.get("source_event_id"),
         summary=str(meta.get("summary") or proposal_id),
         evidence_refs=[str(x) for x in (meta.get("evidence_refs") or [])],
@@ -393,11 +462,149 @@ def record_capsule_from_proposal(
         ],
         outcome_score=outcome_score,
         promotion_ref=f"proposal:{proposal_id}",
-        strategy_id=meta.get("strategy_id"),
-        metadata={"proposal_kind": meta.get("kind"), "proposal_id": proposal_id},
+        strategy_id=meta.get("strategy_id") or proposal_metadata.get("strategy_id"),
+        metadata=capsule_metadata,
     )
     jsonl.append(paths.evolution_capsules, capsule.asdict(), stamp=False)
     return capsule.asdict()
+
+
+def _capsule_metadata_from_proposal(
+    meta: dict[str, Any],
+    proposal_metadata: dict[str, Any],
+    proposal_id: str,
+) -> dict[str, Any]:
+    trigger = (
+        proposal_metadata.get("evolution_trigger_context")
+        if isinstance(proposal_metadata.get("evolution_trigger_context"), dict)
+        else {}
+    )
+    signal_kinds = _str_list(trigger.get("signal_kinds"))
+    out: dict[str, Any] = {
+        "proposal_kind": meta.get("kind"),
+        "proposal_id": proposal_id,
+    }
+    if signal_kinds:
+        out["trigger_signal_kinds"] = signal_kinds
+    for source_key, target_key in (
+        ("market_regimes", "trigger_market_regimes"),
+        ("markets", "trigger_markets"),
+        ("timeframes", "trigger_timeframes"),
+        ("data_quality", "trigger_data_quality"),
+        ("selected_gene_ids", "selected_gene_ids"),
+        ("selected_capsule_ids", "selected_capsule_ids"),
+        ("evidence_refs", "trigger_evidence_refs"),
+    ):
+        values = _str_list(trigger.get(source_key))
+        if values:
+            out[target_key] = values
+    if proposal_metadata.get("package_hash"):
+        out["package_hash"] = proposal_metadata.get("package_hash")
+    return out
+
+
+def _candidate_promotion_gates(
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    evidence_refs: list[str],
+    policy_reasons: list[str],
+) -> dict[str, Any]:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    origin = str(metadata.get("origin") or "").strip()
+    preview_type = str(metadata.get("preview_type") or "").strip()
+    preview_status = str(metadata.get("preview_status") or "").strip()
+    blockers = _unique_strings([str(reason) for reason in policy_reasons if str(reason).strip()])
+    warnings: list[str] = []
+    checks: list[dict[str, Any]] = []
+
+    has_evidence = bool([ref for ref in evidence_refs if str(ref).strip()])
+    if not has_evidence:
+        blockers.append("missing_evidence_refs")
+    checks.append({
+        "id": "evidence_refs",
+        "status": "passed" if has_evidence else "blocked",
+        "summary": (
+            f"{len(evidence_refs)} evidence ref(s) attached."
+            if has_evidence else
+            "Asset candidates need inspectable evidence refs before promotion."
+        ),
+    })
+
+    checks.append({
+        "id": "policy_scope",
+        "status": "passed" if not policy_reasons else "blocked",
+        "summary": (
+            "Mutation scope and validation commands pass asset policy."
+            if not policy_reasons else
+            "Mutation scope or validation command policy blocked promotion."
+        ),
+        "reasons": list(policy_reasons),
+    })
+
+    if origin == "strategy_optimizer_preview":
+        valid_preview = preview_type in {"static", "backtest"} and preview_status in {"passed", "failed"}
+        if not valid_preview:
+            blockers.append("invalid_preview_candidate")
+        checks.append({
+            "id": "preview_outcome",
+            "status": "passed" if valid_preview else "blocked",
+            "summary": (
+                f"{preview_type or 'unknown'} preview outcome is {preview_status or 'unknown'}."
+                if valid_preview else
+                "Preview-generated candidates require a passed or failed static/backtest outcome."
+            ),
+        })
+        if preview_status == "failed":
+            warnings.append("promotes_as_negative_cautionary_capsule")
+    else:
+        checks.append({
+            "id": "asset_payload",
+            "status": "passed" if kind in {"gene", "capsule"} else "blocked",
+            "summary": f"Candidate kind is {kind or 'unknown'}.",
+        })
+        if kind not in {"gene", "capsule"}:
+            blockers.append(f"unknown_kind:{kind}")
+
+    warnings.append("review_only_until_promoted")
+    checks.append({
+        "id": "runtime_selector",
+        "status": "review_only",
+        "summary": "Pending candidates are not used by Selector/GDI until explicit promotion.",
+    })
+    blockers = _unique_strings(blockers)
+    warnings = _unique_strings(warnings)
+    return {
+        "version": "asset_candidate_promotion_gates_v1",
+        "can_promote": not blockers,
+        "review_only_until_promoted": True,
+        "selector_eligible": False,
+        "checks": checks,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+def _str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
 
 
 def _find_candidate(paths: WorkspacePaths, candidate_id: str) -> dict[str, Any] | None:

@@ -100,7 +100,15 @@ class Connector(ABC):
             "spread_bps": t.spread_bps, "ts_ms": t.ts_ms, "venue": t.venue,
         }
 
-    def get_klines(self, market: str, *, interval: str = "1m", limit: int = 100) -> list[list[Any]]:
+    def get_klines(
+        self,
+        market: str,
+        *,
+        interval: str = "1m",
+        limit: int = 100,
+        since: int | None = None,
+        end: int | None = None,
+    ) -> list[list[Any]]:
         # default: empty; overridden by native connectors
         return []
 

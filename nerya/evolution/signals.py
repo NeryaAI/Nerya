@@ -96,9 +96,9 @@ def _tool_failure_signals(
     strategy_id: str | None,
     limit: int,
 ) -> list[EvolutionSignal]:
-    rows = jsonl.read_all(paths.journal("agent"))[-limit:]
+    rows = list(enumerate(jsonl.read_all(paths.journal("agent"))))[-limit:]
     failures: dict[str, list[tuple[int, dict[str, Any]]]] = {}
-    for idx, row in enumerate(rows):
+    for idx, row in rows:
         if strategy_id and str(row.get("strategy_id") or "") != strategy_id:
             continue
         blob = json.dumps(row, ensure_ascii=False, default=str).lower()
@@ -148,9 +148,9 @@ def _operator_correction_signals(
     strategy_id: str | None,
     limit: int,
 ) -> list[EvolutionSignal]:
-    rows = jsonl.read_all(paths.journal("agent"))[-limit:]
+    rows = list(enumerate(jsonl.read_all(paths.journal("agent"))))[-limit:]
     out: list[EvolutionSignal] = []
-    for idx, row in enumerate(rows):
+    for idx, row in rows:
         if row.get("kind") != "agent.turn.start":
             continue
         if strategy_id and str(row.get("strategy_id") or "") != strategy_id:
@@ -182,9 +182,9 @@ def _proposal_outcome_signals(
     limit: int,
 ) -> list[EvolutionSignal]:
     del strategy_id
-    rows = jsonl.read_all(paths.journal("evolution"))[-limit:]
+    rows = list(enumerate(jsonl.read_all(paths.journal("evolution"))))[-limit:]
     out: list[EvolutionSignal] = []
-    for idx, row in enumerate(rows):
+    for idx, row in rows:
         kind = str(row.get("kind") or "")
         state = str(row.get("state") or "")
         pid = str(row.get("proposal_id") or "")
@@ -217,9 +217,9 @@ def _strategy_tuning_signals(
     strategy_id: str | None,
     limit: int,
 ) -> list[EvolutionSignal]:
-    rows = jsonl.read_all(paths.journal("strategy_evolution"))[-limit:]
+    rows = list(enumerate(jsonl.read_all(paths.journal("strategy_evolution"))))[-limit:]
     out: list[EvolutionSignal] = []
-    for idx, row in enumerate(rows):
+    for idx, row in rows:
         sid = str(row.get("strategy_id") or "")
         if strategy_id and sid != strategy_id:
             continue

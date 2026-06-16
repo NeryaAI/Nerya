@@ -84,7 +84,7 @@ def render_chart(backtest_dir: str | Path) -> dict[str, Any]:
         "tables": [
             _table("drawdown_episodes", metrics.get("drawdown_episodes", [])[:10]),
             _table("missed_profit_episodes", metrics.get("missed_profit_episodes", [])[:10]),
-            _table("trades_top10", trades[:10]),
+            _table("trades", trades[:500]),
         ],
     }
     (root / "chart.json").write_text(json.dumps(chart, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -167,6 +167,8 @@ def _workspace_root_from_backtest_dir(backtest_dir: Path) -> Path | None:
     for parent in [cur, *cur.parents]:
         if (parent / "nerya.yml").exists():
             return parent
+        if parent.name == "strategies" and parent.parent:
+            return parent.parent
     return None
 
 

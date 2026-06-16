@@ -40,7 +40,7 @@ from ...connectors.provider_spec import CredentialField, ExchangeProviderSpec, g
 from ...connectors.registry import build_connector
 from ...core.market_defaults import resolve_market_defaults
 from ...core.truth import degraded_envelope, live_envelope
-from ...data.candles import fetch_candles
+from ...data.candles import canonical_venue, fetch_candles, fetch_public_ticker
 from ...data.features import compute_features
 from ..types import (
     ToolCall,
@@ -488,6 +488,35 @@ def _apply_connector_timeout(conn: Any, timeout_s: float) -> Any:
     return conn
 
 
+_PUBLIC_MARKET_DATA_VENUES = frozenset(
+    {
+        "YAHOO",
+        "BINANCE",
+        "BINANCE_PERPETUAL",
+        "OKX",
+        "BYBIT",
+        "BYBIT_PERPETUAL",
+        "KRAKEN",
+    }
+)
+
+
+def _venue_has_public_market_feed(venue: str) -> bool:
+    """True when ``venue`` serves keyless public OHLCV / ticker.
+
+    Read-only market data for these venues never needs trading API keys, so
+    the data tools must not short-circuit on ``credential_missing`` for them.
+    That false gate is what made the agent report it "could not fetch real
+    klines" for BINANCE:BTCUSDT during strategy design — even though the
+    public REST feed (and the backtest engine) load real candles with no
+    keys at all. Credentialed-only data sources (Glassnode, Polygon.io,
+    Tushare, …) are intentionally absent here so their credential guidance is
+    preserved.
+    """
+
+    return canonical_venue(venue) in _PUBLIC_MARKET_DATA_VENUES
+
+
 def _public_connector(
     venue: str,
     *,
@@ -710,20 +739,21 @@ def _market_candles(args: dict[str, Any], *, config_like: Any | None) -> dict[st
     interval = str(args.get("interval") or "1m")
     count = _count(args)
     timeout_s = _market_timeout_s(args)
-    missing = _credential_missing_payload(
-        venue,
-        market,
-        config_like=config_like,
-        capability="candles",
-    )
-    if missing is not None:
-        return {
-            **missing,
-            "interval": interval,
-            "count": 0,
-            "coverage": _candle_coverage([]),
-            "candles": [],
-        }
+    if not _venue_has_public_market_feed(venue):
+        missing = _credential_missing_payload(
+            venue,
+            market,
+            config_like=config_like,
+            capability="candles",
+        )
+        if missing is not None:
+            return {
+                **missing,
+                "interval": interval,
+                "count": 0,
+                "coverage": _candle_coverage([]),
+                "candles": [],
+            }
     connector = _public_connector(venue, config_like=config_like, timeout_s=timeout_s)
     rows = fetch_candles(
         market,
@@ -759,48 +789,58 @@ def _market_candles(args: dict[str, Any], *, config_like: Any | None) -> dict[st
 def _market_ticker(args: dict[str, Any], *, config_like: Any | None) -> dict[str, Any]:
     venue, market = _market_id(args, config_like=config_like)
     timeout_s = _market_timeout_s(args)
-    missing = _credential_missing_payload(
-        venue,
-        market,
-        config_like=config_like,
-        capability="ticker",
-    )
-    if missing is not None:
-        return missing
+    if not _venue_has_public_market_feed(venue):
+        missing = _credential_missing_payload(
+            venue,
+            market,
+            config_like=config_like,
+            capability="ticker",
+        )
+        if missing is not None:
+            return missing
+    last_error = "venue_unavailable"
     connector = _public_connector(venue, config_like=config_like, timeout_s=timeout_s)
-    if connector is None:
+    if connector is not None:
+        try:
+            t = connector.get_ticker(market)
+            return {
+                "venue": getattr(t, "venue", venue),
+                "market": market,
+                "bid": t.bid,
+                "ask": t.ask,
+                "mid": t.mid,
+                "last": t.last,
+                "ts_ms": getattr(t, "ts_ms", 0),
+                "_envelope": live_envelope(
+                    source=venue.lower(), venue=venue.lower()
+                ).as_dict(),
+            }
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+    # Keyless public REST fallback so public venues still resolve a quote even
+    # when an account-scoped connector cannot be built or errors out.
+    snap = fetch_public_ticker(market, allow_mock=False, config_like=config_like)
+    if snap and snap.get("price"):
         return {
             "venue": venue,
             "market": market,
-            "error": "venue_unavailable",
-            "_envelope": degraded_envelope(
-                "ticker",
-                error="venue_unavailable",
-                venue=venue.lower(),
-            ).as_dict(),
-        }
-    try:
-        t = connector.get_ticker(market)
-    except Exception as exc:
-        return {
-            "venue": venue,
-            "market": market,
-            "error": f"{type(exc).__name__}: {exc}",
-            "_envelope": degraded_envelope(
-                "ticker",
-                error=type(exc).__name__,
-                venue=venue.lower(),
-            ).as_dict(),
+            "bid": snap.get("bid"),
+            "ask": snap.get("ask"),
+            "mid": snap.get("mid") or snap.get("price"),
+            "last": snap.get("last") or snap.get("price"),
+            "ts_ms": snap.get("ts_ms") or 0,
+            "_envelope": snap.get("_envelope")
+            or live_envelope(source=venue.lower(), venue=venue.lower()).as_dict(),
         }
     return {
-        "venue": getattr(t, "venue", venue),
+        "venue": venue,
         "market": market,
-        "bid": t.bid,
-        "ask": t.ask,
-        "mid": t.mid,
-        "last": t.last,
-        "ts_ms": getattr(t, "ts_ms", 0),
-        "_envelope": live_envelope(source=venue.lower(), venue=venue.lower()).as_dict(),
+        "error": last_error,
+        "_envelope": degraded_envelope(
+            "ticker",
+            error=last_error,
+            venue=venue.lower(),
+        ).as_dict(),
     }
 
 
@@ -962,13 +1002,28 @@ def connector_view_handler(call: ToolCall, *, config_like: Any | None = None) ->
 
     info = _spec_to_dict(spec, include_source_path=True, config_like=config_like)
     info["found"] = True
+    if _venue_has_public_market_feed(spec.id) or any(
+        _venue_has_public_market_feed(alias) for alias in spec.aliases
+    ):
+        info["public_market_data"] = {
+            "available": True,
+            "requires_credentials": False,
+            "note": (
+                "Read-only OHLCV and ticker for this venue load from public "
+                "endpoints with no API keys. Fetch them with market_data "
+                "(get_candles / calculate_features) or ctx.market.candles(...). "
+                "Credentials are only needed to place live orders — not to "
+                "design or backtest a strategy."
+            ),
+        }
     include_source = bool(args.get("include_source", False))
     if not include_source and max_bytes > 0:
         info["source_omitted"] = True
         info["source_hint"] = (
             "Source omitted by default. For strategy authoring, use connector "
             "metadata plus data_api capability results and move to "
-            "strategy_generate_proposal; request include_source=true only when "
+            "strategy_draft_proposal (then edit the staged proposal files); "
+            "request include_source=true only when "
             "implementing or debugging connector code."
         )
         max_bytes = 0

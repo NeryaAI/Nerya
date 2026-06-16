@@ -71,6 +71,14 @@ def data_api_handler(
     op = str(args.get("op") or "").strip().lower()
     reg = registry or build_data_api_registry()
     context = DataApiContext(config_like=config_like)
+    if op in ("call", "schema"):
+        missing = [
+            field
+            for field in ("provider", "action")
+            if str(args.get(field) or "").strip() == ""
+        ]
+        if missing:
+            return _missing_route_error(call, reg, op=op, missing=missing)
     try:
         if op == "list":
             payload = reg.list(
@@ -102,8 +110,8 @@ def data_api_handler(
                         "already returned. For read-only lookup, call the selected "
                         "market_data/data_api route and summarize. For strategy "
                         "authoring, read strategy_author with skill_view and move "
-                        "to strategy_generate_proposal with SDK files instead of "
-                        "repeating catalog discovery."
+                        "to strategy_draft_proposal, then edit the staged proposal "
+                        "files with SDK code instead of repeating catalog discovery."
                     ),
                     detail={"provider": provider, "action": action},
                     retryable=False,
@@ -154,6 +162,62 @@ def data_api_handler(
         )
 
 
+def _missing_route_error(
+    call: ToolCall,
+    reg: DataApiRegistry,
+    *,
+    op: str,
+    missing: list[str],
+) -> ToolResult:
+    """Self-correcting error for op=call/schema with no provider/action.
+
+    The model frequently emits a bare ``{"op": "call"}`` and then retries
+    the identical empty call (which the dedupe guard suppresses), so the
+    terse "missing required field" was producing back-to-back failures.
+    Return the available providers/aliases and the exact discovery path so
+    the next call is valid instead of a repeat.
+    """
+
+    try:
+        providers = reg.providers()
+    except Exception:
+        providers = []
+    try:
+        aliases = reg.aliases()
+    except Exception:
+        aliases = {}
+    example_provider = providers[0] if providers else None
+    return _error(
+        call,
+        ToolErrorKind.SCHEMA_VALIDATION,
+        (
+            f"data_api op={op!r} needs both 'provider' and 'action' "
+            f"(missing: {', '.join(missing)}). There is no default route — "
+            "discover one first: call op='list' (optionally with a provider "
+            "to narrow), then op='schema' to inspect an action's inputs, then "
+            "op='call' with provider + action + args. Do not resend this "
+            "exact call with empty arguments."
+        ),
+        detail={
+            "op": op,
+            "missing": missing,
+            "providers": providers,
+            "aliases": aliases,
+            "example_next_call": (
+                {"op": "list", "provider": example_provider}
+                if example_provider
+                else {"op": "list"}
+            ),
+        },
+        retryable=False,
+        recovery_hint={
+            "action": "data_api_list_first",
+            "hint": "Run data_api op='list' to discover provider/action, then call.",
+            "providers": providers[:40],
+        },
+    )
+
+
 def _required(args: dict[str, Any], key: str) -> str:
     value = args.get(key)
     if value is None or str(value).strip() == "":
@@ -190,6 +254,7 @@ def _error(
     *,
     detail: dict[str, Any] | None = None,
     retryable: bool | None = None,
+    recovery_hint: dict[str, Any] | None = None,
 ) -> ToolResult:
     return ToolResult.from_error(
         tool_use_id=call.id,
@@ -199,5 +264,6 @@ def _error(
             message=message,
             detail=dict(detail or {}),
             retryable=retryable,
+            recovery_hint=dict(recovery_hint or {}),
         ),
     )

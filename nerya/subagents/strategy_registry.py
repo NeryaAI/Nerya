@@ -14,9 +14,11 @@ This module owns the resolution policy:
    subagent in its manifest, the strategy-local prompt wins.
 2. Otherwise we fall back to the global ``workspace/subagents``
    registry.
-3. If neither has the prompt, a stub :class:`SubAgentSpec` with an
-   empty body is returned so the dispatcher's existing journal /
-   error path keeps working.
+3. If neither has the prompt, a :class:`SubAgentSpec` is synthesised:
+   a canonical default profile when the name maps to one, otherwise a
+   *capable generic* researcher/analyst body + safe read-only skills so
+   a role the lead agent invented on the fly still does real work
+   instead of running blank.
 
 ``allowed_skills`` and ``tier`` are still resolved by name through
 the same defaults the global registry uses; per-strategy overrides
@@ -36,8 +38,10 @@ from .registry import (
     DEFAULT_SUBAGENT_PROMPTS,
     DEFAULT_SUBAGENT_SKILLS,
     DEFAULT_TIERS,
+    GENERIC_ADHOC_SKILLS,
     SubAgentSpec,
     canonical_subagent_name,
+    generic_role_prompt,
     load_registry,
 )
 
@@ -123,14 +127,30 @@ class StrategySubAgentRegistry:
                     spec.prompt,
                 )
             return spec
+        # Ship a default prompt body so the role still has scope and an
+        # output contract even when no file exists on disk. Operators can
+        # override it by writing ``workspace/subagents/<name>.agent.md``.
+        #
+        # For a brand-new role name the lead agent invented (no workspace
+        # file, no canonical default), fall back to a *capable generic*
+        # researcher/analyst spec instead of a blank prompt + empty skill
+        # list. That lets the main agent spin up a temporary role on demand
+        # (``team_run`` / ``subagent_run`` with a novel name) and still get
+        # real work done, rather than being forced to reuse a registered
+        # role or persist one first.
+        # Preserve the canonical default prompt verbatim when one exists
+        # (callers/tests compare it byte-for-byte); only synthesise the
+        # generic body when the canonical profile has no prompt at all.
+        canonical_prompt = DEFAULT_SUBAGENT_PROMPTS.get(canonical, "") or ""
+        prompt = canonical_prompt if canonical_prompt.strip() else generic_role_prompt(name)
+        allowed = list(DEFAULT_SUBAGENT_SKILLS.get(canonical, []))
+        if not allowed:
+            allowed = list(GENERIC_ADHOC_SKILLS)
         return SubAgentSpec(
             name=name,
             prompt_path=self.paths.subagents / f"{name}.agent.md",
-            # Ship a default prompt body so the role still has scope and an
-            # output contract even when no file exists on disk. Operators can
-            # override it by writing ``workspace/subagents/<name>.agent.md``.
-            prompt=DEFAULT_SUBAGENT_PROMPTS.get(canonical, ""),
-            allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(canonical, [])),
+            prompt=prompt,
+            allowed_skills=allowed,
             tier=DEFAULT_TIERS.get(canonical, "medium"),
             canonical_name=canonical,
         )

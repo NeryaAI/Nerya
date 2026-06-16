@@ -661,6 +661,15 @@ class StrategyRunner:
         except Exception:
             _LOG.exception("failed to write run record %s", run_id)
 
+        try:
+            from ..evolution.strategy_run_observation import (
+                record_strategy_run_post_apply_observation,
+            )
+
+            record_strategy_run_post_apply_observation(self.config.paths, record)
+        except Exception:
+            _LOG.exception("strategy run post-apply observation failed")
+
         # Mirror the legacy strategy-history rows so the existing
         # dashboard panels keep working without a separate migration.
         try:

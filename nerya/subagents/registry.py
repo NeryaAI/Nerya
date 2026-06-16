@@ -610,8 +610,13 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "signals over higher activity.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``analysis``: short paragraph (what worked / what didn't)\n"
-        "  - ``proposed_changes``: list[{file, operation, summary,\n"
-        "    diff}]\n"
+        "  - ``proposed_changes``: list of materializable changes. For\n"
+        "    Python / prompt / text files use {file, kind:\"full_file\",\n"
+        "    after_content:\"<complete replacement file>\", rationale}.\n"
+        "    For YAML targets use {file, kind:\"config\", config_after:{...}}\n"
+        "    or {file, kind:\"config\", yaml_after:\"<complete YAML mapping>\"}.\n"
+        "    Diff-only / code_patch-only entries are advisory and cannot be\n"
+        "    applied by the proposal runner.\n"
         "  - ``validation_plan``: list[str] such as [\"unit\", \"backtest\"]\n"
         "  - ``backtest_required``: bool\n"
         "  - ``shadow_run_required``: bool\n"
@@ -856,6 +861,95 @@ def save_role(
     }
 
 
+# Safe, read-only skill set handed to an ad-hoc role when neither an inline
+# spec nor a canonical default names any skills. Every entry is a research /
+# analysis surface — none of them are on ``SUBAGENT_SKILL_DENYLIST`` (trading /
+# trading_write / wallet / script_runtime), so a synthesised role can gather
+# evidence and reason but never reaches a live-trading or signer surface.
+GENERIC_ADHOC_SKILLS: tuple[str, ...] = (
+    "research",
+    "web_search",
+    "web_search_fetch",
+    "news_social",
+    "market_research",
+    "analysis",
+    "llm",
+    "trace",
+)
+
+
+def generic_role_prompt(name: str) -> str:
+    """Default prompt body for a role with no registered/inline prompt.
+
+    The lead agent can spin up a brand-new role name (e.g. ``equity_researcher``
+    or ``spacex_valuation``) without first calling ``save_role``; this body
+    gives that ephemeral role real scope, an evidence discipline, and an output
+    contract so it never runs blank.
+    """
+
+    label = (name or "specialist").replace("_", " ").strip() or "specialist"
+    return (
+        f"You are the **{name}** lane — an ad-hoc specialist the lead agent "
+        "spun up on demand because no pre-registered role matched the task. "
+        f"Act as a focused {label}.\n\n"
+        "Mission. Execute the assignment in your task payload and any "
+        "role-specific instructions with evidence-first rigor. The role name "
+        "and the shared team task define your scope; stay inside it.\n\n"
+        "How you work.\n"
+        "1. Read the shared team task and your payload (``target`` / ``focus`` "
+        "fields) before doing anything else.\n"
+        "2. Gather evidence with the tools you are granted (web_search / "
+        "web_search_fetch / news_social / market_data when available). Every "
+        "material claim must cite a tool result or a fetched source.\n"
+        "3. If a required source, credential, feed, or dataset is missing, say "
+        "so plainly and report the evidence gap — never invent mock, "
+        "placeholder, synthetic, or proxy data, and mark every estimate or "
+        "assumption explicitly.\n\n"
+        "Output. Return a compact JSON object with your findings plus an "
+        "``evidence`` array of ``{source, claim}`` entries and a short "
+        "``summary``. Answer in the requested output/analysis language."
+    )
+
+
+def build_inline_spec(
+    paths: WorkspacePaths,
+    *,
+    name: str,
+    prompt: Optional[str] = None,
+    allowed_skills: Optional[list[str]] = None,
+    tier: Optional[str] = None,
+) -> SubAgentSpec:
+    """Build an *ephemeral* role spec from inline fields (never written to disk).
+
+    Unlike :func:`save_role`, this does not touch the workspace: the spec lives
+    only for the current dispatch. It lets the lead agent define a temporary
+    role inline (in ``team_run`` / ``subagent_run``) instead of being forced to
+    reuse a registered role or persist a new one. Layered defaults keep the
+    role useful even when only a name is supplied: explicit inline prompt/skills
+    win, then the canonical default profile, then the generic ad-hoc fallback.
+    """
+
+    canonical = canonical_subagent_name(name)
+    body = (prompt or "").strip()
+    if not body:
+        canonical_prompt = DEFAULT_SUBAGENT_PROMPTS.get(canonical, "") or ""
+        body = canonical_prompt if canonical_prompt.strip() else generic_role_prompt(name)
+    skills = [str(s).strip() for s in (allowed_skills or []) if str(s).strip()]
+    if not skills:
+        skills = list(DEFAULT_SUBAGENT_SKILLS.get(canonical, []))
+    if not skills:
+        skills = list(GENERIC_ADHOC_SKILLS)
+    final_tier = str(tier or DEFAULT_TIERS.get(canonical, "medium"))
+    return SubAgentSpec(
+        name=name,
+        prompt_path=_prompt_path(paths, name),
+        prompt=body,
+        allowed_skills=skills,
+        tier=final_tier,
+        canonical_name=canonical,
+    )
+
+
 def delete_role(paths: WorkspacePaths, name: str) -> bool:
     """Remove a persistent role. Returns ``True`` if anything was deleted.
 
@@ -880,10 +974,13 @@ __all__ = [
     "DEFAULT_SUBAGENT_PROFILES",
     "DEFAULT_SUBAGENT_SKILLS",
     "DEFAULT_TIERS",
+    "GENERIC_ADHOC_SKILLS",
     "SubAgentSpec",
+    "build_inline_spec",
     "canonical_subagent_name",
     "delete_role",
     "describe_role",
+    "generic_role_prompt",
     "list_roles",
     "load_registry",
     "save_role",

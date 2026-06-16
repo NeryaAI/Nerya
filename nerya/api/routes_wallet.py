@@ -17,9 +17,6 @@ import socket
 import subprocess
 import time
 from typing import Any
-from urllib.parse import urlencode
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 
 from .. import wallet as wallet_mod
 from ..core import yaml_io
@@ -1004,7 +1001,7 @@ def _auth_start_args(provider: str, payload: dict[str, Any]) -> tuple[list[str] 
         return ["auth", "login", email, "--json"], "otp", ["otp"]
     if provider == "binance_agentic":
         return ["auth", "signin", "--json"], "qr_approval", ["qrCodeId"]
-    if provider in {"bitget", "self_custody"}:
+    if provider in {"bitget", "self_custody", "byreal"}:
         return None, "no_login_required", []
     return None, "auth_cli_unavailable", []
 
@@ -1034,337 +1031,9 @@ def _auth_status_args(provider: str) -> list[str] | None:
         return ["status", "--json"]
     if provider == "binance_agentic":
         return ["wallet", "status", "--json"]
+    if provider == "byreal":
+        return ["wallet", "address"]
     return None
-
-
-_XAGT_DEFAULT_API_BASE = "https://api.xerpaai.com"
-_XAGT_DEFAULT_FRONTEND_BASE = "https://www.xerpaai.com"
-
-
-def _http_post_json(
-    url: str,
-    payload: dict[str, Any],
-    *,
-    headers: dict[str, str] | None = None,
-    timeout_s: float = 20.0,
-) -> dict[str, Any]:
-    req = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "content-type": "application/json",
-            "accept": "application/json",
-            "user-agent": "Nerya/0.1 wallet-xagt",
-            **(headers or {}),
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(req, timeout=timeout_s) as res:
-            text = res.read().decode("utf-8", "replace")
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
-        raise WalletPolicyDenied(
-            f"XAgent auth API returned HTTP {exc.code}: {body[:500]}"
-        ) from exc
-    parsed = json.loads(text or "{}")
-    return parsed if isinstance(parsed, dict) else {"data": parsed}
-
-
-def _xagt_payload_config(client, payload: dict[str, Any]) -> dict[str, Any]:
-    cfg = _wallet_cfg(client, "xagt_agent_plugin")
-    if isinstance(payload.get("config"), dict):
-        cfg.update(dict(payload.get("config") or {}))
-    return cfg
-
-
-def _xagt_base_urls(client, payload: dict[str, Any]) -> tuple[str, str]:
-    cfg = _xagt_payload_config(client, payload)
-    api_base = str(
-        cfg.get("api_base_url")
-        or payload.get("api_base_url")
-        or os.environ.get("XAGT_API_BASE")
-        or _XAGT_DEFAULT_API_BASE
-    ).strip().rstrip("/")
-    frontend_base = str(
-        cfg.get("frontend_base_url")
-        or payload.get("frontend_base_url")
-        or os.environ.get("XAGT_FRONTEND_BASE")
-        or _XAGT_DEFAULT_FRONTEND_BASE
-    ).strip().rstrip("/")
-    return api_base or _XAGT_DEFAULT_API_BASE, frontend_base or _XAGT_DEFAULT_FRONTEND_BASE
-
-
-def _xagt_package_json_candidates(client, install: dict[str, Any] | None = None) -> list[Path]:
-    candidates: list[Path] = []
-    if install:
-        install_path = str(install.get("install_path") or "").strip()
-        if install_path:
-            candidates.append(Path(install_path))
-    state = _provider_install_state(client, "xagt_agent_plugin")
-    install_path = str(state.get("install_path") or "").strip()
-    if install_path:
-        candidates.append(Path(install_path))
-    root = client.config.paths.root / "skills" / "_node" / _npm_safe_name("@xagt/agent-plugin")
-    candidates.append(root)
-    out: list[Path] = []
-    for candidate in candidates:
-        out.append(candidate / "package.json")
-        out.append(candidate / "node_modules" / "@xagt" / "agent-plugin" / "package.json")
-    return out
-
-
-def _xagt_plugin_version(client, install: dict[str, Any] | None = None) -> str:
-    for pkg_json in _xagt_package_json_candidates(client, install):
-        if not pkg_json.exists():
-            continue
-        try:
-            doc = json.loads(pkg_json.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        version = str(doc.get("version") or "").strip()
-        if version:
-            return version
-    return "0.4.0"
-
-
-def _xagt_login_url(frontend_base: str, api_base: str, user_code: str) -> str:
-    callback = (
-        f"{api_base}/xagent/plugin/cli/callback?"
-        + urlencode({"flow": "device", "userCode": user_code})
-    )
-    return f"{frontend_base}/userAuth?" + urlencode(
-        {"sourceApp": "x-agent", "sourceUrl": callback}
-    )
-
-
-def _xagt_data(doc: dict[str, Any]) -> dict[str, Any]:
-    data = doc.get("data")
-    return data if isinstance(data, dict) else doc
-
-
-def _xagt_device_auth_start(
-    client,
-    payload: dict[str, Any],
-    *,
-    install: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    api_base, frontend_base = _xagt_base_urls(client, payload)
-    try:
-        doc = _http_post_json(
-            f"{api_base}/xagent/plugin/cli/auth/device",
-            {
-                "clientName": "xagt-plugin",
-                "clientVersion": _xagt_plugin_version(client, install),
-            },
-            timeout_s=20.0,
-        )
-    except Exception as exc:
-        return {
-            "ok": False,
-            "provider": "xagt_agent_plugin",
-            "return_code": None,
-            "error": "xagt_device_auth_start_failed",
-            "detail": str(exc),
-        }
-    data = _xagt_data(doc)
-    device_code = _first_auth_string(data, doc, keys=["deviceCode", "device_code"])
-    user_code = _first_auth_string(data, doc, keys=["userCode", "user_code"])
-    if not device_code or not user_code:
-        return {
-            "ok": False,
-            "provider": "xagt_agent_plugin",
-            "return_code": None,
-            "error": "xagt_device_code_missing",
-            "json": _redact_cli_value(doc),
-        }
-    verification_url = _first_auth_string(
-        data,
-        doc,
-        keys=["verificationUrl", "verificationUri", "verification_url", "url"],
-    ) or _xagt_login_url(frontend_base, api_base, user_code)
-    return {
-        "ok": True,
-        "provider": "xagt_agent_plugin",
-        "return_code": None,
-        "json": {
-            "loginMethod": "device_code",
-            "deviceCode": device_code,
-            "userCode": user_code,
-            "verificationUrl": verification_url,
-            "apiBaseUrl": api_base,
-            "frontendBaseUrl": frontend_base,
-            "expiresIn": data.get("expiresIn") or data.get("expires_in"),
-            "interval": data.get("interval"),
-        },
-    }
-
-
-def _xagt_account_from_token_doc(
-    doc: dict[str, Any],
-    *,
-    api_base: str,
-    frontend_base: str,
-    client,
-) -> dict[str, Any]:
-    data = _xagt_data(doc)
-    access_token = _first_auth_string(
-        data,
-        doc,
-        keys=["accessToken", "access_token", "token"],
-    )
-    refresh_token = _first_auth_string(
-        data,
-        doc,
-        keys=["refreshToken", "refresh_token"],
-    )
-    user_id = _first_auth_string(data, doc, keys=["userId", "user_id", "uid"])
-    scope = _first_auth_string(data, doc, keys=["scope"])
-    access_expire = str(
-        data.get("accessExpire")
-        or data.get("access_expire")
-        or data.get("expiresAt")
-        or data.get("expires_at")
-        or ""
-    ).strip()
-    return {
-        "ok": bool(access_token or user_id),
-        "provider": "xagt_agent_plugin",
-        "user_id": user_id,
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "access_expire": access_expire,
-        "scope": scope,
-        "api_base_url": api_base,
-        "frontend_base_url": frontend_base,
-        "plugin_version": _xagt_plugin_version(client),
-        "error": "" if (access_token or user_id) else "xagt_token_missing",
-    }
-
-
-def _xagt_device_auth_verify(client, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    device_code = str(
-        payload.get("deviceCode")
-        or payload.get("device_code")
-        or payload.get("code")
-        or ""
-    ).strip()
-    if not device_code:
-        return (
-            {
-                "ok": False,
-                "provider": "xagt_agent_plugin",
-                "return_code": None,
-                "error": "device_code_required",
-            },
-            None,
-        )
-    api_base, frontend_base = _xagt_base_urls(client, payload)
-    try:
-        doc = _http_post_json(
-            f"{api_base}/xagent/plugin/cli/auth/token",
-            {"deviceCode": device_code},
-            timeout_s=20.0,
-        )
-    except Exception as exc:
-        return (
-            {
-                "ok": False,
-                "provider": "xagt_agent_plugin",
-                "return_code": None,
-                "error": "xagt_device_auth_verify_failed",
-                "detail": str(exc),
-            },
-            None,
-        )
-    account = _xagt_account_from_token_doc(
-        doc,
-        api_base=api_base,
-        frontend_base=frontend_base,
-        client=client,
-    )
-    result = {
-        "ok": bool(account.get("ok")),
-        "provider": "xagt_agent_plugin",
-        "return_code": None,
-        "json": _redact_cli_value({
-            "success": bool(account.get("ok")),
-            "data": {
-                **_xagt_data(doc),
-                "apiBaseUrl": api_base,
-                "frontendBaseUrl": frontend_base,
-            },
-        }),
-        "error": "" if account.get("ok") else account.get("error") or "xagt_token_missing",
-    }
-    return result, account
-
-
-def _xagt_credentials_path(client, payload: dict[str, Any]) -> Path:
-    cfg = _xagt_payload_config(client, payload)
-    configured = str(cfg.get("credentials_path") or payload.get("credentials_path") or "").strip()
-    if configured:
-        return Path(configured)
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return Path(appdata) / "xagt" / "credentials.json"
-    return Path.home() / ".xagt" / "credentials.json"
-
-
-def _xagt_status_result(client, payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    path = _xagt_credentials_path(client, payload)
-    api_base, frontend_base = _xagt_base_urls(client, payload)
-    if not path.exists():
-        return (
-            {
-                "ok": False,
-                "provider": "xagt_agent_plugin",
-                "return_code": None,
-                "error": "xagt_credentials_not_found",
-                "json": {
-                    "credentialsPath": str(path),
-                    "credentialsExists": False,
-                    "loginMethod": "device_code",
-                },
-            },
-            None,
-        )
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        return (
-            {
-                "ok": False,
-                "provider": "xagt_agent_plugin",
-                "return_code": None,
-                "error": "xagt_credentials_unreadable",
-                "detail": str(exc),
-            },
-            None,
-        )
-    account = _xagt_account_from_token_doc(
-        doc if isinstance(doc, dict) else {},
-        api_base=api_base,
-        frontend_base=frontend_base,
-        client=client,
-    )
-    if account.get("ok"):
-        account["credentials_path"] = str(path)
-    return (
-        {
-            "ok": bool(account.get("ok")),
-            "provider": "xagt_agent_plugin",
-            "return_code": None,
-            "json": _redact_cli_value({
-                "credentialsPath": str(path),
-                "credentialsExists": True,
-                "loginMethod": "device_code",
-                "data": doc if isinstance(doc, dict) else {},
-            }),
-            "error": "" if account.get("ok") else account.get("error") or "xagt_token_missing",
-        },
-        account if account.get("ok") else None,
-    )
 
 
 def _cli_json_data(result: dict[str, Any] | None) -> dict[str, Any]:
@@ -1508,34 +1177,18 @@ def _config_from_auth_payload(
         entry = extra.get("entry")
         if entry and not cfg.get("entry"):
             cfg["entry"] = str(entry)
-    if provider == "xagt_agent_plugin":
+    if provider == "byreal":
         if install:
             install_path = str(install.get("install_path") or "").strip()
-            if install_path and not cfg.get("plugin_path"):
-                cfg["plugin_path"] = install_path
+            if install_path and not cfg.get("install_path"):
+                cfg["install_path"] = install_path
             extra = install.get("extra") if isinstance(install.get("extra"), dict) else {}
+            cli_path = str(extra.get("cli_path") or "").strip()
+            if cli_path and not cfg.get("cli_path"):
+                cfg["cli_path"] = cli_path
             version = extra.get("version")
-            if version and not cfg.get("plugin_version"):
-                cfg["plugin_version"] = str(version)
-        if account:
-            for key in (
-                "user_id",
-                "access_expire",
-                "scope",
-                "api_base_url",
-                "frontend_base_url",
-                "plugin_version",
-                "credentials_path",
-            ):
-                value = account.get(key)
-                if value not in (None, "") and not cfg.get(key):
-                    cfg[key] = str(value)
-            if account.get("access_token") and not cfg.get("access_token"):
-                cfg["access_token"] = str(account["access_token"])
-            if account.get("refresh_token") and not cfg.get("refresh_token"):
-                cfg["refresh_token"] = str(account["refresh_token"])
-            if account.get("login_pending") and not cfg.get("login_pending"):
-                cfg["login_pending"] = "true"
+            if version and not cfg.get("cli_version"):
+                cfg["cli_version"] = str(version)
     if provider == "coinbase":
         if not cfg.get("agentic_session_path"):
             cfg["agentic_session_path"] = str(_coinbase_awal_session_path())
@@ -1992,44 +1645,6 @@ def routes():
                     "provider": name,
                     "install": install_result,
                 }
-        if name == "xagt_agent_plugin":
-            result = _xagt_device_auth_start(
-                client,
-                body,
-                install=install_result,
-            )
-            out = {
-                "ok": bool(result.get("ok")),
-                "provider": name,
-                "next_action": "device_approval",
-                "required_inputs": ["deviceCode"],
-                "auth": result,
-                "install": install_result,
-            }
-            if result.get("ok") and (body.get("wallet_id") or body.get("create_binding")):
-                pending_account = {
-                    "ok": True,
-                    "provider": name,
-                    "login_pending": True,
-                    "api_base_url": (result.get("json") or {}).get("apiBaseUrl", ""),
-                    "frontend_base_url": (result.get("json") or {}).get("frontendBaseUrl", ""),
-                    "plugin_version": _xagt_plugin_version(client, install_result),
-                }
-                binding = _maybe_save_auth_binding(
-                    client,
-                    name,
-                    body,
-                    account=pending_account,
-                    install=install_result,
-                )
-                if binding is not None:
-                    out["binding"] = binding
-                    out["bindings"] = binding.get("bindings", [])
-            if not result.get("ok"):
-                out["error"] = result.get("error") or "auth_start_failed"
-                if result.get("detail"):
-                    out["detail"] = result.get("detail")
-            return out
         args, next_action, required_inputs = _auth_start_args(name, body)
         if args is None:
             if next_action == "no_login_required":
@@ -2097,26 +1712,6 @@ def routes():
             return {"ok": False, "error": "provider_required"}
         if name not in wallet_mod.PROVIDERS:
             return {"ok": False, "error": "unknown_provider"}
-        if name == "xagt_agent_plugin":
-            result, account = _xagt_device_auth_verify(client, body)
-            binding = None
-            if result.get("ok") and account is not None:
-                binding = _maybe_save_auth_binding(client, name, body, account=account)
-            out = {
-                "ok": bool(result.get("ok")),
-                "provider": name,
-                "auth": result,
-            }
-            if account is not None:
-                out["account"] = _redact_cli_value(account)
-            if binding is not None:
-                out["binding"] = binding
-                out["bindings"] = binding.get("bindings", [])
-            if not result.get("ok"):
-                out["error"] = result.get("error") or "auth_verify_failed"
-                if result.get("detail"):
-                    out["detail"] = result.get("detail")
-            return out
         args, error = _auth_verify_args(name, body)
         if args is None:
             return {"ok": False, "provider": name, "error": error}
@@ -2148,23 +1743,6 @@ def routes():
             return {"ok": False, "error": "provider_required"}
         if name not in wallet_mod.PROVIDERS:
             return {"ok": False, "error": "unknown_provider"}
-        if name == "xagt_agent_plugin":
-            result, account = _xagt_status_result(client, body)
-            out = {
-                "ok": bool(result.get("ok")),
-                "provider": name,
-                "auth": result,
-            }
-            if result.get("ok") and (body.get("wallet_id") or body.get("create_binding")):
-                binding = _maybe_save_auth_binding(client, name, body, account=account)
-                if account is not None:
-                    out["account"] = _redact_cli_value(account)
-                if binding is not None:
-                    out["binding"] = binding
-                    out["bindings"] = binding.get("bindings", [])
-            if not result.get("ok"):
-                out["error"] = result.get("error") or "auth_status_failed"
-            return out
         args = _auth_status_args(name)
         if args is None:
             return {"ok": False, "provider": name, "error": "auth_cli_unavailable"}

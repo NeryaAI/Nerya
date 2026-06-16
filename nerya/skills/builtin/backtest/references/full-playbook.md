@@ -56,11 +56,14 @@ freeform lane. The script may use the provider SDK or data source the strategy
 actually depends on; report limitations honestly.
 
 If real OHLCV candles exist but the loaded window is short, run and report the
-backtest anyway. One month or more is preferred for robustness, not required.
-For meme coins, a 1-day window can still cover a meaningful launch-to-drawdown
-lifecycle, so describe it as a short-window real-data backtest with lower
-confidence. Do not say "standard backtest unavailable" solely because
-`recommended_coverage_ok=false`.
+backtest anyway. The default asks for roughly six months of history for general
+CEX strategies, but short-lived meme/on-chain/DEX pool strategies use a
+one-week requested window unless an explicit config says otherwise. Always
+accept the maximum real window the source can return.
+For meme coins, a one-week or shorter window can still cover a meaningful
+launch-to-drawdown lifecycle, so describe it as a short-window real-data
+backtest with lower confidence. Do not say "standard backtest unavailable"
+solely because `recommended_coverage_ok=false`.
 
 For meme/on-chain markets, custom/event replay is often the preferred evidence
 path: reserve, swap, holder, top-trader, wallet-flow, and signal histories are
@@ -127,7 +130,7 @@ After the command finishes, read `report.md` and summarize only the verdict,
 Tests can call the same engine in-process:
 
 ```python
-stats = ctx.backtest_replay(run, markets=["BINANCE:BTCUSDT"], window_days=45, tf="1h")
+stats = ctx.backtest_replay(run, markets=["BINANCE:BTCUSDT"], window_days=180, tf="1h")
 ```
 
 No files are written unless `artefacts_dir=...` is passed.

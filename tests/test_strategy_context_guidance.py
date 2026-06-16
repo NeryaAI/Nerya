@@ -17,7 +17,7 @@ from nerya.tools.native.strategy_runtime import strategy_generate_proposal_handl
 from nerya.tools.native.bootstrap import build_native_tool_deps, register_native_tools
 from nerya.tools.native.agents import TEAM_RUN_SCHEMA
 from nerya.tools.registry import ToolRegistry
-from nerya.tools.types import ToolCall
+from nerya.tools.types import ToolCall, ToolErrorKind
 
 
 pytestmark = pytest.mark.smoke
@@ -52,7 +52,8 @@ def test_system_prompt_surfaces_session_market_context_as_advisory(tmp_path) -> 
     assert "generic follow-up strategy requests should inherit this context" in prompt
     assert "do not substitute unrelated example markets" in prompt
     assert "not a keyword router or hard tool gate" in prompt
-    assert "strategy_generate_proposal / strategy_validate /" in prompt
+    assert "strategy_draft_proposal then edit the staged files" in prompt
+    assert "strategy_validate / strategy_submit_proposal /" in prompt
     assert "Turn execution policy:" in prompt
     assert "Choose tools from their schemas" in prompt
     assert "hardcoded workflows" in prompt
@@ -156,7 +157,13 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "Preserve the market scope that the session has already established" in text
     assert "Examples are examples, not defaults" in text
     assert "Market scope assumption" in text
-    assert "strategy_generate_proposal" in text
+    # New draft -> edit -> validate -> submit lane.
+    assert "SCAFFOLD the package as a draft proposal with `strategy_draft_proposal`" in text
+    assert "AUTHOR the strategy by editing the staged files" in text
+    assert "SUBMIT with `strategy_submit_proposal(" in text
+    assert "strategy_draft_proposal" in text
+    assert "strategy_submit_proposal" in text
+    assert "strategy_generate_proposal" not in text
     assert "strategy_backtest({\"proposal_id\"" in text
     assert "--proposal-id <proposal_id>" in text
     assert "only when the action is still proposal validation" in text
@@ -182,7 +189,7 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "promoted strategy path is absent" in text
     assert "do not reply with a questionnaire" in text
     assert "non-live mode, modest sizing" in text
-    assert "do not override `files.main.py`" in text
+    assert "do not edit `main.py` away from the requested thesis" in text
     assert "draft the package files yourself with the Nerya strategy SDK" in text
     assert (
         "from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask"
@@ -193,9 +200,9 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "Do not call StrategyResult.order" in text
     assert "Do not call StrategyResult.dispatch" in text
     assert "prediction-market/Polymarket evidence" in text
-    assert "strategy_generate_proposal` is only the proposal" in text
-    assert "For custom strategies, write `files.main.py`" in text
-    assert "Do not call `write_file`, `edit_file`, `list_dir`, shell" in text
+    assert "`strategy_submit_proposal` only validates and queues the package" in text
+    assert "For custom strategies, author `main.py` by editing the staged file" in text
+    assert "Do not call shell, glob, or raw file reads once the efficient evidence boundary is met" in text
     assert "Never pass `context=`" in text
     assert "`session_key` must be a" in text
     assert "not a string" in text
@@ -207,8 +214,8 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "stop discovery and write the SDK proposal" in text
     assert "Do not call shell, glob, or raw file reads" in text
     assert "the efficient evidence boundary is" in text
-    assert "generate the SDK strategy package immediately" in text
-    assert "until a `strategy_generate_proposal` call with SDK `files`" in text
+    assert "author the SDK strategy package immediately by editing the staged files" in text
+    assert "Continue until a `strategy_submit_proposal` call for a validated SDK package exists" in text
     assert "preferred_provider" in text
     assert "not ready instead of silently substituting another provider" in text
     assert "Wallet Meme Quick Path" in text
@@ -226,7 +233,7 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "do not set `operator_approved: true` yourself" in text
 
 
-def test_strategy_generate_proposal_description_reminds_market_context(tmp_path) -> None:
+def test_strategy_draft_and_submit_descriptions_describe_the_lane(tmp_path) -> None:
     cfg = _config(tmp_path)
     registry = ToolRegistry()
     deps = build_native_tool_deps(
@@ -238,38 +245,43 @@ def test_strategy_generate_proposal_description_reminds_market_context(tmp_path)
     )
     register_native_tools(registry, deps)
 
-    desc = registry.get("strategy_generate_proposal").description
-    assert "preserve explicit session market context" in desc
-    assert "next_required_action" in desc
-    assert "proposal_paths" in desc
-    assert "concrete tool-result markets" in desc
-    assert "instead of probing promoted strategy paths" in desc
-    assert "copy example markets" in desc
-    assert "draft the SDK package files first" in desc
-    assert "Keep proposal tool calls compact" in desc
-    assert "files.main.py" in desc
-    assert "files.strategy.md" in desc
-    assert "explicit data, signal, execution, or replay requirements" in desc
-    assert "rather than inventing hidden strategy logic" in desc
-    assert "instead of first calling write_file/edit_file" in desc
-    assert "Do not pass context= to StrategyAgentTask.dispatch" in desc
-    assert "StrategyAgentTask.skip(reason" in desc
-    assert "preconditions are not met" in desc
+    # The deprecated single-shot tool is no longer exposed to the agent.
+    assert registry.find("strategy_generate_proposal") is None
+
+    draft_desc = registry.get("strategy_draft_proposal").description
+    assert "DRAFT proposal" in draft_desc
+    assert "from_strategy_id to iterate on it" in draft_desc
+    assert "proposal_paths" in draft_desc
+    assert "next_steps" in draft_desc
+    assert "does NOT enter the pending-review queue and writes NO inline code" in draft_desc
+    assert "editing the staged files with read_file + edit_file / write_file" in draft_desc
+    assert "run strategy_validate" in draft_desc
+    assert "finish with strategy_submit_proposal" in draft_desc
+    assert "skill_view" in draft_desc
+    # SDK contract reminders survive on the scaffold tool.
     assert (
         "from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask"
-        in desc
+        in draft_desc
     )
-    assert "do not import from nerya.sdk" in desc
-    assert "do not import from nerya.strategy" in desc
-    assert "Do not call StrategyResult.order" in desc
-    assert "Do not call StrategyResult.dispatch" in desc
-    assert "do not return ctx.result.hold()" in desc
-    assert "agent-task skip" in desc
-    assert "session_key as a small object, not a string" in desc
-    assert "provider route that was not requested or observed" in desc
+    assert "ctx.portfolio.positions(market)" in draft_desc
+    assert "ctx.config.accounts[0]" in draft_desc
+    assert "there is no ctx.account_id" in draft_desc
+    assert "Preserve explicit session/tool-evidence market scope" in draft_desc
+
+    submit_desc = registry.get("strategy_submit_proposal").description
+    assert "re-validate the edited" in submit_desc
+    assert "draft -> pending_review" in submit_desc
+    assert "only if validation passes" in submit_desc
+    assert "the blockers are returned so you can edit the files and submit again" in submit_desc
+    assert "backtest_required" in submit_desc
+    assert "next_required_action" in submit_desc
+
     write_desc = registry.get("write_file").description
-    assert "Do not use write_file to stage generated strategy packages" in write_desc
-    assert "strategy_generate_proposal.files" in write_desc
+    assert "first call strategy_draft_proposal to scaffold a draft" in write_desc
+    assert "after/strategies/<id>/" in write_desc
+    assert "never write directly into the live" in write_desc
+    assert "proposal-only" in write_desc
+
     promote_desc = registry.get("strategy_promote").description
     assert "ordinary create/review strategy request" in promote_desc
     assert "explicitly asks to promote" in promote_desc
@@ -286,7 +298,7 @@ def test_strategy_generate_proposal_requires_sdk_files_for_onchain_wallet_scope(
                 "title": "Solana meme smart money",
                 "description": "Use wallet/on-chain smart money evidence.",
                 "markets": [
-                    "XAGT_ONCHAIN:solana:4pMsh7JF5wXjkx8sK6gJgv14xkBy1kUoMv4ixN8npump"
+                    "BYREAL_ONCHAIN:solana:4pMsh7JF5wXjkx8sK6gJgv14xkBy1kUoMv4ixN8npump"
                 ],
                 "accounts": ["paper"],
             },
@@ -525,15 +537,21 @@ def test_agent_task_validator_rejects_structural_no_dispatch_branch(tmp_path) ->
         config=cfg,
     )
 
-    assert result.is_error is False
-    data = json.loads(result.text())
-    validation = data["validation"]
+    # Validation now gates creation: a package with blockers does not enter
+    # the pending-review queue. The handler hands the blockers back to the
+    # agent as a schema-validation error (with a fix-and-retry hint) instead.
+    assert result.is_error is True
+    assert result.error is not None
+    assert result.error.kind == ToolErrorKind.SCHEMA_VALIDATION
+    validation = result.error.recovery_hint["validation"]
     assert validation["ok"] is False
     assert any(
         issue["code"] == "agent_task_skip_status"
         for issue in validation["blockers"]
     )
     assert "StrategyAgentTask.skip" in json.dumps(validation)
+    # No pending proposal should have been written for the invalid package.
+    assert not list(cfg.paths.evolution.glob("proposals/prp_*"))
 
 
 def test_strategy_generate_proposal_requires_sdk_files_for_polymarket_scope(tmp_path) -> None:
@@ -571,7 +589,7 @@ def test_strategy_generate_proposal_rejects_placeholder_onchain_backtest(tmp_pat
                 "title": "Solana meme smart money",
                 "description": "Use wallet/on-chain smart money evidence.",
                 "markets": [
-                    "XAGT_ONCHAIN:solana:4pMsh7JF5wXjkx8sK6gJgv14xkBy1kUoMv4ixN8npump"
+                    "BYREAL_ONCHAIN:solana:4pMsh7JF5wXjkx8sK6gJgv14xkBy1kUoMv4ixN8npump"
                 ],
                 "accounts": ["paper"],
                 "files": {
@@ -608,8 +626,11 @@ def test_run_shell_description_defers_strategy_authoring_to_native_tools(tmp_pat
     assert "Do not use this for strategy authoring" in desc
     assert "connector/data-source discovery" in desc
     assert "wallet/on-chain provider inspection" in desc
-    assert "strategy_generate_proposal with `files`" in desc
-    assert "SDK code when custom logic is needed" in desc
+    # Strategy authoring is the file-editing lane: draft scaffold, then
+    # edit_file / write_file on the staged proposal files.
+    assert "strategy_draft_proposal followed" in desc
+    assert "edit_file / write_file on the staged proposal files" in desc
+    assert "to author SDK code" in desc
     assert "reserve shell for explicit operator commands" in desc
 
 

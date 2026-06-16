@@ -1090,7 +1090,252 @@ def _strategy_backtest_runtime_repair_prompt(error: dict[str, str]) -> str:
     )
 
 
-def _build_strategy_backtest_done_final_text(items: list[dict[str, Any]]) -> str:
+def _parse_display_number(value: Any) -> float | None:
+    """Parse a metrics_display string (``'0.0000%'`` / ``'-5.90%'`` / ``'1,234'``).
+
+    Returns ``None`` when the value is missing or not numeric so callers can
+    skip interpretation rather than guessing.
+    """
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"n/a", "none", "nan", "-"}:
+        return None
+    text = text.replace("%", "").replace(",", "").replace("$", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _verdict_plain(verdict: str) -> str:
+    """Plain-language reading of a backtest verdict code."""
+
+    code = str(verdict or "").strip().upper()
+    return {
+        "PASS": "通过",
+        "WARN": "可用，但有需要注意的地方",
+        "FAIL": "不通过",
+    }.get(code, str(verdict or "").strip())
+
+
+def _interpret_backtest_metrics(display: dict[str, Any]) -> list[str]:
+    """Turn headline backtest metrics into plain-language good/bad bullets.
+
+    The deterministic finaliser used to dump ``key=value`` pairs, which read
+    like machine output. This explains, in everyday language, whether each
+    number is good or bad and—critically—flags when zero/low trade counts
+    make the other numbers meaningless.
+    """
+
+    if not isinstance(display, dict) or not display:
+        return []
+
+    def disp(key: str) -> str:
+        return str(display.get(key) or "").strip()
+
+    total_return = _parse_display_number(display.get("total_return_pct"))
+    alpha = _parse_display_number(display.get("alpha_vs_benchmark_pct"))
+    max_dd = _parse_display_number(display.get("max_drawdown_pct"))
+    trades = _parse_display_number(display.get("total_trades"))
+    profit_factor = _parse_display_number(display.get("profit_factor"))
+    sharpe = _parse_display_number(display.get("sharpe_ratio"))
+    has_trades = trades is None or trades > 0
+
+    lines: list[str] = []
+
+    # Trade count first: it decides how much the rest is worth trusting.
+    if trades is not None:
+        if trades <= 0:
+            lines.append(
+                f"成交 {disp('total_trades')} 笔：整段回测几乎没有真正下单，"
+                "所以下面的收益/回撤数字参考价值很低——多半是信号太少没触发，"
+                "而不是策略本身好或坏。"
+            )
+        elif trades < 10:
+            lines.append(
+                f"成交 {disp('total_trades')} 笔：样本太少，统计意义不足，"
+                "结论还不稳；建议拉长回测区间或放宽信号条件后再看。"
+            )
+        else:
+            lines.append(f"成交 {disp('total_trades')} 笔：样本量基本够用。")
+
+    if total_return is not None:
+        if total_return > 0.5:
+            takeaway = "整体是赚钱的"
+        elif total_return < -0.5:
+            takeaway = "整体是亏钱的"
+        else:
+            takeaway = "基本不赚不亏"
+        lines.append(f"总收益 {disp('total_return_pct')}：{takeaway}。")
+
+    bench_disp = disp("benchmark_buy_hold_return_pct")
+    if bench_disp:
+        tail = ""
+        if alpha is not None:
+            if alpha > 0.5:
+                tail = f"，策略比直接买入持有多赚约 {disp('alpha_vs_benchmark_pct')}（跑赢大盘）"
+            elif alpha < -0.5:
+                tail = f"，策略比直接买入持有少赚约 {disp('alpha_vs_benchmark_pct')}（跑输大盘）"
+            else:
+                tail = "，和直接买入持有差不多"
+        lines.append(f"同期“买入持有”基准 {bench_disp}{tail}。")
+
+    if max_dd is not None:
+        abs_dd = abs(max_dd)
+        if abs_dd < 1e-9:
+            risk = "期间几乎没有回撤，但这通常也是因为交易太少"
+        elif abs_dd <= 10:
+            risk = "回撤较小，风险控制不错"
+        elif abs_dd <= 25:
+            risk = "回撤中等，属于可接受范围"
+        else:
+            risk = "回撤偏大，需要重点关注风险"
+        lines.append(f"最大回撤 {disp('max_drawdown_pct')}：{risk}。")
+
+    if has_trades and disp("win_rate_pct"):
+        lines.append(f"胜率 {disp('win_rate_pct')}。")
+    if has_trades and profit_factor is not None:
+        if profit_factor >= 1.5:
+            pf = "盈亏比健康（大于 1.5）"
+        elif profit_factor >= 1.0:
+            pf = "勉强盈利（略大于 1）"
+        else:
+            pf = "亏多赚少（小于 1）"
+        lines.append(f"盈亏比 {disp('profit_factor')}：{pf}。")
+    if has_trades and sharpe is not None:
+        if sharpe >= 1.0:
+            sh = "风险调整后的收益不错（大于等于 1）"
+        elif sharpe >= 0:
+            sh = "风险调整后的收益偏弱"
+        else:
+            sh = "风险调整后是负的"
+        lines.append(f"夏普比率 {disp('sharpe_ratio')}：{sh}。")
+    if disp("exposure_pct"):
+        lines.append(f"仓位暴露 {disp('exposure_pct')}（资金真正在场内的时间占比）。")
+    return lines
+
+
+def _requested_english_final(user_text: str | None) -> bool:
+    text = str(user_text or "").lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "final answer language: english",
+            "answer language: english",
+            "output language: english",
+            "respond in english",
+            "answer in english",
+            "english only",
+        )
+    )
+
+
+def _verdict_plain_en(verdict: str) -> str:
+    code = str(verdict or "").strip().upper()
+    return {
+        "PASS": "passed",
+        "WARN": "usable, but needs attention",
+        "FAIL": "failed",
+    }.get(code, str(verdict or "").strip())
+
+
+def _interpret_backtest_metrics_en(display: dict[str, Any]) -> list[str]:
+    if not isinstance(display, dict) or not display:
+        return []
+
+    def disp(key: str) -> str:
+        return str(display.get(key) or "").strip()
+
+    total_return = _parse_display_number(display.get("total_return_pct"))
+    alpha = _parse_display_number(display.get("alpha_vs_benchmark_pct"))
+    max_dd = _parse_display_number(display.get("max_drawdown_pct"))
+    trades = _parse_display_number(display.get("total_trades"))
+    profit_factor = _parse_display_number(display.get("profit_factor"))
+    sharpe = _parse_display_number(display.get("sharpe_ratio"))
+    has_trades = trades is None or trades > 0
+
+    lines: list[str] = []
+    if trades is not None:
+        if trades <= 0:
+            lines.append(
+                f"Trades {disp('total_trades')}: almost no orders were filled, "
+                "so return and drawdown metrics have low evidential value."
+            )
+        elif trades < 10:
+            lines.append(
+                f"Trades {disp('total_trades')}: the sample is small; extend "
+                "history or loosen signals before relying on the statistics."
+            )
+        else:
+            lines.append(f"Trades {disp('total_trades')}: the sample is usable.")
+
+    if total_return is not None:
+        if total_return > 0.5:
+            takeaway = "profitable over the loaded window"
+        elif total_return < -0.5:
+            takeaway = "loss-making over the loaded window"
+        else:
+            takeaway = "roughly flat"
+        lines.append(f"Total return {disp('total_return_pct')}: {takeaway}.")
+
+    bench_disp = disp("benchmark_buy_hold_return_pct")
+    if bench_disp:
+        tail = ""
+        if alpha is not None:
+            if alpha > 0.5:
+                tail = (
+                    f"; the strategy outperformed buy-and-hold by about "
+                    f"{disp('alpha_vs_benchmark_pct')}"
+                )
+            elif alpha < -0.5:
+                tail = (
+                    f"; the strategy underperformed buy-and-hold by about "
+                    f"{disp('alpha_vs_benchmark_pct')}"
+                )
+            else:
+                tail = "; roughly in line with buy-and-hold"
+        lines.append(f"Buy-and-hold benchmark {bench_disp}{tail}.")
+
+    if max_dd is not None:
+        abs_dd = abs(max_dd)
+        if abs_dd < 1e-9:
+            risk = "almost no drawdown, often because exposure was low"
+        elif abs_dd <= 10:
+            risk = "low drawdown"
+        elif abs_dd <= 25:
+            risk = "moderate drawdown"
+        else:
+            risk = "large drawdown; risk needs attention"
+        lines.append(f"Max drawdown {disp('max_drawdown_pct')}: {risk}.")
+
+    if has_trades and disp("win_rate_pct"):
+        lines.append(f"Win rate {disp('win_rate_pct')}.")
+    if has_trades and profit_factor is not None:
+        if profit_factor >= 1.5:
+            pf = "healthy"
+        elif profit_factor >= 1.0:
+            pf = "barely above breakeven"
+        else:
+            pf = "below breakeven"
+        lines.append(f"Profit factor {disp('profit_factor')}: {pf}.")
+    if has_trades and sharpe is not None:
+        if sharpe >= 1.0:
+            sh = "solid risk-adjusted return"
+        elif sharpe >= 0:
+            sh = "weak risk-adjusted return"
+        else:
+            sh = "negative risk-adjusted return"
+        lines.append(f"Sharpe ratio {disp('sharpe_ratio')}: {sh}.")
+    if disp("exposure_pct"):
+        lines.append(f"Exposure {disp('exposure_pct')}: capital was active for this share of the window.")
+    return lines
+
+
+def _build_strategy_backtest_done_final_text_en(items: list[dict[str, Any]]) -> str:
     has_data_gap = any(item.get("completion_kind") == "data_gap" for item in items)
     has_fail_verdict = any(
         str(item.get("verdict") or "").strip().upper() == "FAIL"
@@ -1098,86 +1343,182 @@ def _build_strategy_backtest_done_final_text(items: list[dict[str, Any]]) -> str
     )
     if has_data_gap:
         lines = [
-            "策略提案已创建并尝试真实回测，但当前历史数据源不足，无法完成标准回测；没有直接 promote/apply 到 live workspace。",
+            "The strategy proposal was created and a real-data backtest was attempted, "
+            "but there is not enough historical market data to complete the standard replay.",
+            "The strategy is not live and has not been promoted/applied.",
             "",
         ]
     elif has_fail_verdict:
         lines = [
-            "策略提案已创建并完成真实回测，但回测 verdict=FAIL；没有直接 promote/apply 到 live workspace，需先审阅/调参后再考虑 promote。",
+            "The strategy proposal was created and the real-data backtest is complete, "
+            "but the verdict is FAIL.",
+            "The strategy is not live; fix the issue and rerun validation before approve/promote.",
             "",
         ]
     else:
         lines = [
-            "策略提案已创建并完成回测；没有直接 promote/apply 到 live workspace，相关 account/provider 绑定需在报告中审阅。",
+            "The strategy proposal has been created and the backtest is complete. "
+            "It is not live yet; review it before approve/promote.",
             "",
         ]
+
     for item in items:
-        bits = ["tool=strategy_backtest"]
-        if item.get("strategy_id"):
-            bits.append(f"strategy_id={item.get('strategy_id')}")
-        if item.get("proposal_id"):
-            bits.append(f"proposal_id={item.get('proposal_id')}")
-        if item.get("verdict"):
-            bits.append(f"verdict={item.get('verdict')}")
-        if item.get("reason"):
-            bits.append(f"reason={item.get('reason')}")
-        if item.get("report_path"):
-            bits.append(f"report={_markdown_code_span(str(item.get('report_path')))}")
-        lines.append("- " + "; ".join(bits))
-        if item.get("coverage_message"):
-            lines.append(f"- coverage: {item.get('coverage_message')}")
-        if item.get("next_required_action_message"):
-            lines.append(f"- next_required_action: {item.get('next_required_action_message')}")
-        metrics = item.get("metric_names") or []
-        if metrics:
-            display = item.get("metrics_display")
-            if isinstance(display, dict) and display:
-                ordered = [
-                    key
-                    for key in (
-                        "verdict",
-                        "total_return_pct",
-                        "benchmark_buy_hold_return_pct",
-                        "alpha_vs_benchmark_pct",
-                        "max_drawdown_pct",
-                        "win_rate_pct",
-                        "total_trades",
-                        "exposure_pct",
-                    )
-                    if key in display
-                ]
-                if not ordered:
-                    ordered = [str(x) for x in metrics[:8]]
-                pairs = [
-                    f"{key}={display.get(key)}"
-                    for key in ordered[:8]
-                ]
-                lines.append("- metrics: " + ", ".join(pairs))
-            else:
-                lines.append("- metrics: " + ", ".join(str(x) for x in metrics[:8]))
-        summary_text = str(item.get("operator_summary_text") or "").strip()
-        if summary_text:
-            first_line = summary_text.splitlines()[0].strip()
-            if first_line:
-                lines.append(f"- operator_summary: {first_line}")
+        strategy_id = str(item.get("strategy_id") or "").strip()
+        proposal_id = str(item.get("proposal_id") or "").strip()
+        verdict = str(item.get("verdict") or "").strip()
+        head_bits: list[str] = []
+        if strategy_id:
+            head_bits.append(f"strategy {strategy_id}")
+        if proposal_id:
+            head_bits.append(f"proposal {proposal_id}")
+        if verdict:
+            head_bits.append(f"backtest verdict {verdict} ({_verdict_plain_en(verdict)})")
+        if head_bits:
+            lines.append("- " + ", ".join(head_bits) + ".")
+
+        if item.get("completion_kind") == "data_gap":
+            coverage = str(item.get("coverage_message") or "").strip()
+            if coverage:
+                lines.append(f"  Data gap: {coverage}")
+            next_action = str(item.get("next_required_action_message") or "").strip()
+            if next_action:
+                lines.append(f"  Note: {next_action}")
+            continue
+
+        display = item.get("metrics_display")
+        for bullet in _interpret_backtest_metrics_en(
+            display if isinstance(display, dict) else {}
+        ):
+            lines.append(f"  - {bullet}")
+
+        coverage = str(item.get("coverage_message") or "").strip()
+        if coverage:
+            lines.append(f"  - Coverage: {coverage}")
+        report_path = str(item.get("report_path") or "").strip()
+        if report_path:
+            lines.append(f"  Full chart and trade log: {_markdown_code_span(report_path)}")
         review_gate = item.get("review_gate")
-        if isinstance(review_gate, dict) and review_gate:
-            allowed = review_gate.get("paper_review_allowed")
-            basis = review_gate.get("paper_review_basis") or item.get("paper_review_basis")
-            parts = []
-            if allowed is not None:
-                parts.append(f"paper_review_allowed={str(bool(allowed)).lower()}")
-            if basis:
-                parts.append(f"basis={basis}")
-            if parts:
-                lines.append("- review_gate: " + ", ".join(parts))
+        if (
+            isinstance(review_gate, dict)
+            and review_gate.get("paper_review_allowed") is not None
+        ):
+            allowed = bool(review_gate.get("paper_review_allowed"))
+            lines.append(
+                "  Paper review: " + ("allowed." if allowed else "not recommended yet; add more evidence first.")
+            )
+
     lines.append("")
     if has_data_gap:
-        lines.append("Next: 配置覆盖对应 venue/market 的历史数据源，或改用已有真实历史数据覆盖的市场后再运行 strategy_backtest。")
+        lines.append(
+            "Next step: configure a real historical data source for this market, "
+            "or choose a market with existing durable history, then rerun the backtest."
+        )
     elif has_fail_verdict:
-        lines.append("Next: 先审阅失败原因、调参或补充缺失的策略假设，并重新运行 strategy_backtest；不要直接 approve/promote。")
+        lines.append(
+            "Next step: inspect the report, adjust parameters or missing assumptions, "
+            "and rerun before approving promotion."
+        )
     else:
-        lines.append("Next: 审阅策略参数、仓位、account/provider 绑定和回测报告；确认后再走 approve/promote。")
+        lines.append(
+            "Next step: review the signal triggers, position sizing, and account/data binding; "
+            "approve/promote only when they match expectations."
+        )
+    return "\n".join(lines)
+
+
+def _build_strategy_backtest_done_final_text(
+    items: list[dict[str, Any]],
+    *,
+    user_text: str | None = None,
+) -> str:
+    if _requested_english_final(user_text):
+        return _build_strategy_backtest_done_final_text_en(items)
+    has_data_gap = any(item.get("completion_kind") == "data_gap" for item in items)
+    has_fail_verdict = any(
+        str(item.get("verdict") or "").strip().upper() == "FAIL"
+        for item in items
+    )
+    if has_data_gap:
+        lines = [
+            "策略提案已经创建，也尝试跑了真实回测，但目前缺少足够的历史行情数据，"
+            "没办法完成标准回测。",
+            "策略还没有上线（没有 promote/apply 到 live workspace）。",
+            "",
+        ]
+    elif has_fail_verdict:
+        lines = [
+            "策略提案已经创建并跑完了真实回测，但回测结论是 FAIL（不通过）。",
+            "策略还没有上线，需要先排查原因、调参后重新回测，确认通过前不要 approve/promote。",
+            "",
+        ]
+    else:
+        lines = [
+            "策略提案已经创建并跑完了回测。结果可以参考，但还没有上线——"
+            "需要你先看一下再决定是否 promote/apply。",
+            "",
+        ]
+
+    for item in items:
+        strategy_id = str(item.get("strategy_id") or "").strip()
+        proposal_id = str(item.get("proposal_id") or "").strip()
+        verdict = str(item.get("verdict") or "").strip()
+        head_bits: list[str] = []
+        if strategy_id:
+            head_bits.append(f"策略 {strategy_id}")
+        if proposal_id:
+            head_bits.append(f"提案 {proposal_id}")
+        if verdict:
+            head_bits.append(f"回测结论 {verdict}（{_verdict_plain(verdict)}）")
+        if head_bits:
+            lines.append("· " + "，".join(head_bits) + "。")
+
+        if item.get("completion_kind") == "data_gap":
+            coverage = str(item.get("coverage_message") or "").strip()
+            if coverage:
+                lines.append(f"  数据缺口：{coverage}")
+            next_action = str(item.get("next_required_action_message") or "").strip()
+            if next_action:
+                lines.append(f"  说明：{next_action}")
+            continue
+
+        display = item.get("metrics_display")
+        for bullet in _interpret_backtest_metrics(
+            display if isinstance(display, dict) else {}
+        ):
+            lines.append(f"  - {bullet}")
+
+        report_path = str(item.get("report_path") or "").strip()
+        if report_path:
+            lines.append(
+                f"  完整图表和逐笔记录见报告：{_markdown_code_span(report_path)}"
+            )
+        review_gate = item.get("review_gate")
+        if (
+            isinstance(review_gate, dict)
+            and review_gate.get("paper_review_allowed") is not None
+        ):
+            allowed = bool(review_gate.get("paper_review_allowed"))
+            lines.append(
+                "  纸面（paper）复盘："
+                + ("可以进行。" if allowed else "暂不建议，先补充证据再说。")
+            )
+
+    lines.append("")
+    if has_data_gap:
+        lines.append(
+            "下一步：给对应市场配置/补齐历史数据源，或换一个已有真实历史数据的市场，"
+            "再重新运行回测。"
+        )
+    elif has_fail_verdict:
+        lines.append(
+            "下一步：先看报告里的失败原因，调参或补上缺失的策略假设后重新回测；"
+            "确认通过前不要 approve/promote。"
+        )
+    else:
+        lines.append(
+            "下一步：看一下回测报告，确认信号触发、仓位和账户/数据源绑定都符合预期；"
+            "满意后再走 approve/promote 上线。"
+        )
     return "\n".join(lines)
 
 
@@ -1332,9 +1673,9 @@ def _build_late_strategy_proposal_final_text(
     skipped_tools = ", ".join(str(name) for name in skipped_tool_names if name)
     return (
         f"{final_text.rstrip()}\n\n"
-        "Skipped late native tool(s) because the wall-clock safe reserve "
-        "was reached before starting more action work: "
-        f"{skipped_tools or 'unknown'}."
+        "I ran low on time before the final step(s), so I left them for "
+        f"next time: {skipped_tools or 'the remaining step'}. "
+        "Ask me to continue and I'll finish them."
     )
 
 
@@ -1435,6 +1776,8 @@ def _agent_team_proposal_mode_retry_prompt(
 
 _STRATEGY_WORKFLOW_TOOL_NAMES = frozenset({
     "strategy_generate_proposal",
+    "strategy_draft_proposal",
+    "strategy_submit_proposal",
     "strategy_validate",
     "strategy_backtest",
     "strategy_promote",
@@ -2715,7 +3058,7 @@ def _build_strategy_workflow_after_auxiliary_proposal_final_text(
         lines = [
             "策略/提案流程已执行，但本轮没有拿到可确认完成的策略提案或回测结果；没有直接 promote/apply 到 live workspace。",
             "",
-            "Next: 先修复上面的 strategy_generate_proposal / strategy_backtest 阻塞，再继续审阅策略参数、仓位和调度。",
+            "Next: 先修复上面的 strategy_draft_proposal / strategy_submit_proposal / strategy_backtest 阻塞，再继续审阅策略参数、仓位和调度。",
         ]
     if auxiliary_items:
         lines.extend(["", "辅助 workflow proposal 已创建，但它不是本次策略任务的最终交付："])
@@ -4578,22 +4921,24 @@ def _build_deterministic_final_summary(
     had_model_text: bool,
     evidence_snippets: list[str] | None = None,
 ) -> str:
+    del stop_reason, abort_reason
+    detail = f"I ran {iterations} step(s) and {tool_calls} tool call(s)"
+    if error_count:
+        detail += f", {error_count} of which hit an error"
+    detail += "."
     lines = [
-        "Turn stopped before a complete model-written final answer was produced.",
-        f"- stop_reason: {stop_reason or 'unknown'}",
-        f"- abort_reason: {abort_reason or stop_reason or 'unknown'}",
-        f"- iterations: {iterations}",
-        f"- tool calls: {tool_calls}",
-        f"- tool_error_count: {error_count}",
+        "I couldn't put together a clear final answer on this turn.",
+        detail,
     ]
     if had_model_text:
-        lines.append("- note: the model had emitted partial text, but not a reliable final answer.")
+        lines.append("I'd started writing one but didn't reach a reliable result.")
     else:
-        lines.append("- note: no final assistant text was available after the last tool cycle.")
+        lines.append("I didn't get to write one after the last step ran.")
     for idx, snippet in enumerate(evidence_snippets or [], start=1):
-        lines.append(f"- evidence {idx}: {snippet}")
+        lines.append(f"- found: {snippet}")
     lines.append(
-        "Next: resume the same turn or retry with a narrower request so the agent can synthesize the completed tool results."
+        "Ask me to continue and I'll pull the finished results together, "
+        "or narrow the request and I'll try again."
     )
     return "\n".join(lines)
 
@@ -8221,8 +8566,8 @@ def _build_team_run_bounded_fallback(
         lines.extend([
             "",
             "## Role findings",
-            "The team produced bounded evidence, but no role-level summary "
-            "was available for final synthesis.",
+            "The team gathered some partial results, but there wasn't a clean "
+            "per-role summary to fold into the final answer.",
         ])
     return "\n".join(line for line in lines if str(line).strip())
 
@@ -8349,26 +8694,24 @@ def _wall_time_late_tool_abort_text(
     original_user_text: str = "",
     pending_required_tool_names: tuple[str, ...] = (),
 ) -> str:
-    names = ", ".join(name for name in tool_names if name) or "unknown"
+    names = ", ".join(name for name in tool_names if name) or "the remaining step"
     lines = [
-        "Late native-tool start blocked by wall-clock reserve.",
-        f"Skipped native tools: {names}",
+        "I ran out of time on this turn before the last step, so I stopped "
+        "instead of starting it with too little time left — nothing was "
+        "changed or saved.",
+        f"Unfinished: {names}",
     ]
     request = redact_text(str(original_user_text or "").strip())
     if request:
-        lines.append(f"Original request: {request}")
+        lines.append(f"Your request: {request}")
     pending = ", ".join(
         redact_text(str(name))
         for name in pending_required_tool_names
         if str(name).strip()
     )
     if pending:
-        lines.append(f"Pending required native tools: {pending}")
-    lines.append(
-        "No late tool call was started and no external state was written. "
-        "Retry with a narrower request or complete the required native "
-        "tools first in the next turn if they are still necessary."
-    )
+        lines.append(f"Still needed: {pending}")
+    lines.append("Ask me to continue and I'll finish from here.")
     return "\n".join(lines)
 
 
@@ -8378,15 +8721,12 @@ def _wall_time_llm_timeout_text(
     original_user_text: str = "",
 ) -> str:
     lines = [
-        "Wall-clock budget expired while waiting for the LLM "
-        "provider response.",
+        "I ran out of time on this turn while waiting for a response, so I "
+        "stopped here.",
     ]
     if original_user_text.strip():
-        lines.append(f"Original request: {original_user_text.strip()}")
-    lines.append(
-        "No further model retries or native tool calls were started. "
-        f"Last provider error: {error}"
-    )
+        lines.append(f"Your request: {original_user_text.strip()}")
+    lines.append(f"(Technical detail: {error})")
     return "\n".join(lines)
 
 
@@ -8409,17 +8749,17 @@ def _build_llm_timeout_evidence_fallback(
         )
     snippets = _collect_abort_evidence_snippets(transcript, limit=8)
     lines = [
-        "Bounded timeout result",
-        "source: completed_tool_evidence",
-        f"request: {redact_text(original_user_text or '[empty]')}",
+        "I ran out of time before writing a full answer, but here's what I "
+        "gathered before stopping.",
+        f"Your request: {redact_text(original_user_text or '[empty]')}",
     ]
     if snippets:
-        lines.append("Completed tool evidence")
+        lines.append("What I found so far:")
         for idx, snippet in enumerate(snippets, start=1):
             lines.append(f"{idx}. {_format_timeout_evidence_snippet(snippet)}")
     else:
-        lines.append("Completed tool evidence: no compact evidence markers extracted.")
-    lines.append("No additional tools or provider retries were started after this timeout.")
+        lines.append("I didn't capture compact evidence before stopping.")
+    lines.append("I didn't start anything new after running out of time.")
     return "\n".join(lines)
 
 
@@ -8496,6 +8836,32 @@ _LEGACY_TOOL_ANY_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
 _LEGACY_TOOL_PARAM_RE = re.compile(
     r"<parameter=([A-Za-z0-9_.:-]+)>(.*?)</parameter>",
     re.DOTALL,
+)
+# Truncated / dangling markup: a provider response cut off mid tool call
+# leaves an *unclosed* ``<tool_call>`` / ``<function=...>`` / ``<parameter=...>``
+# block. The complete-block regexes above never match these, so the raw
+# markup used to leak into the operator-visible transcript. These patterns
+# remove everything from the dangling open tag to the end of the text.
+_LEGACY_TOOL_TRUNCATED_RE = re.compile(r"<tool_call\b.*\Z", re.IGNORECASE | re.DOTALL)
+_LEGACY_FUNCTION_BLOCK_RE = re.compile(
+    r"<function=[A-Za-z0-9_.:-]+>.*?</function>",
+    re.DOTALL,
+)
+_LEGACY_FUNCTION_TRUNCATED_RE = re.compile(
+    r"<function=[A-Za-z0-9_.:-]+\b.*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+_LEGACY_PARAM_BLOCK_RE = re.compile(
+    r"<parameter=[A-Za-z0-9_.:-]+>.*?</parameter>",
+    re.DOTALL,
+)
+_LEGACY_PARAM_TRUNCATED_RE = re.compile(
+    r"<parameter=[A-Za-z0-9_.:-]+\b.*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+_LEGACY_TOOL_MARKUP_DETECT_RE = re.compile(
+    r"<tool_call\b|<function=[A-Za-z0-9_.:-]+|<parameter=[A-Za-z0-9_.:-]+",
+    re.IGNORECASE,
 )
 _PLAIN_TEXT_TOOL_CALL_RE = re.compile(
     r"(?:^|[\s`])call\s+`?([A-Za-z0-9_.:-]+)`?",
@@ -8599,8 +8965,51 @@ def _extract_plain_text_legacy_tool_use_blocks(
 
 def _strip_legacy_tool_call_text(text: str) -> str:
     normalised = _normalise_provider_legacy_markup(text)
+    # Remove well-formed blocks first so any real prose that follows a
+    # complete tool call is preserved.
     normalised = _LEGACY_TOOL_CALL_RE.sub("", normalised)
-    return _LEGACY_TOOL_ANY_RE.sub("", normalised).strip()
+    normalised = _LEGACY_TOOL_ANY_RE.sub("", normalised)
+    normalised = _LEGACY_FUNCTION_BLOCK_RE.sub("", normalised)
+    normalised = _LEGACY_PARAM_BLOCK_RE.sub("", normalised)
+    # Remove dangling/truncated markup (response cut off mid tool call). Only
+    # a still-open tag can remain at this point, so these strip from the
+    # leftover open tag to the end of the text without eating earlier prose.
+    normalised = _LEGACY_TOOL_TRUNCATED_RE.sub("", normalised)
+    normalised = _LEGACY_FUNCTION_TRUNCATED_RE.sub("", normalised)
+    normalised = _LEGACY_PARAM_TRUNCATED_RE.sub("", normalised)
+    return normalised.strip()
+
+
+def _contains_legacy_tool_call_markup(text: str) -> bool:
+    """True when ``text`` carries textual tool-call markup, complete or not."""
+
+    normalised = _normalise_provider_legacy_markup(str(text or ""))
+    return bool(_LEGACY_TOOL_MARKUP_DETECT_RE.search(normalised))
+
+
+def _sanitize_assistant_text_blocks(
+    blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip leaked textual tool-call markup from assistant text blocks.
+
+    Applied right before assistant content is persisted/emitted so that
+    truncated or otherwise unrecovered ``<tool_call>`` / ``<function=...>``
+    markup never reaches the operator-visible transcript. Non-text blocks
+    pass through untouched; text blocks that become empty are dropped.
+    """
+
+    sanitized: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            sanitized.append(block)
+            continue
+        cleaned = _strip_legacy_tool_call_text(str(block.get("text") or ""))
+        if not cleaned:
+            continue
+        next_block = dict(block)
+        next_block["text"] = cleaned
+        sanitized.append(next_block)
+    return sanitized
 
 
 _PROVIDER_LEGACY_MARKUP_RE = re.compile(r"\]<\][A-Za-z0-9_.-]+\[>\[")
@@ -8805,6 +9214,10 @@ class WorkspaceNativeAgentLoop:
             for t in provider_tools
             if isinstance(t, dict) and t.get("name")
         }
+        # Track the lazy reveal set so the loop can re-render the
+        # advertised tools when a mid-turn skill_view / mcp_describe
+        # unlocks a new surface (see the refresh inside the loop below).
+        last_render_lazy_sig = self._lazy_described_signature()
 
         iterations = 0
         total_tool_calls = 0
@@ -8905,6 +9318,22 @@ class WorkspaceNativeAgentLoop:
                 stop_reason = "cancelled"
                 transition_reason = "cancelled"
                 break
+            # Re-render the advertised tool list when a prior iteration
+            # promoted a new lazy surface/namespace (skill_view unlocking
+            # native strategy/team tools, or mcp_describe promoting an
+            # MCP namespace). provider_tools is rendered once before the
+            # loop, so without this refresh a tool unlocked mid-turn
+            # would not be advertised until the *next* turn — leaving the
+            # model unable to call a tool it was just told is available.
+            current_lazy_sig = self._lazy_described_signature()
+            if current_lazy_sig != last_render_lazy_sig:
+                provider_tools = self._render_tools(tool_filter)
+                provider_tool_names = {
+                    str(t.get("name") or "")
+                    for t in provider_tools
+                    if isinstance(t, dict) and t.get("name")
+                }
+                last_render_lazy_sig = current_lazy_sig
             # Operator steering: drain queued redirect messages into the
             # live transcript so the very next model round sees them.
             # Pinned so macro-compaction never drops an operator
@@ -10861,6 +11290,18 @@ class WorkspaceNativeAgentLoop:
                     )
                     break
 
+            # Containment for textual tool-call leaks: when the model emits
+            # ``<tool_call>`` / ``<function=...>`` markup as plain text (often a
+            # truncated response that the structured recovery above cannot
+            # parse), scrub it from the assistant text *before* it is persisted
+            # or streamed so the raw markup never reaches the operator. The flag
+            # is remembered so the legacy retry path below still fires.
+            leaked_legacy_markup = not tool_uses and _contains_legacy_tool_call_markup(
+                _legacy_tool_text(assistant_blocks)
+            )
+            if leaked_legacy_markup:
+                assistant_blocks = _sanitize_assistant_text_blocks(assistant_blocks)
+
             assistant_text = _assistant_text_from_blocks(assistant_blocks)
             if tool_uses:
                 candidate = _substantive_pre_tool_answer_candidate(
@@ -10944,10 +11385,12 @@ class WorkspaceNativeAgentLoop:
             if not tool_uses:
                 if aborted_reason:
                     break
-                legacy_text = _legacy_tool_text(assistant_blocks)
-                if "<tool_call>" in legacy_text:
+                if leaked_legacy_markup:
+                    # ``assistant_blocks`` was already scrubbed above, so the
+                    # surviving text is the clean prose (if any) the model wrote
+                    # alongside the leaked tool call.
+                    cleaned_text = _assistant_text_from_blocks(assistant_blocks)
                     if text_only_final_attempt:
-                        cleaned_text = _strip_legacy_tool_call_text(legacy_text)
                         summary = _build_deterministic_final_summary(
                             stop_reason=stop_reason or "end_turn",
                             abort_reason="legacy_tool_call_in_final_synthesis",
@@ -12239,7 +12682,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 final_text = _build_strategy_backtest_done_final_text(
-                    strategy_backtest_results
+                    strategy_backtest_results,
+                    user_text=original_user_text,
                 )
                 transcript.append({
                     "role": "assistant",
@@ -13110,6 +13554,38 @@ class WorkspaceNativeAgentLoop:
         if tool_filter is not None:
             tools = [t for t in tools if tool_filter(t)]
         return [t.to_provider_tool() for t in tools]
+
+    def _lazy_described_signature(self) -> Optional[frozenset]:
+        """Cheap snapshot of the lazy-state ``described`` set.
+
+        The agent loop renders ``provider_tools`` once before iterating.
+        A mid-turn tool call can promote a new tool surface — e.g.
+        ``skill_view`` unlocking the native strategy/team tools, or
+        ``mcp_describe`` promoting an MCP namespace — by adding a key to
+        ``LazyMcpState.described_namespaces``. Comparing this signature
+        across iterations lets the loop detect that change and re-render
+        the advertised tools *within the same turn*, instead of leaving
+        the model told-but-unable to call a freshly unlocked tool until
+        the next turn. Returns ``None`` when no lazy state is attached.
+        """
+
+        lazy_state = getattr(self.registry, "lazy_mcp_state", None)
+        if lazy_state is None:
+            return None
+        described = getattr(lazy_state, "described_namespaces", None)
+        if not isinstance(described, (set, frozenset)):
+            return None
+        lock = getattr(lazy_state, "_lock", None)
+        try:
+            if lock is not None:
+                with lock:
+                    return frozenset(described)
+            return frozenset(described)
+        except Exception:
+            try:
+                return frozenset(described)
+            except Exception:
+                return None
 
     def _render_tool_result(self, result: ToolResult) -> dict[str, Any]:
         """Render a :class:`ToolResult` into an Anthropic ``tool_result`` block.

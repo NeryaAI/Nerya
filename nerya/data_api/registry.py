@@ -72,7 +72,7 @@ class DataApiRegistry:
                 "hint": (
                     f"Unknown data_api provider {requested_provider!r}. "
                     "For wallet-backed on-chain data use provider='wallet' "
-                    "or aliases such as 'xagt_agent_plugin'. For OKX "
+                    "or aliases such as 'byreal'. For OKX "
                     "OnchainOS CLI reads use provider='onchainos'. "
                     "For MCP namespaces such as coingecko use mcp_describe/"
                     "mcp_call instead of data_api."

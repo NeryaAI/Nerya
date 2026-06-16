@@ -22,6 +22,14 @@ dependencies = [
     "jsonschema>=4.21",
     "trafilatura>=1.8",
     "markdownify>=0.11",
+    # Scientific stack used by the in-process backtest engine and
+    # indicator math: the backtest loads a strategy's main.py in this
+    # interpreter, and generated strategies routinely ``import numpy`` /
+    # ``import pandas``. Declaring them here keeps `uv sync` (the
+    # installer path) from omitting them, which otherwise surfaces as
+    # "backtest failed: ModuleNotFoundError: No module named 'numpy'".
+    "numpy>=1.26",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]

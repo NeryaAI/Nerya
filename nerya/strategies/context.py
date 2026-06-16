@@ -1502,6 +1502,18 @@ class StrategyPortfolio:
         totals = (self.summary().get("totals") or {})
         return _coerce_float(totals.get("cash_usd"))
 
+    def ledger(self, account_id: Optional[str] = None) -> dict[str, Any]:
+        """Return a ``{equity, nav, cash}`` snapshot of the portfolio.
+
+        Compatibility accessor for strategies that read NAV via a ledger
+        handle. The backtest ``MockPortfolio`` exposes the same shape, so
+        a strategy reads NAV identically in backtest and live.
+        """
+        totals = (self.summary().get("totals") or {})
+        equity = _coerce_float(totals.get("equity_usd"))
+        cash = _coerce_float(totals.get("cash_usd"))
+        return {"equity": equity, "nav": equity, "cash": cash, "account_id": account_id or ""}
+
     def positions(self, market: Optional[str] = None) -> list[StrategyPosition]:
         """Return this strategy's per-share positions.
 

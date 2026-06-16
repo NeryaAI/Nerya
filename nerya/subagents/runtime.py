@@ -478,6 +478,9 @@ class SubAgentRuntime:
         unstructured_protocol_retry_attempted = False
         total_tokens = 0
         total_usd = 0.0
+        model_calls: list[dict[str, Any]] = []
+        last_provider = ""
+        last_model = ""
         audit_prompts: list[dict[str, Any]] = []
         audit_start = {
             "subagent": spec.name,
@@ -689,6 +692,16 @@ class SubAgentRuntime:
 
             total_tokens += int(result.tokens or 0)
             total_usd += float(result.usd or 0.0)
+            last_provider = str(getattr(result, "provider", "") or last_provider or "")
+            last_model = str(getattr(result, "model", "") or last_model or "")
+            model_calls.append({
+                "iteration": i,
+                "provider": last_provider,
+                "model": last_model,
+                "tier": spec.tier,
+                "tokens": int(result.tokens or 0),
+                "usd": float(result.usd or 0.0),
+            })
             parsed = result.parsed if isinstance(result.parsed, dict) else {}
             legacy_tool_calls = _extract_legacy_tool_calls(result.raw)
             if legacy_tool_calls and _should_use_legacy_tool_calls(parsed):
@@ -1141,6 +1154,9 @@ class SubAgentRuntime:
         return {
             "subagent": spec.name,
             "tier": spec.tier,
+            "provider": last_provider,
+            "model": last_model,
+            "model_calls": model_calls,
             "output": final_output,
             "tokens": total_tokens,
             "usd": total_usd,
@@ -1156,6 +1172,9 @@ class SubAgentRuntime:
             "audit": {
                 **audit_start,
                 "prompt_records": audit_prompts,
+                "provider": last_provider,
+                "model": last_model,
+                "model_calls": model_calls,
                 "redacted": True,
             },
         }
@@ -1666,7 +1685,7 @@ def _native_tool_usage_hints(native_tools: list[str]) -> str:
             '{"skill":"data_api","payload":{"op":"list","provider":"wallet"}} '
             "and "
             '{"skill":"data_api","payload":{"op":"list","provider":"onchainos"}}; '
-            "aliases include xagt_agent_plugin, xagent, okx_os, okx_onchain. "
+            "aliases include byreal, byreal_onchain, okx_os, okx_onchain. "
             "For wallet-backed strategies, first call the relevant wallet "
             "capability catalog or strategy guide so you use the selected route for the "
             "installed/logged-in wallet; when none is ready, follow the "

@@ -142,10 +142,10 @@ def test_data_api_wallet_guide_compaction_keeps_actionable_route() -> None:
         "data": {
             "next_required_action": "author SDK strategy package",
             "selected_route": {
-                "provider": "xagt_agent_plugin",
-                "canonical": "XAGT_ONCHAIN",
+                "provider": "byreal",
+                "canonical": "BYREAL_ONCHAIN",
                 "ready": True,
-                "market": "XAGT_ONCHAIN:solana:<token_contract>",
+                "market": "BYREAL_ONCHAIN:solana:<pool_address>",
             },
             "authoring_contract": {
                 "skill": "strategy_author",
@@ -177,7 +177,7 @@ def test_data_api_wallet_guide_compaction_keeps_actionable_route() -> None:
 
     assert not result.skipped
     assert result.rule_id == "data_api.object"
-    assert result.kept["selected_route"]["canonical"] == "XAGT_ONCHAIN"
+    assert result.kept["selected_route"]["canonical"] == "BYREAL_ONCHAIN"
     assert "StrategyAgentTask" in result.kept["authoring_contract"]["sdk_import"]
     assert result.kept["bounded_sequence"][0]["calls"][0]["action"] == "token_hot_tokens"
 
@@ -248,8 +248,8 @@ def test_market_data_candle_compaction_keeps_non_empty_coverage() -> None:
         for i in range(8)
     ]
     output = {
-        "venue": "xagt_onchain",
-        "market": "XAGT_ONCHAIN:solana:token123",
+        "venue": "byreal_onchain",
+        "market": "BYREAL_ONCHAIN:solana:token123",
         "interval": "5m",
         "count": len(rows),
         "candles": rows,
@@ -262,7 +262,7 @@ def test_market_data_candle_compaction_keeps_non_empty_coverage() -> None:
     assert result.kept["count"] == 8
     assert result.kept["rows"] == 8
     assert len(result.kept["rows_sample"]) == 5
-    assert result.kept["market"] == "XAGT_ONCHAIN:solana:token123"
+    assert result.kept["market"] == "BYREAL_ONCHAIN:solana:token123"
     assert result.kept["first_timestamp"] == "2026-05-18T00:00:00Z"
     assert result.kept["last_timestamp"] == "2026-05-18T07:00:00Z"
     assert result.kept["first_timestamp_iso"] == "2026-05-18T00:00:00Z"
@@ -278,8 +278,8 @@ def test_market_data_candle_compaction_converts_unix_seconds_to_iso() -> None:
     result = tc.compact_tool_result(
         "market_data",
         {
-            "venue": "xagt_onchain",
-            "market": "XAGT_ONCHAIN:solana:token123",
+            "venue": "byreal_onchain",
+            "market": "BYREAL_ONCHAIN:solana:token123",
             "interval": "1h",
             "count": 2,
             "candles": rows,

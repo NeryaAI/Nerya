@@ -127,7 +127,7 @@ _NATIVE_STRATEGY_DISCOVERY_TERMS = (
     "market_data",
     "onchainos",
     "okx_onchain",
-    "xagt",
+    "byreal",
     "wallet provider",
     "wallet capability",
     "token_hot_tokens",
@@ -323,7 +323,7 @@ def _proposal_only_shell_tool(cmd: str, heads: list[str]) -> str:
         return ""
     if _PROPOSAL_ONLY_CONFIG_PATH_RE.search(cmd):
         return "evolve_core_config_patch"
-    return "strategy_generate_proposal"
+    return "strategy_draft_proposal"
 
 
 def _looks_like_read_only_network_fetch(cmd: str, heads: list[str]) -> bool:
@@ -518,21 +518,38 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
                     "that native tools already expose. Read "
                     "strategy_author with skill_view, use connector_list / "
                     "connector_view / data_api / market_data for bounded "
-                    "evidence, then call strategy_generate_proposal with "
-                    "`files` containing Nerya SDK code when custom strategy "
-                    "logic is needed. For workspace file listing use glob, "
-                    "list_dir, or read_file. Reserve run_shell for explicit "
+                    "evidence, then call strategy_draft_proposal and edit_file "
+                    "/ write_file on the staged proposal files with Nerya SDK "
+                    "code when custom strategy logic is needed. For workspace "
+                    "file listing use glob, list_dir, or read_file; to "
+                    "enumerate roles or subagents use role_list / "
+                    "subagent_list; to run a backtest use strategy_backtest. "
+                    "Reserve run_shell for explicit "
                     "operator commands, tests, builds, or cases with no "
                     "native tool."
                 ),
                 retryable=False,
                 detail={
                     "reason": "tool_redirect",
-                    "preferred_tools": ["glob", "list_dir", "read_file"],
+                    "preferred_tools": [
+                        "glob",
+                        "list_dir",
+                        "read_file",
+                        "role_list",
+                        "subagent_list",
+                        "strategy_backtest",
+                    ],
                 },
                 recovery_hint={
                     "reason": "tool_redirect",
-                    "preferred_tools": ["glob", "list_dir", "read_file"],
+                    "preferred_tools": [
+                        "glob",
+                        "list_dir",
+                        "read_file",
+                        "role_list",
+                        "subagent_list",
+                        "strategy_backtest",
+                    ],
                 },
             ),
         )

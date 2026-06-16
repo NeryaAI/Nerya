@@ -230,8 +230,8 @@ PLACEHOLDER_MARKET_PARTS: frozenset[str] = frozenset(
 """Manifest market fragments that mean the agent emitted a placeholder.
 
 Runtime scanners can use a provider universe route such as
-``XAGT_ONCHAIN:solana``. They must not validate a fake token market like
-``XAGT_ONCHAIN:solana:UNKNOWN`` because that makes later backtest and
+``BYREAL_ONCHAIN:solana``. They must not validate a fake token market like
+``BYREAL_ONCHAIN:solana:UNKNOWN`` because that makes later backtest and
 operator-review results look more certain than they are.
 """
 

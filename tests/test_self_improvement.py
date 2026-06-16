@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from nerya.agent import self_improvement
 from nerya.agent.self_improvement import maybe_propose_from_turn
 from nerya.core import jsonl
 from nerya.core import time as time_core
@@ -10,6 +11,24 @@ from nerya.core.paths import WorkspacePaths
 import pytest
 
 pytestmark = pytest.mark.smoke
+
+
+def test_legacy_evolve_delegates_to_canonical_runner(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    sentinel = {
+        "proposal": {"id": "prp_reflect_1", "validation_plan_id": "vpl_1"},
+        "signals": [{"id": "sig_1"}],
+        "selected_assets": {"genes": [{"id": "gene_1"}]},
+        "event": {"id": "evt_1"},
+    }
+
+    def fake_evolve(received_config: Config) -> dict:
+        assert received_config is config
+        return sentinel
+
+    monkeypatch.setattr("nerya.evolution.runner.evolve", fake_evolve)
+
+    assert self_improvement.evolve(config) is sentinel
 
 
 def _config(tmp_path, data: dict | None = None) -> Config:

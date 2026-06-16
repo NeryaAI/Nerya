@@ -24,10 +24,10 @@ from .protocol import WalletCapabilities, WalletProvider, WalletReadiness
 from .providers import (
     BinanceAgenticWallet,
     BitgetWalletSkill,
+    ByrealWallet,
     CoinbaseWallet,
     OkxOsWallet,
     SelfCustodyWallet,
-    XagtAgentPluginWallet,
 )
 
 
@@ -596,123 +596,117 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             ),
         ],
     },
-    "xagt_agent_plugin": {
-        "id": "xagt_agent_plugin",
-        "label": "XAgent x OKX Agent Plugin",
+    "byreal": {
+        "id": "byreal",
+        "label": "Byreal CLMM DEX (Solana)",
         "description": (
-            "Install @xagt/agent-plugin, use the XAgent browser/device login "
-            "flow, then expose the OKX OnchainOS-backed token K-line source "
-            "inside Nerya's market-data routing."
+            "Install the Byreal CLI (`@byreal-io/byreal-cli`) for the Byreal "
+            "concentrated-liquidity DEX on Solana, then expose Solana CLMM "
+            "pool OHLCV plus pool/token/overview discovery inside Nerya's "
+            "market-data routing. Read-only data needs no wallet; swaps and "
+            "CLMM positions use a local keypair from `byreal-cli setup`."
         ),
         "install_hint": (
-            "Install `@xagt/agent-plugin@0.4.0`, open the returned XAgent "
-            "login URL, approve the user code, then click verify so Nerya "
-            "stores the XAgent session as vault:// refs."
+            "Install with `npm install -g @byreal-io/byreal-cli` (or let Nerya "
+            "install it into the workspace). Read-only pools/tokens/overview/"
+            "klines work immediately; run `byreal-cli setup` only when you need "
+            "wallet-signed swaps or CLMM positions."
         ),
-        "install_command": "npm:@xagt/agent-plugin#version=0.4.0&entry=dist/cli.js",
+        "install_command": "npm:@byreal-io/byreal-cli#version=0.3.6&entry=dist/index.cjs",
         "install_alternatives": [
             {
-                "label": "XAgent agent plugin npm package",
-                "command": "npm:@xagt/agent-plugin#version=0.4.0&entry=dist/cli.js",
+                "label": "Byreal CLI npm package",
+                "command": "npm:@byreal-io/byreal-cli#version=0.3.6&entry=dist/index.cjs",
                 "kind": "npm",
-                "note": "Installs the official xagt-plugin CLI package into the workspace.",
+                "note": "Installs the official byreal-cli package into the workspace node-skill area.",
+            },
+            {
+                "label": "Global npm install",
+                "command": "",
+                "kind": "manual",
+                "note": "Run `npm install -g @byreal-io/byreal-cli` to expose byreal-cli on PATH.",
+            },
+            {
+                "label": "Agent skill (skills add)",
+                "command": "",
+                "kind": "manual",
+                "note": "Run `npx skills add byreal-git/byreal-agent-skills` to register the byreal-cli agent skill.",
             },
         ],
         "links": {
-            "npm": "https://www.npmjs.com/package/@xagt/agent-plugin",
-            "config": (
-                "wallet.xagt_agent_plugin.{plugin_path, user_id, "
-                "access_token_ref, refresh_token_ref, api_base_url, frontend_base_url}"
-            ),
+            "docs": "https://byreal.io",
+            "repo": "https://github.com/byreal-git/byreal-agent-skills",
+            "npm": "https://www.npmjs.com/package/@byreal-io/byreal-cli",
+            "config": "wallet.byreal.{cli_path, rpc_url, keypair_path}",
         },
         "runtime": "node",
         "auth_cli": {
             "kind": "npm",
-            "package": "@xagt/agent-plugin",
-            "version": "0.4.0",
-            "bin": "xagt-plugin",
-            "install_command": "npm:@xagt/agent-plugin#version=0.4.0&entry=dist/cli.js",
+            "package": "@byreal-io/byreal-cli",
+            "version": "0.3.6",
+            "bin": "byreal-cli",
+            "install_command": "npm:@byreal-io/byreal-cli#version=0.3.6&entry=dist/index.cjs",
         },
         "auth_flows": [
             _auth_flow(
-                "xagt_device_login",
-                "device_code",
-                "XAgent browser/device login",
+                "byreal_local_keypair",
+                "local_keypair",
+                "Byreal local keypair setup",
                 (
-                    "Nerya starts the same device auth flow used by "
-                    "@xagt/agent-plugin, returns a browser login URL and "
-                    "user code, then verifies the device code after approval."
+                    "Read-only pool/token/overview/K-line commands need no "
+                    "wallet. For swaps and CLMM positions, run `byreal-cli "
+                    "setup` to create or import a Solana keypair stored locally "
+                    "at ~/.config/byreal/keys/ with strict 0600 permissions."
                 ),
-                docs_url="https://www.npmjs.com/package/@xagt/agent-plugin",
+                docs_url="https://github.com/byreal-git/byreal-agent-skills",
                 commands=[
-                    "npm install @xagt/agent-plugin@0.4.0",
-                    "xagt-plugin login --no-browser",
-                    "xagt-plugin setup --target all",
-                    "xagt-plugin doctor",
+                    "npm install -g @byreal-io/byreal-cli",
+                    "byreal-cli overview -o json",
+                    "byreal-cli pools list --sort-field apr24h -o json",
+                    "byreal-cli setup   # only for wallet-signed swaps/positions",
                 ],
-                stores=[
-                    "user_id",
-                    "access_token_ref",
-                    "refresh_token_ref",
-                    "plugin_path",
-                ],
+                stores=["cli_path"],
                 notes=[
-                    "XAgent tokens are never returned to the browser; Nerya persists only vault:// refs.",
-                    "Token K-lines are routed through the OKX OnchainOS provider/fallback.",
+                    "byreal-cli never transmits private keys; keys are used locally for signing only.",
+                    "Token K-lines are per-pool: use market id solana:<poolAddress>.",
                 ],
             ),
         ],
         "market_data_sources": [
             _market_source(
-                "xagt_onchain",
-                "XAGT_ONCHAIN",
-                "XAgent x OKX Onchain Data",
+                "byreal_onchain",
+                "BYREAL_ONCHAIN",
+                "Byreal CLMM DEX (Solana) Onchain Data",
                 market_format="chain:token",
                 fetch_method="get_token_klines",
                 description=(
-                    "Token OHLCV through the XAgent/OKX plugin binding. "
-                    "Uses OKX OnchainOS first and Nerya's real public "
-                    "on-chain K-line fallback if the local OKX CLI is unavailable."
+                    "Solana CLMM pool OHLCV via byreal-cli `pools klines`. The "
+                    "token field is the Byreal pool address (market id "
+                    "solana:<poolAddress>)."
                 ),
             ),
         ],
         "credential_fields": [
             _field(
-                "plugin_path", "Plugin install path", kind="public",
+                "cli_path", "Byreal CLI path", kind="public",
                 sensitive=False, required=False,
-                description="Workspace install path for @xagt/agent-plugin.",
+                description="Optional explicit path to the byreal-cli binary or dist/index.cjs.",
+                placeholder="/usr/local/bin/byreal-cli",
             ),
             _field(
-                "user_id", "XAgent user id", kind="public",
+                "rpc_url", "Solana RPC URL", kind="url",
                 sensitive=False, required=False,
-                description="User id returned by the XAgent device login flow.",
-            ),
-            _field(
-                "api_base_url", "XAgent API base URL", kind="url",
-                sensitive=False, required=False,
-                placeholder="https://api.xerpaai.com",
-            ),
-            _field(
-                "frontend_base_url", "XAgent frontend base URL", kind="url",
-                sensitive=False, required=False,
-                placeholder="https://www.xerpaai.com",
+                placeholder="https://api.mainnet-beta.solana.com",
             ),
         ],
         "advanced_credential_fields": [
             _field(
-                "access_token", "XAgent access token", kind="secret",
-                required=False,
-                description="Normally filled by device login and stored as access_token_ref.",
-            ),
-            _field(
-                "refresh_token", "XAgent refresh token", kind="secret",
-                required=False,
-                description="Normally filled by device login and stored as refresh_token_ref.",
-            ),
-            _field(
-                "credentials_path", "XAgent credentials path", kind="public",
+                "keypair_path", "Byreal keypair path", kind="public",
                 sensitive=False, required=False,
-                description="Optional path to an existing xagt credentials.json for status/import.",
+                description=(
+                    "Optional path to the local Solana keypair directory "
+                    "(default ~/.config/byreal/keys/)."
+                ),
             ),
         ],
     },
@@ -781,9 +775,9 @@ def resolve_provider_name(name: str) -> str | None:
     """Resolve a wallet provider id or one of its market-source aliases.
 
     Operator surfaces sometimes show wallet-backed market sources such
-    as ``xagt_onchain`` next to normal exchange venues. Those are valid
+    as ``byreal_onchain`` next to normal exchange venues. Those are valid
     candle sources, but account management needs the owning wallet
-    provider id (``xagt_agent_plugin``) so credential schemas and
+    provider id (``byreal``) so credential schemas and
     wallet bindings route through the wallet registry.
     """
 
@@ -896,33 +890,29 @@ def build_provider(
             repo=str(cfg.get("repo") or CoinbaseWallet.repo),
             config=cfg,
         )
-    if name_l == "xagt_agent_plugin":
-        access_token = _resolve(
-            cfg.get("access_token_ref") or cfg.get("access_token"),
-            workspace,
-            vault_passphrase,
-        )
-        refresh_token = _resolve(
-            cfg.get("refresh_token_ref") or cfg.get("refresh_token"),
-            workspace,
-            vault_passphrase,
-        )
-        plugin_path = str(cfg.get("plugin_path") or "")
-        if not plugin_path:
-            install_root = _npm_install_root(workspace, "@xagt/agent-plugin")
+    if name_l == "byreal":
+        cli_path = str(cfg.get("cli_path") or "")
+        if not cli_path:
+            install_root = _npm_install_root(workspace, "@byreal-io/byreal-cli")
             if install_root:
-                pkg_root = install_root / "node_modules" / "@xagt" / "agent-plugin"
-                plugin_path = str(pkg_root if pkg_root.exists() else install_root)
-        return XagtAgentPluginWallet(
-            plugin_path=plugin_path,
+                bin_shim = install_root / "node_modules" / ".bin" / "byreal-cli"
+                pkg_entry = (
+                    install_root
+                    / "node_modules"
+                    / "@byreal-io"
+                    / "byreal-cli"
+                    / "dist"
+                    / "index.cjs"
+                )
+                if bin_shim.exists():
+                    cli_path = str(bin_shim)
+                elif pkg_entry.exists():
+                    cli_path = str(pkg_entry)
+        return ByrealWallet(
+            cli_path=cli_path,
             workspace=str(workspace or ""),
-            user_id=str(cfg.get("user_id") or ""),
-            access_token=access_token or "",
-            refresh_token=refresh_token or "",
-            access_expire=str(cfg.get("access_expire") or ""),
-            scope=str(cfg.get("scope") or ""),
-            api_base_url=str(cfg.get("api_base_url") or "https://api.xerpaai.com"),
-            frontend_base_url=str(cfg.get("frontend_base_url") or "https://www.xerpaai.com"),
+            rpc_url=str(cfg.get("rpc_url") or ""),
+            keypair_path=str(cfg.get("keypair_path") or ""),
             config=cfg,
         )
     raise WalletProviderNotFound(

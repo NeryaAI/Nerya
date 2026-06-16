@@ -168,6 +168,72 @@ def test_curated_single_wave_deep_team_keeps_research_floor(tmp_path) -> None:
     assert timeout == 600.0
 
 
+def test_shallow_team_too_small_model_timeout_lifted_to_research_floor(tmp_path) -> None:
+    # The Anthropic regression: a single-wave ad-hoc parallel team where the
+    # model under-budgeted ``timeout_s=60``. With no operator deadline this
+    # must be lifted to the shallow research floor so members aren't starved.
+    args = {
+        "team_template": "ad_hoc_parallel_team",
+        "max_parallel": 2,
+        "timeout_s": 60,
+        "roles": [
+            {"name": "equity_researcher"},
+            {"name": "business_analyst"},
+        ],
+    }
+
+    timeout = agents._effective_team_timeout_seconds(
+        args=args,
+        shared_payload={"context": "已知信息摘要"},
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+    )
+
+    assert timeout == agents._TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS
+
+
+def test_shallow_team_operator_deadline_keeps_small_timeout(tmp_path) -> None:
+    # An explicit operator deadline is a hard budget and must still win over
+    # the shallow research floor.
+    args = {
+        "team_template": "ad_hoc_parallel_team",
+        "max_parallel": 2,
+        "timeout_s": 60,
+        "roles": [
+            {"name": "equity_researcher"},
+            {"name": "business_analyst"},
+        ],
+    }
+
+    timeout = agents._effective_team_timeout_seconds(
+        args=args,
+        shared_payload={"deadline": "60s"},
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+    )
+
+    assert timeout == 60.0
+
+
+def test_shallow_team_large_model_timeout_is_unchanged(tmp_path) -> None:
+    # A generous model timeout above the floor is left untouched.
+    args = {
+        "team_template": "ad_hoc_parallel_team",
+        "max_parallel": 2,
+        "timeout_s": 300,
+        "roles": [
+            {"name": "equity_researcher"},
+            {"name": "business_analyst"},
+        ],
+    }
+
+    timeout = agents._effective_team_timeout_seconds(
+        args=args,
+        shared_payload={},
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+    )
+
+    assert timeout == 300.0
+
+
 def test_team_run_caps_model_requested_parallel_to_template_limit(monkeypatch, tmp_path) -> None:
     dispatched: list[str] = []
 
@@ -187,6 +253,7 @@ def test_team_run_caps_model_requested_parallel_to_template_limit(monkeypatch, t
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             dispatched.append(name)
@@ -263,6 +330,7 @@ def test_team_run_parent_remaining_wall_budget_caps_model_timeout(monkeypatch) -
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -344,6 +412,7 @@ def test_team_run_publishes_member_lifecycle_events(monkeypatch) -> None:
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             assert session_id == "sess-1"
@@ -429,6 +498,7 @@ def test_native_team_run_is_listed_by_team_runs_api_store(monkeypatch, tmp_path)
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -516,6 +586,7 @@ def test_team_run_dispatches_provider_role_payloads_and_persists_requested_roles
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             dispatched.append(name)
@@ -588,6 +659,7 @@ def test_native_team_run_store_preserves_degraded_member_output(monkeypatch, tmp
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -659,6 +731,7 @@ def test_team_run_treats_missing_research_evidence_contract_as_member_failure(
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -786,6 +859,7 @@ def test_team_run_respects_explicit_committee_template_without_prompt_keywords(
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             dispatched.append(name)
@@ -852,6 +926,7 @@ def test_team_run_respects_explicit_roles_and_short_deadline(monkeypatch) -> Non
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             dispatched.append(name)
@@ -920,6 +995,7 @@ def test_team_run_uses_shared_deadline_when_no_outer_timeout(monkeypatch) -> Non
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -971,6 +1047,7 @@ def test_team_run_passes_prompt_relative_language_instruction_to_members(monkeyp
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             seen_payloads.append(dict(payload))
             name = target.split(":", 1)[1]
@@ -1047,6 +1124,7 @@ def test_team_run_supports_split_analysis_and_final_output_languages(monkeypatch
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             seen_payloads.append(dict(payload))
             name = target.split(":", 1)[1]
@@ -1120,6 +1198,7 @@ def test_team_run_role_language_does_not_override_final_output_language(monkeypa
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             seen_payloads.append(dict(payload))
             name = target.split(":", 1)[1]
@@ -1202,6 +1281,7 @@ def test_team_run_role_language_without_final_contract_is_analysis_only(monkeypa
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             seen_payloads.append(dict(payload))
             return {
@@ -1319,6 +1399,7 @@ def test_team_run_executor_repairs_stringified_roles(monkeypatch) -> None:
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -1385,6 +1466,7 @@ def test_team_run_treats_degraded_member_output_as_failure(monkeypatch) -> None:
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -1439,6 +1521,7 @@ def test_team_run_treats_partial_tool_observation_fallback_as_failure(monkeypatc
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -1497,6 +1580,7 @@ def test_team_run_suppresses_duplicate_run_in_same_turn(monkeypatch) -> None:
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             dispatched.append(name)
@@ -1576,6 +1660,7 @@ def test_subagent_run_is_suppressed_after_successful_team_in_same_turn(
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             dispatched.append(name)
@@ -1649,6 +1734,7 @@ def test_task_tools_return_sync_team_result_after_team_run(
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -1741,6 +1827,7 @@ def test_subagent_run_async_returns_sync_team_result_after_team_run(
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             name = target.split(":", 1)[1]
             return {
@@ -1811,6 +1898,48 @@ def test_role_list_surfaces_catalog_without_domain_route_guidance(tmp_path) -> N
     assert any(r["name"] == "fundamentals_analyst" for r in data["roles"])
 
 
+def test_role_get_synthesizes_generic_role_for_unknown_name(tmp_path) -> None:
+    # An unregistered role name must NOT hard-fail: role_get returns a capable
+    # generic ad-hoc researcher so the lead agent can dispatch it directly
+    # (no role_save / recovery detour, no scary "role not found").
+    result = agents.role_get_handler(
+        ToolCall(name="role_get", id="toolu_get", arguments={"name": "business_analyst"}),
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+    )
+
+    assert not result.is_error
+    data = result.content[0].data
+    assert data["name"] == "business_analyst"
+    assert data["source"] == "generated"
+    assert data["generated"] is True
+    assert data["persistent"] is False
+    assert data["prompt_path"] is None
+    assert isinstance(data["prompt"], str) and data["prompt"].strip()
+    # Synthesised roles only get safe read-only research surfaces.
+    assert data["allowed_skills"]
+    assert "trading" not in data["allowed_skills"]
+    assert "wallet" not in data["allowed_skills"]
+    assert "note" in data
+
+
+def test_role_get_returns_registered_default_unchanged(tmp_path) -> None:
+    # A known default still resolves to its real profile (not a generated one).
+    result = agents.role_get_handler(
+        ToolCall(
+            name="role_get",
+            id="toolu_get_default",
+            arguments={"name": "fundamentals_analyst"},
+        ),
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+    )
+
+    assert not result.is_error
+    data = result.content[0].data
+    assert data["name"] == "fundamentals_analyst"
+    assert data.get("source") != "generated"
+    assert not data.get("generated")
+
+
 def test_team_run_forwards_parent_tool_registry(monkeypatch) -> None:
     seen = {}
     registry = ToolRegistry()
@@ -1829,6 +1958,7 @@ def test_team_run_forwards_parent_tool_registry(monkeypatch) -> None:
             session_id,
             turn_id=None,
             parent_call_id=None,
+            inline_spec=None,
         ):
             return {
                 "ok": True,

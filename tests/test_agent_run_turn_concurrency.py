@@ -9,8 +9,11 @@ import pytest
 
 from nerya.agent.kernel import AgentKernel, AgentTurnResult
 from nerya.api import routes_agent
+from nerya.core import jsonl
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
+from nerya.db.repositories import AgentSessionRepository
+from nerya.db.sqlite import connect
 from nerya.llm.messages import MessagesResponse
 
 
@@ -433,3 +436,45 @@ def test_run_turn_response_exposes_verifier_and_execution_state(
     assert result["verifier_outcome"]["transition_label"] == "model_done"
     assert result["verifier_outcome"]["trusted"] is False
     assert result["execution_state"]["counters"]["status"] == 1
+
+
+def test_kernel_persists_failed_session_turn_when_run_raises(tmp_path, monkeypatch):
+    cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+
+    def fail_run(self, **_kwargs):  # noqa: ANN001
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(AgentKernel, "_run", fail_run)
+
+    with pytest.raises(RuntimeError, match="provider exploded"):
+        AgentKernel(config=cfg, skills=None).run_turn(
+            trigger={
+                "id": "evt_failed",
+                "source": "dashboard",
+                "kind": "user.chat",
+                "payload": {"text": "写个游戏"},
+            },
+            session_id="failed-session",
+            turn_id="turn_failed",
+        )
+
+    rows = jsonl.read_all(cfg.paths.journal("agent"))
+    end_rows = [
+        row
+        for row in rows
+        if row.get("kind") == "agent.turn.end"
+        and row.get("turn_id") == "turn_failed"
+    ]
+    assert end_rows
+    assert end_rows[-1]["stop_reason"] == "error"
+    assert end_rows[-1]["transition_reason"] == "runtime_error"
+    assert end_rows[-1]["aborted"] is True
+
+    con = connect(cfg.paths.db)
+    try:
+        messages = AgentSessionRepository(con).transcript("failed-session", limit=0)
+    finally:
+        con.close()
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[0]["content"] == "写个游戏"
+    assert "provider exploded" in messages[1]["content"]

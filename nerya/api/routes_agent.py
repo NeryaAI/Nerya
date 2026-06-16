@@ -71,6 +71,29 @@ def _payload_number(payload: dict[str, Any], key: str, *, minimum: float, maximu
     return value
 
 
+def _payload_context_window(payload: dict[str, Any]) -> int | None:
+    raw = payload.get("model_context_window") or payload.get("context_window")
+    if raw is None:
+        limits = payload.get("runtime_limits")
+        if isinstance(limits, dict):
+            raw = limits.get("model_context_window") or limits.get("context_window")
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(str(raw).strip().replace("_", ""))
+    except Exception:
+        return None
+    aliases = {
+        128000: 131072,
+        131072: 131072,
+        256000: 262144,
+        262144: 262144,
+        1000000: 1048576,
+        1048576: 1048576,
+    }
+    return aliases.get(value)
+
+
 def _with_turn_limit_overrides(config, payload: dict[str, Any]):
     """Return a per-request config clone with safe agent-loop overrides."""
 
@@ -79,7 +102,13 @@ def _with_turn_limit_overrides(config, payload: dict[str, Any]):
     max_iterations = _payload_number(payload, "max_iterations", minimum=1, maximum=240)
     max_tool_calls = _payload_number(payload, "max_total_tool_calls", minimum=1, maximum=1000)
     max_wall_seconds = _payload_number(payload, "max_wall_seconds", minimum=10, maximum=7200)
-    if max_iterations is None and max_tool_calls is None and max_wall_seconds is None:
+    model_context_window = _payload_context_window(payload)
+    if (
+        max_iterations is None
+        and max_tool_calls is None
+        and max_wall_seconds is None
+        and model_context_window is None
+    ):
         return config
 
     data = copy.deepcopy(getattr(config, "data", {}) or {})
@@ -90,6 +119,8 @@ def _with_turn_limit_overrides(config, payload: dict[str, Any]):
         native["max_total_tool_calls"] = int(max_tool_calls)
     if max_wall_seconds is not None:
         native["max_wall_seconds"] = float(max_wall_seconds)
+    if model_context_window is not None:
+        native["model_context_window"] = int(model_context_window)
     return config.__class__(paths=config.paths, data=data)
 
 

@@ -24,6 +24,5 @@ Each panel has `id`, `type`, `title`, and `series`. Series entries use `kind`:
 Tables are pre-trimmed and shaped as:
 
 ```json
-{"id": "trades_top10", "columns": ["ts"], "rows": [[123]]}
+{"id": "trades", "columns": ["ts"], "rows": [[123]]}
 ```
-

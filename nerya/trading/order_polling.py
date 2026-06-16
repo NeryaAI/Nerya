@@ -119,124 +119,132 @@ def poll_active_live_orders(
     """
 
     paths = config.paths
+    owns_tracker = tracker is None
+    owns_book = book is None
     tracker = tracker or OrderTracker(paths)
     book = book or PositionBook(paths)
     registry = registry or ConnectorRegistry(workspace=paths.root)
     now = now if now is not None else time.time()
     out = PollResult()
 
-    accounts = load_accounts(paths)
-    active = tracker.active_orders()
-    for order in active:
-        if account_filter is not None and order.account_id not in account_filter:
-            out.skipped += 1
-            continue
-        out.scanned += 1
-        per: dict[str, Any] = {
-            "order_id": order.order_id,
-            "exchange_order_id": order.exchange_order_id,
-            "market": order.market,
-        }
-
-        account = accounts.get(order.account_id)
-        if account is None:
-            # Account was deleted under us. Mark the order ``lost`` so
-            # operators see it in /incidents and can decide whether to
-            # cancel via the venue manually.
-            tracker.mark_not_found(order.order_id, ts=now)
-            out.not_found += 1
-            per["state"] = "account_missing"
-            out.per_order.append(per)
-            continue
-
-        try:
-            if connector_factory is not None:
-                connector = connector_factory(account.id, account.connector_cfg())
-            else:
-                connector = registry.get(account.id, account.connector_cfg())
-        except Exception as exc:
-            out.errors += 1
-            tracker.mark_not_found(order.order_id, ts=now)
-            per["state"] = f"connector_error:{exc}"
-            out.per_order.append(per)
-            continue
-
-        ack, err = _safe_get_order(
-            connector,
-            market=order.market,
-            order_id=order.exchange_order_id or order.order_id,
-        )
-        if err is not None:
-            kind, detail = err
-            if kind == "unsupported":
-                # The venue can't be polled. Best the poller can do is
-                # leave the row alone and trust reconciliation to catch
-                # drift later.
+    try:
+        accounts = load_accounts(paths)
+        active = tracker.active_orders()
+        for order in active:
+            if account_filter is not None and order.account_id not in account_filter:
                 out.skipped += 1
-                per["state"] = "unsupported"
-            else:
+                continue
+            out.scanned += 1
+            per: dict[str, Any] = {
+                "order_id": order.order_id,
+                "exchange_order_id": order.exchange_order_id,
+                "market": order.market,
+            }
+
+            account = accounts.get(order.account_id)
+            if account is None:
+                # Account was deleted under us. Mark the order ``lost`` so
+                # operators see it in /incidents and can decide whether to
+                # cancel via the venue manually.
+                tracker.mark_not_found(order.order_id, ts=now)
+                out.not_found += 1
+                per["state"] = "account_missing"
+                out.per_order.append(per)
+                continue
+
+            try:
+                if connector_factory is not None:
+                    connector = connector_factory(account.id, account.connector_cfg())
+                else:
+                    connector = registry.get(account.id, account.connector_cfg())
+            except Exception as exc:
                 out.errors += 1
                 tracker.mark_not_found(order.order_id, ts=now)
-                per["state"] = f"poll_error:{detail}"
-            out.per_order.append(per)
-            continue
+                per["state"] = f"connector_error:{exc}"
+                out.per_order.append(per)
+                continue
 
-        tracker.mark_seen(order.order_id, ts=now)
-        ack_filled = float(getattr(ack, "filled", None) or 0.0)
-        ack_avg = float(getattr(ack, "avg_price", None) or 0.0)
-        ack_fee = float(getattr(ack, "fee_usd", None) or 0.0)
-        new_filled_delta = ack_filled - float(order.filled_size or 0.0)
-        if new_filled_delta > 1e-12:
-            price_for_fill = ack_avg or order.avg_price or order.price or 0.0
-            # Record the late fill on the tracker (rolls up
-            # filled_size / avg_price / fee_usd) AND mirror it onto
-            # the PositionBook so the merged position stays in lock-step
-            # with the broker.
-            fill = tracker.record_fill(
-                order_id=order.order_id,
-                price=float(price_for_fill),
-                size_base=float(new_filled_delta),
-                fee_usd=float(ack_fee),
-                source="live",
-                meta={
-                    "via": "background_poller",
-                    "intent_id": order.intent_id,
-                    "exchange_order_id": order.exchange_order_id,
-                },
+            ack, err = _safe_get_order(
+                connector,
+                market=order.market,
+                order_id=order.exchange_order_id or order.order_id,
             )
-            try:
-                book.apply_fill(
-                    account_id=order.account_id,
-                    strategy_id=order.strategy_id,
-                    market=order.market,
-                    side=order.side,
+            if err is not None:
+                kind, detail = err
+                if kind == "unsupported":
+                    # The venue can't be polled. Best the poller can do is
+                    # leave the row alone and trust reconciliation to catch
+                    # drift later.
+                    out.skipped += 1
+                    per["state"] = "unsupported"
+                else:
+                    out.errors += 1
+                    tracker.mark_not_found(order.order_id, ts=now)
+                    per["state"] = f"poll_error:{detail}"
+                out.per_order.append(per)
+                continue
+
+            tracker.mark_seen(order.order_id, ts=now)
+            ack_filled = float(getattr(ack, "filled", None) or 0.0)
+            ack_avg = float(getattr(ack, "avg_price", None) or 0.0)
+            ack_fee = float(getattr(ack, "fee_usd", None) or 0.0)
+            new_filled_delta = ack_filled - float(order.filled_size or 0.0)
+            if new_filled_delta > 1e-12:
+                price_for_fill = ack_avg or order.avg_price or order.price or 0.0
+                # Record the late fill on the tracker (rolls up
+                # filled_size / avg_price / fee_usd) AND mirror it onto
+                # the PositionBook so the merged position stays in lock-step
+                # with the broker.
+                fill = tracker.record_fill(
+                    order_id=order.order_id,
                     price=float(price_for_fill),
                     size_base=float(new_filled_delta),
                     fee_usd=float(ack_fee),
-                    venue=_venue_of(order.market),
-                    leverage=float(order.leverage or 1.0),
                     source="live",
-                    executor_id=order.executor_id,
-                    order_id=order.order_id,
-                    fill_id=fill.fill_id,
+                    meta={
+                        "via": "background_poller",
+                        "intent_id": order.intent_id,
+                        "exchange_order_id": order.exchange_order_id,
+                    },
                 )
-            except Exception:
-                # Don't let a PositionBook hiccup wedge the poll loop.
-                # ``reconciliation`` will surface the drift next pass.
-                log.exception("position book apply_fill failed for order %s", order.order_id)
-            out.fills_applied += 1
-            per["fill_size_base"] = new_filled_delta
-            per["fill_price"] = price_for_fill
+                try:
+                    book.apply_fill(
+                        account_id=order.account_id,
+                        strategy_id=order.strategy_id,
+                        market=order.market,
+                        side=order.side,
+                        price=float(price_for_fill),
+                        size_base=float(new_filled_delta),
+                        fee_usd=float(ack_fee),
+                        venue=_venue_of(order.market),
+                        leverage=float(order.leverage or 1.0),
+                        source="live",
+                        executor_id=order.executor_id,
+                        order_id=order.order_id,
+                        fill_id=fill.fill_id,
+                    )
+                except Exception:
+                    # Don't let a PositionBook hiccup wedge the poll loop.
+                    # ``reconciliation`` will surface the drift next pass.
+                    log.exception("position book apply_fill failed for order %s", order.order_id)
+                out.fills_applied += 1
+                per["fill_size_base"] = new_filled_delta
+                per["fill_price"] = price_for_fill
 
-        terminal_status = _normalize_ack_status(ack)
-        if terminal_status in TERMINAL_STATES:
-            tracker.update_state(order.order_id, terminal_status, ts=now)
-            out.terminal += 1
-            per["state"] = terminal_status
+            terminal_status = _normalize_ack_status(ack)
+            if terminal_status in TERMINAL_STATES:
+                tracker.update_state(order.order_id, terminal_status, ts=now)
+                out.terminal += 1
+                per["state"] = terminal_status
 
-        if "state" not in per:
-            per["state"] = terminal_status or "open"
-        out.per_order.append(per)
+            if "state" not in per:
+                per["state"] = terminal_status or "open"
+            out.per_order.append(per)
+    finally:
+        if owns_tracker:
+            tracker.close()
+        if owns_book:
+            book.close()
 
     return out
 

@@ -58,6 +58,64 @@ def supported_exchanges() -> list[str]:
     return sorted(getattr(ccxt, "exchanges", []))
 
 
+def _timeframe_ms(interval: str) -> int:
+    raw = str(interval or "1m").strip()
+    if not raw:
+        return 60_000
+    unit = raw[-1].lower()
+    try:
+        qty = int(raw[:-1] or 1)
+    except ValueError:
+        return 60_000
+    if unit == "m":
+        return qty * 60_000
+    if unit == "h":
+        return qty * 3_600_000
+    if unit == "d":
+        return qty * 86_400_000
+    if unit == "w":
+        return qty * 7 * 86_400_000
+    return 60_000
+
+
+def _dedupe_ohlcv(rows: list[list[Any]], *, limit: int) -> list[list[Any]]:
+    by_ts: dict[int, list[Any]] = {}
+    for row in rows:
+        if not row:
+            continue
+        try:
+            ts = int(row[0])
+        except Exception:
+            continue
+        by_ts[ts] = list(row)
+    out = [by_ts[ts] for ts in sorted(by_ts)]
+    if limit > 0:
+        out = out[-limit:]
+    return out
+
+
+def _filter_ohlcv_window(
+    rows: list[list[Any]],
+    *,
+    since: int | None,
+    end: int | None,
+) -> list[list[Any]]:
+    out: list[list[Any]] = []
+    for row in rows:
+        if not row:
+            continue
+        try:
+            ts = int(row[0])
+        except Exception:
+            continue
+        if since is not None and ts < int(since):
+            continue
+        if end is not None and ts > int(end):
+            continue
+        out.append(list(row))
+    return out
+
+
 @dataclass
 class CcxtConnector(CEXConnectorBase):
     """ccxt-backed CEX connector wrapping the unified public + private API.
@@ -177,14 +235,200 @@ class CcxtConnector(CEXConnectorBase):
         }
 
     def get_klines(
-        self, market: str, *, interval: str = "1m", limit: int = 100,
+        self,
+        market: str,
+        *,
+        interval: str = "1m",
+        limit: int = 100,
+        since: int | None = None,
+        end: int | None = None,
     ) -> list[list[Any]]:
         sym = self._normalise_symbol(market)
+        target = max(1, int(limit or 100))
+        tf_ms = _timeframe_ms(interval)
+        page_limit = min(target, int(self.options.get("ohlcv_page_limit") or 1000))
+        end_ms = int(end) if end is not None else None
+        now_ms = int(time.time() * 1000)
+        cursor = int(since) if since is not None else (end_ms or now_ms) - (target + 5) * tf_ms
+        max_pages = max(1, min(100, (target + page_limit - 1) // page_limit + 5))
+        rows: list[list[Any]] = []
         try:
-            ohlcv = self.client.fetch_ohlcv(sym, timeframe=interval, limit=limit)
+            rows = self._fetch_ohlcv_auto_pages(
+                sym,
+                interval=interval,
+                target=target,
+                page_limit=page_limit,
+                max_pages=max_pages,
+                since=since,
+                end=end_ms,
+            )
+            if rows:
+                return _dedupe_ohlcv(
+                    _filter_ohlcv_window(rows, since=since, end=end_ms),
+                    limit=target,
+                )
+
+            for _ in range(max_pages):
+                ohlcv = self._fetch_ohlcv_page(sym, interval=interval, since=cursor, limit=page_limit)
+                batch = [list(row) for row in (ohlcv or [])]
+                batch = _filter_ohlcv_window(batch, since=since, end=end_ms)
+                if not batch:
+                    break
+                rows.extend(batch)
+                newest = max(int(row[0]) for row in batch if row)
+                next_cursor = newest + tf_ms
+                if next_cursor <= cursor:
+                    break
+                cursor = next_cursor
+                rows = _dedupe_ohlcv(rows, limit=target)
+                if len(rows) >= target:
+                    break
+                if end_ms is not None and cursor > end_ms:
+                    break
+            if not rows:
+                rows = self._fetch_ohlcv_latest_backward(
+                    sym,
+                    interval=interval,
+                    target=target,
+                    page_limit=page_limit,
+                    max_pages=max_pages,
+                    tf_ms=tf_ms,
+                    since=since,
+                    end=end_ms,
+                )
         except Exception as exc:
             raise TradingError(f"{self.venue} fetch_ohlcv {sym} failed: {exc}") from exc
-        return [list(row) for row in (ohlcv or [])]
+        return _dedupe_ohlcv(
+            _filter_ohlcv_window(rows, since=since, end=end_ms),
+            limit=target,
+        )
+
+    def _fetch_ohlcv_page(
+        self,
+        sym: str,
+        *,
+        interval: str,
+        since: int | None,
+        limit: int,
+        params: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        if params:
+            return self.client.fetch_ohlcv(
+                sym,
+                timeframe=interval,
+                since=since,
+                limit=limit,
+                params=params,
+            )
+        return self.client.fetch_ohlcv(
+            sym,
+            timeframe=interval,
+            since=since,
+            limit=limit,
+        )
+
+    def _fetch_ohlcv_auto_pages(
+        self,
+        sym: str,
+        *,
+        interval: str,
+        target: int,
+        page_limit: int,
+        max_pages: int,
+        since: int | None,
+        end: int | None,
+    ) -> list[list[Any]]:
+        """Use CCXT's built-in paginator when the installed version supports it.
+
+        CCXT marks automatic pagination as experimental, so callers fall back to
+        the deterministic manual loop below whenever a venue/version rejects
+        the params or returns no rows.
+        """
+
+        enabled = bool(self.options.get("ohlcv_auto_paginate", True))
+        if not enabled:
+            return []
+        params = dict(self.options.get("ohlcv_params") or {})
+        params.setdefault("paginate", True)
+        params.setdefault(
+            "paginationCalls",
+            max(1, min(100, int(self.options.get("ohlcv_pagination_calls") or max_pages))),
+        )
+        params.setdefault("maxEntriesPerRequest", page_limit)
+        try:
+            rows = self._fetch_ohlcv_page(
+                sym,
+                interval=interval,
+                since=int(since) if since is not None else None,
+                limit=target,
+                params=params,
+            )
+        except Exception:
+            return []
+        batch = [list(row) for row in (rows or [])]
+        return _filter_ohlcv_window(batch, since=since, end=end)
+
+    def _fetch_ohlcv_latest_backward(
+        self,
+        sym: str,
+        *,
+        interval: str,
+        target: int,
+        page_limit: int,
+        max_pages: int,
+        tf_ms: int,
+        since: int | None,
+        end: int | None,
+    ) -> list[list[Any]]:
+        """Best-effort fallback for venues that ignore very old ``since``.
+
+        Some ccxt venues return an empty page when ``since`` predates listing.
+        Starting from the latest page still gives the operator a real short
+        window, then we walk backward by asking for the page just before the
+        oldest candle we have. This is deliberately conservative: it stops as
+        soon as the venue repeats a page or cannot provide older rows.
+        """
+
+        rows: list[list[Any]] = []
+        latest = self._fetch_ohlcv_page(
+            sym,
+            interval=interval,
+            since=None,
+            limit=page_limit,
+        )
+        batch = _filter_ohlcv_window([list(row) for row in (latest or [])], since=since, end=end)
+        if not batch:
+            return []
+        rows.extend(batch)
+        for _ in range(max(0, max_pages - 1)):
+            rows = _dedupe_ohlcv(rows, limit=target)
+            if len(rows) >= target:
+                break
+            oldest = min(int(row[0]) for row in rows if row)
+            cursor = max(0, oldest - (page_limit + 5) * tf_ms)
+            if since is not None:
+                cursor = max(cursor, int(since))
+            if cursor >= oldest:
+                break
+            older = self._fetch_ohlcv_page(
+                sym,
+                interval=interval,
+                since=cursor,
+                limit=page_limit,
+            )
+            older_batch = [
+                row
+                for row in _filter_ohlcv_window(
+                    [list(item) for item in (older or [])],
+                    since=since,
+                    end=end,
+                )
+                if int(row[0]) < oldest
+            ]
+            if not older_batch:
+                break
+            rows.extend(older_batch)
+        return _dedupe_ohlcv(rows, limit=target)
 
     # --------------------------------------------------------- private
     def get_balances(self) -> list[Balance]:

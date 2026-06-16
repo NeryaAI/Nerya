@@ -197,7 +197,12 @@ class SkillIndex:
         return self._by_id.get(skill_id)
 
     def render_for_prompt(self, *, max_chars: int = 4000) -> str:
-        out: list[str] = ["## Skills available"]
+        out: list[str] = [
+            "## Skills available",
+            "Call skill_view(<id>) to load a skill's playbook; this also "
+            "unlocks that skill's specialized tools for the rest of the "
+            "session (only a small core toolset is shown up front).",
+        ]
         used = sum(len(s) + 1 for s in out)
         for r in self.records():
             head = f"- **{r.skill_id}** — {r.title}"

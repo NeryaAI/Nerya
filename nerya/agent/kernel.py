@@ -83,7 +83,7 @@ from .session_compaction import (
 from .session_restore import apply_to_task_state, restore_from_journal
 from .verifier import compute_verifier_nudge, compute_verifier_outcome, VerifierOutcome
 from .streaming import get_default_bus
-from .transcript_blocks import BlockEnvelope
+from .transcript_blocks import BlockEnvelope, TextBlock
 from .chart_hook import extract_chart_blocks, extract_chart_marker_ids
 # ``..charting`` and ``..workspace.artifact_store`` are imported lazily
 # inside the marker-resolution branch below — eager imports would
@@ -95,6 +95,21 @@ from ..evolution.hooks import EvolutionHookBus
 
 
 _LOG = logging.getLogger(__name__)
+
+
+def _close_db_quietly(con: Any) -> None:
+    """Close a SQLite connection without raising.
+
+    Used in ``except`` handlers around best-effort DB writes so a failure
+    mid-body never leaks the file descriptor (a leak here exhausts the
+    process fd ulimit over a few hours and wedges the whole server).
+    """
+    if con is None:
+        return
+    try:
+        con.close()
+    except Exception:
+        pass
 
 
 # Per-turn meta cap. Chat transcripts can stack up thousands of turns;
@@ -1321,6 +1336,16 @@ class AgentKernel:
                 evidence_contract=evidence_contract,
             )
             return result
+        except Exception as exc:
+            self._record_failed_turn(
+                turn_id=turn_id,
+                trigger=trigger,
+                trigger_event_id=trigger_event_id,
+                strategy_id=strategy_id,
+                session_id=session_id,
+                exc=exc,
+            )
+            raise
         finally:
             if session_id and result is not None:
                 try:
@@ -2365,6 +2390,164 @@ class AgentKernel:
             attachments=all_attachments,
         )
 
+    def _record_failed_turn(
+        self,
+        *,
+        turn_id: str,
+        trigger: dict[str, Any],
+        trigger_event_id: Optional[str],
+        strategy_id: Optional[str],
+        session_id: Optional[str],
+        exc: Exception,
+    ) -> None:
+        """Persist a terminal failure when the native loop exits by exception."""
+
+        try:
+            user_payload = trigger.get("payload") if isinstance(trigger, dict) else {}
+            user_payload = user_payload if isinstance(user_payload, dict) else {}
+            user_text = (
+                user_payload.get("text")
+                or user_payload.get("message")
+                or user_payload.get("prompt")
+                or trigger.get("raw")
+                or trigger.get("text")
+                or "(no user message provided)"
+            )
+            if not isinstance(user_text, str):
+                user_text = str(user_text)
+            source = str(
+                user_payload.get("channel")
+                or trigger.get("source")
+                or trigger.get("kind")
+                or ""
+            )
+            error_type = type(exc).__name__
+            error_text = str(exc) or error_type
+            abort_reason = f"{error_type}: {error_text}"[:4_000]
+            transition_reason = (
+                "llm_error" if error_type == "LLMError" else "runtime_error"
+            )
+            final_text = (
+                "本轮 Agent 在运行过程中异常退出，未能生成最终回复。\n\n"
+                f"错误类型: {error_type}\n"
+                f"错误信息: {error_text[:1200]}"
+            )
+            block_dicts = [
+                BlockEnvelope(
+                    seq=0,
+                    turn_id=turn_id,
+                    message_id=f"{turn_id}:assistant",
+                    role="assistant",
+                    block=TextBlock(index=0, text=final_text).as_dict(),
+                ).as_dict()
+            ]
+            actions = [
+                {
+                    "action": "send_message",
+                    "skill_id": "native",
+                    "ok": False,
+                    "text": final_text,
+                    "error": abort_reason,
+                    "result": {"text": final_text},
+                }
+            ]
+            jsonl.append(
+                self.config.paths.journal("agent"),
+                {
+                    "kind": "agent.turn.end",
+                    "trigger_event_id": trigger_event_id,
+                    "turn_id": turn_id,
+                    "strategy_id": strategy_id,
+                    "session_id": session_id,
+                    "iterations": 0,
+                    "tool_calls": 0,
+                    "stop_reason": "error",
+                    "transition_reason": transition_reason,
+                    "aborted": True,
+                    "abort_reason": abort_reason,
+                    "final_text_len": len(final_text),
+                    "final_text": final_text[:16_000],
+                    "final_text_truncated": len(final_text) > 16_000,
+                    "llm_calls": 0,
+                    "input_tokens_total": 0,
+                    "output_tokens_total": 0,
+                    "prompt_tokens_last": 0,
+                    "context_window": 0,
+                    "compaction_count": 0,
+                    "reactive_compaction_count": 0,
+                    "steer_messages": 0,
+                },
+            )
+            try:
+                get_default_bus().publish(
+                    "turn.complete",
+                    turn_id=turn_id,
+                    trigger_event_id=trigger_event_id,
+                    session_id=session_id,
+                    strategy_id=strategy_id,
+                    stop_reason="error",
+                    transition_reason=transition_reason,
+                    iterations=0,
+                    tool_calls=0,
+                    final_text=final_text,
+                    harness="native",
+                )
+            except Exception:
+                _LOG.debug("failed turn.complete publish failed", exc_info=True)
+            if session_id:
+                self._record_session_db_message(
+                    session_id=session_id,
+                    strategy_id=strategy_id,
+                    turn_id=turn_id,
+                    role="user",
+                    content=user_text[:16_000],
+                    source=source,
+                )
+                self._record_session_db_turn(
+                    session_id=session_id,
+                    strategy_id=strategy_id,
+                    turn_id=turn_id,
+                    user_text=user_text,
+                    final_text=final_text,
+                    blocks=block_dicts,
+                    actions=actions,
+                    tool_trace=[],
+                    activity_events=[],
+                    iterations=0,
+                    tool_calls_count=0,
+                    stop_reason="error",
+                    transition_reason=transition_reason,
+                    aborted=True,
+                    abort_reason=abort_reason,
+                    error_count=1,
+                    execution_state={
+                        "version": 1,
+                        "items": [],
+                        "surfaces": {
+                            "status": [
+                                {
+                                    "kind": "turn_failed",
+                                    "severity": "error",
+                                    "text": abort_reason,
+                                }
+                            ]
+                        },
+                        "counters": {"errors": 1},
+                    },
+                )
+                try:
+                    self._sessions.append_turn(
+                        session_id,
+                        turn_id,
+                        invoked_skills=[],
+                        last_action="error",
+                        strategy_id=strategy_id,
+                    )
+                except Exception:
+                    _LOG.debug("failed turn session append failed", exc_info=True)
+        except Exception:
+            _LOG.debug("failed turn persistence failed", exc_info=True)
+
     @staticmethod
     def _tool_permission_fingerprint(tool_name: str, payload: dict[str, Any]) -> str:
         try:
@@ -2509,6 +2692,7 @@ class AgentKernel:
             )
             con.close()
         except Exception:
+            _close_db_quietly(locals().get("con"))
             _LOG.debug("session db message record failed", exc_info=True)
 
     def _record_session_db_turn(
@@ -2661,6 +2845,7 @@ class AgentKernel:
                 )
             con.close()
         except Exception:
+            _close_db_quietly(locals().get("con"))
             _LOG.debug("session db turn record failed", exc_info=True)
 
     def _fallback_session_title(self, text: str) -> str:
@@ -2740,7 +2925,7 @@ class AgentKernel:
                 AgentSessionRepository(con).set_title(session_id, title)
                 con.close()
             except Exception:
-                pass
+                _close_db_quietly(locals().get("con"))
         except Exception:
             _LOG.debug("auto session title failed", exc_info=True)
 
@@ -3375,6 +3560,7 @@ class AgentKernel:
             if out:
                 return out[-max_pairs * 2:] if max_pairs > 0 else out
         except Exception:
+            _close_db_quietly(locals().get("con"))
             _LOG.debug("db prior chat history load failed", exc_info=True)
 
         journal = self.config.paths.journal("agent")
@@ -3876,7 +4062,8 @@ class AgentKernel:
             " connector_view), trading (portfolio_summary, risk_check,"
             " kill_switch_set, trade_intent_submit, strategy_list /"
             " strategy_view / strategy_history), strategy package"
-            " lifecycle (strategy_generate_proposal / strategy_validate /"
+            " lifecycle (strategy_draft_proposal then edit the staged files"
+            " / strategy_validate / strategy_submit_proposal /"
             " strategy_backtest / strategy_promote / strategy_run_tick),"
             " and LLM delegation"
             " (llm_complete / llm_classify / llm_extract_json /"

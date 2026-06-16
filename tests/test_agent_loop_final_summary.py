@@ -18,12 +18,17 @@ from nerya.agent.loop import (
     _build_llm_timeout_evidence_fallback,
     _build_team_run_bounded_fallback,
     _build_compact_required_tool_retry_prompt,
+    _build_strategy_backtest_done_final_text,
     _build_team_run_final_report,
     _compact_provider_tools_for_safety_retry,
+    _contains_legacy_tool_call_markup,
     _ensure_financial_datasets_key_gap_notice,
     _ensure_source_evidence_markers,
     _extract_next_required_tools,
     _extract_legacy_tool_use_blocks,
+    _interpret_backtest_metrics,
+    _sanitize_assistant_text_blocks,
+    _strip_legacy_tool_call_text,
     _next_required_action_requires_tool,
     _required_artifact_retry_prompt,
     _required_strategy_proposal_recovery_args,
@@ -466,10 +471,10 @@ def test_max_iterations_without_final_text_gets_deterministic_summary() -> None:
     assert outcome.abort_reason == "max_iterations"
     assert outcome.transition_reason == "max_iterations"
     assert outcome.final_text
-    assert "Turn stopped before a complete model-written final answer" in outcome.final_text
-    assert "tool calls: 1" in outcome.final_text
-    assert "tool_error_count: 0" in outcome.final_text
-    assert "Next: resume the same turn" in outcome.final_text
+    assert "couldn't put together a clear final answer" in outcome.final_text
+    assert "1 tool call" in outcome.final_text
+    assert "step(s)" in outcome.final_text
+    assert "Ask me to continue" in outcome.final_text
     assert outcome.blocks[-1].block["kind"] == "text"
 
 
@@ -1850,7 +1855,7 @@ def test_llm_timeout_at_wall_time_returns_timeout_outcome(monkeypatch) -> None:
     assert outcome.aborted is True
     assert outcome.abort_reason == "timeout"
     assert outcome.transition_reason == "timeout_during_llm_call"
-    assert "provider response" in outcome.final_text
+    assert "waiting for a response" in outcome.final_text
     assert "宏观" in outcome.final_text
     assert "BTC" in outcome.final_text
 
@@ -2219,8 +2224,8 @@ def test_transient_timeout_after_read_evidence_does_not_require_exposed_actions(
     assert len(gateway.calls) == 2
     assert outcome.aborted is False
     assert outcome.transition_reason in {"no_tool_use", "wall_time_final_synthesis"}
-    assert "Bounded timeout result" in outcome.final_text
-    assert "Completed tool evidence" in outcome.final_text
+    assert "here's what I gathered before stopping" in outcome.final_text
+    assert "What I found so far" in outcome.final_text
     assert "strategy_generate_proposal" not in outcome.final_text
     assert "未执行的后续工具" not in outcome.final_text
 
@@ -4217,6 +4222,238 @@ def test_truncated_legacy_xml_tool_call_reprompts_for_native_tool() -> None:
     assert outcome.final_text == "retried with native tools"
 
 
+def test_strip_legacy_tool_call_text_removes_truncated_and_complete_markup() -> None:
+    complete = (
+        "before "
+        "<tool_call><function=read_status><parameter=target>x</parameter>"
+        "</function></tool_call>"
+        " after"
+    )
+    cleaned_complete = _strip_legacy_tool_call_text(complete)
+    assert "<tool_call>" not in cleaned_complete
+    assert "before" in cleaned_complete and "after" in cleaned_complete
+
+    truncated = (
+        "现在写文件：\n<tool_call>\n<function=write_file>\n"
+        '<parameter=contents>\n"""x'
+    )
+    cleaned_trunc = _strip_legacy_tool_call_text(truncated)
+    assert cleaned_trunc == "现在写文件："
+    assert "<function=" not in cleaned_trunc
+
+    # Dangling function/parameter without the tool_call wrapper is also removed.
+    assert (
+        _strip_legacy_tool_call_text("ok <function=write_file><parameter=p") == "ok"
+    )
+
+
+def test_contains_legacy_tool_call_markup_detects_complete_and_truncated() -> None:
+    assert _contains_legacy_tool_call_markup("x <tool_call> y")
+    assert _contains_legacy_tool_call_markup("x <function=write_file")
+    assert _contains_legacy_tool_call_markup("x <parameter=path>")
+    assert not _contains_legacy_tool_call_markup("normal text with <html> tags")
+    assert not _contains_legacy_tool_call_markup("")
+
+
+def test_sanitize_assistant_text_blocks_drops_leaked_markup() -> None:
+    blocks = [
+        {
+            "type": "text",
+            "text": (
+                "见下：\n<tool_call>\n<function=write_file>\n"
+                "<parameter=contents>\nx"
+            ),
+        },
+        {"type": "tool_use", "id": "t1", "name": "write_file", "input": {}},
+        {"type": "text", "text": "<tool_call>\n<function=write_file>"},
+    ]
+    sanitized = _sanitize_assistant_text_blocks(blocks)
+    assert [b.get("type") for b in sanitized] == ["text", "tool_use"]
+    assert sanitized[0]["text"] == "见下："
+
+
+def test_truncated_tool_call_markup_not_leaked_to_emitted_text() -> None:
+    leaked = (
+        "模板文件已读到。现在把 main.py 重写：\n"
+        "<tool_call>\n"
+        "<function=write_file>\n"
+        "<parameter=path>\n"
+        "strategies/x/main.py\n"
+        "</parameter>\n"
+        "<parameter=contents>\n"
+        '"""BTC/USDT strategy ...'
+    )
+
+    class TruncatedWriteGateway:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def call_messages(self, **kwargs):  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 1:
+                return MessagesResponse(
+                    content=[{"type": "text", "text": leaked}],
+                    stop_reason="max_tokens",
+                )
+            return MessagesResponse(
+                content=[
+                    {"type": "text", "text": "已经用原生写文件工具创建好策略文件。"}
+                ],
+                stop_reason="end_turn",
+            )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDescriptor(
+            name="write_file",
+            description="Write a file.",
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda call: ToolResult.from_text(
+                tool_use_id=call.id, name=call.name, text="written"
+            ),
+            risk=RiskLevel.WRITE,
+            permission_scope=PermissionScope.WORKSPACE,
+            read_only=False,
+            auto_approve=True,
+        )
+    )
+    executor = NativeToolExecutor(
+        registry=registry,
+        permission_engine=PermissionEngine(),
+        permission_context=PermissionContext(mode=PermissionMode.AUTO),
+    )
+    gateway = TruncatedWriteGateway()
+    loop = WorkspaceNativeAgentLoop(
+        gateway=gateway,  # type: ignore[arg-type]
+        registry=registry,
+        orchestrator=ToolOrchestrator(registry=registry, executor=executor),
+        config=LoopConfig(max_iterations=3),
+    )
+
+    outcome = loop.run(system="system", user_message="create strategy file")
+
+    emitted_text = "\n".join(
+        str(env.block.get("text") or "")
+        for env in outcome.blocks
+        if isinstance(env.block, dict) and env.block.get("kind") == "text"
+    )
+    assert "<tool_call>" not in emitted_text
+    assert "<function=" not in emitted_text
+    assert "<parameter=" not in emitted_text
+    assert "模板文件已读到" in emitted_text
+    assert outcome.final_text == "已经用原生写文件工具创建好策略文件。"
+    assert gateway.calls == 2
+
+
+def test_backtest_done_final_text_is_plain_language_without_jargon() -> None:
+    items = [
+        {
+            "tool": "strategy_backtest",
+            "strategy_id": "btc_usdt_mean_reversion",
+            "proposal_id": "prp_demo",
+            "verdict": "WARN",
+            "metrics_display": {
+                "verdict": "WARN",
+                "total_return_pct": "0.0000%",
+                "benchmark_buy_hold_return_pct": "-5.8974%",
+                "alpha_vs_benchmark_pct": "5.8974%",
+                "max_drawdown_pct": "0.0000%",
+                "total_trades": "0",
+                "exposure_pct": "0.00%",
+            },
+            "operator_summary_text": (
+                "Operator-facing backtest summary. Copy these display values "
+                "exactly.\nverdict: WARN"
+            ),
+            "report_path": "evolution/proposals/prp_demo/report.md",
+            "metric_names": ["verdict", "total_return_pct"],
+        }
+    ]
+    text = _build_strategy_backtest_done_final_text(items)
+    assert "Copy these display values exactly" not in text
+    assert "operator_summary" not in text
+    assert "tool=strategy_backtest" not in text
+    assert "metrics:" not in text
+    assert "prp_demo" in text
+    assert "WARN（可用" in text
+    assert "几乎没有真正下单" in text
+    assert "跑赢大盘" in text
+    assert "下一步" in text
+
+
+def test_backtest_done_final_text_respects_explicit_english_request() -> None:
+    items = [
+        {
+            "tool": "strategy_backtest",
+            "strategy_id": "ema_crossover_sol",
+            "proposal_id": "prp_demo",
+            "verdict": "WARN",
+            "metrics_display": {
+                "verdict": "WARN",
+                "total_return_pct": "0.0323%",
+                "benchmark_buy_hold_return_pct": "-40.9054%",
+                "alpha_vs_benchmark_pct": "40.9378%",
+                "max_drawdown_pct": "0.1351%",
+                "total_trades": "62",
+                "win_rate_pct": "43.55%",
+                "profit_factor": "1.10",
+                "sharpe_ratio": "0.30",
+                "exposure_pct": "2.87%",
+            },
+            "coverage_message": "Loaded the maximum available candle coverage for this request: 182.04d.",
+            "report_path": "evolution/proposals/prp_demo/report.md",
+        }
+    ]
+    text = _build_strategy_backtest_done_final_text(
+        items,
+        user_text="Final answer language: English. Build a Bybit strategy.",
+    )
+
+    assert "The strategy proposal has been created" in text
+    assert "Trades 62" in text
+    assert "Coverage: Loaded the maximum available candle coverage" in text
+    assert "下一步" not in text
+    assert "策略" not in text
+
+
+def test_interpret_backtest_metrics_flags_zero_trades_and_alpha() -> None:
+    bullets = _interpret_backtest_metrics(
+        {
+            "total_return_pct": "0.0000%",
+            "benchmark_buy_hold_return_pct": "-5.90%",
+            "alpha_vs_benchmark_pct": "5.90%",
+            "max_drawdown_pct": "0.0000%",
+            "total_trades": "0",
+        }
+    )
+    joined = "\n".join(bullets)
+    assert "几乎没有真正下单" in joined
+    assert "跑赢大盘" in joined
+    assert _interpret_backtest_metrics({}) == []
+
+
+def test_interpret_backtest_metrics_reads_profitable_run() -> None:
+    bullets = _interpret_backtest_metrics(
+        {
+            "total_return_pct": "12.50%",
+            "benchmark_buy_hold_return_pct": "3.00%",
+            "alpha_vs_benchmark_pct": "9.50%",
+            "max_drawdown_pct": "-8.00%",
+            "total_trades": "42",
+            "win_rate_pct": "55.00%",
+            "profit_factor": "1.80",
+            "sharpe_ratio": "1.40",
+        }
+    )
+    joined = "\n".join(bullets)
+    assert "样本量基本够用" in joined
+    assert "整体是赚钱的" in joined
+    assert "跑赢大盘" in joined
+    assert "回撤较小" in joined
+    assert "盈亏比健康" in joined
+    assert "风险调整后的收益不错" in joined
+
+
 def test_truncated_no_tool_response_gets_one_continue_round() -> None:
     class TruncatedNoToolGateway:
         def __init__(self) -> None:
@@ -5114,9 +5351,9 @@ def test_strategy_backtest_success_finalizes_without_extra_model_round() -> None
     assert gateway.calls == 1
     assert outcome.tool_calls == 1
     assert outcome.transition_reason == "strategy_backtest_finalized"
-    assert "策略提案已创建并完成回测" in outcome.final_text
-    assert "proposal_id=prp_btc" in outcome.final_text
-    assert r"report=`C:\repo\dashboard\.nerya-test-workspace\evolution\proposals\prp_btc\report.md`" in outcome.final_text
+    assert "策略提案已经创建并跑完了回测" in outcome.final_text
+    assert "prp_btc" in outcome.final_text
+    assert r"`C:\repo\dashboard\.nerya-test-workspace\evolution\proposals\prp_btc\report.md`" in outcome.final_text
 
 
 def test_strategy_creation_backtest_does_not_require_reflection_proposal() -> None:
@@ -5272,11 +5509,16 @@ def test_strategy_creation_backtest_does_not_require_reflection_proposal() -> No
 
     assert gateway.calls == 1
     assert outcome.transition_reason == "strategy_backtest_finalized"
-    assert "回测 verdict=FAIL" in outcome.final_text
-    assert "proposal_id=prp_btc" in outcome.final_text
-    assert "verdict=FAIL" in outcome.final_text
-    assert "total_return_pct=0.0000%" in outcome.final_text
-    assert "不要直接 approve/promote" in outcome.final_text
+    # Plain-language finaliser: facts preserved, no key=value dump and no
+    # leaked operator-summary meta-instructions.
+    assert "FAIL（不通过）" in outcome.final_text
+    assert "prp_btc" in outcome.final_text
+    assert "0.0000%" in outcome.final_text
+    assert "approve/promote" in outcome.final_text
+    assert "不要" in outcome.final_text
+    assert "Copy these display values exactly" not in outcome.final_text
+    assert "operator_summary:" not in outcome.final_text
+    assert "tool=strategy_backtest" not in outcome.final_text
     assert "prp_learning" not in outcome.final_text
 
 
@@ -5347,9 +5589,9 @@ def test_strategy_backtest_data_gap_finalizes_without_extra_model_round() -> Non
     assert gateway.calls == 1
     assert outcome.tool_calls == 1
     assert outcome.transition_reason == "strategy_backtest_data_gap_finalized"
-    assert "no_historical_data" in outcome.final_text
+    assert "缺少足够的历史行情数据" in outcome.final_text
     assert "aster:BTCUSDT-PERP" in outcome.final_text
-    assert "proposal_id=prp_gap" in outcome.final_text
+    assert "prp_gap" in outcome.final_text
 
 
 def test_strategy_backtest_onchain_data_gap_finalizes_without_report_type() -> None:
@@ -6516,7 +6758,7 @@ def test_wallet_ready_fallback_route_does_not_finalize_strategy_authoring() -> N
                             "name": "strategy_generate_proposal",
                             "input": {
                                 "strategy_id": "wallet_ready_meme_agent",
-                                "markets": ["XAGT_ONCHAIN:bsc:meme"],
+                                "markets": ["OKX_ONCHAIN:bsc:meme"],
                                 "accounts": ["paper_main"],
                                 "execution_mode": "agent",
                             },
@@ -6550,9 +6792,9 @@ def test_wallet_ready_fallback_route_does_not_finalize_strategy_authoring() -> N
                         "selected_route directly and skip dependency installation."
                     ),
                     "selected_route": {
-                        "canonical": "XAGT_ONCHAIN",
+                        "canonical": "OKX_ONCHAIN",
                         "ready": True,
-                        "market": "XAGT_ONCHAIN:bsc:<token_contract>",
+                        "market": "OKX_ONCHAIN:bsc:<token_contract>",
                     },
                     "selection": {
                         "mode": "wallet_binding",
@@ -17756,7 +17998,7 @@ def test_strategy_skill_doc_reading_does_not_require_skill_proposal() -> None:
                             "name": "strategy_generate_proposal",
                             "input": {
                                 "strategy_id": "bsc_whale_follow",
-                                "markets": ["XAGT_ONCHAIN:bsc:<token_contract>"],
+                                "markets": ["OKX_ONCHAIN:bsc:<token_contract>"],
                                 "accounts": ["paper_bnb"],
                             },
                         }
@@ -21568,7 +21810,7 @@ def test_action_tool_is_not_started_without_wall_time_reserve(monkeypatch) -> No
     assert "[harness]" not in outcome.final_text
     assert "remaining=" not in outcome.final_text
     assert "safe reserve" not in outcome.final_text
-    assert "Skipped native tools" in outcome.final_text
+    assert "Unfinished:" in outcome.final_text
     assert "未执行的后续工具" not in outcome.final_text
 
 
@@ -21696,7 +21938,7 @@ def test_late_action_abort_preserves_request_and_pending_required_action(monkeyp
     assert "[harness]" not in outcome.final_text
     assert "Pending required native tool gap" not in outcome.final_text
     assert "remaining=" not in outcome.final_text
-    assert "Pending required native tools" in outcome.final_text
+    assert "Still needed:" in outcome.final_text
     assert "仍缺的必要动作" not in outcome.final_text
 
 
@@ -24333,7 +24575,7 @@ def test_required_agent_strategy_recovery_builds_sdk_files_from_contract() -> No
                 "source": "test.api_check",
                 "execution_mode": "agent",
                 "subject": "whale",
-                "market": "XAGT_ONCHAIN:bsc:<token_contract>",
+                "market": "OKX_ONCHAIN:bsc:<token_contract>",
                 "account": "paper_main",
             },
         ),
@@ -24343,7 +24585,7 @@ def test_required_agent_strategy_recovery_builds_sdk_files_from_contract() -> No
     assert args["strategy_id"] == "whale_required_strategy"
     assert args["strategy_class"] == "agent"
     assert args["execution_mode"] == "agent"
-    assert args["markets"] == ["XAGT_ONCHAIN:bsc:<token_contract>"]
+    assert args["markets"] == ["OKX_ONCHAIN:bsc:<token_contract>"]
     assert "StrategyAgentTask.dispatch" in args["files.main.py"]
     assert "custom_event_replay_required" in args["files.main.py"]
     assert "whale" in args["files.strategy.md"].lower()
@@ -25403,7 +25645,7 @@ def test_runtime_repaired_strategy_proposal_restarts_required_backtest_debt() ->
         {"proposal_id": "prp_fixed"},
     ]
     assert outcome.transition_reason == "strategy_backtest_finalized"
-    assert "proposal_id=prp_fixed" in outcome.final_text
+    assert "prp_fixed" in outcome.final_text
 
 
 def test_distinct_backtest_runtime_errors_reopen_package_repair_each_time() -> None:
@@ -25609,7 +25851,7 @@ def test_distinct_backtest_runtime_errors_reopen_package_repair_each_time() -> N
         {"proposal_id": "prp_3", "allow_mock": False},
     ]
     assert outcome.transition_reason == "strategy_backtest_finalized"
-    assert "proposal_id=prp_3" in outcome.final_text
+    assert "prp_3" in outcome.final_text
 
 
 def test_empty_terminal_model_text_synthesizes_clean_tool_evidence_final_text() -> None:

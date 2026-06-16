@@ -173,9 +173,9 @@ def test_wallet_configure_live_account_does_not_require_account_credentials(tmp_
     out = handler(
         _client(cfg),
         {
-            "provider": "xagt_agent_plugin",
-            "wallet_id": "xagt_main",
-            "label": "XAgent wallet",
+            "provider": "byreal",
+            "wallet_id": "byreal_main",
+            "label": "Byreal wallet",
             "config": {},
             "auto_create_account": True,
             "account_mode": "live",
@@ -189,8 +189,8 @@ def test_wallet_configure_live_account_does_not_require_account_credentials(tmp_
     assert out["account"]["mode"] == "live"
     profile = accounts_mod.get_account_profile(cfg.paths, out["account"]["account_id"])
     assert profile.kind == "chain"
-    assert profile.wallet_id == "xagt_main"
-    assert profile.venue == "xagt_agent_plugin"
+    assert profile.wallet_id == "byreal_main"
+    assert profile.venue == "byreal"
     assert profile.credentials == {}
     assert profile.initial_balance_usd == pytest.approx(0.0)
 
@@ -224,13 +224,13 @@ def test_account_intake_schema_accepts_wallet_market_source_alias(tmp_path):
     handler = _route(routes_account_intake.routes(), "POST", "/accounts/intake/schema")
     out = handler(
         _client(cfg),
-        {"venue": "xagt_onchain", "account_kind": "chain"},
+        {"venue": "byreal_onchain", "account_kind": "chain"},
     )
 
     assert out["ok"] is True
-    assert out["venue"] == "xagt_onchain"
-    assert out["provider_label"] == "XAgent x OKX Agent Plugin"
-    assert any(field["name"] == "plugin_path" for field in out["credential_fields"])
+    assert out["venue"] == "byreal_onchain"
+    assert out["provider_label"] == "Byreal CLMM DEX (Solana)"
+    assert any(field["name"] == "cli_path" for field in out["credential_fields"])
 
 
 def test_accounts_test_balance_uses_snapshot_path(tmp_path):

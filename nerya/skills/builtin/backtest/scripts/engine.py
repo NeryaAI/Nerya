@@ -51,8 +51,7 @@ def settle(
     ordered = sorted(pending, key=lambda p: str(p.get("reason") or ""))
     for order in ordered:
         market = str(order.get("market") or "")
-        side = str(order.get("side") or "buy").lower()
-        is_exit = side in {"sell", "exit", "close"} or str(order.get("raw", {}).get("intent_type", "")).lower() == "exit"
+        is_exit, order_side = _classify_order(order)
         if config.kill_switch:
             rejects.append(_reject(order, "kill_switch"))
             continue
@@ -68,7 +67,9 @@ def settle(
             continue
         bar = current_bar_by_market[market]
         next_bar = next_bar_by_market.get(market)
-        raw_side = "sell" if is_exit else ("sell" if side in {"short"} else "buy")
+        # ``order_side`` already encodes the executor leg: long entry -> buy,
+        # short entry -> sell, and close_position emits the inverse leg.
+        raw_side = order_side
         base_price = float((next_bar if is_exit and next_bar else bar).get("open" if next_bar else "close", bar.get("open", 0.0)))
         if not is_exit:
             base_price = float(bar.get("open", bar.get("close", 0.0)))
@@ -82,13 +83,32 @@ def settle(
             if qty <= 1e-12:
                 rejects.append(_reject(order, "no_open_position"))
                 continue
+            reduce_pct = order.get("reduce_pct")
+            if reduce_pct is not None:
+                qty = qty * max(0.0, min(1.0, float(reduce_pct or 0.0)))
+                if qty <= 1e-12:
+                    rejects.append(_reject(order, "zero_reduce_qty"))
+                    continue
         else:
             notional = _stake_notional(size, size_unit, fill_price, portfolio, config)
+            if notional <= 0.0:
+                rejects.append(_reject(order, "zero_size"))
+                continue
             fee_preview = compute_fee(notional, fee_bps_for(market, config.fee_bps_by_venue))
-            if (portfolio.cash or 0.0) < notional + fee_preview and not config.allow_short:
+            if raw_side == "sell":
+                # Opening a short books proceeds rather than spending cash, so
+                # there is no cash gate — but the strategy must be allowed to
+                # short for this to be a faithful simulation.
+                if not config.allow_short:
+                    rejects.append(_reject(order, "short_not_allowed"))
+                    continue
+            elif (portfolio.cash or 0.0) < notional + fee_preview:
                 rejects.append(_reject(order, "insufficient_cash"))
                 continue
             qty = notional / fill_price if fill_price else 0.0
+            if qty <= 0.0:
+                rejects.append(_reject(order, "zero_size"))
+                continue
         notional = qty * fill_price
         fee = compute_fee(notional, fee_bps_for(market, config.fee_bps_by_venue))
         fill = {
@@ -168,6 +188,20 @@ def run_backtest(
                 for m, rows in candles_by_market.items()
             }
             tf_rows_so_far = _timeframe_rows_until_ts(tf_rows, rows_so_far, config.tf, ts, timeframe_indexes)
+            # Mirror authoritative NAV into MockState so the strategy's
+            # ``ctx.portfolio`` NAV accessors (equity_usd / cash_usd /
+            # summary / ledger) return real, current values during replay,
+            # matching the live StrategyPortfolio contract. Without this,
+            # any strategy that reads NAV/equity crashes in backtest.
+            state.set(
+                "__portfolio_nav__",
+                {
+                    "equity": float(portfolio.equity() or 0.0),
+                    "nav": float(portfolio.equity() or 0.0),
+                    "cash": float(portfolio.cash or 0.0),
+                    "realized_pnl": float(portfolio.realized_pnl or 0.0),
+                },
+            )
             ctx = MockCtx(
                 strategy_id=strategy_id,
                 market_name=market,
@@ -187,7 +221,7 @@ def run_backtest(
             result.trades.extend(fills)
             result.rejected_signals.extend(rejects)
             for fill in fills:
-                _sync_state_after_fill(state, fill)
+                _sync_state_after_fill(state, portfolio, str(fill.get("market") or market))
             row = dict(current[market])
             row.update({
                 "market": market,
@@ -301,6 +335,41 @@ def _timeframe_rows_until_ts(
     return out
 
 
+def _classify_order(order: dict[str, Any]) -> tuple[bool, str]:
+    """Return ``(is_exit, fill_side)`` for a pending backtest order.
+
+    The control-plane shim (``open_position`` / ``close_position`` /
+    ``reduce_position``) tags each record with ``plan_action`` (mirrored in
+    ``raw.method``). Trust that tag to decide open-vs-close so a short *entry*
+    — whose executor leg is ``sell`` — is not misread as an exit. Only the
+    low-level ``submit_intent`` path lacks an action tag; there we keep the
+    historical heuristic where a bare ``sell``/``exit``/``close`` flattens.
+
+    ``fill_side`` is the executor leg actually sent to the book: ``buy`` or
+    ``sell``. For closes the shim already emits the inverse leg, so the order's
+    own side is correct for both entries and exits.
+    """
+
+    raw = order.get("raw") if isinstance(order.get("raw"), dict) else {}
+    action = str(order.get("plan_action") or raw.get("method") or "").lower()
+    side = str(order.get("side") or raw.get("side") or "buy").lower()
+    if side == "long":
+        fill_side = "buy"
+    elif side == "short":
+        fill_side = "sell"
+    elif side in {"buy", "sell"}:
+        fill_side = side
+    else:
+        fill_side = "buy"
+    if action in {"open_position", "open", "entry"}:
+        return False, fill_side
+    if action in {"close_position", "close", "exit", "reduce_position", "reduce"}:
+        return True, fill_side
+    intent_type = str(raw.get("intent_type") or "").lower()
+    legacy_exit = side in {"sell", "exit", "close"} or intent_type == "exit"
+    return legacy_exit, fill_side
+
+
 def _stake_notional(
     size: float,
     size_unit: str,
@@ -312,6 +381,15 @@ def _stake_notional(
         return float(config.stake_amount.fixed_usd)
     if size_unit in {"base", "qty", "quantity"}:
         return size * price
+    if size_unit in {"pct_nav", "pct", "percent", "nav_pct", "percent_nav", "equity_pct"}:
+        pct = float(size or 0.0)
+        if pct > 1.0:
+            pct = pct / 100.0
+        pct = max(0.0, min(1.0, pct))
+        nav = float(portfolio.equity() or 0.0)
+        if nav <= 0.0:
+            nav = float(portfolio.cash or 0.0)
+        return max(0.0, nav * pct)
     if size > 0:
         return size
     return max(0.0, float(portfolio.cash or 0.0) / max(1, config.max_open_trades))
@@ -372,12 +450,24 @@ def _decision_row(ts: int, market: str, decision: Any) -> dict[str, Any]:
     return {"ts": ts, "market": market, "status": _status_of(decision), "reason": _reason_of(decision)}
 
 
-def _sync_state_after_fill(state: MockState, fill: dict[str, Any]) -> None:
-    key = f"position:{fill['market']}"
-    if fill["forced_close"] or fill["side"] == "sell":
-        state.delete(key)
+def _sync_state_after_fill(state: MockState, portfolio: PortfolioState, market: str) -> None:
+    """Mirror the authoritative portfolio position into ``MockState``.
+
+    The strategy reads its current share via ``ctx.portfolio.positions``,
+    which is backed by this mirror. Deriving open/close from the fill side
+    alone is wrong for shorts (a short *entry* is a ``sell``), so we reflect
+    the real signed position the book holds after the fill.
+    """
+
+    key = f"position:{market}"
+    pos = portfolio.position(market)
+    if abs(pos.qty) > 1e-12:
+        state.set(
+            key,
+            {"qty": pos.qty, "avg_price": pos.avg_price, "opened_ts": pos.opened_ts},
+        )
     else:
-        state.set(key, {"qty": fill["qty"], "avg_price": fill["price"], "opened_ts": fill["ts"]})
+        state.delete(key)
 
 
 def _benchmark_value(candles_by_market: dict[str, list[dict[str, Any]]], markets: list[str], ts: int) -> float:

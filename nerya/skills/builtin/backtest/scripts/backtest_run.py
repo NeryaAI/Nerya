@@ -25,6 +25,30 @@ from .writers import write_csv_artifacts
 
 
 _REAL_DATA_FALLBACK_TIMEFRAMES = ("5m", "15m", "1m", "30m", "1h", "4h", "1d")
+_SHORT_LIVED_MARKET_MARKERS = (
+    "meme",
+    "memecoin",
+    "pump.fun",
+    "pumpfun",
+    "new pool",
+    "new-pool",
+    "thin pool",
+    "byreal",
+    "byreal_onchain",
+    "okx_onchain",
+    "bitget_onchain",
+    "onchain",
+    "on-chain",
+    "dex",
+    "smart money",
+    "smart_money",
+    "holder concentration",
+    "wallet inflow",
+    "slippage",
+    "solana:",
+    "base:",
+    "bsc:",
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--strategy-id")
     target.add_argument("--proposal-id")
+    target.add_argument("--package-dir")
     parser.add_argument("--preset", default="default")
     parser.add_argument("--config")
     parser.add_argument("--workspace")
@@ -42,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         result = run_strategy_backtest(
             strategy_id=args.strategy_id,
             proposal_id=args.proposal_id,
+            package_dir=args.package_dir,
             preset=args.preset,
             config_path=args.config,
             workspace=args.workspace,
@@ -51,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         result = _missing_history_result(
             strategy_id=args.strategy_id,
             proposal_id=args.proposal_id,
+            package_dir=args.package_dir,
             message=str(exc),
         )
     print(json.dumps(result, ensure_ascii=False, default=str))
@@ -61,21 +88,24 @@ def run_strategy_backtest(
     *,
     strategy_id: str | None = None,
     proposal_id: str | None = None,
+    package_dir: str | Path | None = None,
     preset: str = "default",
     config_path: str | Path | None = None,
     workspace: str | Path | None = None,
     allow_mock: bool = False,
 ) -> dict[str, Any]:
-    if bool(strategy_id) == bool(proposal_id):
-        raise TradingError("exactly one of strategy_id or proposal_id is required")
+    target_count = sum(bool(value) for value in (strategy_id, proposal_id, package_dir))
+    if target_count != 1:
+        raise TradingError("exactly one of strategy_id, proposal_id, or package_dir is required")
 
     config_obj = load_workspace_config(Path(workspace).expanduser() if workspace else None)
-    package = _load_target_package(config_obj.paths, strategy_id, proposal_id)
+    package = _load_target_package(config_obj.paths, strategy_id, proposal_id, package_dir)
     cfg = load_config(
         preset=preset,
         config_path=config_path,
         markets=list(package.manifest.markets),
     )
+    _apply_short_lived_window_policy(cfg, package, explicit_config=bool(config_path))
     discovered_timeframes = _discover_strategy_timeframes(package.root)
     if discovered_timeframes:
         if not config_path:
@@ -208,6 +238,8 @@ def run_strategy_backtest(
         "attempted_timeframes",
         "timeframe_fallback",
         "timeframe_fallback_message",
+        "requested_window_days",
+        "target_backtest_days",
     )
     metrics_display = _metrics_display(metrics)
     operator_summary = _operator_summary(metrics)
@@ -231,6 +263,7 @@ def run_strategy_backtest(
         ),
         "strategy_id": package.manifest.strategy_id,
         "proposal_id": proposal_id,
+        "package_dir": _ws_rel(package.root) if package_dir else None,
         "backtest_ts": ts_name,
         "strategy_root": _ws_rel(package.root),
         "strategy_yml_path": _ws_rel(package.root / "strategy.yml"),
@@ -248,6 +281,8 @@ def run_strategy_backtest(
         "coverage_ok": metrics.get("coverage_ok"),
         "recommended_coverage_ok": metrics.get("recommended_coverage_ok"),
         "coverage_message": metrics.get("coverage_message"),
+        "requested_window_days": metrics.get("requested_window_days"),
+        "target_backtest_days": metrics.get("target_backtest_days"),
         "requested_primary_timeframe": metrics.get("requested_primary_timeframe"),
         "attempted_timeframes": metrics.get("attempted_timeframes"),
         "timeframe_fallback": metrics.get("timeframe_fallback"),
@@ -269,6 +304,7 @@ def _missing_history_result(
     *,
     strategy_id: str | None,
     proposal_id: str | None,
+    package_dir: str | Path | None = None,
     message: str,
 ) -> dict[str, Any]:
     return {
@@ -276,6 +312,7 @@ def _missing_history_result(
         "reason": "no_historical_data",
         "strategy_id": strategy_id,
         "proposal_id": proposal_id,
+        "package_dir": str(package_dir) if package_dir else None,
         "coverage_ok": False,
         "coverage_message": message,
         "next_required_action": {
@@ -293,25 +330,74 @@ def _missing_history_result(
     }
 
 
+def _apply_short_lived_window_policy(cfg: Any, package: StrategyPackage, *, explicit_config: bool) -> None:
+    if explicit_config:
+        return
+    if not _package_looks_short_lived(package):
+        return
+    short_days = max(1, int(getattr(cfg, "short_lived_window_days", 7) or 7))
+    if int(getattr(cfg, "window_days", 0) or 0) <= short_days:
+        return
+    cfg.window_days = short_days
+    setattr(cfg, "window_policy", "short_lived_market")
+
+
+def _package_looks_short_lived(package: StrategyPackage) -> bool:
+    parts = [
+        package.manifest.strategy_id,
+        package.manifest.title,
+        package.manifest.description,
+        *package.manifest.markets,
+        *package.manifest.news_sources,
+        *package.manifest.subagents,
+    ]
+    for rel in ("strategy.md", "README.md", "main.py"):
+        path = package.root / rel
+        if path.exists():
+            try:
+                parts.append(path.read_text(encoding="utf-8", errors="ignore")[:20_000])
+            except Exception:
+                pass
+    body = "\n".join(str(part or "") for part in parts).lower()
+    return any(marker in body for marker in _SHORT_LIVED_MARKET_MARKERS)
+
+
 def _apply_coverage_gate(metrics: dict[str, Any], cfg: Any) -> None:
-    recommended_days = float(getattr(cfg, "min_backtest_days", 30) or 0)
+    target_days = float(getattr(cfg, "min_backtest_days", 0) or 0)
+    requested_window_days = float(getattr(cfg, "window_days", 0) or 0)
     try:
         actual_days = float(metrics.get("backtest_days") or 0)
     except Exception:
         actual_days = 0.0
-    recommended_ok = recommended_days <= 0 or actual_days >= recommended_days
+    recommended_ok = target_days <= 0 or actual_days >= target_days
     fallback_note = str(metrics.get("timeframe_fallback_message") or "").strip()
-    # Any non-empty real-data window is acceptable for review. A 30d+ run is
-    # still preferred, but short-lived meme/on-chain assets often cannot
-    # produce that much history.
+    # Any non-empty real-data window is acceptable for review. General CEX
+    # packages request a broad window, while short-lived meme/on-chain packages
+    # use a shorter default and report whatever real coverage the venue can
+    # actually provide.
     metrics["coverage_ok"] = actual_days > 0
     metrics["recommended_coverage_ok"] = recommended_ok
-    metrics["min_backtest_days"] = recommended_days
-    metrics["recommended_backtest_days"] = recommended_days
+    metrics["min_backtest_days"] = target_days
+    metrics["target_backtest_days"] = target_days if target_days > 0 else requested_window_days
+    metrics["recommended_backtest_days"] = target_days
+    metrics["requested_window_days"] = requested_window_days
+    policy = str(getattr(cfg, "window_policy", "") or "")
+    if target_days <= 0:
+        suffix = ""
+        if requested_window_days > 0:
+            suffix = f" within the requested {requested_window_days:.2f}d window"
+        metrics["coverage_message"] = f"Loaded {actual_days:.2f}d of real candle coverage{suffix}."
+        if actual_days > 0 and requested_window_days > 0 and actual_days + 0.01 < requested_window_days:
+            metrics["coverage_message"] += " Using the maximum real history the source returned."
+        if policy == "short_lived_market":
+            metrics["coverage_message"] += " Short-lived meme/on-chain window policy applied."
+        if fallback_note:
+            metrics["coverage_message"] += f" {fallback_note}"
+        return
     if recommended_ok:
         metrics["coverage_message"] = (
-            f"Loaded candle coverage {actual_days:.2f}d meets "
-            f"recommended {recommended_days:.2f}d."
+            f"Loaded {actual_days:.2f}d of real candle coverage against "
+            f"target {target_days:.2f}d."
         )
         if fallback_note:
             metrics["coverage_message"] += f" {fallback_note}"
@@ -324,9 +410,9 @@ def _apply_coverage_gate(metrics: dict[str, Any], cfg: Any) -> None:
         flags.append("below_recommended_backtest_window")
     metrics["flags"] = flags
     metrics["coverage_message"] = (
-        f"Loaded candle coverage {actual_days:.2f}d is below "
-        f"recommended {recommended_days:.2f}d; treat this as a valid "
-        "short-window real-data backtest, not a preferred one-month-plus run."
+        f"Loaded {actual_days:.2f}d of real candle coverage, below target "
+        f"{target_days:.2f}d; treat this as a valid short-window real-data "
+        "backtest, not a failed coverage gate."
     )
     if fallback_note:
         metrics["coverage_message"] += f" {fallback_note}"
@@ -420,38 +506,57 @@ def _operator_summary(metrics: dict[str, Any]) -> dict[str, str]:
 
 
 def _operator_summary_text(summary: dict[str, str]) -> str:
-    def get(key: str) -> str:
-        return str(summary.get(key) or "n/a")
+    """Clean, copy-safe display values for the user-facing summary.
 
-    lines = [
-        "Operator-facing backtest summary. Copy these display values exactly.",
-        "Raw *_pct values are already percentage points; never multiply by 100.",
-        "Example: total_return_pct 0.0274 means 0.0274%, not 2.74%.",
-        f"verdict: {get('verdict')}",
-        f"coverage: {get('coverage_message')}",
-        f"timeframe_fallback: {get('timeframe_fallback_message')}",
-        f"primary_timeframe: {get('tf')}",
-        f"backtest_days: {get('backtest_days')}",
-        f"bars_total: {get('bars_total')}",
-        f"total_trades: {get('total_trades')}",
-        f"total_return_pct: {get('total_return_pct')}",
-        f"benchmark_buy_hold_return_pct: {get('benchmark_buy_hold_return_pct')}",
-        f"alpha_vs_benchmark_pct: {get('alpha_vs_benchmark_pct')}",
-        f"max_drawdown_pct: {get('max_drawdown_pct')}",
-        f"sharpe_ratio: {get('sharpe_ratio')}",
-        f"win_rate_pct: {get('win_rate_pct')}",
-        f"profit_factor: {get('profit_factor')}",
-        f"total_fees_usd: {get('total_fees_usd')}",
-        f"total_slippage_usd: {get('total_slippage_usd')}",
+    This must contain ONLY presentable values — no meta-instructions. The
+    string is sometimes surfaced to operators verbatim (and models are told
+    to reuse these exact numbers), so anything that reads like an internal
+    note ("copy these values exactly") would leak into the final reply.
+    Unit/formatting guidance for the model lives in
+    ``operator_summary['unit_warning']`` and the tool description instead.
+    """
+
+    def get(key: str) -> str:
+        return str(summary.get(key) or "").strip()
+
+    rows = [
+        ("Verdict", get("verdict")),
+        ("Coverage", get("coverage_message")),
+        ("Timeframe fallback", get("timeframe_fallback_message")),
+        ("Primary timeframe", get("tf")),
+        ("Backtest days", get("backtest_days")),
+        ("Bars total", get("bars_total")),
+        ("Total trades", get("total_trades")),
+        ("Total return", get("total_return_pct")),
+        ("Benchmark (buy & hold)", get("benchmark_buy_hold_return_pct")),
+        ("Alpha vs benchmark", get("alpha_vs_benchmark_pct")),
+        ("Max drawdown", get("max_drawdown_pct")),
+        ("Sharpe ratio", get("sharpe_ratio")),
+        ("Win rate", get("win_rate_pct")),
+        ("Profit factor", get("profit_factor")),
+        ("Total fees (USD)", get("total_fees_usd")),
+        ("Total slippage (USD)", get("total_slippage_usd")),
     ]
-    return "\n".join(lines)
+    # Always keep the primary-timeframe line so downstream summaries can
+    # surface the resolved timeframe even when other fields are empty.
+    return "\n".join(
+        f"{label}: {value}"
+        for label, value in rows
+        if value or label == "Primary timeframe"
+    )
 
 
 def _load_target_package(
     paths,
     strategy_id: str | None,
     proposal_id: str | None,
+    package_dir: str | Path | None = None,
 ) -> StrategyPackage:
+    if package_dir:
+        path = Path(package_dir).expanduser()
+        if not path.is_absolute():
+            path = paths.root / path
+        return load_package_from_dir(path)
     if proposal_id:
         for proposal in list_proposals(paths):
             if proposal.id != proposal_id:
@@ -487,6 +592,12 @@ _ALWAYS_SUPPORTED_EXPLICIT_VENUES = {
     "BINANCE_COINM",
     "BINANCECOINM",
     "BINANCE_CM",
+    "BYBIT",
+    "BYBIT_PERPETUAL",
+    "BYBIT_PERP",
+    "BYBIT_LINEAR",
+    "BYBIT_SWAP",
+    "BYBIT_FUTURES",
     "ONCHAIN",
 }
 
@@ -517,6 +628,19 @@ def _unsupported_explicit_historical_markets(
                 supported.add(canon)
     except Exception:
         pass
+    try:
+        from .....connectors.provider_spec import get_registry
+
+        for spec in get_registry().list_specs():
+            info = spec.to_info()
+            if not (info.get("supports") or {}).get("klines", False):
+                continue
+            for venue in [spec.id, *list(spec.aliases or ())]:
+                canon = _canonical_explicit_venue(str(venue or ""))
+                if canon:
+                    supported.add(canon)
+    except Exception:
+        pass
     out: list[str] = []
     for market in markets:
         if ":" not in str(market):
@@ -526,9 +650,25 @@ def _unsupported_explicit_historical_markets(
             continue
         if venue.endswith("_ONCHAIN"):
             continue
+        if _ccxt_supports_explicit_venue(venue):
+            continue
         if venue not in supported:
             out.append(str(market))
     return out
+
+
+def _ccxt_supports_explicit_venue(venue: str) -> bool:
+    try:
+        from .....connectors.ccxt_adapter import supported_exchanges
+        from .....data.candles import _ccxt_exchange_id_for_venue
+
+        supported = set(supported_exchanges())
+        if not supported:
+            return False
+        exchange_id = _ccxt_exchange_id_for_venue(venue)
+        return bool(exchange_id and exchange_id in supported)
+    except Exception:
+        return False
 
 
 def _load_candles_with_timeframe_fallback(

@@ -394,7 +394,7 @@ def test_placeholder_market_is_validation_blocker() -> None:
     files = _files()
     files["strategy.yml"] = files["strategy.yml"].replace(
         'markets: ["paper:BTCUSDT"]',
-        'markets: ["XAGT_ONCHAIN:solana:UNKNOWN"]',
+        'markets: ["BYREAL_ONCHAIN:solana:UNKNOWN"]',
     )
 
     result = validate_proposal_files(
@@ -410,7 +410,7 @@ def test_provider_universe_market_is_allowed_for_runtime_scanner() -> None:
     files = _files()
     files["strategy.yml"] = files["strategy.yml"].replace(
         'markets: ["paper:BTCUSDT"]',
-        'markets: ["XAGT_ONCHAIN:solana"]',
+        'markets: ["BYREAL_ONCHAIN:solana"]',
     )
 
     result = validate_proposal_files(

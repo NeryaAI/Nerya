@@ -76,6 +76,29 @@ def server_id_of(d: ToolDescriptor) -> Optional[str]:
     return None
 
 
+#: Tag prefix that marks which surface a lazy *native* tool belongs to.
+#: Kept in sync with ``nerya.tools.native.tool_surfaces.SURFACE_TAG_PREFIX``;
+#: inlined here so this module stays free of a tools.native import cycle.
+_NATIVE_SURFACE_TAG_PREFIX = "surface:"
+
+
+def native_surface_of(d: ToolDescriptor) -> Optional[str]:
+    """Return the surface a native lazy tool belongs to, or None.
+
+    Mirror of ``tool_surfaces.native_surface_of`` for the visibility
+    check. Native tools opt into lazy gating by carrying a
+    ``surface:<name>`` tag (added by
+    ``tool_surfaces.apply_native_lazy_surfaces``).
+    """
+
+    if d.namespace != "native":
+        return None
+    for tag in d.tags:
+        if tag.startswith(_NATIVE_SURFACE_TAG_PREFIX):
+            return tag[len(_NATIVE_SURFACE_TAG_PREFIX):]
+    return None
+
+
 # ---------------------------------------------------------------------------
 # LazyMcpState
 # ---------------------------------------------------------------------------
@@ -177,14 +200,32 @@ class LazyMcpState:
     def is_visible(self, descriptor: ToolDescriptor) -> bool:
         """Return True iff the descriptor should appear in the prompt.
 
-        * Non-lazy descriptors (native tools, eager MCP tools, the meta
-          tools themselves) always pass.
+        * Non-lazy descriptors (core native tools, eager MCP tools, the
+          meta tools themselves) always pass.
+        * Lazy *native* descriptors carry a ``surface:<name>`` tag and
+          pass iff ``native:<name>`` has been revealed (described) for
+          the session — e.g. by ``skill_view`` on the owning skill.
         * Lazy MCP descriptors pass iff their server is in
           ``always_eager_namespaces`` or ``described_namespaces``.
         """
 
         if not descriptor.lazy:
             return True
+        # Native progressive-disclosure tools share this state's
+        # described set under a ``native:<surface>`` key so the kernel's
+        # per-session cache persists them across turns just like MCP.
+        if descriptor.namespace == "native":
+            surface = native_surface_of(descriptor)
+            if surface is None:
+                # Lazy native tool with no surface tag: hide
+                # conservatively (operator can set lazy=False).
+                return False
+            key = f"native:{surface}"
+            with self._lock:
+                return (
+                    key in self.always_eager_namespaces
+                    or key in self.described_namespaces
+                )
         sid = server_id_of(descriptor)
         if sid is None:
             # Unexpected: a non-MCP tool registered as lazy. Be

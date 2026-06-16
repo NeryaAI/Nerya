@@ -4,28 +4,32 @@ compatibility: the agent can ask for a reflection cycle directly,
 without the legacy ``runtime.call("evolve", "tick", ...)`` bridge. Two
 tools are exposed:
 
-* ``evolve_reflect`` — run :func:`nerya.agent.self_improvement.evolve`
-  to summarise journals + risk + ranked seeds and write a
-  ``learning_update`` proposal under ``evolution/proposals/``.
+* ``evolve_reflect`` — run :func:`nerya.evolution.runner.evolve`
+  to summarise journals + risk + ranked seeds, collect structured
+  evolution signals/assets/events, and write a ``learning_update``
+  proposal under ``evolution/proposals/``.
 * ``evolve_skill_proposal`` — capture a repeatable workflow as a
   reviewable ``skill_proposal`` with ``after/skills/<id>/SKILL.md``.
 * ``evolve_proposals`` — read-only enumeration of pending proposals
   (id + kind + summary + path) so the model can decide whether to
   trigger a fresh reflection or summarise an existing one.
+* ``evolve_post_apply_observation`` — append evidence-backed post-apply
+  observations for an applied proposal.
 
 Both are write-light: ``evolve_reflect`` only ever creates a
 *proposal* (never mutates live config), matching the safety contract
-in ``self_improvement.evolve``'s docstring.
+in ``evolution.runner.evolve``'s docstring.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from ...agent.self_improvement import evolve
 from ...core.config import Config
 from ...core.errors import ProtectedScopeViolation
+from ...evolution import runner as evolution_runner
 from ...evolution.patch_proposal import create_proposal, list_proposals
+from ...evolution.post_apply_observation import record_post_apply_observation
 from ...evolution.self_config import propose_core_config_patch
 from ...evolution.skill_proposal import propose_skill_from_workflow
 from ..types import (
@@ -216,6 +220,65 @@ EVOLVE_PROVIDER_PROPOSAL_SCHEMA: dict[str, Any] = {
     "required": ["venue"],
 }
 
+EVOLVE_POST_APPLY_OBSERVATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "proposal_id": {
+            "type": "string",
+            "description": "Applied proposal id to observe.",
+        },
+        "status": {
+            "type": "string",
+            "description": (
+                "Observation status: healthy, stable, improved, passed, ok, "
+                "regressed, failed, degraded, rollback_recommended, pending, "
+                "or observing. If omitted, Nerya derives it from backtest_result "
+                "when possible."
+            ),
+        },
+        "summary": {
+            "type": "string",
+            "description": "Short operator-facing observation summary.",
+        },
+        "source": {
+            "type": "string",
+            "description": "Evidence source such as backtest, paper, live, validation, or manual.",
+        },
+        "observed_at": {
+            "type": "string",
+            "description": "Optional ISO timestamp for the observation.",
+        },
+        "evidence_refs": {
+            "description": "Evidence refs supporting the observation.",
+            "oneOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}},
+            ],
+        },
+        "metrics": {
+            "type": "object",
+            "description": "Structured paper/live/backtest metrics observed after apply.",
+        },
+        "backtest_result": {
+            "type": "object",
+            "description": "Backtest runner result used for status derivation and audit.",
+        },
+        "run_id": {
+            "type": "string",
+            "description": "Optional paper/live/backtest run id.",
+        },
+        "operator": {
+            "type": "string",
+            "description": "Optional human or system actor recording the observation.",
+        },
+        "metadata": {
+            "type": "object",
+            "description": "Additional non-secret observation metadata.",
+        },
+    },
+    "required": ["proposal_id"],
+}
+
 
 def _string_list(value: Any) -> list[str]:
     if value is None:
@@ -256,7 +319,7 @@ def evolve_reflect_handler(call: ToolCall, *, config: Config) -> ToolResult:
     """Run a reflection tick and return the new proposal envelope."""
 
     try:
-        result = evolve(config)
+        result = evolution_runner.evolve(config)
     except Exception as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -268,6 +331,8 @@ def evolve_reflect_handler(call: ToolCall, *, config: Config) -> ToolResult:
         )
     proposal = result.get("proposal") or {}
     ranked = result.get("ranked") or []
+    signals = result.get("signals") or []
+    selected_assets = result.get("selected_assets") or {}
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
@@ -275,6 +340,11 @@ def evolve_reflect_handler(call: ToolCall, *, config: Config) -> ToolResult:
             "proposal": proposal,
             "ranked_seeds": ranked[:10],
             "seed_count": len(ranked),
+            "signals": signals,
+            "signal_count": len(signals),
+            "selected_assets": selected_assets,
+            "event": result.get("event"),
+            "validation_plan_id": proposal.get("validation_plan_id"),
         },
     )
 
@@ -530,13 +600,62 @@ def evolve_provider_proposal_handler(call: ToolCall, *, config: Config) -> ToolR
     )
 
 
+def evolve_post_apply_observation_handler(call: ToolCall, *, config: Config) -> ToolResult:
+    """Append an evidence-backed observation for an applied proposal."""
+
+    args = call.arguments or {}
+    result = record_post_apply_observation(
+        config.paths,
+        proposal_id=str(args.get("proposal_id") or ""),
+        status=args.get("status"),
+        summary=str(args.get("summary") or args.get("note") or ""),
+        source=str(args.get("source") or "manual"),
+        observed_at=args.get("observed_at"),
+        evidence_refs=args.get("evidence_refs"),
+        metrics=args.get("metrics"),
+        backtest_result=args.get("backtest_result"),
+        run_id=args.get("run_id"),
+        operator=args.get("operator"),
+        metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
+    )
+    if result.get("ok"):
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
+
+    reason = str(result.get("reason") or "record_failed")
+    kind = ToolErrorKind.EXECUTION_ERROR
+    if reason in {
+        "proposal_id_required",
+        "evidence_required",
+        "invalid_status",
+        "metrics_must_be_object",
+        "backtest_result_must_be_object",
+    }:
+        kind = ToolErrorKind.SCHEMA_VALIDATION
+    elif reason == "proposal_not_found":
+        kind = ToolErrorKind.NOT_FOUND
+    elif reason == "proposal_not_applied":
+        kind = ToolErrorKind.CONFLICT
+    return ToolResult.from_error(
+        tool_use_id=call.id,
+        name=call.name,
+        error=ToolError(
+            kind=kind,
+            message=reason,
+            detail=result,
+            retryable=False,
+        ),
+    )
+
+
 __all__ = [
     "EVOLVE_PROVIDER_PROPOSAL_SCHEMA",
+    "EVOLVE_POST_APPLY_OBSERVATION_SCHEMA",
     "EVOLVE_PROPOSALS_SCHEMA",
     "EVOLVE_REFLECT_SCHEMA",
     "EVOLVE_CORE_CONFIG_PATCH_SCHEMA",
     "EVOLVE_SKILL_PROPOSAL_SCHEMA",
     "evolve_core_config_patch_handler",
+    "evolve_post_apply_observation_handler",
     "evolve_provider_proposal_handler",
     "evolve_proposals_handler",
     "evolve_reflect_handler",

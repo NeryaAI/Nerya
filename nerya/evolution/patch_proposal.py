@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import fnmatch
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -251,6 +252,102 @@ def set_state(paths: WorkspacePaths, pid: str, state: str,
                             validation_plan_id=meta.get("validation_plan_id"),
                             metadata=dict(meta.get("metadata") or {}))
     return None
+
+
+def delete_proposal(
+    paths: WorkspacePaths,
+    pid: str,
+    *,
+    force: bool = False,
+    note: str = "",
+) -> dict[str, Any]:
+    """Remove a proposal's on-disk record.
+
+    Pending/draft/rejected/rolled_back proposals (e.g. an agent-generated
+    strategy package an operator decides not to keep) can always be deleted.
+    An ``applied`` proposal is the audit trail of a change that already landed
+    in the workspace, so we refuse to delete it unless ``force`` is set.
+
+    Returns a status dict instead of raising for the not-found / refused
+    cases so callers can map them straight to a tool or API response.
+    """
+    target: Proposal | None = None
+    for p in list_proposals(paths):
+        if p.id == pid:
+            target = p
+            break
+    if target is None:
+        return {
+            "ok": False,
+            "proposal_id": pid,
+            "deleted": False,
+            "reason": "not_found",
+        }
+    if target.state == "applied" and not force:
+        return {
+            "ok": False,
+            "proposal_id": pid,
+            "deleted": False,
+            "state": target.state,
+            "reason": "applied_requires_force",
+        }
+
+    meta = yaml_io.load(_meta_file(target.path), default={}) or {}
+    try:
+        shutil.rmtree(target.path)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        return {
+            "ok": False,
+            "proposal_id": pid,
+            "deleted": False,
+            "state": target.state,
+            "reason": f"delete_failed: {type(exc).__name__}: {exc}",
+        }
+
+    jsonl.append(paths.journal("evolution"), {
+        "kind": "proposal.deleted",
+        "proposal_id": pid,
+        "proposal_kind": target.kind,
+        "prev_state": target.state,
+        "forced": bool(force),
+        "note": note,
+        "source_event_id": meta.get("source_event_id"),
+    })
+    try:
+        from .event_store import record_event
+
+        record_event(
+            paths,
+            parent_id=meta.get("source_event_id"),
+            proposal_id=pid,
+            mutation_scope=[target.target] if target.target else [],
+            validation_status=meta.get("validation_status") or "not_run",
+            # A deleted pending proposal is, for timeline purposes, a removal
+            # of a candidate. We tag the discrete action in metadata.
+            outcome="rejected",
+            outcome_score=-0.5,
+            summary=f"Proposal {pid} deleted.",
+            evidence_refs=list(meta.get("evidence_refs") or []),
+            metadata={
+                "action": "deleted",
+                "note": note,
+                "proposal_kind": target.kind,
+                "prev_state": target.state,
+                "forced": bool(force),
+            },
+        )
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "proposal_id": pid,
+        "deleted": True,
+        "kind": target.kind,
+        "prev_state": target.state,
+        "summary": target.summary,
+    }
 
 
 def is_protected(target: str) -> bool:

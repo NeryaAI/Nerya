@@ -6,8 +6,10 @@ and CI. Production deployments should front it with a real framework.
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -42,16 +44,27 @@ from . import routes_runtime_flags
 from . import routes_tool_raw
 
 
-Route = tuple[str, str, Callable[[InternalClient, dict[str, Any]], dict[str, Any]]]
+Route = tuple[str, str, Callable[[InternalClient, dict[str, Any]], Any]]
 
 _ROUTES: list[Route] = []
 _CRON_THREADS: dict[str, threading.Thread] = {}
 _ACCOUNT_REFRESH_THREADS: dict[str, threading.Thread] = {}
 _LIVE_ORDER_POLL_THREADS: dict[str, threading.Thread] = {}
+_GC_REAPER_THREADS: dict[str, threading.Thread] = {}
 _SHARED_SKILLS: dict[str, SkillKernel] = {}
 _SHARED_SKILLS_LOCK = threading.RLock()
 _THREAD_CLIENTS = threading.local()
 log = logging.getLogger(__name__)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 class StreamingResponse:
@@ -118,6 +131,43 @@ class StreamingResponse:
             return
 
 
+class BinaryResponse:
+    """Finite byte response for raw workspace artifacts.
+
+    Unlike :class:`StreamingResponse`, this sends a content length and does
+    not force event-stream headers, so the dashboard can embed images, PDFs,
+    and other local file previews through the normal proxy.
+    """
+
+    def __init__(
+        self,
+        *,
+        body: bytes,
+        content_type: str = "application/octet-stream",
+        status: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self.body = body
+        self.content_type = content_type
+        self.status = status
+        self.extra_headers = dict(headers or {})
+
+    def run(self, handler: BaseHTTPRequestHandler) -> None:
+        handler.send_response(self.status)
+        handler.send_header("Content-Type", self.content_type)
+        handler.send_header("Content-Length", str(len(self.body)))
+        handler.send_header("Cache-Control", "no-store")
+        for key, value in self.extra_headers.items():
+            handler.send_header(key, value)
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-Nerya-Token",
+        )
+        handler.end_headers()
+        handler.wfile.write(self.body)
+
+
 def _register(method: str, path: str, handler):
     _ROUTES.append((method.upper(), path, handler))
 
@@ -151,19 +201,37 @@ def _collect_routes(config: Config | None = None) -> None:
 
 
 def _path_params(pattern: str, path: str) -> dict[str, str] | None:
+    from urllib.parse import unquote
+
     if pattern == path:
         return {}
     pattern_parts = [part for part in pattern.strip("/").split("/") if part]
     path_parts = [part for part in path.strip("/").split("/") if part]
-    if len(pattern_parts) != len(path_parts):
-        return None
     params: dict[str, str] = {}
-    for expected, actual in zip(pattern_parts, path_parts):
-        if expected.startswith("{") and expected.endswith("}") and len(expected) > 2:
-            params[expected[1:-1]] = actual
-            continue
-        if expected != actual:
+    i = 0
+    j = 0
+    while i < len(pattern_parts):
+        expected = pattern_parts[i]
+        variadic = (
+            expected.startswith("{")
+            and expected.endswith("...}")
+            and len(expected) > 5
+        )
+        if variadic:
+            name = expected[1:-4]
+            params[name] = unquote("/".join(path_parts[j:]))
+            return params
+        if j >= len(path_parts):
             return None
+        actual = path_parts[j]
+        if expected.startswith("{") and expected.endswith("}") and len(expected) > 2:
+            params[expected[1:-1]] = unquote(actual)
+        elif expected != actual:
+            return None
+        i += 1
+        j += 1
+    if j != len(path_parts):
+        return None
     return params
 
 
@@ -291,6 +359,47 @@ def _start_live_order_poller(client: InternalClient) -> None:
     _LIVE_ORDER_POLL_THREADS[key] = thread
 
 
+def _start_idle_gc_reaper(client: InternalClient) -> None:
+    """Periodically run a cyclic GC pass so idle SQLite connections close.
+
+    ``sqlite3.Connection`` participates in internal reference cycles (its
+    statement cache), so a handle that isn't explicitly ``.close()``d is
+    reclaimed only by CPython's *cyclic* collector, never by plain
+    refcounting. ``ThreadingHTTPServer`` spawns a thread per request and
+    each caches a thread-local ``InternalClient`` with lazy DB handles
+    (TriggerRouter, etc.), so dashboard polling steadily accumulates open
+    ``nerya.db`` fds while the box is otherwise idle. Under load the
+    collector fires on its own and the fds drop, but an idle server can
+    drift toward its fd ceiling. A low-frequency explicit ``gc.collect()``
+    bounds that drift uniformly across every store without threading
+    ``.close()`` through dozens of read handlers.
+    """
+
+    if os.environ.get("NERYA_DISABLE_GC_REAPER", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    key = str(client.config.paths.root.resolve())
+    thread = _GC_REAPER_THREADS.get(key)
+    if thread is not None and thread.is_alive():
+        return
+
+    def _run() -> None:
+        while True:
+            tick = float(client.config.get("runtime.gc_reaper_interval_s", 45.0))
+            time.sleep(max(10.0, tick))
+            try:
+                gc.collect()
+            except Exception:  # pragma: no cover - background loop guard
+                log.exception("idle gc reaper failed")
+
+    thread = threading.Thread(
+        target=_run,
+        name=f"nerya-gc-reaper-{client.config.paths.root.name}",
+        daemon=True,
+    )
+    thread.start()
+    _GC_REAPER_THREADS[key] = thread
+
+
 def _client_for_current_thread(config: Config) -> InternalClient:
     """Return a client whose lazy DB handles belong to this request thread."""
     key = str(config.paths.root.resolve())
@@ -351,6 +460,7 @@ def build_server(
         _start_cron_scheduler(startup_client)
         _start_account_refresh_loop(startup_client)
         _start_live_order_poller(startup_client)
+        _start_idle_gc_reaper(startup_client)
 
     class Handler(BaseHTTPRequestHandler):
         def _cors(self) -> None:
@@ -364,7 +474,7 @@ def build_server(
             )
 
         def _write(self, status: int, body: dict[str, Any]) -> None:
-            data = json.dumps(body, default=str).encode("utf-8")
+            data = json.dumps(_json_safe(body), default=str, allow_nan=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
@@ -434,6 +544,8 @@ def build_server(
                 result = handler(_client_for_current_thread(config), query)
                 if isinstance(result, StreamingResponse):
                     result.run(self)
+                elif isinstance(result, BinaryResponse):
+                    result.run(self)
                 else:
                     status, body = _status_body_from_result(result)
                     self._write(status, body)
@@ -461,8 +573,13 @@ def build_server(
                     _client_for_current_thread(config),
                     payload,
                 )
-                status, body = _status_body_from_result(result)
-                self._write(status, body)
+                if isinstance(result, StreamingResponse):
+                    result.run(self)
+                elif isinstance(result, BinaryResponse):
+                    result.run(self)
+                else:
+                    status, body = _status_body_from_result(result)
+                    self._write(status, body)
             except Exception as exc:  # pragma: no cover
                 import traceback
                 tb = traceback.format_exc()

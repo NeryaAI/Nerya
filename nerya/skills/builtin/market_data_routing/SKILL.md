@@ -26,7 +26,7 @@ and allowlisted OnchainOS wallet/DeFi reads.
 For on-chain meme / DEX / wallet-backed strategies, call
 `data_api(op="call", provider="wallet", action="capability_catalog",
 args={"topic":"meme"})` or `wallet.meme_strategy_guide` before choosing data
-sources. Use `selection.selected_route.call` instead of hardcoding OKX/XAgent:
+sources. Use `selection.selected_route.call` instead of hardcoding OKX/Byreal:
 installed and logged-in wallets provide their own wallet venues, and when no
 wallet is ready the returned GOAT/self-custody fallback uses
 `wallet_install(provider="self_custody", mode="goat")` and then

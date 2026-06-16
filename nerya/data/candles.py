@@ -192,6 +192,75 @@ def _bybit_interval(interval: str) -> str:
     return raw or "1"
 
 
+def _okx_interval(interval: str) -> str:
+    raw = str(interval or "1m").strip()
+    lowered = raw.lower()
+    if lowered.endswith("h"):
+        return lowered[:-1] + "H"
+    if lowered.endswith("d"):
+        return lowered[:-1] + "D"
+    if lowered.endswith("w"):
+        return lowered[:-1] + "W"
+    return lowered
+
+
+def _tf_seconds(interval: str) -> int:
+    raw = str(interval or "1m").strip().lower()
+    try:
+        qty = int(raw[:-1] or 1)
+    except ValueError:
+        qty = 1
+    unit = raw[-1:] or "m"
+    if unit == "m":
+        return qty * 60
+    if unit == "h":
+        return qty * 3600
+    if unit == "d":
+        return qty * 86400
+    if unit == "w":
+        return qty * 7 * 86400
+    return 60
+
+
+def _dedupe_sort_tail(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    by_ts: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            ts = int(row.get("ts", row.get("ts_ms", 0)))
+        except Exception:
+            continue
+        if ts <= 0:
+            continue
+        by_ts[ts] = row
+    out = [by_ts[ts] for ts in sorted(by_ts)]
+    if limit > 0:
+        out = out[-limit:]
+    return out
+
+
+def _window_from_count(
+    *,
+    interval: str,
+    count: int,
+    start: int | None,
+    end: int | None,
+) -> tuple[int, int]:
+    end_s = int(end or time.time())
+    if start is not None:
+        return int(start), end_s
+    span = max(1, int(count or 60) + 5) * _tf_seconds(interval)
+    return end_s - span, end_s
+
+
+def _bybit_category(venue: str) -> str:
+    v = (venue or "").upper()
+    if any(key in v for key in ("PERP", "LINEAR", "SWAP", "FUTURES")):
+        return "linear"
+    if "INVERSE" in v:
+        return "inverse"
+    return "spot"
+
+
 def _kraken_interval(interval: str) -> str:
     raw = str(interval or "1m").strip().lower()
     try:
@@ -217,12 +286,18 @@ def _canonical_venue(venue: str) -> str:
     raw = str(venue or "").strip()
     if raw.lower().startswith("ccxt:"):
         raw = raw.split(":", 1)[1]
+    if raw.lower().startswith("ccxt_"):
+        raw = raw.split("_", 1)[1]
     key = raw.replace("-", "_").replace(" ", "_").upper()
     aliases = {
         "BINANCEUSDM": "BINANCE_PERPETUAL",
         "BINANCE_USDM": "BINANCE_PERPETUAL",
         "BINANCE_PERP": "BINANCE_PERPETUAL",
         "BINANCE_FUTURES": "BINANCE_PERPETUAL",
+        "BYBIT_PERP": "BYBIT_PERPETUAL",
+        "BYBIT_LINEAR": "BYBIT_PERPETUAL",
+        "BYBIT_SWAP": "BYBIT_PERPETUAL",
+        "BYBIT_FUTURES": "BYBIT_PERPETUAL",
         "OKX_OS": "OKX_ONCHAIN",
         "OKX_ONCHAIN_OS": "OKX_ONCHAIN",
         "BITGET_WALLET": "BITGET_ONCHAIN",
@@ -232,10 +307,10 @@ def _canonical_venue(venue: str) -> str:
         "BINANCE_ALPHA": "BINANCE_ALPHA",
         "COINBASE_WALLET": "COINBASE_WALLET",
         "COINBASE_EXCHANGE_WALLET": "COINBASE_WALLET",
-        "XAGT": "XAGT_ONCHAIN",
-        "XAGT_AGENT_PLUGIN": "XAGT_ONCHAIN",
-        "XAGT_OKX": "XAGT_ONCHAIN",
-        "XAGT_ONCHAIN": "XAGT_ONCHAIN",
+        "BYREAL": "BYREAL_ONCHAIN",
+        "BYREAL_CLI": "BYREAL_ONCHAIN",
+        "BYREAL_SOLANA": "BYREAL_ONCHAIN",
+        "BYREAL_ONCHAIN": "BYREAL_ONCHAIN",
         "ONCHAIN": "ONCHAIN",
         "PAPER": "PAPER",
         "MOCK": "MOCK",
@@ -261,6 +336,102 @@ def canonical_venue(venue: str) -> str:
 def _market_for_venue(market: str, venue: str) -> str:
     tail = _tail_symbol(market)
     return f"{_canonical_venue(venue)}:{tail}" if venue else market
+
+
+_NON_CCXT_VENUES = {
+    "",
+    "MOCK",
+    "PAPER",
+    "YAHOO",
+    "ALPACA",
+    "IBKR",
+    "MT5",
+    "ONCHAIN",
+    "OKX_ONCHAIN",
+    "BITGET_ONCHAIN",
+    "BYREAL_ONCHAIN",
+    "BINANCE_ALPHA",
+    "COINBASE_WALLET",
+    "TUSHARE",
+    "AKSHARE",
+    "POLYGON_IO",
+    "COINGECKO",
+    "COINMARKETCAP",
+    "GLASSNODE",
+    "DUNE",
+    "TENCENT",
+    "MOEX",
+    "MESSARI",
+    "HTTP",
+}
+
+
+def _normalised_exchange_key(value: str) -> str:
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def _ccxt_exchange_id_for_venue(venue: str) -> str:
+    canon = _canonical_venue(venue)
+    if canon in _NON_CCXT_VENUES:
+        return ""
+    key = canon.lower()
+    aliases = {
+        "binance_spot": "binance",
+        "binance_perpetual": "binanceusdm",
+        "binance_perp": "binanceusdm",
+        "binance_usdm": "binanceusdm",
+        "binanceusdm": "binanceusdm",
+        "binance_coinm_perpetual": "binancecoinm",
+        "binance_coinm": "binancecoinm",
+        "bybit_perpetual": "bybit",
+        "bybit_perp": "bybit",
+        "bybit_linear": "bybit",
+        "bybit_swap": "bybit",
+        "bybit_futures": "bybit",
+        "okx_perpetual": "okx",
+        "okx_perp": "okx",
+        "okx_swap": "okx",
+        "gate_perpetual": "gate",
+        "gate_io": "gate",
+        "gateio": "gate",
+        "bitget_perpetual": "bitget",
+        "bitget_perp": "bitget",
+        "bitget_mix": "bitget",
+        "kucoin_perpetual": "kucoinfutures",
+        "kucoin_perp": "kucoinfutures",
+        "hyperliquid_perpetual": "hyperliquid",
+        "hyperliquid_perp": "hyperliquid",
+        "hl": "hyperliquid",
+        "hl_perp": "hyperliquid",
+        "coinbase_exchange": "coinbaseexchange",
+        "coinbase_pro": "coinbaseexchange",
+        "coinbasepro": "coinbaseexchange",
+        "coinbase_international": "coinbaseinternational",
+    }
+    if key in aliases:
+        return aliases[key]
+    try:
+        from ..connectors.ccxt_adapter import supported_exchanges
+
+        supported = supported_exchanges()
+    except Exception:
+        supported = []
+    if not supported:
+        # ccxt may simply be absent. Return the normalized id so the caller can
+        # surface the ccxt install/error path instead of silently skipping the
+        # requested exchange.
+        return key
+    if key in supported:
+        return key
+    by_normalised = {_normalised_exchange_key(exchange_id): exchange_id for exchange_id in supported}
+    return by_normalised.get(_normalised_exchange_key(key), "")
+
+
+def _ccxt_options_for_venue(venue: str) -> dict[str, Any]:
+    canon = _canonical_venue(venue)
+    if any(token in canon for token in ("PERPETUAL", "PERP", "SWAP", "FUTURES", "LINEAR")):
+        return {"defaultType": "swap"}
+    return {}
 
 
 def _config_get(config_like: Any | None, dotted: str, default: Any = None) -> Any:
@@ -366,6 +537,8 @@ def _fetch_wallet_market_klines(
     interval: str,
     count: int,
     config_like: Any | None,
+    start: int | None = None,
+    end: int | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     venue = _canonical_venue(_venue_of(market))
     if venue == "ONCHAIN":
@@ -433,14 +606,30 @@ def _fetch_wallet_market_klines(
                     token=token,
                     interval=interval,
                     limit=count,
+                    after=str(int(start) * 1000) if start is not None else None,
+                    before=str(int(end) * 1000) if end is not None else None,
+                    start=start,
+                    end=end,
                 )
             else:
                 rows = fetcher(
                     market=market_id,
                     interval=interval,
                     limit=count,
+                    after=str(int(start) * 1000) if start is not None else None,
+                    before=str(int(end) * 1000) if end is not None else None,
+                    start=start,
+                    end=end,
                 )
             if rows:
+                if start is not None or end is not None:
+                    lo, hi = _window_from_count(
+                        interval=interval,
+                        count=count,
+                        start=start,
+                        end=end,
+                    )
+                    rows = [row for row in rows if lo <= int(row.get("ts", 0)) <= hi]
                 venue_name = str(source.get("venue") or venue.lower())
                 env = live_envelope(
                     source=provider_name,
@@ -496,7 +685,15 @@ def discover_market_data_sources(config_like: Any | None = None) -> list[dict[st
                 if child.is_dir() and (child / "provider.py").exists():
                     _add_source(out, seen, child.name, origin="workspace_providers")
 
-    for venue in ("yahoo", "binance", "binance_perpetual", "okx", "bybit", "kraken"):
+    for venue in (
+        "yahoo",
+        "binance",
+        "binance_perpetual",
+        "okx",
+        "bybit",
+        "bybit_perpetual",
+        "kraken",
+    ):
         _add_source(out, seen, venue, origin="built_in_public_rest")
     for binding in _wallet_market_data_bindings(config_like):
         source = dict(binding.get("market_data_source") or {})
@@ -523,12 +720,11 @@ def discover_market_data_sources(config_like: Any | None = None) -> list[dict[st
 
 def _candidate_venues(market: str, config_like: Any | None) -> list[str]:
     explicit = _venue_of(market)
-    venues: list[str] = []
-    seen: set[str] = set()
     if explicit:
         canon = _canonical_venue(explicit)
-        venues.append(canon)
-        seen.add(canon)
+        return [canon] if canon else []
+    venues: list[str] = []
+    seen: set[str] = set()
     for source in discover_market_data_sources(config_like):
         canon = str(source.get("canonical") or "").upper()
         if canon and canon not in seen:
@@ -543,6 +739,8 @@ def _fetch_public_rest_klines(
     *,
     interval: str,
     count: int,
+    start: int | None = None,
+    end: int | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch public OHLCV via venue REST when ccxt cannot load markets.
 
@@ -553,58 +751,272 @@ def _fetch_public_rest_klines(
     """
 
     v = (venue or "").upper()
-    limit = max(1, min(int(count or 60), 500))
+    target = max(1, int(count or 60))
     if v == "BINANCE":
-        url = "https://api.binance.com/api/v3/klines?" + urlencode({
-            "symbol": _compact_symbol(market),
-            "interval": interval,
-            "limit": limit,
-        })
-        return normalize_klines(v, _http_json(url))[:limit]
+        return _fetch_binance_rest_pages(
+            "https://api.binance.com/api/v3/klines",
+            market,
+            interval=interval,
+            count=target,
+            start=start,
+            end=end,
+        )
 
     if v in {"BINANCE_PERPETUAL", "BINANCE_PERP", "BINANCEUSDM", "BINANCE_USDM"}:
-        url = "https://fapi.binance.com/fapi/v1/klines?" + urlencode({
-            "symbol": _compact_symbol(market),
-            "interval": interval,
-            "limit": limit,
-        })
-        return normalize_klines("BINANCE", _http_json(url))[:limit]
+        return _fetch_binance_rest_pages(
+            "https://fapi.binance.com/fapi/v1/klines",
+            market,
+            interval=interval,
+            count=target,
+            start=start,
+            end=end,
+        )
 
     if v == "OKX":
-        url = "https://www.okx.com/api/v5/market/candles?" + urlencode({
-            "instId": _hyphen_symbol(market),
-            "bar": interval,
-            "limit": limit,
-        })
-        doc = _http_json(url)
-        return normalize_klines(v, (doc.get("data") or []))[:limit]
+        return _fetch_okx_rest_pages(market, interval=interval, count=target, start=start, end=end)
 
-    if v == "BYBIT":
-        url = "https://api.bybit.com/v5/market/kline?" + urlencode({
-            "category": "spot",
-            "symbol": _compact_symbol(market),
-            "interval": _bybit_interval(interval),
-            "limit": limit,
-        })
-        doc = _http_json(url)
-        rows = ((doc.get("result") or {}).get("list") or [])
-        return normalize_klines(v, rows)[:limit]
+    if v in {"BYBIT", "BYBIT_PERPETUAL"}:
+        return _fetch_bybit_rest_pages(
+            v,
+            market,
+            interval=interval,
+            count=target,
+            start=start,
+            end=end,
+        )
 
     if v == "KRAKEN":
+        return _fetch_kraken_rest_pages(market, interval=interval, count=target, start=start, end=end)
+
+    return []
+
+
+def _fetch_ccxt_klines(
+    venue: str,
+    market: str,
+    *,
+    interval: str,
+    count: int,
+    start: int | None,
+    end: int | None,
+) -> list[dict[str, Any]]:
+    exchange_id = _ccxt_exchange_id_for_venue(venue)
+    if not exchange_id:
+        return []
+    from ..connectors.ccxt_adapter import CcxtConnector
+
+    since_ms = int(start) * 1000 if start is not None else None
+    end_ms = int(end) * 1000 if end is not None else None
+    conn = CcxtConnector(
+        exchange_id=exchange_id,
+        venue=_canonical_venue(venue),
+        live=False,
+        options=_ccxt_options_for_venue(venue),
+    )
+    rows = conn.get_klines(
+        market,
+        interval=interval,
+        limit=count,
+        since=since_ms,
+        end=end_ms,
+    )
+    return normalize_klines(getattr(conn, "venue", venue), rows)
+
+
+def _connector_get_klines(
+    conn: Any,
+    market: str,
+    *,
+    interval: str,
+    count: int,
+    start: int | None,
+    end: int | None,
+) -> list[Any]:
+    since = int(start) * 1000 if start is not None else None
+    end_ms = int(end) * 1000 if end is not None else None
+    try:
+        return conn.get_klines(
+            market,
+            interval=interval,
+            limit=count,
+            since=since,
+            end=end_ms,
+        )
+    except TypeError:
+        try:
+            return conn.get_klines(
+                market,
+                interval=interval,
+                limit=count,
+                since=since,
+            )
+        except TypeError:
+            return conn.get_klines(market, interval=interval, limit=count)
+
+
+def _fetch_binance_rest_pages(
+    base_url: str,
+    market: str,
+    *,
+    interval: str,
+    count: int,
+    start: int | None,
+    end: int | None,
+) -> list[dict[str, Any]]:
+    page_limit = 1000
+    start_s, end_s = _window_from_count(interval=interval, count=count, start=start, end=end)
+    cursor_ms = start_s * 1000
+    end_ms = end_s * 1000
+    rows: list[dict[str, Any]] = []
+    max_pages = max(1, min(100, (count + page_limit - 1) // page_limit + 5))
+    for _ in range(max_pages):
+        url = base_url + "?" + urlencode({
+            "symbol": _compact_symbol(market),
+            "interval": interval,
+            "startTime": cursor_ms,
+            "endTime": end_ms,
+            "limit": min(page_limit, max(1, count - len(rows))),
+        })
+        batch = normalize_klines("BINANCE", _http_json(url))
+        if not batch:
+            break
+        rows.extend(batch)
+        newest_ms = max(int(row["ts"]) * 1000 for row in batch)
+        next_cursor = newest_ms + (_tf_seconds(interval) * 1000)
+        if next_cursor <= cursor_ms:
+            break
+        cursor_ms = next_cursor
+        rows = _dedupe_sort_tail(rows, limit=count)
+        if len(rows) >= count or cursor_ms > end_ms:
+            break
+    return _dedupe_sort_tail(rows, limit=count)
+
+
+def _fetch_okx_rest_pages(
+    market: str,
+    *,
+    interval: str,
+    count: int,
+    start: int | None,
+    end: int | None,
+) -> list[dict[str, Any]]:
+    page_limit = 300
+    start_s, end_s = _window_from_count(interval=interval, count=count, start=start, end=end)
+    cursor_ms = end_s * 1000
+    floor_ms = start_s * 1000
+    rows: list[dict[str, Any]] = []
+    max_pages = max(1, min(100, (count + page_limit - 1) // page_limit + 5))
+    for _ in range(max_pages):
+        url = "https://www.okx.com/api/v5/market/candles?" + urlencode({
+            "instId": _hyphen_symbol(market),
+            "bar": _okx_interval(interval),
+            "before": cursor_ms,
+            "limit": page_limit,
+        })
+        doc = _http_json(url)
+        batch = normalize_klines("OKX", (doc.get("data") or []))
+        batch = [row for row in batch if floor_ms <= int(row["ts"]) * 1000 <= cursor_ms]
+        if not batch:
+            break
+        rows.extend(batch)
+        oldest_ms = min(int(row["ts"]) * 1000 for row in batch)
+        next_cursor = oldest_ms - 1
+        if next_cursor >= cursor_ms:
+            break
+        cursor_ms = next_cursor
+        rows = _dedupe_sort_tail(rows, limit=count)
+        if len(rows) >= count or cursor_ms < floor_ms:
+            break
+    return _dedupe_sort_tail(rows, limit=count)
+
+
+def _fetch_bybit_rest_pages(
+    venue: str,
+    market: str,
+    *,
+    interval: str,
+    count: int,
+    start: int | None,
+    end: int | None,
+) -> list[dict[str, Any]]:
+    page_limit = 1000
+    start_s, end_s = _window_from_count(interval=interval, count=count, start=start, end=end)
+    cursor_ms = end_s * 1000
+    floor_ms = start_s * 1000
+    rows: list[dict[str, Any]] = []
+    max_pages = max(1, min(100, (count + page_limit - 1) // page_limit + 5))
+    for _ in range(max_pages):
+        url = "https://api.bybit.com/v5/market/kline?" + urlencode({
+            "category": _bybit_category(venue),
+            "symbol": _compact_symbol(market),
+            "interval": _bybit_interval(interval),
+            "start": floor_ms,
+            "end": cursor_ms,
+            "limit": page_limit,
+        })
+        doc = _http_json(url)
+        batch = normalize_klines("BYBIT", ((doc.get("result") or {}).get("list") or []))
+        batch = [row for row in batch if floor_ms <= int(row["ts"]) * 1000 <= cursor_ms]
+        if not batch:
+            break
+        rows.extend(batch)
+        oldest_ms = min(int(row["ts"]) * 1000 for row in batch)
+        next_cursor = oldest_ms - 1
+        if next_cursor >= cursor_ms:
+            break
+        cursor_ms = next_cursor
+        rows = _dedupe_sort_tail(rows, limit=count)
+        if len(rows) >= count or cursor_ms < floor_ms:
+            break
+    return _dedupe_sort_tail(rows, limit=count)
+
+
+def _fetch_kraken_rest_pages(
+    market: str,
+    *,
+    interval: str,
+    count: int,
+    start: int | None,
+    end: int | None,
+) -> list[dict[str, Any]]:
+    start_s, end_s = _window_from_count(interval=interval, count=count, start=start, end=end)
+    cursor_s = start_s
+    rows: list[dict[str, Any]] = []
+    max_pages = max(1, min(100, (count + 719) // 720 + 5))
+    for _ in range(max_pages):
         url = "https://api.kraken.com/0/public/OHLC?" + urlencode({
             "pair": _kraken_pair(market),
             "interval": _kraken_interval(interval),
+            "since": cursor_s,
         })
         doc = _http_json(url)
         result = doc.get("result") or {}
-        rows: list[Any] = []
+        raw_rows: list[Any] = []
+        next_cursor = None
         for key, value in result.items():
-            if key != "last" and isinstance(value, list):
-                rows = value
-                break
-        return normalize_klines(v, rows)[-limit:]
-
-    return []
+            if key == "last":
+                try:
+                    next_cursor = int(value)
+                except Exception:
+                    next_cursor = None
+            elif isinstance(value, list):
+                raw_rows = value
+        batch = [
+            row for row in normalize_klines("KRAKEN", raw_rows)
+            if start_s <= int(row["ts"]) <= end_s
+        ]
+        if not batch:
+            break
+        rows.extend(batch)
+        newest = max(int(row["ts"]) for row in batch)
+        cursor_next = max(newest + _tf_seconds(interval), int(next_cursor or 0))
+        if cursor_next <= cursor_s:
+            break
+        cursor_s = cursor_next
+        rows = _dedupe_sort_tail(rows, limit=count)
+        if len(rows) >= count or cursor_s > end_s:
+            break
+    return _dedupe_sort_tail(rows, limit=count)
 
 
 def _fetch_public_rest_ticker(venue: str, market: str) -> dict[str, Any]:
@@ -721,7 +1133,9 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
                    registry: Any | None = None,
                    account_cfg: dict[str, Any] | None = None,
                    allow_mock: bool | None = None,
-                   config_like: Any | None = None) -> list[dict[str, Any]]:
+                   config_like: Any | None = None,
+                   start: int | None = None,
+                   end: int | None = None) -> list[dict[str, Any]]:
     """Fetch candles for ``market``.
 
     Resolution order:
@@ -744,6 +1158,8 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
             interval=interval,
             count=count,
             config_like=config_like,
+            start=start,
+            end=end,
         )
         if rows:
             return rows
@@ -766,15 +1182,30 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
 
     if conn is not None:
         try:
-            rows = conn.get_klines(market, interval=interval, limit=count)
+            rows = _connector_get_klines(
+                conn,
+                market,
+                interval=interval,
+                count=count,
+                start=start,
+                end=end,
+            )
             norm = normalize_klines(getattr(conn, "venue", venue), rows)
             if norm:
+                if start is not None or end is not None:
+                    lo, hi = _window_from_count(
+                        interval=interval,
+                        count=count,
+                        start=start,
+                        end=end,
+                    )
+                    norm = [row for row in norm if lo <= int(row["ts"]) <= hi]
                 env = live_envelope(
                     source=(getattr(conn, "venue", venue) or venue).lower(),
                     venue=(getattr(conn, "venue", venue) or venue).lower(),
                     connector_id=getattr(conn, "connector_id", ""),
                 )
-                return tag_list_envelope(norm[:count], env)
+                return tag_list_envelope(_dedupe_sort_tail(norm, limit=count), env)
         except NotImplementedError as exc:
             err = f"NotImplementedError: {exc}"
         except Exception as exc:
@@ -785,11 +1216,15 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
             continue
         market_id = _market_for_venue(market, candidate)
         try:
+            kwargs: dict[str, Any] = {"interval": interval, "count": count}
+            if start is not None:
+                kwargs["start"] = start
+            if end is not None:
+                kwargs["end"] = end
             norm = _fetch_public_rest_klines(
                 candidate,
                 market_id,
-                interval=interval,
-                count=count,
+                **kwargs,
             )
             if norm:
                 env = live_envelope(
@@ -797,7 +1232,7 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
                     venue=candidate.lower(),
                     connector_id="public_rest",
                 )
-                return tag_list_envelope(norm[:count], env)
+                return tag_list_envelope(_dedupe_sort_tail(norm, limit=count), env)
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
 
@@ -805,18 +1240,52 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
             from ..connectors.registry import build_connector
 
             c = build_connector({"venue": candidate.lower(), "kind": "cex", "live": False})
-            rows = c.get_klines(market_id, interval=interval, limit=count)
+            rows = _connector_get_klines(
+                c,
+                market_id,
+                interval=interval,
+                count=count,
+                start=start,
+                end=end,
+            )
             norm = normalize_klines(getattr(c, "venue", candidate), rows)
             if norm:
+                if start is not None or end is not None:
+                    lo, hi = _window_from_count(
+                        interval=interval,
+                        count=count,
+                        start=start,
+                        end=end,
+                    )
+                    norm = [row for row in norm if lo <= int(row["ts"]) <= hi]
                 source = (getattr(c, "venue", candidate) or candidate).lower()
                 env = live_envelope(
                     source=source,
                     venue=source,
                     connector_id=getattr(c, "connector_id", ""),
                 )
-                return tag_list_envelope(norm[:count], env)
+                return tag_list_envelope(_dedupe_sort_tail(norm, limit=count), env)
         except NotImplementedError as exc:
             err = f"NotImplementedError: {exc}"
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+
+        try:
+            norm = _fetch_ccxt_klines(
+                candidate,
+                market_id,
+                interval=interval,
+                count=count,
+                start=start,
+                end=end,
+            )
+            if norm:
+                env = live_envelope(
+                    source=f"{candidate.lower()}_ccxt",
+                    venue=candidate.lower(),
+                    connector_id="ccxt",
+                )
+                return tag_list_envelope(_dedupe_sort_tail(norm, limit=count), env)
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
 

@@ -567,11 +567,11 @@ def build_data_api_registry() -> DataApiRegistry:
         "wallet_provider",
         "agentic_wallet",
         "agentic_wallets",
-        "xagt",
-        "xagt_agent_plugin",
-        "xagent",
-        "x_agent",
-        "xagt_onchain",
+        "byreal",
+        "byreal_cli",
+        "byreal_onchain",
+        "byreal_solana",
+        "byreal_dex",
     ):
         registry.register_provider_alias(alias, "wallet")
     for alias in (
@@ -594,10 +594,10 @@ def _wallet_specs() -> list[DataActionSpec]:
             description=(
                 "List configured wallet bindings and wallet-backed market data "
                 "sources without exposing secrets. Use this before claiming "
-                "XAgent/xagt_agent_plugin/agentic wallet or on-chain meme/DEX "
+                "Byreal/byreal/agentic wallet or on-chain meme/DEX "
                 "data is unavailable."
             ),
-            tags=("wallet", "onchain", "catalog", "xagt", "xagent", "dex", "meme", "token"),
+            tags=("wallet", "onchain", "catalog", "byreal", "solana", "dex", "meme", "token"),
             output_kind="json",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=_wallet_list_sources,
@@ -608,17 +608,17 @@ def _wallet_specs() -> list[DataActionSpec]:
             title="Wallet provider readiness",
             description=(
                 "Return wallet provider dependency readiness and static "
-                "read/write capabilities for OnchainOS, XAgent/xagt, and other "
+                "read/write capabilities for OnchainOS, Byreal, and other "
                 "wallet-backed on-chain data sources."
             ),
-            tags=("wallet", "onchain", "catalog", "xagt", "xagent", "dex", "meme", "token"),
+            tags=("wallet", "onchain", "catalog", "byreal", "solana", "dex", "meme", "token"),
             output_kind="json",
             input_schema={
                 "type": "object",
                 "properties": {
                     "provider": {
                         "type": "string",
-                        "description": "Optional wallet provider to inspect, e.g. xagt, xagt-plugin, okx_os.",
+                        "description": "Optional wallet provider to inspect, e.g. byreal, okx_os, bitget.",
                     },
                     "preferred_provider": {
                         "type": "string",
@@ -644,8 +644,8 @@ def _wallet_specs() -> list[DataActionSpec]:
                 "onchain",
                 "catalog",
                 "capabilities",
-                "xagt",
-                "xagent",
+                "byreal",
+                "solana",
                 "dex",
                 "meme",
                 "token",
@@ -671,7 +671,7 @@ def _wallet_specs() -> list[DataActionSpec]:
                         "type": "string",
                         "description": (
                             "Optional wallet provider preference from the operator, "
-                            "for example xagt_agent_plugin, xagt_onchain, okx_os, or bitget."
+                            "for example byreal, byreal_onchain, okx_os, or bitget."
                         ),
                     },
                 },
@@ -702,13 +702,137 @@ def _wallet_specs() -> list[DataActionSpec]:
                         "type": "string",
                         "description": (
                             "Optional wallet provider preference from the operator, "
-                            "for example xagt_agent_plugin, xagt_onchain, okx_os, or bitget."
+                            "for example byreal, byreal_onchain, okx_os, or bitget."
                         ),
                     },
                 },
                 "additionalProperties": False,
             },
             handler=_wallet_meme_strategy_guide,
+        ),
+        DataActionSpec(
+            provider="wallet",
+            action="pools",
+            title="List wallet DEX pools",
+            description=(
+                "List on-chain CLMM/DEX liquidity pools from a configured "
+                "wallet provider (e.g. Byreal on Solana), sortable by TVL, "
+                "24h volume, fees, or APR. Use this to discover concrete pool "
+                "addresses for meme/on-chain strategy markets instead of "
+                "shelling out to a provider CLI."
+            ),
+            tags=(
+                "wallet",
+                "onchain",
+                "pools",
+                "byreal",
+                "solana",
+                "dex",
+                "meme",
+                "clmm",
+                "discovery",
+            ),
+            output_kind="json",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "wallet_id": {"type": "string"},
+                    "provider": {
+                        "type": "string",
+                        "description": "Wallet provider id, e.g. byreal.",
+                    },
+                    "sort_field": {
+                        "type": "string",
+                        "default": "tvl",
+                        "description": "tvl | volumeUsd24h | feeUsd24h | apr24h",
+                    },
+                    "sort_type": {
+                        "type": "string",
+                        "default": "desc",
+                        "description": "asc | desc",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional provider pool-category filter.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=_wallet_pools,
+        ),
+        DataActionSpec(
+            provider="wallet",
+            action="tokens",
+            title="List wallet DEX tokens",
+            description=(
+                "List tokens tradable on a configured wallet provider's DEX "
+                "(e.g. Byreal on Solana), sortable by 24h volume and optionally "
+                "filtered by a name/symbol/contract search. Use for meme/token "
+                "discovery before selecting a market."
+            ),
+            tags=(
+                "wallet",
+                "onchain",
+                "tokens",
+                "byreal",
+                "solana",
+                "dex",
+                "meme",
+                "discovery",
+            ),
+            output_kind="json",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "wallet_id": {"type": "string"},
+                    "provider": {
+                        "type": "string",
+                        "description": "Wallet provider id, e.g. byreal.",
+                    },
+                    "search": {
+                        "type": "string",
+                        "description": "Optional name/symbol/contract search.",
+                    },
+                    "sort_field": {"type": "string", "default": "volumeUsd24h"},
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=_wallet_tokens,
+        ),
+        DataActionSpec(
+            provider="wallet",
+            action="overview",
+            title="Wallet DEX overview",
+            description=(
+                "Return global DEX statistics (TVL, 24h volume, fees) from a "
+                "configured wallet provider such as Byreal."
+            ),
+            tags=("wallet", "onchain", "overview", "byreal", "solana", "dex"),
+            output_kind="json",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "wallet_id": {"type": "string"},
+                    "provider": {
+                        "type": "string",
+                        "description": "Wallet provider id, e.g. byreal.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            handler=_wallet_overview,
         ),
         DataActionSpec(
             provider="wallet",
@@ -973,7 +1097,7 @@ def _wallet_capability_catalog(context: DataApiContext, args: dict[str, Any]) ->
         },
         "rules": [
             "Do not infer wallet-backed on-chain data from connector_list; use data_api wallet/onchainos first.",
-            "Choose the data route from installed/logged-in wallet bindings; do not hardcode OKX/XAgent/GOAT.",
+            "Choose the data route from installed/logged-in wallet bindings; do not hardcode OKX/Byreal/GOAT.",
             "Do not repeat this catalog call with larger limits; for read-only queries use selected_route.call, and reserve wallet.meme_strategy_guide for strategy authoring.",
             wallet_route_note,
         ],
@@ -1237,7 +1361,7 @@ def _wallet_data_selection(
         "routing_rules": [
             "Prefer a ready wallet binding that exposes chain:token market data for meme tokens.",
             "If the operator names a wallet provider, prefer that provider and report when it is not ready instead of silently substituting another wallet.",
-            "Use OKX OnchainOS/XAgent for discovery, security, holders, traders, and memepump feeds when logged in.",
+            "Use OKX OnchainOS for discovery, security, holders, traders, and memepump feeds and Byreal for Solana CLMM pool/token/OHLCV data when installed.",
             "Use generic ONCHAIN candles as the fallback when no richer wallet data source is installed/logged in.",
             "Execution remains gated; this selection is for read-only data and sizing evidence.",
         ],
@@ -1288,7 +1412,7 @@ def _wallet_market_data_routes(
 
 def _wallet_route_priority(provider: str, market_format: str) -> int:
     provider_l = provider.lower()
-    if provider_l == "xagt_agent_plugin":
+    if provider_l == "byreal":
         return 10
     if provider_l == "okx_os":
         return 20
@@ -1305,7 +1429,9 @@ def _wallet_route_priority(provider: str, market_format: str) -> int:
 
 def _route_use_cases(provider: str, market_format: str) -> list[str]:
     provider_l = provider.lower()
-    if provider_l in {"okx_os", "xagt_agent_plugin"}:
+    if provider_l == "byreal":
+        return ["Solana CLMM pool discovery", "chain-native pool OHLCV", "token/TVL/APR stats", "wallet balance/quote checks"]
+    if provider_l == "okx_os":
         return ["meme discovery", "token risk enrichment", "chain-native OHLCV", "wallet balance/quote checks"]
     if provider_l == "bitget":
         return ["token OHLCV", "wallet quote/balance checks", "secondary meme evidence"]
@@ -1338,12 +1464,11 @@ def _preferred_wallet_provider(args: dict[str, Any]) -> str:
         .replace(" ", "_")
     )
     common_aliases = {
-        "xagt": "xagt_agent_plugin",
-        "xagt_plugin": "xagt_agent_plugin",
-        "xagt_agent_plugin": "xagt_agent_plugin",
-        "xagt_onchain": "xagt_agent_plugin",
-        "xagent": "xagt_agent_plugin",
-        "x_agent": "xagt_agent_plugin",
+        "byreal": "byreal",
+        "byreal_cli": "byreal",
+        "byreal_onchain": "byreal",
+        "byreal_solana": "byreal",
+        "byreal_dex": "byreal",
         "okx": "okx_os",
         "okx_web3": "okx_os",
         "okx_onchain": "okx_os",
@@ -1440,7 +1565,7 @@ def _wallet_install_recommendations(
     provider_rows = {str(row.get("id") or "").lower(): row for row in providers}
     priority = [
         ("okx_os", "Best default for meme/token discovery, OnchainOS reads, security, holders, traders, and OHLCV."),
-        ("xagt_agent_plugin", "Useful when the logged-in XAgent wallet already carries OnchainOS-backed data."),
+        ("byreal", "Best for Solana CLMM pool/token discovery and chain-native pool OHLCV via byreal-cli."),
         ("bitget", "Useful secondary wallet market-data and quote/balance source."),
         ("binance_agentic", "Useful for Binance Alpha symbols; not enough alone for arbitrary contract memes."),
         ("coinbase", "Useful for Coinbase/Base wallet/product data; weaker for long-tail meme discovery."),
@@ -1545,11 +1670,13 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
         "next_required_action": (
             "Read strategy_author via skill_view, execute only the bounded "
             "native evidence sequence below, then call "
-            "strategy_generate_proposal with files containing Nerya SDK "
-            "strategy code. Do not use shell, public web search, raw file "
-            "reads, wallet.readiness/list_sources, or another "
-            "capability_catalog call to rediscover sources already listed "
-            f"here. {wallet_route_note}"
+            "strategy_draft_proposal to scaffold a draft and author the Nerya "
+            "SDK strategy code by editing the staged after/strategies files "
+            "with edit_file / write_file, validate with strategy_validate, and "
+            "finish with strategy_submit_proposal. Do not use shell, public "
+            "web search, raw file reads, wallet.readiness/list_sources, or "
+            "another capability_catalog call to rediscover sources already "
+            f"listed here. {wallet_route_note}"
             + (
                 f" The operator requested wallet provider {preferred_provider}; "
                 "do not silently substitute a different wallet route."
@@ -1559,7 +1686,7 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
         ),
         "authoring_contract": {
             "skill": "strategy_author",
-            "implementation": "write package-relative files such as main.py and strategy.md",
+            "implementation": "scaffold via strategy_draft_proposal, then edit the staged after/strategies files such as main.py and strategy.md with edit_file/write_file",
             "sdk": ["StrategyContext", "StrategyResult", "StrategyAgentTask"],
             "sdk_import": (
                 "from nerya.strategies import StrategyContext, "
@@ -1570,7 +1697,7 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
                 "import SDK classes from nerya.strategies.result, "
                 "nerya.strategies.context, or nerya.strategy."
             ),
-            "proposal_tool_role": "package and validate the supplied files, not generate the core strategy",
+            "proposal_tool_role": "strategy_draft_proposal scaffolds the draft and strategy_submit_proposal validates + queues it; you author the core strategy by editing the staged files",
             "prompt_contract": (
                 "Use exact provider/action names only for the evidence tool "
                 "calls. In generated StrategyAgentTask prompts and "
@@ -1606,21 +1733,38 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
                 "call": historical_ohlcv.get("call", {}),
                 "must_feed_strategy_markets": (
                     "If this call returns ok with a concrete `market` such as "
-                    "XAGT_ONCHAIN:solana:<token_contract>, pass that exact value "
-                    "as strategy_generate_proposal.markets. Do not fall back to "
-                    "the generic XAGT_ONCHAIN:solana universe route for a direct "
+                    "BYREAL_ONCHAIN:solana:<pool_address>, pass that exact value "
+                    "as strategy_draft_proposal.markets. Do not fall back to "
+                    "the generic BYREAL_ONCHAIN:solana universe route for a direct "
                     "generate-and-backtest request."
                 ),
             },
             {
-                "step": "author_sdk_strategy_package",
-                "tool": "strategy_generate_proposal",
+                "step": "scaffold_strategy_draft",
+                "tool": "strategy_draft_proposal",
                 "call_shape": {
-                    "files": {
-                        "main.py": "Nerya SDK strategy using StrategyContext/StrategyAgentTask",
-                        "strategy.md": "evidence, replay gap, and operator approval notes",
-                    }
+                    "strategy_id": "<lowercase id>",
+                    "markets": ["<chain:token from market_data>"],
+                    "accounts": ["<paper account>"],
                 },
+            },
+            {
+                "step": "author_sdk_strategy_package",
+                "tool": "edit_file",
+                "call_shape": {
+                    "path": "<proposal_paths.main_path>",
+                    "note": (
+                        "Author main.py + strategy.md in the staged "
+                        "after/strategies tree with Nerya SDK code "
+                        "(StrategyContext/StrategyAgentTask) plus evidence, "
+                        "replay gap, and operator approval notes."
+                    ),
+                },
+            },
+            {
+                "step": "submit_for_review",
+                "tool": "strategy_submit_proposal",
+                "call_shape": {"proposal_id": "<from strategy_draft_proposal>"},
             },
         ],
         "selected_route": selected_route,
@@ -1636,7 +1780,7 @@ def _wallet_meme_strategy_guide(context: DataApiContext, args: dict[str, Any]) -
             "If the bounded market_data call succeeds for a selected candidate, use that exact chain:token market in strategy.yml so standard short-window replay can run.",
             "candidate tokens come from onchainos token_hot_tokens or memepump_tokens, not a CEX ticker substitution.",
             "token risk is checked with token_report plus security_token_scan before strategy generation.",
-            "historical replay uses market_data get_candles on OKX_ONCHAIN/XAGT_ONCHAIN/BITGET_ONCHAIN/ONCHAIN with chain:token format.",
+            "historical replay uses market_data get_candles on OKX_ONCHAIN/BYREAL_ONCHAIN/BITGET_ONCHAIN/ONCHAIN with chain:token format.",
             "live execution is never started from data_api; it must flow through strategy/trading submit intent, RiskGate, ApprovalGate, and runtime.live_trading_enabled.",
         ],
         "preferred_read_actions": [
@@ -1687,6 +1831,31 @@ def _wallet_global_actions() -> list[dict[str, Any]]:
                 "provider": "wallet",
                 "action": "meme_strategy_guide",
             },
+        },
+        {
+            "action": "wallet.pools",
+            "read_only": True,
+            "call": {
+                "op": "call",
+                "provider": "wallet",
+                "action": "pools",
+                "args": {"sort_field": "volumeUsd24h", "limit": 20},
+            },
+        },
+        {
+            "action": "wallet.tokens",
+            "read_only": True,
+            "call": {
+                "op": "call",
+                "provider": "wallet",
+                "action": "tokens",
+                "args": {"sort_field": "volumeUsd24h", "limit": 20},
+            },
+        },
+        {
+            "action": "wallet.overview",
+            "read_only": True,
+            "call": {"op": "call", "provider": "wallet", "action": "overview"},
         },
     ]
 
@@ -2029,6 +2198,68 @@ def _wallet_quote(context: DataApiContext, args: dict[str, Any]) -> Any:
         amount_in=amount_in,
         slippage_bps=slippage_bps,
     )
+
+
+def _wallet_pools(context: DataApiContext, args: dict[str, Any]) -> Any:
+    provider, summary = _resolve_wallet_provider(context, args)
+    fn = getattr(provider, "list_pools", None)
+    if not callable(fn):
+        raise DataApiError(
+            f"wallet provider {summary.get('provider')!r} does not expose pool listing",
+            kind="provider_error",
+            detail={"provider": summary.get("provider")},
+            retryable=False,
+        )
+    sort_field = str(args.get("sort_field") or "tvl")
+    sort_type = str(args.get("sort_type") or "desc")
+    limit = _int_arg(args, "limit", default=20, minimum=1, maximum=100)
+    category = str(args.get("category") or "")
+    pools = fn(sort_field=sort_field, sort_type=sort_type, limit=limit, category=category)
+    return {
+        "provider": summary.get("provider"),
+        "wallet_id": summary.get("wallet_id"),
+        "sort_field": sort_field,
+        "sort_type": sort_type,
+        "count": len(pools),
+        "pools": pools,
+    }
+
+
+def _wallet_tokens(context: DataApiContext, args: dict[str, Any]) -> Any:
+    provider, summary = _resolve_wallet_provider(context, args)
+    fn = getattr(provider, "list_tokens", None)
+    if not callable(fn):
+        raise DataApiError(
+            f"wallet provider {summary.get('provider')!r} does not expose token listing",
+            kind="provider_error",
+            detail={"provider": summary.get("provider")},
+            retryable=False,
+        )
+    search = str(args.get("search") or "")
+    sort_field = str(args.get("sort_field") or "volumeUsd24h")
+    limit = _int_arg(args, "limit", default=20, minimum=1, maximum=100)
+    tokens = fn(search=search, sort_field=sort_field, limit=limit)
+    return {
+        "provider": summary.get("provider"),
+        "wallet_id": summary.get("wallet_id"),
+        "search": search,
+        "sort_field": sort_field,
+        "count": len(tokens),
+        "tokens": tokens,
+    }
+
+
+def _wallet_overview(context: DataApiContext, args: dict[str, Any]) -> Any:
+    provider, summary = _resolve_wallet_provider(context, args)
+    fn = getattr(provider, "overview", None)
+    if not callable(fn):
+        raise DataApiError(
+            f"wallet provider {summary.get('provider')!r} does not expose an overview",
+            kind="provider_error",
+            detail={"provider": summary.get("provider")},
+            retryable=False,
+        )
+    return fn()
 
 
 def _resolve_wallet_provider(context: DataApiContext, args: dict[str, Any]) -> tuple[Any, dict[str, Any]]:

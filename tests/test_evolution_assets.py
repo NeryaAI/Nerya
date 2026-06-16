@@ -31,6 +31,11 @@ def test_asset_candidate_promote_writes_gene(tmp_path):
         evidence_refs=["signal:sig_1"],
     )
 
+    assert candidate["safe_to_promote"] is True
+    assert candidate["promotion_gates"]["can_promote"] is True
+    assert candidate["promotion_gates"]["review_only_until_promoted"] is True
+    assert candidate["promotion_gates"]["selector_eligible"] is False
+
     out = promote_candidate(paths, candidate["id"])
 
     assert out["ok"] is True
@@ -52,3 +57,24 @@ def test_asset_candidate_reject_removes_from_pending(tmp_path):
 
     assert out["ok"] is True
     assert list_candidates(paths) == []
+
+
+def test_asset_candidate_without_evidence_is_blocked_from_promotion(tmp_path):
+    paths = WorkspacePaths(tmp_path)
+    candidate = create_candidate(
+        paths,
+        kind="capsule",
+        summary="no evidence capsule",
+        payload={"summary": "capsule"},
+        evidence_refs=[],
+    )
+
+    assert candidate["safe_to_promote"] is False
+    assert "missing_evidence_refs" in candidate["blocked_reasons"]
+    assert candidate["promotion_gates"]["selector_eligible"] is False
+
+    out = promote_candidate(paths, candidate["id"])
+
+    assert out["ok"] is False
+    assert out["reason"] == "blocked"
+    assert "missing_evidence_refs" in out["blocked_reasons"]

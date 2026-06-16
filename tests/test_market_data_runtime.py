@@ -230,6 +230,272 @@ def test_fetch_candles_routes_equity_aliases_to_yahoo(tmp_path, monkeypatch) -> 
     }
 
 
+def test_bybit_perpetual_rest_klines_paginates_backward(monkeypatch) -> None:
+    from urllib.parse import parse_qs, urlparse
+
+    from nerya.data import candles as candles_mod
+
+    calls: list[dict[str, str]] = []
+    hour_ms = 3_600_000
+    batches = [
+        [
+            [str(4 * hour_ms), "104", "105", "103", "104.5", "10"],
+            [str(3 * hour_ms), "103", "104", "102", "103.5", "10"],
+        ],
+        [
+            [str(2 * hour_ms), "102", "103", "101", "102.5", "10"],
+            [str(1 * hour_ms), "101", "102", "100", "101.5", "10"],
+        ],
+    ]
+
+    def fake_http_json(url: str):
+        qs = parse_qs(urlparse(url).query)
+        calls.append({key: values[0] for key, values in qs.items()})
+        rows = batches[len(calls) - 1] if len(calls) <= len(batches) else []
+        return {"result": {"list": rows}}
+
+    monkeypatch.setattr(candles_mod, "_http_json", fake_http_json)
+
+    rows = candles_mod._fetch_public_rest_klines(
+        "BYBIT_PERPETUAL",
+        "BYBIT_PERPETUAL:SOLUSDT",
+        interval="1h",
+        count=4,
+        start=0,
+        end=5 * 3600,
+    )
+
+    assert [row["ts"] for row in rows] == [3600, 7200, 10800, 14400]
+    assert calls[0]["category"] == "linear"
+    assert int(calls[1]["end"]) < int(calls[0]["end"])
+
+
+def test_ccxt_connector_fetches_ohlcv_pages_with_since() -> None:
+    from nerya.connectors.ccxt_adapter import CcxtConnector
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[dict[str, int]] = []
+
+        def fetch_ohlcv(self, sym, *, timeframe, since, limit):
+            self.calls.append({"since": int(since), "limit": int(limit)})
+            if len(self.calls) == 1:
+                return [
+                    [0, 100, 101, 99, 100.5, 10],
+                    [60_000, 101, 102, 100, 101.5, 10],
+                ]
+            if len(self.calls) == 2:
+                return [
+                    [120_000, 102, 103, 101, 102.5, 10],
+                    [180_000, 103, 104, 102, 103.5, 10],
+                ]
+            return []
+
+    conn = CcxtConnector(exchange_id="binance", options={"ohlcv_page_limit": 2})
+    conn._client = FakeClient()
+
+    rows = conn.get_klines("BTC/USDT", interval="1m", limit=4, since=0)
+
+    assert [row[0] for row in rows] == [0, 60_000, 120_000, 180_000]
+    assert conn._client.calls == [
+        {"since": 0, "limit": 2},
+        {"since": 120_000, "limit": 2},
+    ]
+
+
+def test_ccxt_connector_uses_auto_pagination_when_available() -> None:
+    from nerya.connectors.ccxt_adapter import CcxtConnector
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def fetch_ohlcv(self, sym, *, timeframe, since, limit, params=None):
+            self.calls.append(
+                {
+                    "sym": sym,
+                    "timeframe": timeframe,
+                    "since": since,
+                    "limit": limit,
+                    "params": dict(params or {}),
+                }
+            )
+            if params and params.get("paginate"):
+                return [
+                    [0, 100, 101, 99, 100.5, 10],
+                    [60_000, 101, 102, 100, 101.5, 10],
+                    [120_000, 102, 103, 101, 102.5, 10],
+                    [180_000, 103, 104, 102, 103.5, 10],
+                ]
+            return []
+
+    conn = CcxtConnector(
+        exchange_id="binance",
+        options={"ohlcv_page_limit": 2, "ohlcv_pagination_calls": 2},
+    )
+    conn._client = FakeClient()
+
+    rows = conn.get_klines("BTC/USDT", interval="1m", limit=4, since=0, end=180_000)
+
+    assert [row[0] for row in rows] == [0, 60_000, 120_000, 180_000]
+    assert conn._client.calls[0]["params"]["paginate"] is True
+    assert conn._client.calls[0]["params"]["paginationCalls"] == 2
+    assert conn._client.calls[0]["params"]["maxEntriesPerRequest"] == 2
+
+
+def test_ccxt_connector_falls_back_when_auto_pagination_rejected() -> None:
+    from nerya.connectors.ccxt_adapter import CcxtConnector
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def fetch_ohlcv(self, sym, *, timeframe, since, limit, params=None):
+            self.calls.append(
+                {
+                    "sym": sym,
+                    "timeframe": timeframe,
+                    "since": since,
+                    "limit": limit,
+                    "params": dict(params or {}),
+                }
+            )
+            if params and params.get("paginate"):
+                raise RuntimeError("exchange rejected automatic pagination params")
+            if len(self.calls) == 2:
+                return [
+                    [0, 100, 101, 99, 100.5, 10],
+                    [60_000, 101, 102, 100, 101.5, 10],
+                ]
+            if len(self.calls) == 3:
+                return [
+                    [120_000, 102, 103, 101, 102.5, 10],
+                    [180_000, 103, 104, 102, 103.5, 10],
+                ]
+            return []
+
+    conn = CcxtConnector(
+        exchange_id="gate",
+        options={"ohlcv_page_limit": 2, "ohlcv_pagination_calls": 2},
+    )
+    conn._client = FakeClient()
+
+    rows = conn.get_klines("BTC/USDT", interval="1m", limit=4, since=0)
+
+    assert [row[0] for row in rows] == [0, 60_000, 120_000, 180_000]
+    assert conn._client.calls[0]["params"]["paginate"] is True
+    assert conn._client.calls[1]["params"] == {}
+    assert conn._client.calls[2]["since"] == 120_000
+
+
+def test_fetch_candles_tries_direct_ccxt_for_supported_explicit_venue(monkeypatch) -> None:
+    from nerya.connectors import ccxt_adapter
+    from nerya.data import candles as candles_mod
+
+    seen: dict[str, object] = {}
+
+    def fake_public_rest_klines(*_args, **_kwargs):
+        return []
+
+    class FakeCcxtConnector:
+        venue = "PHEMEX"
+
+        def __init__(self, *, exchange_id, venue, live, options):
+            seen["init"] = {
+                "exchange_id": exchange_id,
+                "venue": venue,
+                "live": live,
+                "options": options,
+            }
+
+        def get_klines(self, market, *, interval, limit, since=None, end=None):
+            seen["call"] = {
+                "market": market,
+                "interval": interval,
+                "limit": limit,
+                "since": since,
+                "end": end,
+            }
+            start_ms = 1_700_000_000_000
+            return [
+                [start_ms, 1, 2, 0.5, 1.5, 10],
+                [start_ms + 60_000, 2, 3, 1.5, 2.5, 11],
+            ]
+
+    monkeypatch.setattr(candles_mod, "_fetch_public_rest_klines", fake_public_rest_klines)
+    monkeypatch.setattr(ccxt_adapter, "supported_exchanges", lambda: ["phemex"])
+    monkeypatch.setattr(ccxt_adapter, "CcxtConnector", FakeCcxtConnector)
+
+    rows = fetch_candles(
+        "PHEMEX:BTCUSDT",
+        count=2,
+        interval="1m",
+        allow_mock=False,
+        start=1_700_000_000,
+        end=1_700_000_060,
+    )
+
+    assert seen["init"] == {
+        "exchange_id": "phemex",
+        "venue": "PHEMEX",
+        "live": False,
+        "options": {},
+    }
+    assert seen["call"] == {
+        "market": "PHEMEX:BTCUSDT",
+        "interval": "1m",
+        "limit": 2,
+        "since": 1_700_000_000_000,
+        "end": 1_700_000_060_000,
+    }
+    assert [row["ts"] for row in rows] == [1_700_000_000, 1_700_000_060]
+    assert rows[0]["_envelope"]["connector_id"] == "ccxt"
+
+
+def test_explicit_venue_does_not_fallback_to_other_public_sources(tmp_path, monkeypatch) -> None:
+    cfg = _config(tmp_path)
+    seen_public: list[str] = []
+    seen_connector: list[str] = []
+
+    def fake_public_rest_klines(venue, market, *, interval, count, **_kwargs):
+        del market, interval, count
+        seen_public.append(str(venue).upper())
+        if str(venue).upper() == "BINANCE":
+            return [
+                {"ts": 1_777_000_000, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}
+            ]
+        return []
+
+    class FakeGate:
+        venue = "GATE"
+        connector_id = "fake_gate"
+
+        def get_klines(self, market, *, interval, limit, since=None):
+            del market, interval, limit, since
+            seen_connector.append("GATE")
+            return [[1_777_000_000_000, 100, 101, 99, 100.5, 10]]
+
+    def fake_build_connector(cfg, **_kwargs):
+        assert cfg["venue"] == "gate"
+        return FakeGate()
+
+    monkeypatch.setattr("nerya.data.candles._fetch_public_rest_klines", fake_public_rest_klines)
+    monkeypatch.setattr("nerya.connectors.registry.build_connector", fake_build_connector)
+
+    rows = fetch_candles(
+        "GATE:BTCUSDT",
+        count=1,
+        interval="1h",
+        allow_mock=False,
+        config_like=cfg,
+    )
+
+    assert seen_public == ["GATE"]
+    assert seen_connector == ["GATE"]
+    assert rows[0]["close"] == 100.5
+    assert rows[0]["_envelope"]["venue"] == "gate"
+
+
 def test_native_market_data_returns_candles_and_features(tmp_path) -> None:
     cfg = _config(tmp_path)
 
@@ -385,7 +651,7 @@ def test_wallet_market_data_sources_are_discovered_for_all_supported_wallets(tmp
             "bitget_main": {"provider": "bitget", "config": {}},
             "binance_web3_main": {"provider": "binance_agentic", "config": {}},
             "coinbase_main": {"provider": "coinbase", "config": {}},
-            "xagt_main": {"provider": "xagt_agent_plugin", "config": {}},
+            "byreal_main": {"provider": "byreal", "config": {}},
             "self_main": {"provider": "self_custody", "config": {}},
         }
     }
@@ -398,7 +664,7 @@ def test_wallet_market_data_sources_are_discovered_for_all_supported_wallets(tmp
         "BITGET_ONCHAIN",
         "BINANCE_ALPHA",
         "COINBASE_WALLET",
-        "XAGT_ONCHAIN",
+        "BYREAL_ONCHAIN",
     } <= venues
     assert "SELF_CUSTODY_ONCHAIN" not in venues
 
@@ -442,16 +708,16 @@ def test_wallet_provider_catalog_declares_verified_login_flows() -> None:
     assert "npx awal@2.10.0 auth login <email> --json" in coinbase_flows["coinbase_email_otp"]["commands"]
     assert "npx awal@2.10.0 auth verify <otp> --json" in coinbase_flows["coinbase_email_otp"]["commands"]
 
-    xagt_flows = {row["id"]: row for row in providers["xagt_agent_plugin"]["auth_flows"]}
-    assert xagt_flows["xagt_device_login"]["kind"] == "device_code"
-    assert providers["xagt_agent_plugin"]["install_command"] == (
-        "npm:@xagt/agent-plugin#version=0.4.0&entry=dist/cli.js"
+    byreal_flows = {row["id"]: row for row in providers["byreal"]["auth_flows"]}
+    assert byreal_flows["byreal_local_keypair"]["kind"] == "local_keypair"
+    assert providers["byreal"]["install_command"] == (
+        "npm:@byreal-io/byreal-cli#version=0.3.6&entry=dist/index.cjs"
     )
-    assert "xagt-plugin login --no-browser" in xagt_flows["xagt_device_login"]["commands"]
-    xagt_sources = {
-        row["canonical"] for row in providers["xagt_agent_plugin"]["market_data_sources"]
+    assert "npm install -g @byreal-io/byreal-cli" in byreal_flows["byreal_local_keypair"]["commands"]
+    byreal_sources = {
+        row["canonical"] for row in providers["byreal"]["market_data_sources"]
     }
-    assert "XAGT_ONCHAIN" in xagt_sources
+    assert "BYREAL_ONCHAIN" in byreal_sources
 
 
 def test_wallet_credential_schema_returns_auth_flows(tmp_path) -> None:
@@ -577,7 +843,7 @@ def test_wallet_auth_start_binance_qr_creates_binding_for_market_data(
     assert binding["provider"] == "binance_agentic"
 
 
-def test_wallet_auth_start_xagt_device_login_returns_url_and_pending_binding(
+def test_wallet_auth_start_byreal_requires_no_login_and_creates_binding(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -589,111 +855,46 @@ def test_wallet_auth_start_xagt_device_login_returns_url_and_pending_binding(
         ("POST", "/wallet/auth/start")
     ]
     client = SimpleNamespace(config=cfg)
-    pkg_root = tmp_path / "skills" / "_node" / "xagt__agent-plugin" / "node_modules" / "@xagt" / "agent-plugin"
+    pkg_root = tmp_path / "skills" / "_node" / "byreal-io__byreal-cli"
+    cli_path = pkg_root / "node_modules" / ".bin" / "byreal-cli"
 
     def fake_install_for_auth(client_arg, provider, *, approve):
-        assert provider == "xagt_agent_plugin"
+        assert provider == "byreal"
         assert approve is True
         return {
             "ok": True,
             "kind": "npm",
-            "target": "@xagt/agent-plugin@0.4.0",
-            "command": "npm install @xagt/agent-plugin@0.4.0",
+            "target": "@byreal-io/byreal-cli@0.3.6",
+            "command": "npm install @byreal-io/byreal-cli@0.3.6",
             "duration_s": 0.01,
             "install_path": str(pkg_root),
-            "extra": {"entry": "dist/cli.js", "package": "@xagt/agent-plugin", "version": "0.4.0"},
-        }
-
-    def fake_http_post_json(url, payload, **_kwargs):
-        assert url == "https://api.xerpaai.com/xagent/plugin/cli/auth/device"
-        assert payload["clientName"] == "xagt-plugin"
-        return {
-            "data": {
-                "deviceCode": "dev-123",
-                "userCode": "USER-123",
-                "expiresIn": 600,
-                "interval": 5,
-            }
+            "extra": {
+                "entry": "dist/index.cjs",
+                "package": "@byreal-io/byreal-cli",
+                "version": "0.3.6",
+                "cli_path": str(cli_path),
+            },
         }
 
     monkeypatch.setattr(routes_wallet, "_install_for_auth", fake_install_for_auth)
-    monkeypatch.setattr(routes_wallet, "_http_post_json", fake_http_post_json)
 
     res = handler(
         client,
         {
-            "provider": "xagt_agent_plugin",
+            "provider": "byreal",
             "approve": True,
-            "wallet_id": "xagt_main",
-            "label": "XAgent OKX",
+            "wallet_id": "byreal_main",
+            "label": "Byreal Solana",
             "create_binding": True,
         },
     )
 
     assert res["ok"] is True
-    assert res["next_action"] == "device_approval"
-    assert res["required_inputs"] == ["deviceCode"]
-    assert res["auth"]["json"]["deviceCode"] == "dev-123"
-    assert "userAuth" in res["auth"]["json"]["verificationUrl"]
-    binding = cfg.data["wallet"]["providers"]["xagt_main"]
-    assert binding["provider"] == "xagt_agent_plugin"
-    assert binding["config"]["plugin_path"] == str(pkg_root)
-    assert binding["config"]["login_pending"] == "true"
-
-
-def test_wallet_auth_verify_xagt_vaults_tokens_and_creates_binding(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    from nerya.api import routes_wallet
-    from nerya.api.routes_wallet import routes as wallet_routes
-    from nerya.security.secrets import SecretVault
-
-    cfg = _config(tmp_path)
-    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
-        ("POST", "/wallet/auth/verify")
-    ]
-    client = SimpleNamespace(config=cfg)
-
-    def fake_http_post_json(url, payload, **_kwargs):
-        assert url == "https://api.xerpaai.com/xagent/plugin/cli/auth/token"
-        assert payload == {"deviceCode": "dev-123"}
-        return {
-            "data": {
-                "accessToken": "access-secret",
-                "refreshToken": "refresh-secret",
-                "userId": "user-1",
-                "accessExpire": 1778700000,
-                "scope": "wallet market",
-            }
-        }
-
-    monkeypatch.setattr(routes_wallet, "_http_post_json", fake_http_post_json)
-
-    res = handler(
-        client,
-        {
-            "provider": "xagt_agent_plugin",
-            "deviceCode": "dev-123",
-            "wallet_id": "xagt_main",
-            "label": "XAgent OKX",
-            "create_binding": True,
-        },
-    )
-
-    assert res["ok"] is True
-    assert res["account"]["access_token"] == "***"
-    assert res["account"]["refresh_token"] == "***"
-    binding = cfg.data["wallet"]["providers"]["xagt_main"]
-    saved_cfg = binding["config"]
-    assert saved_cfg["user_id"] == "user-1"
-    assert saved_cfg["access_token_ref"] == "vault://wallet_xagt_main_access_token"
-    assert saved_cfg["refresh_token_ref"] == "vault://wallet_xagt_main_refresh_token"
-    assert "access_token" not in saved_cfg
-    assert "refresh_token" not in saved_cfg
-    vault = SecretVault.open(cfg.paths.vault_enc)
-    assert vault.resolve("wallet_xagt_main_access_token", required_scope="wallet") == "access-secret"
-    assert vault.resolve("wallet_xagt_main_refresh_token", required_scope="wallet") == "refresh-secret"
+    assert res["next_action"] == "no_login_required"
+    assert res["required_inputs"] == []
+    binding = cfg.data["wallet"]["providers"]["byreal_main"]
+    assert binding["provider"] == "byreal"
+    assert binding["config"]["cli_path"] == str(cli_path)
 
 
 def test_wallet_auth_verify_uses_coinbase_awal_otp(
@@ -1228,24 +1429,26 @@ def test_okx_wallet_market_data_routes_through_fetch_candles(
     assert rows[0]["_envelope"]["connector_id"] == "okx_main"
 
 
-def test_xagt_wallet_market_data_routes_through_okx_delegate(
+def test_byreal_wallet_market_data_routes_through_byreal_cli(
     tmp_path,
     monkeypatch,
 ) -> None:
     cfg = _config(tmp_path)
     cfg.data["wallet"] = {
         "providers": {
-            "xagt_main": {
-                "provider": "xagt_agent_plugin",
-                "label": "XAgent OKX",
-                "config": {"user_id": "user-1"},
+            "byreal_main": {
+                "provider": "byreal",
+                "label": "Byreal Solana",
+                "config": {},
             }
         }
     }
 
+    pool_address = "So1anaPoo1Address11111111111111111111111111"
+
     def fake_klines(self, *, chain, token, interval="1h", limit=100, **_kw):
-        assert chain == "ethereum"
-        assert token == "0xtoken"
+        assert chain == "solana"
+        assert token == pool_address
         assert interval == "1h"
         assert limit == 2
         return [
@@ -1254,12 +1457,12 @@ def test_xagt_wallet_market_data_routes_through_okx_delegate(
         ]
 
     monkeypatch.setattr(
-        "nerya.wallet.providers.okx_os.OkxOsWallet.get_token_klines",
+        "nerya.wallet.providers.byreal.ByrealWallet.get_token_klines",
         fake_klines,
     )
 
     rows = fetch_candles(
-        "XAGT_ONCHAIN:ethereum:0xtoken",
+        f"BYREAL_ONCHAIN:solana:{pool_address}",
         count=2,
         interval="1h",
         allow_mock=False,
@@ -1267,9 +1470,9 @@ def test_xagt_wallet_market_data_routes_through_okx_delegate(
     )
 
     assert len(rows) == 2
-    assert rows[0]["_envelope"]["source"] == "xagt_agent_plugin"
-    assert rows[0]["_envelope"]["venue"] == "xagt_onchain"
-    assert rows[0]["_envelope"]["connector_id"] == "xagt_main"
+    assert rows[0]["_envelope"]["source"] == "byreal"
+    assert rows[0]["_envelope"]["venue"] == "byreal_onchain"
+    assert rows[0]["_envelope"]["connector_id"] == "byreal_main"
 
 
 def test_okx_wallet_market_data_can_use_onchainos_cli_without_api_keys(
