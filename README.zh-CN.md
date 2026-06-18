@@ -76,82 +76,21 @@
 
 工作台自带 4 个起步提示词：写监控脚本、建子智能体、挂心跳、跑复盘。点一下就开跑。
 
-<br/>
-
-### Setup 向导
-
-<img src="branding/screenshots/dashboard-setup-zh.png" alt="Setup wizard" />
-
-同一份向导，CLI 是 `nerya setup --tui`，Dashboard 是 `/setup`。七步：密码、LLM、网关、记忆、
-浏览器、交易账户、网页搜索。除了 LLM 那一步要填 key，其它一路回车也能装出一个能跑的环境。
-
-<br/>
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-**Skills · `SKILL.md` 就是定义本身**
-
-<img src="branding/screenshots/dashboard-skills-zh.png" alt="Skills" />
-
-74 个技能在线。2 个能在工作区直接改，72 个内置，0 个待装。内嵌 `SKILL.md` 阅读器，按工作区/
-内置/已安装/可编辑过滤，再加一个直接吃 GitHub URL、本地目录或压缩包的「从仓库添加」装载器。
-
-</td>
-<td width="50%" valign="top">
-
-**Memory · 多后端、笔记本、证据库**
-
-<img src="branding/screenshots/dashboard-memory-zh.png" alt="Memory" />
-
-笔记本默认常驻。想要更强的检索可以挂 `memsearch`（Milvus + 向量模型）或外部 `agentmemory`。
-Tab 分页：笔记本、活动日志、写入规则、Provider、证据、操作员画像。
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-**Portfolio · 交易所和钱包共用一份账本**
-
-<img src="branding/screenshots/dashboard-portfolio-zh.png" alt="Portfolio" />
-
-中心化交易所账户和链上钱包共用一份虚拟账本。余额、敞口、最近成交、对账状态、净值曲线，
-按你设的计价币种统一显示——底层报的是 USDT 还是 USDC 都能合并。
-
-</td>
-<td width="50%" valign="top">
-
-**Agent Team · 持久化、有角色、有审批门**
-
-<img src="branding/screenshots/dashboard-agents-zh.png" alt="Agent Team" />
-
-团队是一份持久化配置，不是几个 LLM 并行调一下完事。角色分明（队长、分析师、风控批评家、
-执行者），每个角色独立的技能黑/白名单，带依赖的任务板，邮箱，共享黑板，队长综合，审批门。
-
-</td>
-</tr>
-<tr>
-<td colspan="2" valign="top">
-
-**统一网关 · Telegram、Discord、Slack、飞书、企业微信、钉钉、WhatsApp、Webhook**
-
-<img src="branding/screenshots/dashboard-gateway-zh.png" alt="Gateway" />
-
-每个平台一份契约：频道 ID、启用开关、交易通知扇出、自动回复、话题过滤、权限控制、配置清单。
-你提交明文 Token 的那一秒，立刻被改写成 `vault://` 引用——Token 永远不会留在频道配置里。
-
-</td>
-</tr>
-</table>
-
 ### 自我进化审阅台
 
 <img src="branding/screenshots/dashboard-self-evolution-zh.png" alt="Self-evolution replay and proposal review" />
 
 把一次进化 run 的全过程摊开给操作员看：触发、角色提示词、结构化输入、模型调用、提议改动、
 验证预览、候选评分、lineage 上下文，全都在一个页面里审。任何提案在被批准或晋升前，都先过这道面板。
+
+### 其他 Dashboard 页面
+
+- `setup` 复用 `nerya setup --tui` 的同一套引导：密码、LLM、网关、记忆、浏览器、交易账户、网页搜索。
+- `skills` 以 `SKILL.md` 为唯一技能定义入口，统一浏览内置技能、工作区覆盖、已安装技能和仓库导入。
+- `memory` 管 notebook、证据、画像和多后端配置，想接 `memsearch` 或外部 `agentmemory` 也都在这里。
+- `portfolio` 把交易所账户和钱包合到一份报表账本里，看余额、敞口、对账状态和净值历史。
+- `agents` 管持久化子智能体：角色提示词、技能白名单/黑名单、工作区 persona 都在一处维护。
+- `gateway` 把 Telegram、Discord、Slack、飞书、企业微信、钉钉、WhatsApp 和 webhook 的投递统一收口，密钥一律改写成 `vault://` 引用。
 
 > Dashboard 就在 `dashboard/`（Next.js 14、App Router，`:18380`）。下面一行命令跑起来，
 > 没云账号，没遥测，全程本地。

@@ -115,85 +115,6 @@ review strategy sessions, and open evolution proposals. Per-message controls:
 Starter prompts ship with the workspace: build a monitoring script, create a
 subagent, schedule a heartbeat, run a postmortem, and draft a strategy package.
 
-<br/>
-
-### Setup wizard
-
-<img src="branding/screenshots/dashboard-setup.png" alt="Setup wizard" />
-
-Same wizard from CLI (`nerya setup --tui`) and the dashboard (`/setup`). Seven
-domains: Password, LLM model, Gateway, Memory, Browser, Trading account, Web search.
-Only the LLM model needs your input. Hit Enter through every other prompt and you
-get a working install.
-
-<br/>
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-**Skills · `SKILL.md` is the only definition**
-
-<img src="branding/screenshots/dashboard-skills.png" alt="Skills" />
-
-74 loaded skills. 2 editable in the workspace, 72 built-in, 0 staged. Inline `SKILL.md`
-reader, filter by workspace / built-in / installed / editable, and an "Add from repo"
-installer that takes GitHub URLs, local folders, or archives.
-
-</td>
-<td width="50%" valign="top">
-
-**Memory · typed backends, notebook, evidence vault**
-
-<img src="branding/screenshots/dashboard-memory.png" alt="Memory" />
-
-The built-in notebook stays on. Strategy reviews, mistakes, market regimes, and
-skill learnings feed the next evolution proposal. Optional plug-ins: `memsearch`
-(Milvus + embedding model) or `agentmemory` (external service).
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-**Portfolio · exchanges and wallets, one ledger**
-
-<img src="branding/screenshots/dashboard-portfolio.png" alt="Portfolio" />
-
-CEX accounts and on-chain wallets share the same virtual ledger. Balances, exposure,
-recent fills, reconciliation status, equity curve. All denominated in your reporting
-currency, even when the underlying venues report in different stablecoins.
-
-</td>
-<td width="50%" valign="top">
-
-**Agent Team · durable, role-typed, gated**
-
-<img src="branding/screenshots/dashboard-agents.png" alt="Agent Team" />
-
-The strategy lead coordinates typed members: market, on-chain, news, technical,
-risk, execution, and portfolio. Each role has a skill allowlist and denylist. The
-team works through a task board, mailbox, shared blackboard, leader synthesis, and
-approval gates.
-
-</td>
-</tr>
-<tr>
-<td colspan="2" valign="top">
-
-**Universal gateway · Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, Webhook**
-
-<img src="branding/screenshots/dashboard-gateway.png" alt="Gateway" />
-
-One contract per platform: channel ID, enabled toggle, trade-notification fan-out,
-auto-reply, topic filters, access control, setup checklist. Plaintext tokens get
-rewritten as `vault://` refs the moment you submit them. The token never sits in the
-channel config.
-
-</td>
-</tr>
-</table>
-
 ### Self-evolution review desk
 
 <img src="branding/screenshots/dashboard-self-evolution.png" alt="Self-evolution replay and proposal review" />
@@ -202,6 +123,15 @@ Replay the entire evolution run in one place: trigger, role prompt, structured
 input, model call, proposed file change, validation preview, optimizer scoring,
 and lineage context. This is the operator-facing review surface before any
 proposal is approved or promoted.
+
+### Other dashboard surfaces
+
+- `setup` reuses the same onboarding flow as `nerya setup --tui`: password, LLM, gateway, memory, browser, trading account, and web search.
+- `skills` treats `SKILL.md` as the definition: browse built-ins, workspace overrides, installed skills, and repo imports from one place.
+- `memory` keeps typed notebook entries, evidence, profile state, and optional backends such as `memsearch` or `agentmemory`.
+- `portfolio` merges exchange accounts and wallets into one reporting ledger with balances, exposure, reconciliation, and equity history.
+- `agents` manages durable role-typed subagents with per-role skill allowlists, prompt overrides, and persistent workspace personas.
+- `gateway` centralises Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, and webhook delivery with `vault://` secret refs.
 
 > The dashboard ships under `dashboard/` (Next.js 14, App Router, `:18380`). Run it
 > locally with the one-liner below. No cloud account, no telemetry phone-home.
