@@ -59,6 +59,8 @@
 
 ### Agent 工作台
 
+<img src="branding/screenshots/dashboard-chat-zh.png" alt="Agent workspace" />
+
 > _「写个监控脚本。新建一个子智能体。每分钟跑一次心跳。给我做一次复盘。」_
 
 每条消息跑一回合：planner 选路由 → 调工具 → 把产物落盘。每条消息都能单独调：
@@ -143,6 +145,13 @@ Tab 分页：笔记本、活动日志、写入规则、Provider、证据、操�
 </td>
 </tr>
 </table>
+
+### 自我进化审阅台
+
+<img src="branding/screenshots/dashboard-self-evolution-zh.png" alt="Self-evolution replay and proposal review" />
+
+把一次进化 run 的全过程摊开给操作员看：触发、角色提示词、结构化输入、模型调用、提议改动、
+验证预览、候选评分、lineage 上下文，全都在一个页面里审。任何提案在被批准或晋升前，都先过这道面板。
 
 > Dashboard 就在 `dashboard/`（Next.js 14、App Router，`:18380`）。下面一行命令跑起来，
 > 没云账号，没遥测，全程本地。

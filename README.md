@@ -6,12 +6,13 @@
 
 # Nerya
 
-### A self-evolving AI trading team that runs on your laptop.
+### A local Agent Team that builds and evolves trading strategies.
 
-Skill-first. Trading-native. Self-evolving.
-Nerya ships its own agent kernel, LLM gateway, sub-agents, memory, triggers,
-**Agent Team** orchestrator, trading kernel, and evolution pipeline. No external
-agent framework attached at runtime.
+Nerya runs a role-typed trading team on your machine: strategy lead, market analyst,
+on-chain analyst, news analyst, technical analyst, risk critic, execution planner,
+and portfolio manager. The team drafts strategies, runs them behind Risk Gate and
+Approval Gate, then turns session logs into operator-approved patches for prompts,
+skills, scripts, triggers, and strategy configs.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -26,41 +27,57 @@ agent framework attached at runtime.
 
 ---
 
-## No strategy? Ask the agent for one.
+## From request to evolving strategy
 
 > _"I have **$500** in a paper account. Make me money on BTC. Don't blow it up."_
 
-One sentence is enough. The `strategy_author` skill turns that prompt into a working
-strategy package in a single chat turn: trigger, sub-agent prompt library, candle
-source, account binding, risk limits, session ledger. You approve. It runs.
+The strategy lead opens a `TeamRun` from that request. Market, on-chain, news, and
+technical analysts gather evidence. The risk critic challenges the plan. The
+execution planner writes a runnable strategy package. The portfolio manager checks
+exposure before the operator approves the run.
 
-After it runs, the agent journals every decision, reviews every fill, reflects between
-sessions, and drafts upgrade proposals (prompt patches, new scripts, new skills, tuned
-configs). Operator signs the diff or rejects it.
+The `strategy_author` skill writes the first package: trigger route, sub-agent
+prompts, candle source, account binding, risk limits, and session ledger. Nerya runs
+it on paper until you enable live trading and approve the intent.
 
-Live trading stays off until you sign for it. Mistakes go into memory, not into your wallet.
+After the session closes, Nerya journals decisions, reviews fills, writes mistakes
+into typed memory, and drafts evolution proposals. You sign or reject each diff.
+Applied proposals carry rollback snapshots.
 
 ---
 
-## The six pillars
+## Strategy lifecycle
+
+1. You describe the market, account, budget, and risk limit.
+2. The strategy lead assigns research, risk, execution, and portfolio checks.
+3. Agents write evidence to the blackboard and pass decisions through the mailbox.
+4. The execution planner produces a strategy package with triggers, prompts, data
+   sources, limits, and history.
+5. The trading kernel submits intents through Risk Gate and Approval Gate.
+6. Reflection writes memory. Evolution drafts patches. The operator signs the next
+   version.
+
+---
+
+## The six pillars behind the loop
 
 <p align="center">
-<img src="branding/feature-grid.png" alt="Nerya core pillars: Agent Team, Self-Evolution, Typed Memory, SKILL.md First, Trading Kernel, SDK + Gateway" width="100%" />
+<img src="branding/feature-grid.png" alt="Nerya core pillars: Agent Team, Strategy Evolution, Typed Memory, SKILL.md First, Trading Kernel, SDK + Gateway" width="100%" />
 </p>
 
 ---
 
-## Why Nerya is different
+## Nerya compared
 
-|   | Most agent frameworks | Nerya |
+|   | Generic agent frameworks | Nerya |
 |---|---|---|
-| **Trading primitives** | Tool calls against exchange SDKs | Risk Gate, Approval Gate, paper/live separation, virtual ledger, reconciliation |
-| **Memory** | A vector blob, maybe | 5 typed markdown surfaces: global, mistakes, market regimes, skill learnings, per-strategy |
-| **Self-improvement** | You write the prompts | Reflection writes proposals. Operator signs. Runtime applies with rollback snapshot. |
-| **Multi-agent** | Loose function calls | Durable Agent Team with leader, analysts, risk critic, shared blackboard, task board, mailbox, gates |
-| **Connectors** | One SDK per venue | Binance, Bybit, OKX, Hyperliquid, PancakeSwap, Jupiter, generic EVM, **plus 100+ via CCXT**. Missing one? Ask the agent to author it. |
-| **Security** | "Don't log keys" | Vault-only secrets, `vault://` refs in context, prompt firewall, signer policy, script sandbox |
-| **Ops** | Write your own supervisor | One-liner installer plus systemd / launchd / NSSM service |
+| **Agent work** | Single planner or loose function calls | Durable Agent Team with leader, analysts, risk critic, blackboard, task board, mailbox, gates |
+| **Strategy creation** | Manual prompt-to-code handoff | `strategy_author` builds triggers, prompts, data sources, account binding, limits, and ledgers |
+| **Strategy evolution** | Operator rewrites prompts after failures | Reflection drafts typed proposals. Operator signs. Runtime applies them with rollback snapshots. |
+| **Trading execution** | Tool calls against exchange SDKs | Risk Gate, Approval Gate, paper/live separation, virtual ledger, reconciliation |
+| **Memory** | Vector snippets with weak meaning | 5 typed markdown surfaces: global, mistakes, market regimes, skill learnings, per-strategy |
+| **Connectors** | One SDK per venue | Binance, Bybit, OKX, Hyperliquid, PancakeSwap, Jupiter, generic EVM, plus 100+ via CCXT. Missing one? Ask the agent to author it. |
+| **Security** | Key handling left to each integration | Vault-only secrets, `vault://` refs in context, prompt firewall, signer policy, script sandbox |
 
 ---
 
@@ -72,18 +89,21 @@ Live trading stays off until you sign for it. Mistakes go into memory, not into 
 
 Total equity, today's P&L, active strategies, open positions, setup-readiness
 checklist (LLM provider, trading account, risk policy, wallet/exchange in green / yellow
-/ red), and a live candle chart for whichever venue you configured.
+/ red), and a live candle chart for the venue you configured.
 
 <br/>
 
 ### Agent workspace
 
-> _"Write a monitoring script. Create a subagent. Schedule a heartbeat. Run a postmortem."_
+<img src="branding/screenshots/dashboard-chat.png" alt="Agent workspace" />
 
-Each message runs one agent turn. The planner picks a route, calls tools, writes
-artifacts to disk. Per-message controls:
+> _"Draft a BTC strategy. Run the team review. Paper-trade it. Propose the next version."_
 
-| Knob          | What it does                                                       |
+Each message runs one agent turn. The planner picks a route, calls tools, and writes
+artifacts to disk. Use the same workspace to create subagents, schedule triggers,
+review strategy sessions, and open evolution proposals. Per-message controls:
+
+| Knob          | Purpose                                                            |
 |---------------|--------------------------------------------------------------------|
 | Think mode    | Force the planner to draft a plan before tool calls                |
 | Model tier    | `light` / `medium` / `high` / `intent` for cost vs. capability      |
@@ -92,8 +112,8 @@ artifacts to disk. Per-message controls:
 | Tool budget   | Maximum tool calls before the kernel ends the turn                 |
 | Turn budget   | LLM token budget for this turn                                     |
 
-Four starter prompts ship with the workspace: build a monitoring script, create a
-subagent, schedule a heartbeat, run a postmortem. Click and they run.
+Starter prompts ship with the workspace: build a monitoring script, create a
+subagent, schedule a heartbeat, run a postmortem, and draft a strategy package.
 
 <br/>
 
@@ -127,9 +147,9 @@ installer that takes GitHub URLs, local folders, or archives.
 
 <img src="branding/screenshots/dashboard-memory.png" alt="Memory" />
 
-The built-in notebook is always on. Optional plug-ins: `memsearch` (Milvus +
-embedding model) or `agentmemory` (external service). Tabs for Notebook, Activity,
-Write rules, Providers, Evidence, Profile.
+The built-in notebook stays on. Strategy reviews, mistakes, market regimes, and
+skill learnings feed the next evolution proposal. Optional plug-ins: `memsearch`
+(Milvus + embedding model) or `agentmemory` (external service).
 
 </td>
 </tr>
@@ -151,9 +171,10 @@ currency, even when the underlying venues report in different stablecoins.
 
 <img src="branding/screenshots/dashboard-agents.png" alt="Agent Team" />
 
-A team is a durable config, not a `Promise.all`. Typed members (lead, analyst, risk
-critic, executor) with per-role skill allowlist and denylist. Task board with
-dependencies. Mailbox. Shared blackboard. Leader synthesis. Approval gates.
+The strategy lead coordinates typed members: market, on-chain, news, technical,
+risk, execution, and portfolio. Each role has a skill allowlist and denylist. The
+team works through a task board, mailbox, shared blackboard, leader synthesis, and
+approval gates.
 
 </td>
 </tr>
@@ -173,6 +194,15 @@ channel config.
 </tr>
 </table>
 
+### Self-evolution review desk
+
+<img src="branding/screenshots/dashboard-self-evolution.png" alt="Self-evolution replay and proposal review" />
+
+Replay the entire evolution run in one place: trigger, role prompt, structured
+input, model call, proposed file change, validation preview, optimizer scoring,
+and lineage context. This is the operator-facing review surface before any
+proposal is approved or promoted.
+
 > The dashboard ships under `dashboard/` (Next.js 14, App Router, `:18380`). Run it
 > locally with the one-liner below. No cloud account, no telemetry phone-home.
 
@@ -182,13 +212,13 @@ channel config.
 
 ### Agent Team
 
-A `TeamRun` is a durable team config, not a parallel `Promise.all`. It carries:
+A `TeamRun` gives the strategy lead a durable room for the trade:
 
-- typed members (strategy lead, market analyst, on-chain analyst, news analyst,
-  technical analyst, risk critic, execution planner, portfolio manager)
-- per-role skill allowlist + denylist. `execution_planner` cannot touch `trading`.
+- typed members: strategy lead, market analyst, on-chain analyst, news analyst,
+  technical analyst, risk critic, execution planner, portfolio manager
+- per-role skill allowlist + denylist. `execution_planner` cannot touch `trading`
 - task board with dependencies, locks, priorities, owners
-- mailbox for inter-agent messaging, plus a shared blackboard for evidence
+- mailbox for inter-agent messages, plus a shared blackboard for evidence
 - leader synthesis: the lead waits for required reports, resolves conflicts, emits a
   decision memo
 - gates: plan-artefact gate, all-tasks-complete gate, verification gate, optional
@@ -197,10 +227,11 @@ A `TeamRun` is a durable team config, not a parallel `Promise.all`. It carries:
 Three templates ship today: `market_analysis_team`, `strategy_design_team`,
 `trade_decision_committee`. Drop new ones under `nerya/teams/templates`.
 
-### Self-evolution
+### Strategy and agent evolution
 
-After each closed session, `nerya/agent/reflection.py` writes memory entries.
-`nerya/evolution/` reads those entries and produces typed proposals:
+Nerya keeps strategy code, prompts, triggers, limits, sessions, and reviews under
+one workspace. After a strategy run closes, `nerya/agent/reflection.py` writes memory
+entries. `nerya/evolution/` reads those entries and opens typed proposals:
 
 ```
 learning_update        markdown patch to memory
@@ -212,9 +243,9 @@ strategy_config_patch  unified diff to strategies/<id>/strategy.yml
 risk_limit_suggestion  advisory only; never overwrites limits.yml
 ```
 
-Code-enforced immutables: no agent-authored patch touches `accounts.yml`, `limits.yml`,
-the vault, signer policy, or `live_trading_enabled`. `promotion.py` rejects any diff
-that tries. Every applied proposal carries a `rollback.py` snapshot.
+`promotion.py` rejects patches that touch `accounts.yml`, `limits.yml`, the vault,
+signer policy, or `live_trading_enabled`. Each applied proposal carries a
+`rollback.py` snapshot.
 
 ### Memory
 
@@ -266,16 +297,16 @@ TradeIntent → RiskGate → ApprovalGate → PaperExecution | LiveConnector
 
 ### Adding a new exchange
 
-Your venue isn't in the list? You don't have to wait for a release. Ask the agent:
+Missing a venue? Ask the agent:
 
-> **You:** Add Bitget perpetual futures. Here are the API docs: https://bitgetlimited.github.io/apidoc/en/
+> **You:** Add Bitget perpetual futures. Use these API docs: https://bitgetlimited.github.io/apidoc/en/
 
-The `coding` skill checks the CCXT bridge first (100+ venues already wired). If your
-venue is one of them, the agent registers an alias and you're done. If not, the
-agent drops a new `workspace/providers/<id>/provider.py` exposing a `SPEC` constant,
-calls `ConnectorRegistry.reload_providers()` for hot-reload, and verifies with
-`connector_view`. No daemon restart, no source-tree commit. Once the venue
-stabilises, a maintainer can lift the workspace file into `nerya/connectors/`.
+The `coding` skill checks the CCXT bridge first (100+ venues already wired). For a
+supported venue, the agent registers an alias. For a new venue, the agent drops a
+`workspace/providers/<id>/provider.py` file with a `SPEC` constant, calls
+`ConnectorRegistry.reload_providers()` for hot-reload, and verifies with
+`connector_view`. The daemon keeps running. The source tree stays clean. Once the
+venue stabilises, a maintainer can lift the workspace file into `nerya/connectors/`.
 
 ### Triggers
 
@@ -367,9 +398,10 @@ prompt and you get a working install. Then open the dashboard and chat:
 
 > **You:** I have $500 in a paper account. Make me money on BTC. Don't blow it up.
 >
-> **Nerya:** _Drafts a `demo_btc_5m_scalper` strategy package, wires up
-> `binance:BTCUSDT` candles, binds `paper_main`, sets a 0.4% max-drawdown guard,
-> schedules the trigger every 5 minutes, and asks you to approve._
+> **Nerya:** _Starts a `TeamRun`, gathers analyst notes, drafts a
+> `demo_btc_5m_scalper` strategy package, wires up `binance:BTCUSDT` candles, binds
+> `paper_main`, sets a 0.4% max-drawdown guard, schedules the trigger every 5
+> minutes, and asks you to approve._
 
 ### Manual quick start (no installer)
 
@@ -428,7 +460,7 @@ The launcher is idempotent. Re-run it whenever. API on `:18317`, dashboard on
 │   │ pipeline    │   │ signer +    │   │ bridges  │   │               │
 │   │             │   │ firewall    │   │          │   │               │
 │   └─────────────┘   └─────────────┘   └──────────┘   ▼               │
-│                                         Strategy history + journals   │
+│                              Strategy history + journals + proposals  │
 └────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -449,7 +481,7 @@ or `rm -rf` it.
 
 ## SDKs
 
-| Surface  | Path                                  | What it does                                                                |
+| Surface  | Path                                  | Purpose                                                                     |
 |----------|---------------------------------------|-----------------------------------------------------------------------------|
 | Python   | `sdk/python/nerya_sdk/`               | Thin client over the local daemon. Triggers, trading, LLM, strategy, memory. |
 | TypeScript | `sdk/typescript/` → `@nerya/sdk`    | Same surface. Node, Bun, and Edge friendly.                                  |
@@ -483,9 +515,9 @@ python sdk/python/examples/whale_wallet_trigger.py   # whale wallet activity tri
 
 ---
 
-## What ships in `nerya/*` today
+## Repo modules
 
-| Module               | What it owns                                                                                        |
+| Module               | Role                                                                                                |
 |----------------------|-----------------------------------------------------------------------------------------------------|
 | `agent/`             | Kernel, planner, context builder, memory, working memory, reflection                                |
 | `subagents/`         | Per-role runtimes with skill allow/denylists, budget caps, parallel dispatcher, result aggregator   |
@@ -547,7 +579,7 @@ variable.
 - ✅ CEX live-signed order placement and cancellation for Binance, Bybit, OKX, and
   Hyperliquid. DEX swaps for BSC PancakeSwap v2 and Solana Jupiter.
 - ✅ Cross-platform one-line installer with service registration.
-- ✅ Dashboard (Next.js 14): Setup wizard, Chat, Strategies, Self-Evolution, Memory,
+- ✅ Dashboard (Next.js 14): Setup wizard, Chat, Strategies, Evolution, Memory,
   Skills, Workflows, Inbox, Portfolio, Gateway, Env Vault, Settings.
 - 🚧 Agent Team Phase 5: snapshot and replay.
 - 🚧 More native gateway adapters: Feishu rich cards, Discord slash commands,
@@ -560,26 +592,26 @@ variable.
 Nerya is released under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0).
 The full text lives in [`LICENSE`](LICENSE).
 
-- ✅ **Free for personal use** — study, research, hobby projects, experiments,
+- ✅ **Free for personal use**: study, research, hobby projects, experiments,
   writing papers, running it against your own paper or live account with your
   own money. Read it, modify it, fork it, share it.
-- ✅ **Free for nonprofits, schools, and public-interest organizations** — the
+- ✅ **Free for nonprofits, schools, and public-interest organizations**: the
   license is explicit about this.
 - ❌ **Commercial use needs a separate license**, including hosting Nerya as a
   managed/SaaS service, embedding it in a paid product, running it inside a
   for-profit firm's trading or fund-management operations, or selling
   Nerya-powered strategy execution to third parties.
 
-Want a commercial license? Open a GitHub issue describing your use case, or
-email the maintainers — see the [Commercial Use Addendum](LICENSE) at the end
-of the LICENSE file.
+Need a commercial license? Open a GitHub issue describing your use case, or email
+the maintainers. See the [Commercial Use Addendum](LICENSE) at the end of the
+LICENSE file.
 
 ---
 
 <div align="center">
 
-Built for operators who want an agent that thinks, trades, remembers, and grows up
-without ever holding the hot keys.
+Built for operators who want a local Agent Team that researches, trades, reviews,
+and evolves strategies without holding the hot keys.
 
 <sub>Nerya · Evolutionary Brain</sub>
 
