@@ -2399,6 +2399,13 @@ def _missing_required_artifact_tool_names(
     prose. They come from a machine-readable caller contract such as the E2E
     CSV ``api_check`` adapter, and are satisfied only by successful tool
     results.
+
+    Contract order is authoritative: an earlier artifact that is still
+    unsatisfied holds its place even when its tool is not currently
+    advertised (e.g. a lazily gated surface not yet revealed). Later
+    artifacts never jump the queue — otherwise an always-on tool like
+    ``write_file`` could be forced before a gated ``team_run``, writing
+    the deliverable before the research it must be based on.
     """
 
     missing: list[str] = []
@@ -2427,10 +2434,16 @@ def _missing_required_artifact_tool_names(
                 "provider_proposal": "evolve_provider_proposal",
                 "skill_proposal": "evolve_skill_proposal",
             }.get(kind, "")
-        if not tool or tool not in provider_tool_names:
+        if not tool:
             continue
         if tool in successful_tool_names:
             continue
+        if tool not in provider_tool_names:
+            # Unsatisfied but not advertised: stop here so artifacts
+            # declared after this one cannot be forced ahead of it. The
+            # loop pre-reveals contract surfaces at turn start, so this
+            # only holds tools that are genuinely unavailable.
+            break
         if tool not in missing:
             missing.append(tool)
     return tuple(missing)
@@ -9208,6 +9221,27 @@ class WorkspaceNativeAgentLoop:
         else:
             transcript.append({"role": "user", "content": list(user_message)})
 
+        if self.config.required_artifacts:
+            # A caller contract may name tools that live on lazily gated
+            # native surfaces (e.g. team_run on the "team" surface).
+            # Reveal those surfaces before the first render so every
+            # contract tool is advertised from iteration 1 and the
+            # contract's declared order can be enforced from the start.
+            try:
+                from ..tools.native.tool_surfaces import (
+                    reveal_surfaces_for_tools,
+                )
+
+                reveal_surfaces_for_tools(
+                    self.registry,
+                    tuple(
+                        str(artifact.get("tool") or "")
+                        for artifact in self.config.required_artifacts
+                        if isinstance(artifact, dict)
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - reveal is best-effort
+                pass
         provider_tools = self._render_tools(tool_filter)
         provider_tool_names = {
             str(t.get("name") or "")

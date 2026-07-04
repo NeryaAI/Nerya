@@ -280,6 +280,35 @@ def _ensure_lazy_state_attached(registry: ToolRegistry) -> Any:
     return attach_lazy_state(registry, state)
 
 
+def reveal_surfaces_for_tools(
+    registry: ToolRegistry,
+    tool_names: Iterable[str],
+) -> list[str]:
+    """Mark the surfaces owning the given native tools as described.
+
+    Used by the agent loop when a caller declares an explicit
+    ``required_artifacts`` contract: a contract tool that lives on a
+    lazily gated surface (e.g. ``team_run`` on the ``team`` surface)
+    must be advertised from the very first iteration, otherwise the
+    contract-order enforcement would skip it as "not available" and
+    force a later always-on artifact tool (such as ``write_file``)
+    first. Returns the surface names newly revealed.
+    """
+
+    state = getattr(registry, "lazy_mcp_state", None)
+    mark = getattr(state, "mark_described", None)
+    if not callable(mark):
+        return []
+    newly: list[str] = []
+    for name in tool_names:
+        surface = _SURFACE_BY_TOOL.get(str(name or "").strip())
+        if not surface:
+            continue
+        if mark(described_key(surface)) and surface not in newly:
+            newly.append(surface)
+    return newly
+
+
 def reveal_surfaces_for_skill(registry: ToolRegistry, skill_id: str) -> list[str]:
     """Mark a skill's surfaces described on the registry's lazy state.
 

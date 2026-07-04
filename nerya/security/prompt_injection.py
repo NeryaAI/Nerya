@@ -22,8 +22,11 @@ import logging
 import re
 
 _LOG = logging.getLogger(__name__)
+#: "token" alone is NOT a secret reference in a crypto workspace (token
+#: holders, token flows, platform token …). Only auth-ish tokens count.
+_AUTH_TOKEN_EN = r"(?:api|access|auth|bearer|session|oauth|refresh|bot)[ _-]?tokens?"
 _SECRET_REF_CN = (
-    r"(vault|密钥|令牌|(?<![A-Za-z0-9])tokens?(?![A-Za-z0-9])|"
+    rf"(vault|密钥|令牌|(?<![A-Za-z0-9]){_AUTH_TOKEN_EN}(?![A-Za-z0-9])|"
     r"api\s*key|凭证.{0,8}(内容|明文|原文|值|实际))"
 )
 
@@ -52,8 +55,8 @@ _SUSPICIOUS_PATTERNS = [
     # secrets
     re.compile(r"\b(exfiltrate|reveal|leak|print|dump)\s+(the\s+)?(api|private|secret|bot)?\s*(key|token|secret|seed|mnemonic)\b", re.I),
     re.compile(r"\b(show|send)\s+(me\s+)?(the\s+)?(\.env|environment\s+variables|api\s+key)\b", re.I),
-    re.compile(r"\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b.{0,80}\b(vault|secrets?|credentials?|tokens?)\b", re.I | re.S),
-    re.compile(r"\b(vault|secrets?|credentials?|tokens?)\b.{0,80}\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b", re.I | re.S),
+    re.compile(rf"\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b.{{0,80}}\b(vault|secrets?|credentials?|{_AUTH_TOKEN_EN})\b", re.I | re.S),
+    re.compile(rf"\b(vault|secrets?|credentials?|{_AUTH_TOKEN_EN})\b.{{0,80}}\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b", re.I | re.S),
     re.compile(rf"(读取|查看|展示|输出|打印|泄露|导出).{{0,40}}{_SECRET_REF_CN}", re.I | re.S),
     re.compile(rf"{_SECRET_REF_CN}.{{0,40}}(读取|查看|展示|输出|打印|泄露|导出)", re.I | re.S),
     # limits tampering
@@ -137,8 +140,8 @@ _BLOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bturn\s+on\s+live\s+mode\b", re.I),
     re.compile(r"\b(exfiltrate|reveal|leak|print|dump)\s+(the\s+)?(api|private|secret|bot)?\s*(key|token|secret|seed|mnemonic)\b", re.I),
     re.compile(r"\b(show|send)\s+(me\s+)?(the\s+)?(\.env|environment\s+variables|api\s+key)\b", re.I),
-    re.compile(r"\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b.{0,80}\b(vault|secrets?|credentials?|tokens?)\b", re.I | re.S),
-    re.compile(r"\b(vault|secrets?|credentials?|tokens?)\b.{0,80}\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b", re.I | re.S),
+    re.compile(rf"\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b.{{0,80}}\b(vault|secrets?|credentials?|{_AUTH_TOKEN_EN})\b", re.I | re.S),
+    re.compile(rf"\b(vault|secrets?|credentials?|{_AUTH_TOKEN_EN})\b.{{0,80}}\b(read|show|print|dump|output|exfiltrate|reveal|leak)\b", re.I | re.S),
     re.compile(rf"(读取|查看|展示|输出|打印|泄露|导出).{{0,40}}{_SECRET_REF_CN}", re.I | re.S),
     re.compile(rf"{_SECRET_REF_CN}.{{0,40}}(读取|查看|展示|输出|打印|泄露|导出)", re.I | re.S),
     re.compile(r"\bexecute\s+(this|the)\s+(order|trade)\s+without\b", re.I),
