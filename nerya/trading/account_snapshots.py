@@ -555,13 +555,8 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
 
     try:
         registry = ConnectorRegistry(workspace=config.paths.root)
-        legacy_account = profile.to_account()
+        legacy_account = profile.to_connector_account(live=True)
         connector_cfg = legacy_account.connector_cfg()
-        # Balance reads are private API calls but not trading actions.
-        # Keep AccountProfile.to_account() conservative for the order
-        # path, and opt into a live connector only inside this
-        # snapshot-read context.
-        connector_cfg["live"] = True
         conn = registry.get(profile.id, connector_cfg)
         balances = conn.get_balances()
     except TradingError as exc:

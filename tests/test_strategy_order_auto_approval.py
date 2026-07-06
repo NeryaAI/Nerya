@@ -18,8 +18,9 @@ from nerya.tools.native.trading import (
 )
 from nerya.tools.types import ToolCall
 from nerya.trading.account_snapshots import capture_snapshot, latest_snapshot
+from nerya.trading.capital import CapitalReservationStore
 from nerya.trading.order_intents import SizingPolicy, TradeEntry, TradePlan
-from nerya.trading.submit import _plan_to_intent, submit_trade_intent
+from nerya.trading.submit import _plan_to_intent, submit_trade_intent, submit_trade_plan
 
 
 pytestmark = pytest.mark.smoke
@@ -101,6 +102,105 @@ def test_strategy_runtime_threshold_escalation_is_auto_approved(tmp_path):
     approved = jsonl.read_all(cfg.paths.approvals_approved)
     assert approved[-1]["auto"] is True
     assert approved[-1]["intent"]["source"] == "strategy_runtime"
+
+
+def test_canary_strategy_order_waits_for_operator_approval(tmp_path):
+    cfg = _config(tmp_path)
+    yaml_io.dump(
+        cfg.paths.strategy("s1") / "strategy.yml",
+        {
+            "id": "s1",
+            "status": "canary",
+            "account_id": "paper_main",
+            "markets": ["mock:BTC/USDT"],
+            "paper_trading_enabled": True,
+            "live_trading_enabled": False,
+        },
+    )
+    spec = _intent_spec("strategy_runtime")
+    spec["meta"] = {"protection_present": True}
+
+    out = submit_trade_intent(
+        cfg,
+        spec=spec,
+        market_snapshot={"price": 50_000, "age_s": 0, "source": "test"},
+    )
+
+    assert out["status"] == "pending_approval"
+    assert out["approval_id"]
+    assert jsonl.read_all(cfg.paths.approvals_approved) == []
+    pending = jsonl.read_all(cfg.paths.approvals_pending)
+    assert pending[-1]["intent"]["source"] == "strategy_runtime"
+    assert "canary_per_trade_approval_required" in out["risk_decision"]["reasons"]
+
+
+def test_trade_plan_live_account_without_order_permission_never_creates_executor(tmp_path):
+    cfg = _config(tmp_path)
+    cfg.data["runtime"]["live_trading_enabled"] = True
+    yaml_io.dump(
+        cfg.paths.accounts_file,
+        {
+            "accounts": [
+                {
+                    "id": "live_main",
+                    "exchange": "mock",
+                    "venue": "mock",
+                    "mode": "live",
+                    "status": "active",
+                    "live_trading_enabled": True,
+                    "initial_balance_usd": 10_000,
+                    "permissions": {
+                        "read_balances": False,
+                        "place_order": False,
+                        "cancel_order": False,
+                    },
+                }
+            ]
+        },
+    )
+    yaml_io.dump(
+        cfg.paths.strategy("s1") / "strategy.yml",
+        {
+            "id": "s1",
+            "status": "live",
+            "account_id": "live_main",
+            "markets": ["mock:BTC/USDT"],
+            "paper_trading_enabled": False,
+            "live_trading_enabled": True,
+        },
+    )
+    yaml_io.dump(
+        cfg.paths.strategy("s1") / "limits.yml",
+        {
+            "allowed_markets": ["mock:BTC/USDT"],
+            "min_confidence": 0,
+            "max_stale_seconds": 60,
+            "approval_threshold_usd": 0,
+        },
+    )
+    plan = TradePlan(
+        action="open_position",
+        strategy_id="s1",
+        account_id="live_main",
+        market="mock:BTC/USDT",
+        side="long",
+        sizing=SizingPolicy(method="fixed_usd", fixed_usd=100),
+        entry=TradeEntry(order_type="market"),
+        confidence=1.0,
+        source="strategy_runtime",
+    )
+
+    out = submit_trade_plan(
+        cfg,
+        plan,
+        market_snapshot={"price": 50_000, "age_s": 0, "source": "test"},
+    )
+
+    assert out["status"] == "rejected"
+    assert out["execution_blocker"] == "account_cannot_place_order"
+    assert CapitalReservationStore(cfg.paths).active_for_account("live_main") == []
+    journal = jsonl.read_all(cfg.paths.journal("trading"))
+    assert journal[-1]["kind"] == "trade_plan.execution_blocked"
 
 
 def test_strategy_order_refreshes_stale_account_snapshot_before_risk(tmp_path):

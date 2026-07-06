@@ -95,3 +95,36 @@ def test_exchange_credential_schema_keeps_legacy_schema_fields_shape(tmp_path):
 
     assert out["credential_fields"] == out["schema"]["fields"]
     assert {"api_key", "api_secret", "api_passphrase"}.issubset(names)
+
+
+def test_account_profile_connector_account_modes_are_explicit():
+    canary = accounts_mod.AccountProfile(
+        id="canary_main",
+        mode="canary",
+        venue="bybit",
+        kind="cex",
+        provider_spec="bybit",
+        base_currency="USDT",
+        subaccount="",
+        status="active",
+        live_trading_enabled=True,
+        initial_balance_usd=0.0,
+        permissions=accounts_mod.AccountPermissions(place_order=True),
+    )
+    shadow = accounts_mod.AccountProfile(
+        id="shadow_main",
+        mode="shadow",
+        venue="bybit",
+        kind="cex",
+        provider_spec="bybit",
+        base_currency="USDT",
+        subaccount="",
+        status="active",
+        live_trading_enabled=False,
+        initial_balance_usd=0.0,
+        permissions=accounts_mod.AccountPermissions(read_balances=True),
+    )
+
+    assert canary.to_connector_account().connector_cfg()["live"] is True
+    assert shadow.to_connector_account().connector_cfg()["live"] is False
+    assert shadow.to_connector_account(live=True).connector_cfg()["live"] is True

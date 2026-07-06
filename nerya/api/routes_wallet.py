@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 from .. import wallet as wallet_mod
-from ..core import yaml_io
+from ..core import jsonl, yaml_io
 from ..core.errors import TradingError
 from ..data.onchain_klines import fetch_token_klines
 from ..security.runtime_env import build_process_env
@@ -694,15 +694,12 @@ def _patch_coinbase_awal_windows(client) -> None:
             )
         if patched != text:
             target.write_text(patched, encoding="utf-8")
-    bundle_candidates = [
-        root / "server-bundle" / "bundle-electron.js",
-        Path(
-            os.environ.get(
-                "LOCALAPPDATA",
-                str(Path.home() / "AppData" / "Local"),
-            )
-        ) / "awal-nodejs" / "Data" / "server" / "bundle-electron.js",
-    ]
+    bundle_candidates = [root / "server-bundle" / "bundle-electron.js"]
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        bundle_candidates.append(
+            Path(local_appdata) / "awal-nodejs" / "Data" / "server" / "bundle-electron.js"
+        )
     for bundle in bundle_candidates:
         if not bundle.exists():
             continue
@@ -1409,6 +1406,19 @@ def routes():
         if not client.config.live_trading_enabled():
             return {"ok": False, "error": "live_trading_disabled",
                     "reason": "enable runtime.live_trading_enabled to run swaps"}
+        if client.config.kill_switch():
+            return {"ok": False, "error": "kill_switch_enabled"}
+        audit = {
+            "kind": "wallet.swap.requested",
+            "ts": time.time(),
+            "provider": name,
+            "chain": str(payload.get("chain") or "ethereum"),
+            "token_in": str(payload.get("token_in") or ""),
+            "token_out": str(payload.get("token_out") or ""),
+            "amount_in": float(payload.get("amount_in") or 0.0),
+            "slippage_bps": int(payload.get("slippage_bps") or 50),
+        }
+        jsonl.append(client.config.paths.journal("wallet"), audit)
         try:
             p = wallet_mod.build_provider(
                 name, _wallet_cfg(client, name), workspace=_workspace(client),
@@ -1422,6 +1432,12 @@ def routes():
                 receiver=payload.get("receiver") or None,
                 live=True,
             )
+            jsonl.append(client.config.paths.journal("wallet"), {
+                **audit,
+                "kind": "wallet.swap.result",
+                "ok": result.ok,
+                "tx_hash": getattr(result, "tx_hash", "") or "",
+            })
             return {"ok": result.ok, "result": result.to_dict()}
         except WalletDependencyError as exc:
             return {"ok": False, "error": "dependency_missing",

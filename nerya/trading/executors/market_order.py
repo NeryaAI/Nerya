@@ -263,7 +263,7 @@ class MarketOrderExecutor(Executor):
         from ...connectors import ConnectorRegistry
         tracker = self._tracker()
         registry = ConnectorRegistry(workspace=self.paths.root)
-        legacy_account = profile.to_account()
+        legacy_account = profile.to_connector_account()
         try:
             conn = registry.get(profile.id, legacy_account.connector_cfg())
         except Exception as exc:  # pragma: no cover
@@ -321,7 +321,7 @@ class MarketOrderExecutor(Executor):
         if order is None:
             return None
         registry = ConnectorRegistry(workspace=self.paths.root)
-        legacy_account = profile.to_account()
+        legacy_account = profile.to_connector_account()
         try:
             conn = registry.get(profile.id, legacy_account.connector_cfg())
             ack = conn.get_order(market=order.market, order_id=order.exchange_order_id or order.order_id)

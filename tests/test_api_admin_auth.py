@@ -2,7 +2,7 @@ import pytest
 
 from nerya.api import auth, route_scopes
 from nerya.core import yaml_io
-from nerya.core.config import load_config
+from nerya.core.config import DEFAULT_CONFIG, load_config
 
 
 @pytest.mark.smoke
@@ -48,6 +48,15 @@ def test_remote_without_jwt_is_rejected_after_password_is_configured(tmp_path):
     assert not result.ok
     assert result.status == 401
     assert result.reason == "missing_token"
+
+
+@pytest.mark.smoke
+def test_admin_password_does_not_mutate_default_config(tmp_path):
+    cfg = load_config(tmp_path)
+
+    auth.set_admin_password(cfg, "correct-horse")
+
+    assert "auth" not in DEFAULT_CONFIG["runtime"]
 
 
 @pytest.mark.smoke

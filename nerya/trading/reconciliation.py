@@ -617,7 +617,7 @@ def _fetch_exchange_positions(config: Config, profile) -> list[dict[str, Any]]:
     try:
         from ..connectors import ConnectorRegistry
         registry = ConnectorRegistry(workspace=config.paths.root)
-        legacy_account = profile.to_account()
+        legacy_account = profile.to_connector_account(live=True)
         conn = registry.get(profile.id, legacy_account.connector_cfg())
         if hasattr(conn, "fetch_positions"):
             try:
@@ -656,7 +656,7 @@ def _fetch_exchange_open_orders(config: Config, profile) -> list[dict[str, Any]]
     try:
         from ..connectors import ConnectorRegistry
         registry = ConnectorRegistry(workspace=config.paths.root)
-        legacy_account = profile.to_account()
+        legacy_account = profile.to_connector_account(live=True)
         conn = registry.get(profile.id, legacy_account.connector_cfg())
         if hasattr(conn, "fetch_open_orders"):
             raw = conn.fetch_open_orders()  # type: ignore[attr-defined]

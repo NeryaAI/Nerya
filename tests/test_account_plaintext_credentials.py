@@ -9,6 +9,7 @@ from nerya.api import routes_accounts
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.core import yaml_io
+from nerya.connectors.registry import _resolve_cex_creds
 from nerya.security.secrets import SecretVault
 
 pytestmark = pytest.mark.smoke
@@ -51,3 +52,31 @@ def test_accounts_upsert_converts_plaintext_credentials_to_vault(tmp_path):
     assert "plain-key" not in str(saved)
     vault = SecretVault.open(tmp_path / "vault" / "secrets.enc")
     assert vault.resolve(refs["api_key"].removeprefix("vault://"), required_scope="exchange") == "plain-key"
+
+
+def test_live_connector_drops_plaintext_credentials(tmp_path):
+    live = _resolve_cex_creds(
+        {
+            "venue": "bybit",
+            "live_trading_enabled": True,
+            "api_key": "plain-key",
+            "api_secret": "plain-secret",
+        },
+        tmp_path,
+        None,
+    )
+    paper_mock = _resolve_cex_creds(
+        {
+            "venue": "mock",
+            "live": False,
+            "api_key": "plain-key",
+            "api_secret": "plain-secret",
+        },
+        tmp_path,
+        None,
+    )
+
+    assert live.api_key == ""
+    assert live.api_secret == ""
+    assert paper_mock.api_key == "plain-key"
+    assert paper_mock.api_secret == "plain-secret"

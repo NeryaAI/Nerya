@@ -96,6 +96,11 @@ def _maybe_auto_approve_strategy_order(
 ):
     if not bool(config.get("trading.strategy_orders.auto_approve_escalations", True)):
         return None
+    if str(getattr(risk, "promotion_state", "") or "").strip().lower() in {
+        "canary",
+        "live",
+    }:
+        return None
     if not _is_strategy_originated_order(intent):
         return None
     if not _auto_approvable_strategy_escalation(risk):
@@ -115,6 +120,18 @@ def _approval_summary(record) -> dict[str, Any] | None:
         "state": "auto_approved" if record.state == "approved" else record.state,
         "auto": True,
     }
+
+
+def _real_money_execution_blocker(config: Config, profile) -> str | None:
+    if not bool(getattr(profile, "is_real_money", False)):
+        return None
+    if config.kill_switch():
+        return "kill_switch_enabled"
+    if not config.live_trading_enabled():
+        return "live_trading_disabled_runtime"
+    if not bool(getattr(profile, "can_place_order", False)):
+        return "account_cannot_place_order"
+    return None
 
 
 def submit_trade_intent(
@@ -625,6 +642,26 @@ def submit_trade_plan(
 
     # Budget check + reservation.
     profile = get_account_profile(paths, plan.account_id)
+    blocker = _real_money_execution_blocker(config, profile)
+    if blocker:
+        jsonl.append(paths.journal("trading"), {
+            "kind": "trade_plan.execution_blocked",
+            "ts": now_iso(),
+            "strategy_id": plan.strategy_id,
+            "session_id": session_id,
+            "plan_id": plan.plan_id,
+            "intent_id": intent.intent_id,
+            "account_id": plan.account_id,
+            "reason": blocker,
+        })
+        return {
+            "status": "rejected",
+            "session_id": session_id,
+            "plan_id": plan.plan_id,
+            "intent": redact_dict(intent.asdict()),
+            "risk_decision": risk.asdict(),
+            "execution_blocker": blocker,
+        }
     snap = fresh_snapshot(config, plan.account_id, profile=profile)
     store = CapitalReservationStore(paths)
     checker = BudgetChecker(profile=profile, snapshot=snap, store=store)

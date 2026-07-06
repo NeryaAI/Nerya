@@ -170,22 +170,36 @@ class AccountProfile:
             return bool(self.permissions.read_balances)
         return False
 
-    def to_account(self) -> Account:
-        """Bridge into the legacy :class:`Account` shape."""
+    def to_connector_account(self, *, live: bool | None = None) -> Account:
+        """Bridge into :class:`Account` for connector-facing code.
+
+        Canary/live are real-money connector modes; paper/shadow stay
+        paper by default. Private balance reads can pass ``live=True``
+        without granting order permission.
+        """
         legacy_mode = self.mode if self.mode in ("paper", "live") else (
             "live" if self.is_real_money else "paper"
         )
+        live_enabled = self.live_trading_enabled
+        if live is not None:
+            live_enabled = bool(live)
+            if live_enabled:
+                legacy_mode = "live"
         return Account(
             id=self.id,
             exchange=self.venue or self.provider_spec or "mock",
             mode=legacy_mode,
-            live_trading_enabled=self.live_trading_enabled,
+            live_trading_enabled=live_enabled,
             initial_balance_usd=self.initial_balance_usd,
             status="active" if self.status == "active" else "disabled",
             venue=self.venue,
             kind=self.kind,
             raw=dict(self.raw),
         )
+
+    def to_account(self) -> Account:
+        """Compatibility alias for older connector call sites."""
+        return self.to_connector_account()
 
     def asdict(self) -> dict[str, Any]:
         return {
