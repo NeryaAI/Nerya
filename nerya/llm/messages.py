@@ -1106,6 +1106,13 @@ class OpenAIMessagesBackend:
                 or self.reasoning_effort
                 or ""
             ).strip().lower()
+            # OpenAI rejects reasoning_effort alongside function tools on
+            # /v1/chat/completions for gpt-5.5 ("Please use /v1/responses
+            # instead"), and OpenAI-compatible gateways (GMI Cloud) proxy
+            # that 400 straight through. Default effort still applies, so
+            # dropping the knob is strictly better than a dead request.
+            if request.tools:
+                eff = ""
             if eff and eff != "none":
                 body["reasoning_effort"] = eff
             summ = (
@@ -1113,7 +1120,7 @@ class OpenAIMessagesBackend:
                 or self.reasoning_summary
                 or ""
             ).strip().lower()
-            if summ in {"concise", "detailed", "auto"}:
+            if summ in {"concise", "detailed", "auto"} and not request.tools:
                 body["reasoning"] = {"summary": summ}
                 if eff and eff != "none":
                     body["reasoning"]["effort"] = eff
@@ -1135,6 +1142,21 @@ class OpenAIMessagesBackend:
         if request.tools:
             body["tools"] = _openai_render_tools(request.tools)
             choice = _openai_tool_choice(request.tool_choice) or "auto"
+            # Some OpenAI-compatible gateways (observed: GMI Cloud serving
+            # openai/* models) mistranslate the nested chat-completions
+            # forced form {"type":"function","function":{"name":...}} and
+            # reject it with "Missing required parameter: 'tool_choice.name'".
+            # When the advertised surface is exactly the forced tool,
+            # "required" is semantically identical and universally accepted.
+            if (
+                isinstance(choice, dict)
+                and len(body["tools"]) == 1
+                and (
+                    (body["tools"][0].get("function") or {}).get("name")
+                    == (choice.get("function") or {}).get("name")
+                )
+            ):
+                choice = "required"
             body["tool_choice"] = choice
         if native_web_search.get("enabled"):
             body["web_search_options"] = _openai_web_search_options(
@@ -1229,7 +1251,13 @@ def _is_reasoning_model_id(model: str) -> bool:
     if not model:
         return False
     low = model.lower()
-    return any(low.startswith(p) for p in _REASONING_MODEL_PREFIXES)
+    # Match gateway-namespaced ids ("openai/gpt-5.5") on the bare name too;
+    # see _is_reasoning_model in adapters/openai.py for rationale.
+    bare = low.rsplit("/", 1)[-1]
+    return any(
+        low.startswith(p) or bare.startswith(p)
+        for p in _REASONING_MODEL_PREFIXES
+    )
 
 
 # ---------------------------------------------------------------------------

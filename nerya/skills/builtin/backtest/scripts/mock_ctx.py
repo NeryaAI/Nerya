@@ -791,6 +791,19 @@ class MockCtx:
     def market_data(self) -> MockMarket:
         return self.market
 
+    # Top-level trading forwards. The live ``StrategyContext`` exposes
+    # ``ctx.open_position`` / ``ctx.close_position`` / ``ctx.reduce_position``
+    # directly (mirroring TradingAPI); strategy code written against that
+    # surface must run unmodified under backtest.
+    def open_position(self, **kwargs: Any) -> dict[str, Any]:
+        return self.trading.open_position(**kwargs)
+
+    def close_position(self, **kwargs: Any) -> dict[str, Any]:
+        return self.trading.close_position(**kwargs)
+
+    def reduce_position(self, **kwargs: Any) -> dict[str, Any]:
+        return self.trading.reduce_position(**kwargs)
+
     def ohlcv(
         self,
         market: str | None = None,

@@ -205,14 +205,29 @@ class ResultBuilder:
     later without breaking generated code).
     """
 
-    def hold(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None) -> StrategyResult:
-        return StrategyResult.hold(reason=reason, metadata=metadata)
+    # Strategy entrypoints are typically LLM-authored. Authors regularly
+    # attach extra context ("actions", "signals", ...) to these calls; a
+    # TypeError there kills the whole run over cosmetics, so fold unknown
+    # keyword arguments into ``metadata`` instead.
+    @staticmethod
+    def _merge_extra(
+        metadata: Optional[dict[str, Any]], extra: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not extra:
+            return metadata
+        merged = dict(metadata or {})
+        for key, value in extra.items():
+            merged.setdefault(key, value)
+        return merged
 
-    def skip(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None) -> StrategyResult:
-        return StrategyResult.skip(reason=reason, metadata=metadata)
+    def hold(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None, **extra: Any) -> StrategyResult:
+        return StrategyResult.hold(reason=reason, metadata=self._merge_extra(metadata, extra))
 
-    def ok(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None) -> StrategyResult:
-        return StrategyResult.ok(reason=reason, metadata=metadata)
+    def skip(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None, **extra: Any) -> StrategyResult:
+        return StrategyResult.skip(reason=reason, metadata=self._merge_extra(metadata, extra))
+
+    def ok(self, *, reason: str = "", metadata: Optional[dict[str, Any]] = None, **extra: Any) -> StrategyResult:
+        return StrategyResult.ok(reason=reason, metadata=self._merge_extra(metadata, extra))
 
     def error(
         self,
@@ -220,8 +235,12 @@ class ResultBuilder:
         message: str,
         kind: str = "strategy_error",
         metadata: Optional[dict[str, Any]] = None,
+        **extra: Any,
     ) -> StrategyResult:
-        return StrategyResult.error(message=message, kind=kind, metadata=metadata)
+        return StrategyResult.error(
+            message=message, kind=kind,
+            metadata=self._merge_extra(metadata, extra),
+        )
 
 
 __all__ = [

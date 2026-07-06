@@ -323,6 +323,40 @@ def _canonical_venue(venue: str) -> str:
         "US_STOCK": "YAHOO",
         "US_STOCKS": "YAHOO",
         "YAHOO_FINANCE": "YAHOO",
+        # US exchange prefixes route to the tokenless Yahoo public feed —
+        # the Yahoo connector strips the exchange prefix from the symbol.
+        "NASDAQ": "YAHOO",
+        "NYSE": "YAHOO",
+        "AMEX": "YAHOO",
+        "ARCA": "YAHOO",
+        "BATS": "YAHOO",
+        # China A-share exchange prefixes resolve to the tokenless AkShare
+        # open-data feed (mirrors US equities -> YAHOO above). The AkShare
+        # connector re-derives the sh/sz/bj board from the 6-digit code, so
+        # the specific prefix here only needs to route data, not disambiguate.
+        "SSE": "AKSHARE",
+        "SH": "AKSHARE",
+        "SHA": "AKSHARE",
+        "SHSE": "AKSHARE",
+        "SSE_STAR": "AKSHARE",
+        "STAR": "AKSHARE",
+        "SZSE": "AKSHARE",
+        "SZ": "AKSHARE",
+        "SZA": "AKSHARE",
+        "CHINEXT": "AKSHARE",
+        "BSE": "AKSHARE",
+        "BJ": "AKSHARE",
+        "BJSE": "AKSHARE",
+        "CN": "AKSHARE",
+        "CN_STOCK": "AKSHARE",
+        "CN_STOCKS": "AKSHARE",
+        "CN_EQUITY": "AKSHARE",
+        "CN_EQUITIES": "AKSHARE",
+        "CHINA_A": "AKSHARE",
+        "A_SHARE": "AKSHARE",
+        "A_SHARES": "AKSHARE",
+        "ASHARE": "AKSHARE",
+        "ASHARES": "AKSHARE",
     }
     return aliases.get(key, key)
 

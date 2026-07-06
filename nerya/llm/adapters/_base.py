@@ -278,6 +278,32 @@ def _sleep_with_deadline(delay: float, deadline: float | None) -> None:
         time.sleep(sleep_for)
 
 
+def _is_transient_provider_400(status: int, doc: dict[str, Any]) -> bool:
+    """True for provider-side 400s that are actually upstream flaps.
+
+    Some OpenAI-compatible gateways (observed on GMI Cloud) surface a
+    transient backend failure as ``400 {"error": {"message": "Backend
+    request failed with status 400"}}`` with no validation detail. The
+    exact same payload succeeds on replay, so treating it as permanent
+    kills long agent turns for no reason. Genuine validation errors
+    (context overflow, bad schema, unknown params) name the offending
+    field/limit and never match this generic-backend-failure shape.
+    """
+
+    if int(status) != 400:
+        return False
+    try:
+        err = doc.get("error") if isinstance(doc, dict) else None
+        msg = (
+            err.get("message")
+            if isinstance(err, dict)
+            else (err if isinstance(err, str) else "")
+        ) or ""
+    except Exception:
+        return False
+    return "backend request failed" in str(msg).lower()
+
+
 def _post_with_retry(
     transport: Transport,
     url: str,
@@ -381,7 +407,13 @@ def _post_with_retry(
             if rl_state is not None:
                 store.update(provider_name, key_fp, rl_state)
 
-        if not is_retryable_status(status) or attempt >= max_attempts:
+        if (
+            not (
+                is_retryable_status(status)
+                or _is_transient_provider_400(status, doc)
+            )
+            or attempt >= max_attempts
+        ):
             break
 
         delay = jittered_backoff(attempt, base_delay=base_delay,

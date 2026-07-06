@@ -277,7 +277,16 @@ def _is_reasoning_model(model: str) -> bool:
     if not model:
         return False
     low = model.lower()
-    return any(low.startswith(p) for p in _REASONING_MODEL_PREFIXES)
+    # Gateways (GMI Cloud, OpenRouter, ...) namespace passthrough models as
+    # "vendor/model" (e.g. "openai/gpt-5.5"). Match on the bare model name,
+    # otherwise reasoning models behind a gateway silently fall into the
+    # legacy branch and get max_tokens/temperature — which the strict
+    # upstream rejects with 400 unsupported_parameter.
+    bare = low.rsplit("/", 1)[-1]
+    return any(
+        low.startswith(p) or bare.startswith(p)
+        for p in _REASONING_MODEL_PREFIXES
+    )
 
 
 _MINIMAX_THINKING_ON_VALUES: frozenset[str] = frozenset({
