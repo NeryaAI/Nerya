@@ -32,6 +32,7 @@ import {
   StatusDot,
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
+import { StrategyCardSpark } from "../../components/strategies/StrategyCardSpark";
 import { Select } from "../../components/Select";
 import {
   StrategyProposalApprovalCard,
@@ -634,7 +635,7 @@ export default function StrategiesPage() {
               }
             />
           ) : (
-            <div className="grid gap-3 grid-cols-[repeat(auto-fill,minmax(320px,1fr))]">
+            <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(360px,1fr))]">
               {filtered.map((strategy) => (
                 <StrategyCard
                   key={strategy.id}
@@ -700,14 +701,18 @@ function StrategyCard({
   return (
     <div
       data-strategy-id={strategy.id}
-      className="group relative flex cursor-pointer flex-col gap-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] p-4 transition-colors hover:border-[color:var(--line-hi)]"
+      className="group relative flex min-h-[230px] cursor-pointer flex-col gap-4 overflow-hidden rounded-xl border border-[color:var(--line)] bg-[linear-gradient(180deg,rgba(23,26,53,.78),rgba(10,11,26,.72))] p-5 shadow-[0_24px_70px_-52px_rgba(139,92,246,.9)] transition-colors hover:border-[color:var(--line-hi)]"
       onClick={() => {
         void router.push(strategyHref);
       }}
     >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -right-16 -top-20 h-40 w-40 rounded-full bg-violet-500/10 blur-3xl transition-opacity group-hover:opacity-90"
+      />
       <div className="relative flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate text-[15px] font-medium text-[color:var(--text-base)]">
+          <div className="truncate text-[16px] font-semibold text-[color:var(--text-base)]">
             {strategy.title || t("untitledStrategy")}
           </div>
           <div className="mt-0.5 truncate font-mono text-[12px] text-[color:var(--text-muted)]">
@@ -717,16 +722,17 @@ function StrategyCard({
         <StatusDot tone={tone} label={strategy.status} />
       </div>
       <div className="relative flex items-baseline justify-between gap-3">
-        <div className="text-[12px] text-[color:var(--text-muted)]">
+        <div className="rounded-full border border-[color:var(--line)] bg-white/[0.03] px-2.5 py-1 text-[11px] text-[color:var(--text-muted)]">
           {strategy.mode || "–"} · {strategy.account_id || "–"}
         </div>
-        <div className={`text-[18px] font-medium tabular-nums ${pnlClassName(totalPnl)}`}>
+        <div className={`text-[22px] font-semibold tabular-nums ${pnlClassName(totalPnl)}`}>
           {formatSignedUsd(totalPnl)}
         </div>
       </div>
       <div className="relative truncate font-mono text-[12px] text-[color:var(--text-muted)]">
         {markets}
       </div>
+      <StrategyCardSpark strategyId={strategy.id} />
       <div className="relative flex items-center justify-end gap-1 pt-1">
         <button
           type="button"

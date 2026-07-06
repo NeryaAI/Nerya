@@ -1623,12 +1623,12 @@ function AgentRunReplayPanel({
         <Pill tone={exactModel ? "brand" : "warn"}>{modelDisplay}</Pill>
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        <RunMeta label={labels.runSubagent} value={String(run?.subagent || labels.notRecorded)} />
-        <RunMeta label={labels.runTier} value={String(run?.tier || labels.notRecorded)} />
-        <RunMeta label={labels.runTokens} value={formatRunTokens(run?.tokens, labels.notRecorded)} />
-        <RunMeta label={labels.runWallTime} value={formatDurationMs(run?.wall_ms, labels.notRecorded)} />
-        <RunMeta label={labels.runCost} value={formatRunCost(run?.usd, labels.notRecorded)} />
-        <RunMeta label={labels.runModel} value={modelDisplay} wide />
+        {run?.subagent ? <RunMeta label={labels.runSubagent} value={String(run.subagent)} /> : null}
+        {run?.tier ? <RunMeta label={labels.runTier} value={String(run.tier)} /> : null}
+        {run?.tokens != null ? <RunMeta label={labels.runTokens} value={formatRunTokens(run.tokens, labels.notRecorded)} /> : null}
+        {run?.wall_ms != null ? <RunMeta label={labels.runWallTime} value={formatDurationMs(run.wall_ms, labels.notRecorded)} /> : null}
+        {run?.usd != null ? <RunMeta label={labels.runCost} value={formatRunCost(run.usd, labels.notRecorded)} /> : null}
+        {exactModel ? <RunMeta label={labels.runModel} value={modelDisplay} wide /> : null}
       </div>
       {run?.model_calls?.length ? (
         <ModelCallList
