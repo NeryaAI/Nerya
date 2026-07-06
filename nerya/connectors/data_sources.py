@@ -217,6 +217,114 @@ class AkShareConnector(_ReadOnlyMixin, CEXConnectorBase):
         )
 
 
+    @staticmethod
+    def _sina_symbol(code: str) -> str:
+        """Map a bare 6-digit A-share code to AkShare's ``sh``/``sz``/``bj`` form."""
+        c = "".join(ch for ch in str(code) if ch.isdigit())
+        if len(c) != 6:
+            return str(code).lower()
+        if c[0] == "6" or c[:2] == "90" or c[:3] == "688":
+            return "sh" + c
+        if c[0] in ("0", "2", "3"):
+            return "sz" + c
+        if c[:2] in ("43", "83", "87", "88") or c[0] in ("4", "8"):
+            return "bj" + c
+        return "sz" + c
+
+    def get_klines(self, market: str, *, interval: str = "1d",
+                    limit: int = 200, since: int | None = None,
+                    end: int | None = None) -> list[list[Any]]:
+        """Daily OHLCV for CN A-shares via AkShare.
+
+        Returns ``[[ts_ms, open, high, low, close, volume], ...]`` consumed by
+        the shared ``normalize_klines`` generic-array path. AkShare A-share
+        history is end-of-day only, so intraday intervals fall back to daily.
+        Sources are tried in order (Sina, then Tencent, then EastMoney) so the
+        fetch survives any single endpoint being throttled or unreachable.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        import pandas as pd  # bundled with akshare
+
+        ak = self._client()
+        symbol = _strip_prefix(market)
+        sina_sym = self._sina_symbol(symbol)
+
+        def _as_dt(value: int | None, fallback: datetime) -> datetime:
+            if value is None:
+                return fallback
+            secs = int(value) / 1000 if int(value) > 1_000_000_000_000 else int(value)
+            return datetime.fromtimestamp(secs, tz=timezone.utc)
+
+        end_dt = _as_dt(end, datetime.now(timezone.utc))
+        start_dt = _as_dt(since, end_dt - timedelta(days=int(limit) * 2 + 15))
+        start_s, end_s = start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d")
+
+        def _from_sina():
+            return ak.stock_zh_a_daily(
+                symbol=sina_sym, start_date=start_s, end_date=end_s, adjust="qfq"
+            )
+
+        def _from_tencent():
+            return ak.stock_zh_a_hist_tx(
+                symbol=sina_sym, start_date=start_s, end_date=end_s, adjust="qfq"
+            )
+
+        def _from_eastmoney():
+            return ak.stock_zh_a_hist(
+                symbol=symbol, period="daily",
+                start_date=start_s, end_date=end_s, adjust="qfq",
+            )
+
+        df = None
+        last_exc: Exception | None = None
+        for fetch in (_from_sina, _from_tencent, _from_eastmoney):
+            try:
+                df = fetch()
+                if df is not None and len(df) > 0:
+                    break
+            except Exception as exc:  # noqa: BLE001 - try the next source
+                last_exc = exc
+                df = None
+        if df is None or len(df) == 0:
+            if last_exc is not None:
+                raise RuntimeError(
+                    f"AkShare cannot fetch klines for {symbol!r}: {last_exc}"
+                )
+            return []
+
+        cols = {str(c).lower(): c for c in df.columns}
+
+        def pick(*names: str):
+            for n in names:
+                if n in cols:
+                    return cols[n]
+            return None
+
+        c_date = pick("date", "\u65e5\u671f")
+        c_open = pick("open", "\u5f00\u76d8")
+        c_high = pick("high", "\u6700\u9ad8")
+        c_low = pick("low", "\u6700\u4f4e")
+        c_close = pick("close", "\u6536\u76d8")
+        c_vol = pick("volume", "\u6210\u4ea4\u91cf", "amount", "\u6210\u4ea4\u989d")
+
+        out: list[list[Any]] = []
+        for _, row in df.iterrows():
+            ts = pd.Timestamp(row[c_date])
+            ts_ms = int(
+                datetime(ts.year, ts.month, ts.day, tzinfo=timezone.utc).timestamp()
+                * 1000
+            )
+            out.append([
+                ts_ms,
+                float(row[c_open]), float(row[c_high]),
+                float(row[c_low]), float(row[c_close]),
+                float(row[c_vol]) if c_vol is not None else 0.0,
+            ])
+        out.sort(key=lambda r: r[0])
+        return out[-int(limit):]
+
+
 # ---------------------------------------------------------------------------
 # Polygon.io (US equities + crypto)
 # ---------------------------------------------------------------------------

@@ -117,6 +117,7 @@ def run_strategy_backtest(
             cfg.timeframes = _unique([cfg.tf, *discovered_timeframes])
         else:
             cfg.timeframes = _unique([*discovered_timeframes, cfg.tf, *cfg.timeframes])
+    _apply_daily_only_venue_policy(cfg)
     if not allow_mock:
         unsupported_markets = _unsupported_explicit_historical_markets(
             cfg.markets,
@@ -328,6 +329,33 @@ def _missing_history_result(
             ),
         },
     }
+
+
+_DAILY_ONLY_VENUES = {"AKSHARE", "TUSHARE"}
+_DAILY_ONLY_MIN_WINDOW_DAYS = 500
+
+
+def _apply_daily_only_venue_policy(cfg: Any) -> None:
+    """Force a daily primary timeframe for end-of-day-only data feeds.
+
+    China A-share open-data feeds (AkShare, Tushare) only publish
+    end-of-day candles. A sub-daily primary timeframe silently yields the
+    same sparse daily rows mislabelled as intraday, which starves warmup +
+    entry logic and produces spurious ``no_trades`` results. When every
+    explicit market resolves to such a venue, pin the primary timeframe to
+    ``1d`` and guarantee enough daily history for warmup + signals.
+    """
+
+    markets = [str(m) for m in (getattr(cfg, "markets", []) or []) if ":" in str(m)]
+    if not markets:
+        return
+    venues = {canonical_venue(m.split(":", 1)[0]) for m in markets}
+    if not venues or not venues.issubset(_DAILY_ONLY_VENUES):
+        return
+    cfg.tf = "1d"
+    cfg.timeframes = _unique(["1d", *(getattr(cfg, "timeframes", []) or [])])
+    if int(getattr(cfg, "window_days", 0) or 0) < _DAILY_ONLY_MIN_WINDOW_DAYS:
+        cfg.window_days = _DAILY_ONLY_MIN_WINDOW_DAYS
 
 
 def _apply_short_lived_window_policy(cfg: Any, package: StrategyPackage, *, explicit_config: bool) -> None:

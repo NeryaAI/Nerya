@@ -903,6 +903,13 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         api_keys_url="https://www.bybit.com/app/user/api-management",
     ))
     reg.register(_perp_spec(
+        "htx_perpetual", "HTX Linear Perpetual (USDT-M)",
+        ccxt_id="htx", default_type="swap",
+        aliases=("htx_perp", "htx_swap", "huobi_perpetual", "huobi_perp"),
+        docs_url="https://huobiapi.github.io/docs/usdt_swap/v1/en/",
+        api_keys_url="https://www.htx.com/en-us/account/api",
+    ))
+    reg.register(_perp_spec(
         "okx_perpetual", "OKX Perpetual Swap",
         ccxt_id="okx", default_type="swap",
         with_passphrase=True,

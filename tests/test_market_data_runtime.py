@@ -8,7 +8,7 @@ import pytest
 
 from nerya.agent.kernel import AgentKernel as _AgentKernel  # noqa: F401
 from nerya.connectors.mock_exchange import MockExchange
-from nerya.core import yaml_io
+from nerya.core import jsonl, yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.data.candles import discover_market_data_sources, fetch_candles, fetch_public_ticker
@@ -1686,6 +1686,89 @@ def test_wallet_configure_binding_vaultifies_plaintext(tmp_path) -> None:
     assert "api_key" not in binding["config"]
     vault = SecretVault.open(cfg.paths.vault_enc)
     assert vault.resolve("wallet_okx_main_api_key", required_scope="wallet") == "plain-key"
+
+
+def test_wallet_swap_obeys_runtime_kill_switch(tmp_path, monkeypatch) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+
+    cfg = _config(tmp_path)
+    cfg.data["runtime"]["live_trading_enabled"] = True
+    cfg.data["runtime"]["kill_switch"] = True
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/swap")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    def fail_build_provider(*_args, **_kwargs):  # noqa: ANN001
+        raise AssertionError("provider should not be built while kill switch is on")
+
+    monkeypatch.setattr(routes_wallet.wallet_mod, "build_provider", fail_build_provider)
+
+    res = handler(
+        client,
+        {
+            "provider": "byreal",
+            "chain": "solana",
+            "token_in": "SOL",
+            "token_out": "USDC",
+            "amount_in": 1,
+        },
+    )
+
+    assert res == {"ok": False, "error": "kill_switch_enabled"}
+
+
+def test_wallet_swap_journals_request_and_result(tmp_path, monkeypatch) -> None:
+    from nerya.api import routes_wallet
+    from nerya.api.routes_wallet import routes as wallet_routes
+    from nerya.wallet.protocol import WalletSwapResult
+
+    cfg = _config(tmp_path)
+    cfg.data["runtime"]["live_trading_enabled"] = True
+    handler = dict(((method, path), fn) for method, path, fn in wallet_routes())[
+        ("POST", "/wallet/swap")
+    ]
+    client = SimpleNamespace(config=cfg)
+
+    class FakeProvider:
+        def swap(self, **kwargs):  # noqa: ANN001
+            assert kwargs["live"] is True
+            return WalletSwapResult(
+                provider="byreal",
+                chain=kwargs["chain"],
+                ok=True,
+                tx_hash="tx-123",
+                amount_in=kwargs["amount_in"],
+                amount_out=99,
+            )
+
+    monkeypatch.setattr(
+        routes_wallet.wallet_mod,
+        "build_provider",
+        lambda *_args, **_kwargs: FakeProvider(),
+    )
+
+    res = handler(
+        client,
+        {
+            "provider": "byreal",
+            "chain": "solana",
+            "token_in": "SOL",
+            "token_out": "USDC",
+            "amount_in": 1,
+            "slippage_bps": 25,
+        },
+    )
+
+    assert res["ok"] is True
+    rows = jsonl.read_all(cfg.paths.journal("wallet"))
+    assert [row["kind"] for row in rows[-2:]] == [
+        "wallet.swap.requested",
+        "wallet.swap.result",
+    ]
+    assert rows[-1]["tx_hash"] == "tx-123"
+    assert "private" not in str(rows).lower()
 
 
 def test_subagent_legacy_market_data_skill_call_falls_through_to_native_tool(tmp_path) -> None:

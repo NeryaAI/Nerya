@@ -118,6 +118,9 @@ def _resolve_cex_creds(
     if not isinstance(provider_config, dict):
         provider_config = {}
 
+    live_account = bool(account_cfg.get("live") or account_cfg.get("live_trading_enabled"))
+    venue = str(account_cfg.get("venue") or account_cfg.get("exchange") or "").lower()
+
     def _pull(field: str, legacy_key: str) -> str:
         ref = (
             creds_map.get(field)
@@ -132,6 +135,8 @@ def _resolve_cex_creds(
             return _resolve_ref(
                 ref, workspace, vault_passphrase, scope="exchange",
             ) or ""
+        if live_account and venue != "mock":
+            return ""
         # Legacy fixtures still occasionally embed non-vault values for
         # local mock runs. Treat them as already-resolved.
         return ref
@@ -156,7 +161,6 @@ def _resolve_cex_creds(
     # Backward compatibility for older Hyperliquid rows that used the
     # generic api_key/api_secret slots before the CCXT-specific wallet
     # field names were exposed.
-    venue = str(account_cfg.get("venue") or account_cfg.get("exchange") or "").lower()
     if venue in {"hyperliquid", "hyperliquid_perpetual", "hyperliquid_perp", "hl", "hl_perp"}:
         extras["walletAddress"] = extras.get("walletAddress") or key
         extras["privateKey"] = extras.get("privateKey") or sec
