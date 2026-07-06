@@ -59,7 +59,7 @@ nerya = ["agent/route_manifest_presets/*.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "sdk/python"]
 # Default to the curated smoke suite (~50 cases) so local
 # `pytest` runs are fast. Run the full 1900+ test regression
 # pass via `pytest -m ""` (empty filter selects everything).

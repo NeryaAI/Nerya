@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Ground-truth orientation for AI agents and
-human contributors working inside the **Nerya** repository.
+Orientation for AI agents and human contributors working inside the
+**Nerya** repository.
 
-Read this file *first*. It answers the "where does X live, and how do
-I run things" questions so you don't grep through the whole tree on
+Read this file *first*. It answers the "where does X live, and how do I
+run things" questions so you don't grep through the whole tree on
 every session.
 
 ---
@@ -20,7 +20,7 @@ agent runtime**. It runs as:
 - `dashboard/` — Next.js 14 control panel on `:3001`, talking to the
 API server through `/api/proxy/`*.
 
-The runtime never calls exchanges or LLMs directly — **every external
+The runtime never calls exchanges or LLMs directly. **Every external
 call is mediated by a Skill and its approved scripts**. A Skill is the
 model/operator-facing playbook declared by `SKILL.md`. Executable logic
 belongs under `scripts/`, not in `actions.py` or YAML manifests. Do not
@@ -219,7 +219,7 @@ the action.
 
 ## 7. Known intentional mocks (safe)
 
-These are *deliberately* mocks — not missing features:
+These are *deliberately* mocks, not missing features:
 
 - `nerya/connectors/mock_exchange.py` and `mock_chain.py` — used by
 paper runs and tests. Do **not** try to "replace with real data".

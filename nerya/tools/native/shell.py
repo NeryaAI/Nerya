@@ -507,6 +507,12 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
             ),
         )
     if _looks_like_native_strategy_discovery(cmd, str(description)):
+        preferred_tools = ["glob", "list_dir", "read_file"]
+        if any(
+            term in f"{description}\n{cmd}".lower()
+            for term in _NATIVE_STRATEGY_DISCOVERY_TERMS
+        ):
+            preferred_tools.extend(["role_list", "subagent_list", "strategy_backtest"])
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
@@ -531,25 +537,11 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
                 retryable=False,
                 detail={
                     "reason": "tool_redirect",
-                    "preferred_tools": [
-                        "glob",
-                        "list_dir",
-                        "read_file",
-                        "role_list",
-                        "subagent_list",
-                        "strategy_backtest",
-                    ],
+                    "preferred_tools": preferred_tools,
                 },
                 recovery_hint={
                     "reason": "tool_redirect",
-                    "preferred_tools": [
-                        "glob",
-                        "list_dir",
-                        "read_file",
-                        "role_list",
-                        "subagent_list",
-                        "strategy_backtest",
-                    ],
+                    "preferred_tools": preferred_tools,
                 },
             ),
         )

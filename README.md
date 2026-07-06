@@ -10,8 +10,8 @@
 
 Nerya runs a role-typed trading team on your machine: strategy lead, market analyst,
 on-chain analyst, news analyst, technical analyst, risk critic, execution planner,
-and portfolio manager. The team drafts strategies, runs them behind Risk Gate and
-Approval Gate, then turns session logs into operator-approved patches for prompts,
+and portfolio manager. The team drafts strategies, runs them through the Risk Gate
+and Approval Gate, then turns session logs into operator-approved patches for prompts,
 skills, scripts, triggers, and strategy configs.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
@@ -540,8 +540,9 @@ LICENSE file.
 
 <div align="center">
 
-Built for operators who want a local Agent Team that researches, trades, reviews,
-and evolves strategies without holding the hot keys.
+Built for operators who want a local Agent Team that can research, trade, learn
+from its mistakes, and evolve its own strategies, without ever handing over the
+hot keys.
 
 <sub>Nerya · Evolutionary Brain</sub>
 
