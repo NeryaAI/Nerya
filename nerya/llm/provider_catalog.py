@@ -307,6 +307,23 @@ PROVIDER_CATALOG: tuple[ProviderEntry, ...] = (
         aliases=("mimo", "xiaomi-mimo"),
         description="Xiaomi MiMo family.",
     ),
+    # ---------- B.AI (AI-agent financial infra gateway) -------------
+    ProviderEntry(
+        id="bai",
+        name="B.AI (Agent Compute Gateway)",
+        family="bai",
+        api_mode="chat_completions",
+        auth_type="api_key",
+        base_url="https://api.b.ai/v1",
+        env_keys=("BAI_API_KEY", "B_AI_API_KEY"),
+        base_url_env="BAI_BASE_URL",
+        aliases=("b.ai", "b-ai", "bai-gateway"),
+        description=(
+            "B.AI unified LLM gateway \u2014 permissionless access to frontier "
+            "models with x402 agent payments and 8004 on-chain agent identity "
+            "(HTX Genesis ecosystem AI compute)."
+        ),
+    ),
     # ---------- xAI / Grok -----------------------------------------
     ProviderEntry(
         id="xai",

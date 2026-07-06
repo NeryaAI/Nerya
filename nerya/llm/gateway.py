@@ -154,7 +154,11 @@ class LLMGateway:
             default_tier=config.get("llm.default_tier") or "medium",
             extra_class_map=extra_class_map or None,
         )
-        self.router = ModelRouter(tiers=tiers, workspace=config.paths.root)
+        self.router = ModelRouter(
+            tiers=tiers,
+            workspace=config.paths.root,
+            config_like=config,
+        )
         self.usage = LLMUsageJournal(
             journal_path=config.paths.journal("llm"),
             security_path=config.paths.journal("security"),

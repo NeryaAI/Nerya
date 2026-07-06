@@ -7,6 +7,7 @@ Config precedence:
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -402,12 +403,12 @@ class Config:
 
 
 def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    out = dict(base)
+    out = deepcopy(base)
     for k, v in (override or {}).items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = _merge(out[k], v)
         else:
-            out[k] = v
+            out[k] = deepcopy(v)
     return out
 
 

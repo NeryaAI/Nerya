@@ -195,6 +195,14 @@ class ModelRouter:
                     continue
                 raise last_error
             if route_provider == "mock":
+                if not self._mock_allowed():
+                    last_error = LLMError(
+                        f"LLM tier '{tier}' route unavailable "
+                        "(provider='mock', reason=mock_not_allowed)"
+                    )
+                    if route_index < len(routes) - 1:
+                        continue
+                    raise last_error
                 res = _mock_call(tier=tier, task=task, prompt=prompt, schema=schema)
                 return CallResult(
                     text=res.text,

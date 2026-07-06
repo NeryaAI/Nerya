@@ -28,8 +28,9 @@ from nerya.llm.providers import ProviderResult
 pytestmark = pytest.mark.smoke
 
 
-def _config(tmp_path, tiers: dict) -> Config:
+def _config(tmp_path, tiers: dict, *, mock_mode: bool = True) -> Config:
     data = deepcopy(DEFAULT_CONFIG)
+    data["runtime"]["mock_mode"] = mock_mode
     data["llm"]["tiers"] = tiers
     return Config(paths=WorkspacePaths(tmp_path), data=data)
 
@@ -99,6 +100,30 @@ def test_messages_call_uses_frontend_model_override_without_mutating_tier(tmp_pa
     assert response.provider == "mock"
     assert response.model == "front-end-picked-model"
     assert cfg.get("llm.tiers")["medium"]["model"] == "medium-model"
+
+
+def test_prompt_api_mock_provider_requires_explicit_mock_mode(monkeypatch, tmp_path):
+    monkeypatch.delenv("NERYA_ALLOW_MOCK_DATA", raising=False)
+    monkeypatch.delenv("NERYA_MOCK_MODE", raising=False)
+    cfg = _config(
+        tmp_path,
+        {
+            "medium": {
+                "provider": "mock",
+                "model": "medium-model",
+                "allowed_tasks": ["subagent_analysis"],
+            },
+        },
+        mock_mode=False,
+    )
+
+    with pytest.raises(LLMError, match="mock_not_allowed"):
+        LLMGateway(cfg).call(
+            task="subagent_analysis",
+            caller="test",
+            tier="medium",
+            prompt="hello",
+        )
 
 
 def test_minimax_cn_catalog_routes_messages_to_openai_compat(monkeypatch, tmp_path):
@@ -1391,6 +1416,7 @@ def test_real_messages_provider_missing_key_fails_loud(
                 "allowed_tasks": ["agent.loop"],
             },
         },
+        mock_mode=False,
     )
     cfg.data["llm"]["providers"] = {
         "cliproxy": {

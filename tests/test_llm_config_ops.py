@@ -18,7 +18,9 @@ pytestmark = pytest.mark.smoke
 
 
 def _config(tmp_path) -> Config:
-    return Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    data = deepcopy(DEFAULT_CONFIG)
+    data["runtime"]["mock_mode"] = True
+    return Config(paths=WorkspacePaths(root=tmp_path), data=data)
 
 
 def _route(method: str, path: str):
