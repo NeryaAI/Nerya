@@ -40,7 +40,7 @@ from ..trading import strategy_versions as _versions
 def evolve(config: Config) -> dict[str, Any]:
     """Run reflection + auto-create a minimal ``learning_update`` proposal."""
 
-    reflect = run_reflection(config.paths)
+    reflect = run_reflection(config.paths, config=config)
     err = summarize_errors(config.paths)
     ranked = rank_proposal_seeds(reflect)
     signals = collect_signals(config.paths, persist=True)

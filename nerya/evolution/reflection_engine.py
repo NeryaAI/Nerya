@@ -15,6 +15,7 @@ from collections import Counter, defaultdict
 from typing import Any, Iterable
 
 from ..core import jsonl
+from ..core.config import Config
 from ..core.paths import WorkspacePaths
 from ..strategy_history import store
 from ..strategy_history.attribution import (
@@ -22,7 +23,6 @@ from ..strategy_history.attribution import (
     subagent_contribution,
     paper_vs_live_divergence,
 )
-from .learning_writer import append_global_learning, append_strategy_learning
 
 
 # ---------------------------------------------------------------------------
@@ -255,16 +255,54 @@ def _list_strategy_ids(paths: WorkspacePaths) -> list[str]:
     return [p.name for p in root.iterdir() if p.is_dir() and (p / "history").exists()]
 
 
+def _validated_strategy_ids(
+    paths: WorkspacePaths,
+    strategy_ids: Iterable[str],
+) -> tuple[list[str], list[str]]:
+    root = paths.strategies.resolve()
+    valid: list[str] = []
+    invalid: list[str] = []
+    seen: set[str] = set()
+    for raw in strategy_ids:
+        strategy_id = str(raw or "").strip()
+        if not strategy_id:
+            invalid.append(strategy_id)
+            continue
+        if strategy_id in seen:
+            continue
+        seen.add(strategy_id)
+        try:
+            strategy_path = (root / strategy_id).resolve()
+            strategy_path.relative_to(root)
+        except (ValueError, OSError):
+            invalid.append(strategy_id)
+            continue
+        if not strategy_path.is_dir():
+            invalid.append(strategy_id)
+            continue
+        valid.append(strategy_id)
+    return valid, invalid
+
+
 def run_reflection(paths: WorkspacePaths,
-                   strategy_ids: Iterable[str] | None = None) -> dict[str, Any]:
+                   strategy_ids: Iterable[str] | None = None,
+                   *,
+                   config: Config | None = None) -> dict[str, Any]:
     """Scan the journals, write a global learning note and per-strategy notes
     for any finding. Returns a summary dict with all findings."""
     errors = jsonl.read_all(paths.journal("errors"))
     trading = jsonl.read_all(paths.journal("trading"))
     skills = jsonl.read_all(paths.journal("skills"))
     evolution = jsonl.read_all(paths.journal("evolution"))
+    runtime_config = config or Config(paths=paths, data={})
 
-    strategies = list(strategy_ids) if strategy_ids is not None else _list_strategy_ids(paths)
+    requested = (
+        list(strategy_ids)
+        if strategy_ids is not None
+        else _list_strategy_ids(paths)
+    )
+    strategies, invalid_strategy_ids = _validated_strategy_ids(paths, requested)
+    memory_write_errors: list[dict[str, str]] = []
 
     per_strategy: dict[str, dict[str, list]] = {}
     for sid in strategies:
@@ -289,12 +327,38 @@ def run_reflection(paths: WorkspacePaths,
         per_strategy[sid] = findings
         # write a strategy learning note if anything fired
         if any(findings.values()):
-            append_strategy_learning(
-                paths, sid,
-                note=(f"Reflection for {sid}: "
-                      + ", ".join(f"{k}={len(v)}" for k, v in findings.items() if v)),
-                kind="strategy",
+            note = (
+                f"Reflection for {sid}: "
+                + ", ".join(
+                    f"{key}={len(value)}"
+                    for key, value in findings.items()
+                    if value
+                )
             )
+            from ..memory.runtime import MemoryRuntime
+
+            try:
+                remembered = MemoryRuntime(runtime_config, strategy_id=sid).remember(
+                    category="learning",
+                    content=note,
+                    scope="strategy",
+                    key="reflection.latest",
+                    source="reflection:strategy",
+                    evidence_refs=[f"strategy:{sid}"],
+                    writer_id="reflection_engine",
+                )
+                if not remembered.ok:
+                    memory_write_errors.append({
+                        "scope": "strategy",
+                        "strategy_id": sid,
+                        "skip_reason": remembered.skip_reason or "write_failed",
+                    })
+            except Exception as exc:  # noqa: BLE001 - report the failed tick
+                memory_write_errors.append({
+                    "scope": "strategy",
+                    "strategy_id": sid,
+                    "skip_reason": f"{type(exc).__name__}: {exc}",
+                })
 
     summary_note = (
         f"Reflection scan: errors={len(errors)}, trading_events={len(trading)}, "
@@ -302,10 +366,47 @@ def run_reflection(paths: WorkspacePaths,
         f"strategies_scanned={len(strategies)}.\n"
         f"Recent error samples: {errors[-3:]}"
     )
-    path = append_global_learning(paths, note=summary_note, kind="global")
+    from ..memory.runtime import MemoryRuntime
+
+    try:
+        global_write = MemoryRuntime(runtime_config).remember(
+            category="learning",
+            content=summary_note,
+            scope="global",
+            key="reflection.workspace.latest",
+            source="reflection:global",
+            evidence_refs=[
+                "journal:errors",
+                "journal:trading",
+                "journal:skills",
+                "journal:evolution",
+            ],
+            writer_id="reflection_engine",
+        )
+        if not global_write.ok:
+            memory_write_errors.append({
+                "scope": "global",
+                "strategy_id": "",
+                "skip_reason": global_write.skip_reason or "write_failed",
+            })
+    except Exception as exc:  # noqa: BLE001 - report the failed tick
+        memory_write_errors.append({
+            "scope": "global",
+            "strategy_id": "",
+            "skip_reason": f"{type(exc).__name__}: {exc}",
+        })
+    path = paths.memory / "global.md"
+    write_error = (
+        memory_write_errors[0]["skip_reason"]
+        if memory_write_errors
+        else ""
+    )
     return {
-        "ok": True,
+        "ok": not invalid_strategy_ids and not memory_write_errors,
         "file": str(path),
         "errors": len(errors),
         "strategies": per_strategy,
+        "invalid_strategy_ids": invalid_strategy_ids,
+        "memory_write_errors": memory_write_errors,
+        "write_error": write_error,
     }

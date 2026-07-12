@@ -143,6 +143,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_stale_seconds": 30,
     },
     "memory": {
+        "legacy_owner_actor": "default",
         "external": {
             "enabled": False,
             "provider": "",

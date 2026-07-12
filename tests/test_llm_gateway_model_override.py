@@ -427,6 +427,50 @@ def test_anthropic_messages_can_enable_provider_native_web_search():
     assert [tool["name"] for tool in tools] == ["web_search", "web_fetch"]
 
 
+def test_anthropic_caches_only_the_stable_system_prefix():
+    from nerya.agent.prompt_sections import CACHE_BOUNDARY_MARKER
+
+    transport = _CapturingTransport({
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 3, "output_tokens": 1},
+    })
+    backend = AnthropicMessagesBackend(
+        api_key="sk-ant-test",
+        model="claude-sonnet-4-5",
+        transport=transport,
+    )
+
+    backend(MessagesRequest(
+        system=f"stable notebook\n\n{CACHE_BOUNDARY_MARKER}\n\ndynamic recall",
+        messages=[{"role": "user", "content": "hello"}],
+    ))
+
+    system = transport.calls[0]["body"]["system"]
+    assert system == [
+        {
+            "type": "text",
+            "text": "stable notebook",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": "dynamic recall"},
+    ]
+
+
+def test_internal_cache_boundary_is_removed_for_non_anthropic_wire_prompts():
+    from nerya.agent.prompt_sections import CACHE_BOUNDARY_MARKER
+    from nerya.llm.messages import _openai_render_messages
+
+    rendered = _openai_render_messages(
+        system=f"stable\n{CACHE_BOUNDARY_MARKER}\ndynamic",
+        messages=[],
+    )
+
+    assert rendered[0]["role"] == "system"
+    assert CACHE_BOUNDARY_MARKER not in rendered[0]["content"]
+    assert rendered[0]["content"] == "stable\n\ndynamic"
+
+
 def test_gemini_messages_can_enable_provider_native_web_search():
     transport = _CapturingTransport({
         "candidates": [

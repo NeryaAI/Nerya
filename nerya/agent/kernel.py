@@ -12,10 +12,6 @@ the model decides which tool to call. The kernel only:
 * builds the tool registry (native + legacy-skill bridge),
 * renders the system prompt (charter + memory recap + skill / recipe
   listing),
-* attaches long-lived helpers — :class:`~nerya.agent.memory.Memory`,
-  :class:`~nerya.subagents.dispatcher.SubAgentDispatcher` — so callers
-  (and the kernel's own end-of-turn hook) can use them without
-  re-instantiating per turn,
 * delegates the conversation to :class:`WorkspaceNativeAgentLoop`,
 * runs end-of-turn auto-evolution (``maybe_propose_from_turn``) and an
   optional memory-write tick so durable lessons aren't dropped between
@@ -70,12 +66,10 @@ from .market_context import (
     load_session_market_context,
     render_session_market_context_block,
 )
-from .memory import Memory
 from .prompt_sections import CACHE_BOUNDARY_MARKER
 from .self_improvement import maybe_propose_from_turn
 from .session import SessionStore
 from .session_compaction import (
-    SESSION_COMPACTION_META_KEY,
     SessionCompactionPolicy,
     checkpoint_from_session_meta,
     compact_session_history,
@@ -883,6 +877,17 @@ def _model_user_text_for_trigger(user_text: str, trigger: dict[str, Any]) -> str
     return user_text
 
 
+def _memory_actor_id_for_trigger(trigger: dict[str, Any]) -> str:
+    payload = trigger.get("payload") if isinstance(trigger.get("payload"), dict) else {}
+    actor_id = (
+        payload.get("actor_id")
+        or payload.get("user_id")
+        or trigger.get("actor_id")
+        or "default"
+    )
+    return str(actor_id).strip() or "default"
+
+
 def _latest_prior_user_text(messages: list[dict[str, Any]]) -> str | None:
     for message in reversed(messages or []):
         if message.get("role") != "user":
@@ -1168,7 +1173,6 @@ class AgentKernel:
         self._sessions = SessionStore(self.config.paths.root)
         self._registry = ToolRegistry()
         self._deps: Optional[NativeToolDeps] = None
-        self._memory: Optional[Memory] = None
         self._subagents: Optional[Any] = None
         self._evolution_hooks = EvolutionHookBus(self.config)
         # Per-kernel turn counter feeds the periodic memory compaction
@@ -1191,24 +1195,6 @@ class AgentKernel:
         """Return the tool registry, building it lazily on first access."""
         self._ensure_registry()
         return self._registry
-
-    @property
-    def memory(self) -> Memory:
-        """Long-term memory (workspace ``memory/*.md`` + per-strategy
-        ``learnings.md``).
-
-        Lazily attached so unit tests that build a kernel without a
-        real workspace don't pay the I/O cost. Mirrors
-        :class:`agent_runtime.MemoryManager` in spirit: the kernel keeps
-        a single instance for the whole session, the native
-        ``memory_recall`` / ``memory_remember`` tools read/write through
-        it, and end-of-turn hooks (see :meth:`_after_turn_memory`) call
-        :meth:`Memory.append_global` for durable lessons.
-        """
-
-        if self._memory is None:
-            self._memory = Memory(paths=self.config.paths)
-        return self._memory
 
     @property
     def subagents(self):
@@ -1247,6 +1233,74 @@ class AgentKernel:
         self._deps = None
         return {}
 
+    def _bind_session_strategy(
+        self,
+        *,
+        session_id: str,
+        requested_strategy_id: Optional[str],
+    ) -> Optional[str]:
+        """Resolve one immutable strategy binding across JSON and SQLite."""
+
+        from ..db.repositories import (
+            AgentSessionRepository,
+            SessionStrategyMismatch,
+        )
+        from ..db.sqlite import connect
+
+        requested = str(requested_strategy_id or "").strip() or None
+        file_state = self._sessions.load(session_id)
+        file_strategy = (
+            str(file_state.strategy_id or "").strip() or None
+            if file_state is not None
+            else None
+        )
+        con = connect(self.config.paths.db)
+        try:
+            repo = AgentSessionRepository(con)
+            db_row = repo.get_session(session_id)
+            db_strategy = (
+                str((db_row or {}).get("strategy_id") or "").strip() or None
+            )
+            if file_strategy and db_strategy and file_strategy != db_strategy:
+                raise SessionStrategyMismatch(
+                    session_id,
+                    db_strategy,
+                    file_strategy,
+                )
+            bound = file_strategy or db_strategy
+            if requested and bound and requested != bound:
+                raise SessionStrategyMismatch(session_id, bound, requested)
+            resolved = bound or requested
+            if db_row is None or (resolved and not db_strategy):
+                repo.upsert_session(
+                    session_id=session_id,
+                    strategy_id=resolved,
+                )
+        finally:
+            con.close()
+
+        if file_state is None:
+            self._sessions.ensure(session_id, strategy_id=resolved)
+        elif resolved and not file_strategy:
+            file_state.strategy_id = resolved
+            self._sessions.save(file_state)
+        return resolved
+
+    def _session_exists_anywhere(self, session_id: str) -> bool:
+        if self._sessions.exists(session_id):
+            return True
+        try:
+            from ..db.repositories import AgentSessionRepository
+            from ..db.sqlite import connect
+
+            con = connect(self.config.paths.db)
+            try:
+                return AgentSessionRepository(con).get_session(session_id) is not None
+            finally:
+                con.close()
+        except Exception:
+            return False
+
     # ------------------------------------------------------------- run_turn
 
     def run_turn(
@@ -1274,11 +1328,11 @@ class AgentKernel:
 
         session_existed = False
         if session_id:
-            try:
-                session_existed = self._sessions.exists(session_id)
-                self._sessions.ensure(session_id, strategy_id=strategy_id)
-            except Exception:
-                _LOG.debug("session ensure failed", exc_info=True)
+            session_existed = self._session_exists_anywhere(session_id)
+            strategy_id = self._bind_session_strategy(
+                session_id=session_id,
+                requested_strategy_id=strategy_id,
+            )
 
         if cancel_token is not None:
             try:
@@ -1391,6 +1445,7 @@ class AgentKernel:
                     turn_id=turn_id,
                     result=result,
                     strategy_id=strategy_id,
+                    session_id=session_id,
                 )
                 try:
                     self._evolution_hooks.after_turn(
@@ -1461,6 +1516,7 @@ class AgentKernel:
         )
         deps.active_strategy_id = strategy_id
         deps.active_session_id = session_id
+        deps.active_actor_id = _memory_actor_id_for_trigger(trigger)
         deps.active_trigger_event_id = trigger_event_id
         deps.active_trigger_source = str((trigger or {}).get("source") or "")
         deps.active_trigger_kind = str((trigger or {}).get("kind") or "")
@@ -1994,10 +2050,11 @@ class AgentKernel:
             strategy_id=strategy_id,
             session_id=session_id,
             user_text=system_user_text,
-            frozen_memory_block=self._freeze_memory_prompt_block(
+            frozen_memory_context=self._freeze_memory_prompt_context(
                 deps,
                 session_id=session_id,
                 strategy_id=strategy_id,
+                query=system_user_text,
             ),
         )
         effective_provider, _effective_model, effective_meta = gw.effective_model_metadata(
@@ -2352,6 +2409,7 @@ class AgentKernel:
             self._fire_verifier_nudge(
                 turn_id=turn_id,
                 strategy_id=strategy_id,
+                session_id=session_id,
                 blocks=block_dicts,
                 todos_before=todos_before,
                 todos_after=deps.task_state.snapshot_todos(),
@@ -3465,12 +3523,38 @@ class AgentKernel:
             con = connect(self.config.paths.db)
             repo = AgentSessionRepository(con)
             session_row = repo.get_session(session_id) or {}
-            session_meta = self._parse_json_dict(session_row.get("meta_json"))
+            session_meta = _json_obj(session_row.get("meta_json"))
+            existing_checkpoint = checkpoint_from_session_meta(session_meta)
+            compaction_epoch = int(session_row.get("compaction_epoch") or 0)
             session_compact_enabled = bool(
                 self.config.get("agent.native.session_autocompact_enabled", True)
             )
             if session_compact_enabled:
-                rows = repo.transcript(session_id, limit=0)
+                cursor = int(
+                    (existing_checkpoint or {}).get("last_compacted_message_seq")
+                    or 0
+                )
+                checkpoint_epoch = int(
+                    (existing_checkpoint or {}).get("compaction_epoch") or 0
+                )
+                cursor_id = str(
+                    (existing_checkpoint or {}).get("last_compacted_message_id")
+                    or ""
+                )
+                cursor_valid = bool(
+                    existing_checkpoint
+                    and cursor > 0
+                    and checkpoint_epoch == compaction_epoch
+                    and repo.compaction_cursor_matches(
+                        session_id,
+                        message_seq=cursor,
+                        message_id=cursor_id,
+                    )
+                )
+                rows = repo.compaction_transcript(
+                    session_id,
+                    after_seq=cursor if cursor_valid else 0,
+                )
             else:
                 rows = repo.transcript(
                     session_id,
@@ -3533,15 +3617,35 @@ class AgentKernel:
                 )
                 compacted = compact_session_history(
                     rows,
-                    existing_checkpoint=checkpoint_from_session_meta(session_meta),
+                    existing_checkpoint=existing_checkpoint,
                     policy=policy,
                     exclude_turn_id=exclude_turn_id,
+                    compaction_epoch=compaction_epoch,
                 )
                 if compacted.checkpoint is not None:
-                    existing_checkpoint = checkpoint_from_session_meta(session_meta)
-                    if compacted.checkpoint != existing_checkpoint:
-                        session_meta[SESSION_COMPACTION_META_KEY] = compacted.checkpoint
-                        repo.update_session_meta(session_id, session_meta)
+                    saved = repo.update_context_checkpoint(
+                        session_id,
+                        compacted.checkpoint,
+                        expected_epoch=compaction_epoch,
+                    )
+                    if not saved:
+                        recent = repo.transcript(
+                            session_id,
+                            limit=policy.keep_recent_messages,
+                        )
+                        con.close()
+                        return [
+                            {
+                                "role": str(row.get("role") or ""),
+                                "content": str(row.get("content") or "")[
+                                    :policy.per_message_chars
+                                ],
+                            }
+                            for row in recent
+                            if str(row.get("role") or "")
+                            in ("user", "assistant")
+                            and str(row.get("content") or "").strip()
+                        ]
                 con.close()
                 if compacted.messages:
                     return compacted.messages
@@ -3628,6 +3732,7 @@ class AgentKernel:
         turn_id: str,
         result: AgentTurnResult,
         strategy_id: Optional[str],
+        session_id: Optional[str] = None,
     ) -> None:
         """Optional: append a one-line summary of the turn to memory.
 
@@ -3651,6 +3756,12 @@ class AgentKernel:
                 f"turn={turn_id} action={result.actions[0].get('action') if result.actions else 'noop'}"
                 f" stopped={result.stopped_reason} :: {preview}"
             )
+            if session_id:
+                scope = "session"
+            elif strategy_id:
+                scope = "strategy"
+            else:
+                scope = "global"
             if strategy_id:
                 self._evolution_hooks.on_memory_write(
                     target=f"strategy:{strategy_id}",
@@ -3659,7 +3770,6 @@ class AgentKernel:
                     evidence_refs=[f"turn:{turn_id}"],
                     strategy_id=strategy_id,
                 )
-                self.memory.append_strategy_learning(strategy_id, note)
             else:
                 self._evolution_hooks.on_memory_write(
                     target="global.md",
@@ -3667,7 +3777,27 @@ class AgentKernel:
                     source="after_turn_memory",
                     evidence_refs=[f"turn:{turn_id}"],
                 )
-                self.memory.append_global("global.md", note)
+            from ..memory.runtime import MemoryRuntime
+
+            MemoryRuntime(
+                self.config,
+                actor_id=(
+                    self._deps.active_actor_id
+                    if self._deps is not None
+                    else "default"
+                ),
+                session_id=str(session_id or ""),
+                strategy_id=str(strategy_id or ""),
+            ).remember(
+                category="session_summary",
+                content=note,
+                scope=scope,
+                key=f"turn.summary.{turn_id}",
+                source="kernel:after_turn",
+                source_turn_id=turn_id,
+                evidence_refs=[f"turn:{turn_id}"],
+                writer_id="agent_kernel",
+            )
         except Exception:
             _LOG.debug("after-turn memory hook failed", exc_info=True)
 
@@ -3676,6 +3806,7 @@ class AgentKernel:
         *,
         turn_id: str,
         strategy_id: Optional[str],
+        session_id: Optional[str] = None,
         blocks: list[dict[str, Any]],
         todos_before: list[dict[str, Any]],
         todos_after: list[dict[str, Any]],
@@ -3716,24 +3847,38 @@ class AgentKernel:
         except Exception:
             pass
         try:
-            self.memory.append_global("global.md", nudge.message)
+            from ..memory.runtime import MemoryRuntime
+
+            if session_id:
+                scope = "session"
+            elif strategy_id:
+                scope = "strategy"
+            else:
+                scope = "global"
+            MemoryRuntime(
+                self.config,
+                actor_id=(
+                    self._deps.active_actor_id
+                    if self._deps is not None
+                    else "default"
+                ),
+                session_id=str(session_id or ""),
+                strategy_id=str(strategy_id or ""),
+            ).remember(
+                category="learning",
+                content=nudge.message,
+                scope=scope,
+                key=f"verifier.nudge.{turn_id}",
+                source="kernel:verifier_nudge",
+                source_turn_id=turn_id,
+                evidence_refs=[f"turn:{turn_id}"],
+                writer_id="agent_kernel",
+            )
         except Exception:
             _LOG.debug("verifier nudge memory write failed", exc_info=True)
 
     def _maybe_compact_memory(self) -> None:
-        """Periodic memory compaction tick.
-
-        Drives :meth:`Memory.compact_all` every ``every_n`` turns
-        (default 50) so ``memory/global.md`` and friends don't grow
-        forever. The compaction itself is TTL-based — sections whose
-        ``## <timestamp>`` header is older than ``max_age_days`` are
-        dropped, everything else (including handwritten notes without
-        a parseable timestamp) survives.
-
-        Disabled when ``agent.native.memory_compact_every_n_turns``
-        is 0 or unset, so workspaces that don't want auto-compaction
-        keep the full history.
-        """
+        """Run configured :class:`MemoryRuntime` maintenance periodically."""
 
         every_n = int(
             self.config.get("agent.native.memory_compact_every_n_turns", 0)
@@ -3742,23 +3887,28 @@ class AgentKernel:
             return
         if (self._turn_count % every_n) != 0:
             return
-        max_age_days = float(
-            self.config.get("agent.native.memory_max_age_days", 30.0)
-        )
         try:
-            report = self.memory.compact_all(max_age_days=max_age_days)
+            from ..memory.runtime import MemoryRuntime
+
+            expired = MemoryRuntime(
+                self.config,
+                actor_id=(
+                    self._deps.active_actor_id
+                    if self._deps is not None
+                    else "default"
+                ),
+            ).maintain()
         except Exception:
             _LOG.debug("memory compaction tick failed", exc_info=True)
             return
-        if any(report.values()):
+        if expired:
             try:
                 jsonl.append(
                     self.config.paths.journal("agent"),
                     {
                         "kind": "agent.memory.compacted",
                         "turn_count": self._turn_count,
-                        "max_age_days": max_age_days,
-                        "report": report,
+                        "expired": expired,
                     },
                 )
             except Exception:
@@ -3951,35 +4101,32 @@ class AgentKernel:
             pass
         return roots
 
-    def _freeze_memory_prompt_block(
+    def _freeze_memory_prompt_context(
         self,
         deps: NativeToolDeps,
         *,
         session_id: Optional[str] = None,
         strategy_id: Optional[str] = None,
-    ) -> str:
-        """Render the memory prompt fragment once at the turn boundary.
+        query: str = "",
+    ) -> Any:
+        """Freeze stable notebook and dynamic recall once for this turn."""
 
-        Memory writes during a turn persist for the next turn, but must
-        not reshape the in-flight prompt or invalidate its cache prefix.
-        """
+        from ..memory.runtime import MemoryContext, MemoryRuntime
 
         if deps.paths is None:
-            return ""
-        try:
-            from ..tools.native.memory import build_system_prompt_block
-
-            return build_system_prompt_block(
-                deps.paths,
-                config=self.config,
-                session_id=session_id,
-                strategy_id=strategy_id,
-                max_chars=int(
-                    self.config.get("agent.native.memory_block_chars", 1200)
-                ),
-            )
-        except Exception:
-            return ""
+            return MemoryContext()
+        runtime = MemoryRuntime(
+            self.config,
+            actor_id=deps.active_actor_id or "default",
+            session_id=str(session_id or ""),
+            strategy_id=str(strategy_id or ""),
+        )
+        return runtime.context(
+            query,
+            max_chars=int(
+                self.config.get("agent.native.memory_block_chars", 3600)
+            ),
+        )
 
     def _build_system_prompt(
         self,
@@ -3989,7 +4136,7 @@ class AgentKernel:
         strategy_id: Optional[str] = None,
         session_id: Optional[str] = None,
         user_text: Optional[str] = None,
-        frozen_memory_block: Optional[str] = None,
+        frozen_memory_context: Any = None,
     ) -> str:
         """Render the workspace-native system prompt.
 
@@ -4006,15 +4153,22 @@ class AgentKernel:
         except Exception:
             skill_block = ""
 
-        memory_block = (
-            frozen_memory_block
-            if frozen_memory_block is not None
-            else self._freeze_memory_prompt_block(
+        if frozen_memory_context is not None:
+            stable_memory_block = str(
+                getattr(frozen_memory_context, "stable", "") or ""
+            )
+            dynamic_memory_block = str(
+                getattr(frozen_memory_context, "dynamic", "") or ""
+            )
+        else:
+            snapshot = self._freeze_memory_prompt_context(
                 deps,
                 session_id=session_id,
                 strategy_id=strategy_id,
+                query=str(user_text or ""),
             )
-        )
+            stable_memory_block = snapshot.stable
+            dynamic_memory_block = snapshot.dynamic
 
         profile_block = ""
         if deps.paths is not None and session_id:
@@ -4089,8 +4243,10 @@ class AgentKernel:
                 "Attached skills (preferred for this turn): "
                 + ", ".join(attached_skills)
             )
-        if memory_block:
-            sections.append(memory_block)
+        if stable_memory_block:
+            cached_sections.append(stable_memory_block)
+        if dynamic_memory_block:
+            rolling_sections.append(dynamic_memory_block)
         if profile_block:
             sections.append(profile_block)
         if market_context_block:

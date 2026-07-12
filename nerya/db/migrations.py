@@ -816,6 +816,177 @@ def _v6_position_shares(con: sqlite3.Connection) -> None:
     )
 
 
+_V7_CANONICAL_MEMORY = (
+    """
+    CREATE TABLE IF NOT EXISTS memory_records (
+        memory_id          TEXT PRIMARY KEY,
+        actor_id           TEXT NOT NULL,
+        writer_id          TEXT NOT NULL DEFAULT 'runtime',
+        scope              TEXT NOT NULL
+                           CHECK (scope IN ('global', 'strategy', 'session')),
+        scope_id           TEXT NOT NULL DEFAULT '',
+        strategy_id        TEXT NOT NULL DEFAULT '',
+        session_id         TEXT NOT NULL DEFAULT '',
+        category           TEXT NOT NULL,
+        stable_key         TEXT NOT NULL DEFAULT '',
+        title              TEXT NOT NULL DEFAULT '',
+        content            TEXT NOT NULL DEFAULT '',
+        content_hash       TEXT NOT NULL DEFAULT '',
+        tags_json          TEXT NOT NULL DEFAULT '[]',
+        source_ref         TEXT NOT NULL DEFAULT '',
+        source_turn_id     TEXT NOT NULL DEFAULT '',
+        evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+        confidence         REAL NOT NULL DEFAULT 1.0
+                           CHECK (confidence >= 0 AND confidence <= 1),
+        importance         REAL NOT NULL DEFAULT 0.5
+                           CHECK (importance >= 0 AND importance <= 1),
+        status             TEXT NOT NULL DEFAULT 'active'
+                           CHECK (status IN ('active', 'superseded', 'expired', 'forgotten')),
+        superseded_by      TEXT,
+        pinned             INTEGER NOT NULL DEFAULT 0
+                           CHECK (pinned IN (0, 1)),
+        retention_days     INTEGER NOT NULL DEFAULT 0,
+        created_at         REAL NOT NULL,
+        updated_at         REAL NOT NULL,
+        expires_at         REAL,
+        invalidated_at     REAL,
+        target_files_json  TEXT NOT NULL DEFAULT '[]',
+        legacy_source      TEXT NOT NULL DEFAULT '',
+        legacy_ref         TEXT NOT NULL DEFAULT '',
+        meta_json          TEXT NOT NULL DEFAULT '{}',
+        CHECK (
+          (scope = 'global' AND scope_id = '') OR
+          (scope = 'strategy' AND scope_id <> '' AND strategy_id = scope_id) OR
+          (scope = 'session' AND scope_id <> '' AND session_id = scope_id)
+        ),
+        CHECK (status <> 'active' OR length(trim(content)) > 0),
+        FOREIGN KEY (superseded_by) REFERENCES memory_records(memory_id)
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_active_key
+    ON memory_records(actor_id, scope, scope_id, stable_key)
+    WHERE status = 'active' AND stable_key <> ''
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_legacy_ref
+    ON memory_records(actor_id, legacy_source, legacy_ref)
+    WHERE legacy_source <> '' AND legacy_ref <> ''
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_memory_recall
+    ON memory_records(actor_id, scope, scope_id, status, updated_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_memory_category_cap
+    ON memory_records(actor_id, category, scope, scope_id, status, created_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_memory_active_hash
+    ON memory_records(actor_id, category, scope, scope_id, content_hash)
+    WHERE status = 'active'
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_memory_expiry
+    ON memory_records(expires_at)
+    WHERE status = 'active' AND expires_at IS NOT NULL AND pinned = 0
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memory_import_sources (
+        actor_id     TEXT NOT NULL,
+        legacy_source TEXT NOT NULL,
+        legacy_ref   TEXT NOT NULL,
+        memory_id    TEXT NOT NULL,
+        imported_at  REAL NOT NULL,
+        PRIMARY KEY (actor_id, legacy_source, legacy_ref),
+        FOREIGN KEY (memory_id) REFERENCES memory_records(memory_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_memory_import_record
+    ON memory_import_sources(memory_id)
+    """,
+)
+
+
+def _v7_canonical_memory(con: sqlite3.Connection) -> None:
+    """Create the scoped SQLite source of truth for long-term memory."""
+
+    for stmt in _V7_CANONICAL_MEMORY:
+        con.execute(stmt)
+
+
+def _v8_session_compaction_epoch(con: sqlite3.Connection) -> None:
+    """Invalidate stored checkpoints whenever persisted messages change."""
+
+    columns = {
+        str(row[1]) for row in con.execute("PRAGMA table_info(agent_sessions)")
+    }
+    if "compaction_epoch" not in columns:
+        con.execute(
+            "ALTER TABLE agent_sessions "
+            "ADD COLUMN compaction_epoch INTEGER NOT NULL DEFAULT 0"
+        )
+    # Version 1 checkpoints did not carry a transcript cursor or rewrite
+    # epoch, so they cannot prove that their digest still matches edited or
+    # deleted messages. Preserve unrelated session metadata and force the
+    # next read to rebuild the checkpoint from the canonical transcript.
+    con.execute(
+        """
+        UPDATE agent_sessions
+        SET meta_json = json_remove(meta_json, '$.context_compaction')
+        WHERE json_valid(meta_json)
+          AND CAST(
+              json_extract(meta_json, '$.context_compaction.version') AS INTEGER
+          ) = 1
+        """
+    )
+    con.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_agent_messages_compaction_invalidate
+        AFTER UPDATE OF content, deleted ON agent_messages
+        WHEN OLD.content IS NOT NEW.content OR OLD.deleted IS NOT NEW.deleted
+        BEGIN
+            UPDATE agent_sessions
+            SET compaction_epoch = compaction_epoch + 1,
+                meta_json = CASE
+                    WHEN json_valid(meta_json)
+                    THEN json_remove(meta_json, '$.context_compaction')
+                    ELSE '{}'
+                END
+            WHERE session_id = NEW.session_id;
+        END
+        """
+    )
+
+
+def _v9_memory_legacy_import_ownership(con: sqlite3.Connection) -> None:
+    """Ensure shared legacy files are migrated into exactly one actor scope."""
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_legacy_imports (
+            legacy_source TEXT PRIMARY KEY,
+            actor_id     TEXT NOT NULL,
+            claimed_at   REAL NOT NULL,
+            completed_at REAL
+        )
+        """
+    )
+    # Some development workspaces may already have applied the initial v8
+    # migration before v1 checkpoint invalidation was added.
+    con.execute(
+        """
+        UPDATE agent_sessions
+        SET meta_json = json_remove(meta_json, '$.context_compaction')
+        WHERE json_valid(meta_json)
+          AND CAST(
+              json_extract(meta_json, '$.context_compaction.version') AS INTEGER
+          ) = 1
+        """
+    )
+
+
 # Append new migrations to the end of this list. Never renumber; new
 # work always becomes a *new* version. The registry validator above
 # enforces a contiguous 1..N sequence at startup.
@@ -826,6 +997,17 @@ MIGRATIONS: list[Migration] = [
     Migration(version=4, name="strategy_promotion", up=_v4_strategy_promotion),
     Migration(version=5, name="agent_chat_sessions", up=_v5_agent_chat_sessions),
     Migration(version=6, name="position_shares_merge", up=_v6_position_shares),
+    Migration(version=7, name="canonical_memory", up=_v7_canonical_memory),
+    Migration(
+        version=8,
+        name="session_compaction_epoch",
+        up=_v8_session_compaction_epoch,
+    ),
+    Migration(
+        version=9,
+        name="memory_legacy_import_ownership",
+        up=_v9_memory_legacy_import_ownership,
+    ),
 ]
 
 
@@ -834,21 +1016,30 @@ def apply_migrations(con: sqlite3.Connection) -> list[int]:
 
     _validate_registry(MIGRATIONS)
     _ensure_schema_table(con)
-    already = _applied_versions(con)
+    con.commit()
     applied_now: list[int] = []
     for mig in MIGRATIONS:
-        if mig.version in already:
-            continue
-        if callable(mig.up):
-            mig.up(con)
-        else:
-            con.execute(mig.up)
-        con.execute(
-            "INSERT INTO schema_version(version, name, applied_at) VALUES (?, ?, ?)",
-            (mig.version, mig.name, time.time()),
-        )
-        applied_now.append(mig.version)
-    con.commit()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT 1 FROM schema_version WHERE version = ?", (mig.version,),
+            ).fetchone()
+            if row is not None:
+                con.commit()
+                continue
+            if callable(mig.up):
+                mig.up(con)
+            else:
+                con.execute(mig.up)
+            con.execute(
+                "INSERT INTO schema_version(version, name, applied_at) VALUES (?, ?, ?)",
+                (mig.version, mig.name, time.time()),
+            )
+            con.commit()
+            applied_now.append(mig.version)
+        except BaseException:
+            con.rollback()
+            raise
     return applied_now
 
 

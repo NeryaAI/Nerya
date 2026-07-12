@@ -15,10 +15,13 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from .types import ToolCall, ToolError, ToolErrorKind, ToolResult
+
 
 __all__ = [
     "collect_schema_issues",
     "format_schema_validation_error",
+    "schema_validation_result",
     "SchemaIssue",
 ]
 
@@ -38,6 +41,25 @@ class SchemaIssue(dict):
     * ``expected``  — expected type/enum (present for ``type``/``enum``).
     * ``actual``    — observed type (present for ``type`` only).
     """
+
+
+def schema_validation_result(
+    call: ToolCall,
+    message: str,
+    *,
+    recovery_hint: dict[str, Any] | None = None,
+) -> ToolResult:
+    """Return the native-tool result shape for invalid call arguments."""
+
+    return ToolResult.from_error(
+        tool_use_id=call.id,
+        name=call.name,
+        error=ToolError(
+            kind=ToolErrorKind.SCHEMA_VALIDATION,
+            message=message,
+            recovery_hint=dict(recovery_hint or {}),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 SESSION_COMPACTION_META_KEY = "context_compaction"
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 CHECKPOINT_HEADER = "[context checkpoint]"
 
 
@@ -54,8 +54,6 @@ class SessionCompactionResult:
 
     messages: list[dict[str, Any]]
     checkpoint: dict[str, Any] | None = None
-    compacted: bool = False
-    folded_messages: int = 0
 
 
 @dataclass
@@ -140,6 +138,7 @@ def compact_session_history(
     existing_checkpoint: Mapping[str, Any] | None = None,
     policy: SessionCompactionPolicy | None = None,
     exclude_turn_id: str | None = None,
+    compaction_epoch: int = 0,
 ) -> SessionCompactionResult:
     """Build prompt-ready prior messages with an anchored checkpoint.
 
@@ -150,20 +149,37 @@ def compact_session_history(
 
     pol = policy or SessionCompactionPolicy()
     clean = _normalise_rows(rows, exclude_turn_id=exclude_turn_id, cap=pol.per_message_chars)
+    checkpoint = _coerce_checkpoint(existing_checkpoint)
     if not clean:
-        return SessionCompactionResult(messages=[])
+        messages = (
+            [{"role": "user", "content": checkpoint["rendered"]}]
+            if checkpoint
+            else []
+        )
+        return SessionCompactionResult(messages=messages, checkpoint=checkpoint)
     if len(clean) <= pol.trigger_messages:
-        return SessionCompactionResult(messages=_strip_internal(clean))
+        messages = _strip_internal(clean)
+        if checkpoint:
+            messages.insert(0, {"role": "user", "content": checkpoint["rendered"]})
+        return SessionCompactionResult(messages=messages, checkpoint=checkpoint)
 
     tail_count = min(len(clean), pol.keep_recent_messages)
     fold_candidates = clean[:-tail_count]
     tail = clean[-tail_count:]
-    checkpoint = _coerce_checkpoint(existing_checkpoint)
     digest = _Digest.from_mapping((checkpoint or {}).get("digest"))
 
     new_span = fold_candidates
     last_id = str((checkpoint or {}).get("last_compacted_message_id") or "")
-    if checkpoint and last_id:
+    prior_cursor = int((checkpoint or {}).get("last_compacted_message_seq") or 0)
+    incremental_window = bool(
+        checkpoint
+        and prior_cursor > 0
+        and clean
+        and all(int(item.get("message_seq") or 0) > prior_cursor for item in clean)
+    )
+    if checkpoint and incremental_window:
+        new_span = fold_candidates
+    elif checkpoint and last_id:
         for idx, item in enumerate(fold_candidates):
             if str(item.get("message_id") or "") == last_id:
                 new_span = fold_candidates[idx + 1:]
@@ -174,13 +190,28 @@ def compact_session_history(
             # the current persisted transcript rather than layering stale facts.
             digest = _Digest()
             new_span = fold_candidates
+    elif checkpoint:
+        digest = _Digest()
+        new_span = fold_candidates
 
     _fold_into_digest(digest, new_span, limit=pol.max_bullets_per_section)
     last_folded = fold_candidates[-1]
+    if incremental_window:
+        compacted_count = int(
+            (checkpoint or {}).get("compacted_message_count") or 0
+        ) + len(fold_candidates)
+        first_message_id = str(
+            (checkpoint or {}).get("first_compacted_message_id")
+            or fold_candidates[0].get("message_id")
+            or ""
+        )
+    else:
+        compacted_count = len(fold_candidates)
+        first_message_id = str(fold_candidates[0].get("message_id") or "")
     rendered = _render_checkpoint(
         digest,
-        compacted_count=len(fold_candidates),
-        first_message_id=str(fold_candidates[0].get("message_id") or ""),
+        compacted_count=compacted_count,
+        first_message_id=first_message_id,
         last_message_id=str(last_folded.get("message_id") or ""),
         max_chars=pol.max_render_chars,
     )
@@ -188,18 +219,18 @@ def compact_session_history(
         "version": CHECKPOINT_VERSION,
         "rendered": rendered,
         "digest": digest.asdict(),
-        "compacted_message_count": len(fold_candidates),
-        "first_compacted_message_id": str(fold_candidates[0].get("message_id") or ""),
+        "compacted_message_count": compacted_count,
+        "first_compacted_message_id": first_message_id,
         "last_compacted_message_id": str(last_folded.get("message_id") or ""),
+        "last_compacted_message_seq": int(last_folded.get("message_seq") or 0),
         "last_compacted_turn_id": str(last_folded.get("turn_id") or ""),
         "last_compacted_ts": float(last_folded.get("ts") or 0.0),
+        "compaction_epoch": int(compaction_epoch),
     }
     messages = [{"role": "user", "content": rendered}] + _strip_internal(tail)
     return SessionCompactionResult(
         messages=messages,
         checkpoint=updated_checkpoint,
-        compacted=True,
-        folded_messages=len(fold_candidates),
     )
 
 
@@ -228,6 +259,7 @@ def _normalise_rows(
             "message_id": str(row.get("message_id") or f"row:{idx}"),
             "turn_id": str(row.get("turn_id") or ""),
             "ts": float(row.get("ts") or 0.0),
+            "message_seq": int(row.get("message_seq") or 0),
         })
     return out
 

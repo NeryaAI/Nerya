@@ -281,6 +281,9 @@ class NativeToolDeps:
     active_session_id: Optional[str] = None
     """Agent session scoped to the current turn, if any."""
 
+    active_actor_id: str = "default"
+    """Trusted operator/gateway actor scoped to the current turn."""
+
     active_trigger_event_id: Optional[str] = None
     """Trigger event currently driving the Agent turn, if any."""
 
@@ -873,14 +876,32 @@ def _auto_approve_skill_script_run(deps: NativeToolDeps, payload: dict[str, Any]
 
 def _wrap_memory_recall(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return memory_recall_handler(call, paths=deps.paths)
+        from ...memory.runtime import MemoryRuntime
+
+        config = deps.config or Config(paths=deps.paths, data={})
+        runtime = MemoryRuntime(
+            config,
+            actor_id=deps.active_actor_id or "default",
+            session_id=deps.active_session_id or "",
+            strategy_id=deps.active_strategy_id or "",
+        )
+        return memory_recall_handler(call, runtime=runtime)
 
     return handler
 
 
 def _wrap_memory_remember(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return memory_remember_handler(call, paths=deps.paths)
+        from ...memory.runtime import MemoryRuntime
+
+        config = deps.config or Config(paths=deps.paths, data={})
+        runtime = MemoryRuntime(
+            config,
+            actor_id=deps.active_actor_id or "default",
+            session_id=deps.active_session_id or "",
+            strategy_id=deps.active_strategy_id or "",
+        )
+        return memory_remember_handler(call, runtime=runtime)
 
     return handler
 
@@ -2228,10 +2249,9 @@ def register_native_tools(
             make_native_descriptor(
                 name="memory_recall",
                 description=(
-                    "Read the agent's long-term memory. Use scope='global' for "
-                    "the whitelisted markdown notes (global.md, mistakes.md, "
-                    "market_regimes.md, skill_learnings.md) or scope='strategy' "
-                    "with a strategy_id for that strategy's learnings.md."
+                    "Recall query-relevant long-term memory visible to this "
+                    "session and its active strategy. Strategy and session "
+                    "identifiers are enforced by the runtime."
                 ),
                 input_schema=MEMORY_RECALL_SCHEMA,
                 handler=_wrap_memory_recall(deps),

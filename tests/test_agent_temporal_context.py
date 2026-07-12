@@ -9,6 +9,7 @@ import pytest
 import nerya.agent.kernel as kernel_module
 from nerya.agent.kernel import (
     AgentKernel,
+    AgentTurnResult,
     _model_user_text_for_trigger,
 )
 from nerya.agent.loop import LoopOutcome
@@ -183,40 +184,160 @@ def test_system_prompt_cache_boundary_keeps_dynamic_context_below_marker(tmp_pat
 
 
 def test_system_prompt_uses_frozen_memory_snapshot_until_next_turn(tmp_path) -> None:
+    from nerya.memory.runtime import MemoryRuntime
+
     cfg = _config(tmp_path)
-    cfg.paths.memory.mkdir(parents=True, exist_ok=True)
-    (cfg.paths.memory / "global.md").write_text(
-        "stable lesson from turn start\n",
-        encoding="utf-8",
+    memory = MemoryRuntime(cfg, session_id="s1")
+    memory.remember(
+        category="learning",
+        content="stable lesson from turn start",
+        key="test.temporal_snapshot",
+        scope="global",
     )
     kernel = AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]
     deps = kernel._ensure_registry()
 
-    frozen_memory = kernel._freeze_memory_prompt_block(
+    frozen_memory = kernel._freeze_memory_prompt_context(
         deps,
         session_id="s1",
         strategy_id=None,
+        query="lesson",
     )
-    (cfg.paths.memory / "global.md").write_text(
-        "newly written mid-turn lesson\n",
-        encoding="utf-8",
+    memory.remember(
+        category="learning",
+        content="newly written mid-turn lesson",
+        key="test.temporal_snapshot",
+        scope="global",
     )
 
     current_turn_prompt = kernel._build_system_prompt(
         deps,
         session_id="s1",
         user_text="same turn",
-        frozen_memory_block=frozen_memory,
+        frozen_memory_context=frozen_memory,
     )
     next_turn_prompt = kernel._build_system_prompt(
         deps,
         session_id="s1",
-        user_text="next turn",
+        user_text="next turn lesson",
     )
 
     assert "stable lesson from turn start" in current_turn_prompt
     assert "newly written mid-turn lesson" not in current_turn_prompt
     assert "newly written mid-turn lesson" in next_turn_prompt
+
+
+def test_system_prompt_splits_stable_notebook_from_query_recall(tmp_path) -> None:
+    from nerya.memory.runtime import MemoryRuntime
+
+    cfg = _config(tmp_path)
+    seed = MemoryRuntime(
+        cfg,
+        actor_id="default",
+        session_id="s1",
+        strategy_id="alpha",
+    )
+    seed.remember(
+        category="notebook_operator",
+        content="操作者希望默认使用中文回答。",
+        key="communication.language",
+        scope="global",
+    )
+    seed.remember(
+        category="preference",
+        content="操作者的交易周期偏好是三到五天。",
+        key="trading.preferred_horizon",
+        scope="global",
+    )
+    seed.remember(
+        category="error",
+        content="Bybit API 曾经短暂断线。",
+        scope="global",
+    )
+
+    kernel = AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]
+    deps = kernel._ensure_registry()
+    prompt = kernel._build_system_prompt(
+        deps,
+        session_id="s1",
+        strategy_id="alpha",
+        user_text="我的交易周期偏好是什么？",
+    )
+
+    boundary = prompt.index(CACHE_BOUNDARY_MARKER)
+    assert "默认使用中文" in prompt[:boundary]
+    assert "交易周期偏好是三到五天" not in prompt[:boundary]
+    assert "交易周期偏好是三到五天" in prompt[boundary:]
+    assert "Bybit API" not in prompt
+
+
+def test_memory_prompt_uses_the_trusted_gateway_actor_scope(tmp_path) -> None:
+    from nerya.memory.runtime import MemoryRuntime
+
+    cfg = _config(tmp_path)
+    MemoryRuntime(cfg, actor_id="gateway-user-1").remember(
+        category="preference",
+        content="Gateway user 1 的私有持仓周期是七天。",
+        key="trading.gateway_horizon",
+        scope="global",
+    )
+    MemoryRuntime(cfg, actor_id="gateway-user-2").remember(
+        category="preference",
+        content="Gateway user 2 的私有持仓周期是一天。",
+        key="trading.gateway_horizon",
+        scope="global",
+    )
+    kernel = AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]
+    deps = kernel._ensure_registry()
+    deps.active_actor_id = "gateway-user-1"
+
+    snapshot = kernel._freeze_memory_prompt_context(
+        deps,
+        session_id="s1",
+        query="私有持仓周期",
+    )
+
+    assert "Gateway user 1" in snapshot.dynamic
+    assert "Gateway user 2" not in snapshot.dynamic
+
+
+def test_after_turn_summary_stays_in_the_active_session_scope(tmp_path) -> None:
+    from nerya.memory.runtime import MemoryRuntime
+
+    cfg = _config(tmp_path)
+    cfg.data.setdefault("agent", {}).setdefault("native", {})[
+        "memory_write_on_turn"
+    ] = True
+    kernel = AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]
+    deps = kernel._ensure_registry()
+    deps.active_actor_id = "gateway-user-1"
+    result = AgentTurnResult(
+        trigger_event_id=None,
+        strategy_id=None,
+        session_id="s1",
+        turn_id="t1",
+        decision={"action": "send_message"},
+        final_text="本轮确认风险参数已经完成。",
+    )
+
+    kernel._after_turn_memory(
+        turn_id="t1",
+        result=result,
+        strategy_id=None,
+        session_id="s1",
+    )
+
+    session_hits = MemoryRuntime(
+        cfg,
+        actor_id="gateway-user-1",
+        session_id="s1",
+    ).recall("风险参数", scope="session")
+    global_hits = MemoryRuntime(
+        cfg,
+        actor_id="gateway-user-1",
+    ).recall("风险参数", scope="global")
+    assert len(session_hits) == 1
+    assert global_hits == []
 
 
 def test_turn_focus_uses_generic_evidence_policy_not_prompt_routing(tmp_path) -> None:

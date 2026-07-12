@@ -33,15 +33,16 @@ the file is renamed to ``activity.jsonl.1`` and a fresh one starts.
 from __future__ import annotations
 
 import json
-import os
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from ..core.atomic_write import atomic_write_bytes
 from ..core.config import Config
+from .content_scanner import scan_memory_content
 
 
 __all__ = [
@@ -52,6 +53,19 @@ __all__ = [
 
 
 _LOCK = threading.RLock()
+
+_fcntl: Any
+_msvcrt: Any
+try:  # pragma: no cover - platform branch
+    import fcntl as _fcntl
+
+    _msvcrt = None
+except ImportError:  # pragma: no cover - platform branch
+    _fcntl = None
+    try:
+        import msvcrt as _msvcrt
+    except ImportError:
+        _msvcrt = None
 
 
 def activity_log_path(config: Config) -> Path:
@@ -147,9 +161,12 @@ class MemoryActivityEvent:
         actor_id: str = "default",
         extra: dict[str, Any] | None = None,
     ) -> "MemoryActivityEvent":
+        query_text = str(query or "")
+        if scan_memory_content(query_text):
+            query_text = "[redacted unsafe memory query]"
         return cls(
             kind="search",
-            query=query,
+            query=query_text,
             result_count=int(result_count),
             latency_ms=int(latency_ms),
             source=source,
@@ -175,21 +192,111 @@ class MemoryActivityLog:
     def append(self, event: MemoryActivityEvent) -> None:
         record = json.dumps(event.to_dict(), ensure_ascii=False) + "\n"
         with _LOCK:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                size = self.path.stat().st_size if self.path.exists() else 0
-            except OSError:
-                size = 0
-            if size and size + len(record.encode("utf-8")) > self.max_bytes:
-                self._rotate()
-            with self.path.open("ab") as fh:
-                fh.write(record.encode("utf-8"))
+            with _file_lock(self._lock_path):
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    size = self.path.stat().st_size if self.path.exists() else 0
+                except OSError:
+                    size = 0
+                if size and size + len(record.encode("utf-8")) > self.max_bytes:
+                    self._rotate()
+                with self.path.open("ab") as fh:
+                    fh.write(record.encode("utf-8"))
+
+    @property
+    def _lock_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".lock")
+
+    def scrub(
+        self,
+        *,
+        actor_id: str,
+        key: str = "",
+        hashes: Iterable[str] | None = None,
+    ) -> int:
+        """Remove matching events from the live log and every rotation.
+
+        An event is removed only when ``actor_id`` matches and either its
+        stable key or its activity hash is selected. Each file replacement is
+        atomic, while the shared activity lock prevents append/rotation from
+        racing the complete multi-file scrub.
+        """
+
+        actor = str(actor_id or "").strip()
+        wanted_key = str(key or "").strip()
+        hash_values = (hashes,) if isinstance(hashes, str) else (hashes or ())
+        wanted_hashes = {
+            str(value).strip() for value in hash_values if str(value or "").strip()
+        }
+        if not actor or (not wanted_key and not wanted_hashes):
+            return 0
+
+        removed = 0
+        with _LOCK:
+            with _file_lock(self._lock_path):
+                for path in self._log_paths():
+                    try:
+                        raw = path.read_bytes()
+                    except FileNotFoundError:
+                        continue
+                    kept: list[bytes] = []
+                    changed = False
+                    for line in raw.splitlines(keepends=True):
+                        if self._matches_scrub(
+                            line,
+                            actor_id=actor,
+                            key=wanted_key,
+                            hashes=wanted_hashes,
+                        ):
+                            removed += 1
+                            changed = True
+                        else:
+                            kept.append(line)
+                    if changed:
+                        atomic_write_bytes(path, b"".join(kept))
+        return removed
+
+    def _log_paths(self) -> list[Path]:
+        """Return live plus every numeric rotation, oldest name last."""
+
+        paths = [self.path] if self.path.exists() else []
+        rotations = sorted(
+            (
+                path
+                for path in self.path.parent.glob(self.path.name + ".*")
+                if path.name.removeprefix(self.path.name + ".").isdigit()
+            ),
+            key=lambda path: int(path.name.rsplit(".", 1)[-1]),
+        )
+        paths.extend(rotations)
+        return paths
+
+    @staticmethod
+    def _matches_scrub(
+        line: bytes,
+        *,
+        actor_id: str,
+        key: str,
+        hashes: set[str],
+    ) -> bool:
+        try:
+            obj = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(obj, dict) or str(obj.get("actor_id") or "") != actor_id:
+            return False
+        extra = obj.get("extra") if isinstance(obj.get("extra"), dict) else {}
+        event_key = str(obj.get("key") or extra.get("key") or "").strip()
+        event_hash = str(obj.get("hash") or "").strip()
+        return bool((key and event_key == key) or (event_hash and event_hash in hashes))
 
     def _rotate(self) -> None:
         # Keep the last ``keep_rotations`` files. ``activity.jsonl`` →
         # ``activity.jsonl.1`` → ``activity.jsonl.2`` → discard.
         for idx in range(self.keep_rotations, 0, -1):
-            src = self.path.with_suffix(self.path.suffix + (f".{idx - 1}" if idx > 1 else ""))
+            src = self.path.with_suffix(
+                self.path.suffix + (f".{idx - 1}" if idx > 1 else "")
+            )
             if src == self.path:
                 src = self.path
             else:
@@ -268,7 +375,12 @@ class MemoryActivityLog:
             try:
                 lines = self.path.read_text(encoding="utf-8").splitlines()
             except OSError:
-                return {"total": 0, "by_kind": {}, "by_category": {}, "size_bytes": size}
+                return {
+                    "total": 0,
+                    "by_kind": {},
+                    "by_category": {},
+                    "size_bytes": size,
+                }
         for raw in lines:
             raw = raw.strip()
             if not raw:
@@ -292,3 +404,39 @@ class MemoryActivityLog:
             "by_category": by_category,
             "size_bytes": size,
         }
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    """Cross-process lock shared by append, rotation, and scrub."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if _fcntl is None and _msvcrt is None:
+        yield
+        return
+    if _msvcrt is not None:
+        with path.open("a+b") as bootstrap:
+            bootstrap.seek(0, 2)
+            if bootstrap.tell() == 0:
+                bootstrap.write(b" ")
+                bootstrap.flush()
+
+    mode = "r+" if _msvcrt is not None else "a+"
+    handle = open(path, mode, encoding="utf-8")
+    try:
+        if _fcntl is not None:
+            _fcntl.flock(handle, _fcntl.LOCK_EX)
+        else:
+            handle.seek(0)
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            if _fcntl is not None:
+                _fcntl.flock(handle, _fcntl.LOCK_UN)
+            elif _msvcrt is not None:
+                handle.seek(0)
+                _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        handle.close()

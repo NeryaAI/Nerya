@@ -57,7 +57,6 @@ def test_session_compaction_injects_checkpoint_and_keeps_recent_tail() -> None:
         policy=SessionCompactionPolicy(keep_recent_pairs=2, trigger_pairs=2),
     )
 
-    assert result.compacted is True
     assert result.checkpoint is not None
     assert len(result.messages) == 5
     checkpoint = result.messages[0]["content"]

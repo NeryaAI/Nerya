@@ -32,6 +32,7 @@ from nerya.tools.registry import ToolRegistry
 from nerya.tools.tool_errors import (
     collect_schema_issues,
     format_schema_validation_error,
+    schema_validation_result,
 )
 from nerya.tools.types import (
     PermissionScope,
@@ -44,6 +45,22 @@ from nerya.tools.types import (
 
 
 pytestmark = pytest.mark.smoke
+
+
+def test_schema_validation_result_preserves_call_and_recovery_hint():
+    call = ToolCall(name="native_tool", id="toolu_bad_input")
+
+    result = schema_validation_result(
+        call,
+        "field is required",
+        recovery_hint={"required": ["field"]},
+    )
+
+    assert result.tool_use_id == call.id
+    assert result.name == call.name
+    assert result.error is not None
+    assert result.error.kind == ToolErrorKind.SCHEMA_VALIDATION
+    assert result.error.recovery_hint == {"required": ["field"]}
 
 
 # ---------------------------------------------------------------------------

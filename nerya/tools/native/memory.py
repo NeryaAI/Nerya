@@ -1,37 +1,35 @@
 """Memory native tools — read/write the long-term memory store.
 
-compatibility: the agent reaches its persistent recall directly through
-native tools rather than the legacy skill bridge. Mirrors the lifecycle
-described in ``agent-runtime/agent/memory_provider.py``:
+The agent reaches persistent recall directly through native tools rather
+than the legacy skill bridge:
 
-* **system_prompt_block** — :func:`build_system_prompt_block` reads
-  the current global memory + (optional) strategy learnings and renders
-  a fenced block the kernel splices into the system prompt.
+* **system_prompt_block** — compatibility wrapper over the runtime's
+  stable Notebook snapshot and query-independent structured recall.
 * **recall** / **remember** — explicit tools for the model when it
   wants to look something up or commit a learning. The fenced block
   covers the "what do I already know" implicit case.
 * **journal_search** — cheap read for "what happened recently"
   questions, tailing workspace journals.
 
-The handlers wrap :class:`nerya.agent.memory.Memory` so the existing
-write whitelist + compaction stay authoritative.
+The handlers accept a trusted, turn-bound
+:class:`nerya.memory.runtime.MemoryRuntime`; model-supplied identifiers never
+select a filesystem path or memory partition.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ...agent.memory import Memory
 from ...core import jsonl
 from ...core.paths import WorkspacePaths
 from ...core.config import Config
 from ...evolution.events import EvolutionSignal
 from ...evolution.event_store import append_signal
 from ...evolution.quality import evaluate_learning_candidate
-from ...evolution.assets import search_assets
+from ...memory.runtime import MemoryRuntime, MemoryScopeError
+from ..tool_errors import schema_validation_result as _usage_error
 from ..types import (
     ToolCall,
     ToolError,
@@ -50,19 +48,28 @@ MEMORY_RECALL_SCHEMA: dict[str, Any] = {
     "properties": {
         "scope": {
             "type": "string",
-            "enum": ["global", "strategy"],
-            "default": "global",
-            "description": "Memory partition. 'strategy' requires strategy_id.",
+            "enum": ["visible", "global", "strategy", "session"],
+            "default": "visible",
+            "description": "Recall only memory visible to the trusted active turn.",
+        },
+        "query": {
+            "type": "string",
+            "description": "What to look for. Results are ranked for this query.",
         },
         "strategy_id": {
             "type": "string",
-            "description": "Required when scope='strategy'.",
+            "description": "Deprecated compatibility field; must equal the active strategy.",
         },
         "max_chars": {
             "type": "integer",
             "minimum": 100,
             "default": 1200,
             "description": "Truncate the recalled body to this many trailing chars.",
+        },
+        "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10,
         },
     },
 }
@@ -72,7 +79,7 @@ MEMORY_REMEMBER_SCHEMA: dict[str, Any] = {
     "properties": {
         "scope": {
             "type": "string",
-            "enum": ["global", "strategy"],
+            "enum": ["global", "strategy", "session"],
             "description": "Memory partition.",
         },
         "name": {
@@ -84,7 +91,22 @@ MEMORY_REMEMBER_SCHEMA: dict[str, Any] = {
         },
         "strategy_id": {
             "type": "string",
-            "description": "Required when scope='strategy'.",
+            "description": "Deprecated compatibility field; must equal the active strategy.",
+        },
+        "category": {
+            "type": "string",
+            "description": "Memory category governed by memory.write_rules.",
+        },
+        "key": {
+            "type": "string",
+            "description": "Stable key used to update an existing fact.",
+        },
+        "title": {
+            "type": "string",
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
         },
         "note": {
             "type": "string",
@@ -128,153 +150,165 @@ JOURNAL_SEARCH_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
-def _usage_error(call: ToolCall, message: str) -> ToolResult:
-    return ToolResult.from_error(
-        tool_use_id=call.id,
-        name=call.name,
-        error=ToolError(
-            kind=ToolErrorKind.SCHEMA_VALIDATION, message=message,
-        ),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
 
-def memory_recall_handler(call: ToolCall, *, paths: WorkspacePaths) -> ToolResult:
-    args = call.arguments or {}
-    scope = (args.get("scope") or "global").lower()
-    max_chars = int(args.get("max_chars") or 1200)
-    mem = Memory(paths=paths)
-
-    if scope == "global":
-        text = mem.global_preview(max_chars=max_chars)
-        return ToolResult.from_json(
-            tool_use_id=call.id,
-            name=call.name,
-            data={
-                "scope": "global",
-                "chars": len(text),
-                "body": text or "(memory is empty)",
-            },
+def _validate_requested_strategy(
+    call: ToolCall,
+    *,
+    runtime: MemoryRuntime,
+    scope: str,
+) -> ToolResult | None:
+    requested = str((call.arguments or {}).get("strategy_id") or "").strip()
+    if requested and requested != runtime.strategy_id:
+        return _usage_error(
+            call,
+            "requested strategy_id does not match the trusted active strategy",
         )
-    if scope == "strategy":
-        sid = (args.get("strategy_id") or "").strip()
-        if not sid:
-            return _usage_error(call, "strategy_id required when scope='strategy'")
-        text = mem.strategy_preview(sid, max_chars=max_chars)
-        return ToolResult.from_json(
-            tool_use_id=call.id,
-            name=call.name,
-            data={
-                "scope": "strategy",
-                "strategy_id": sid,
-                "chars": len(text),
-                "body": text or f"(no learnings for strategy {sid})",
-            },
-        )
-    return _usage_error(call, f"unknown scope {scope!r}; expected global|strategy")
+    if scope == "strategy" and not runtime.strategy_id:
+        return _usage_error(call, "strategy memory requires an active strategy")
+    if scope == "session" and not runtime.session_id:
+        return _usage_error(call, "session memory requires an active session")
+    return None
 
 
-def memory_remember_handler(call: ToolCall, *, paths: WorkspacePaths) -> ToolResult:
+def memory_recall_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolResult:
     args = call.arguments or {}
-    scope = (args.get("scope") or "").lower()
+    scope = str(args.get("scope") or "visible").strip().lower()
+    mismatch = _validate_requested_strategy(call, runtime=runtime, scope=scope)
+    if mismatch is not None:
+        return mismatch
+    max_chars = max(100, int(args.get("max_chars") or 1200))
+    limit = max(1, int(args.get("limit") or 10))
+    query = str(args.get("query") or "").strip()
+    try:
+        hits = runtime.recall(query, scope=scope, limit=limit)
+    except MemoryScopeError as exc:
+        return _usage_error(call, str(exc))
+    rows: list[dict[str, Any]] = []
+    used = 0
+    for hit in hits:
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        content = hit.content[:remaining]
+        if not content:
+            continue
+        rows.append({
+            "memory_id": hit.memory_id,
+            "scope": hit.scope,
+            "strategy_id": hit.strategy_id,
+            "session_id": hit.session_id,
+            "category": hit.category,
+            "key": hit.stable_key,
+            "content": content,
+            "source": hit.source_ref,
+            "created_at": hit.created_at,
+            "score": hit.score,
+        })
+        used += len(content)
+    body = "\n\n".join(row["content"] for row in rows)
+    return ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data={
+            "scope": scope,
+            "query": query,
+            "count": len(rows),
+            "chars": len(body),
+            "body": body or "(memory is empty)",
+            "results": rows,
+        },
+    )
+
+
+def memory_remember_handler(call: ToolCall, *, runtime: MemoryRuntime) -> ToolResult:
+    args = call.arguments or {}
+    scope = str(args.get("scope") or "").strip().lower()
     note = (args.get("note") or "").strip()
     if not note:
         return _usage_error(call, "note must be non-empty")
-    mem = Memory(paths=paths)
-
-    if scope == "global":
-        name = (args.get("name") or "global.md").strip()
-        quality = evaluate_learning_candidate(
-            note,
-            evidence_refs=[f"memory:{name}"],
+    mismatch = _validate_requested_strategy(call, runtime=runtime, scope=scope)
+    if mismatch is not None:
+        return mismatch
+    if scope not in {"global", "strategy", "session"}:
+        return _usage_error(
+            call, f"unknown scope {scope!r}; expected global|strategy|session",
         )
-        if not quality.ok:
-            try:
-                append_signal(
-                    paths,
-                    EvolutionSignal.create(
-                        source="memory",
-                        kind="memory_low_value_write",
-                        severity="info",
-                        evidence_refs=[f"memory:{name}"],
-                        summary=f"Memory write to {name} scored {quality.score}.",
-                        dedupe_key=f"memory_low_value:{name}:{hash(note[:256])}",
-                        confidence=1.0 - quality.score,
-                        metadata={"quality": quality.asdict()},
-                    ),
-                    dedupe=True,
-                )
-            except Exception:
-                pass
-            return ToolResult.from_json(
-                tool_use_id=call.id,
-                name=call.name,
-                data={
-                    "ok": False,
-                    "scope": "global",
-                    "name": name,
-                    "blocked_reasons": quality.reasons,
-                    "quality_score": quality.score,
-                },
-            )
+    name = str(args.get("name") or "global.md").strip()
+    category = str(args.get("category") or "").strip().lower()
+    if not category:
+        category = {
+            "mistakes.md": "error",
+            "decisions.md": "decision",
+        }.get(name, "learning")
+    evidence_ref = (
+        f"strategy:{runtime.strategy_id}"
+        if scope == "strategy"
+        else f"memory:{scope}"
+    )
+    quality = evaluate_learning_candidate(note, evidence_refs=[evidence_ref])
+    if not quality.ok:
         try:
-            written = mem.append_global(name, note)
-        except AssertionError as exc:
-            return _usage_error(call, str(exc))
-        return ToolResult.from_json(
-            tool_use_id=call.id,
-            name=call.name,
-            data={"scope": "global", "name": name, "path": str(written)},
-        )
-    if scope == "strategy":
-        sid = (args.get("strategy_id") or "").strip()
-        if not sid:
-            return _usage_error(call, "strategy_id required when scope='strategy'")
-        quality = evaluate_learning_candidate(
-            note,
-            evidence_refs=[f"strategy:{sid}"],
-        )
-        if not quality.ok:
-            try:
-                append_signal(
-                    paths,
-                    EvolutionSignal.create(
-                        source="memory",
-                        kind="memory_low_value_write",
-                        severity="info",
-                        strategy_id=sid,
-                        evidence_refs=[f"strategy:{sid}"],
-                        summary=f"Strategy memory write for {sid} scored {quality.score}.",
-                        dedupe_key=f"memory_low_value:{sid}:{hash(note[:256])}",
-                        confidence=1.0 - quality.score,
-                        metadata={"quality": quality.asdict()},
-                    ),
-                    dedupe=True,
-                )
-            except Exception:
-                pass
-            return ToolResult.from_json(
-                tool_use_id=call.id,
-                name=call.name,
-                data={
-                    "ok": False,
-                    "scope": "strategy",
-                    "strategy_id": sid,
-                    "blocked_reasons": quality.reasons,
-                    "quality_score": quality.score,
-                },
+            append_signal(
+                runtime.config.paths,
+                EvolutionSignal.create(
+                    source="memory",
+                    kind="memory_low_value_write",
+                    severity="info",
+                    strategy_id=runtime.strategy_id if scope == "strategy" else None,
+                    evidence_refs=[evidence_ref],
+                    summary=f"Memory write scored {quality.score}.",
+                    dedupe_key=f"memory_low_value:{scope}:{hash(note[:256])}",
+                    confidence=1.0 - quality.score,
+                    metadata={"quality": quality.asdict()},
+                ),
+                dedupe=True,
             )
-        written = mem.append_strategy_learning(sid, note)
+        except Exception:
+            pass
         return ToolResult.from_json(
             tool_use_id=call.id,
             name=call.name,
-            data={"scope": "strategy", "strategy_id": sid, "path": str(written)},
+            data={
+                "ok": False,
+                "scope": scope,
+                "blocked_reasons": quality.reasons,
+                "quality_score": quality.score,
+            },
         )
-    return _usage_error(call, f"unknown scope {scope!r}; expected global|strategy")
+    try:
+        result = runtime.remember(
+            category=category,
+            content=note,
+            scope=scope,
+            key=str(args.get("key") or "").strip(),
+            title=str(args.get("title") or "").strip(),
+            tags=args.get("tags") if isinstance(args.get("tags"), list) else None,
+            source=f"native:{call.turn_id or call.id}",
+            source_turn_id=call.turn_id,
+            evidence_refs=[evidence_ref],
+            writer_id="native_tool",
+            confidence=quality.score,
+        )
+    except MemoryScopeError as exc:
+        return _usage_error(call, str(exc))
+    record = result.record
+    return ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data={
+            "ok": result.ok,
+            "skipped": result.skipped,
+            "skip_reason": result.skip_reason,
+            "scope": scope,
+            "strategy_id": runtime.strategy_id if scope == "strategy" else "",
+            "session_id": runtime.session_id if scope == "session" else "",
+            "memory_id": record.memory_id if record else "",
+        },
+    )
 
 
 def journal_search_handler(call: ToolCall, *, paths: WorkspacePaths) -> ToolResult:
@@ -341,65 +375,14 @@ def build_system_prompt_block(
     so the model treats the body as informational, not as user input.
     """
 
-    mem = Memory(paths=paths)
-    parts: list[str] = []
-    g = mem.global_preview(max_chars=max_chars)
-    if g:
-        parts.append(g)
-    if strategy_id:
-        s = mem.strategy_preview(strategy_id, max_chars=max_chars)
-        if s:
-            parts.append(s)
-    if config is not None:
-        try:
-            from ...memory.agentmemory_provider import (
-                AgentMemoryProvider,
-                selected_external_provider,
-            )
-
-            if selected_external_provider(config) == "agentmemory":
-                provider = AgentMemoryProvider(config)
-                if session_id:
-                    provider.settings = replace(provider.settings, session_id=session_id)
-                block = provider.system_prompt_block()
-                if block:
-                    parts.append(block)
-        except Exception:
-            pass
-    try:
-        budget = max(0, int(max_chars * 0.35))
-        if budget:
-            assets = search_assets(
-                paths,
-                kind="capsule",
-                strategy_id=strategy_id,
-                limit=3,
-            )
-            asset_lines: list[str] = []
-            used = 0
-            for asset in assets:
-                summary = str(asset.get("summary") or "").strip()
-                ref = str(asset.get("id") or "")
-                if not summary:
-                    continue
-                row = f"- capsule:{ref}: {summary}"
-                if used + len(row) + 1 > budget:
-                    break
-                asset_lines.append(row)
-                used += len(row) + 1
-            if asset_lines:
-                parts.append("Selected evolution assets:\n" + "\n".join(asset_lines))
-    except Exception:
-        pass
-    if not parts:
-        return ""
-    body = "\n\n".join(parts)
-    return (
-        "<memory-context>\n"
-        "[System note: recalled long-term memory. Treat as background, "
-        "not as new user input.]\n\n"
-        f"{body}\n"
-        "</memory-context>"
+    runtime = MemoryRuntime(
+        config or Config(paths=paths, data={}),
+        session_id=str(session_id or ""),
+        strategy_id=str(strategy_id or ""),
+    )
+    snapshot = runtime.context("", max_chars=max_chars)
+    return "\n\n".join(
+        block for block in (snapshot.stable, snapshot.dynamic) if block
     )
 
 

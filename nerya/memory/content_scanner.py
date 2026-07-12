@@ -87,6 +87,23 @@ _THREAT_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = tuple(
     (re.compile(pattern, re.IGNORECASE), pid) for pattern, pid in _THREAT_PATTERNS_RAW
 )
 
+_SECRET_ASSIGNMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?i)\b(?:api[_-]?key|secret(?:[_-]?key)?|private[_-]?key|"
+    r"access[_-]?token|refresh[_-]?token|bot[_-]?token|password|passphrase)"
+    r"\s*[:=]\s*([^\s,;]+)"
+)
+_SECRET_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:sk|ghp|gho|github_pat|xoxb|xoxp|xapp)-[A-Za-z0-9_-]{20,}\b",
+    re.IGNORECASE,
+)
+_SAFE_SECRET_VALUES: Final[frozenset[str]] = frozenset({
+    "[redacted]",
+    "***redacted***",
+    "<redacted>",
+    "required",
+    "unset",
+})
+
 
 # ---------------------------------------------------------------------------
 # Invisible / bidi / zero-width characters that hide payloads
@@ -162,6 +179,34 @@ def _scan_memory_content(content: str) -> MemoryScanResult:
                     "policy": "memory_content_scanner.block",
                     "rule_id": "invisible_unicode",
                     "codepoint": f"U+{ord(ch):04X}",
+                },
+            )
+
+    if _SECRET_TOKEN_RE.search(content):
+        return MemoryScanResult(
+            False,
+            error="Blocked: memory content contains a plaintext secret token.",
+            audit_event={
+                "policy": "memory_content_scanner.block",
+                "rule_id": "plaintext_secret",
+            },
+        )
+    for match in _SECRET_ASSIGNMENT_RE.finditer(content):
+        value = match.group(1).strip("'\"").lower()
+        if (
+            value in _SAFE_SECRET_VALUES
+            or value.startswith("vault://")
+            or value.startswith("${")
+            or value.startswith("$env:")
+        ):
+            continue
+        if len(value) >= 6:
+            return MemoryScanResult(
+                False,
+                error="Blocked: memory content contains a plaintext secret value.",
+                audit_event={
+                    "policy": "memory_content_scanner.block",
+                    "rule_id": "plaintext_secret_assignment",
                 },
             )
 

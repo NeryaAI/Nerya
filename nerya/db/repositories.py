@@ -8,6 +8,19 @@ from dataclasses import dataclass
 from typing import Any
 
 
+class SessionStrategyMismatch(RuntimeError):
+    """A session cannot be rebound to a different strategy."""
+
+    def __init__(self, session_id: str, existing: str, requested: str) -> None:
+        self.session_id = session_id
+        self.existing = existing
+        self.requested = requested
+        super().__init__(
+            f"session {session_id!r} is bound to strategy {existing!r}; "
+            f"cannot rebind to {requested!r}"
+        )
+
+
 @dataclass
 class DedupeRepository:
     con: Any
@@ -91,7 +104,14 @@ class ApprovalRepository:
         now = time.time()
         self.con.execute(
             "INSERT INTO approvals(id,kind,state,created_at,expires_at,payload) VALUES(?,?,?,?,?,?)",
-            (id, kind, "pending", now, now + expires_s, json.dumps(payload, default=str)),
+            (
+                id,
+                kind,
+                "pending",
+                now,
+                now + expires_s,
+                json.dumps(payload, default=str),
+            ),
         )
 
     def set_state(self, id: str, state: str) -> None:
@@ -105,7 +125,8 @@ class ApprovalRepository:
 
     def get(self, id: str) -> dict | None:
         r = self.con.execute(
-            "SELECT id,kind,state,created_at,expires_at,payload FROM approvals WHERE id=?", (id,)
+            "SELECT id,kind,state,created_at,expires_at,payload FROM approvals WHERE id=?",
+            (id,),
         ).fetchone()
         return dict(r) if r else None
 
@@ -114,7 +135,9 @@ class ApprovalRepository:
 class LLMUsageRepository:
     con: Any
 
-    def record(self, *, tier: str, task: str, caller: str, tokens: int, usd: float) -> None:
+    def record(
+        self, *, tier: str, task: str, caller: str, tokens: int, usd: float
+    ) -> None:
         self.con.execute(
             "INSERT INTO llm_usage(ts,tier,task,caller,tokens,usd) VALUES(?,?,?,?,?,?)",
             (time.time(), tier, task, caller, int(tokens), float(usd)),
@@ -144,8 +167,9 @@ class AgentSessionRepository:
         ts: float | None = None,
     ) -> None:
         now = float(ts or time.time())
+        strategy_id = str(strategy_id or "").strip() or None
         meta_json = json.dumps(meta or {}, default=str, ensure_ascii=False)
-        self.con.execute(
+        cur = self.con.execute(
             """
             INSERT INTO agent_sessions(
                 session_id, strategy_id, title, source,
@@ -153,7 +177,12 @@ class AgentSessionRepository:
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
-                strategy_id=COALESCE(excluded.strategy_id, agent_sessions.strategy_id),
+                strategy_id=CASE
+                    WHEN agent_sessions.strategy_id IS NULL
+                         OR agent_sessions.strategy_id = ''
+                    THEN excluded.strategy_id
+                    ELSE agent_sessions.strategy_id
+                END,
                 title=CASE
                     WHEN excluded.title <> '' THEN excluded.title
                     ELSE agent_sessions.title
@@ -164,14 +193,32 @@ class AgentSessionRepository:
                 END,
                 updated_at=excluded.updated_at,
                 meta_json=CASE
-                    WHEN excluded.meta_json <> '{}' THEN excluded.meta_json
+                    WHEN excluded.meta_json <> '{}' THEN json_patch(
+                        agent_sessions.meta_json,
+                        excluded.meta_json
+                    )
                     ELSE agent_sessions.meta_json
                 END
+            WHERE excluded.strategy_id IS NULL
+               OR excluded.strategy_id = ''
+               OR agent_sessions.strategy_id IS NULL
+               OR agent_sessions.strategy_id = ''
+               OR agent_sessions.strategy_id = excluded.strategy_id
             """,
             (session_id, strategy_id, title, source, now, now, meta_json),
         )
+        if not (cur.rowcount or 0) and strategy_id:
+            row = self.con.execute(
+                "SELECT strategy_id FROM agent_sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            existing = str(row["strategy_id"] or "") if row is not None else ""
+            if existing and existing != strategy_id:
+                raise SessionStrategyMismatch(session_id, existing, strategy_id)
 
-    def set_title(self, session_id: str, title: str, *, ts: float | None = None) -> None:
+    def set_title(
+        self, session_id: str, title: str, *, ts: float | None = None
+    ) -> None:
         self.con.execute(
             "UPDATE agent_sessions SET title=?, updated_at=? WHERE session_id=?",
             (title, float(ts or time.time()), session_id),
@@ -181,7 +228,7 @@ class AgentSessionRepository:
         row = self.con.execute(
             """
             SELECT session_id, strategy_id, title, source,
-                   created_at, updated_at, meta_json
+                   created_at, updated_at, meta_json, compaction_epoch
             FROM agent_sessions
             WHERE session_id=?
             """,
@@ -208,6 +255,34 @@ class AgentSessionRepository:
                 now,
                 session_id,
             ),
+        )
+        return bool(cur.rowcount or 0)
+
+    def update_context_checkpoint(
+        self,
+        session_id: str,
+        checkpoint: dict[str, Any],
+        *,
+        expected_epoch: int,
+    ) -> bool:
+        """CAS a checkpoint without making the session look user-active."""
+
+        next_epoch = int(expected_epoch) + 1
+        next_checkpoint = dict(checkpoint)
+        next_checkpoint["compaction_epoch"] = next_epoch
+        payload = json.dumps(next_checkpoint, default=str, ensure_ascii=False)
+        cur = self.con.execute(
+            """
+            UPDATE agent_sessions
+            SET meta_json = json_set(
+                CASE WHEN json_valid(meta_json) THEN meta_json ELSE '{}' END,
+                '$.context_compaction',
+                json(?)
+            ),
+                compaction_epoch = compaction_epoch + 1
+            WHERE session_id=? AND compaction_epoch=?
+            """,
+            (payload, session_id, int(expected_epoch)),
         )
         return bool(cur.rowcount or 0)
 
@@ -355,7 +430,7 @@ class AgentSessionRepository:
         rows = self.con.execute(
             """
             SELECT session_id, strategy_id, title, source,
-                   created_at, updated_at, meta_json,
+                   created_at, updated_at, meta_json, compaction_epoch,
                    (
                        SELECT COUNT(*)
                        FROM agent_messages m
@@ -419,6 +494,42 @@ class AgentSessionRepository:
                 (session_id,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def compaction_transcript(
+        self,
+        session_id: str,
+        *,
+        after_seq: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return the append-only transcript window after a checkpoint cursor."""
+
+        rows = self.con.execute(
+            """
+            SELECT rowid AS message_seq, message_id, session_id, turn_id,
+                   role, content, ts, meta_json
+            FROM agent_messages
+            WHERE session_id=? AND deleted=0 AND rowid>?
+            ORDER BY rowid ASC
+            """,
+            (session_id, max(0, int(after_seq))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def compaction_cursor_matches(
+        self,
+        session_id: str,
+        *,
+        message_seq: int,
+        message_id: str,
+    ) -> bool:
+        row = self.con.execute(
+            """
+            SELECT message_id FROM agent_messages
+            WHERE session_id=? AND rowid=? AND deleted=0
+            """,
+            (session_id, int(message_seq)),
+        ).fetchone()
+        return row is not None and str(row["message_id"] or "") == message_id
 
     def tool_events(
         self,

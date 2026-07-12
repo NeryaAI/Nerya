@@ -118,6 +118,8 @@ class SessionStore:
         sid = session_id or new_session_id()
         existing = self.load(sid)
         if existing is not None:
+            if self._bind_strategy(existing, strategy_id):
+                self.save(existing)
             return existing
         now = now_iso()
         state = SessionState(
@@ -140,6 +142,7 @@ class SessionStore:
             session_id=session_id,
             created_at=now_iso(),
         )
+        self._bind_strategy(state, strategy_id)
         if turn_id not in state.turn_ids:
             state.turn_ids.append(turn_id)
         for skill in invoked_skills or []:
@@ -147,8 +150,6 @@ class SessionStore:
                 state.invoked_skills.append(skill)
         if last_action is not None:
             state.last_action = last_action
-        if strategy_id and not state.strategy_id:
-            state.strategy_id = strategy_id
         state.updated_at = now_iso()
         self.save(state)
         return state
@@ -162,15 +163,30 @@ class SessionStore:
     ) -> SessionState:
         state = self.load(session_id) or SessionState(
             session_id=session_id,
-            strategy_id=strategy_id,
             created_at=now_iso(),
         )
-        if strategy_id and not state.strategy_id:
-            state.strategy_id = strategy_id
+        self._bind_strategy(state, strategy_id)
         state.meta.update(dict(patch or {}))
         state.updated_at = now_iso()
         self.save(state)
         return state
+
+    @staticmethod
+    def _bind_strategy(state: SessionState, requested: str | None) -> bool:
+        requested_id = str(requested or "").strip() or None
+        existing_id = str(state.strategy_id or "").strip() or None
+        if requested_id and existing_id and requested_id != existing_id:
+            from ..db.repositories import SessionStrategyMismatch
+
+            raise SessionStrategyMismatch(
+                state.session_id,
+                existing_id,
+                requested_id,
+            )
+        if requested_id and not existing_id:
+            state.strategy_id = requested_id
+            return True
+        return False
 
     def record_skill_state(
         self, session_id: str, skill_id: str, state_payload: Any,

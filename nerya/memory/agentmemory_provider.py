@@ -401,7 +401,12 @@ class AgentMemoryProvider(MemoryProvider):
             result = self._request(
                 "POST",
                 "/agentmemory/smart-search",
-                json={"query": query, "limit": int(limit or 5)},
+                json={
+                    "query": query,
+                    "limit": int(limit or 5),
+                    "sessionId": self.settings.session_id,
+                    "project": self.settings.project,
+                },
             )
         except Exception:
             return []

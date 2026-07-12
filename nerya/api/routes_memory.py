@@ -20,8 +20,6 @@ from ..memory.agentmemory_provider import (
     external_memory_config,
     selected_external_provider,
 )
-from ..memory.notebook import MemoryNotebook
-from ..memory.writer import default_notebook
 
 
 def routes():
@@ -39,7 +37,9 @@ def routes():
         return memsearch_index.configure(
             client.config,
             enabled=body.get("enabled") if "enabled" in body else None,
-            watch_enabled=body.get("watch_enabled") if "watch_enabled" in body else None,
+            watch_enabled=body.get("watch_enabled")
+            if "watch_enabled" in body
+            else None,
             paths=body.get("paths") if isinstance(body.get("paths"), list) else None,
             install_package=body.get("install_package"),
             embedding=embedding,
@@ -92,41 +92,145 @@ def routes():
             "warnings": validate_write_rules(rules),
         }
 
+    def _memory_scope_error(client, *, scope: str, strategy_id: str) -> str:
+        if scope == "session":
+            return "session_scope_requires_trusted_context"
+        if scope not in {"global", "strategy"}:
+            return "invalid_scope"
+        if scope == "global":
+            return "scope_override_forbidden" if strategy_id else ""
+        try:
+            strategy_path = client.config.paths.strategy(strategy_id).resolve()
+            strategy_path.relative_to(client.config.paths.strategies.resolve())
+        except (ValueError, OSError):
+            return "invalid_scope"
+        return "" if strategy_id and strategy_path.is_dir() else "unknown_strategy"
+
     def memory_capture(client, payload):
         body = payload or {}
-        # Lazy import to avoid pulling the agent kernel into module-load
-        # time (writer → memory_index → agent kernel → strategies …).
-        from ..memory.writer import MemoryWriter
-        writer = MemoryWriter(client.config)
-        result = writer.capture(
-            category=str(body.get("category") or ""),
-            content=str(body.get("content") or ""),
-            title=str(body.get("title") or ""),
-            key=str(body.get("key") or ""),
-            tags=list(body.get("tags") or []) if isinstance(body.get("tags"), list) else None,
-            source=str(body.get("source") or "api"),
-            actor_id=str(body.get("actor_id") or "default"),
-            scope=str(body.get("scope") or "global"),
-            strategy_id=str(body.get("strategy_id") or ""),
-            target_files=body.get("target_files") if isinstance(body.get("target_files"), list) else None,
+        from ..memory.runtime import MemoryRuntime, MemoryScopeError
+
+        scope = str(body.get("scope") or "global").strip().lower()
+        strategy_id = str(body.get("strategy_id") or "").strip()
+        if "target_files" in body:
+            return {
+                "ok": False,
+                "skipped": True,
+                "skip_reason": "target_override_forbidden",
+            }
+        scope_error = _memory_scope_error(
+            client,
+            scope=scope,
+            strategy_id=strategy_id,
         )
+        if scope_error:
+            return {
+                "ok": False,
+                "skipped": True,
+                "skip_reason": scope_error,
+            }
+
+        category = str(body.get("category") or "")
+        content = str(body.get("content") or "")
+        key = str(body.get("key") or "")
+        title = str(body.get("title") or "")
+        try:
+            result = MemoryRuntime(
+                client.config,
+                actor_id=str(getattr(client, "actor_id", "default") or "default"),
+                strategy_id=strategy_id,
+            ).remember(
+                category=category,
+                content=content,
+                title=title,
+                key=key,
+                tags=(
+                    list(body.get("tags") or [])
+                    if isinstance(body.get("tags"), list)
+                    else None
+                ),
+                source="api:memory_capture",
+                writer_id="memory_api",
+                scope=scope,
+            )
+        except MemoryScopeError:
+            return {"ok": False, "skipped": True, "skip_reason": "invalid_scope"}
+        record = result.record
+        unsafe_result = result.skip_reason == "unsafe_content"
+        response_category = (
+            record.category if record is not None else "" if unsafe_result else category
+        )
+        response_key = (
+            record.stable_key if record is not None else "" if unsafe_result else key
+        )
+        response_title = (
+            record.title if record is not None else "" if unsafe_result else title
+        )
+        rule = load_write_rules(client.config).get(response_category)
         return {
             "ok": result.ok,
             "skipped": result.skipped,
             "skip_reason": result.skip_reason,
-            "category": result.category,
-            "key": result.key,
-            "title": result.title,
-            "hash": result.hash,
-            "fact_ts": result.fact_ts,
-            "target_files": result.target_files,
+            "category": response_category,
+            "key": response_key,
+            "title": response_title,
+            "memory_id": record.memory_id if record else "",
+            "fact_ts": record.created_at if record else None,
+            "target_files": (
+                list(record.target_files)
+                if record is not None
+                else list(rule.target_files)
+                if rule is not None
+                else []
+            ),
         }
+
+    def memory_forget(client, payload):
+        body = payload or {}
+        from ..memory.runtime import MemoryRuntime, MemoryScopeError
+
+        scope = str(body.get("scope") or "global").strip().lower()
+        strategy_id = str(body.get("strategy_id") or "").strip()
+        key = str(body.get("key") or "").strip()
+        memory_id = str(body.get("memory_id") or "").strip()
+        if bool(key) == bool(memory_id):
+            return {
+                "ok": False,
+                "skipped": True,
+                "skip_reason": "exactly_one_selector_required",
+            }
+        scope_error = _memory_scope_error(
+            client,
+            scope=scope,
+            strategy_id=strategy_id,
+        )
+        if scope_error:
+            return {
+                "ok": False,
+                "skipped": True,
+                "skip_reason": scope_error,
+            }
+
+        try:
+            forgotten = MemoryRuntime(
+                client.config,
+                actor_id=str(getattr(client, "actor_id", "default") or "default"),
+                strategy_id=strategy_id,
+            ).forget(
+                key=key,
+                memory_id=memory_id,
+                scope=scope,
+            )
+        except MemoryScopeError:
+            return {"ok": False, "skipped": True, "skip_reason": "invalid_scope"}
+        return {"ok": True, "forgotten": forgotten, "scope": scope}
 
     # ----------------------------------------------- curated notebook
     def _notebook_for(client):
         # Lazy import — ``MemoryWriter`` pulls in ``MemoryIndex`` which
         # we do not want to drag into module-load time.
         from ..memory.writer import default_notebook
+
         return default_notebook(client.config)
 
     def notebook_list(client, _payload):
@@ -152,7 +256,10 @@ def routes():
         action = str(body.get("action") or "").strip().lower()
         target = str(body.get("target") or "").strip().lower()
         if action not in {"add", "replace", "remove"}:
-            return {"ok": False, "error": f"unknown action {action!r}; expected add|replace|remove"}
+            return {
+                "ok": False,
+                "error": f"unknown action {action!r}; expected add|replace|remove",
+            }
         if target not in NOTEBOOK_VALID_TARGETS:
             return {
                 "ok": False,
@@ -175,35 +282,40 @@ def routes():
         log = MemoryActivityLog(config=client.config)
         try:
             from ..memory.activity import MemoryActivityEvent
+
             cat = "notebook_agent" if target == "agent" else "notebook_operator"
             if res.ok:
-                log.append(MemoryActivityEvent.write_ok(
-                    category=cat,
-                    title=f"notebook.{action}",
-                    preview=str(body.get("content") or "")[:200],
-                    source="api:notebook",
-                    extra={
-                        "action": action,
-                        "notebook_target": target,
-                        "notebook_used_chars": res.used_chars,
-                        "notebook_char_limit": res.char_limit,
-                        "notebook_entry_count": len(res.entries),
-                    },
-                ))
+                log.append(
+                    MemoryActivityEvent.write_ok(
+                        category=cat,
+                        title=f"notebook.{action}",
+                        preview=str(body.get("content") or "")[:200],
+                        source="api:notebook",
+                        extra={
+                            "action": action,
+                            "notebook_target": target,
+                            "notebook_used_chars": res.used_chars,
+                            "notebook_char_limit": res.char_limit,
+                            "notebook_entry_count": len(res.entries),
+                        },
+                    )
+                )
             else:
-                log.append(MemoryActivityEvent.write_skipped(
-                    category=cat,
-                    skip_reason="notebook_rejected",
-                    title=f"notebook.{action}",
-                    source="api:notebook",
-                    extra={
-                        "action": action,
-                        "notebook_target": target,
-                        "notebook_error": res.error,
-                        "notebook_used_chars": res.used_chars,
-                        "notebook_char_limit": res.char_limit,
-                    },
-                ))
+                log.append(
+                    MemoryActivityEvent.write_skipped(
+                        category=cat,
+                        skip_reason="notebook_rejected",
+                        title=f"notebook.{action}",
+                        source="api:notebook",
+                        extra={
+                            "action": action,
+                            "notebook_target": target,
+                            "notebook_error": res.error,
+                            "notebook_used_chars": res.used_chars,
+                            "notebook_char_limit": res.char_limit,
+                        },
+                    )
+                )
         except Exception:  # noqa: BLE001 — activity log must never break notebook
             pass
         # Auto-ingest a research-vault row when the operator/agent saves a
@@ -216,9 +328,12 @@ def routes():
                 from ..evidence import autoingest as _evidence_autoingest
 
                 content = str(body.get("content") or "")
-                artifact_id = "sha256:" + _hashlib.sha256(
-                    content.encode("utf-8", errors="ignore")
-                ).hexdigest()[:16]
+                artifact_id = (
+                    "sha256:"
+                    + _hashlib.sha256(
+                        content.encode("utf-8", errors="ignore")
+                    ).hexdigest()[:16]
+                )
                 cat = "notebook_agent" if target == "agent" else "notebook_operator"
                 _evidence_autoingest.on_research_save(
                     client,
@@ -325,26 +440,41 @@ def routes():
             "query": query,
             "backends": [],
         }
-        # Built-in: list a couple of notebook entries; never fails.
+        # Built-in: exercise the same scoped, query-ranked recall path used
+        # by the agent instead of inspecting Notebook files directly.
         try:
-            nb: MemoryNotebook = default_notebook(client.config)
-            agent_entries = list(nb.entries("agent"))[: max(1, limit)]
-            operator_entries = list(nb.entries("operator"))[: max(1, limit)]
-            out["backends"].append({
-                "backend": "builtin",
-                "ok": True,
-                "agent_entries": len(agent_entries),
-                "operator_entries": len(operator_entries),
-                "preview": (
-                    (agent_entries + operator_entries)[:2]
-                ),
-            })
+            from ..memory.runtime import MemoryRuntime
+
+            hits = MemoryRuntime(
+                client.config,
+                actor_id=str(getattr(client, "actor_id", "default") or "default"),
+            ).recall(query, limit=limit)
+            out["backends"].append(
+                {
+                    "backend": "builtin",
+                    "ok": True,
+                    "matches": len(hits),
+                    "preview": [
+                        {
+                            "memory_id": hit.memory_id,
+                            "scope": hit.scope,
+                            "strategy_id": hit.strategy_id,
+                            "category": hit.category,
+                            "key": hit.stable_key,
+                            "content": hit.content,
+                        }
+                        for hit in hits[: max(1, limit)]
+                    ],
+                }
+            )
         except Exception as exc:  # noqa: BLE001 — diagnostic only
-            out["backends"].append({
-                "backend": "builtin",
-                "ok": False,
-                "error": str(exc),
-            })
+            out["backends"].append(
+                {
+                    "backend": "builtin",
+                    "ok": False,
+                    "error": str(exc),
+                }
+            )
         # memsearch: run a real vector search if the package is installed.
         try:
             res = memsearch_index.search(
@@ -354,63 +484,78 @@ def routes():
             )
             if isinstance(res, dict) and res.get("ok") is not False:
                 rows = res.get("results") or []
-                out["backends"].append({
-                    "backend": "memsearch",
-                    "ok": True,
-                    "matches": len(rows),
-                    "preview": [
-                        {
-                            "source": str(r.get("source") or r.get("path") or ""),
-                            "score": r.get("score"),
-                        }
-                        for r in rows[: max(1, limit)] if isinstance(r, dict)
-                    ],
-                })
+                out["backends"].append(
+                    {
+                        "backend": "memsearch",
+                        "ok": True,
+                        "matches": len(rows),
+                        "preview": [
+                            {
+                                "source": str(r.get("source") or r.get("path") or ""),
+                                "score": r.get("score"),
+                            }
+                            for r in rows[: max(1, limit)]
+                            if isinstance(r, dict)
+                        ],
+                    }
+                )
             else:
-                out["backends"].append({
+                out["backends"].append(
+                    {
+                        "backend": "memsearch",
+                        "ok": False,
+                        "error": (res or {}).get("error")
+                        if isinstance(res, dict)
+                        else "search_failed",
+                        "detail": (res or {}).get("detail")
+                        if isinstance(res, dict)
+                        else None,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 — diagnostic only
+            out["backends"].append(
+                {
                     "backend": "memsearch",
                     "ok": False,
-                    "error": (res or {}).get("error") if isinstance(res, dict) else "search_failed",
-                    "detail": (res or {}).get("detail") if isinstance(res, dict) else None,
-                })
-        except Exception as exc:  # noqa: BLE001 — diagnostic only
-            out["backends"].append({
-                "backend": "memsearch",
-                "ok": False,
-                "error": str(exc),
-            })
-        # agentmemory: health probe + smart-search if enabled.
+                    "error": str(exc),
+                }
+            )
+        # AgentMemory recall is session-private. This operator diagnostic may
+        # check service health, but it must not issue an unscoped smart-search.
         try:
             provider = AgentMemoryProvider(client.config)
             settings = provider.settings
             if settings.enabled and settings.provider == "agentmemory":
                 available = provider.is_available()
-                chunks = provider.prefetch(query, limit=limit) if available else []
-                out["backends"].append({
-                    "backend": "agentmemory",
-                    "ok": bool(available),
-                    "available": bool(available),
-                    "base_url": settings.base_url,
-                    "matches": len(chunks),
-                    "preview": [
-                        {"source": c.source, "score": c.score, "text_preview": c.text[:120]}
-                        for c in chunks[: max(1, limit)]
-                    ],
-                    "last_error": getattr(provider, "_last_error", "") or None,
-                })
+                out["backends"].append(
+                    {
+                        "backend": "agentmemory",
+                        "ok": bool(available),
+                        "available": bool(available),
+                        "base_url": settings.base_url,
+                        "matches": 0,
+                        "preview": [],
+                        "note": "recall requires a trusted active session",
+                        "last_error": getattr(provider, "_last_error", "") or None,
+                    }
+                )
             else:
-                out["backends"].append({
+                out["backends"].append(
+                    {
+                        "backend": "agentmemory",
+                        "ok": False,
+                        "enabled": False,
+                        "note": "agentmemory not selected in memory.external",
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 — diagnostic only
+            out["backends"].append(
+                {
                     "backend": "agentmemory",
                     "ok": False,
-                    "enabled": False,
-                    "note": "agentmemory not selected in memory.external",
-                })
-        except Exception as exc:  # noqa: BLE001 — diagnostic only
-            out["backends"].append({
-                "backend": "agentmemory",
-                "ok": False,
-                "error": str(exc),
-            })
+                    "error": str(exc),
+                }
+            )
         return out
 
     def activity_tail(client, payload):
@@ -578,11 +723,15 @@ def routes():
         if not _ff.is_enabled(client, _PROMPT_GUARD_FLAG):
             return _prompt_guard_disabled()
         from ..security import prompt_injection as _pi
+
         body = payload or {}
         content = str(body.get("content") or "")
         verdict = _pi.classify(content)
         rec = None
-        if bool(body.get("enqueue", True)) and verdict["verdict"] in ("review", "block"):
+        if bool(body.get("enqueue", True)) and verdict["verdict"] in (
+            "review",
+            "block",
+        ):
             rec = _pg.enqueue(
                 client,
                 verdict=verdict["verdict"],
@@ -614,6 +763,7 @@ def routes():
         ("GET", "/memory/write_rules", write_rules_get),
         ("POST", "/memory/write_rules", write_rules_set),
         ("POST", "/memory/capture", memory_capture),
+        ("POST", "/memory/forget", memory_forget),
         ("GET", "/memory/activity", activity_tail),
         ("POST", "/memory/activity", activity_tail),
         # Curated agent / operator notebook

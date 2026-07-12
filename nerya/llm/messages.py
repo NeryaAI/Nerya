@@ -72,6 +72,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
+from ..agent.prompt_sections import CACHE_BOUNDARY_MARKER
 from ..core.errors import LLMError
 from .adapters._base import (
     Transport,
@@ -634,7 +635,10 @@ class AnthropicMessagesBackend:
             "model": self.model,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
-            "system": request.system,
+            "system": _anthropic_system_blocks(
+                request.system,
+                enable_cache=self.enable_prompt_cache,
+            ),
             "messages": request.messages,
         }
         tools = list(request.tools)
@@ -721,6 +725,41 @@ class AnthropicMessagesBackend:
         )
 
 
+def _anthropic_system_blocks(system: str, *, enable_cache: bool) -> Any:
+    """Remove the internal boundary and cache only the stable prefix."""
+
+    text = str(system or "")
+    if CACHE_BOUNDARY_MARKER not in text:
+        return text
+    stable, dynamic = text.split(CACHE_BOUNDARY_MARKER, 1)
+    stable = stable.rstrip()
+    dynamic = dynamic.lstrip()
+    if not enable_cache:
+        return _system_without_cache_boundary(text)
+    blocks: list[dict[str, Any]] = []
+    if stable:
+        blocks.append({
+            "type": "text",
+            "text": stable,
+            "cache_control": {"type": "ephemeral"},
+        })
+    if dynamic:
+        blocks.append({"type": "text", "text": dynamic})
+    return blocks
+
+
+def _system_without_cache_boundary(system: str) -> str:
+    """Remove the internal prompt-cache marker before provider transport."""
+
+    text = str(system or "")
+    if CACHE_BOUNDARY_MARKER not in text:
+        return text
+    stable, dynamic = text.split(CACHE_BOUNDARY_MARKER, 1)
+    return "\n\n".join(
+        part for part in (stable.rstrip(), dynamic.lstrip()) if part
+    )
+
+
 _ANTHROPIC_LEGACY_THINKING_PREFIXES: tuple[str, ...] = (
     "claude-3-7-sonnet",
     "claude-3.7-sonnet",
@@ -783,7 +822,7 @@ def _openai_render_messages(
 
     system_chunks: list[str] = []
     if system:
-        system_chunks.append(system)
+        system_chunks.append(_system_without_cache_boundary(system))
     out: list[dict[str, Any]] = []
 
     for msg in messages:
@@ -1445,7 +1484,9 @@ class GeminiMessagesBackend:
         base = self.base_url.rstrip("/")
         url = f"{base}/models/{self.model}:generateContent?key={self.api_key}"
         body: dict[str, Any] = {
-            "systemInstruction": {"parts": [{"text": request.system or ""}]},
+            "systemInstruction": {
+                "parts": [{"text": _system_without_cache_boundary(request.system)}]
+            },
             "contents": _gemini_render_contents(request.messages),
             "generationConfig": {
                 "temperature": request.temperature,
@@ -1638,7 +1679,7 @@ class BedrockAnthropicMessagesBackend:
             "anthropic_version": self.anthropic_version,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
-            "system": request.system,
+            "system": _system_without_cache_boundary(request.system),
             "messages": request.messages,
         }
         if request.tools:
