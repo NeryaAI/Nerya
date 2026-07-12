@@ -812,16 +812,55 @@ def _str_tuple(value: Any, *, where: str, required: bool) -> tuple[str, ...]:
 
 def _collect_files(root: Path) -> tuple[str, ...]:
     out: list[str] = []
+    resolved_root = root.resolve()
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
+        try:
+            p.resolve().relative_to(resolved_root)
+        except (OSError, ValueError):
+            continue
         rel = p.relative_to(root).as_posix()
-        # Skip per-run state we don't want in the content hash.
-        first = rel.split("/", 1)[0]
-        if first in {"runs", "state", "versions", "reviews"}:
+        parts = p.relative_to(root).parts
+        first = parts[0]
+        if first in {
+            "backtests",
+            "history",
+            "runs",
+            "state",
+            "versions",
+            "reviews",
+        }:
+            continue
+        if any(
+            part in {"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
+            for part in parts
+        ):
+            continue
+        if p.suffix in {".pyc", ".pyo"} or p.name in {".DS_Store", ".coverage"}:
             continue
         out.append(rel)
     return tuple(out)
+
+
+def resolve_package_relative_path(
+    package: StrategyPackage,
+    relative_path: str,
+) -> tuple[Path, str] | None:
+    """Resolve a manifest path only when it remains inside the package."""
+
+    raw = Path(str(relative_path or ""))
+    if not raw.parts or raw.is_absolute():
+        return None
+    root = package.root.resolve()
+    candidate = (root / raw).resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not relative.parts:
+        return None
+    return candidate, relative.as_posix()
 
 
 def _hash_files(root: Path, files: tuple[str, ...]) -> str:

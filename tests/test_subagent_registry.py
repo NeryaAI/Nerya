@@ -110,6 +110,10 @@ def test_strategy_registry_uses_tuning_subagent_prompt_and_tier(tmp_path):
             },
         },
     )
+    (root / "main.py").write_text(
+        "def run(ctx):\n    return ctx.result.hold(reason='test')\n",
+        encoding="utf-8",
+    )
     prompt_path = root / "subagents" / "strategy_tuner.agent.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text("Tune alpha using live review evidence.", encoding="utf-8")

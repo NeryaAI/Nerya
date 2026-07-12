@@ -161,6 +161,22 @@ def proposal_action_gates(paths: WorkspacePaths, proposal_or_id: Any) -> dict[st
         if not validation.get("ok"):
             reason = str(validation.get("reason") or "validation_not_passed")
             blockers.append(reason)
+    if prop.kind == "strategy_tuning_proposal":
+        strategy_id = str(metadata.get("strategy_id") or "").strip()
+        expected_hash = str(metadata.get("package_hash") or "").strip()
+        if not strategy_id:
+            blockers.append("missing_strategy_id")
+        if not expected_hash:
+            blockers.append("missing_strategy_package_hash")
+        if strategy_id and expected_hash:
+            try:
+                from ..strategies.package import load_package
+
+                current_hash = load_package(paths, strategy_id).content_hash
+            except Exception:
+                current_hash = ""
+            if current_hash != expected_hash:
+                blockers.append("strategy_package_changed")
     return {
         "version": "proposal_action_gates_v1",
         "can_apply": not blockers,

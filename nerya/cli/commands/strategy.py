@@ -240,6 +240,10 @@ def cmd_tuning_run(args) -> int:
         operator=getattr(args, "operator", None),
         note=getattr(args, "note", "") or "",
         trigger_event_id=getattr(args, "trigger_event_id", None),
+        evidence_run_ids=tuple(getattr(args, "evidence_run_ids", None) or ()),
+        evidence_session_ids=tuple(
+            getattr(args, "evidence_session_ids", None) or ()
+        ),
     )
     _print(out)
     return 0 if out.get("status") != "error" else 1
@@ -474,6 +478,18 @@ def register(sub) -> None:
     tp.add_argument("--operator", default=None)
     tp.add_argument("--note", default="")
     tp.add_argument("--trigger-event-id", dest="trigger_event_id", default=None)
+    tp.add_argument(
+        "--evidence-run-id",
+        dest="evidence_run_ids",
+        action="append",
+        default=[],
+    )
+    tp.add_argument(
+        "--evidence-session-id",
+        dest="evidence_session_ids",
+        action="append",
+        default=[],
+    )
     tp.set_defaults(func=cmd_tuning_run)
 
     tp = tsub.add_parser(

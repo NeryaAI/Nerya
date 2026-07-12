@@ -23,7 +23,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from ..core.config import Config
 from ..core.errors import (
@@ -112,6 +112,9 @@ STOCK_RESEARCH_SUBAGENTS: frozenset[str] = frozenset({
     "research_editor",
 })
 SUBAGENT_FINALIZATION_RESERVE_SECONDS = 45.0
+SubAgentContextScope = Literal["subagent", "explicit_payload_only"]
+DEFAULT_CONTEXT_SCOPE: SubAgentContextScope = "subagent"
+EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE: SubAgentContextScope = "explicit_payload_only"
 
 
 def _spec_profile_name(spec: SubAgentSpec | None) -> str:
@@ -366,44 +369,55 @@ class SubAgentRuntime:
         session_id: str | None = None,
         turn_id: str | None = None,
         parent_call_id: str | None = None,
+        context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
     ) -> dict[str, Any]:
         t_start = time.monotonic()
         steps: list[_StepRecord] = []
-        # Treat ``spec.allowed_skills`` as a preload / preference list, not
-        # a hard allowlist. The subagent gets the full callable catalogue
-        # minus :data:`CHILD_SKILL_DENYLIST`; the preferred list only nudges
-        # prompt-time tool selection.
-        preloaded = [s for s in spec.allowed_skills if s not in CHILD_SKILL_DENYLIST]
-        for sid in CHILD_CORE_SELF_CONTROL_SKILLS:
-            if sid in CHILD_SKILL_DENYLIST:
-                continue
-            if sid in preloaded:
-                continue
-            preloaded.append(sid)
-        # Build the universe of skills the runtime is willing to dispatch.
-        # Denylist still wins.
-        try:
-            registry_ids = [
-                str(getattr(e, "id", "") or "")
-                for e in self.skills.registry.list()
+        if context_scope not in {
+            DEFAULT_CONTEXT_SCOPE,
+            EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE,
+        }:
+            raise ValueError(f"unknown subagent context scope: {context_scope!r}")
+        explicit_payload_only = context_scope == EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE
+        preloaded: list[str] = []
+        callable_skills: list[str] = []
+        callable_native_tools: list[str] = []
+        if not explicit_payload_only:
+            # Treat ``spec.allowed_skills`` as a preload / preference list, not
+            # a hard allowlist. The subagent gets the full callable catalogue
+            # minus :data:`CHILD_SKILL_DENYLIST`; the preferred list only nudges
+            # prompt-time tool selection.
+            preloaded = [
+                s for s in spec.allowed_skills if s not in CHILD_SKILL_DENYLIST
             ]
-        except Exception:
-            registry_ids = []
-        callable_skills = sorted({
-            sid for sid in registry_ids
-            if sid and sid not in CHILD_SKILL_DENYLIST
-        })
-        # Also surface the native-tool set inherited from the parent. The
-        # child uses the same ``skill_calls`` JSON envelope; the dispatcher
-        # decides whether each name resolves to a skill or a native tool.
-        # Compute the visible set once per run so the prompt copy is stable
-        # across iterations.
-        callable_native_tools = self._allowed_native_tool_names()
-        preloaded = _normalise_preloaded_tools(
-            preloaded,
-            callable_skills=callable_skills,
-            native_tools=callable_native_tools,
-        )
+            for sid in CHILD_CORE_SELF_CONTROL_SKILLS:
+                if sid in CHILD_SKILL_DENYLIST:
+                    continue
+                if sid in preloaded:
+                    continue
+                preloaded.append(sid)
+            # Build the universe of skills the runtime is willing to dispatch.
+            # Denylist still wins.
+            try:
+                registry_ids = [
+                    str(getattr(e, "id", "") or "")
+                    for e in self.skills.registry.list()
+                ]
+            except Exception:
+                registry_ids = []
+            callable_skills = sorted({
+                sid for sid in registry_ids
+                if sid and sid not in CHILD_SKILL_DENYLIST
+            })
+            # Also surface the native-tool set inherited from the parent. The
+            # child uses the same ``skill_calls`` JSON envelope; the dispatcher
+            # decides whether each name resolves to a skill or a native tool.
+            callable_native_tools = self._allowed_native_tool_names()
+            preloaded = _normalise_preloaded_tools(
+                preloaded,
+                callable_skills=callable_skills,
+                native_tools=callable_native_tools,
+            )
         skill_calls: list[dict[str, Any]] = []
         rejected_actions: list[dict[str, Any]] = []
         signals_used: list[str] = []
@@ -459,13 +473,15 @@ class SubAgentRuntime:
             except Exception:
                 pass
 
-        base_context = build_context(
-            self.config, self.skills, spec,
-            payload=payload, strategy_id=strategy_id,
-        )
+        base_context = ""
+        if not explicit_payload_only:
+            base_context = build_context(
+                self.config, self.skills, spec,
+                payload=payload, strategy_id=strategy_id,
+            )
 
         max_iter = self._max_iterations(spec)
-        max_calls = self._max_skill_calls()
+        max_calls = 0 if explicit_payload_only else self._max_skill_calls()
         max_wall_seconds = self._max_wall_seconds(spec)
         finalization_reserve_seconds = self._finalization_reserve_seconds()
         consecutive_unproductive_batches = 0
@@ -495,6 +511,7 @@ class SubAgentRuntime:
             "callable_skills": callable_skills,
             "native_tools": callable_native_tools,
             "context_chars": len(base_context or ""),
+            "context_scope": context_scope,
             "redacted": True,
         }
 
@@ -595,12 +612,14 @@ class SubAgentRuntime:
                 allowed=preloaded,
                 native_tools=callable_native_tools,
                 task_envelope=task_envelope,
+                context_scope=context_scope,
             )
             audit_prompt = self._render_prompt(
                 spec, audit_payload, base_context, accumulated_obs,
                 allowed=preloaded,
                 native_tools=callable_native_tools,
                 task_envelope=safe_task_envelope,
+                context_scope=context_scope,
             )
             safe_prompt = redact_text(audit_prompt)
             audit_prompts.append({
@@ -633,7 +652,7 @@ class SubAgentRuntime:
                             "strategy_id": strategy_id,
                             "trigger_event_id": trigger_event_id,
                             "parent_call_id": parent_call_id,
-                            "context_scope": "subagent",
+                            "context_scope": context_scope,
                             "team_run_id": task_envelope.get("team_run_id"),
                             "llm_attempt": llm_attempt + 1,
                         },
@@ -968,6 +987,7 @@ class SubAgentRuntime:
                 native_tools=[],
                 task_envelope=task_envelope,
                 finalization_mode=True,
+                context_scope=context_scope,
             )
             audit_prompt = self._render_prompt(
                 spec,
@@ -978,6 +998,7 @@ class SubAgentRuntime:
                 native_tools=[],
                 task_envelope=safe_task_envelope,
                 finalization_mode=True,
+                context_scope=context_scope,
             )
             safe_prompt = redact_text(audit_prompt)
             audit_prompts.append({
@@ -1010,7 +1031,11 @@ class SubAgentRuntime:
                         "strategy_id": strategy_id,
                         "trigger_event_id": trigger_event_id,
                         "parent_call_id": parent_call_id,
-                        "context_scope": "subagent_finalization",
+                        "context_scope": (
+                            context_scope
+                            if explicit_payload_only
+                            else "subagent_finalization"
+                        ),
                         "team_run_id": task_envelope.get("team_run_id"),
                         "finalization_reason": reason,
                     },
@@ -1191,6 +1216,7 @@ class SubAgentRuntime:
         native_tools: list[str] | None = None,
         task_envelope: dict[str, Any] | None = None,
         finalization_mode: bool = False,
+        context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
     ) -> str:
         task_envelope = task_envelope or {}
         obs_block = ""
@@ -1274,6 +1300,14 @@ class SubAgentRuntime:
                 "``evidence`` / ``risk_flags`` / ``uncertainty`` or explicit "
                 "data gaps when useful. ``skill_calls`` and ``tool_calls`` "
                 "are forbidden in this mode."
+            )
+        elif context_scope == EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE:
+            allow_note = (
+                "\nThis run is isolated to the explicit task payload. "
+                "Do not request tools or rely on chat history, global memory, "
+                "operator profile, or facts from another session. Produce the "
+                "final analysis from the frozen payload only and include "
+                '``"done": true``.'
             )
         else:
             allow_note = (

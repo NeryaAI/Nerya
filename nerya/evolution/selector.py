@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from ..core import jsonl
 from ..core.paths import WorkspacePaths
-from .assets import list_capsules, list_genes
+from .assets import DEFAULT_GENES, list_capsules, list_genes
 from .observation_summary import (
     POST_APPLY_HEALTHY_STATUSES,
     POST_APPLY_NEGATIVE_STATUSES,
@@ -17,6 +17,7 @@ from .observation_summary import (
 
 _POST_APPLY_HEALTHY = POST_APPLY_HEALTHY_STATUSES
 _POST_APPLY_NEGATIVE = POST_APPLY_NEGATIVE_STATUSES
+_DEFAULT_GENES_BY_ID = {gene.id: gene.asdict() for gene in DEFAULT_GENES}
 
 
 def select_assets_for_signals(
@@ -24,12 +25,47 @@ def select_assets_for_signals(
     signals: list[dict[str, Any]],
     *,
     strategy_id: str | None = None,
+    package_hash: str | None = None,
+    gene_categories: Iterable[str] | None = None,
+    include_usage: bool = True,
+    include_post_apply: bool = True,
+    scope_usage_to_strategy: bool = False,
+    require_strategy_gene_owner: bool = False,
+    require_strategy_gene_package_hash: bool = False,
+    require_capsule_package_hash: bool = False,
     limit: int = 8,
 ) -> dict[str, list[dict[str, Any]]]:
     kinds = {str(s.get("kind") or "") for s in signals}
-    usage = _asset_usage(paths)
-    post_apply = _post_apply_summary_by_proposal(paths)
-    genes_all = list_genes(paths)
+    usage = (
+        _asset_usage(
+            paths,
+            strategy_id=strategy_id if scope_usage_to_strategy else None,
+        )
+        if include_usage
+        else {"genes": {}, "capsules": {}}
+    )
+    post_apply = (
+        _post_apply_summary_by_proposal(paths)
+        if include_post_apply
+        else {}
+    )
+    categories = {
+        str(category).strip().lower()
+        for category in (gene_categories or ())
+        if str(category or "").strip()
+    }
+    genes_all = [
+        gene
+        for gene in list_genes(paths)
+        if _gene_is_in_scope(
+            gene,
+            strategy_id=strategy_id,
+            package_hash=package_hash,
+            categories=categories,
+            require_strategy_owner=require_strategy_gene_owner,
+            require_package_hash=require_strategy_gene_package_hash,
+        )
+    ]
     gene_signal_map = {
         str(gene.get("id") or ""): {
             str(signal)
@@ -61,7 +97,16 @@ def select_assets_for_signals(
                 context=context,
             ),
         )
-        for capsule in list_capsules(paths, strategy_id=strategy_id, limit=max(limit, 200))
+        for capsule in list_capsules(
+            paths,
+            strategy_id=strategy_id,
+            limit=max(limit, 200),
+        )
+        if _capsule_is_in_scope(
+            capsule,
+            package_hash=package_hash,
+            require_package_hash=require_capsule_package_hash,
+        )
     ]
     capsules.sort(key=lambda c: float((c.get("gdi") or {}).get("score") or 0.0), reverse=True)
     return {
@@ -73,6 +118,32 @@ def select_assets_for_signals(
             "signal_kinds": sorted(k for k in kinds if k),
         },
     }
+
+
+def select_strategy_tuning_assets(
+    paths: WorkspacePaths,
+    signals: list[dict[str, Any]],
+    *,
+    strategy_id: str,
+    package_hash: str,
+    limit: int = 8,
+) -> dict[str, list[dict[str, Any]]]:
+    """Select only current-package assets for an isolated tuning review."""
+
+    return select_assets_for_signals(
+        paths,
+        signals,
+        strategy_id=strategy_id,
+        package_hash=package_hash,
+        gene_categories={"strategy"},
+        include_usage=False,
+        include_post_apply=False,
+        scope_usage_to_strategy=True,
+        require_strategy_gene_owner=True,
+        require_strategy_gene_package_hash=True,
+        require_capsule_package_hash=True,
+        limit=limit,
+    )
 
 
 def annotate_assets_with_gdi(
@@ -240,10 +311,16 @@ def _with_gdi(asset: dict[str, Any], gdi: dict[str, Any]) -> dict[str, Any]:
     return {**asset, "gdi": gdi}
 
 
-def _asset_usage(paths: WorkspacePaths) -> dict[str, dict[str, int]]:
+def _asset_usage(
+    paths: WorkspacePaths,
+    *,
+    strategy_id: str | None = None,
+) -> dict[str, dict[str, int]]:
     genes: dict[str, int] = {}
     capsules: dict[str, int] = {}
     for row in jsonl.read_all(paths.evolution_events):
+        if strategy_id and str(row.get("strategy_id") or "") != strategy_id:
+            continue
         for gid in row.get("genes_used") or []:
             text = str(gid or "")
             if text:
@@ -260,10 +337,16 @@ def _asset_usage(paths: WorkspacePaths) -> dict[str, dict[str, int]]:
     return {"genes": genes, "capsules": capsules}
 
 
-def _post_apply_summary_by_proposal(paths: WorkspacePaths) -> dict[str, dict[str, Any]]:
+def _post_apply_summary_by_proposal(
+    paths: WorkspacePaths,
+    *,
+    strategy_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
     rows_by_proposal: dict[str, list[dict[str, Any]]] = {}
     for row in jsonl.read_all(paths.journal("evolution")):
         if row.get("kind") != "proposal.post_apply_observation":
+            continue
+        if strategy_id and str(row.get("strategy_id") or "") != strategy_id:
             continue
         proposal_id = str(row.get("proposal_id") or "")
         if proposal_id:
@@ -272,6 +355,53 @@ def _post_apply_summary_by_proposal(paths: WorkspacePaths) -> dict[str, dict[str
         proposal_id: _post_apply_summary(rows)
         for proposal_id, rows in rows_by_proposal.items()
     }
+
+
+def _gene_is_in_scope(
+    gene: dict[str, Any],
+    *,
+    strategy_id: str | None,
+    package_hash: str | None,
+    categories: set[str],
+    require_strategy_owner: bool,
+    require_package_hash: bool,
+) -> bool:
+    category = str(gene.get("category") or "").strip().lower()
+    if categories and category not in categories:
+        return False
+    metadata = gene.get("metadata") if isinstance(gene.get("metadata"), dict) else {}
+    owner = str(gene.get("strategy_id") or metadata.get("strategy_id") or "").strip()
+    default_gene = _DEFAULT_GENES_BY_ID.get(str(gene.get("id") or ""))
+    if default_gene == gene:
+        return True
+    if require_strategy_owner and (not owner or not strategy_id or owner != strategy_id):
+        return False
+    if require_package_hash:
+        owner_hash = str(
+            gene.get("package_hash") or metadata.get("package_hash") or ""
+        ).strip()
+        if not owner_hash or not package_hash or owner_hash != package_hash:
+            return False
+    return not owner or not strategy_id or owner == strategy_id
+
+
+def _capsule_is_in_scope(
+    capsule: dict[str, Any],
+    *,
+    package_hash: str | None,
+    require_package_hash: bool,
+) -> bool:
+    metadata = (
+        capsule.get("metadata")
+        if isinstance(capsule.get("metadata"), dict)
+        else {}
+    )
+    owner_hash = str(
+        capsule.get("package_hash") or metadata.get("package_hash") or ""
+    ).strip()
+    if require_package_hash and not owner_hash:
+        return False
+    return not owner_hash or not package_hash or owner_hash == package_hash
 
 
 def _post_apply_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:

@@ -24,7 +24,7 @@ from ..llm.gateway import LLMGateway
 from ..skills.kernel import SkillKernel
 from ..strategy_history import store as history_store
 from .registry import SubAgentSpec
-from .runtime import SubAgentRuntime
+from .runtime import DEFAULT_CONTEXT_SCOPE, SubAgentContextScope, SubAgentRuntime
 from .strategy_registry import StrategySubAgentRegistry
 
 
@@ -118,6 +118,7 @@ class SubAgentDispatcher:
         turn_id: str | None = None,
         parent_call_id: str | None = None,
         inline_spec: SubAgentSpec | None = None,
+        context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
     ) -> SubAgentResult:
         import time as _t
         t0 = _t.monotonic()
@@ -139,6 +140,7 @@ class SubAgentDispatcher:
                 session_id=session_id,
                 turn_id=turn_id,
                 parent_call_id=parent_call_id,
+                context_scope=context_scope,
             )
             return SubAgentResult(
                 ok=True,
@@ -185,6 +187,8 @@ class SubAgentDispatcher:
             "wall_ms": res.wall_ms,
             "error": res.error, "error_kind": res.error_kind,
             "metrics": res.metrics,
+            "context_scope": (res.audit or {}).get("context_scope")
+            or DEFAULT_CONTEXT_SCOPE,
             "model_calls": (res.audit or {}).get("model_calls") or [],
             "steps_count": len(res.steps),
         })
@@ -205,6 +209,7 @@ class SubAgentDispatcher:
         turn_id: str | None = None,
         parent_call_id: str | None = None,
         inline_spec: SubAgentSpec | None = None,
+        context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
     ) -> dict[str, Any]:
         if not target.startswith("subagent:"):
             return {"ok": False, "reason": "not_subagent_target"}
@@ -216,6 +221,7 @@ class SubAgentDispatcher:
             turn_id=turn_id,
             parent_call_id=parent_call_id,
             inline_spec=inline_spec,
+            context_scope=context_scope,
         )
         self._journal(
             res,
@@ -249,6 +255,7 @@ class SubAgentDispatcher:
         strategy_id: str | None = None,
         session_id: str | None = None,
         max_parallel: int | None = None,
+        context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
     ) -> list[SubAgentResult]:
         """Run multiple subagents concurrently.
 
@@ -273,6 +280,7 @@ class SubAgentDispatcher:
                     trigger_event_id=trigger_event_id,
                     strategy_id=strategy_id,
                     session_id=session_id,
+                    context_scope=context_scope,
                 ): name
                 for name in names_list
             }

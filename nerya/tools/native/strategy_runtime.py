@@ -499,6 +499,14 @@ STRATEGY_TUNING_RUN_SCHEMA: dict[str, Any] = {
         "operator": {"type": "string"},
         "note": {"type": "string"},
         "trigger_event_id": {"type": "string"},
+        "evidence_run_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "evidence_session_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
     },
     "required": ["strategy_id"],
 }
@@ -3246,6 +3254,12 @@ def strategy_tuning_run_handler(
     if not sid:
         return _usage_error(call, "strategy_id is required")
     runner = StrategyEvolutionRunner(config=config, skills=skills)
+    evidence_run_ids = args.get("evidence_run_ids") or []
+    if isinstance(evidence_run_ids, str):
+        evidence_run_ids = [evidence_run_ids]
+    evidence_session_ids = args.get("evidence_session_ids") or []
+    if isinstance(evidence_session_ids, str):
+        evidence_session_ids = [evidence_session_ids]
     try:
         result = runner.run_once(
             sid,
@@ -3253,6 +3267,10 @@ def strategy_tuning_run_handler(
             note=str(args.get("note") or ""),
             dry_run=bool(args.get("dry_run", False)),
             trigger_event_id=(args.get("trigger_event_id") or None),
+            evidence_run_ids=tuple(str(value) for value in evidence_run_ids),
+            evidence_session_ids=tuple(
+                str(value) for value in evidence_session_ids
+            ),
         )
     except (NeryaError, TradingError) as exc:
         return _usage_error(call, str(exc))

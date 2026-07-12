@@ -85,6 +85,17 @@ def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, **extra}
 
 
+def _id_tuple(value: Any) -> tuple[str, ...]:
+    values = (value,) if isinstance(value, str) else (value or ())
+    if not isinstance(values, (list, tuple, set)):
+        return ()
+    return tuple(
+        item
+        for item in (str(raw).strip() for raw in values)
+        if item
+    )
+
+
 def routes():
     def list_packages(client, _query):
         return _ok({"strategies": client.strategy.list_packages()})
@@ -318,6 +329,12 @@ def routes():
                     operator=(payload or {}).get("operator"),
                     note=str((payload or {}).get("note") or ""),
                     trigger_event_id=(payload or {}).get("trigger_event_id"),
+                    evidence_run_ids=_id_tuple(
+                        (payload or {}).get("evidence_run_ids")
+                    ),
+                    evidence_session_ids=_id_tuple(
+                        (payload or {}).get("evidence_session_ids")
+                    ),
                 )
             )
         except NeryaError as exc:

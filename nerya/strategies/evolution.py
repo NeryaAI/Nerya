@@ -66,7 +66,7 @@ import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ..core import jsonl, yaml_io
 from ..core.atomic_write import atomic_write_text
@@ -85,11 +85,12 @@ from ..evolution.patch_proposal import Proposal, create_proposal, is_protected, 
 from ..evolution.event_store import record_event
 from ..evolution.events import EvolutionSignal
 from ..evolution.event_store import append_signal
-from ..evolution.selector import select_assets_for_signals
+from ..evolution.selector import select_strategy_tuning_assets
 from ..evolution.validation_plan import build_validation_plan, write_validation_plan
 from ..skills.kernel import SkillKernel
 from .package import StrategyPackage, StrategyTuningConfig, load_package
-from .performance import StrategyPerformanceSnapshot, build_snapshot
+from .performance import StrategyPerformanceSnapshot
+from .review_context import StrategyReviewPolicy, build_strategy_review_context
 from .validator import validate_proposal_files
 
 
@@ -129,24 +130,6 @@ _TUNING_MATERIALIZATION_CONTRACT = """Strategy tuning materialization contract:
 - Return advisory-only changes only when you cannot safely provide complete after content; mark those as {"kind":"advisory",...} and explain the blocker.
 - Keep targets inside allowed_targets and never mutate forbidden_targets or live-trading enablement.
 """
-_CANDIDATE_BASELINE_COMPARISON_METRICS = (
-    "total_return_pct",
-    "alpha_vs_benchmark_pct",
-    "max_drawdown_pct",
-    "sharpe_ratio",
-    "profit_factor",
-    "win_rate_pct",
-    "total_trades",
-)
-_CANDIDATE_BASELINE_LOWER_IS_BETTER = {
-    "max_drawdown_pct",
-}
-_CANDIDATE_BASELINE_CRITICAL_METRICS = {
-    "total_return_pct",
-    "alpha_vs_benchmark_pct",
-    "max_drawdown_pct",
-    "sharpe_ratio",
-}
 _CANDIDATE_LIST_KEYS = (
     "candidates",
     "candidate_recommendations",
@@ -233,6 +216,8 @@ class StrategyEvolutionRunner:
         note: str = "",
         dry_run: bool = False,
         trigger_event_id: Optional[str] = None,
+        evidence_run_ids: Iterable[str] | None = None,
+        evidence_session_ids: Iterable[str] | None = None,
     ) -> TuningRunResult:
         """Run one self-evolution cycle.
 
@@ -262,11 +247,20 @@ class StrategyEvolutionRunner:
                 reason="tuning is disabled in strategy.yml::tuning.enabled",
             )
 
-        snapshot = build_snapshot(
+        snapshot = build_strategy_review_context(
             self.paths,
-            strategy_id,
-            lookback_runs=int(cfg.lookback.runs or 200),
-            package=pkg,
+            pkg,
+            policy=StrategyReviewPolicy(
+                lookback_runs=int(cfg.lookback.runs or 200),
+                max_age_hours=int(cfg.lookback.max_age_hours or 168),
+                execution_mode=pkg.manifest.mode,
+                run_ids=tuple(str(value) for value in (evidence_run_ids or ())),
+                session_ids=tuple(
+                    str(value) for value in (evidence_session_ids or ())
+                ),
+                allowed_targets=tuple(cfg.allowed_targets),
+                forbidden_targets=tuple(cfg.forbidden_targets),
+            ),
             config_like=self.config,
         )
 
@@ -292,9 +286,16 @@ class StrategyEvolutionRunner:
             return res
 
         try:
+            selected_assets = _select_tuning_assets(
+                self.paths,
+                pkg,
+                snapshot,
+                run_id,
+            )
             envelope = self._dispatch_tuner(
                 pkg=pkg,
                 snapshot=snapshot,
+                selected_assets=selected_assets,
                 trigger_event_id=trigger_event_id,
                 run_id=run_id,
             )
@@ -333,6 +334,18 @@ class StrategyEvolutionRunner:
             self._journal(res, pkg=pkg, dry_run=dry_run, operator=operator)
             return res
 
+        package_changed = self._abort_if_package_changed(
+            pkg=pkg,
+            run_id=run_id,
+            started=started,
+            t0=t0,
+            snapshot=snapshot,
+            dry_run=dry_run,
+            operator=operator,
+        )
+        if package_changed is not None:
+            return package_changed
+
         output = envelope.get("output") or {}
         if not isinstance(output, dict):
             output = {}
@@ -359,6 +372,17 @@ class StrategyEvolutionRunner:
             envelope["raw_output"] = raw_output
             envelope["output"] = output
             envelope["optimizer_report"] = optimizer_report
+        package_changed = self._abort_if_package_changed(
+            pkg=pkg,
+            run_id=run_id,
+            started=started,
+            t0=t0,
+            snapshot=snapshot,
+            dry_run=dry_run,
+            operator=operator,
+        )
+        if package_changed is not None:
+            return package_changed
         audit_path = self._write_tuning_audit(
             pkg=pkg,
             run_id=run_id,
@@ -452,6 +476,17 @@ class StrategyEvolutionRunner:
 
         proposal: Optional[Proposal] = None
         if accepted and not dry_run:
+            package_changed = self._abort_if_package_changed(
+                pkg=pkg,
+                run_id=run_id,
+                started=started,
+                t0=t0,
+                snapshot=snapshot,
+                dry_run=dry_run,
+                operator=operator,
+            )
+            if package_changed is not None:
+                return package_changed
             proposal = self._create_tuning_proposal(
                 pkg=pkg,
                 run_id=run_id,
@@ -512,14 +547,20 @@ class StrategyEvolutionRunner:
         *,
         pkg: StrategyPackage,
         snapshot: StrategyPerformanceSnapshot,
+        selected_assets: dict[str, Any],
         trigger_event_id: Optional[str],
         run_id: str,
     ) -> dict[str, Any]:
         cfg = pkg.manifest.tuning
         name = cfg.subagent.name or "strategy_tuner"
         from ..subagents.dispatcher import SubAgentDispatcher
+        from ..subagents.runtime import EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE
+        from ..subagents.strategy_registry import build_strategy_tuner_spec
         dispatcher = SubAgentDispatcher(config=self.config, skills=self.skills)
-        selected_assets = _select_tuning_assets(self.paths, pkg, snapshot, run_id)
+        tuner_spec = build_strategy_tuner_spec(
+            pkg,
+            package_context=snapshot.package_context,
+        )
         selected_genes = selected_assets.get("genes", [])
         similar_capsules = [
             c for c in selected_assets.get("capsules", [])
@@ -559,6 +600,8 @@ class StrategyEvolutionRunner:
             strategy_id=pkg.strategy_id,
             session_id=run_id,
             trigger_event_id=trigger_event_id,
+            inline_spec=tuner_spec,
+            context_scope=EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE,
         )
         if isinstance(envelope, dict):
             envelope.setdefault("selected_assets", selected_assets)
@@ -756,6 +799,38 @@ class StrategyEvolutionRunner:
             error={"kind": kind, "message": message},
         )
 
+    def _abort_if_package_changed(
+        self,
+        *,
+        pkg: StrategyPackage,
+        run_id: str,
+        started: str,
+        t0: float,
+        snapshot: StrategyPerformanceSnapshot,
+        dry_run: bool,
+        operator: Optional[str],
+    ) -> TuningRunResult | None:
+        try:
+            current_hash = load_package(self.paths, pkg.strategy_id).content_hash
+        except Exception:
+            current_hash = ""
+        if current_hash == pkg.content_hash:
+            return None
+        result = self._error(
+            run_id,
+            pkg.strategy_id,
+            started,
+            t0,
+            kind="package_changed",
+            message=(
+                "strategy package changed after the frozen review; "
+                "discarded this tuning result"
+            ),
+            snapshot=snapshot.asdict(),
+        )
+        self._journal(result, pkg=pkg, dry_run=dry_run, operator=operator)
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Filtering / rendering helpers
@@ -769,10 +844,11 @@ def _select_tuning_assets(
     run_id: str,
 ) -> dict[str, list[dict[str, Any]]]:
     signals = _tuning_asset_selection_signals(pkg, snapshot, run_id)
-    selected = select_assets_for_signals(
+    selected = select_strategy_tuning_assets(
         paths,
         signals,
         strategy_id=pkg.strategy_id,
+        package_hash=pkg.content_hash,
         limit=8,
     )
     return {**selected, "selection_signals": signals}
@@ -2044,21 +2120,19 @@ def _select_tuning_candidate(
     run_id: str | None = None,
     selected_assets: dict[str, Any] | None = None,
     create_asset_candidates: bool = True,
+    outcome_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     candidates = _candidate_outputs(output)
     if not candidates:
         return None
-    outcome_feedback = (
-        _optimizer_outcome_feedback(paths, pkg)
-        if paths is not None else _empty_optimizer_feedback()
-    )
+    frozen_feedback = outcome_feedback or _empty_optimizer_feedback()
     evaluations = [
         _evaluate_tuning_candidate(
             candidate,
             cfg,
             pkg,
             index=idx,
-            outcome_feedback=outcome_feedback,
+            outcome_feedback=frozen_feedback,
         )
         for idx, candidate in enumerate(candidates[:_MAX_TUNING_CANDIDATES])
     ]
@@ -2073,7 +2147,6 @@ def _select_tuning_candidate(
         )
         evaluations = _apply_candidate_backtest_previews(
             paths=paths,
-            pkg=pkg,
             run_id=run_id,
             evaluations=evaluations,
         )
@@ -2098,13 +2171,13 @@ def _select_tuning_candidate(
         "selected_candidate_id": selected.get("candidate_id"),
         "selected_index": selected.get("index"),
         "selected_score": selected.get("score"),
-        "outcome_feedback": _optimizer_feedback_report(outcome_feedback),
+        "outcome_feedback": _optimizer_feedback_report(frozen_feedback),
         "validation_preview": _optimizer_validation_preview_summary(evaluations),
         "backtest_preview": _optimizer_backtest_preview_summary(evaluations),
         "selection_reason": (
             "selected highest deterministic local score from materialization, "
             "validation strength, bounded candidate static/backtest previews, "
-            "risk, evidence, expected-effect, and historical outcome-feedback signals"
+            "risk, evidence, and expected-effect signals from this tuning run"
         ),
         "candidates": [_candidate_report(row) for row in evaluations],
     }
@@ -2350,7 +2423,6 @@ def _candidate_validation_preview(
 def _apply_candidate_backtest_previews(
     *,
     paths: WorkspacePaths,
-    pkg: StrategyPackage,
     run_id: str,
     evaluations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -2367,7 +2439,6 @@ def _apply_candidate_backtest_previews(
     for row in ranked[:_CANDIDATE_BACKTEST_PREVIEW_TOP_K]:
         preview = _candidate_backtest_preview(
             paths=paths,
-            pkg=pkg,
             run_id=run_id,
             row=row,
         )
@@ -2510,6 +2581,7 @@ def _candidate_preview_asset_payload(
     evidence_refs = _candidate_preview_evidence_refs(run_id, preview)
     metadata = {
         "origin": "strategy_optimizer_preview",
+        "package_hash": pkg.content_hash,
         "optimizer_run_id": run_id,
         "optimizer_candidate_id": candidate_id,
         "optimizer_candidate_index": row.get("index"),
@@ -2665,7 +2737,6 @@ def _candidate_preview_asset_candidate_digest(candidate: dict[str, Any]) -> dict
 def _candidate_backtest_preview(
     *,
     paths: WorkspacePaths,
-    pkg: StrategyPackage,
     run_id: str,
     row: dict[str, Any],
 ) -> dict[str, Any]:
@@ -2714,15 +2785,17 @@ def _candidate_backtest_preview(
             allow_mock=False,
         )
         status, score_delta, blocked = _candidate_backtest_preview_status(result)
-        baseline_comparison = _candidate_backtest_baseline_comparison(
-            paths=paths,
-            pkg=pkg,
-            result=result,
-        )
-        score_delta = round(
-            score_delta + float(baseline_comparison.get("score_delta") or 0.0),
-            3,
-        )
+        baseline_comparison = {
+            "version": "candidate_backtest_baseline_comparison_v1",
+            "status": "excluded_unfrozen_evidence",
+            "summary": (
+                "Workspace backtest history is outside the frozen strategy "
+                "review scope and did not affect candidate selection."
+            ),
+            "score_delta": 0.0,
+            "metrics_delta": [],
+            "evidence_refs": [],
+        }
         preview = {
             **base,
             "status": status,
@@ -2802,156 +2875,6 @@ def _candidate_backtest_preview_skipped(row: dict[str, Any]) -> dict[str, Any]:
             "top_k": _CANDIDATE_BACKTEST_PREVIEW_TOP_K,
         },
     }
-
-
-def _candidate_backtest_baseline_comparison(
-    *,
-    paths: WorkspacePaths,
-    pkg: StrategyPackage,
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    baseline = _latest_strategy_backtest_metrics(paths, pkg.strategy_id)
-    candidate_metrics = _candidate_backtest_metrics(result)
-    if not baseline:
-        return {
-            "version": "candidate_backtest_baseline_comparison_v1",
-            "status": "missing_baseline",
-            "summary": "No workspace baseline backtest artifact was found.",
-            "score_delta": 0.0,
-            "metrics_delta": [],
-            "evidence_refs": [],
-        }
-    deltas = _candidate_backtest_metric_deltas(
-        baseline.get("metrics") if isinstance(baseline.get("metrics"), dict) else {},
-        candidate_metrics,
-    )
-    improved = sum(1 for row in deltas if row.get("direction") == "improved")
-    regressed = sum(1 for row in deltas if row.get("direction") == "regressed")
-    critical_regressed = [
-        str(row.get("key"))
-        for row in deltas
-        if row.get("direction") == "regressed"
-        and str(row.get("key") or "") in _CANDIDATE_BASELINE_CRITICAL_METRICS
-    ]
-    if not deltas:
-        direction = "unknown"
-    elif regressed > improved or critical_regressed:
-        direction = "regressed"
-    elif improved > regressed:
-        direction = "improved"
-    else:
-        direction = "flat"
-    score_delta = _candidate_backtest_baseline_score_delta(deltas)
-    evidence_refs = [
-        _file_evidence_ref(paths, baseline.get("metrics_path"))
-        if baseline.get("metrics_path") else "",
-    ]
-    return {
-        "version": "candidate_backtest_baseline_comparison_v1",
-        "status": "complete",
-        "overall_direction": direction,
-        "summary": (
-            f"Candidate backtest vs latest workspace baseline: "
-            f"{improved} metric(s) improved, {regressed} regressed."
-        ),
-        "score_delta": score_delta,
-        "baseline": baseline,
-        "candidate": {
-            "metrics": {
-                key: candidate_metrics.get(key)
-                for key in _CANDIDATE_BASELINE_COMPARISON_METRICS
-                if key in candidate_metrics
-            },
-        },
-        "metrics_delta": deltas,
-        "critical_regressed": critical_regressed[:8],
-        "evidence_refs": _unique_strings(evidence_refs),
-    }
-
-
-def _latest_strategy_backtest_metrics(
-    paths: WorkspacePaths,
-    strategy_id: str,
-) -> dict[str, Any] | None:
-    root = paths.strategy(strategy_id) / "backtests"
-    if not root.exists() or not root.is_dir():
-        return None
-    metrics_paths = sorted(
-        (path for path in root.glob("*/metrics.json") if path.is_file()),
-        key=lambda path: (path.parent.name, str(path)),
-    )
-    if not metrics_paths:
-        return None
-    metrics_path = metrics_paths[-1]
-    try:
-        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return {
-        "backtest_id": metrics_path.parent.name,
-        "metrics_path": str(metrics_path),
-        "metrics": {
-            key: metrics.get(key)
-            for key in _CANDIDATE_BASELINE_COMPARISON_METRICS
-            if key in metrics
-        },
-    }
-
-
-def _candidate_backtest_metrics(result: dict[str, Any]) -> dict[str, Any]:
-    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
-    out = {
-        key: result.get(key)
-        for key in _CANDIDATE_BASELINE_COMPARISON_METRICS
-        if key in result
-    }
-    for key in _CANDIDATE_BASELINE_COMPARISON_METRICS:
-        if key in metrics and key not in out:
-            out[key] = metrics.get(key)
-    return out
-
-
-def _candidate_backtest_metric_deltas(
-    baseline: dict[str, Any],
-    candidate: dict[str, Any],
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for key in _CANDIDATE_BASELINE_COMPARISON_METRICS:
-        before = _maybe_float(baseline.get(key))
-        after = _maybe_float(candidate.get(key))
-        if before is None or after is None:
-            continue
-        delta = round(after - before, 6)
-        rows.append({
-            "key": key,
-            "before": before,
-            "after": after,
-            "delta": delta,
-            "direction": _candidate_backtest_delta_direction(key, delta),
-        })
-    return rows
-
-
-def _candidate_backtest_delta_direction(key: str, delta: float) -> str:
-    if abs(delta) < 1e-12:
-        return "flat"
-    improved = delta < 0 if key in _CANDIDATE_BASELINE_LOWER_IS_BETTER else delta > 0
-    return "improved" if improved else "regressed"
-
-
-def _candidate_backtest_baseline_score_delta(deltas: list[dict[str, Any]]) -> float:
-    score = 0.0
-    for row in deltas:
-        direction = str(row.get("direction") or "")
-        if direction == "flat":
-            continue
-        key = str(row.get("key") or "")
-        critical = key in _CANDIDATE_BASELINE_CRITICAL_METRICS
-        if direction == "improved":
-            score += 6.0 if critical else 3.0
-        elif direction == "regressed":
-            score -= 14.0 if critical else 5.0
-    return round(max(-60.0, min(24.0, score)), 3)
 
 
 def _candidate_backtest_result_digest(result: dict[str, Any]) -> dict[str, Any]:

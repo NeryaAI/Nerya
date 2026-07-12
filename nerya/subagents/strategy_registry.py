@@ -12,9 +12,10 @@ This module owns the resolution policy:
 
 1. If ``strategy_id`` is provided and the package declares the
    subagent in its manifest, the strategy-local prompt wins.
-2. Otherwise we fall back to the global ``workspace/subagents``
-   registry.
-3. If neither has the prompt, a :class:`SubAgentSpec` is synthesised:
+2. A tuning subagent with no strategy-local file uses the built-in
+   ``strategy_tuner`` prompt and never reads the global registry.
+3. Other roles fall back to the global ``workspace/subagents`` registry.
+4. If neither has the prompt, a :class:`SubAgentSpec` is synthesised:
    a canonical default profile when the name maps to one, otherwise a
    *capable generic* researcher/analyst body + safe read-only skills so
    a role the lead agent invented on the fly still does real work
@@ -29,11 +30,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ..core.errors import TradingError
 from ..core.paths import WorkspacePaths
-from ..strategies.package import StrategyPackage, load_package
+from ..strategies.package import (
+    StrategyPackage,
+    load_package,
+    resolve_package_relative_path,
+)
 from .registry import (
     DEFAULT_SUBAGENT_PROMPTS,
     DEFAULT_SUBAGENT_SKILLS,
@@ -82,13 +87,12 @@ class StrategySubAgentRegistry:
         pkg = self._load_package()
         if pkg is None:
             return None
-        tuning = pkg.manifest.tuning
-        if tuning.enabled and name == tuning.subagent.name:
-            path = pkg.root / tuning.subagent.prompt_file
-            return path if path.exists() else None
         if name not in pkg.manifest.subagents:
             return None
-        path = pkg.subagents_dir / f"{name}.agent.md"
+        resolved = resolve_package_relative_path(pkg, f"subagents/{name}.agent.md")
+        if resolved is None:
+            return None
+        path, _relative_path = resolved
         return path if path.exists() else None
 
     def _strategy_tier(self, name: str) -> str:
@@ -106,6 +110,13 @@ class StrategySubAgentRegistry:
         return DEFAULT_TIERS.get(canonical, "medium")
 
     def get(self, name: str) -> SubAgentSpec:
+        pkg = self._load_package()
+        if (
+            pkg is not None
+            and pkg.manifest.tuning.enabled
+            and name == pkg.manifest.tuning.subagent.name
+        ):
+            return build_strategy_tuner_spec(pkg)
         canonical = canonical_subagent_name(name)
         path = self._strategy_prompt_path(name)
         if path is not None:
@@ -176,4 +187,54 @@ def resolve_spec(
     return StrategySubAgentRegistry(paths=paths, strategy_id=strategy_id).get(name)
 
 
-__all__ = ["StrategySubAgentRegistry", "resolve_spec"]
+def build_strategy_tuner_spec(
+    package: StrategyPackage,
+    *,
+    package_context: dict[str, Any] | None = None,
+) -> SubAgentSpec:
+    """Resolve a tuner prompt from package-local or already-frozen content."""
+
+    tuning = package.manifest.tuning
+    resolved = resolve_package_relative_path(package, tuning.subagent.prompt_file)
+    prompt_path = package.root / "subagents" / "strategy_tuner.agent.md"
+    prompt = DEFAULT_SUBAGENT_PROMPTS["strategy_tuner"]
+    if resolved is not None:
+        prompt_path, relative_path = resolved
+        if package_context is not None:
+            tuner_prompt = (
+                package_context.get("tuner_prompt")
+                if isinstance(package_context.get("tuner_prompt"), dict)
+                and package_context["tuner_prompt"].get("path") == relative_path
+                else None
+            )
+            files = (
+                package_context.get("files")
+                if isinstance(package_context.get("files"), dict)
+                else {}
+            )
+            frozen = files.get(relative_path) if tuner_prompt is not None else None
+            content = frozen.get("content") if isinstance(frozen, dict) else None
+            if isinstance(content, str) and content.strip():
+                prompt = content
+        elif prompt_path.is_file():
+            try:
+                content = prompt_path.read_text(encoding="utf-8")
+            except OSError:
+                content = ""
+            if content.strip():
+                prompt = content
+    return SubAgentSpec(
+        name=tuning.subagent.name,
+        prompt_path=prompt_path,
+        prompt=prompt,
+        allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get("strategy_tuner", [])),
+        tier=str(tuning.subagent.tier or "medium"),
+        canonical_name="strategy_tuner",
+    )
+
+
+__all__ = [
+    "StrategySubAgentRegistry",
+    "build_strategy_tuner_spec",
+    "resolve_spec",
+]

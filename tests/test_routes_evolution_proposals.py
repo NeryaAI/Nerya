@@ -8,6 +8,7 @@ from nerya.core import yaml_io
 from nerya.core.paths import WorkspacePaths
 from nerya.evolution.patch_proposal import create_proposal
 from nerya.evolution.validation_plan import build_validation_plan, write_validation_plan
+from nerya.strategies.package import load_package
 
 pytestmark = pytest.mark.smoke
 
@@ -18,6 +19,25 @@ def _write_metrics(root, ts: str, metrics: dict):
     (out / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
     (out / "report.md").write_text("# Report\n", encoding="utf-8")
     return out
+
+
+def _seed_alpha_package(paths: WorkspacePaths, *, main: str | None = None):
+    root = paths.strategy("alpha")
+    yaml_io.dump(
+        root / "strategy.yml",
+        {
+            "version": 1,
+            "strategy_id": "alpha",
+            "mode": "paper",
+            "entrypoint": "main.py:run",
+            "schedule": {"type": "cron", "cron": "*/5 * * * *"},
+        },
+    )
+    (root / "main.py").write_text(
+        main or "def run(ctx):\n    return {'ok': False}\n",
+        encoding="utf-8",
+    )
+    return load_package(paths, "alpha")
 
 
 def test_proposal_detail_includes_strategy_package_files(tmp_path):
@@ -208,6 +228,7 @@ def test_proposal_detail_includes_action_gates(tmp_path):
 
 def test_validation_run_route_refreshes_action_gates(tmp_path):
     paths = WorkspacePaths(root=tmp_path)
+    package = _seed_alpha_package(paths)
     sample = tmp_path / "test_gate_sample.py"
     sample.write_text("def test_gate_sample():\n    assert True\n", encoding="utf-8")
     plan = build_validation_plan(
@@ -223,7 +244,11 @@ def test_validation_run_route_refreshes_action_gates(tmp_path):
         target="strategies/alpha",
         initial_state="approved",
         validation_plan_id=plan_id,
-        metadata={"strategy_id": "alpha", "materialized": True},
+        metadata={
+            "strategy_id": "alpha",
+            "package_hash": package.content_hash,
+            "materialized": True,
+        },
         extra_files={
             "after/strategies/alpha/main.py": "def run(ctx):\n    return {'ok': True}\n",
         },
@@ -251,13 +276,18 @@ def test_validation_run_route_refreshes_action_gates(tmp_path):
 
 def test_approve_proposal_route_updates_state_and_action_gates(tmp_path):
     paths = WorkspacePaths(root=tmp_path)
+    package = _seed_alpha_package(paths)
     proposal = create_proposal(
         paths,
         kind="strategy_tuning_proposal",
         summary="Approve validated alpha",
         target="strategies/alpha",
         initial_state="pending_review",
-        metadata={"strategy_id": "alpha", "materialized": True},
+        metadata={
+            "strategy_id": "alpha",
+            "package_hash": package.content_hash,
+            "materialized": True,
+        },
         extra_files={
             "after/strategies/alpha/main.py": "def run(ctx):\n    return {'ok': True}\n",
             "validation_report.json": json.dumps({"ok": True, "issues": []}),
@@ -303,12 +333,11 @@ def test_reject_proposal_route_updates_state(tmp_path):
 
 def test_apply_route_applies_approved_proposal_when_gates_pass(tmp_path):
     paths = WorkspacePaths(root=tmp_path)
-    strategy_root = paths.strategy("alpha")
-    strategy_root.mkdir(parents=True, exist_ok=True)
-    (strategy_root / "main.py").write_text(
-        "def run(ctx):\n    return {'ok': False}\n",
-        encoding="utf-8",
+    package = _seed_alpha_package(
+        paths,
+        main="def run(ctx):\n    return {'ok': False}\n",
     )
+    strategy_root = package.root
     proposal = create_proposal(
         paths,
         kind="strategy_tuning_proposal",
@@ -316,7 +345,11 @@ def test_apply_route_applies_approved_proposal_when_gates_pass(tmp_path):
         target="strategies/alpha",
         initial_state="approved",
         evidence_refs=["proposal:test"],
-        metadata={"strategy_id": "alpha", "materialized": True},
+        metadata={
+            "strategy_id": "alpha",
+            "package_hash": package.content_hash,
+            "materialized": True,
+        },
         extra_files={
             "after/strategies/alpha/main.py": "def run(ctx):\n    return {'ok': True}\n",
             "validation_report.json": json.dumps({"ok": True, "issues": []}),
@@ -339,12 +372,11 @@ def test_apply_route_applies_approved_proposal_when_gates_pass(tmp_path):
 
 def test_rollback_route_restores_before_snapshot(tmp_path):
     paths = WorkspacePaths(root=tmp_path)
-    strategy_root = paths.strategy("alpha")
-    strategy_root.mkdir(parents=True, exist_ok=True)
-    (strategy_root / "main.py").write_text(
-        "def run(ctx):\n    return {'ok': False}\n",
-        encoding="utf-8",
+    package = _seed_alpha_package(
+        paths,
+        main="def run(ctx):\n    return {'ok': False}\n",
     )
+    strategy_root = package.root
     proposal = create_proposal(
         paths,
         kind="strategy_tuning_proposal",
@@ -352,7 +384,11 @@ def test_rollback_route_restores_before_snapshot(tmp_path):
         target="strategies/alpha",
         initial_state="approved",
         evidence_refs=["proposal:test"],
-        metadata={"strategy_id": "alpha", "materialized": True},
+        metadata={
+            "strategy_id": "alpha",
+            "package_hash": package.content_hash,
+            "materialized": True,
+        },
         extra_files={
             "after/strategies/alpha/main.py": "def run(ctx):\n    return {'ok': True}\n",
             "validation_report.json": json.dumps({"ok": True, "issues": []}),

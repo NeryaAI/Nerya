@@ -29,7 +29,9 @@ from nerya.strategies.evolution import (
     StrategyEvolutionRunner,
     _filter_changes,
     _materialize_strategy_tuning_after_files,
+    _optimizer_outcome_feedback,
     _score_optimizer_outcome_feedback,
+    _select_tuning_assets,
     _tuning_asset_selection_signals,
     _validation_plan_input,
 )
@@ -470,6 +472,7 @@ def test_strategy_tuner_payload_includes_selected_genes_and_capsules(tmp_path, m
             "validation_results": [{"status": "passed"}],
             "outcome_score": 0.8,
             "strategy_id": "alpha",
+            "metadata": {"package_hash": pkg.content_hash},
         },
         stamp=False,
     )
@@ -483,6 +486,7 @@ def test_strategy_tuner_payload_includes_selected_genes_and_capsules(tmp_path, m
             "validation_results": [{"status": "failed"}],
             "outcome_score": -0.6,
             "strategy_id": "alpha",
+            "metadata": {"package_hash": pkg.content_hash},
         },
         stamp=False,
     )
@@ -500,6 +504,8 @@ def test_strategy_tuner_payload_includes_selected_genes_and_capsules(tmp_path, m
     )
 
     class Snapshot:
+        package_context = {}
+
         def asdict(self):  # noqa: ANN201
             return {
                 "strategy_id": "alpha",
@@ -525,12 +531,20 @@ def test_strategy_tuner_payload_includes_selected_genes_and_capsules(tmp_path, m
         fake_dispatch,
     )
 
+    snapshot = Snapshot()
+    selected_assets = _select_tuning_assets(
+        paths,
+        pkg,
+        snapshot,
+        "tune_assets",
+    )
     envelope = StrategyEvolutionRunner(
         config=config,
         skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
     )._dispatch_tuner(
         pkg=pkg,
-        snapshot=Snapshot(),
+        snapshot=snapshot,
+        selected_assets=selected_assets,
         trigger_event_id=None,
         run_id="tune_assets",
     )
@@ -557,9 +571,11 @@ def test_strategy_tuner_payload_uses_market_regime_selection_signals(tmp_path, m
     paths.evolution_genes.write_text(
         json.dumps(
             [
-                {
-                    "id": "gene_market_regime_breakout",
-                    "category": "strategy",
+                    {
+                        "id": "gene_market_regime_breakout",
+                        "category": "strategy",
+                        "strategy_id": "alpha",
+                        "metadata": {"package_hash": pkg.content_hash},
                     "signals_match": [
                         "market_regime_trending",
                         "market_regime_high_volatility",
@@ -585,11 +601,14 @@ def test_strategy_tuner_payload_uses_market_regime_selection_signals(tmp_path, m
             "validation_results": [{"status": "passed"}],
             "outcome_score": 0.9,
             "strategy_id": "alpha",
+            "metadata": {"package_hash": pkg.content_hash},
         },
         stamp=False,
     )
 
     class Snapshot:
+        package_context = {}
+
         def asdict(self):  # noqa: ANN201
             return {
                 "strategy_id": "alpha",
@@ -644,12 +663,20 @@ def test_strategy_tuner_payload_uses_market_regime_selection_signals(tmp_path, m
         fake_dispatch,
     )
 
+    snapshot = Snapshot()
+    selected_assets = _select_tuning_assets(
+        paths,
+        pkg,
+        snapshot,
+        "tune_regime",
+    )
     envelope = StrategyEvolutionRunner(
         config=config,
         skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
     )._dispatch_tuner(
         pkg=pkg,
-        snapshot=Snapshot(),
+        snapshot=snapshot,
+        selected_assets=selected_assets,
         trigger_event_id=None,
         run_id="tune_regime",
     )
@@ -754,6 +781,7 @@ def test_apply_blocks_materialized_mutation_without_validation_evidence(tmp_path
 
 def test_apply_requires_passed_validation_plan_for_materialized_mutation(tmp_path):
     paths = WorkspacePaths(tmp_path)
+    package = _seed_strategy(paths)
     plan = build_validation_plan(
         [{"type": "manual_review", "required": True}],
         source="test",
@@ -774,7 +802,11 @@ def test_apply_requires_passed_validation_plan_for_materialized_mutation(tmp_pat
         initial_state="approved",
         evidence_refs=["turn:t_alpha"],
         validation_plan_id=plan_id,
-        metadata={"strategy_id": "alpha", "materialized": True},
+        metadata={
+            "strategy_id": "alpha",
+            "package_hash": package.content_hash,
+            "materialized": True,
+        },
         extra_files={
             "after/strategies/alpha/main.py": "def run(ctx):\n    return {'ok': True}\n",
         },
@@ -787,6 +819,54 @@ def test_apply_requires_passed_validation_plan_for_materialized_mutation(tmp_pat
     assert result["ok"] is True
     assert result["action_gates"]["can_apply"] is True
     assert (tmp_path / "strategies" / "alpha" / "main.py").exists()
+
+
+def test_apply_blocks_strategy_tuning_for_a_changed_package(tmp_path):
+    paths = WorkspacePaths(tmp_path)
+    package = _seed_strategy(paths)
+    plan = build_validation_plan(
+        [{"type": "manual_review", "required": True}],
+        source="test",
+        strategy_id="alpha",
+    )
+    plan_id = write_validation_plan(paths, plan)
+    plan_path = paths.evolution_validation_plans / f"{plan_id}.json"
+    plan_record = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan_record["status"] = "passed"
+    plan_record["steps"][0]["status"] = "passed"
+    plan_record["steps"][0]["evidence_ref"] = "validation:vrn_alpha:step:0"
+    plan_path.write_text(json.dumps(plan_record), encoding="utf-8")
+    proposal = create_proposal(
+        paths,
+        kind="strategy_tuning_proposal",
+        summary="Validated tuning for the prior alpha package",
+        target="strategies/alpha",
+        initial_state="approved",
+        evidence_refs=["turn:t_alpha"],
+        validation_plan_id=plan_id,
+        metadata={
+            "strategy_id": "alpha",
+            "package_hash": package.content_hash,
+            "materialized": True,
+        },
+        extra_files={
+            "after/strategies/alpha/main.py": (
+                "def run(ctx):\n    return {'ok': 'stale tuning'}\n"
+            ),
+        },
+    )
+    (package.root / "main.py").write_text(
+        "def run(ctx):\n    return {'ok': 'new package'}\n",
+        encoding="utf-8",
+    )
+
+    gates = proposal_action_gates(paths, proposal.id)
+    result = apply_proposal(paths, proposal.id)
+
+    assert gates["can_apply"] is False
+    assert "strategy_package_changed" in gates["blockers"]
+    assert result["ok"] is False
+    assert result["reason"] == "strategy_package_changed"
 
 
 def test_strategy_tuning_selects_best_multi_candidate_and_persists_optimizer_report(
@@ -1189,7 +1269,7 @@ def test_strategy_tuning_candidate_backtest_preview_penalizes_failed_replay(
     assert payload["validation_results"][0]["backtest_result"]["verdict"] == "FAIL"
 
 
-def test_strategy_tuning_candidate_backtest_preview_compares_workspace_baseline(
+def test_strategy_tuning_candidate_backtest_preview_ignores_unfrozen_workspace_baseline(
     tmp_path,
     monkeypatch,
 ):
@@ -1291,26 +1371,18 @@ def test_strategy_tuning_candidate_backtest_preview_compares_workspace_baseline(
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
-    assert result.subagent_output["candidate_id"] == "safe_manual"
+    assert result.subagent_output["candidate_id"] == "worse_than_baseline"
     report = result.optimizer_report
     candidates = {row["candidate_id"]: row for row in report["candidates"]}
     regressed = candidates["worse_than_baseline"]
     preview = regressed["backtest_preview"]
     assert preview["status"] == "passed"
-    assert preview["baseline_comparison"]["status"] == "complete"
-    assert preview["baseline_comparison"]["overall_direction"] == "regressed"
-    assert preview["baseline_comparison"]["score_delta"] < 0
-    assert preview["score_delta"] < 0
-    assert "candidate_backtest_baseline_regressed" in regressed["reasons"]
-    assert any(
-        row["key"] == "total_return_pct" and row["direction"] == "regressed"
-        for row in preview["baseline_comparison"]["metrics_delta"]
-    )
-    assert any(
-        ref.endswith("strategies/alpha/backtests/baseline_good/metrics.json")
-        for ref in preview["baseline_comparison"]["evidence_refs"]
-    )
-    assert any(
+    assert preview["baseline_comparison"]["status"] == "excluded_unfrozen_evidence"
+    assert preview["baseline_comparison"]["score_delta"] == 0
+    assert preview["baseline_comparison"]["metrics_delta"] == []
+    assert preview["score_delta"] > 0
+    assert "candidate_backtest_baseline_regressed" not in regressed["reasons"]
+    assert not any(
         ref.endswith("strategies/alpha/backtests/baseline_good/metrics.json")
         for ref in preview["evidence_refs"]
     )
@@ -1322,11 +1394,13 @@ def test_strategy_tuning_candidate_backtest_preview_compares_workspace_baseline(
     ]
     assert len(preview_candidates) == 1
     payload = preview_candidates[0]["payload"]
-    assert payload["metadata"]["baseline_comparison"]["overall_direction"] == "regressed"
-    assert payload["validation_results"][0]["baseline_comparison"]["score_delta"] < 0
+    assert payload["metadata"]["baseline_comparison"]["status"] == (
+        "excluded_unfrozen_evidence"
+    )
+    assert payload["validation_results"][0]["baseline_comparison"]["score_delta"] == 0
 
 
-def test_strategy_tuning_candidate_scoring_uses_historical_outcome_feedback(
+def test_strategy_tuning_candidate_scoring_ignores_unfrozen_outcome_feedback(
     tmp_path,
     monkeypatch,
 ):
@@ -1440,19 +1514,17 @@ def test_strategy_tuning_candidate_scoring_uses_historical_outcome_feedback(
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
-    assert result.subagent_output["candidate_id"] == "feedback_winner"
+    assert result.subagent_output["candidate_id"] == "fresh_alternative"
     report = result.optimizer_report
-    assert report["outcome_feedback"]["sample_count"] == 1
-    assert report["outcome_feedback"]["positive_samples"] == 1
+    assert report["outcome_feedback"]["sample_count"] == 0
+    assert report["outcome_feedback"]["positive_samples"] == 0
     candidates = {
         row["candidate_id"]: row
         for row in report["candidates"]
     }
-    assert candidates["feedback_winner"]["score"] > candidates["fresh_alternative"]["score"]
-    assert candidates["feedback_winner"]["outcome_feedback"]["score_delta"] > (
-        candidates["fresh_alternative"]["outcome_feedback"]["score_delta"]
-    )
-    assert "historical_outcome_feedback_positive" in candidates["feedback_winner"]["reasons"]
+    assert candidates["feedback_winner"]["outcome_feedback"]["score_delta"] == 0
+    assert candidates["fresh_alternative"]["outcome_feedback"]["score_delta"] == 0
+    assert "historical_outcome_feedback_positive" not in candidates["feedback_winner"]["reasons"]
 
 
 def _optimizer_preview_candidate_payload(
@@ -1499,7 +1571,7 @@ def _optimizer_preview_candidate_payload(
     }
 
 
-def test_strategy_tuning_candidate_scoring_uses_operator_candidate_decisions(
+def test_strategy_tuning_candidate_scoring_ignores_unfrozen_operator_decisions(
     tmp_path,
     monkeypatch,
 ):
@@ -1599,36 +1671,20 @@ def test_strategy_tuning_candidate_scoring_uses_operator_candidate_decisions(
     ).run_once("alpha", operator="test", dry_run=False)
 
     assert result.status == "ok"
-    assert result.subagent_output["candidate_id"] == "operator_keep"
+    assert result.subagent_output["candidate_id"] == "neutral_choice"
     report = result.optimizer_report
     feedback = report["outcome_feedback"]
-    assert feedback["sample_count"] == 2
-    assert feedback["candidate_decision_samples"] == 2
-    assert feedback["candidate_decision_positive_samples"] == 1
-    assert feedback["candidate_decision_negative_samples"] == 1
-    assert any(
-        example.get("source") == "asset_candidate_decision"
-        for example in feedback["examples"]
-    )
+    assert feedback["sample_count"] == 0
+    assert feedback["candidate_decision_samples"] == 0
+    assert feedback["examples"] == []
     candidates = {row["candidate_id"]: row for row in report["candidates"]}
-    assert candidates["operator_keep"]["score"] > candidates["neutral_choice"]["score"]
-    assert candidates["operator_drop"]["score"] < candidates["neutral_choice"]["score"]
-    assert candidates["operator_keep"]["outcome_feedback"]["score_delta"] > 0
-    assert candidates["operator_drop"]["outcome_feedback"]["score_delta"] < (
-        candidates["neutral_choice"]["outcome_feedback"]["score_delta"]
-    )
-    keep_match = candidates["operator_keep"]["outcome_feedback"]["matched_features"][0]
-    assert keep_match["sources"]["asset_candidate_decision"] == 1
-    assert keep_match["examples"][0]["source"] == "asset_candidate_decision"
-    assert keep_match["examples"][0]["asset_candidate_id"] == promoted["id"]
-    assert keep_match["examples"][0]["feedback_policy"] == "promoted_positive_preview_reward"
-    assert 0 < keep_match["examples"][0]["feedback_weighting"]["decay_weight"] <= 1
-    assert "strategy_tuning:tune_promoted_keep" in keep_match["examples"][0]["evidence_refs"]
-    assert "historical_outcome_feedback_positive" in candidates["operator_keep"]["reasons"]
-    assert "historical_outcome_feedback_negative" in candidates["operator_drop"]["reasons"]
+    assert candidates["operator_keep"]["outcome_feedback"]["score_delta"] == 0
+    assert candidates["operator_drop"]["outcome_feedback"]["score_delta"] == 0
+    assert "historical_outcome_feedback_positive" not in candidates["operator_keep"]["reasons"]
+    assert "historical_outcome_feedback_negative" not in candidates["operator_drop"]["reasons"]
 
 
-def test_promoted_negative_candidate_decision_penalizes_matching_risk_feature(
+def test_promoted_negative_candidate_decision_does_not_enter_live_tuning(
     tmp_path,
     monkeypatch,
 ):
@@ -1699,26 +1755,16 @@ def test_promoted_negative_candidate_decision_penalizes_matching_risk_feature(
 
     assert result.status == "ok"
     candidates = {row["candidate_id"]: row for row in result.optimizer_report["candidates"]}
-    assert candidates["risky_retry"]["outcome_feedback"]["score_delta"] < 0
-    assert "historical_outcome_feedback_negative" in candidates["risky_retry"]["reasons"]
-    assert any(
-        feature["feature"] == "risk:overfit_entry"
-        for feature in candidates["risky_retry"]["outcome_feedback"]["matched_features"]
-    )
-    risk_match = [
-        feature for feature in candidates["risky_retry"]["outcome_feedback"]["matched_features"]
-        if feature["feature"] == "risk:overfit_entry"
-    ][0]
-    assert risk_match["sources"]["asset_candidate_decision"] == 1
-    assert risk_match["examples"][0]["feedback_policy"] == "promoted_negative_preview_caution_penalty"
+    assert result.optimizer_report["outcome_feedback"]["sample_count"] == 0
+    assert candidates["risky_retry"]["outcome_feedback"]["score_delta"] == 0
+    assert candidates["risky_retry"]["outcome_feedback"]["matched_features"] == []
+    assert "historical_outcome_feedback_negative" not in candidates["risky_retry"]["reasons"]
 
 
 def test_operator_candidate_decision_feedback_decays_and_caps_feature_weight(
     tmp_path,
-    monkeypatch,
 ):
     paths = WorkspacePaths(tmp_path)
-    config = Config(paths=paths, data={"runtime": {"mock_mode": True}})
     _seed_strategy(paths)
     fixed_now = datetime(2026, 6, 17, tzinfo=timezone.utc)
 
@@ -1746,55 +1792,10 @@ def test_operator_candidate_decision_feedback_decays_and_caps_feature_weight(
             promote_decision(f"tune_fresh_keep_{index}", fixed_now)
         set_clock(lambda: fixed_now)
 
-        def fake_dispatch(self, name, *, payload, **kwargs):  # noqa: ANN001, ANN202
-            return {
-                "ok": True,
-                "output": {
-                    "summary": "choose using capped decision feedback",
-                    "candidates": [
-                        {
-                            "id": "neutral_choice",
-                            "summary": "Same target without candidate-id decision history.",
-                            "proposed_changes": [
-                                {
-                                    "file": "main.py",
-                                    "kind": "full_file",
-                                    "after_content": "def run(ctx):\n    return {'ok': 'neutral'}\n",
-                                }
-                            ],
-                            "validation_plan": ["manual_review"],
-                        },
-                        {
-                            "id": "operator_keep",
-                            "summary": "Matches repeated promoted operator decisions.",
-                            "proposed_changes": [
-                                {
-                                    "file": "main.py",
-                                    "kind": "full_file",
-                                    "after_content": "def run(ctx):\n    return {'ok': 'keep'}\n",
-                                }
-                            ],
-                            "validation_plan": ["manual_review"],
-                        },
-                    ],
-                },
-            }
-
-        monkeypatch.setattr(
-            "nerya.subagents.dispatcher.SubAgentDispatcher.dispatch",
-            fake_dispatch,
-        )
-
-        result = StrategyEvolutionRunner(
-            config=config,
-            skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
-        ).run_once("alpha", operator="test", dry_run=False)
+        feedback = _optimizer_outcome_feedback(paths, load_package(paths, "alpha"))
     finally:
         reset_clock()
 
-    assert result.status == "ok"
-    report = result.optimizer_report
-    feedback = report["outcome_feedback"]
     assert feedback["candidate_decision_samples"] == 4
     assert feedback["decision_feedback_policy"]["half_life_days"] == 45.0
     assert feedback["decision_feedback_policy"]["feature_source_cap"] == 1.2
@@ -1810,15 +1811,9 @@ def test_operator_candidate_decision_feedback_decays_and_caps_feature_weight(
     assert old_example["feedback_score"] < 0.05
     assert fresh_example["feedback_weighting"]["decay_weight"] == pytest.approx(1.0)
 
-    candidates = {row["candidate_id"]: row for row in report["candidates"]}
-    keep_match = [
-        feature for feature in candidates["operator_keep"]["outcome_feedback"]["matched_features"]
-        if feature["feature"] == "candidate_id:operator_keep"
-    ][0]
-    assert keep_match["positive_by_source"]["asset_candidate_decision"] > 1.2
-    assert keep_match["positive"] == pytest.approx(1.2)
-    assert keep_match["source_caps"]["asset_candidate_decision"] == 1.2
-    assert candidates["operator_keep"]["score"] > candidates["neutral_choice"]["score"]
+    keep_feature = feedback["features"]["candidate_id:operator_keep"]
+    assert keep_feature["positive_by_source"]["asset_candidate_decision"] > 1.2
+    assert keep_feature["source_caps"]["asset_candidate_decision"] == 1.2
 
 
 def test_optimizer_feedback_calibration_downweights_low_confidence_matches():
@@ -1927,13 +1922,16 @@ def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatc
     tuner_prompt = root / "subagents" / "strategy_tuner.agent.md"
     tuner_prompt.parent.mkdir(parents=True, exist_ok=True)
     tuner_prompt.write_text("Tune alpha with small patches only.", encoding="utf-8")
+    package_hash = load_package(paths, "alpha").content_hash
     paths.evolution_genes.parent.mkdir(parents=True, exist_ok=True)
     paths.evolution_genes.write_text(
         json.dumps(
             [
-                {
-                    "id": "gene_tuning_context",
-                    "category": "strategy",
+                    {
+                        "id": "gene_tuning_context",
+                        "category": "strategy",
+                        "strategy_id": "alpha",
+                        "metadata": {"package_hash": package_hash},
                     "signals_match": ["strategy_tuning_run"],
                     "preconditions": ["strategy_id_is_known"],
                     "strategy": ["reuse the latest strategy tuning lessons"],
@@ -1955,6 +1953,7 @@ def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatc
             "validation_results": [{"status": "failed"}],
             "outcome_score": -0.7,
             "strategy_id": "alpha",
+            "metadata": {"package_hash": package_hash},
         },
         stamp=False,
     )
@@ -2097,7 +2096,9 @@ def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatc
     assert "Role prompt" in titles
     assert "Subagent payload" in titles
     assert "Market & risk context" in titles
-    assert "Runtime feedback" in titles
+    # The manual observation above has no matching strategy run record, so
+    # isolated tuning must not treat it as attributable runtime evidence.
+    assert "Runtime feedback" not in titles
     assert "Reused evolution assets" in titles
     assert "Subagent output" in titles
     decision_context = next(
@@ -2112,16 +2113,6 @@ def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatc
     assert context_payload["market_context"]["items"][0]["market"] == "mock:BTC/USDT"
     assert context_payload["trade_metrics"]["pnl_total_usd"] == 0.0
     assert context_payload["risk_metrics"]["risk_rejects"] == 0
-    feedback = next(
-        artifact
-        for section in process["sections"]
-        for artifact in section["artifacts"]
-        if artifact["title"] == "Runtime feedback"
-    )
-    feedback_payload = json.loads(feedback["preview"])
-    assert feedback_payload["negative_count"] == 1
-    assert feedback_payload["weighted_negative_count"] == 1.0
-    assert feedback_payload["recent_observations"][0]["run_id"] == "run_regressed"
     reused = next(
         artifact
         for section in process["sections"]

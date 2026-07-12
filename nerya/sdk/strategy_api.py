@@ -29,11 +29,11 @@ operator confirmation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ..core.config import Config
 from ..core.errors import NeryaError, TradingError
-from ..evolution.patch_proposal import set_state
+from ..evolution.patch_proposal import list_proposals, set_state
 from ..evolution.promotion import apply_proposal
 from ..evolution.strategy_code_generator import (
     StrategyCodeGenerator,
@@ -623,6 +623,8 @@ class StrategyTuningAPI:
         operator: Optional[str] = None,
         note: str = "",
         trigger_event_id: Optional[str] = None,
+        evidence_run_ids: Iterable[str] | None = None,
+        evidence_session_ids: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         runner = StrategyEvolutionRunner(config=self.config, skills=self.skills)
         result = runner.run_once(
@@ -631,6 +633,8 @@ class StrategyTuningAPI:
             note=note,
             dry_run=dry_run,
             trigger_event_id=trigger_event_id,
+            evidence_run_ids=evidence_run_ids,
+            evidence_session_ids=evidence_session_ids,
         )
         return result.asdict()
 

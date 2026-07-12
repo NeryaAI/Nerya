@@ -90,6 +90,8 @@ class StrategyPerformanceSnapshot:
     market_context: dict[str, Any] = field(default_factory=dict)
     news_context: dict[str, Any] = field(default_factory=dict)
     evolution_context: dict[str, Any] = field(default_factory=dict)
+    package_context: dict[str, Any] = field(default_factory=dict)
+    evidence_scope: dict[str, Any] = field(default_factory=dict)
     last_run_at: Optional[str] = None
     last_review_at: Optional[str] = None
     notes: list[str] = field(default_factory=list)
@@ -121,33 +123,60 @@ def build_snapshot(
             pkg = None
 
     runs = StrategyRunStore(paths, strategy_id).list(limit=lookback_runs)
+    ledgers = {
+        name: read_strategy_ledger(paths, strategy_id, name)
+        for name in STRATEGY_REVIEW_LEDGER_NAMES
+    }
+    return _compose_snapshot(
+        paths,
+        strategy_id,
+        package=pkg,
+        lookback_runs=lookback_runs,
+        runs=runs,
+        ledgers=ledgers,
+        config_like=config_like,
+    )
+
+
+STRATEGY_REVIEW_LEDGER_NAMES: tuple[str, ...] = (
+    "intents",
+    "orders",
+    "fills",
+    "pnl",
+    "risk",
+    "decisions",
+    "reviews",
+    "subagents",
+)
+
+
+def _compose_snapshot(
+    paths: WorkspacePaths,
+    strategy_id: str,
+    *,
+    package: StrategyPackage | None,
+    lookback_runs: int,
+    runs: list[StrategyRunRecord],
+    ledgers: dict[str, list[dict[str, Any]]],
+    evolution_rows: list[dict[str, Any]] | None = None,
+    package_context: dict[str, Any] | None = None,
+    evidence_scope: dict[str, Any] | None = None,
+    config_like: Any | None = None,
+) -> StrategyPerformanceSnapshot:
     notes: list[str] = []
-
-    run_metrics = _summarise_runs(runs)
-    last_run_at = runs[0].finished_at if runs else None
-
-    intents = _read(paths, strategy_id, "intents")
-    orders = _read(paths, strategy_id, "orders")
-    fills = _read(paths, strategy_id, "fills")
-    pnls = _read(paths, strategy_id, "pnl")
-    risk_rows = _read(paths, strategy_id, "risk")
-    decisions = _read(paths, strategy_id, "decisions")
-    reviews = _read(paths, strategy_id, "reviews")
-    subagent_rows = _read(paths, strategy_id, "subagents")
-
-    trade_metrics = _summarise_trades(intents, orders, fills, pnls)
-    risk_metrics = _summarise_risk(risk_rows, decisions)
-    cost_metrics = _summarise_costs(subagent_rows)
-    market_context = _build_market_context(pkg, config_like=config_like)
-    news_context = _build_news_context(pkg, config_like=config_like)
-    evolution_context = _build_evolution_context(paths, strategy_id)
-
+    intents = ledgers.get("intents", [])
+    orders = ledgers.get("orders", [])
+    fills = ledgers.get("fills", [])
+    pnls = ledgers.get("pnl", [])
+    risk_rows = ledgers.get("risk", [])
+    decisions = ledgers.get("decisions", [])
+    reviews = ledgers.get("reviews", [])
+    subagent_rows = ledgers.get("subagents", [])
     last_review_at = None
     if reviews:
         last_review_at = (
             reviews[-1].get("ts") if isinstance(reviews[-1], dict) else None
         )
-
     if not runs:
         notes.append("no runs recorded yet")
     if not orders:
@@ -155,18 +184,24 @@ def build_snapshot(
 
     return StrategyPerformanceSnapshot(
         strategy_id=strategy_id,
-        package_hash=(pkg.content_hash if pkg is not None else ""),
+        package_hash=(package.content_hash if package is not None else ""),
         generated_at=now_iso(),
         lookback_runs=lookback_runs,
         runs_considered=len(runs),
-        run_metrics=run_metrics,
-        trade_metrics=trade_metrics,
-        cost_metrics=cost_metrics,
-        risk_metrics=risk_metrics,
-        market_context=market_context,
-        news_context=news_context,
-        evolution_context=evolution_context,
-        last_run_at=last_run_at,
+        run_metrics=_summarise_runs(runs),
+        trade_metrics=_summarise_trades(intents, orders, fills, pnls),
+        cost_metrics=_summarise_costs(subagent_rows),
+        risk_metrics=_summarise_risk(risk_rows, decisions),
+        market_context=_build_market_context(package, config_like=config_like),
+        news_context=_build_news_context(package, config_like=config_like),
+        evolution_context=_build_evolution_context(
+            paths,
+            strategy_id,
+            rows=evolution_rows,
+        ),
+        package_context=dict(package_context or {}),
+        evidence_scope=dict(evidence_scope or {}),
+        last_run_at=(runs[0].finished_at if runs else None),
         last_review_at=last_review_at,
         notes=notes,
     )
@@ -177,7 +212,7 @@ def build_snapshot(
 # ---------------------------------------------------------------------------
 
 
-def _read(
+def read_strategy_ledger(
     paths: WorkspacePaths, strategy_id: str, name: str
 ) -> list[dict[str, Any]]:
     try:
@@ -192,14 +227,20 @@ def _build_evolution_context(
     strategy_id: str,
     *,
     limit: int = 20,
+    rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    rows = [
-        row for row in jsonl.read_all(paths.journal("evolution"))
-        if row.get("kind") == "proposal.post_apply_observation"
-        and str(row.get("strategy_id") or "") == strategy_id
-    ]
-    rows.sort(key=lambda row: str(row.get("observed_at") or row.get("ts") or ""))
-    recent = rows[-max(1, int(limit)) :]
+    selected_rows = rows
+    if selected_rows is None:
+        selected_rows = [
+            row for row in jsonl.read_all(paths.journal("evolution"))
+            if row.get("kind") == "proposal.post_apply_observation"
+            and str(row.get("strategy_id") or "") == strategy_id
+        ]
+    selected_rows = list(selected_rows)
+    selected_rows.sort(
+        key=lambda row: str(row.get("observed_at") or row.get("ts") or "")
+    )
+    recent = selected_rows[-max(1, int(limit)) :]
     summary = summarize_observation_weights(recent)
     by_status = summary["by_status"]
     by_source = summary["by_source"]
@@ -207,7 +248,7 @@ def _build_evolution_context(
     for row in recent:
         evidence_refs.extend(_str_list(row.get("evidence_refs")))
     return {
-        "post_apply_observation_count": len(rows),
+        "post_apply_observation_count": len(selected_rows),
         "recent_count": len(recent),
         "by_status": by_status,
         "by_source": by_source,
@@ -346,6 +387,13 @@ def _build_news_context(
             "error": f"{type(exc).__name__}: {exc}",
         }
     tickers = _market_symbols(package.manifest.markets)
+    if not tickers:
+        return {
+            "count": 0,
+            "symbols": [],
+            "items": [],
+            "notes": ["no strategy market symbols were available for news matching"],
+        }
     filtered = []
     for row in rows[:24]:
         if not isinstance(row, dict):
@@ -377,20 +425,6 @@ def _build_news_context(
         )
         if len(filtered) >= 12:
             break
-    if not filtered:
-        filtered = [
-            {
-                "source": row.get("source"),
-                "title": row.get("title"),
-                "summary": row.get("summary") or row.get("body"),
-                "published_at": row.get("published_at") or row.get("ts"),
-                "link": row.get("link"),
-                "tickers": list(row.get("tickers") or []),
-                "_envelope": row.get("_envelope") if isinstance(row.get("_envelope"), dict) else None,
-            }
-            for row in rows[:8]
-            if isinstance(row, dict)
-        ]
     return {
         "count": len(filtered),
         "symbols": sorted(tickers),
