@@ -19,7 +19,6 @@ Endpoints:
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..llm import oauth_login as _oauth
 

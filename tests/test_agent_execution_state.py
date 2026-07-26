@@ -202,6 +202,34 @@ def test_artifact_index_keeps_real_permission_denied_errors() -> None:
     assert index.errors[0]["kind"] == "permission_denied"
 
 
+def test_artifact_index_uses_verifier_validation_catalogue() -> None:
+    blocks = [
+        {
+            "block": {
+                "kind": "tool_use",
+                "call_id": "call_lint",
+                "action": "run_shell",
+                "payload": {"command": "ruff check nerya"},
+            },
+        },
+        {
+            "block": {
+                "kind": "tool_result",
+                "call_id": "call_lint",
+                "action": "run_shell",
+                "ok": True,
+                "output": {"exit_code": 0},
+            },
+        },
+    ]
+
+    index = build_artifact_index(blocks)
+
+    assert index.tests_run == [
+        {"command": "ruff check nerya", "exit_code": 0, "ok": True}
+    ]
+
+
 def test_artifact_index_moves_recovered_tool_errors_out_of_final_errors() -> None:
     blocks = [
         {

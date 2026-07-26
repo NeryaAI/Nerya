@@ -13,7 +13,6 @@ why a capability is blocked.
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..runtime import capability_catalog as cc
 from ..runtime import feature_flags as ff

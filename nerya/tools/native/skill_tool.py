@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from ..registry import ToolRegistry, make_native_descriptor
+from ..tool_errors import schema_validation_result
 from ..types import (
     PermissionScope,
     RiskLevel,
@@ -149,13 +150,8 @@ def skill_tool_handler(
     args = call.arguments or {}
     skill_name = _normalise_name(args.get("skill") or args.get("name"))
     if not skill_name:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message='Skill tool requires a non-empty "skill" argument.',
-            ),
+        return schema_validation_result(
+            call, 'Skill tool requires a non-empty "skill" argument.',
         )
 
     record = skill_index.get(skill_name)

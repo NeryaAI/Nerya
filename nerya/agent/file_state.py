@@ -44,7 +44,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -202,9 +202,6 @@ class FileStateCache:
     def get(self, path: str | Path) -> Optional[FileStateEntry]:
         with self._lock:
             return self._entries.get(self._key(path))
-
-    def has_been_read(self, path: str | Path) -> bool:
-        return self.get(path) is not None
 
     # ---- edit precondition --------------------------------------------------
 

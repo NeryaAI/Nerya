@@ -69,13 +69,100 @@ class PositionProtectionExecutor(Executor):
             self.transition("done", close_type="filled")
             return True
 
-        # Mark price source: first try the position's own mark, then
-        # fall back to entry price (we'd hit the connector if we had
-        # a market data hub here; that's a P2 follow-up).
-        current_price = position.mark_price or position.avg_entry_price
+        # Mark price source. Prefer a live connector mark; fall back to
+        # the position's stored mark, then entry price. A stale mark is
+        # dangerous for a soft stop-loss so we try the venue first.
+        current_price = self._live_mark_price(rule) or position.mark_price or position.avg_entry_price
         if current_price <= 0:
             self.transition("working")
             return False
+
+        prior_high = self.run.result_json.get("high_water_mark")
+        new_high = _update_high_water(rule.side, current_price, prior_high)
+        if new_high != prior_high:
+            self.run.result_json["high_water_mark"] = new_high
+
+        trigger = evaluate(
+            rule,
+            entry_price=position.avg_entry_price,
+            current_price=current_price,
+            side=rule.side,
+            opened_at=position.opened_at,
+            high_water_mark=new_high,
+        )
+        if not trigger.fired:
+            self.transition("working")
+            return False
+
+        # Trigger fired — spin up a flatten market order. We don't
+        # need the orchestrator here because paper mode is
+        # synchronous; live mode flattens via a fresh executor row,
+        # which the orchestrator picks up on the next tick.
+        from .market_order import MarketOrderExecutor, MarketOrderConfig
+
+        flatten_side = "sell" if rule.side == "long" else "buy"
+        close_size = abs(position.size_base) * float(trigger.close_pct or 1.0)
+        candidate = OrderCandidate(
+            account_id=position.account_id,
+            strategy_id=position.strategy_id,
+            market=position.market,
+            side=flatten_side,
+            order_type="market",
+            size_base=close_size,
+            notional_usd=close_size * current_price,
+            reduce_only=True,
+        )
+        flatten_cfg = MarketOrderConfig(
+            kind="market_order",
+            account_id=position.account_id,
+            strategy_id=position.strategy_id,
+            market=position.market,
+            candidate=candidate.asdict(),
+        )
+        flattener = MarketOrderExecutor.new(
+            account_id=position.account_id,
+            strategy_id=position.strategy_id,
+            market=position.market,
+            config=flatten_cfg,
+            paths=self.paths,
+            position_id=position.position_id,
+        )
+        # Drive the flattener until terminal — paper mode is fully
+        # synchronous; live mode would normally come back here on the
+        # next tick because the flatten exec needs to poll itself.
+        flattener.prepare()
+        flattener.transition("ready")
+        flattener.step()
+
+        store.set_status(rule.protection_id, "triggered", triggered_kind=trigger.kind)
+        self.store_result({
+            "trigger_kind": trigger.kind,
+            "trigger_reason": trigger.reason,
+            "close_size_base": close_size,
+            "flatten_executor_id": flattener.run.executor_id,
+        })
+        self.transition("done", close_type=_trigger_to_close_type(trigger.kind))
+        return True
+
+    def _live_mark_price(self, rule) -> float:
+        """Best-effort live mark from the venue.
+
+        For ``exchange_armed`` / ``hybrid`` rules the venue enforces the
+        bracket natively, so the executor only needs the mark for
+        monitoring/audit. For ``soft_runtime`` rules the mark drives the
+        stop, so a live price is safety-critical. We swallow connector
+        failures and let the caller fall back to the stored mark.
+        """
+        try:
+            from ...connectors import ConnectorRegistry
+            from ..accounts import get_account_profile
+            profile = get_account_profile(self.paths, rule.account_id)
+            registry = ConnectorRegistry(workspace=self.paths.root)
+            legacy_account = profile.to_connector_account()
+            conn = registry.get(profile.id, legacy_account.connector_cfg())
+            return float(conn.get_mark_price(rule.market) or 0.0)
+        except Exception:
+            return 0.0
 
         prior_high = self.run.result_json.get("high_water_mark")
         new_high = _update_high_water(rule.side, current_price, prior_high)

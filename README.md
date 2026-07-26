@@ -27,6 +27,25 @@ skills, scripts, triggers, and strategy configs.
 
 ---
 
+## Latest updates
+
+- **Git and WebDAV workspace sync** — push or pull a Nerya workspace from the
+  dashboard or workspace API while keeping runtime state local and explicit.
+- **Unified durable memory** — session memory, reflection writes, compaction,
+  native tools, and the memory API now share one scoped runtime and projection
+  model instead of maintaining separate recall paths.
+- **Isolated strategy tuning reviews** — tuning evaluates the selected strategy
+  package and its evidence scope without leaking unrelated runtime context into
+  the review.
+- **Production trading hardening** — derivative orders now carry exchange-aware
+  precision, contract sizing, reduce-only, leverage, margin mode, position index,
+  and native stop-loss/take-profit parameters through the CCXT bridge.
+- **Deeper finance workflows** — new bundled expert-investor, finance-creator,
+  and quant-strategy-loop skills add research lenses and repeatable strategy
+  iteration without bloating the always-on agent prompt.
+
+---
+
 ## From request to evolving strategy
 
 > _"I have **$500** in a paper account. Make me money on BTC. Don't blow it up."_

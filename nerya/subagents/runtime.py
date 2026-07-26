@@ -128,6 +128,7 @@ def _is_stock_research_spec(spec: SubAgentSpec | None) -> bool:
         return False
     return spec.name in STOCK_RESEARCH_SUBAGENTS or _spec_profile_name(spec) in STOCK_RESEARCH_SUBAGENTS
 
+
 _TASK_CONTROL_PAYLOAD_KEYS: frozenset[str] = frozenset({
     "__team_instructions",
     "__team_task",
@@ -316,12 +317,13 @@ class SubAgentRuntime:
         # and still produce a structured report without stopping mid-run.
         explicit = self.config.get("agent.subagents.max_iterations", None)
         if explicit is not None:
-            return max(1, int(explicit or 1))
+            return max(1, int(explicit))
         if _is_stock_research_spec(spec):
-            return max(1, int(self.config.get(
+            configured = self.config.get(
                 "agent.subagents.stock_research_max_iterations", 8,
-            ) or 8))
-        return max(1, int(60))
+            )
+            return max(1, int(8 if configured is None else configured))
+        return 60
 
     def _max_skill_calls(self) -> int:
         # Aligned with the iteration bump: a research subagent now has room
@@ -329,33 +331,41 @@ class SubAgentRuntime:
         # ``websearch.search`` → ``operator.read_file`` → ``write_file``
         # several times before summarising. Hard cap stays in place so a
         # genuinely runaway loop still trips an error.
-        return max(0, int(self.config.get(
-            "agent.subagents.max_skill_calls", 120,
-        ) or 120))
+        configured = self.config.get("agent.subagents.max_skill_calls", 120)
+        return max(0, int(120 if configured is None else configured))
 
     def _max_wall_seconds(self, spec: SubAgentSpec | None = None) -> float:
         explicit = self.config.get("agent.subagents.max_wall_seconds", None)
         if explicit is not None:
             try:
-                return max(5.0, float(explicit or 5))
-            except Exception:
+                return max(5.0, float(explicit))
+            except (TypeError, ValueError):
                 return 120.0
         if _is_stock_research_spec(spec):
+            configured = self.config.get(
+                "agent.subagents.stock_research_max_wall_seconds", 360,
+            )
             try:
-                return max(5.0, float(self.config.get(
-                    "agent.subagents.stock_research_max_wall_seconds", 360,
-                ) or 360))
-            except Exception:
+                return max(5.0, float(360 if configured is None else configured))
+            except (TypeError, ValueError):
                 return 360.0
-        return max(5.0, float(600))
+        return 600.0
 
     def _finalization_reserve_seconds(self) -> float:
+        configured = self.config.get(
+            "agent.subagents.finalization_reserve_seconds",
+            SUBAGENT_FINALIZATION_RESERVE_SECONDS,
+        )
         try:
-            return max(5.0, float(self.config.get(
-                "agent.subagents.finalization_reserve_seconds",
-                SUBAGENT_FINALIZATION_RESERVE_SECONDS,
-            ) or SUBAGENT_FINALIZATION_RESERVE_SECONDS))
-        except Exception:
+            return max(
+                5.0,
+                float(
+                    SUBAGENT_FINALIZATION_RESERVE_SECONDS
+                    if configured is None
+                    else configured
+                ),
+            )
+        except (TypeError, ValueError):
             return SUBAGENT_FINALIZATION_RESERVE_SECONDS
 
     # ---------------------------------------------------------------- core
@@ -383,25 +393,22 @@ class SubAgentRuntime:
         callable_skills: list[str] = []
         callable_native_tools: list[str] = []
         if not explicit_payload_only:
-            # Treat ``spec.allowed_skills`` as a preload / preference list, not
-            # a hard allowlist. The subagent gets the full callable catalogue
-            # minus :data:`CHILD_SKILL_DENYLIST`; the preferred list only nudges
-            # prompt-time tool selection.
+            # Normal subagents treat allowed_skills as preferences and inherit
+            # the callable catalog. Isolated reviews never touch either
+            # registry, so global tool state cannot affect the review.
             preloaded = [
-                s for s in spec.allowed_skills if s not in CHILD_SKILL_DENYLIST
+                skill
+                for skill in (*spec.allowed_skills, *CHILD_CORE_SELF_CONTROL_SKILLS)
+                if skill not in CHILD_SKILL_DENYLIST
             ]
-            for sid in CHILD_CORE_SELF_CONTROL_SKILLS:
-                if sid in CHILD_SKILL_DENYLIST:
-                    continue
-                if sid in preloaded:
-                    continue
-                preloaded.append(sid)
-            # Build the universe of skills the runtime is willing to dispatch.
-            # Denylist still wins.
             try:
                 registry_ids = [
-                    str(getattr(e, "id", "") or "")
-                    for e in self.skills.registry.list()
+                    str(
+                        getattr(getattr(entry, "manifest", None), "id", "")
+                        or getattr(entry, "id", "")
+                        or ""
+                    )
+                    for entry in self.skills.registry.list()
                 ]
             except Exception:
                 registry_ids = []
@@ -409,9 +416,6 @@ class SubAgentRuntime:
                 sid for sid in registry_ids
                 if sid and sid not in CHILD_SKILL_DENYLIST
             })
-            # Also surface the native-tool set inherited from the parent. The
-            # child uses the same ``skill_calls`` JSON envelope; the dispatcher
-            # decides whether each name resolves to a skill or a native tool.
             callable_native_tools = self._allowed_native_tool_names()
             preloaded = _normalise_preloaded_tools(
                 preloaded,
@@ -446,15 +450,8 @@ class SubAgentRuntime:
             "team_task_subject": task_envelope.get("task_subject")
             or task_envelope.get("__team_task"),
         }
-        try:
-            safe_payload = redact_display_dict(data_payload)
-        except Exception:
-            safe_payload = data_payload
-        try:
-            safe_task_envelope = redact_display_dict(task_envelope)
-        except Exception:
-            safe_task_envelope = task_envelope
-        audit_payload = safe_payload if isinstance(safe_payload, dict) else data_payload
+        safe_payload = redact_display_dict(data_payload)
+        safe_task_envelope = redact_display_dict(task_envelope)
 
         def _publish(kind: str, **fields: Any) -> None:
             if _bus is None:
@@ -529,6 +526,54 @@ class SubAgentRuntime:
             context_chars=audit_start["context_chars"],
         )
 
+        def _dispatch_action(
+            entry: Any,
+            *,
+            observation_iteration: int | str,
+            event_iteration: int,
+            signature: str,
+        ) -> dict[str, Any] | None:
+            record = self._dispatch_one(
+                entry,
+                spec_name=spec.name,
+                allowed=callable_skills,
+                allowed_native_tools=callable_native_tools,
+                strategy_id=strategy_id,
+                session_id=session_id,
+                trigger_event_id=trigger_event_id,
+                context_metadata=team_event_fields,
+            )
+            if record is None:
+                return None
+            ok = bool(record.get("ok"))
+            if ok:
+                if signature:
+                    successful_call_signatures.add(signature)
+                skill_calls.append(record)
+            else:
+                rejected_actions.append(record)
+            observation = {
+                "iteration": observation_iteration,
+                "skill": record.get("skill"),
+                "action": record.get("action"),
+                "ok": ok,
+            }
+            if ok:
+                observation["summary"] = _summarise(record.get("result"))
+            else:
+                observation["error"] = record.get("error")
+            event = {
+                "step_kind": "act",
+                "iteration": event_iteration,
+                "status": "ok" if ok else "error",
+                "skill": record.get("skill"),
+                "action": record.get("action"),
+            }
+            if not ok:
+                event["error"] = str(record.get("error") or "")
+            _publish("subagent.step", **event)
+            return observation
+
         accumulated_obs: list[dict[str, Any]] = []
         for entry in _stock_research_data_prefetch_calls(
             _spec_profile_name(spec),
@@ -541,56 +586,14 @@ class SubAgentRuntime:
                     "reason": "skill_call_budget_exhausted",
                 })
                 break
-            record = self._dispatch_one(
+            observation = _dispatch_action(
                 entry,
-                spec_name=spec.name,
-                allowed=callable_skills,
-                allowed_native_tools=callable_native_tools,
-                strategy_id=strategy_id,
-                session_id=session_id,
-                trigger_event_id=trigger_event_id,
-                context_metadata=team_event_fields,
+                observation_iteration="prefetch",
+                event_iteration=-1,
+                signature=_skill_call_signature(entry),
             )
-            if record is None:
-                continue
-            if record.get("ok"):
-                signature = _skill_call_signature(entry)
-                if signature:
-                    successful_call_signatures.add(signature)
-                skill_calls.append(record)
-                accumulated_obs.append({
-                    "iteration": "prefetch",
-                    "skill": record.get("skill"),
-                    "action": record.get("action"),
-                    "ok": True,
-                    "summary": _summarise(record.get("result")),
-                })
-                _publish(
-                    "subagent.step",
-                    step_kind="act",
-                    iteration=-1,
-                    status="ok",
-                    skill=record.get("skill"),
-                    action=record.get("action"),
-                )
-            else:
-                rejected_actions.append(record)
-                accumulated_obs.append({
-                    "iteration": "prefetch",
-                    "skill": record.get("skill"),
-                    "action": record.get("action"),
-                    "ok": False,
-                    "error": record.get("error"),
-                })
-                _publish(
-                    "subagent.step",
-                    step_kind="act",
-                    iteration=-1,
-                    status="error",
-                    skill=record.get("skill"),
-                    action=record.get("action"),
-                    error=str(record.get("error") or ""),
-                )
+            if observation is not None:
+                accumulated_obs.append(observation)
         for i in range(max_iter):
             if time.monotonic() - t_start >= max_wall_seconds:
                 close_reason = "subagent_wall_time_exceeded"
@@ -615,7 +618,7 @@ class SubAgentRuntime:
                 context_scope=context_scope,
             )
             audit_prompt = self._render_prompt(
-                spec, audit_payload, base_context, accumulated_obs,
+                spec, safe_payload, base_context, accumulated_obs,
                 allowed=preloaded,
                 native_tools=callable_native_tools,
                 task_envelope=safe_task_envelope,
@@ -709,29 +712,31 @@ class SubAgentRuntime:
                     close_reason = "llm_error_after_tool_observations"
                 break
 
-            total_tokens += int(result.tokens or 0)
-            total_usd += float(result.usd or 0.0)
-            last_provider = str(getattr(result, "provider", "") or last_provider or "")
-            last_model = str(getattr(result, "model", "") or last_model or "")
+            call_tokens = int(result.tokens or 0)
+            call_usd = float(result.usd or 0.0)
+            total_tokens += call_tokens
+            total_usd += call_usd
+            last_provider = str(getattr(result, "provider", "") or last_provider)
+            last_model = str(getattr(result, "model", "") or last_model)
             model_calls.append({
                 "iteration": i,
                 "provider": last_provider,
                 "model": last_model,
                 "tier": spec.tier,
-                "tokens": int(result.tokens or 0),
-                "usd": float(result.usd or 0.0),
+                "tokens": call_tokens,
+                "usd": call_usd,
             })
             parsed = result.parsed if isinstance(result.parsed, dict) else {}
-            legacy_tool_calls = _extract_legacy_tool_calls(result.raw)
-            if legacy_tool_calls and _should_use_legacy_tool_calls(parsed):
+            if _should_use_legacy_tool_calls(parsed):
+                recovered_tool_calls = (
+                    _extract_legacy_tool_calls(result.raw)
+                    or _extract_raw_json_tool_calls(result.raw)
+                )
+            else:
+                recovered_tool_calls = []
+            if recovered_tool_calls:
                 parsed = {
-                    "skill_calls": legacy_tool_calls,
-                    "replan": True,
-                }
-            raw_json_tool_calls = _extract_raw_json_tool_calls(result.raw)
-            if raw_json_tool_calls and _should_use_legacy_tool_calls(parsed):
-                parsed = {
-                    "skill_calls": raw_json_tool_calls,
+                    "skill_calls": recovered_tool_calls,
                     "replan": True,
                 }
             last_parsed = parsed
@@ -739,8 +744,8 @@ class SubAgentRuntime:
             think_wall = int((time.monotonic() - t0) * 1000)
             steps.append(_StepRecord(
                 kind="think", iteration=i, status="ok",
-                tokens=int(result.tokens or 0),
-                usd=float(result.usd or 0.0),
+                tokens=call_tokens,
+                usd=call_usd,
                 wall_ms=think_wall,
                 detail={"keys": sorted(parsed.keys())[:8]},
             ))
@@ -748,18 +753,14 @@ class SubAgentRuntime:
             # ``nerya.agent.kernel`` publishes for the main agent's
             # think/replan steps so ``LiveActivity`` can render the
             # subagent's reasoning inline.
-            _reasoning_text = ""
-            try:
-                _reasoning_text = str(getattr(result, "reasoning_text", "") or "")
-            except Exception:
-                _reasoning_text = ""
+            reasoning_text = str(getattr(result, "reasoning_text", "") or "")
             _publish(
                 "subagent.step",
                 step_kind="think", iteration=i, status="ok",
-                tokens=int(result.tokens or 0),
-                usd=float(result.usd or 0.0),
+                tokens=call_tokens,
+                usd=call_usd,
                 wall_ms=think_wall,
-                reasoning=_reasoning_text[:4000] if _reasoning_text else "",
+                reasoning=reasoning_text[:4000],
                 reasoning_tokens=int(getattr(result, "reasoning_tokens", 0) or 0),
                 reasoning_effort=str(
                     getattr(result, "reasoning_effort", "") or ""
@@ -778,12 +779,12 @@ class SubAgentRuntime:
                     evidence.append(ev)
                 else:
                     evidence.append({"note": str(ev)})
-            try:
-                u = parsed.get("uncertainty")
-                if u is not None:
+            u = parsed.get("uncertainty")
+            if u is not None:
+                try:
                     uncertainty = max(0.0, min(1.0, float(u)))
-            except Exception:
-                pass
+                except (TypeError, ValueError):
+                    pass
 
             # Dispatch any requested skill calls. Only allowed skills that are
             # not denylisted will run. Every attempt is recorded either as a
@@ -817,49 +818,15 @@ class SubAgentRuntime:
                         "error": "duplicate_successful_skill_call",
                     })
                     continue
-                record = self._dispatch_one(
-                    entry, spec_name=spec.name, allowed=callable_skills,
-                    allowed_native_tools=callable_native_tools,
-                    strategy_id=strategy_id, session_id=session_id,
-                    trigger_event_id=trigger_event_id,
-                    context_metadata=team_event_fields,
+                observation = _dispatch_action(
+                    entry,
+                    observation_iteration=i,
+                    event_iteration=i,
+                    signature=signature,
                 )
-                if record is None:
-                    continue
-                if record.get("ok"):
-                    batch_success = True
-                    if signature:
-                        successful_call_signatures.add(signature)
-                    skill_calls.append(record)
-                    batch_obs.append({
-                        "iteration": i,
-                        "skill": record.get("skill"),
-                        "action": record.get("action"),
-                        "ok": True,
-                        "summary": _summarise(record.get("result")),
-                    })
-                    _publish(
-                        "subagent.step",
-                        step_kind="act", iteration=i, status="ok",
-                        skill=record.get("skill"),
-                        action=record.get("action"),
-                    )
-                else:
-                    rejected_actions.append(record)
-                    batch_obs.append({
-                        "iteration": i,
-                        "skill": record.get("skill"),
-                        "action": record.get("action"),
-                        "ok": False,
-                        "error": record.get("error"),
-                    })
-                    _publish(
-                        "subagent.step",
-                        step_kind="act", iteration=i, status="error",
-                        skill=record.get("skill"),
-                        action=record.get("action"),
-                        error=str(record.get("error") or ""),
-                    )
+                if observation is not None:
+                    batch_success = batch_success or observation["ok"] is True
+                    batch_obs.append(observation)
             if batch_obs:
                 steps.append(_StepRecord(
                     kind="act", iteration=i, status="ok",
@@ -957,27 +924,28 @@ class SubAgentRuntime:
                 continue
             if not (parsed.get("continue") or parsed.get("replan")):
                 break
-        if close_reason is None:
-            if sum(1 for s in steps if s.kind == "think") >= max_iter:
-                close_reason = "max_iterations"
+        iterations = sum(1 for step in steps if step.kind == "think")
+        if close_reason is None and iterations >= max_iter:
+            close_reason = "max_iterations"
 
         steps.append(_StepRecord(
             kind="close", iteration=len(steps),
             wall_ms=int((time.monotonic() - t_start) * 1000),
             detail={
-                "iterations": sum(1 for s in steps if s.kind == "think"),
+                "iterations": iterations,
                 "skill_calls": len(skill_calls),
                 "rejected_actions": len(rejected_actions),
                 "close_reason": close_reason,
             },
         ))
+
         def _try_final_observation_synthesis(reason: str) -> dict[str, Any] | None:
+            nonlocal total_tokens, total_usd
             if not accumulated_obs:
                 return None
             remaining = max_wall_seconds - (time.monotonic() - t_start)
             if remaining < 5.0:
                 return None
-            final_iteration = sum(1 for s in steps if s.kind == "think")
             prompt = self._render_prompt(
                 spec,
                 data_payload,
@@ -991,7 +959,7 @@ class SubAgentRuntime:
             )
             audit_prompt = self._render_prompt(
                 spec,
-                audit_payload,
+                safe_payload,
                 base_context,
                 accumulated_obs,
                 allowed=preloaded,
@@ -1010,7 +978,7 @@ class SubAgentRuntime:
             _publish(
                 "subagent.step",
                 step_kind="finalize",
-                iteration=final_iteration,
+                iteration=iterations,
                 status="sent",
                 prompt=safe_prompt,
                 prompt_chars=len(audit_prompt),
@@ -1026,7 +994,7 @@ class SubAgentRuntime:
                     metadata={
                         "session_id": session_id,
                         "turn_id": turn_id,
-                        "iteration": final_iteration,
+                        "iteration": iterations,
                         "subagent": spec.name,
                         "strategy_id": strategy_id,
                         "trigger_event_id": trigger_event_id,
@@ -1044,7 +1012,7 @@ class SubAgentRuntime:
                 err_msg = redact_text(f"{type(exc).__name__}: {exc}")[:500]
                 steps.append(_StepRecord(
                     kind="finalize",
-                    iteration=final_iteration,
+                    iteration=iterations,
                     status="error",
                     error=err_msg,
                     wall_ms=int((time.monotonic() - t0) * 1000),
@@ -1053,7 +1021,7 @@ class SubAgentRuntime:
                 _publish(
                     "subagent.step",
                     step_kind="finalize",
-                    iteration=final_iteration,
+                    iteration=iterations,
                     status="error",
                     error=err_msg,
                     wall_ms=int((time.monotonic() - t0) * 1000),
@@ -1067,17 +1035,18 @@ class SubAgentRuntime:
                 has_tool_requests = True
             total_tokens_local = int(result.tokens or 0)
             total_usd_local = float(result.usd or 0.0)
-            nonlocal total_tokens, total_usd
             total_tokens += total_tokens_local
             total_usd += total_usd_local
-            output = None if has_tool_requests else _final_subagent_output(parsed, raw_text)
+            output = (
+                None if has_tool_requests else _final_subagent_output(parsed, raw_text)
+            )
             if output and not output.get("degraded"):
                 output.setdefault("done", True)
             else:
                 output = None
             steps.append(_StepRecord(
                 kind="finalize",
-                iteration=final_iteration,
+                iteration=iterations,
                 status="ok" if output is not None else "ignored",
                 tokens=total_tokens_local,
                 usd=total_usd_local,
@@ -1092,7 +1061,7 @@ class SubAgentRuntime:
             _publish(
                 "subagent.step",
                 step_kind="finalize",
-                iteration=final_iteration,
+                iteration=iterations,
                 status="ok" if output is not None else "ignored",
                 tokens=total_tokens_local,
                 usd=total_usd_local,
@@ -1138,12 +1107,19 @@ class SubAgentRuntime:
             skill_calls=skill_calls,
             rejected_actions=rejected_actions,
         )
+        contribution_metrics = {
+            "signals_used": signals_used,
+            "skill_calls": skill_calls,
+            "rejected_actions": rejected_actions,
+            "uncertainty": uncertainty,
+            "evidence": evidence,
+        }
         _publish(
             "subagent.step",
             step_kind="close",
             iteration=len(steps),
             wall_ms=int((time.monotonic() - t_start) * 1000),
-            iterations=sum(1 for s in steps if s.kind == "think"),
+            iterations=iterations,
             skill_calls_n=len(skill_calls),
             rejected_actions_n=len(rejected_actions),
             tokens=total_tokens,
@@ -1153,7 +1129,7 @@ class SubAgentRuntime:
         )
         _publish(
             "subagent.end",
-            iterations=sum(1 for s in steps if s.kind == "think"),
+            iterations=iterations,
             skill_calls=len(skill_calls),
             rejected=len(rejected_actions),
             tokens=total_tokens,
@@ -1161,13 +1137,7 @@ class SubAgentRuntime:
             error=fatal_llm_error,
             wall_ms=int((time.monotonic() - t_start) * 1000),
             output=redact_display_dict(final_output),
-            metrics=redact_display_dict({
-                "signals_used": signals_used,
-                "skill_calls": skill_calls,
-                "rejected_actions": rejected_actions,
-                "uncertainty": uncertainty,
-                "evidence": evidence,
-            }),
+            metrics=redact_display_dict(contribution_metrics),
         )
 
         if fatal_llm_error and not last_parsed and not last_raw and not skill_calls:
@@ -1185,14 +1155,7 @@ class SubAgentRuntime:
             "output": final_output,
             "tokens": total_tokens,
             "usd": total_usd,
-            "metrics": {
-                "signals_used": signals_used,
-                "skill_calls": skill_calls,
-                "rejected_actions": rejected_actions,
-                "uncertainty": uncertainty,
-                "evidence": evidence,
-                "iterations": sum(1 for s in steps if s.kind == "think"),
-            },
+            "metrics": {**contribution_metrics, "iterations": iterations},
             "steps": [s.asdict() for s in steps],
             "audit": {
                 **audit_start,
@@ -1296,7 +1259,7 @@ class SubAgentRuntime:
                 "\nFinalization mode: do not request any more tools. "
                 "Produce the role's final evidence-backed analysis from the "
                 "prior observations only. Return strict JSON with "
-                "``\"done\": true`` and a concise ``summary``; include "
+                '``"done": true`` and a concise ``summary``; include '
                 "``evidence`` / ``risk_flags`` / ``uncertainty`` or explicit "
                 "data gaps when useful. ``skill_calls`` and ``tool_calls`` "
                 "are forbidden in this mode."
@@ -1312,8 +1275,8 @@ class SubAgentRuntime:
         else:
             allow_note = (
                 "\nYou may request skill calls via JSON "
-                "``{\"skill_calls\": [{\"skill\": <id>, \"action\": <name>, "
-                "\"payload\": {...}}]}``. "
+                '``{"skill_calls": [{"skill": <id>, "action": <name>, '
+                '"payload": {...}}]}``. '
                 f"Preferred callable tools for this role: {allowed or 'none'}. "
                 "Use exact tool names and fields; do not invent legacy names "
                 "such as ``websearch`` / ``news_social`` or guessed actions "
@@ -1321,13 +1284,13 @@ class SubAgentRuntime:
                 "describes a playbook, use it as context and call the native "
                 "tools below rather than guessing action names. "
                 f"{nt_block}"
-                "\nIf you are done, include ``\"done\": true``; to re-plan after "
-                "these calls, include ``\"replan\": true``."
+                '\nIf you are done, include ``"done": true``; to re-plan after '
+                'these calls, include ``"replan": true``.'
             )
         if observations:
             allow_note += (
                 "\nYou already have tool observations. Prefer producing the "
-                "final role analysis now with ``\"done\": true``. Do not "
+                'final role analysis now with ``"done": true``. Do not '
                 "request the same data again; if a field is missing, state "
                 "the evidence gap instead of looping on more tools."
             )
@@ -1383,18 +1346,14 @@ class SubAgentRuntime:
         registry = self.tool_registry
         if registry is None:
             return []
-        try:
-            tools = registry.list_tools()
-        except Exception:
-            return []
         out: list[str] = []
-        for d in tools:
-            name = str(getattr(d, "name", "") or "")
+        for descriptor in registry.list_tools():
+            name = str(getattr(descriptor, "name", "") or "")
             if not name:
                 continue
             if any(name.startswith(p) for p in CHILD_NATIVE_TOOL_DENYLIST_PREFIXES):
                 continue
-            risk = str(getattr(getattr(d, "risk", None), "value", "") or "")
+            risk = str(getattr(getattr(descriptor, "risk", None), "value", "") or "")
             if risk and risk.lower() in CHILD_NATIVE_TOOL_DENY_RISK:
                 continue
             out.append(name)
@@ -1463,7 +1422,7 @@ class SubAgentRuntime:
         # the operator's per-spec preload list — that's a hint surfaced
         # in the prompt, not a hard wall. So we only fail closed when
         # the requested id is genuinely unknown to the registry.
-        if allowed and skill not in allowed:
+        if skill not in allowed:
             return {
                 "ok": False, "skill": skill, "action": action,
                 "error": (
@@ -1897,12 +1856,14 @@ def _normalise_native_payload(tool_name: str, payload: dict[str, Any]) -> dict[s
         if "ticker" not in out and out.get("symbol"):
             out["ticker"] = out.get("symbol")
         if name.endswith("__get_financial_statement"):
-            raw = str(
+            raw = (
+                str(
                 out.get("financial_type")
                 or out.get("statement_type")
                 or out.get("statement")
                 or ""
             ).strip().lower()
+            )
             statement_aliases = {
                 "income": "income_stmt",
                 "income_statement": "income_stmt",
@@ -1937,7 +1898,7 @@ def _normalise_native_payload(tool_name: str, payload: dict[str, Any]) -> dict[s
 
 def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
     if isinstance(parsed, dict) and parsed:
-        if _has_substantive_subagent_output(parsed, raw):
+        if _has_substantive_subagent_output(parsed):
             return parsed
         raw_text = " ".join(
             str(parsed.get(key) or "")
@@ -1960,8 +1921,7 @@ def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
                 "degraded": True,
                 "error_kind": "unfinished_tool_request",
                 "summary": (
-                    "subagent requested tool calls but did not produce a "
-                    "final analysis"
+                    "subagent requested tool calls but did not produce a final analysis"
                 ),
                 "requested_tools": parsed.get("skill_calls") or parsed.get("tool_calls"),
             }
@@ -2008,7 +1968,9 @@ def _is_unstructured_protocol_miss(parsed: dict[str, Any], raw: str) -> bool:
         str(parsed.get(key) or "")
         for key in ("raw", "text", "message", "content")
     ) or str(raw or "")
-    if "<tool_call" in raw_text or '"skill_calls"' in raw_text or '"tool_calls"' in raw_text:
+    if (
+        "<tool_call" in raw_text or '"skill_calls"' in raw_text or '"tool_calls"' in raw_text
+    ):
         return False
     return set(parsed).issubset({"raw", "text", "message", "content"})
 
@@ -2022,7 +1984,7 @@ def _is_transient_subagent_llm_error(exc: BaseException) -> bool:
     return any(hint.lower() in msg for hint in _TRANSIENT_SUBAGENT_LLM_HINTS)
 
 
-def _has_substantive_subagent_output(parsed: dict[str, Any], raw: str) -> bool:
+def _has_substantive_subagent_output(parsed: dict[str, Any]) -> bool:
     """Return true when the model produced role analysis, not only tool calls."""
 
     analytical_keys = {
@@ -2053,7 +2015,7 @@ def _raw_has_substantive_subagent_output(raw: str) -> bool:
         return True
     if re.search(
         r'"(?:status|summary|recommendation|analysis|findings|conclusion|'
-        r'report|data_inventory|risk_policy|parameter_table|fundamentals|'
+        r"report|data_inventory|risk_policy|parameter_table|fundamentals|"
         r'valuation)"\s*:',
         text,
         re.I,
@@ -2176,7 +2138,6 @@ def _attach_data_coverage(
         merged.setdefault("role_profile", role_profile)
     merged["data_coverage"] = coverage
     contract = _evidence_contract_for_output(
-        merged,
         role_profile=role_profile,
         coverage=coverage,
     )
@@ -2192,7 +2153,6 @@ def _attach_data_coverage(
 
 
 def _evidence_contract_for_output(
-    output: dict[str, Any],
     *,
     role_profile: str,
     coverage: dict[str, Any],
@@ -2242,7 +2202,9 @@ def _sec_filing_observed(rec: dict[str, Any]) -> bool:
     result = rec.get("result") if isinstance(rec.get("result"), dict) else {}
     provider = str(payload.get("provider") or result.get("provider") or "").lower()
     action = str(payload.get("action") or result.get("action") or "").lower()
-    return provider in {"financial_datasets", "equities", "financials", "sec_filings"} and action == "filings"
+    return (
+        provider in {"financial_datasets", "equities", "financials", "sec_filings"} and action == "filings"
+    )
 
 
 def _coerce_list(v: Any) -> list[Any]:
@@ -2446,7 +2408,9 @@ def _summarise(result: Any, *, limit: int = 4000) -> str:
             rest_text = json.dumps(rest, ensure_ascii=False, default=str)
         except Exception:
             rest_text = repr(rest)
-        text = "{" + ", ".join(head) + (", _envelope: " + rest_text if rest else "") + "}"
+        text = (
+            "{" + ", ".join(head) + (", _envelope: " + rest_text if rest else "") + "}"
+        )
     else:
         try:
             text = json.dumps(result, ensure_ascii=False, default=str)

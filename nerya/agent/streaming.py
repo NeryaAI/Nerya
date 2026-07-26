@@ -12,9 +12,9 @@ contract*:
 
 - every event carries a monotonic ``seq`` and a stable ``event_id``;
 - subscribers can ask for "everything I missed" via
-  :meth:`StreamingEventBus.events_since` /
+  :meth:`StreamingEventBus.recent` /
   ``GET /agent/stream/events?after_seq=N``;
-- the in-memory ring is large enough (default 500 events) to cover
+- the in-memory ring is large enough (default 2,000 events) to cover
   routine reconnects, dropped websockets, and dashboard reloads.
 
 Wire:
@@ -51,7 +51,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable
 
 
 _EventCb = Callable[[dict[str, Any]], None]
@@ -63,7 +63,7 @@ class StreamingEventBus:
 
     ``_max_replay`` controls the in-memory ring buffer the bus retains
     so that late subscribers and reconnecting clients can replay
-    missed events. The default is intentionally generous (500): a
+    missed events. The default is intentionally generous (2,000): a
     typical turn emits a few dozen events, so the ring covers a few
     consecutive turns even under pressure. Tests build their own bus
     with smaller rings to keep assertions tight.
@@ -133,16 +133,6 @@ class StreamingEventBus:
 
     # ---- replay / cursor API -----------------------------------------
 
-    def replay_buffer(self) -> list[dict[str, Any]]:
-        """Best-effort recent events for late subscribers.
-
-        Returns a copy of the in-memory ring so callers cannot mutate
-        the bus state.
-        """
-
-        with self._lock:
-            return list(self._last_events)
-
     def recent(self, *, after_seq: int | None = None) -> list[dict[str, Any]]:
         """Return events newer than ``after_seq`` (or the whole ring).
 
@@ -157,15 +147,6 @@ class StreamingEventBus:
         if after_seq is None:
             return buf
         return [ev for ev in buf if int(ev.get("seq") or 0) > int(after_seq)]
-
-    def events_since(self, after_seq: int) -> list[dict[str, Any]]:
-        """Alias for :meth:`recent` with a required cursor argument.
-
-        Used by HTTP handlers that want to make the cursor intent
-        explicit at the call site.
-        """
-
-        return self.recent(after_seq=after_seq)
 
     def latest_seq(self) -> int:
         """Return the highest ``seq`` ever assigned by this bus.
@@ -197,22 +178,6 @@ class StreamingEventBus:
         if max_seq == 0:
             return self.latest_seq()
         return max_seq
-
-    def next_seq(self) -> int:
-        """Reserve and return the next ``seq`` value.
-
-        Useful when a caller needs to journal an event to disk *before*
-        publishing it (so the on-disk row carries the same seq the
-        live subscribers will see). The reserved seq is consumed —
-        callers must subsequently publish via
-        ``publish(..., seq=<reserved>)`` style helpers if they want
-        the values to match. Today no caller relies on this; the helper
-        is exposed so the upcoming context-manifest writer can use it.
-        """
-
-        with self._lock:
-            self._seq += 1
-            return self._seq
 
     def clear(self) -> None:
         """Drop every subscriber and reset the buffer/seq.

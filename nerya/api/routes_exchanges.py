@@ -11,7 +11,6 @@ used by the account-intake flow.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from ..connectors.ccxt_adapter import supported_exchanges
 from ..connectors.registry import list_providers

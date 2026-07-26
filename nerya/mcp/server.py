@@ -24,7 +24,6 @@ from .dynamic_tools import (
 )
 from .registry_bridge import (
     NativeMCPPolicy,
-    NativeMCPRegistry,
     MCPNativeTool,
     build_native_mcp_registry,
     policy_from_config as native_policy_from_config,
@@ -124,6 +123,9 @@ def create_server(
             deps = build_native_tool_deps(
                 workspace_root=Path(tools.client.config.paths.root),
                 skill_roots=_default_skill_roots(tools),
+                paths=tools.client.config.paths,
+                config=tools.client.config,
+                skills=tools.client.skills,
             )
             register_native_tools(native_registry, deps)
             native_view, _native_executor = build_native_mcp_registry(

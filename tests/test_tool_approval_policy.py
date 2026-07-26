@@ -590,7 +590,6 @@ def test_strategy_triggered_run_tick_auto_approves_live_tick(tmp_path):
     deps.active_strategy_id = "s1"
     deps.active_trigger_event_id = "evt_strategy_tick"
     deps.active_trigger_source = "scheduled_session"
-    deps.active_trigger_kind = "strategy.tick"
     deps.strategy_order_auto_approve = True
 
     live = _decision(

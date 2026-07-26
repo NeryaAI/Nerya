@@ -122,7 +122,7 @@ class PolymarketConnector(CEXConnectorBase):
         ask_levels = _sorted_levels(asks)
         bid = bid_levels[0][0] if bid_levels else 0.0
         ask = ask_levels[0][0] if ask_levels else 0.0
-        mid = (bid + ask) / 2 if (bid and ask) else (bid or ask)
+        mid = round((bid + ask) / 2, 12) if (bid and ask) else (bid or ask)
         last = _float_or_zero((book_raw or {}).get("last_trade_price")) or mid  # type: ignore[union-attr]
         spread_bps = ((ask - bid) / mid) * 10_000 if mid else 0.0
         return Ticker(

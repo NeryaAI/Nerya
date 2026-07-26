@@ -32,8 +32,9 @@ import json
 import os
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from ..core.time import now_iso
 
@@ -56,6 +57,175 @@ class SessionState:
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _iso_from_db_ts(value: Any) -> str:
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if ts <= 0:
+        return ""
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_meta_json(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    try:
+        meta = json.loads(str(raw or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def file_session_asdict(row: SessionState | Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a file-backed session for API and gateway consumers."""
+
+    data = row.asdict() if isinstance(row, SessionState) else dict(row)
+    turn_ids = data.get("turn_ids") if isinstance(data.get("turn_ids"), list) else []
+    turn_count = max(_nonnegative_int(data.get("turn_count")), len(turn_ids))
+    data["turn_count"] = turn_count
+    data["message_count"] = max(
+        _nonnegative_int(data.get("message_count")),
+        turn_count * 2,
+    )
+    if not data.get("source"):
+        data["source"] = "session_file"
+    return data
+
+
+def db_session_asdict(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize an ``agent_sessions`` repository row."""
+
+    title = str(row.get("title") or "").strip()
+    meta = _parse_meta_json(row.get("meta_json"))
+    if title and not meta.get("title"):
+        meta["title"] = title
+        meta.setdefault("title_source", "db")
+    return {
+        "session_id": str(row.get("session_id") or ""),
+        "strategy_id": row.get("strategy_id"),
+        "created_at": _iso_from_db_ts(row.get("created_at")),
+        "updated_at": _iso_from_db_ts(row.get("updated_at")),
+        "turn_ids": [],
+        "invoked_skills": [],
+        "skill_state": {},
+        "last_action": None,
+        "meta": meta,
+        "source": row.get("source") or "",
+        "message_count": _nonnegative_int(row.get("message_count")),
+        "turn_count": _nonnegative_int(row.get("turn_count")),
+    }
+
+
+def hydrate_db_session_counts(
+    paths: Any,
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach exact live message and turn counts to repository rows."""
+
+    records = [dict(row) for row in rows]
+    session_ids = tuple(
+        dict.fromkeys(
+            str(row.get("session_id") or "")
+            for row in records
+            if row.get("session_id")
+        )
+    )
+    if not session_ids:
+        return records
+
+    from ..db.sqlite import connect
+
+    placeholders = ",".join("?" for _ in session_ids)
+    con = connect(paths.db)
+    try:
+        count_rows = con.execute(
+            f"""
+            SELECT
+                session_id,
+                COUNT(*) AS message_count,
+                COUNT(DISTINCT COALESCE(turn_id, message_id)) AS turn_count
+            FROM agent_messages
+            WHERE deleted=0 AND session_id IN ({placeholders})
+            GROUP BY session_id
+            """,
+            session_ids,
+        ).fetchall()
+    finally:
+        con.close()
+    counts = {
+        str(row["session_id"]): {
+            "message_count": _nonnegative_int(row["message_count"]),
+            "turn_count": _nonnegative_int(row["turn_count"]),
+        }
+        for row in count_rows
+    }
+    for row in records:
+        row.update(
+            counts.get(
+                str(row.get("session_id") or ""),
+                {"message_count": 0, "turn_count": 0},
+            )
+        )
+    return records
+
+
+def session_updated_ts(session: Mapping[str, Any]) -> float:
+    raw = session.get("updated_at")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def merge_session_dict(
+    file_state: SessionState | Mapping[str, Any],
+    db_row: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge file and DB session records without losing richer counts."""
+
+    file_data = file_session_asdict(file_state)
+    if not db_row:
+        return file_data
+    db_state = db_session_asdict(db_row)
+    merged = {**db_state, **file_data}
+    file_meta = file_data.get("meta") if isinstance(file_data.get("meta"), dict) else {}
+    db_meta = db_state.get("meta") if isinstance(db_state.get("meta"), dict) else {}
+    meta = {**db_meta, **file_meta}
+    if not meta.get("title") and db_meta.get("title"):
+        meta["title"] = db_meta["title"]
+    merged["meta"] = meta
+    if not merged.get("strategy_id"):
+        merged["strategy_id"] = db_state.get("strategy_id")
+    if not merged.get("created_at"):
+        merged["created_at"] = db_state.get("created_at") or ""
+    if session_updated_ts(db_state) > session_updated_ts(file_data):
+        merged["updated_at"] = db_state.get("updated_at") or merged.get("updated_at")
+    if not merged.get("source") or merged.get("source") == "session_file":
+        merged["source"] = db_state.get("source") or merged.get("source") or ""
+    merged["message_count"] = max(
+        _nonnegative_int(file_data.get("message_count")),
+        _nonnegative_int(db_state.get("message_count")),
+    )
+    merged["turn_count"] = max(
+        _nonnegative_int(file_data.get("turn_count")),
+        _nonnegative_int(db_state.get("turn_count")),
+    )
+    return merged
 
 
 class SessionStore:
@@ -204,14 +374,6 @@ class SessionStore:
         self.save(state)
         return state
 
-    def get_skill_state(
-        self, session_id: str, skill_id: str, default: Any = None,
-    ) -> Any:
-        state = self.load(session_id)
-        if state is None:
-            return default
-        return state.skill_state.get(skill_id, default)
-
     def list(self, *, strategy_id: str | None = None,
              limit: int = 50) -> list[SessionState]:
         """List every persisted session, newest-first.
@@ -258,4 +420,13 @@ class SessionStore:
         return True
 
 
-__all__ = ["SessionState", "SessionStore", "new_session_id"]
+__all__ = [
+    "SessionState",
+    "SessionStore",
+    "db_session_asdict",
+    "file_session_asdict",
+    "hydrate_db_session_counts",
+    "merge_session_dict",
+    "new_session_id",
+    "session_updated_ts",
+]

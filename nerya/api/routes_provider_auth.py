@@ -21,7 +21,6 @@ same store.  Nothing here writes to the network.
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..security.provider_auth import (
     NeedsReauth,

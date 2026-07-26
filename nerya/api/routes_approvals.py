@@ -31,24 +31,14 @@ from ..messaging.approval_prompts import (
 
 
 def _read_pending(client) -> list[dict[str, Any]]:
-    paths = client.config.paths
-    p = paths.approvals_pending
+    p = client.config.paths.approvals_pending
     if not p.exists():
         return []
-    rows: list[dict[str, Any]] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            import json as _json
-            rec = _json.loads(line)
-        except Exception:
-            continue
-        if rec.get("state") and rec["state"] != "pending":
-            continue
-        rows.append(rec)
-    return rows
+    return [
+        rec
+        for rec in jsonl.read_all(p)
+        if not rec.get("state") or rec["state"] == "pending"
+    ]
 
 
 def _find_record(client, approval_id: str) -> dict[str, Any] | None:
@@ -226,7 +216,6 @@ def _retract_approval_cards(client, approval_id: str, *, state: str) -> None:
 
 
 def _publish_approval_resolution(
-    client,
     approval_id: str,
     *,
     state: str,
@@ -323,7 +312,6 @@ def _callback(client, payload):
         except Exception:
             pass
         _publish_approval_resolution(
-            client,
             aid,
             state=str(resolution.state),
             record=rec,

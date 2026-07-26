@@ -313,6 +313,60 @@ def test_stock_research_subagents_default_wall_time_allows_final_synthesis(tmp_p
     assert runtime._max_wall_seconds(spec) >= 360.0  # noqa: SLF001
 
 
+def test_subagent_runtime_honors_zero_limits(tmp_path) -> None:
+    runtime = SubAgentRuntime(
+        config=Config(
+            paths=WorkspacePaths(root=tmp_path),
+            data={
+                "agent": {
+                    "subagents": {
+                        "max_iterations": 0,
+                        "max_skill_calls": 0,
+                        "max_wall_seconds": 0,
+                        "finalization_reserve_seconds": 0,
+                    }
+                }
+            },
+        ),
+        skills=object(),
+        llm=object(),
+    )
+
+    assert runtime._max_iterations() == 1  # noqa: SLF001
+    assert runtime._max_skill_calls() == 0  # noqa: SLF001
+    assert runtime._max_wall_seconds() == 5.0  # noqa: SLF001
+    assert runtime._finalization_reserve_seconds() == 5.0  # noqa: SLF001
+
+
+def test_subagent_runtime_rejects_unknown_skill_when_registry_is_empty(tmp_path) -> None:
+    class FailIfCalled:
+        def call(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            raise AssertionError("unknown skill must not reach the runtime")
+
+    class FakeSkills:
+        runtime = FailIfCalled()
+
+    runtime = SubAgentRuntime(
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+        skills=FakeSkills(),
+        llm=object(),
+    )
+
+    record = runtime._dispatch_one(  # noqa: SLF001
+        {"skill": "missing_skill", "action": "run"},
+        spec_name="researcher",
+        allowed=[],
+        allowed_native_tools=[],
+        trigger_event_id=None,
+        strategy_id=None,
+        session_id=None,
+    )
+
+    assert record is not None
+    assert record["ok"] is False
+    assert "not registered" in record["error"]
+
+
 def test_team_run_parent_remaining_wall_budget_caps_model_timeout(monkeypatch) -> None:
     class FakeDispatcher:
         def __init__(self, config, skills, tool_registry=None) -> None:  # noqa: ANN001
@@ -792,51 +846,6 @@ def test_team_run_treats_missing_research_evidence_contract_as_member_failure(
     task = store.list_tasks(data["team_run_id"])[0]
     assert task.status == "failed"
     assert task.payload["output"]["missing_evidence"] == ["financial_statement"]
-
-
-def test_team_run_template_resolution_respects_explicit_input() -> None:
-    assert agents._resolve_team_template(
-        requested="investment_committee_team",
-        role_names=["bull_researcher", "bear_researcher", "risk_critic"],
-        task="Comprehensively analyze TSLA and give a buy/hold/sell rating.",
-    ) == "investment_committee_team"
-    assert agents._resolve_team_template(
-        requested="investment_committee_team",
-        role_names=["bull_researcher", "bear_researcher", "risk_critic"],
-        task="Debate whether we should go long TSLA and stress-test the thesis.",
-    ) == "investment_committee_team"
-    assert agents._resolve_team_template(
-        requested="investment_committee_team",
-        role_names=[
-            "fundamentals_analyst",
-            "technical_analyst",
-            "sentiment_analyst",
-            "bull_researcher",
-            "bear_researcher",
-            "risk_critic",
-            "research_manager",
-        ],
-    ) == "investment_committee_team"
-    assert agents._resolve_team_template(
-        requested="ad_hoc_parallel_team",
-        role_names=["bull_researcher", "bear_researcher", "risk_critic"],
-    ) == "ad_hoc_parallel_team"
-    assert agents._resolve_team_template(
-        requested="ad_hoc_parallel_team",
-        role_names=[
-            "fundamentals_analyst",
-            "technical_analyst",
-            "sentiment_analyst",
-            "bull_researcher",
-            "bear_researcher",
-            "risk_critic",
-            "research_manager",
-        ],
-    ) == "ad_hoc_parallel_team"
-    assert agents._resolve_team_template(
-        requested="ad_hoc_parallel_team",
-        role_names=["market_analyst", "risk_critic", "execution_planner"],
-    ) == "ad_hoc_parallel_team"
 
 
 def test_team_run_respects_explicit_committee_template_without_prompt_keywords(

@@ -50,7 +50,6 @@ from .account_snapshots import capture_snapshot, fresh_snapshot
 from .accounts import get_account_profile
 from .approval import ApprovalGate
 from .capital import BudgetChecker, CapitalReservationStore
-from .execution import ExecutionEngine
 from .executors.orchestrator import ExecutorOrchestrator
 from .intents import TradeIntent
 from .order_intents import SizingPolicy, TradePlan
@@ -144,44 +143,25 @@ def submit_trade_intent(
 ) -> dict[str, Any]:
     """Run the full trade-intent pipeline and return a canonical envelope.
 
-    Parameters
-    ----------
-    config:
-        Workspace ``Config``. Determines paths, accounts, risk policy.
-    spec:
-        Intent fields (``account_id``, ``market``, ``side``, ``size``,
-        ``size_unit``, ``order_type``, …). Either includes an
-        ``intent_id`` (for replay) or omits it so a fresh one is
-        generated.
-    market_snapshot:
-        Optional caller-supplied snapshot. When ``None`` we resolve a
-        snapshot from the mock exchange (when allowed) or fall back to
-        a degraded envelope referencing the intent's ``limit_price``.
-    default_strategy:
-        Used when the spec does not declare ``strategy_id``.
-    default_source:
-        Used when the spec does not declare ``source``.
+    This is now a thin adapter over :func:`submit_trade_plan`: the
+    intent is translated into a :class:`TradePlan` and flows through the
+    same unified pipeline (Risk Gate → BudgetChecker → ApprovalGate →
+    executor) as the plan path. That means *every* order — legacy intent
+    or new plan — now goes through the same guards:
 
-    Returns
-    -------
-    dict envelope with one of these shapes:
+    * account ``place_order`` permission check
+      (:func:`_real_money_execution_blocker`)
+    * :class:`BudgetChecker` sizing against the live snapshot
+    * :class:`CapitalReservationStore` reservation
+    * durable executor with atomic fill → PositionBook → protection
 
-    * ``{"status": "rejected", "order_id": None, "session_id": str,
-       "intent": {...}, "risk_decision": {...}}``
-    * ``{"status": "pending_approval", "order_id": None,
-       "session_id": str, "approval_id": str, "intent": {...},
-       "risk_decision": {...}}``
-    * ``{"status": "filled" | "partial" | ...,
-       "order_id": str, "session_id": str,
-       "risk_decision": {...}, "order": {...}}``
+    Previously the legacy path jumped straight from the Risk Gate to
+    :class:`ExecutionEngine.execute`, bypassing the permission and
+    budget checks — an account with ``place_order: false`` could still
+    trade via this path. That bypass is now closed.
 
-    Raises
-    ------
-    ValueError
-        When the intent fails validation. Caller decides whether to
-        translate that into a typed error response.
-    Exception
-        Any exception from :class:`ExecutionEngine`. Caller wraps it.
+    The return envelope keeps its historical shape so native tools, the
+    SDK, and ``ctx.trading.submit_intent`` callers are unaffected.
     """
 
     payload = dict(spec or {})
@@ -192,179 +172,123 @@ def submit_trade_intent(
         payload.setdefault("source", default_source)
         intent = TradeIntent.new(**payload)
 
-    paths = config.paths
-    session_id = open_session(
-        paths,
-        intent.strategy_id,
-        trigger={
-            "intent_id": intent.intent_id,
-            "source": intent.source or default_source,
-            "trigger_event_id": intent.trigger_event_id,
-        },
-    )
-    history_store.record_trigger(
-        paths,
-        strategy_id=intent.strategy_id,
-        session_id=session_id,
-        event={
-            "name": "direct_intent",
-            "source": intent.source or default_source,
-            "payload": {"intent_id": intent.intent_id},
-        },
-    )
-    history_store.record_intent(
-        paths,
-        strategy_id=intent.strategy_id,
-        session_id=session_id,
-        intent=intent.asdict(),
-    )
+    plan = _intent_to_plan(intent)
+    plan_response = submit_trade_plan(config, plan, market_snapshot=market_snapshot)
 
-    snapshot = _resolve_market_snapshot(
-        config, intent, supplied=market_snapshot if isinstance(market_snapshot, dict) else None,
-    )
-
-    risk = RiskGate(config).evaluate(intent, market_snapshot=snapshot)
-    history_store.record_risk(
-        paths,
-        strategy_id=intent.strategy_id,
-        session_id=session_id,
-        decision=risk.asdict(),
-    )
-    jsonl.append(paths.journal("trading"), {
-        "kind": "risk.decision",
-        "ts": now_iso(),
-        "strategy_id": intent.strategy_id,
-        "session_id": session_id,
-        "intent_id": intent.intent_id,
-        "decision": risk.decision,
-        "reasons": risk.reasons,
-    })
-    history_store.record_decision(
-        paths,
-        strategy_id=intent.strategy_id,
-        session_id=session_id,
-        decision={
-            "intent_id": intent.intent_id,
-            "risk": risk.decision,
-            "reasons": risk.reasons,
-        },
-    )
-
-    approval_record = None
-    if risk.decision == "reject":
-        return {
-            "status": "rejected",
-            "order_id": None,
-            "session_id": session_id,
-            "intent": redact_dict(intent.asdict()),
-            "risk_decision": risk.asdict(),
-        }
-
-    if risk.decision == "escalate":
-        approval_record = _maybe_auto_approve_strategy_order(config, intent, risk)
-        if approval_record is None:
-            try:
-                ApprovalGate(config).require(intent, risk)
-            except ApprovalPending as p:
-                return {
-                    "status": "pending_approval",
-                    "order_id": None,
-                    "session_id": session_id,
-                    "approval_id": p.approval_id,
-                    "intent": redact_dict(intent.asdict()),
-                    "risk_decision": risk.asdict(),
-                }
-
-    # shadow strategies stop here. The intent is fully
-    # journaled and the risk decision is persisted, but no order is
-    # ever sent (paper or live). This gives operators a side-by-side
-    # stream against paper without touching the real-money venue.
-    if getattr(risk, "shadow_only", False):
-        jsonl.append(paths.journal("trading"), {
-            "kind": "shadow.intent",
-            "ts": now_iso(),
-            "strategy_id": intent.strategy_id,
-            "session_id": session_id,
-            "intent_id": intent.intent_id,
-            "promotion_state": getattr(risk, "promotion_state", "shadow"),
-        })
-        return {
-            "status": "shadow",
-            "order_id": None,
-            "session_id": session_id,
-            "intent": redact_dict(intent.asdict()),
-            "risk_decision": risk.asdict(),
-            **({"approval": _approval_summary(approval_record)} if approval_record else {}),
-        }
-
-    engine = ExecutionEngine(config)
-    result = engine.execute(intent, market_snapshot=snapshot)
-
-    history_store.record_order(
-        paths,
-        strategy_id=intent.strategy_id,
-        session_id=session_id,
-        payload={
-            "order_id": result.order_id,
-            "intent_id": intent.intent_id,
-            "status": result.status,
-            "notional_usd": result.notional_usd,
-            "avg_price": result.avg_price,
-            "filled_size": result.filled_size,
-        },
-    )
-    jsonl.append(paths.journal("trading"), {
-        "kind": "order.placed",
-        "ts": now_iso(),
-        "strategy_id": intent.strategy_id,
-        "session_id": session_id,
-        "intent_id": intent.intent_id,
-        "order_id": result.order_id,
-        "status": result.status,
-        "notional_usd": result.notional_usd,
-        "avg_price": result.avg_price,
-        "filled_size": result.filled_size,
-    })
-    for f in result.fills:
-        history_store.record_fill(
-            paths,
-            strategy_id=intent.strategy_id,
-            session_id=session_id,
-            fill={
-                "order_id": f.order_id,
-                "fill_id": f.fill_id,
-                "intent_id": f.intent_id,
-                "market": f.market,
-                "price": f.price,
-                "size": f.size,
-                "fee_usd": f.fee_usd,
-                "ts": f.ts,
-            },
-        )
-    _sync_position_book_after_execution(config, intent, result)
-    track_outcome(paths, intent.strategy_id, session_id)
-    notification_summary = _safe_broadcast_trade_event(
-        config,
-        event_from_order_result(
-            intent=intent,
-            result=result,
-            session_id=session_id,
-            risk_decision=risk.asdict(),
-            approval=_approval_summary(approval_record),
-        ),
-    )
-
-    response = {
-        "status": result.status,
-        "order_id": result.order_id,
-        "session_id": session_id,
-        "risk_decision": risk.asdict(),
-        "order": result.asdict(),
-        "notifications": notification_summary,
+    # Reshape the plan envelope into the legacy intent envelope so
+    # existing callers see the keys they expect (``order_id``,
+    # ``order``). The plan envelope carries strictly more information,
+    # so we only synthesise the legacy ``order`` summary when the
+    # executor produced one.
+    status = str(plan_response.get("status") or "")
+    response: dict[str, Any] = {
+        "status": status,
+        "order_id": None,
+        "session_id": plan_response.get("session_id"),
+        "intent": redact_dict(intent.asdict()),
+        "risk_decision": plan_response.get("risk_decision") or {},
     }
-    if approval_record is not None:
-        response["approval"] = _approval_summary(approval_record)
+    if plan_response.get("approval_id"):
+        response["approval_id"] = plan_response["approval_id"]
+        response["status"] = "pending_approval"
+    if plan_response.get("budget_decision"):
+        response["budget_decision"] = plan_response["budget_decision"]
+    if plan_response.get("execution_blocker"):
+        response["execution_blocker"] = plan_response["execution_blocker"]
+    if plan_response.get("approval"):
+        response["approval"] = plan_response["approval"]
+    if plan_response.get("notifications"):
+        response["notifications"] = plan_response["notifications"]
+    executor = plan_response.get("executor") or {}
+    if executor:
+        response["executor_id"] = executor.get("executor_id") or plan_response.get("executor_id")
+        response["order_ids"] = executor.get("order_ids") or []
+        # Synthesise an ``order`` summary from the executor result so
+        # legacy callers that read ``response["order"]`` keep working.
+        result = executor.get("result") or {}
+        response["order"] = {
+            "order_id": (executor.get("order_ids") or [None])[0],
+            "intent_id": intent.intent_id,
+            "status": status,
+            "notional_usd": result.get("notional_usd", 0.0),
+            "avg_price": result.get("fill_price", 0.0),
+            "filled_size": result.get("size_base", 0.0),
+        }
+        response["order_id"] = response["order"]["order_id"]
     return response
+
+
+def _intent_to_plan(intent: TradeIntent) -> TradePlan:
+    """Translate a legacy :class:`TradeIntent` into a :class:`TradePlan`.
+
+    The plan carries the same information but in the unified control-plane
+    schema so it flows through :func:`submit_trade_plan`. Action is inferred
+    from ``meta.plan_action`` when present (set by the resume path) or from
+    the side / reduce_only hint, defaulting to ``open_position``.
+    """
+    from .order_intents import SizingPolicy, TradeEntry, TradePlan
+
+    meta = intent.meta or {}
+    plan_action = str(meta.get("plan_action") or "").strip()
+    reduce_only = bool(meta.get("reduce_only"))
+    if plan_action in ("close_position", "reduce_position", "attach_protection"):
+        action = plan_action  # type: ignore[assignment]
+    elif reduce_only:
+        action = "reduce_position"
+    else:
+        action = "open_position"
+
+    # Side: the intent is already a CEX-native buy/sell. Map back to the
+    # directional long/short the plan expects based on the action.
+    if action == "open_position":
+        side = "long" if intent.side == "buy" else "short"
+    else:  # close/reduce — the strategy's position direction is inferred
+        side = "short" if intent.side == "buy" else "long"
+
+    # Sizing policy: intent.size is already a concrete number in a known
+    # unit, so we hand the BudgetChecker a fixed value.
+    if intent.size_unit == "usd":
+        sizing = SizingPolicy(method="fixed_usd", fixed_usd=float(intent.size))
+    else:
+        sizing = SizingPolicy(method="fixed_base", fixed_base=float(intent.size))
+
+    entry = TradeEntry(
+        order_type=intent.order_type if intent.order_type in ("market", "limit") else "market",
+        limit_price=intent.limit_price,
+        time_in_force=intent.time_in_force,
+    )
+
+    # Thread the intent_id back so the resume path and dedupe stay stable.
+    plan_meta = {k: v for k, v in meta.items() if k not in ("plan_action",)}
+    plan_meta["bridged_from_intent"] = True
+    # Preserve the original intent source verbatim (e.g. ``agent:native``)
+    # so the approval record and audit trail show exactly what the caller
+    # declared. TradePlan.source is a restricted Literal, so we normalise
+    # to the closest valid value and stash the original in meta.
+    valid_plan_sources = (
+        "agent", "subagent", "script", "cron",
+        "strategy_runtime", "strategy_agent", "strategy_triggered_agent",
+    )
+    if intent.source in valid_plan_sources:
+        plan_source = intent.source  # type: ignore[assignment]
+    else:
+        plan_source = "agent"
+        plan_meta["original_source"] = intent.source
+    return TradePlan(
+        action=action,
+        strategy_id=intent.strategy_id,
+        account_id=intent.account_id,
+        market=intent.market,
+        side=side,  # type: ignore[arg-type]
+        sizing=sizing,
+        entry=entry,
+        confidence=intent.confidence,
+        reasoning_ref=intent.reasoning,
+        trigger_event_id=intent.trigger_event_id,
+        source=plan_source,  # type: ignore[arg-type]
+        intent_id=intent.intent_id,
+        meta=plan_meta,
+    )
 
 
 def _sync_position_book_after_execution(config: Config, intent: TradeIntent, result) -> None:
@@ -435,6 +359,30 @@ def _safe_broadcast_trade_event(config: Config, event: dict[str, Any]) -> dict[s
         except Exception:
             pass
         return {"ok": False, "channels": [], "deliveries": [], "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _latest_notification_summary(paths, intent_id: str) -> dict[str, Any]:
+    """Read the most recent ``trade.notification`` journal row for an intent.
+
+    The executor's :class:`OrderTracker` broadcasts the canonical fill
+    notification (so late fills via the poller are covered too). This
+    helper surfaces that broadcast's summary on the submit response so
+    callers can see which channels were notified without us re-sending.
+    """
+    try:
+        rows = jsonl.read_all(paths.journal("trading"))
+        for row in reversed(rows):
+            if row.get("kind") == "trade.notification" and row.get("intent_id") == intent_id:
+                summary = row.get("summary") or {}
+                if isinstance(summary, dict):
+                    return {
+                        "ok": bool(summary.get("ok")),
+                        "channels": list(summary.get("channels") or []),
+                        "deliveries": list(summary.get("deliveries") or []),
+                    }
+        return {"ok": True, "channels": [], "deliveries": []}
+    except Exception:
+        return {"ok": False, "channels": [], "deliveries": []}
 
 
 def _venue_of(market: str) -> str:
@@ -521,6 +469,7 @@ def submit_trade_plan(
     plan: TradePlan,
     *,
     market_snapshot: Optional[dict[str, Any]] = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run a :class:`TradePlan` through the new control-plane.
 
@@ -584,7 +533,7 @@ def submit_trade_plan(
         config, intent, supplied=market_snapshot if isinstance(market_snapshot, dict) else None,
     )
 
-    risk = RiskGate(config).evaluate(intent, market_snapshot=snapshot)
+    risk = RiskGate(config).evaluate(intent, market_snapshot=snapshot, resume=resume)
     history_store.record_risk(
         paths,
         strategy_id=intent.strategy_id,
@@ -603,9 +552,19 @@ def submit_trade_plan(
     approval_record = None
     if risk.decision == "escalate":
         approval_record = _maybe_auto_approve_strategy_order(config, intent, risk)
+        if approval_record is None and resume:
+            # Resume path: an operator already approved the original
+            # intent, so re-escalation (e.g. canary per-trade approval)
+            # is auto-satisfied. This closes the loop where a resumed
+            # canary order would re-escalate forever.
+            approval_record = ApprovalGate(config).auto_approve(
+                intent, risk, reason="resumed_from_operator_approval",
+            )
         if approval_record is None:
             try:
-                ApprovalGate(config).require(intent, risk)
+                ApprovalGate(config).require(
+                    intent, risk, market_snapshot=snapshot, plan=plan,
+                )
             except ApprovalPending as p:
                 return {
                     "status": "pending_approval",
@@ -744,6 +703,7 @@ def submit_trade_plan(
         "rejected": "rejected",
     }
     response_status = status_map.get(run.state, run.state)
+
     response = {
         "status": response_status,
         "session_id": session_id,
@@ -760,6 +720,12 @@ def submit_trade_plan(
             "order_ids": run.order_ids,
         },
     }
+    # Surface the trade-notification summary the executor's OrderTracker
+    # broadcast (it owns the canonical fill notification path so we never
+    # double-send). We read the most recent ``trade.notification`` journal
+    # row for this intent so the response carries the channel list.
+    if run.state == "done":
+        response["notifications"] = _latest_notification_summary(paths, intent.intent_id)
     if approval_record is not None:
         response["approval"] = _approval_summary(approval_record)
     return response
@@ -866,15 +832,20 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
         "time_in_force": plan.entry.time_in_force,
         "confidence": plan.confidence,
         "reasoning": plan.reasoning_ref,
-        "source": plan.source if plan.source in (
-            "agent",
-            "subagent",
-            "script",
-            "cron",
-            "strategy_runtime",
-            "strategy_agent",
-            "strategy_triggered_agent",
-        ) else "agent",
+        "source": (
+            str((plan.meta or {}).get("original_source"))
+            if (plan.meta or {}).get("original_source")
+            else plan.source if plan.source in (
+                "agent",
+                "agent:native",
+                "subagent",
+                "script",
+                "cron",
+                "strategy_runtime",
+                "strategy_agent",
+                "strategy_triggered_agent",
+            ) else "agent"
+        ),
         "trigger_event_id": plan.trigger_event_id,
         "meta": {
             "plan_id": plan.plan_id,
@@ -887,6 +858,45 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
         payload["intent_id"] = plan.intent_id
         return TradeIntent(**payload)
     return TradeIntent.new(**payload)
+
+
+class _ExecutorResultAdapter:
+    """Adapter that lets :func:`event_from_order_result` read an
+    :class:`ExecutorRun` the same way it reads a legacy
+    :class:`ExecutionResult`.
+
+    The notification helper calls ``_asdict(result)`` and reads
+    ``.status`` / ``.order_id`` / ``.fills`` / ``.notional_usd`` /
+    ``.avg_price`` / ``.filled_size`` / ``.fee_usd``. We synthesise
+    those from the executor run's ``result_json`` so the unified plan
+    path can broadcast trade notifications without resurrecting the
+    old ExecutionEngine shape.
+    """
+
+    def __init__(self, *, run, intent, response_status: str):
+        self._run = run
+        self._intent = intent
+        self.status = response_status
+        rj = run.result_json or {}
+        self.order_id = (run.order_ids or [None])[0]
+        self.avg_price = float(rj.get("fill_price") or rj.get("avg_price") or 0.0)
+        self.filled_size = float(rj.get("size_base") or 0.0)
+        self.notional_usd = float(rj.get("notional_usd") or 0.0)
+        self.fee_usd = float(rj.get("fee_usd") or 0.0)
+        self.fills: list[Any] = []
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "order_id": self.order_id,
+            "intent_id": self._intent.intent_id,
+            "avg_price": self.avg_price,
+            "filled_size": self.filled_size,
+            "notional_usd": self.notional_usd,
+            "fee_usd": self.fee_usd,
+            "fills": list(self.fills),
+            "reason": getattr(self._run, "close_type", "") or "",
+        }
 
 
 __all__ = ["submit_trade_intent", "submit_trade_plan"]

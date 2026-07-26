@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..core import yaml_io
 from ..core.paths import WorkspacePaths
@@ -66,10 +66,6 @@ def _builtin_manifest_paths() -> list[Path]:
     )
 
 
-def _builtin_manifest_ids() -> set[str]:
-    return {path.stem for path in _builtin_manifest_paths()}
-
-
 def _load_builtin_manifest(manifest_id: str) -> RouteManifest:
     for suffix in (".yml", ".yaml"):
         path = _BUILTIN_MANIFEST_DIR / f"{manifest_id}{suffix}"
@@ -85,19 +81,6 @@ def builtin_manifests() -> list[RouteManifest]:
         _manifest_from_path(path, manifest_id=path.stem)
         for path in _builtin_manifest_paths()
     ]
-
-
-def list_manifest_ids(paths: WorkspacePaths | None = None) -> list[str]:
-    """Return bundled + workspace-defined manifest ids (deduped, sorted)."""
-
-    ids: set[str] = set(_builtin_manifest_ids())
-    if paths is not None:
-        external = _external_manifest_dir(paths)
-        if external.is_dir():
-            for entry in external.iterdir():
-                if entry.suffix.lower() in {".yml", ".yaml"} and entry.is_file():
-                    ids.add(entry.stem)
-    return sorted(ids)
 
 
 def _external_manifest_dir(paths: WorkspacePaths) -> Path:
@@ -185,22 +168,3 @@ def manifest_summary(
                 except ValueError:
                     continue
     return [m.as_dict() for m in seen.values()]
-
-
-def normalised_capabilities(manifest: RouteManifest) -> list[str]:
-    """Return ``manifest.capabilities`` deduped while preserving order."""
-
-    out: list[str] = []
-    seen: set[str] = set()
-    for cap in _walk(manifest.capabilities):
-        if cap in seen:
-            continue
-        seen.add(cap)
-        out.append(cap)
-    return out
-
-
-def _walk(values: Iterable[Any]) -> Iterable[str]:
-    for v in values or []:
-        if isinstance(v, str) and v:
-            yield v

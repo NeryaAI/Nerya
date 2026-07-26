@@ -10,6 +10,7 @@ from nerya.agent.kernel import (
     _loop_config_from_config,
     _normalise_required_artifacts_contract,
 )
+from nerya.agent.finalizers.strategy_backtest import _interpret_backtest_metrics
 from nerya.agent.loop import (
     _COMPACT_REQUIRED_TOOL_SYSTEM,
     LoopConfig,
@@ -19,14 +20,12 @@ from nerya.agent.loop import (
     _build_team_run_bounded_fallback,
     _build_compact_required_tool_retry_prompt,
     _build_strategy_backtest_done_final_text,
-    _build_team_run_final_report,
     _compact_provider_tools_for_safety_retry,
     _contains_legacy_tool_call_markup,
     _ensure_financial_datasets_key_gap_notice,
     _ensure_source_evidence_markers,
     _extract_next_required_tools,
     _extract_legacy_tool_use_blocks,
-    _interpret_backtest_metrics,
     _sanitize_assistant_text_blocks,
     _strip_legacy_tool_call_text,
     _next_required_action_requires_tool,
@@ -37,7 +36,7 @@ from nerya.agent.loop import (
     _split_tool_uses_by_action_risk,
     _success_tool_result_markers,
     _team_final_text_appears_complete,
-    _team_result_requires_strategy_proposal,
+    _team_result_can_trigger_strategy_proposal,
     _tool_result_counts_as_success,
     _trade_risk_check_required_context_observed,
     _wrap_external_content,
@@ -693,7 +692,6 @@ def test_team_run_final_synthesis_passes_context_metadata_to_llm_gateway() -> No
     )
 
     text = loop._synthesize_team_run_final_answer(  # noqa: SLF001
-        system="system",
         user_message="summarize team result",
         team_results=[{"team_run_id": "team-context", "summary": "done"}],
     )
@@ -732,7 +730,6 @@ def test_team_run_final_synthesis_uses_compact_system_and_evidence() -> None:
     noisy_observation = "raw observation noise " + ("x" * 40_000)
 
     text = loop._synthesize_team_run_final_answer(  # noqa: SLF001
-        system="full agent system " + ("y" * 50_000),
         user_message="深度研究 NVDA",
         team_results=[
             {
@@ -795,7 +792,6 @@ def test_team_run_final_synthesis_evidence_is_user_visible_not_debug_schema() ->
     )
 
     text = loop._synthesize_team_run_final_answer(  # noqa: SLF001
-        system="full system should not be used",
         user_message="Deep research NVDA",
         team_results=[
             {
@@ -2674,6 +2670,7 @@ def test_high_volume_source_evidence_keeps_large_compact_synthesis_reserve(
         orchestrator=ToolOrchestrator(registry=registry, executor=executor),
         config=LoopConfig(
             max_iterations=3,
+            max_total_tool_calls=20,
             max_wall_seconds=285,
             wall_time_final_synthesis_seconds=60,
         ),
@@ -14407,7 +14404,6 @@ def test_timeout_evidence_fallback_prefers_sanitized_team_report() -> None:
             }
         ],
         original_user_text="深度研究 NVDA：基本面 + DCF + SEC 最新 10-K + 投资大师视角",
-        error=LLMError("network error calling provider: handshake timed out"),
         team_results=[
             {
                 "status": "completed",
@@ -14649,41 +14645,6 @@ def test_truncated_team_run_final_synthesis_falls_back_to_bounded_report() -> No
     assert "The moat is strong but valuation is demanding" in outcome.final_text
     assert "customer concentration" in outcome.final_text
     assert "team-truncated-final" not in outcome.final_text
-
-
-def test_team_run_final_report_includes_degraded_member_evidence() -> None:
-    report = _build_team_run_final_report({
-        "status": "completed_with_failures",
-        "team_run_id": "team-degraded-evidence",
-        "task": "Research a public company.",
-        "roles_succeeded": [],
-        "roles_failed": ["sentiment_analyst"],
-        "results": [],
-        "failures": [
-            {
-                "subagent": "sentiment_analyst",
-                "error_kind": "tool_observation_fallback",
-                "error": "member gathered observations but did not finalize",
-                "output": {
-                    "summary": "sentiment_analyst gathered social/news observations.",
-                    "quality": "tool_observation_fallback",
-                    "observations": [
-                        {
-                            "skill": "web_search_fetch",
-                            "ok": True,
-                            "summary": "source mentions demand concerns",
-                        }
-                    ],
-                },
-            }
-        ],
-        "aggregated": {},
-        "tokens_total": 5,
-        "usd_total": 0.01,
-    })
-
-    assert "sentiment_analyst gathered social/news observations" in report
-    assert "web_search_fetch" in report
 
 
 def test_degraded_strategy_design_team_continues_to_strategy_proposal() -> None:
@@ -14986,7 +14947,7 @@ def test_investment_committee_debate_does_not_force_strategy_proposal() -> None:
         "aggregated": {"summary": "Committee debate only; no strategy package requested."},
     }
 
-    assert not _team_result_requires_strategy_proposal(data)
+    assert not _team_result_can_trigger_strategy_proposal(data)
 
 
 def test_empty_degraded_team_run_gets_retry_before_final_report() -> None:
@@ -16671,106 +16632,6 @@ def test_degraded_scheduled_agent_team_strategy_retries_proposal_before_final() 
     assert outcome.final_text == "NVDA agent_team proposal created"
 
 
-def test_team_run_final_report_renders_structured_role_outputs_as_markdown() -> None:
-    report = _build_team_run_final_report(
-        {
-            "ok": True,
-            "status": "completed",
-            "team_run_id": "team-nvda",
-            "task": "Analyze NVDA",
-            "roles_succeeded": ["bull_researcher", "risk_critic", "research_manager"],
-            "roles_failed": [],
-            "results": [
-                {
-                    "subagent": "bull_researcher",
-                    "output": {
-                        "bull_points": [
-                            {
-                                "claim": "Data center growth remains strong",
-                                "evidence": "Revenue grew 65% year over year.",
-                                "confidence": 0.9,
-                            }
-                        ],
-                        "confidence": 0.9,
-                    },
-                },
-                {
-                    "subagent": "risk_critic",
-                    "output": {
-                        "verdict": "approve_with_reductions",
-                        "reasons": [
-                            "Single-name concentration should stay capped.",
-                        ],
-                        "recommended_size_pct": 0.05,
-                    },
-                },
-                {
-                    "subagent": "research_manager",
-                    "output": "NVDA has strong AI infrastructure momentum, but valuation risk requires sizing discipline.",
-                },
-            ],
-            "aggregated": {
-                "summary": '{"bull_researcher": {"summary": "{\\"bull_points\\": []}"}}',
-                "truncated": True,
-            },
-            "tokens_total": 100,
-            "usd_total": 0.02,
-        }
-    )
-
-    assert "## Synthesis" in report
-    assert "NVDA has strong AI infrastructure momentum" in report
-    assert "### bull_researcher (bull researcher)" in report
-    assert "#### bull points" in report
-    assert "Data center growth remains strong" in report
-    assert "recommended size pct**: 5.0%" in report
-    assert '{"bull_points"' not in report
-    assert '\\"claim\\"' not in report
-
-
-def test_team_run_final_report_fallback_keeps_schema_labels_generic() -> None:
-    report = _build_team_run_final_report(
-        {
-            "ok": True,
-            "status": "completed",
-            "team_run_id": "team-nvda",
-            "task": "简短分析英伟达 NVDA",
-            "roles_succeeded": ["fundamentals_analyst"],
-            "roles_failed": [],
-            "results": [
-                {
-                    "subagent": "fundamentals_analyst",
-                    "output": {
-                        "red_flags": ["客户集中度较高"],
-                        "stop_suggestions": [{"symbol": "NVDA", "stop": 171}],
-                        "rating_bias": "positive",
-                        "evidence": [{"source": "Yahoo Finance", "period": "FY2026"}],
-                        "confidence": 0.8,
-                    },
-                }
-            ],
-            "aggregated": {
-                "subagents": {
-                    "fundamentals_analyst": {"summary": "财务质量较强"}
-                },
-                "avg_confidence": 0.8,
-            },
-            "tokens_total": 10,
-            "usd_total": 0.01,
-        }
-    )
-
-    assert "subagents" not in report
-    assert "fundamentals analyst" in report
-    assert "red flags" in report
-    assert "stop suggestions" in report
-    assert "rating bias" in report
-    assert "period" in report
-    assert "风险提示" not in report
-    assert "止损建议" not in report
-    assert "评级倾向" not in report
-
-
 def test_native_loop_config_inherits_legacy_harness_limits(tmp_path) -> None:
     cfg = Config(
         paths=WorkspacePaths(root=tmp_path),
@@ -17930,7 +17791,6 @@ def test_skill_discovery_gets_one_proposal_retry_after_bounded_research() -> Non
         orchestrator=ToolOrchestrator(registry=registry, executor=executor),
         config=LoopConfig(
             max_iterations=5,
-            skill_discovery_proposal_tool_threshold=1,
         ),
     )
 
@@ -18082,7 +17942,6 @@ def test_strategy_skill_doc_reading_does_not_require_skill_proposal() -> None:
         orchestrator=ToolOrchestrator(registry=registry, executor=executor),
         config=LoopConfig(
             max_iterations=4,
-            skill_discovery_proposal_tool_threshold=1,
         ),
     )
 
@@ -19288,7 +19147,6 @@ def test_skill_proposal_retry_can_run_inside_late_action_reserve(monkeypatch) ->
             max_iterations=4,
             max_wall_seconds=120,
             wall_time_final_synthesis_seconds=60,
-            skill_discovery_proposal_tool_threshold=1,
         ),
     )
 
@@ -19418,7 +19276,6 @@ def test_fast_required_action_llm_call_uses_bounded_provider_deadline(
         config=LoopConfig(
             max_iterations=4,
             max_wall_seconds=165,
-            skill_discovery_proposal_tool_threshold=1,
         ),
     )
 
@@ -19570,7 +19427,9 @@ def test_required_action_provider_timeout_near_deadline_returns_stable_gap(
                 )
             if len(self.calls) == 2:
                 assert tool_names == ["evolve_skill_proposal"]
-                self.clock.now = 1_119.5
+                # The fast required-action reserve is 15s. Fourteen seconds
+                # cannot cover another model call plus the proposal tool.
+                self.clock.now = 1_106.0
                 raise LLMError(
                     "network error calling provider: The read operation timed out"
                 )
@@ -19633,7 +19492,6 @@ def test_required_action_provider_timeout_near_deadline_returns_stable_gap(
             llm_retry_base_delay=0,
             llm_retry_max_delay=0,
             llm_retry_full_jitter=False,
-            skill_discovery_proposal_tool_threshold=1,
         ),
     )
 
@@ -19790,7 +19648,6 @@ def test_required_action_transient_timeout_retries_with_compact_tool_context(
             llm_retry_full_jitter=False,
             reasoning_effort="high",
             reasoning_summary="concise",
-            skill_discovery_proposal_tool_threshold=1,
         ),
     )
 
@@ -20479,7 +20336,6 @@ def test_required_action_compact_retry_exhaustion_returns_stable_gap(
             llm_retry_base_delay=0,
             llm_retry_max_delay=0,
             llm_retry_full_jitter=False,
-            skill_discovery_proposal_tool_threshold=1,
         ),
     )
 

@@ -363,10 +363,6 @@ def estimate_inline_bytes(block: ChartBlock) -> int:
     return total
 
 
-def _series_has_inline_data(series: Iterable[ChartSeries]) -> bool:
-    return any(s.data is not None for s in series)
-
-
 def _series_has_uri(series: Iterable[ChartSeries]) -> bool:
     return any(s.data_uri is not None for s in series)
 

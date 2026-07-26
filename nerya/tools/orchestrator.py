@@ -24,12 +24,12 @@ the transcript — it is a pure batch dispatcher over an executor.
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
+from ..agent.error_recovery import RecoveryAction, classify_for_recovery, policy_for_kind
 from .executor import NativeToolExecutor
 from .registry import ToolNotFoundError, ToolRegistry
 from .types import ContextModifier, ToolCall, ToolResult
@@ -88,17 +88,6 @@ class ToolOrchestrator:
         self.max_parallel = max(1, int(max_parallel))
         self.modifier_sink = modifier_sink
         self.auto_retry_transient = bool(auto_retry_transient)
-        # Lazy import — keeps orchestrator usable in legacy contexts that
-        # never installed nerya.agent.error_recovery (e.g. minimal tests).
-        try:
-            from ..agent.error_recovery import classify_for_recovery, policy_for_kind, RecoveryAction
-            self._classify = classify_for_recovery
-            self._policy_for_kind = policy_for_kind
-            self._RecoveryAction = RecoveryAction
-        except Exception:  # pragma: no cover - defensive
-            self._classify = None
-            self._policy_for_kind = None
-            self._RecoveryAction = None
 
     def run_batch(self, calls: Iterable[ToolCall]) -> BatchResult:
         """Execute ``calls`` honouring concurrency-safety semantics."""
@@ -145,22 +134,16 @@ class ToolOrchestrator:
                     )
                 if not r.is_error or not self.auto_retry_transient:
                     return r, retries_consumed
-                if self._classify is None or self._policy_for_kind is None:
-                    return r, retries_consumed
                 err = r.error
                 if err is None:
                     return r, retries_consumed
-                try:
-                    verdict = self._classify(
-                        error_kind=err.kind.value if err.kind else None,
-                        error_message=err.message,
-                    )
-                except Exception:
-                    return r, retries_consumed
-                policy = self._policy_for_kind(verdict.category)
+                verdict = classify_for_recovery(
+                    error_kind=err.kind.value if err.kind else None,
+                    error_message=err.message,
+                )
+                policy = policy_for_kind(verdict.category)
                 if (
-                    self._RecoveryAction is None
-                    or policy.action != self._RecoveryAction.AUTO_RETRY
+                    policy.action != RecoveryAction.AUTO_RETRY
                     or attempt >= policy.max_retries
                 ):
                     return r, retries_consumed

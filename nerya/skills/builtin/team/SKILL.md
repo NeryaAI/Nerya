@@ -1,7 +1,7 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: team
-description: "Use when a task needs an Agent Team, committee, multi-role research pass, or coordinated low-frequency strategy decision."
+description: "Use for one bounded worker or coordinated multi-agent work when tasks are genuinely independent."
 version: 0.1.0
 license: MIT
 author: Nerya
@@ -10,12 +10,16 @@ author: Nerya
 
 # Team
 
-Use for coordinated multi-agent work. For a single isolated subtask,
-load `agents` first.
+Use only when a bounded subtask can run independently. Keep coupled or tiny
+work in the main agent.
 
 ## Flow
 
-DEFINE shared objective, roles, stop condition, and evidence contract.
+FOR one independent subtask, define owner, inputs, write scope, and expected
+evidence, then run one worker while the main agent keeps integrating.
+
+FOR multiple independent lanes, define the shared objective, roles, stop
+condition, and evidence contract.
 SPLIT independent lanes with non-overlapping write scopes.
 RUN parallel only when lanes do not share mutable files.
 COLLECT member outputs into one synthesis.

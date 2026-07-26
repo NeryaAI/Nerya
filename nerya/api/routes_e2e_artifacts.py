@@ -14,7 +14,6 @@ them directly. The full artifact-capture API lives in
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..ops import e2e_artifacts as e2e
 from ..runtime import feature_flags as ff

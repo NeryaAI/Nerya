@@ -172,7 +172,7 @@ def _register(method: str, path: str, handler):
     _ROUTES.append((method.upper(), path, handler))
 
 
-def _collect_routes(config: Config | None = None) -> None:
+def _collect_routes() -> None:
     if _ROUTES:
         return
     base_modules = (routes_health, routes_auth, routes_workspace, routes_agent,
@@ -442,7 +442,7 @@ def build_server(
     *,
     start_cron: bool = True,
 ) -> ThreadingHTTPServer:
-    _collect_routes(config)
+    _collect_routes()
     startup_client = InternalClient.from_config(config)
     routes_gateway.launch_configured_gateways_on_start(startup_client)
     routes_network.launch_configured_tunnels_on_start(startup_client)

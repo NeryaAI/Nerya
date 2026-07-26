@@ -22,7 +22,6 @@ import json
 import os
 import shutil
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
@@ -30,9 +29,7 @@ from ..core import jsonl
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
 from .models import (
-    BlackboardEntry,
     TeamMember,
-    TeamMessage,
     TeamRun,
     TeamTask,
     TeamTemplate,

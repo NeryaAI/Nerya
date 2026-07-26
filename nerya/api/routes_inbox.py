@@ -33,9 +33,9 @@ The legacy ``/approvals/*``, ``/evolution/*``, ``/agent/open_turns``,
 
 from __future__ import annotations
 
-import json
 from typing import Any, Iterable, Optional
 
+from ..core import jsonl
 from ._envelope import action, debug_ref, error, ok, source_ref, warn
 
 
@@ -45,23 +45,14 @@ from ._envelope import action, debug_ref, error, ok, source_ref, warn
 
 
 def _read_approvals(client) -> list[dict[str, Any]]:
-    paths = client.config.paths
-    p = getattr(paths, "approvals_pending", None)
+    p = getattr(client.config.paths, "approvals_pending", None)
     if not p or not p.exists():
         return []
-    rows: list[dict[str, Any]] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        if rec.get("state") and rec["state"] != "pending":
-            continue
-        rows.append(rec)
-    return rows
+    return [
+        rec
+        for rec in jsonl.read_all(p)
+        if not rec.get("state") or rec["state"] == "pending"
+    ]
 
 
 def _read_proposals(client) -> list[dict[str, Any]]:

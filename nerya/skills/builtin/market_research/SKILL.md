@@ -19,7 +19,9 @@ LOAD `market_data_routing` when source choice is unclear.
 FETCH facts with `markets` and `research`.
 IF company fundamentals matter, load `equity_research`.
 IF factor or signal validation matters, load `quant_research`.
-IF a named framework is requested, load `expert_investors`.
+IF a named durable-investor framework is requested, load `expert_investors`.
+IF Serenity (including the white-haired finance creator), Unusual Whales, or
+The Kobeissi Letter is requested, load `finance-creators`.
 SYNTHESIZE thesis, evidence, risks, invalidation, and confidence.
 LOAD `research_report` only when the user wants a report artifact.
 

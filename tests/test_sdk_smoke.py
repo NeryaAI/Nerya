@@ -13,8 +13,10 @@ from copy import deepcopy
 
 import pytest
 
+from nerya.agent.kernel import AgentTurnResult
 from nerya.core.config import DEFAULT_CONFIG, Config
 from nerya.core.paths import WorkspacePaths
+from nerya.sdk import agent_api as agent_api_module
 from nerya.sdk.internal_client import InternalClient
 
 
@@ -52,8 +54,71 @@ def test_sdk_agent_api_surface(tmp_path):
     # Smoke-check the agent API has a callable for the workspace-native
     # transcript / trace helpers.
     assert client.agent is not None
-    # The agent_api exposes light helpers; we only enforce presence so the
-    # dashboard's typed client doesn't drift silently.
+    tools = client.agent.list_tools()
+    assert tools["ok"] is True
+    assert tools["count"] == len(tools["tools"])
+    assert tools["count"] > 0
+
+
+def test_sdk_agent_run_turn_returns_complete_kernel_contract(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    block = {
+        "seq": 1,
+        "turn_id": "turn-1",
+        "message_id": "turn-1:assistant",
+        "role": "assistant",
+        "block": {"kind": "text", "text": "done"},
+    }
+    turn = AgentTurnResult(
+        trigger_event_id="event-1",
+        strategy_id="strategy-1",
+        session_id="session-1",
+        turn_id="turn-1",
+        decision={"action": "send_message", "text": "done"},
+        actions=[{"action": "send_message", "text": "done"}],
+        tool_trace=[],
+        budget={"iterations": 1},
+        steps=[block],
+        blocks=[block],
+        stopped_reason="end_turn",
+        transition_reason="verified",
+        final_text="  done  ",
+        iterations=1,
+        activity_events=[{"kind": "team.end"}],
+        artifact_index={"artifacts": [{"path": "report.md"}]},
+        verifier_outcome={"transition_label": "verified"},
+        execution_state={"version": 1},
+        final_report={"summary": "done"},
+        attachments=[{"kind": "file", "path": "report.md"}],
+    )
+
+    class FakeKernel:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_turn(self, **_kwargs):
+            return turn
+
+    monkeypatch.setattr(agent_api_module, "AgentKernel", FakeKernel)
+
+    result = InternalClient.from_config(cfg).agent.run_turn(
+        text="run",
+        strategy_id="strategy-1",
+        session_id="session-1",
+    )
+
+    assert result["strategy_id"] == "strategy-1"
+    assert result["session_id"] == "session-1"
+    assert result["reply_text"] == "done"
+    assert result["final_text"] == "  done  "
+    assert result["events"][0]["phase"] == "message"
+    assert result["transition_reason"] == "verified"
+    assert result["activity_events"] == [{"kind": "team.end"}]
+    assert result["artifact_index"]["artifacts"][0]["path"] == "report.md"
+    assert result["verifier_outcome"]["transition_label"] == "verified"
+    assert result["execution_state"] == {"version": 1}
+    assert result["final_report"] == {"summary": "done"}
+    assert result["attachments"][0]["path"] == "report.md"
 
 
 def test_sdk_messages_api_surface(tmp_path):

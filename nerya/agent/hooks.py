@@ -36,7 +36,7 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 from ..core import jsonl
 from ..core.config import Config
@@ -159,10 +159,6 @@ class HookRegistry:
             raise ValueError(f"unknown hook phase: {phase}")
         self._hooks[phase].append(fn)
         self._loaded = True
-
-    def hooks_for(self, phase: str) -> Iterable[HookFn]:
-        self.ensure_loaded()
-        return tuple(self._hooks.get(phase, ()))
 
     def fire(self, phase: str, ctx: HookContext) -> None:
         """Fire every hook for ``phase``.

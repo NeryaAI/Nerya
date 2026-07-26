@@ -167,9 +167,11 @@ NATIVE_SURFACES: dict[str, tuple[str, ...]] = {
 #: Multiple skills may reveal the same surface.
 SKILL_SURFACES: dict[str, tuple[str, ...]] = {
     "strategy_author": ("strategy", "trading", "markets"),
+    "quant-strategy-loop": ("strategy", "trading", "markets"),
     "trading": ("trading", "markets"),
     "markets": ("markets",),
     "market_data_routing": ("markets",),
+    "agents": ("team",),  # compatibility alias
     "team": ("team",),
     "tasks": ("tasks",),
     "llm": ("llm",),

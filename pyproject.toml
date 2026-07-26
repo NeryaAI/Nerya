@@ -39,6 +39,7 @@ dev = [
     "ruff>=0.4",
 ]
 trading = [
+    "ccxt>=4.4",
     "eth-account>=0.13",
     "eth-abi>=5.0",
     "msgpack>=1.0",
@@ -55,7 +56,11 @@ include = ["nerya*", "nerya_sdk*"]
 exclude = ["tests*", "dashboard*", "workspace_template*", "sdk.typescript*"]
 
 [tool.setuptools.package-data]
-nerya = ["agent/route_manifest_presets/*.yml"]
+nerya = [
+    "agent/route_manifest_presets/*.yml",
+    "skills/builtin/**/*.md",
+    "skills/builtin/**/*.yml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

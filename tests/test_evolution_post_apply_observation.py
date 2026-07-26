@@ -265,7 +265,7 @@ policy:
             proposal_id=proposal.id,
             status="observing",
             source="strategy_run_paper",
-            observed_at=f"2026-06-{10 + idx:02d}T00:00:00+00:00",
+            observed_at=latest["observed_at"],
             evidence_refs=[f"file:strategies/alpha/runs/run_post_apply_paper_{idx}.json"],
             metrics={"mode": "paper", "run_status": "hold"},
             run_id=f"run_post_apply_paper_{idx}",

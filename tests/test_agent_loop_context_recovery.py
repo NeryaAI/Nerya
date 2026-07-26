@@ -297,6 +297,42 @@ def test_token_budget_exceeded_stops_loop() -> None:
     assert outcome.output_tokens_total == 200
 
 
+class _WideBatchGateway:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def call_messages(self, **kwargs):  # noqa: ANN001
+        self.calls += 1
+        return MessagesResponse(
+            content=[
+                {
+                    "type": "tool_use",
+                    "id": f"toolu_{self.calls}_{index}",
+                    "name": "read_status",
+                    "input": {"i": self.calls * 10 + index},
+                }
+                for index in range(5)
+            ],
+            stop_reason="tool_use",
+        )
+
+
+def test_default_tool_call_budget_is_four_per_iteration() -> None:
+    gateway = _WideBatchGateway()
+    loop = _make_loop(
+        gateway,
+        config=LoopConfig(max_iterations=10),
+    )
+
+    outcome = loop.run(system="system", user_message="keep reading")
+
+    assert outcome.aborted
+    assert outcome.stop_reason == "max_tool_calls"
+    assert outcome.abort_reason == "max_tool_calls"
+    assert outcome.tool_calls == 40
+    assert gateway.calls == 8
+
+
 # ---------------------------------------------------------------------------
 # token-pressure forced compaction
 # ---------------------------------------------------------------------------

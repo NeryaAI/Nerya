@@ -20,7 +20,6 @@ delegated to a subagent runtime.
 from __future__ import annotations
 
 import json
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
@@ -34,10 +33,9 @@ from ..skills.kernel import SkillKernel
 from ..subagents.dispatcher import SubAgentDispatcher, SubAgentResult
 from .aggregator import TeamAggregator
 from .blackboard import Blackboard
-from .gates import GateOutcome, evaluate_gates
+from .gates import evaluate_gates
 from .mailbox import Mailbox
 from .models import (
-    TeamGateSpec,
     TeamMember,
     TeamRun,
     TeamRunResult,

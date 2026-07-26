@@ -281,6 +281,9 @@ class NativeToolDeps:
     active_session_id: Optional[str] = None
     """Agent session scoped to the current turn, if any."""
 
+    active_conversation_id: Optional[str] = None
+    """File-placement scope for the current turn (session id or turn id)."""
+
     active_actor_id: str = "default"
     """Trusted operator/gateway actor scoped to the current turn."""
 
@@ -289,9 +292,6 @@ class NativeToolDeps:
 
     active_trigger_source: str = ""
     """Source of the current Agent trigger, for handler defaults."""
-
-    active_trigger_kind: str = ""
-    """Kind of the current Agent trigger, for handler defaults."""
 
     strategy_order_auto_approve: bool = False
     """True only for strategy-triggered turns allowed to run strategy
@@ -366,6 +366,18 @@ _WRITE_FILE_SCHEMA = {
     "properties": {
         "path": {"type": "string"},
         "contents": {"type": "string"},
+        "allow_outside_conversation": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Exceptional: create a new file outside the current "
+                "conversation directory. Requires outside_conversation_reason."
+            ),
+        },
+        "outside_conversation_reason": {
+            "type": "string",
+            "description": "Why this new file needs its requested canonical path.",
+        },
     },
     "required": ["path", "contents"],
 }
@@ -378,6 +390,19 @@ _RUN_SHELL_SCHEMA = {
         "timeout_sec": {"type": "number", "minimum": 0.1},
         "background": {"type": "boolean", "default": False},
         "description": {"type": "string"},
+        "allow_outside_conversation": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Exceptional: let a file-mutating command run outside the "
+                "current conversation directory. Requires "
+                "outside_conversation_reason."
+            ),
+        },
+        "outside_conversation_reason": {
+            "type": "string",
+            "description": "Why the command must write at its requested path.",
+        },
     },
     "required": ["command"],
 }
@@ -522,7 +547,12 @@ def _wrap_edit_file(deps: NativeToolDeps):
 
 def _wrap_write_file(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return write_file_handler(call, root=deps.workspace_root, file_state=deps.file_state)
+        return write_file_handler(
+            call,
+            root=deps.workspace_root,
+            file_state=deps.file_state,
+            session_id=deps.active_conversation_id or deps.active_session_id,
+        )
 
     return handler
 
@@ -543,7 +573,11 @@ def _wrap_grep(deps: NativeToolDeps):
 
 def _wrap_run_shell(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return run_shell_handler(call, root=deps.workspace_root)
+        return run_shell_handler(
+            call,
+            root=deps.workspace_root,
+            session_id=deps.active_conversation_id or deps.active_session_id,
+        )
 
     return handler
 
@@ -1525,12 +1559,6 @@ def is_strategy_run_tick_auto_approved(
     return configured_mode in _AUTO_APPROVED_STRATEGY_TICK_MODES
 
 
-def is_paper_strategy_run_tick(payload: dict[str, Any]) -> bool:
-    """Compatibility helper for callers that only need paper detection."""
-
-    return _strategy_tick_mode(payload) == "paper"
-
-
 def _strategy_agent_run_tick_call(
     deps: NativeToolDeps,
     call: ToolCall,
@@ -1642,7 +1670,14 @@ def build_native_tool_deps(
     fs = file_state if file_state is not None else FileStateCache()
     ts = task_state if task_state is not None else TaskState()
     skill_roots_list = [Path(r) for r in skill_roots]
-    si = SkillIndex(skill_roots_list)
+    skill_files = None
+    if skills is not None:
+        skill_files = [
+            Path(entry.manifest.path) / "SKILL.md"
+            for entry in skills.registry.list()
+            if entry.manifest.path is not None
+        ]
+    si = SkillIndex(skill_roots_list, skill_files=skill_files)
     # Default to a paths layout rooted at the workspace so memory tools
     # have somewhere to land even when the caller hasn't passed an
     # explicit ``paths`` (e.g. CLI ad-hoc invocation).
@@ -1755,6 +1790,10 @@ def register_native_tools(
             name="write_file",
             description=(
                 "Create or overwrite a workspace file with the given contents. "
+                "New free-form files are automatically placed under the active "
+                "conversation directory. Creating elsewhere requires "
+                "allow_outside_conversation=true plus "
+                "outside_conversation_reason. Existing files keep their path. "
                 "For strategy authoring, first call strategy_draft_proposal to "
                 "scaffold a draft, then use write_file / edit_file on the "
                 "returned proposal_paths (the after/strategies/<id>/ files "
@@ -1781,6 +1820,11 @@ def register_native_tools(
                 "Run a shell command (tests, builds, git, one-off scripts). "
                 "Risk is classified per-call: rm -rf, sudo, git push --force, "
                 "etc. are flagged as DANGEROUS. "
+                "During an Agent conversation, common file-mutating commands "
+                "default to its artifacts/conversations/<session>/ directory. "
+                "Standard tests and builds retain the project cwd. "
+                "Writing elsewhere requires allow_outside_conversation=true "
+                "plus outside_conversation_reason. "
                 "Do not use this for strategy authoring, connector/data-source "
                 "discovery, or wallet/on-chain provider inspection. "
                 "Prefer the native tool first — the sandbox BLOCKS run_shell "

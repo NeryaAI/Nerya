@@ -21,7 +21,7 @@ input file.
 CHOOSE revenue, margin, reinvestment, terminal, and WACC assumptions.
 RUN `scripts/dcf_calc.py`.
 LOAD methodology references only when assumptions are contested.
-`equity_research` depends on the same Financial Datasets keychain as
+This skill uses the same Financial Datasets keychain as
 `equity_research` / `sec_filings`, configured via:
 
 - env: `NERYA_FINANCIAL_DATASETS_KEYS` / `FINANCIAL_DATASETS_API_KEY`

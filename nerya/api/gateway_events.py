@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .gateway_commands import DEFAULT_REGISTRY, help_text as _registry_help_text, menu_commands as _registry_menu
+from .gateway_commands import help_text as _registry_help_text, menu_commands as _registry_menu
 
 
 # Backwards-compatible alias kept for callers still importing the list. The

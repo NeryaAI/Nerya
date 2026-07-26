@@ -19,6 +19,7 @@ import pytest
 from nerya.agent.loop import LoopConfig, WorkspaceNativeAgentLoop
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
+from nerya.core import yaml_io
 from nerya.llm.messages import MessagesResponse
 from nerya.tools.executor import NativeToolExecutor
 from nerya.tools.native import build_native_tool_deps, register_native_tools
@@ -35,6 +36,7 @@ from nerya.tools.permissions import (
 )
 from nerya.tools.registry import ToolRegistry
 from nerya.tools.types import ToolCall
+from nerya.skills.kernel import SkillKernel
 
 pytestmark = pytest.mark.smoke
 
@@ -109,6 +111,28 @@ def test_gating_shrinks_the_rendered_surface(tmp_path: Path) -> None:
     # A meaningful reduction — well over a third of tools are gated.
     assert visible < total
     assert (total - visible) >= 30
+
+
+def test_skill_index_reuses_active_registry_paths(tmp_path: Path) -> None:
+    paths = WorkspacePaths(root=tmp_path)
+    yaml_io.dump(
+        paths.skills_enabled,
+        {"version": 1, "enabled": ["research", "finance.private_equity.ic_memo"]},
+    )
+    config = Config(paths=paths)
+    skills = SkillKernel.boot(config)
+    deps = build_native_tool_deps(
+        workspace_root=tmp_path,
+        skill_roots=[BUILTIN_ROOT],
+        paths=paths,
+        config=config,
+        skills=skills,
+    )
+
+    assert {record.skill_id for record in deps.skill_index.records()} == {
+        "research",
+        "finance.private_equity.ic_memo",
+    }
 
 
 def test_skill_view_reveals_owning_surface(tmp_path: Path) -> None:

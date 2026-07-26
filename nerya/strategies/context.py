@@ -1616,10 +1616,14 @@ class StrategyPnL:
         equity = _coerce_float(out.get("equity_usd"))
         drawdown_usd = 0.0
         try:
-            from .performance import build_snapshot
+            from .performance import _summarise_trades, read_strategy_ledger
 
-            snap = build_snapshot(self.paths, self.strategy_id)
-            trade = snap.trade_metrics or {}
+            trade = _summarise_trades(
+                read_strategy_ledger(self.paths, self.strategy_id, "intents"),
+                read_strategy_ledger(self.paths, self.strategy_id, "orders"),
+                read_strategy_ledger(self.paths, self.strategy_id, "fills"),
+                read_strategy_ledger(self.paths, self.strategy_id, "pnl"),
+            )
             drawdown_usd = _coerce_float(trade.get("max_drawdown_usd"))
             out.update(
                 {

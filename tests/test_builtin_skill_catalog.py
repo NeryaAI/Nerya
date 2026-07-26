@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 from nerya.core.paths import WorkspacePaths
+from nerya.core.config import Config
+from nerya.core import yaml_io
 from nerya.skills.manifest import SkillManifest
-from nerya.skills.registry import SkillRegistry, _walk_skill_dirs
+from nerya.skills.registry import (
+    SkillRegistry,
+    _walk_skill_dirs,
+    list_bundled_skill_names,
+)
+from nerya.workspace.manager import _DEFAULT_ENABLED_SKILLS
 
 
 pytestmark = pytest.mark.smoke
@@ -75,6 +83,34 @@ def test_builtin_registry_includes_core_compact_skills() -> None:
             assert entry.actions == {}
 
 
+def test_default_enabled_ids_are_real_bundled_playbooks() -> None:
+    ids = set(list_bundled_skill_names())
+
+    assert set(_DEFAULT_ENABLED_SKILLS) <= ids
+    assert "market_data" not in _DEFAULT_ENABLED_SKILLS
+
+
+def test_legacy_enabled_action_ids_map_to_current_playbooks(tmp_path: Path) -> None:
+    paths = WorkspacePaths(root=tmp_path)
+    yaml_io.dump(
+        paths.skills_enabled,
+        {
+            "version": 1,
+            "enabled": ["market_data", "operator", "strategy_validation"],
+        },
+    )
+
+    ids = set(SkillRegistry.load_builtin(paths, config=Config(paths=paths)).by_id)
+
+    assert {
+        "markets",
+        "market_data_routing",
+        "coding",
+        "backtest",
+        "quant_research",
+    } <= ids
+
+
 def test_builtin_registry_loads_finance_namespace_skills() -> None:
     registry = SkillRegistry.load_builtin()
     ids = set(registry.by_id)
@@ -82,6 +118,110 @@ def test_builtin_registry_loads_finance_namespace_skills() -> None:
     assert "finance.private_equity.ic_memo" in ids
     assert "finance.financial_analysis.dcf_model" not in ids
     assert registry.get("finance.private_equity.ic_memo").manifest.source == "builtin"
+
+
+def test_expert_investors_is_source_backed_and_self_contained() -> None:
+    skill_dir = BUILTIN_ROOT / "expert_investors"
+    manifest = SkillManifest.from_skill_md(skill_dir / "SKILL.md")
+    lenses = (skill_dir / "references" / "investor-lenses.md").read_text(
+        encoding="utf-8",
+    )
+
+    assert manifest.id == "expert_investors"
+    assert manifest.version == "0.2.0"
+    assert {
+        "Warren Buffett",
+        "Aswath Damodaran",
+        "Howard Marks",
+        "Michael Mauboussin",
+        "Stanley Druckenmiller",
+    } <= {line.removeprefix("## ").split(":", 1)[0] for line in lenses.splitlines()}
+    assert "framework inference" in lenses
+    assert lenses.count("https://") >= 20
+
+    research_dir = skill_dir / "references" / "research"
+    assert {path.name for path in research_dir.glob("*.md")} == {
+        "01-writings.md",
+        "02-conversations.md",
+        "03-expression-dna.md",
+        "04-external-views.md",
+        "05-decisions.md",
+        "06-timeline.md",
+    }
+
+    bindings: dict[str, set[str]] = {}
+    source_id = re.compile(r"\*\*(?:\[[^]:]+:\s*)?([BDHMS]\d+)")
+    url = re.compile(r"https?://[^ )]+")
+    for path in [skill_dir / "references" / "investor-lenses.md", *research_dir.glob("*.md")]:
+        pending_id: str | None = None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if match := source_id.search(line):
+                pending_id = match.group(1)
+            if pending_id and (match := url.search(line)):
+                bindings.setdefault(pending_id, set()).add(match.group(0).rstrip(".,;"))
+                pending_id = None
+
+    assert len(bindings) >= 30
+    assert {key: values for key, values in bindings.items() if len(values) > 1} == {}
+
+
+def test_finance_creators_is_english_source_backed_and_self_contained() -> None:
+    skill_dir = BUILTIN_ROOT / "finance-creators"
+    manifest = SkillManifest.from_skill_md(skill_dir / "SKILL.md")
+    lenses = (skill_dir / "references" / "creator-lenses.md").read_text(
+        encoding="utf-8",
+    )
+
+    assert manifest.id == "finance-creators"
+    assert manifest.version == "0.1.0"
+    assert manifest.id in _DEFAULT_ENABLED_SKILLS
+    assert {
+        "Serenity",
+        "Unusual Whales",
+        "The Kobeissi Letter",
+    } <= {line.removeprefix("## ").split(":", 1)[0] for line in lenses.splitlines()}
+    assert "framework inference" in lenses
+
+    research_dir = skill_dir / "references" / "research"
+    research_files = sorted(research_dir.glob("*.md"))
+    assert {path.name for path in research_files} == {
+        "01-writings.md",
+        "02-conversations.md",
+        "03-expression-dna.md",
+        "04-external-views.md",
+        "05-decisions.md",
+        "06-timeline.md",
+    }
+
+    all_docs = [
+        skill_dir / "SKILL.md",
+        skill_dir / "references" / "creator-lenses.md",
+        skill_dir / "references" / "full-playbook.md",
+        *research_files,
+    ]
+    assert not re.search(
+        r"[\u3400-\u4dbf\u4e00-\u9fff]",
+        "\n".join(path.read_text(encoding="utf-8") for path in all_docs),
+    )
+
+    bindings: dict[str, set[str]] = {}
+    source_id = re.compile(r"\b((?:FW|FC|FE|FX|FD|FT)-(?:SER|UW|KOB)-\d+)\b")
+    url = re.compile(r"https?://[^ )]+")
+    for path in [skill_dir / "references" / "creator-lenses.md", *research_files]:
+        pending_id: str | None = None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if match := source_id.search(line):
+                pending_id = match.group(1)
+            if pending_id and (match := url.search(line)):
+                bindings.setdefault(pending_id, set()).add(match.group(0).rstrip(".,;"))
+                pending_id = None
+
+    assert len(bindings) >= 18
+    assert all(
+        sum(key.split("-")[1] == creator for key in bindings) >= 5
+        for creator in ("SER", "UW", "KOB")
+    )
+    assert {key: values for key, values in bindings.items() if len(values) > 1} == {}
 
 
 def test_workspace_skills_override_user_home_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

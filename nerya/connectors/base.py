@@ -64,6 +64,12 @@ class OrderAck:
     # Fee breakdown keyed by asset code, preserved verbatim from the
     # broker for audit. ``{"BNB": 0.001}`` etc.
     fee_breakdown: dict[str, float] = field(default_factory=dict)
+    # Exchange-native stop-loss / take-profit bracket order ids, if the
+    # venue attached them to the position on entry (e.g. Bybit V5
+    # ``stopLossPrice``/``takeProfitPrice`` create resting TP/SL orders
+    # whose ids the connector surfaces here for protection accounting).
+    # Keys are venue-stable names ("stop_loss", "take_profit", …).
+    attached_bracket_order_ids: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def asdict(self) -> dict[str, Any]:
@@ -79,6 +85,50 @@ class OrderAck:
             "avg_price": self.avg_price,
             "fee_usd": self.fee_usd,
             "fee_breakdown": dict(self.fee_breakdown),
+            "attached_bracket_order_ids": dict(self.attached_bracket_order_ids),
+        }
+
+
+@dataclass
+class ContractPosition:
+    """A single derivatives position row from ``fetch_positions``.
+
+    Carries the fields the snapshot/reconciliation layers need to
+    aggregate margin used, unrealised PnL, and per-market size. Spot
+    connectors never produce these — only derivatives venues do.
+    """
+
+    market: str
+    side: str  # long | short | none
+    contracts: float = 0.0
+    contract_size: float = 1.0
+    entry_price: float = 0.0
+    mark_price: float = 0.0
+    notional_usd: float = 0.0
+    initial_margin_usd: float = 0.0
+    unrealised_pnl_usd: float = 0.0
+    leverage: float = 1.0
+    liquidation_price: float | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def size_base(self) -> float:
+        return float(self.contracts) * float(self.contract_size or 1.0)
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "market": self.market,
+            "side": self.side,
+            "contracts": self.contracts,
+            "contract_size": self.contract_size,
+            "entry_price": self.entry_price,
+            "mark_price": self.mark_price,
+            "notional_usd": self.notional_usd,
+            "initial_margin_usd": self.initial_margin_usd,
+            "unrealised_pnl_usd": self.unrealised_pnl_usd,
+            "leverage": self.leverage,
+            "liquidation_price": self.liquidation_price,
+            "size_base": self.size_base,
         }
 
 
@@ -116,10 +166,36 @@ class Connector(ABC):
     def get_balances(self) -> list[Balance]:
         raise NotImplementedError(f"{self.venue} connector does not support balances in this build")
 
-    def place_order(self, *, market: str, side: str, order_type: str,
-                     size: float, price: float | None = None,
-                     client_order_id: str | None = None,
-                     time_in_force: str = "GTC") -> OrderAck:
+    def place_order(
+        self,
+        *,
+        market: str,
+        side: str,
+        order_type: str,
+        size: float,
+        price: float | None = None,
+        client_order_id: str | None = None,
+        time_in_force: str = "GTC",
+        reduce_only: bool = False,
+        leverage: float | None = None,
+        margin_mode: str | None = None,
+        position_side: str | None = None,
+        position_idx: int | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        trigger_price: float | None = None,
+        extra_params: dict[str, Any] | None = None,
+    ) -> OrderAck:
+        """Place an order. Derivatives-specific fields (``reduce_only``,
+        ``leverage``, ``margin_mode``, ``position_side``/``position_idx``,
+        ``stop_loss``/``take_profit``) are forwarded to venues that
+        accept them; spot-only venues ignore them. ``None`` defaults keep
+        the legacy 6-arg call shape working.
+
+        Returns an :class:`OrderAck` whose ``attached_bracket_order_ids``
+        is populated when the venue created resting native SL/TP orders
+        alongside the entry (Bybit V5, …).
+        """
         raise NotImplementedError(
             f"live place_order disabled for {self.venue}; use paper executor or enable live_trading"
         )
@@ -129,6 +205,25 @@ class Connector(ABC):
 
     def get_order(self, *, market: str, order_id: str) -> OrderAck:
         raise NotImplementedError(f"get_order disabled for {self.venue}")
+
+    # ----------------------------------------------------------- derivatives
+    def fetch_positions(self, *, symbols: list[str] | None = None) -> list[ContractPosition]:
+        """Open derivatives positions. Default: not supported (spot)."""
+        return []
+
+    def fetch_open_orders(self, *, symbols: list[str] | None = None) -> list[OrderAck]:
+        """Resting open orders at the venue. Default: not supported."""
+        return []
+
+    def fetch_my_trades(
+        self,
+        *,
+        market: str | None = None,
+        since_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[OrderAck]:
+        """Recently executed fills. Default: not supported."""
+        return []
 
 
 class CEXConnectorBase(Connector):
@@ -140,4 +235,4 @@ class DEXConnectorBase(Connector):
 
 
 __all__ = ["Connector", "CEXConnectorBase", "DEXConnectorBase",
-           "Ticker", "Balance", "OrderAck"]
+           "Ticker", "Balance", "OrderAck", "ContractPosition"]

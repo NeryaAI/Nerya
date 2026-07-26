@@ -20,14 +20,18 @@ agent runtime**. It runs as:
 - `dashboard/` — Next.js 14 control panel on `:3001`, talking to the
 API server through `/api/proxy/`*.
 
-The runtime never calls exchanges or LLMs directly. **Every external
-call is mediated by a Skill and its approved scripts**. A Skill is the
-model/operator-facing playbook declared by `SKILL.md`. Executable logic
-belongs under `scripts/`, not in `actions.py` or YAML manifests. Do not
-create new `skill.yml`, `skill.yaml`, `manifest.yml`, `manifest.yaml`, or
-`actions.py` files to define skills. Legacy YAML/action files in existing
-skill directories are migration artifacts only and must be removed or
-converted when touching that capability.
+The agent runtime never calls exchanges or LLMs directly. **Every
+model-driven external capability call is mediated by a Skill and its
+approved scripts**. Operator-only control-plane maintenance (for example,
+an `admin:ops` workspace backup/restore) may call its dedicated adapter
+directly when it is not exposed as an agent tool and validates remote
+content before applying it. A Skill is the model/operator-facing playbook
+declared by `SKILL.md`. Executable logic belongs under `scripts/`, not in
+`actions.py` or YAML manifests. Do not create new `skill.yml`, `skill.yaml`,
+`manifest.yml`, `manifest.yaml`, or `actions.py` files to define skills.
+Legacy YAML/action files in existing skill directories are migration
+artifacts only and must be removed or converted when touching that
+capability.
 
 ## 2. Absolute rules (read before editing code)
 
@@ -40,7 +44,11 @@ converted when touching that capability.
 3. **All agent-authored changes are proposals.** Writing a strategy,
   a trigger, a script, or a skill goes through
    `nerya.evolution.PatchProposal`. Never mutate `workspace/` state
-   directly from an action.
+   directly from an action. Operator-initiated workspace restore is not an
+   agent-authored action: it may apply a curated snapshot directly only
+   behind `admin:ops`, with secret/runtime paths excluded, manifest hashes
+   verified, and conflicts rejected unless the operator explicitly forces
+   the restore.
 4. **Don't introduce native CEX connectors.** All CEX venues are
   handled by `nerya.connectors.ccxt_adapter.CcxtConnector`. If you
    want a new venue, add an `ExchangeProviderSpec` (see

@@ -18,7 +18,6 @@ Endpoints
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..runtime import feature_flags as ff
 from ._envelope import action, debug_ref, ok

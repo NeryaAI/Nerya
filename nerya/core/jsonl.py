@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from .atomic_write import atomic_write_text
 from .time import now_iso
 
 
@@ -108,6 +109,18 @@ def read_all(path: Path) -> list[dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
     return out
+
+
+def write_all(path: Path, records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Atomically replace a JSONL file with ``records``."""
+
+    rows = list(records)
+    text = "".join(
+        json.dumps(row, default=str, ensure_ascii=False) + "\n"
+        for row in rows
+    )
+    atomic_write_text(Path(path), text)
+    return rows
 
 
 def tail(path: Path, n: int = 100) -> list[dict[str, Any]]:

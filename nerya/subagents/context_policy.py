@@ -14,9 +14,6 @@ context layer is fully registry-driven:
   result the builder can render.
 * ``context.news`` — action should be invoked with ``{topic, limit}``
   and is expected to return ``{items: [{title}, ...]}``.
-* ``context.onchain`` / ``context.wallet`` / ``context.strategy`` —
-  additional hooks reserved for future skills.
-
 Exact-skill-id lookup is preserved as a fallback so existing installs
 keep working even when their skill manifests don't yet declare tags.
 """
@@ -37,9 +34,6 @@ from .registry import SubAgentSpec
 # Canonical capability-tag ids. Kept in sync with the skill manifest
 CAP_MARKET = "context.market"
 CAP_NEWS = "context.news"
-CAP_ONCHAIN = "context.onchain"
-CAP_WALLET = "context.wallet"
-CAP_STRATEGY = "context.strategy"
 
 
 def _infer_market_from_text(

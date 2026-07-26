@@ -24,6 +24,7 @@ denylist; we don't relax it here.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Optional
 
 from ...core.errors import TriggerValidationError
@@ -32,6 +33,7 @@ from ...skills.builtin.tasks.scripts import create_task
 from ...skills.kernel import SkillKernel
 from ...subagents.dispatcher import SubAgentDispatcher
 from ...subagents.tasks import TaskStore, run_in_thread
+from ..tool_errors import schema_validation_result as _usage_error
 from ..types import (
     ToolCall,
     ToolError,
@@ -264,14 +266,6 @@ def _worker(
 # ---------------------------------------------------------------------------
 
 
-def _usage_error(call: ToolCall, message: str) -> ToolResult:
-    return ToolResult.from_error(
-        tool_use_id=call.id,
-        name=call.name,
-        error=ToolError(kind=ToolErrorKind.SCHEMA_VALIDATION, message=message),
-    )
-
-
 def _cached_team_summary(call: ToolCall, args: dict[str, Any]) -> dict[str, Any] | None:
     try:
         from .agents import cached_team_run_summary_for_call
@@ -435,19 +429,12 @@ def task_list_handler(
 def task_create_handler(
     call: ToolCall,
     *,
-    workspace: str | "Path",
+    workspace: str | Path,
 ) -> ToolResult:
     try:
         result = create_task.run(dict(call.arguments or {}), workspace=workspace)
     except TriggerValidationError as exc:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=f"{type(exc).__name__}: {exc}",
-            ),
-        )
+        return _usage_error(call, f"{type(exc).__name__}: {exc}")
     except Exception as exc:  # noqa: BLE001 - surface concrete tool failure.
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -458,13 +445,8 @@ def task_create_handler(
             ),
         )
     if not result.get("ok"):
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=str(result.get("error") or "task_create failed"),
-            ),
+        return _usage_error(
+            call, str(result.get("error") or "task_create failed"),
         )
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
 

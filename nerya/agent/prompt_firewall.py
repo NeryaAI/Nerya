@@ -30,7 +30,7 @@ Returns a small dict the caller can use to decide whether to proceed:
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from ..security.prompt_injection import (  # noqa: F401  re-exported
     classify,

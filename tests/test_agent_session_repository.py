@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from nerya.agent.session import hydrate_db_session_counts
+from nerya.core.paths import WorkspacePaths
 from nerya.db.repositories import AgentSessionRepository
 from nerya.db.sqlite import connect
 from nerya.api.routes_agent import (
@@ -77,6 +79,33 @@ def test_transcript_limit_zero_returns_full_history(tmp_path):
         "t2:user",
         "t2:assistant",
     ]
+    con.close()
+
+
+def test_session_rows_include_message_and_turn_counts(tmp_path):
+    con = connect(tmp_path / "nerya.db")
+    repo = AgentSessionRepository(con)
+    repo.upsert_session(session_id="s1", title="Session")
+    for message_id, turn_id in (
+        ("t1:user", "t1"),
+        ("t1:assistant", "t1"),
+        ("t2:user", "t2"),
+    ):
+        repo.record_message(
+            message_id=message_id,
+            session_id="s1",
+            turn_id=turn_id,
+            role="assistant" if message_id.endswith("assistant") else "user",
+            content=message_id,
+        )
+
+    paths = WorkspacePaths(root=tmp_path)
+    detail = hydrate_db_session_counts(paths, [repo.get_session("s1")])[0]
+    listed = hydrate_db_session_counts(paths, repo.list_sessions(limit=10))[0]
+
+    assert detail is not None
+    assert (detail["message_count"], detail["turn_count"]) == (3, 2)
+    assert (listed["message_count"], listed["turn_count"]) == (3, 2)
     con.close()
 
 

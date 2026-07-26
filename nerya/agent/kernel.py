@@ -13,9 +13,8 @@ the model decides which tool to call. The kernel only:
 * renders the system prompt (charter + memory recap + skill / recipe
   listing),
 * delegates the conversation to :class:`WorkspaceNativeAgentLoop`,
-* runs end-of-turn auto-evolution (``maybe_propose_from_turn``) and an
-  optional memory-write tick so durable lessons aren't dropped between
-  turns,
+* runs an optional end-of-turn memory-write tick so durable lessons
+  aren't dropped between turns,
 * projects the loop outcome onto :class:`AgentTurnResult` for HTTP/SDK
   consumers.
 """
@@ -28,7 +27,7 @@ import json
 import re
 import time
 from datetime import timezone
-from dataclasses import dataclass, field
+from dataclasses import asdict as _dataclass_asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -53,9 +52,15 @@ from ..tools.native.bootstrap import (
     build_native_tool_deps,
     register_native_tools,
 )
+from ..tools.native.conversation_files import render_conversation_file_policy
 from .file_state import FileStateCache
 from .hooks import HookContext, HookRegistry, _bind_config, _unbind_config
-from .loop import LoopConfig, LoopOutcome, WorkspaceNativeAgentLoop
+from .loop import (
+    _REQUIRED_ARTIFACT_TOOL_CONTRACT_KEYS,
+    LoopConfig,
+    LoopOutcome,
+    WorkspaceNativeAgentLoop,
+)
 from .attachments import (
     prepare_user_message,
     public_attachment_blocks_from_envelopes,
@@ -67,14 +72,12 @@ from .market_context import (
     render_session_market_context_block,
 )
 from .prompt_sections import CACHE_BOUNDARY_MARKER
-from .self_improvement import maybe_propose_from_turn
 from .session import SessionStore
 from .session_compaction import (
     SessionCompactionPolicy,
     checkpoint_from_session_meta,
     compact_session_history,
 )
-from .session_restore import apply_to_task_state, restore_from_journal
 from .verifier import compute_verifier_nudge, compute_verifier_outcome, VerifierOutcome
 from .streaming import get_default_bus
 from .transcript_blocks import BlockEnvelope, TextBlock
@@ -824,7 +827,7 @@ def _render_temporal_context_block() -> str:
     )
 
 
-def _render_output_language_block(user_text: str | None) -> str:
+def _render_output_language_block() -> str:
     return (
         "Output language:\n"
         "- Write the final answer and any user-visible conclusion in the "
@@ -900,7 +903,6 @@ def _latest_prior_user_text(messages: list[dict[str, Any]]) -> str | None:
 
 def _render_turn_focus_block(
     *,
-    user_text: str | None,
     attached_skills: Optional[list[str]] = None,
 ) -> str:
     """Render a small non-routing execution policy for every turn."""
@@ -1025,6 +1027,18 @@ class AgentTurnResult:
     final_report: dict[str, Any] = field(default_factory=dict)
     attachments: list[dict[str, Any]] = field(default_factory=list)
 
+    def asdict(
+        self,
+        *,
+        events: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Return the canonical SDK/HTTP response shape for this turn."""
+
+        payload = _dataclass_asdict(self)
+        payload["reply_text"] = self.final_text.strip()
+        payload["events"] = list(events or [])
+        return payload
+
 
 def _normalise_required_artifacts_contract(value: Any) -> tuple[dict[str, Any], ...]:
     if not isinstance(value, dict):
@@ -1041,21 +1055,7 @@ def _normalise_required_artifacts_contract(value: Any) -> tuple[dict[str, Any], 
             "kind",
             "tool",
             "source",
-            "execution_mode",
-            "after_has",
-            "output_language",
-            "analysis_language",
-            "team_template",
-            "subject",
-            "metadata_contains",
-            "venue",
-            "base_url",
-            "docs_url",
-            "auth",
-            "label",
-            "runtime",
-            "market",
-            "account",
+            *_REQUIRED_ARTIFACT_TOOL_CONTRACT_KEYS,
         ):
             val = raw.get(key)
             if isinstance(val, str):
@@ -1173,7 +1173,6 @@ class AgentKernel:
         self._sessions = SessionStore(self.config.paths.root)
         self._registry = ToolRegistry()
         self._deps: Optional[NativeToolDeps] = None
-        self._subagents: Optional[Any] = None
         self._evolution_hooks = EvolutionHookBus(self.config)
         # Per-kernel turn counter feeds the periodic memory compaction
         # tick so we don't run a full filesystem walk after every
@@ -1195,43 +1194,6 @@ class AgentKernel:
         """Return the tool registry, building it lazily on first access."""
         self._ensure_registry()
         return self._registry
-
-    @property
-    def subagents(self):
-        """Workspace-level :class:`SubAgentDispatcher`.
-
-        Held on the kernel so the parent runtime can dispatch children
-        without rebuilding the dispatcher per turn (it caches the
-        :class:`LLMGateway` and the subagent registry). The native
-        ``subagent_run`` tool reads from the same registry — exposing
-        it on the kernel makes recipes and hooks reusable too.
-        """
-
-        if self._subagents is None:
-            from ..subagents.dispatcher import SubAgentDispatcher
-
-            self._subagents = SubAgentDispatcher(
-                config=self.config, skills=self.skills,
-                # Subagents inherit the parent's full native-tool surface
-                # (connector_list / connector_view, memory, search, file
-                # primitives, …). Accessing the property here guarantees
-                # the native registry is built before children look up tools.
-                tool_registry=self.tool_registry,
-            )
-        return self._subagents
-
-    def refresh_action_map(self) -> dict[str, Any]:
-        """Force the tool registry to be rebuilt on the next turn.
-
-        Compatibility shim — the legacy ``ACTION_MAP`` is gone; the tool
-        registry is rebuilt on the next call to :meth:`run_turn` so any
-        new native tools or hot-loaded user skills come into view. The
-        method preserves the old name so callers that refresh after a
-        skill install/uninstall keep working.
-        """
-
-        self._deps = None
-        return {}
 
     def _bind_session_strategy(
         self,
@@ -1427,20 +1389,6 @@ class AgentKernel:
                 except Exception:
                     pass
             if result is not None:
-                # Long-running invariants the legacy planner used to handle
-                # before the workspace-native rewrite — restored here so
-                # they still fire on every turn:
-                #
-                # 1. ``maybe_propose_from_turn`` scans the journal for
-                #    consecutive no-ops / error spikes and files a
-                #    learning_update proposal *without* mutating live
-                #    config. Cheap to run; gated by the journal tail it
-                #    reads, not by an LLM call.
-                # 2. ``_after_turn_memory`` appends a one-line summary to
-                #    ``memory/global.md`` so the next turn's
-                #    ``memory_recall`` block has the freshest lesson. Off
-                #    by default — operator turns it on per workspace.
-                self._after_turn_evolve(turn_id=turn_id, result=result)
                 self._after_turn_memory(
                     turn_id=turn_id,
                     result=result,
@@ -1516,23 +1464,12 @@ class AgentKernel:
         )
         deps.active_strategy_id = strategy_id
         deps.active_session_id = session_id
+        deps.active_conversation_id = session_id or turn_id
         deps.active_actor_id = _memory_actor_id_for_trigger(trigger)
         deps.active_trigger_event_id = trigger_event_id
         deps.active_trigger_source = str((trigger or {}).get("source") or "")
-        deps.active_trigger_kind = str((trigger or {}).get("kind") or "")
         deps.strategy_order_auto_approve = strategy_order_auto_approve
         deps.permission_mode = self.permission_mode.value
-        # Replay todos / plan-mode flag for resumed sessions so the
-        # model picks up where it left off instead of starting from an
-        # empty :class:`TaskState`. We snapshot the live todos *before*
-        # the turn so the verifier nudge can compute "newly completed"
-        # accurately at the end.
-        if session_existed and session_id:
-            try:
-                restored = restore_from_journal(self.config.paths, session_id=session_id)
-                apply_to_task_state(restored, task_state=deps.task_state)
-            except Exception:
-                _LOG.debug("session restore application failed", exc_info=True)
         # In ``auto`` / ``yolo`` permission modes we run unattended, so any
         # plan the previous turn submitted via ``exit_plan_mode`` would
         # otherwise sit forever waiting for an operator that isn't there.
@@ -1740,6 +1677,16 @@ class AgentKernel:
             _unsubscribe_activity_events = bus.subscribe(_activity_event_sink)
         except Exception:
             _unsubscribe_activity_events = None
+
+        # Register the durable approval-resume subscriber so an operator
+        # approving an escalated canary/live order actually resumes the
+        # original intent. Idempotent: the module guards against
+        # double-registration.
+        try:
+            from ..trading.approval_resume import register_approval_resume_subscriber
+            register_approval_resume_subscriber(self.config)
+        except Exception:
+            pass
 
         def _event_sink(env: BlockEnvelope) -> None:
             """Translate native block envelopes onto the streaming bus.
@@ -2049,6 +1996,7 @@ class AgentKernel:
             attached_skills=attached_skills,
             strategy_id=strategy_id,
             session_id=session_id,
+            conversation_id=session_id or turn_id,
             user_text=system_user_text,
             frozen_memory_context=self._freeze_memory_prompt_context(
                 deps,
@@ -3416,32 +3364,15 @@ class AgentKernel:
         """
 
         try:
-            from .recipes import all_recipes, is_available
+            from .recipes import _capability_set, all_recipes, is_available
         except Exception:
             return ""
 
-        skill_ids: set[str] = set()
-        action_ids: set[str] = set()
-        try:
-            entries = list(self.skills.registry.list())
-        except Exception:
-            entries = []
-        for entry in entries:
-            manifest = getattr(entry, "manifest", None)
-            if manifest is None:
-                continue
-            sid = getattr(manifest, "id", "")
-            if sid:
-                skill_ids.add(sid)
-            actions = getattr(manifest, "actions", {}) or {}
-            for name in actions.keys():
-                action_ids.add(f"{sid}.{name}")
-        sf = frozenset(skill_ids)
-        af = frozenset(action_ids)
+        skill_ids, action_ids = _capability_set(self)
 
         recipes = [
             r for r in all_recipes(self.config.paths)
-            if is_available(r, sf, af)
+            if is_available(r, skill_ids, action_ids)
         ]
         if not recipes:
             return ""
@@ -3462,38 +3393,6 @@ class AgentKernel:
             lines.append(row)
             used += len(row) + 1
         return "\n".join(lines)
-
-    # ------------------------------------------------------- after-turn hooks
-
-    def _after_turn_evolve(self, *, turn_id: str, result: AgentTurnResult) -> None:
-        """Best-effort end-of-turn auto-evolution tick.
-
-        :func:`maybe_propose_from_turn` only fires when a clear signal
-        is in the journal (e.g. ≥9/10 consecutive no-ops); it never
-        mutates live config and always emits a *proposal* the operator
-        must approve. We swallow exceptions here because a journal-write
-        flake on this hook must not poison a successful turn.
-        """
-
-        if not bool(self.config.get("agent.native.evolve_after_turn", True)):
-            return
-        try:
-            top_action = (
-                (result.actions[0].get("action") if result.actions else None)
-                or "noop"
-            )
-            maybe_propose_from_turn(
-                self.config,
-                turn=({
-                    "turn_id": turn_id,
-                    "action": top_action,
-                    "stop_reason": result.stopped_reason,
-                    "transition_reason": result.transition_reason,
-                    "iterations": result.iterations,
-                }),
-            )
-        except Exception:
-            _LOG.debug("after-turn evolve hook failed", exc_info=True)
 
     def _load_prior_chat_messages(
         self,
@@ -3714,18 +3613,6 @@ class AgentKernel:
                 out.append({"role": "assistant", "content": assistant})
         return out
 
-    @staticmethod
-    def _parse_json_dict(raw: Any) -> dict[str, Any]:
-        if isinstance(raw, dict):
-            return dict(raw)
-        if not isinstance(raw, str) or not raw.strip():
-            return {}
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            return {}
-        return dict(parsed) if isinstance(parsed, dict) else {}
-
     def _after_turn_memory(
         self,
         *,
@@ -3914,92 +3801,6 @@ class AgentKernel:
             except Exception:
                 pass
 
-    def on_session_end(
-        self,
-        *,
-        session_id: str,
-        reason: str = "session_end",
-    ) -> dict[str, Any]:
-        """End-of-session lifecycle hook.
-
-        End-of-session cleanup:
-
-        * fires the registry-level ``after_session`` hook so operator
-          extensions can run cleanup,
-        * compacts the global memory files (TTL pass) so a long chat
-          doesn't snowball ``global.md`` indefinitely,
-        * appends an ``agent.session.end`` record to the journal so
-          the dashboard can show "session closed at ..." with the
-          per-skill invocation counts the session collected.
-
-        Safe to call multiple times — each component swallows its own
-        exceptions so a missing file or unloaded subagent doesn't
-        block the rest of the cleanup.
-        """
-
-        report: dict[str, Any] = {"session_id": session_id, "reason": reason}
-        try:
-            state = self._sessions.load(session_id)
-        except Exception:
-            state = None
-        if state is not None:
-            report["turn_ids"] = list(state.turn_ids)
-            report["invoked_skills"] = list(state.invoked_skills)
-            report["last_action"] = state.last_action
-
-        # 1. Memory compaction — guarded by the same knobs as the
-        #    periodic tick. Always do at least the global pass so
-        #    closing a long session is the natural moment to GC.
-        try:
-            max_age_days = float(
-                self.config.get("agent.native.memory_max_age_days", 30.0)
-            )
-            report["compacted"] = self.memory.compact_all(max_age_days=max_age_days)
-        except Exception as exc:
-            report["compact_error"] = repr(exc)
-
-        # 2. Lifecycle hook — operators can register extra cleanup
-        #    (flush caches, ack queues, …) without touching the kernel.
-        try:
-            self._hooks.fire(
-                "after_session",
-                HookContext(
-                    phase="after_session",
-                    turn_id="",
-                    trigger_event_id=None,
-                    strategy_id=(state.strategy_id if state else None),
-                    session_id=session_id,
-                    data={"reason": reason, "report": report},
-                ),
-            )
-        except Exception as exc:
-            report["hook_error"] = repr(exc)
-
-        # 3. Journal — single record so the dashboard can render
-        #    "session closed (3 skills invoked, 12 turns)" without
-        #    tailing the entire session file.
-        try:
-            jsonl.append(
-                self.config.paths.journal("agent"),
-                {
-                    "kind": "agent.session.end",
-                    "session_id": session_id,
-                    "reason": reason,
-                    "turns": len(report.get("turn_ids", []) or []),
-                    "invoked_skills": list(report.get("invoked_skills", []) or []),
-                },
-            )
-        except Exception:
-            pass
-        try:
-            self._evolution_hooks.on_session_end(
-                session_id=session_id,
-                report=report,
-            )
-        except Exception:
-            _LOG.debug("evolution session hook failed", exc_info=True)
-        return report
-
     def _ensure_registry(self) -> NativeToolDeps:
         if self._deps is not None:
             return self._deps
@@ -4135,6 +3936,7 @@ class AgentKernel:
         attached_skills: Optional[list[str]] = None,
         strategy_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
         user_text: Optional[str] = None,
         frozen_memory_context: Any = None,
     ) -> str:
@@ -4232,11 +4034,16 @@ class AgentKernel:
         rolling_sections.append(_render_temporal_context_block())
         rolling_sections.append(
             _render_turn_focus_block(
-                user_text=user_text,
                 attached_skills=attached_skills,
             )
         )
-        rolling_sections.append(_render_output_language_block(user_text))
+        conversation_file_policy = render_conversation_file_policy(
+            deps.workspace_root,
+            conversation_id or session_id,
+        )
+        if conversation_file_policy:
+            rolling_sections.append(conversation_file_policy)
+        rolling_sections.append(_render_output_language_block())
         rolling_sections.append(_render_permission_mode_block(self.permission_mode))
         if attached_skills:
             rolling_sections.append(

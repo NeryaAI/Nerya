@@ -242,7 +242,7 @@ def _detect_symbols(text: str) -> list[str]:
     # uppercase regex but some 2-3 letter ALL-CAPS words slip through.
     stops = {
         "I", "AM", "OK", "USD", "EUR", "GBP", "JPY", "API", "URL", "JSON",
-        "PRO", "OK", "NEW", "OLD", "TOP", "BUY", "SELL", "BUYS", "ASK", "BID",
+        "PRO", "NEW", "OLD", "TOP", "BUY", "SELL", "BUYS", "ASK", "BID",
     }
     for raw in matches:
         sym = raw.upper()
@@ -265,7 +265,6 @@ def observe_turn(
     client: Any,
     *,
     user_text: str = "",
-    reply_text: str = "",
     channel: str = "chat",
 ) -> dict[str, Any]:
     """Inspect a single turn and possibly propose profile facts.

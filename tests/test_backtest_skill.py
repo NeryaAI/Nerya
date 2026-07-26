@@ -304,12 +304,12 @@ def test_backtest_rejects_unsupported_explicit_market_before_fetch(
     proposal = create_proposal(
         paths,
         kind="strategy_package_proposal",
-        summary="Aster perp cash-and-carry",
+        summary="Unsupported venue cash-and-carry",
         extra_files={
             "after/strategies/aster_cash_carry/strategy.yml": (
                 "strategy_id: aster_cash_carry\n"
                 "markets:\n"
-                "  - aster:BTCUSDT-PERP\n"
+                "  - nohistory:BTCUSDT-PERP\n"
                 "accounts:\n"
                 "  - paper\n"
                 "schedule:\n"

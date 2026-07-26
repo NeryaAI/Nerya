@@ -325,6 +325,7 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/memory/profile/pin", "write:memory", ""),
     RouteRule("POST", "/memory/profile/forget", "write:memory", ""),
     RouteRule("POST", "/memory/profile/rebuild", "write:memory", ""),
+    RouteRule("POST", "/memory/forget", "write:memory", ""),
     # Memory backend installer + tester (Selected backend settings UX)
     RouteRule("POST", "/memory/external/install/run", "admin:ops", ""),
     RouteRule("POST", "/memory/test", "read:runtime", ""),

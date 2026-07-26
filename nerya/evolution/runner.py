@@ -4,10 +4,8 @@ Renders journal evidence + capability snapshots into a fresh
 ``learning_update`` proposal that operators review. Never mutates
 protected scopes; the proposal is the only artifact.
 
-Historically this lived in ``nerya/agent/self_improvement.py`` together
-with the legacy per-turn proposal hook (``maybe_propose_from_turn``).
-The new workspace-native agent loop has no notion of "post-turn
-self-improvement" — proposals are now produced explicitly by an
+The workspace-native agent loop has no implicit "post-turn self-improvement";
+proposals are produced explicitly by an
 operator running ``POST /evolution/reflect`` (``cli.commands.evolution``)
 or by a scheduled trigger. Keeping the runner here untangles it from
 the agent kernel and makes the dependency graph match the ownership

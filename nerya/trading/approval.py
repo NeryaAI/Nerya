@@ -46,8 +46,11 @@ class ApprovalGate:
         aid: str,
         intent: TradeIntent,
         decision: RiskDecision,
+        *,
+        market_snapshot: dict[str, Any] | None = None,
+        plan: Any = None,
     ) -> dict[str, Any]:
-        return {
+        record = {
             "approval_id": aid,
             "kind": "trade_intent",
             "intent_id": intent.intent_id,
@@ -59,14 +62,41 @@ class ApprovalGate:
             "intent": intent.asdict(),
             "risk": decision.asdict(),
         }
+        # Freeze the market snapshot and plan at escalation time so the
+        # resume path can replay against the exact market state the risk
+        # decision was made on (no drift between escalation and approval).
+        if market_snapshot is not None:
+            record["frozen_market_snapshot"] = dict(market_snapshot)
+        if plan is not None:
+            try:
+                record["frozen_plan"] = plan.asdict()
+            except Exception:
+                pass
+        return record
 
-    def require(self, intent: TradeIntent, decision: RiskDecision) -> ApprovalRecord:
+    def require(
+        self,
+        intent: TradeIntent,
+        decision: RiskDecision,
+        *,
+        market_snapshot: dict[str, Any] | None = None,
+        plan: Any = None,
+    ) -> ApprovalRecord:
         expires_s = float(self.config.get("approvals.expire_seconds", 600))
         aid = approval_id()
         repo = ApprovalRepository(self._con_lazy())
         payload = {"intent": intent.asdict(), "risk": decision.asdict()}
+        if market_snapshot is not None:
+            payload["frozen_market_snapshot"] = dict(market_snapshot)
+        if plan is not None:
+            try:
+                payload["frozen_plan"] = plan.asdict()
+            except Exception:
+                pass
         repo.insert(id=aid, kind="trade_intent", expires_s=expires_s, payload=payload)
-        record = self._record_payload(aid, intent, decision)
+        record = self._record_payload(
+            aid, intent, decision, market_snapshot=market_snapshot, plan=plan,
+        )
         jsonl.append(self.config.paths.approvals_pending, record)
         # Fan the new approval out to every configured messaging channel
         # that opted into the approvals topic so operators can resolve it

@@ -34,11 +34,12 @@ and the caller asserts the content has already been redacted.
 from __future__ import annotations
 
 import hashlib
-import json
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from ..core import jsonl
 
 
 def _now_iso() -> str:
@@ -51,28 +52,6 @@ def _queue_file(client) -> Path:
 
 def _hash(text: str) -> str:
     return "sha256:" + hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
-
-
-def _read_all(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            continue
-    return out
-
-
-def _write_all(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def enqueue(
@@ -111,14 +90,11 @@ def enqueue(
         "state": "pending",
     }
     path = _queue_file(client)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return rec
+    return jsonl.append(path, rec, stamp=False)
 
 
 def list_items(client, *, state: Optional[str] = None) -> list[dict[str, Any]]:
-    rows = _read_all(_queue_file(client))
+    rows = jsonl.read_all(_queue_file(client))
     if state:
         rows = [r for r in rows if r.get("state") == state]
     return sorted(rows, key=lambda r: r.get("ts") or "", reverse=True)
@@ -137,7 +113,7 @@ def resolve(
     if decision not in valid:
         raise ValueError(f"invalid decision {decision!r}; expected one of {sorted(valid)}")
     path = _queue_file(client)
-    rows = _read_all(path)
+    rows = jsonl.read_all(path)
     found = None
     for row in rows:
         if row.get("id") == item_id:
@@ -157,12 +133,12 @@ def resolve(
             break
     if found is None:
         raise KeyError(f"prompt_guard item {item_id!r} not found")
-    _write_all(path, rows)
+    jsonl.write_all(path, rows)
     return found
 
 
 def stats(client) -> dict[str, Any]:
-    rows = _read_all(_queue_file(client))
+    rows = jsonl.read_all(_queue_file(client))
     by_state: dict[str, int] = {}
     by_verdict: dict[str, int] = {}
     for row in rows:

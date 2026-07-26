@@ -42,18 +42,16 @@ from ...core.truth import (
     mock_envelope,
     resolve_allow_mock,
 )
-from ...strategy_history import open_session, store as history_store, track_outcome
+from ...strategy_history import store as history_store
 from ...trading.account_snapshots import latest_snapshot
 from ...trading import portfolio as portfolio_mod
 from ...trading.accounts import load_accounts
-from ...core.errors import ApprovalPending
-from ...trading.approval import ApprovalGate
-from ...trading.execution import ExecutionEngine
 from ...trading.intents import TradeIntent
 from ...trading.risk import RiskGate
 from ...trading.strategies import Strategy, list_strategies, load_strategy
 from ...trading.virtual_ledger import open_ledger
 from ...workspace.state_store import StateStore
+from ..tool_errors import schema_validation_result as _usage_error
 from ..types import (
     ToolCall,
     ToolError,
@@ -358,16 +356,6 @@ STRATEGY_HISTORY_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _usage_error(call: ToolCall, message: str) -> ToolResult:
-    return ToolResult.from_error(
-        tool_use_id=call.id,
-        name=call.name,
-        error=ToolError(
-            kind=ToolErrorKind.SCHEMA_VALIDATION, message=message,
-        ),
-    )
 
 
 _TRADE_INTENT_NUMBER_FIELDS = {

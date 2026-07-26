@@ -51,5 +51,21 @@ def test_run_turn_handles_registered_slash_command_without_agent_kernel(tmp_path
     assert result["stopped_reason"] == "command"
     assert result["transition_reason"] == "slash_command"
     assert result["harness"] == "command"
+    assert result["session_id"] == "sess-command"
+    assert result["events"] == []
     assert "Workflows" in result["reply_text"]
     assert "schedule" in result["reply_text"]
+
+
+def test_agent_tools_route_delegates_to_agent_api():
+    expected = {"ok": True, "count": 0, "tools": [], "harness": "native"}
+    client = SimpleNamespace(
+        agent=SimpleNamespace(list_tools=lambda: expected),
+    )
+    handler = next(
+        h
+        for method, path, h in routes_agent.routes()
+        if method == "GET" and path == "/agent/tools"
+    )
+
+    assert handler(client, {}) is expected

@@ -31,6 +31,7 @@ from typing import Any
 
 from ...core.sandbox import sandbox_exec
 from ...security.runtime_env import build_process_env
+from ..tool_errors import schema_validation_result
 from ..types import (
     ContextModifier,
     RiskLevel,
@@ -40,6 +41,7 @@ from ..types import (
     ToolResult,
     ToolResultPart,
 )
+from .conversation_files import conversation_files_dir
 from .paths import (
     WorkspaceEscapeError,
     resolve_workspace_path,
@@ -137,6 +139,16 @@ _SHELL_TEST_OR_BUILD_RE = re.compile(
     r"\b(pytest|ruff|mypy|pyright|npm\s+test|pnpm\s+test|yarn\s+test)\b",
     re.IGNORECASE,
 )
+_SHELL_PROJECT_COMMAND_RE = re.compile(
+    r"\b("
+    r"pytest|mypy|pyright|"
+    r"ruff(?![^\n]*--fix)|"
+    r"(?:npm|pnpm|yarn)\s+(?:(?:run|run-script)\s+)?"
+    r"(?:test|build|lint|typecheck|check)"
+    r")\b",
+    re.IGNORECASE,
+)
+_PARENT_PATH_RE = re.compile(r"(^|[\s\"'=:(])\.\.(?:[/\\]|$)")
 _WORKSPACE_ENUM_RE = re.compile(
     r"(?i)(list\s+workspace|workspace\s+files|workspace\s+root|os\.walk|"
     r"get-childitem|dir\s+.*[/\\]s|ls\s+-la|find\s+.+-name)"
@@ -258,6 +270,7 @@ def _shell_segments(cmd: str) -> list[list[str]]:
 
 def _looks_like_absolute_path_arg(token: str) -> bool:
     text = str(token or "").strip().strip("\"'")
+    text = re.sub(r"^(?:\d*(?:>>?|<<?)|&>)", "", text).strip()
     if not text or text.startswith("-") or _URL_LIKE_RE.match(text):
         return False
     # Windows command switches such as /s or /b are not paths.
@@ -280,20 +293,43 @@ def _absolute_path_escape(cmd: str, *, root: Path) -> str:
     """
 
     root_resolved = Path(root).expanduser().resolve()
+    mutation_context = _shell_may_mutate_files(cmd, _command_heads(cmd))
+
+    def escaped(raw: str) -> bool:
+        text = re.sub(
+            r"^(?:\d*(?:>>?|<<?)|&>)",
+            "",
+            str(raw or "").strip().strip("\"'"),
+        ).strip()
+        if text.lower() in {"/dev/null", "nul"}:
+            return False
+        try:
+            Path(text).expanduser().resolve().relative_to(root_resolved)
+        except ValueError:
+            return True
+        except Exception:
+            return True
+        return False
+
     for segment in _shell_segments(cmd):
         head = Path(segment[0]).name.lower()
-        if head not in _FS_PATH_ACCESS_HEADS:
+        if head not in _FS_PATH_ACCESS_HEADS and not mutation_context:
             continue
         for token in segment[1:]:
             if not _looks_like_absolute_path_arg(token):
                 continue
-            try:
-                candidate = Path(token).expanduser().resolve()
-                candidate.relative_to(root_resolved)
-            except ValueError:
+            if escaped(token):
                 return token
-            except Exception:
-                return token
+
+    if mutation_context:
+        quoted_absolute_path = re.compile(
+            r"(?P<quote>[\"'])(?P<path>(?:~[/\\]|/|[A-Za-z]:[/\\])"
+            r"[^\"'\r\n]+)(?P=quote)"
+        )
+        for match in quoted_absolute_path.finditer(cmd):
+            candidate = match.group("path")
+            if escaped(candidate):
+                return candidate
     return ""
 
 
@@ -403,6 +439,8 @@ def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     """
 
     arguments = arguments or {}
+    if bool(arguments.get("allow_outside_conversation")):
+        return RiskLevel.DANGEROUS
     cmd = str(arguments.get("command") or "")
     if not cmd:
         return RiskLevel.READ
@@ -450,6 +488,61 @@ def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     return RiskLevel.EXEC
 
 
+def _shell_may_mutate_files(cmd: str, heads: list[str]) -> bool:
+    """Conservatively identify shell commands that can change files."""
+
+    without_dev_null = re.sub(
+        r"(?:\d?>|&>)\s*(?:/dev/null|NUL)\b",
+        "",
+        cmd,
+        flags=re.IGNORECASE,
+    )
+    if ">" in without_dev_null or _NETWORK_WRITE_FLAGS_RE.search(cmd):
+        return True
+    if _SHELL_WRITE_TEXT_RE.search(cmd):
+        return True
+    if re.search(r"\b(?:ruff)\b[^\n|;&]*--fix\b", cmd, re.IGNORECASE):
+        return True
+    if _SHELL_PROJECT_COMMAND_RE.search(cmd):
+        return False
+    return any(head in _WRITE_HEADS or head in _DELETE_HEADS for head in heads)
+
+
+def _conversation_cwd_required_result(
+    call: ToolCall,
+    *,
+    conversation_dir: Path,
+    reason: str,
+) -> ToolResult:
+    relative = conversation_dir.as_posix()
+    return ToolResult.from_error(
+        tool_use_id=call.id,
+        name=call.name,
+        error=ToolError(
+            kind=ToolErrorKind.PERMISSION_DENIED,
+            message=(
+                "run_shell was not executed: a file-mutating command in an "
+                "Agent conversation must stay in the conversation directory "
+                f"{relative!r}. {reason} To write elsewhere, set "
+                "allow_outside_conversation=true and provide "
+                "outside_conversation_reason; that exception requires approval."
+            ),
+            retryable=False,
+            detail={
+                "reason": "conversation_file_placement",
+                "conversation_dir": relative,
+            },
+            recovery_hint={
+                "next_required_action": {
+                    "tool": "run_shell",
+                    "cwd": relative,
+                    "reason": "conversation_file_placement",
+                }
+            },
+        ),
+    )
+
+
 def _truncate(s: str, *, limit: int) -> tuple[str, bool]:
     data = s.encode("utf-8", errors="replace")
     if len(data) <= limit:
@@ -464,24 +557,33 @@ def _truncate(s: str, *, limit: int) -> tuple[str, bool]:
     )
 
 
-def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
+def run_shell_handler(
+    call: ToolCall,
+    *,
+    root: Path,
+    session_id: str | None = None,
+) -> ToolResult:
     args = call.arguments or {}
     cmd = args.get("command")
     description = args.get("description") or ""
+    cwd_was_explicit = bool(str(args.get("cwd") or "").strip())
     cwd_arg = args.get("cwd") or "."
+    allow_outside = bool(args.get("allow_outside_conversation", False))
+    outside_reason = str(args.get("outside_conversation_reason") or "").strip()
     timeout_s = args.get("timeout_s") or args.get("timeout") or _DEFAULT_TIMEOUT_S
     background = bool(args.get("background", False))
     output_limit = int(args.get("output_limit") or _DEFAULT_OUTPUT_BYTES)
     output_limit = max(1024, min(output_limit, _MAX_OUTPUT_BYTES))
 
     if not isinstance(cmd, str) or not cmd.strip():
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="run_shell requires a non-empty 'command' string",
-            ),
+        return schema_validation_result(
+            call, "run_shell requires a non-empty 'command' string",
+        )
+    if allow_outside and not outside_reason:
+        return schema_validation_result(
+            call,
+            "outside_conversation_reason is required when "
+            "allow_outside_conversation=true",
         )
     heads = _command_heads(cmd)
     proposal_tool = _proposal_only_shell_tool(cmd, heads)
@@ -571,6 +673,64 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
                 },
             ),
         )
+    conversation_dir: Path | None = None
+    shell_placement = "workspace"
+    mutates_files = _shell_may_mutate_files(cmd, heads)
+    if mutates_files and _PARENT_PATH_RE.search(cmd):
+        if session_id and not allow_outside:
+            return _conversation_cwd_required_result(
+                call,
+                conversation_dir=conversation_files_dir(root, session_id),
+                reason="Parent-directory traversal is not allowed for this command.",
+            )
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.PERMISSION_DENIED,
+                message=(
+                    "run_shell was not executed: parent-directory traversal "
+                    "in a file-mutating command cannot be proven to stay "
+                    "inside the workspace. Use a workspace-rooted path instead."
+                ),
+                retryable=False,
+                detail={"reason": "workspace_sandbox_escape"},
+            ),
+        )
+    if session_id:
+        conversation_dir = conversation_files_dir(root, session_id)
+        if mutates_files and not allow_outside:
+            escaped_conversation_path = _absolute_path_escape(
+                cmd,
+                root=conversation_dir,
+            )
+            if escaped_conversation_path:
+                return _conversation_cwd_required_result(
+                    call,
+                    conversation_dir=conversation_dir,
+                    reason=(
+                        "The command names an absolute path outside the "
+                        f"conversation directory: {escaped_conversation_path!r}."
+                    ),
+                )
+            if not cwd_was_explicit:
+                try:
+                    conversation_dir.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    return ToolResult.from_error(
+                        tool_use_id=call.id,
+                        name=call.name,
+                        error=ToolError(
+                            kind=ToolErrorKind.EXECUTION_ERROR,
+                            message=f"failed to create conversation directory: {exc}",
+                        ),
+                    )
+                cwd_arg = str(conversation_dir)
+                shell_placement = "conversation_reroute"
+            else:
+                shell_placement = "conversation"
+        elif mutates_files and allow_outside:
+            shell_placement = "explicit_exception"
     try:
         timeout_s = float(timeout_s)
     except Exception:
@@ -589,19 +749,28 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
             ),
         )
     if not cwd.is_dir():
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=f"cwd is not a directory: {cwd}",
-            ),
-        )
+        return schema_validation_result(call, f"cwd is not a directory: {cwd}")
+    if (
+        conversation_dir is not None
+        and mutates_files
+        and not allow_outside
+        and cwd_was_explicit
+    ):
+        try:
+            cwd.relative_to(conversation_dir.resolve())
+        except ValueError:
+            return _conversation_cwd_required_result(
+                call,
+                conversation_dir=conversation_dir,
+                reason=f"The requested cwd {to_workspace_relative(cwd, root)!r} is outside it.",
+            )
 
     try:
         env = build_process_env(os.environ, root)
     except Exception:
         env = os.environ.copy()
+    if conversation_dir is not None:
+        env["NERYA_CONVERSATION_DIR"] = str(conversation_dir)
     started = time.monotonic()
     try:
         if background:
@@ -632,10 +801,25 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
                             "pid": pid,
                             "background": True,
                             "description": description,
+                            "placement": shell_placement,
+                            **(
+                                {"outside_conversation_reason": outside_reason}
+                                if outside_reason
+                                else {}
+                            ),
                         }
                     ),
                 ],
-                metadata={"pid": pid, "background": True},
+                metadata={
+                    "pid": pid,
+                    "background": True,
+                    "placement": shell_placement,
+                    **(
+                        {"outside_conversation_reason": outside_reason}
+                        if outside_reason
+                        else {}
+                    ),
+                },
             )
 
         proc = sandbox_exec(
@@ -712,6 +896,12 @@ def run_shell_handler(call: ToolCall, *, root: Path) -> ToolResult:
             "exit_code": exit_code,
             "cwd": to_workspace_relative(cwd, root),
             "description": description,
+            "placement": shell_placement,
+            **(
+                {"outside_conversation_reason": outside_reason}
+                if outside_reason
+                else {}
+            ),
         },
         context_modifiers=[
             ContextModifier(

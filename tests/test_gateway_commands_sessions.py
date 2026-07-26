@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from nerya.agent.session import SessionStore
+from nerya.api import routes_agent
 from nerya.api.gateway_commands import CommandContext, DEFAULT_REGISTRY
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
@@ -86,3 +88,38 @@ def test_session_switch_accepts_db_only_session_and_returns_last_message(tmp_pat
     assert "Last assistant message:" in outcome.reply_text
     assert "last answer from sqlite" in outcome.reply_text
     assert state["active_sessions"] == {"chat-1": "db-only"}
+
+
+def test_gateway_and_agent_routes_share_session_counts(tmp_path):
+    _seed_db_session(tmp_path, session_id="shared")
+    con = connect(tmp_path / "nerya.db")
+    AgentSessionRepository(con).record_message(
+        message_id="shared:followup",
+        session_id="shared",
+        turn_id="shared:followup-turn",
+        role="user",
+        content="one more turn",
+        ts=1003,
+    )
+    con.close()
+    SessionStore(tmp_path).append_turn("shared", "shared:turn")
+    ctx, _state = _ctx(tmp_path)
+    route_map = {(method, path): handler for method, path, handler in routes_agent.routes()}
+
+    listed = route_map[("GET", "/agent/sessions")](
+        ctx.client,
+        {"include": "all"},
+    )["sessions"]
+    detail = route_map[("GET", "/agent/session")](
+        ctx.client,
+        {"session_id": "shared"},
+    )
+    row = next(item for item in listed if item["session_id"] == "shared")
+
+    assert (row["message_count"], row["turn_count"]) == (3, 2)
+    assert (detail["message_count"], detail["turn_count"]) == (3, 2)
+    assert row["source"] == detail["source"] == "dashboard"
+
+    outcome = DEFAULT_REGISTRY.handle("/sessions", ctx)
+    assert "shared" in outcome.reply_text
+    assert "2 turn(s)" in outcome.reply_text

@@ -42,12 +42,8 @@ from ...core.market_defaults import resolve_market_defaults
 from ...core.truth import degraded_envelope, live_envelope
 from ...data.candles import canonical_venue, fetch_candles, fetch_public_ticker
 from ...data.features import compute_features
-from ..types import (
-    ToolCall,
-    ToolError,
-    ToolErrorKind,
-    ToolResult,
-)
+from ..tool_errors import schema_validation_result as _usage_error
+from ..types import ToolCall, ToolResult
 
 
 # ---------------------------------------------------------------------------
@@ -411,17 +407,6 @@ def _credential_missing_payload(
             venue=venue.lower(),
         ).as_dict(),
     }
-
-
-def _usage_error(call: ToolCall, message: str) -> ToolResult:
-    return ToolResult.from_error(
-        tool_use_id=call.id,
-        name=call.name,
-        error=ToolError(
-            kind=ToolErrorKind.SCHEMA_VALIDATION,
-            message=message,
-        ),
-    )
 
 
 def _normalize_market(venue: str, market: str) -> str:

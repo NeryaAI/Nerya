@@ -62,6 +62,14 @@ def _call_meta(call: ToolCall, key: str) -> Any:
     return meta.get(key)
 
 
+def _schema_error(call: ToolCall, message: str) -> ToolResult:
+    return ToolResult.from_error(
+        tool_use_id=call.id,
+        name=call.name,
+        error=ToolError(kind=ToolErrorKind.SCHEMA_VALIDATION, message=message),
+    )
+
+
 def _build_inline_role_spec(
     config: Config,
     *,
@@ -342,17 +350,6 @@ def _native_team_run_report(summary: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def _public_team_completion_label(status: str) -> str:
-    normalized = str(status or "").strip().lower()
-    if normalized in {"completed", "ok", "success"}:
-        return "completed"
-    if normalized in {"completed_with_failures", "partial", "degraded"}:
-        return "partial"
-    if normalized in {"failed", "error", "timeout"}:
-        return "failed"
-    return "partial"
-
-
 def _public_team_parse_jsonish(value: Any, *, depth: int = 0) -> Any:
     if depth >= 5:
         return value
@@ -506,38 +503,6 @@ def _public_team_failure_line(row: dict[str, Any]) -> str:
     return f"### {role}\n{detail}"
 
 
-def _resolve_team_template(
-    *,
-    requested: str,
-    role_names: list[str],
-    task: str = "",
-) -> str:
-    requested = (requested or "").strip()
-    del role_names, task
-    if requested:
-        return requested
-    return "ad_hoc_parallel_team"
-
-
-def _required_template_roles(template_id: str) -> list[str]:
-    template = get_template(template_id)
-    if template is None:
-        return []
-    roles: list[str] = []
-    for member in template.members:
-        if not member.required:
-            continue
-        role_name = str(
-            member.subagent_name
-            or member.role
-            or member.name
-            or ""
-        ).strip()
-        if role_name and role_name not in roles:
-            roles.append(role_name)
-    return roles
-
-
 _TEAM_RUN_TURN_CACHE_MAX = 128
 _TEAM_RUN_TURN_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _TEAM_RUN_TURN_CACHE_ORDER: list[tuple[str, str]] = []
@@ -678,7 +643,6 @@ def _explicit_output_language(value: Any) -> str | None:
 def _resolve_team_output_language(
     *,
     args: dict[str, Any],
-    task: str,
     raw_roles: list[Any],
     shared_payload: dict[str, Any],
 ) -> str:
@@ -903,23 +867,17 @@ def _effective_team_timeout_seconds(
             candidates.append(parsed)
     auto_floor = _team_timeout_floor_seconds(args)
     if not candidates:
-        try:
-            configured = config.get("agent.team_run.timeout_s", 300)
-        except Exception:
-            configured = 300
+        configured = _config_get(config, "agent.team_run.timeout_s", 300)
         parsed = _parse_duration_seconds(configured, allow_bare_number=True)
         if parsed is not None:
             candidates.append(parsed)
     if not candidates:
         candidates.append(300.0)
     timeout = max(30.0, max(auto_floor, min(candidates)))
-    try:
-        max_timeout = _parse_duration_seconds(
-            config.get("agent.team_run.max_timeout_s", 900),
-            allow_bare_number=True,
-        )
-    except Exception:
-        max_timeout = 900.0
+    max_timeout = _parse_duration_seconds(
+        _config_get(config, "agent.team_run.max_timeout_s", 900),
+        allow_bare_number=True,
+    )
     timeout = min(timeout, max_timeout or 900.0)
     return _apply_parent_wall_budget_cap(
         timeout,
@@ -936,7 +894,7 @@ def _team_timeout_floor_seconds(args: dict[str, Any]) -> float:
         return 0.0
     try:
         workers = max(1, int(args.get("max_parallel") or 4))
-    except Exception:
+    except (TypeError, ValueError):
         workers = 4
     workers = max(1, min(workers, role_count))
     waves = max(1, (role_count + workers - 1) // workers)
@@ -991,16 +949,13 @@ def _config_get(config: Config, key: str, default: Any = None) -> Any:
     getter = getattr(config, "get", None)
     if not callable(getter):
         return default
-    try:
-        return getter(key, default)
-    except Exception:
-        return default
+    return getter(key, default)
 
 
 def _positive_int(value: Any) -> int | None:
     try:
         parsed = int(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
 
@@ -1009,10 +964,7 @@ def _team_template_parallel_limit(team_template: str) -> int | None:
     template_id = str(team_template or "").strip()
     if not template_id:
         return None
-    try:
-        template = get_template(template_id)
-    except Exception:
-        template = None
+    template = get_template(template_id)
     if template is None:
         return None
     return _positive_int(getattr(template, "max_parallel", None))
@@ -1339,29 +1291,6 @@ def _coerce_roles_arg(raw_roles: Any, *, args: dict[str, Any] | None = None) -> 
     return roles
 
 
-def _roles_arg_explicitly_supplied(args: dict[str, Any]) -> bool:
-    raw_roles = args.get("roles")
-    if isinstance(raw_roles, list):
-        return bool(raw_roles)
-    if isinstance(raw_roles, str) and raw_roles.strip():
-        try:
-            parsed = json.loads(raw_roles)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            return bool(parsed)
-        if isinstance(parsed, dict) and isinstance(parsed.get("roles"), list):
-            return bool(parsed["roles"])
-        if isinstance(parsed, dict) and _collect_role_payloads(parsed.get("role_payloads")):
-            return True
-    return bool(
-        _collect_role_payloads(args.get("role_payloads"))
-        or _collect_provider_wrapped_roles(args.get("item"))
-        or _collect_provider_wrapped_roles(args.get("items"))
-        or _collect_raw_roles(args.get("_raw") or args.get("raw"))
-    )
-
-
 def _coerce_raw_args(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -1372,13 +1301,6 @@ def _coerce_raw_args(value: Any) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
-
-
-def _collect_raw_roles(value: Any) -> list[Any]:
-    raw_args = _coerce_raw_args(value)
-    if not raw_args:
-        return []
-    return _coerce_roles_arg(raw_args.get("roles"), args=raw_args)
 
 
 def _collect_role_payloads(value: Any) -> list[dict[str, Any]]:
@@ -1560,14 +1482,7 @@ def subagent_run_handler(
     args = call.arguments or {}
     name = (args.get("name") or "").strip()
     if not name:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="name is required",
-            ),
-        )
+        return _schema_error(call, "name is required")
     payload = args.get("payload") if isinstance(args.get("payload"), dict) else {}
     strategy_id = args.get("strategy_id") or _call_meta(call, "strategy_id") or None
     session_id = args.get("session_id") or _call_meta(call, "session_id") or None
@@ -1868,28 +1783,14 @@ def team_run_handler(
     args = call.arguments or {}
     task = (args.get("task") or "").strip()
     if not task:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="task is required (one-line shared mission)",
-            ),
-        )
+        return _schema_error(call, "task is required (one-line shared mission)")
 
-    roles_explicitly_supplied = _roles_arg_explicitly_supplied(args)
     raw_roles = _coerce_roles_arg(args.get("roles"), args=args)
     if not isinstance(raw_roles, list) or not raw_roles:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=(
-                    "roles must be a non-empty array of objects, e.g. "
-                    "[{\"name\":\"market_analyst\"}, {\"name\":\"risk_critic\"}]"
-                ),
-            ),
+        return _schema_error(
+            call,
+            "roles must be a non-empty array of objects, e.g. "
+            "[{\"name\":\"market_analyst\"}, {\"name\":\"risk_critic\"}]",
         )
 
     shared_payload = args.get("shared_payload") if isinstance(
@@ -1897,7 +1798,6 @@ def team_run_handler(
     ) else {}
     output_language = _resolve_team_output_language(
         args=args,
-        task=task,
         raw_roles=raw_roles,
         shared_payload=shared_payload,
     )
@@ -1919,12 +1819,6 @@ def team_run_handler(
         or _call_meta(call, "trigger_event_id")
         or None
     )
-    max_parallel = args.get("max_parallel")
-    if max_parallel is not None:
-        try:
-            max_parallel = max(1, int(max_parallel))
-        except Exception:
-            max_parallel = None
     team_run_id = str(args.get("team_run_id") or "").strip()
     if not team_run_id:
         team_run_id = f"team-{uuid.uuid4().hex[:10]}"
@@ -1937,33 +1831,12 @@ def team_run_handler(
     inline_specs: dict[str, Any] = {}
     for entry in raw_roles:
         if not isinstance(entry, dict):
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=call.name,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message="roles[*] must be objects",
-                ),
-            )
+            return _schema_error(call, "roles[*] must be objects")
         role_name = (entry.get("name") or "").strip()
         if not role_name:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=call.name,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message="roles[*].name is required",
-                ),
-            )
+            return _schema_error(call, "roles[*].name is required")
         if role_name in role_names:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=call.name,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message=f"duplicate role: {role_name!r}",
-                ),
-            )
+            return _schema_error(call, f"duplicate role: {role_name!r}")
         role_names.append(role_name)
         merged = dict(shared_payload or {})
         per_role = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
@@ -1997,47 +1870,6 @@ def team_run_handler(
             role_name=role_name,
             payload=merged,
             instructions=instructions,
-            output_language=output_language,
-            analysis_language=analysis_language,
-        )
-
-    requested_team_template = team_template
-    team_template = _resolve_team_template(
-        requested=requested_team_template,
-        role_names=role_names,
-        task=task,
-    )
-    if (
-        team_template == "market_analysis_team"
-        and requested_team_template == "market_analysis_team"
-        and not roles_explicitly_supplied
-    ):
-        existing_roles = {name.lower() for name in role_names}
-        for required_role in _required_template_roles(team_template):
-            if required_role.lower() in existing_roles:
-                continue
-            role_names.append(required_role)
-            existing_roles.add(required_role.lower())
-            merged = dict(shared_payload or {})
-            merged.setdefault("output_language", output_language)
-            merged.setdefault("analysis_language", analysis_language)
-            if original_user_prompt:
-                merged.setdefault("original_user_prompt", original_user_prompt)
-            merged["__team_task"] = task
-            merged["team_run_id"] = team_run_id
-            merged["team_template"] = team_template
-            merged["team_call_id"] = call.id
-            merged["task_id"] = f"role-{required_role}"
-            merged["task_owner"] = required_role
-            merged["task_subject"] = task
-            role_payloads[required_role] = merged
-    for role_name in role_names:
-        role_payloads[role_name]["team_template"] = team_template
-        role_assignment_prompts[role_name] = _team_assignment_prompt(
-            task=task,
-            role_name=role_name,
-            payload=role_payloads[role_name],
-            instructions=str(role_payloads[role_name].get("__team_instructions") or ""),
             output_language=output_language,
             analysis_language=analysis_language,
         )
@@ -2087,7 +1919,7 @@ def team_run_handler(
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     workers = _effective_team_workers(
-        args={**args, "max_parallel": max_parallel},
+        args=args,
         config=config,
         role_count=len(role_names),
         team_template=team_template,
@@ -2321,8 +2153,8 @@ def team_run_handler(
     }
     _publish_team_event(
         "team.end",
-        ok=not failures,
-        status="completed" if not failures else "completed_with_failures",
+        ok=summary["ok"],
+        status=status,
         roles_succeeded=summary["roles_succeeded"],
         roles_failed=summary["roles_failed"],
         tokens_total=summary["tokens_total"],
@@ -2374,14 +2206,7 @@ def role_get_handler(
     args = call.arguments or {}
     name = (args.get("name") or "").strip()
     if not name:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="name is required",
-            ),
-        )
+        return _schema_error(call, "name is required")
     record = describe_role(config.paths, name)
     if record is None:
         # No saved/default role matched. Instead of hard-failing with
@@ -2445,14 +2270,7 @@ def role_save_handler(
             tier=args.get("tier"),
         )
     except (ValueError, OSError) as exc:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=str(exc),
-            ),
-        )
+        return _schema_error(call, str(exc))
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
@@ -2468,25 +2286,11 @@ def role_delete_handler(
     args = call.arguments or {}
     name = (args.get("name") or "").strip()
     if not name:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="name is required",
-            ),
-        )
+        return _schema_error(call, "name is required")
     try:
         deleted = delete_role(config.paths, name)
     except ValueError as exc:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=str(exc),
-            ),
-        )
+        return _schema_error(call, str(exc))
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,

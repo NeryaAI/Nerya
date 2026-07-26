@@ -5,14 +5,20 @@ import json
 import re
 import threading
 import traceback
-from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import Any
 
 from ..agent.attachments import upload_chat_attachments
-from ..agent.kernel import AgentKernel
+from ..agent.kernel import AgentKernel, AgentTurnResult
 from ..agent.recovery import list_open_turns, load_turn_state
-from ..agent.session import SessionStore
+from ..agent.session import (
+    SessionStore,
+    db_session_asdict,
+    file_session_asdict,
+    hydrate_db_session_counts,
+    merge_session_dict,
+    session_updated_ts,
+)
 from ..core import jsonl
 from ..observability.trace import build_trace, explain_trace
 from .gateway_commands import CommandContext, DEFAULT_REGISTRY
@@ -163,111 +169,37 @@ def _run_turn_command_response(client: Any, payload: dict[str, Any], user_text: 
     if not outcome.handled:
         return None
     reply = outcome.reply_text
-    return {
-        "trigger_event_id": trigger.get("id") or trigger.get("event_id"),
-        "decision": {"action": "send_message", "text": reply, "command": outcome.command},
-        "actions": [{"action": "send_message", "payload": {"text": reply, "command": outcome.command}}],
-        "tool_trace": [],
-        "budget": {"iterations": 0, "tool_calls": 0, "errors": 0, "aborted": False, "transition_reason": "slash_command"},
-        "reply_text": reply,
-        "events": [],
-        "turn_id": str(payload.get("turn_id") or ""),
-        "stopped_reason": "command",
-        "transition_reason": "slash_command",
-        "final_text": reply,
-        "iterations": 0,
-        "steps": [],
-        "blocks": [],
-        "activity_events": [],
-        "harness": "command",
-        "artifact_index": {},
-        "verifier_outcome": {},
-        "execution_state": {},
-        "final_report": {},
-        "attachments": [],
-        "command": outcome.command,
-    }
-
-
-def _iso_from_db_ts(value: Any) -> str:
-    try:
-        ts = float(value)
-    except Exception:
-        return ""
-    if ts <= 0:
-        return ""
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
+    result = AgentTurnResult(
+        trigger_event_id=trigger.get("id") or trigger.get("event_id"),
+        strategy_id=payload.get("strategy_id"),
+        session_id=payload.get("session_id"),
+        turn_id=str(payload.get("turn_id") or ""),
+        decision={"action": "send_message", "text": reply, "command": outcome.command},
+        actions=[{
+            "action": "send_message",
+            "payload": {"text": reply, "command": outcome.command},
+        }],
+        budget={
+            "iterations": 0,
+            "tool_calls": 0,
+            "errors": 0,
+            "aborted": False,
+            "transition_reason": "slash_command",
+        },
+        stopped_reason="command",
+        transition_reason="slash_command",
+        final_text=reply,
+        harness="command",
+    )
+    return {**result.asdict(), "command": outcome.command}
 
 
 def _parse_meta_json(raw: Any) -> dict[str, Any]:
     try:
         meta = json.loads(str(raw or "{}"))
-    except Exception:
-        meta = {}
+    except (TypeError, ValueError):
+        return {}
     return meta if isinstance(meta, dict) else {}
-
-
-def _db_session_asdict(row: dict[str, Any]) -> dict[str, Any]:
-    title = str(row.get("title") or "").strip()
-    meta = _parse_meta_json(row.get("meta_json"))
-    if title and not meta.get("title"):
-        meta["title"] = title
-        meta.setdefault("title_source", "db")
-    try:
-        message_count = int(row.get("message_count") or 0)
-    except Exception:
-        message_count = 0
-    return {
-        "session_id": str(row.get("session_id") or ""),
-        "strategy_id": row.get("strategy_id"),
-        "created_at": _iso_from_db_ts(row.get("created_at")),
-        "updated_at": _iso_from_db_ts(row.get("updated_at")),
-        "turn_ids": [],
-        "invoked_skills": [],
-        "skill_state": {},
-        "last_action": None,
-        "meta": meta,
-        "source": row.get("source") or "",
-        "message_count": max(0, message_count),
-    }
-
-
-def _merge_session_dict(file_state: dict[str, Any], db_row: dict[str, Any] | None) -> dict[str, Any]:
-    if not db_row:
-        return file_state
-    db_state = _db_session_asdict(db_row)
-    merged = dict(db_state)
-    merged.update(file_state)
-    file_meta = file_state.get("meta") if isinstance(file_state.get("meta"), dict) else {}
-    db_meta = db_state.get("meta") if isinstance(db_state.get("meta"), dict) else {}
-    meta = {**db_meta, **file_meta}
-    if not meta.get("title") and db_meta.get("title"):
-        meta["title"] = db_meta["title"]
-    merged["meta"] = meta
-    if not merged.get("created_at"):
-        merged["created_at"] = db_state.get("created_at") or ""
-    if _session_updated_ts(db_state) > _session_updated_ts(file_state):
-        merged["updated_at"] = db_state.get("updated_at") or merged.get("updated_at")
-    if not merged.get("source"):
-        merged["source"] = db_state.get("source") or ""
-    merged["message_count"] = max(
-        int(merged.get("message_count") or 0),
-        int(db_state.get("message_count") or 0),
-    )
-    return merged
-
-
-def _session_updated_ts(session: dict[str, Any]) -> float:
-    raw = session.get("updated_at")
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    text = str(raw or "").strip()
-    if not text:
-        return 0.0
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
 
 
 def _truthy_query(value: Any) -> bool:
@@ -557,206 +489,10 @@ def normalise_trigger_payload(payload):
     return {}
 
 
-def _payload_text(payload) -> str:
-    """Pull human-visible text out of a ``send_message`` payload.
+def agent_reply_text(result: AgentTurnResult) -> str:
+    """Return the canonical workspace-native assistant response."""
 
-    We accept three nesting shapes here because the LLM sometimes wraps
-    the real payload in another ``payload`` envelope (mirroring the
-    ``payload=<shape>`` style we render in the action catalog). Without
-    this, a perfectly good Chinese/English reply at
-    ``payload.payload.text`` would be discarded and the kernel would
-    fall back to "I could not produce a reply for that turn.".
-    """
-    if not isinstance(payload, dict):
-        return ""
-    for key in ("text", "message", "reply", "body", "title"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    inner = payload.get("payload")
-    if isinstance(inner, dict):
-        for key in ("text", "message", "reply", "body", "title"):
-            value = inner.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return ""
-
-
-def _summarise_action_result(action) -> str:
-    if not isinstance(action, dict):
-        return ""
-    name = action.get("action")
-    result = action.get("result") if isinstance(action.get("result"), dict) else {}
-    if name == "create_strategy" and result:
-        return (
-            f"Created strategy `{result.get('strategy_id')}` "
-            f"with status `{result.get('status')}`."
-        )
-    if name == "set_strategy_status" and result:
-        return f"Set strategy `{result.get('strategy_id')}` to `{result.get('status')}`."
-    if name == "propose_script" and result:
-        return (
-            f"Proposed script `{result.get('script_id')}` "
-            f"as `{result.get('state')}`."
-        )
-    if name == "create_subagent" and result:
-        return f"Created subagent `{result.get('name')}` ({result.get('state')})."
-    if name == "add_schedule" and result:
-        entry = result.get("entry") if isinstance(result.get("entry"), dict) else {}
-        return (
-            f"Added schedule `{result.get('id')}` for `{entry.get('kind')}` "
-            f"({result.get('state')})."
-        )
-    if name == "explain_turn" and result:
-        stages = result.get("stages") if isinstance(result.get("stages"), dict) else {}
-        return (
-            f"Loaded trace for turn `{result.get('turn_id')}`: "
-            f"{len(stages)} stage(s), {len(result.get('degradations') or [])} degradation(s)."
-        )
-    return ""
-
-
-def _summarise_actions(actions) -> str:
-    lines = [_summarise_action_result(a) for a in (actions or [])]
-    lines = [line for line in lines if line]
-    return "\n".join(f"- {line}" for line in lines)
-
-
-def _decision_payload_text(decision) -> str:
-    """Pull human text from a decision dict when no tool actually fired.
-
-    Some LLM responses (notably structured-output adapters that wrap
-    the model's JSON in an envelope) arrive as
-    ``{"raw": "<json string>"}``. The parsed JSON inside still has a
-    perfectly valid ``payload.text`` we should surface — otherwise the
-    operator sees the canned "I could not produce a reply" fallback
-    even though the model gave a complete answer.
-
-    This helper tries, in order:
-
-    1. ``decision["payload"]["text"]`` (and aliases).
-    2. ``json.loads(decision["raw"])`` and the same payload mining.
-    3. Anywhere ``payload.payload.text`` is nested inside the payload.
-    """
-
-    if not isinstance(decision, dict):
-        return ""
-    payload = decision.get("payload")
-    text = _payload_text(payload)
-    if text:
-        return text
-    raw = decision.get("raw")
-    if isinstance(raw, str) and raw.strip().startswith("{"):
-        try:
-            import json as _json
-            parsed = _json.loads(raw)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, dict):
-            text = _payload_text(parsed.get("payload"))
-            if text:
-                return text
-            for key in ("text", "message", "reply"):
-                value = parsed.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-    return ""
-
-
-def agent_reply_text(result) -> str:
-    """Best-effort human text extraction from an agent turn result.
-
-    Order of preference:
-
-    1. ``result.final_text`` — the workspace-native loop's terminal
-       assistant text (the model's answer at ``stop_reason == end_turn``).
-    2. The last ``send_message`` payload in ``result.tool_trace`` — for
-       skill bridges that route the answer through the legacy
-       ``message`` skill.
-    3. Decision-level fallbacks (legacy harness shapes).
-
-    ``reasoning`` explains why the model chose tools; we never surface
-    it as the chat reply when tools actually ran, to avoid leaking
-    chain-of-thought into operator-facing surfaces.
-    """
-
-    final_text = getattr(result, "final_text", "")
-    if isinstance(final_text, str) and final_text.strip():
-        return final_text.strip()
-    decision = result.decision or {}
-    last_send_text = ""
-    for rec in result.tool_trace or []:
-        if (
-            isinstance(rec, dict)
-            and (rec.get("skill_id") or rec.get("skill")) == "message"
-            and rec.get("action") == "send_message"
-        ):
-            text = _payload_text(rec.get("payload"))
-            if text:
-                last_send_text = text
-    if last_send_text:
-        return last_send_text
-    for key in ("text", "message", "reply"):
-        value = decision.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    # Decision-level send_message: the model emitted a fully-formed
-    # ``{"action":"send_message", "payload":{"text":...}}`` but no
-    # tool actually ran (some structured-output adapters route the
-    # whole envelope into ``decision.raw`` and leave the action lane
-    # empty). The user's reply text still lives there — surface it.
-    decision_text = _decision_payload_text(decision)
-    if decision_text:
-        return decision_text
-    # Only mine ``send_message`` action records for reply text. Reading
-    # ``result.text`` from arbitrary read-only actions (``recall``,
-    # ``list_messages``, ``get_social_signals``, ...) used to leak raw
-    # memory snapshots / past trace dumps into the operator-visible reply
-    # whenever the LLM forgot to wrap its answer in ``send_message``.
-    for action in result.actions or []:
-        if not isinstance(action, dict):
-            continue
-        if action.get("action") != "send_message":
-            continue
-        for key in ("text", "message", "reply"):
-            value = action.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        result_obj = action.get("result")
-        if isinstance(result_obj, dict):
-            for key in ("text", "message", "reply"):
-                value = result_obj.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-    action_summary = _summarise_actions(result.actions)
-    if action_summary:
-        return action_summary
-    # Special case: an explicit ``noop`` decision with no executed actions
-    # is the LLM saying "nothing to do" — its ``reasoning`` is the only
-    # operator-facing payload it produced and is safe to surface (the
-    # rule below about not leaking chain-of-thought applies to *tool*
-    # turns, where reasoning is internal commentary). Without this
-    # fallback, ``/agent/run_turn`` returns "I could not produce a reply"
-    # whenever an LLM explicitly says noop, which is wrong.
-    if (
-        not result.actions
-        and not result.tool_trace
-        and isinstance(decision, dict)
-        and str(decision.get("action") or "").strip() == "noop"
-    ):
-        reasoning = decision.get("reasoning")
-        if isinstance(reasoning, str) and reasoning.strip():
-            return reasoning.strip()
-    # Intentionally do NOT fall back to ``decision.get("reasoning")`` for
-    # tool-running turns. ``reasoning`` is the model's internal
-    # chain-of-thought (e.g. "the user asks for X, we should answer
-    # concisely ...") — surfacing it as the chat reply leaks
-    # meta-commentary to operators. When the turn ends without a real
-    # ``send_message`` payload, the kernel sets ``stopped_reason``
-    # (typically ``needs_summarisation`` or ``max_iterations``) so
-    # callers can show a "no reply yet" state and decide whether to
-    # nudge the agent for a follow-up.
-    return "I could not produce a reply for that turn."
+    return result.final_text.strip()
 
 
 def routes():
@@ -806,6 +542,7 @@ def routes():
         return raw[:160]
 
     def run_turn(client, payload):
+        payload = payload if isinstance(payload, dict) else {}
         # Permission mode resolution order (most → least specific):
         # explicit payload field, env override, default. Env override
         # ``NERYA_PERMISSION_MODE`` exists so headless / unattended runs
@@ -817,7 +554,7 @@ def routes():
         from ..tools.permissions import PermissionMode as _PM
         _turn_started_at = _time.time()
         raw = (
-            (payload.get("permission_mode") if isinstance(payload, dict) else None)
+            payload.get("permission_mode")
             or _os.environ.get("NERYA_PERMISSION_MODE")
             or client.config.get("runtime.permission_mode")
             or "default"
@@ -828,14 +565,8 @@ def routes():
             pmode = _PM.DEFAULT
         reasoning_effort = _normalise_reasoning_effort(
             payload.get("reasoning_effort")
-            if isinstance(payload, dict)
-            else None
         )
-        reasoning_summary_raw = (
-            payload.get("reasoning_summary")
-            if isinstance(payload, dict)
-            else None
-        )
+        reasoning_summary_raw = payload.get("reasoning_summary")
         reasoning_summary = (
             str(reasoning_summary_raw).strip().lower()
             if reasoning_summary_raw is not None
@@ -937,33 +668,7 @@ def routes():
                     "trace": tb.splitlines()[-20:],
                 })
                 raise
-        # The workspace-native loop emits :class:`BlockEnvelope`
-        # transcripts; ``steps`` and ``blocks`` carry the same payload
-        # so old clients pointed at ``steps`` keep working while the
-        # canonical name is ``blocks``.
-        response = {
-            "trigger_event_id": result.trigger_event_id,
-            "decision": result.decision,
-            "actions": result.actions,
-            "tool_trace": result.tool_trace,
-            "budget": result.budget,
-            "reply_text": agent_reply_text(result),
-            "events": turn_events(result),
-            "turn_id": result.turn_id,
-            "stopped_reason": result.stopped_reason,
-            "transition_reason": getattr(result, "transition_reason", None),
-            "final_text": getattr(result, "final_text", ""),
-            "iterations": getattr(result, "iterations", 0),
-            "steps": list(result.steps or []),
-            "blocks": list(result.blocks or []),
-            "activity_events": list(getattr(result, "activity_events", []) or []),
-            "harness": getattr(result, "harness", "native"),
-            "artifact_index": dict(getattr(result, "artifact_index", {}) or {}),
-            "verifier_outcome": dict(getattr(result, "verifier_outcome", {}) or {}),
-            "execution_state": dict(getattr(result, "execution_state", {}) or {}),
-            "final_report": dict(getattr(result, "final_report", {}) or {}),
-            "attachments": list(getattr(result, "attachments", []) or []),
-        }
+        response = result.asdict(events=turn_events(result))
         # Surface the prompt-guard verdict on review (block already short-
         # circuited above). Operators see this in the dashboard turn detail.
         if _pg and _pg.get("verdict") in ("review", "block"):
@@ -982,7 +687,6 @@ def routes():
             _capture = _observe_turn(
                 client,
                 user_text=_user_text or "",
-                reply_text=response.get("reply_text") or "",
                 channel=str(_channel_for_capture),
             )
             if _capture and _capture.get("proposed"):
@@ -1168,10 +872,7 @@ def routes():
         include_mode = str(q.get("include") or "").strip().lower()
         chat_only = include_mode != "all" and not strategy_id
         states = [
-            {
-                **s.asdict(),
-                "message_count": max(0, len(s.turn_ids) * 2),
-            }
+            file_session_asdict(s)
             for s in store.list(strategy_id=strategy_id, limit=fetch_limit)
         ]
         by_id = {str(s.get("session_id") or ""): dict(s) for s in states}
@@ -1184,6 +885,7 @@ def routes():
                 limit=fetch_limit,
             )
             con.close()
+            rows = hydrate_db_session_counts(client.config.paths, rows)
             for row in rows:
                 if strategy_id and row.get("strategy_id") != strategy_id:
                     continue
@@ -1191,16 +893,16 @@ def routes():
                 if not sid:
                     continue
                 if sid in by_id:
-                    by_id[sid] = _merge_session_dict(by_id[sid], row)
+                    by_id[sid] = merge_session_dict(by_id[sid], row)
                 else:
-                    by_id[sid] = _db_session_asdict(row)
+                    by_id[sid] = db_session_asdict(row)
         except Exception:
             pass
         sessions = list(by_id.values())
         if chat_only:
             sessions = [s for s in sessions if _is_chat_session(s)]
         sessions.sort(
-            key=_session_updated_ts,
+            key=session_updated_ts,
             reverse=True,
         )
         page = sessions[offset:offset + limit]
@@ -1226,13 +928,15 @@ def routes():
             con = connect(client.config.paths.db)
             db_row = AgentSessionRepository(con).get_session(str(sid))
             con.close()
+            if db_row:
+                db_row = hydrate_db_session_counts(client.config.paths, [db_row])[0]
         except Exception:
             db_row = None
         if state is None:
             if db_row:
-                return _db_session_asdict(db_row)
+                return db_session_asdict(db_row)
             return {"error": "session not found", "session_id": sid}
-        return _merge_session_dict(state.asdict(), db_row)
+        return merge_session_dict(state, db_row)
 
     def session_delete(client, payload):
         sid = (payload or {}).get("session_id")
@@ -1487,7 +1191,7 @@ def routes():
             con.close()
         except Exception:
             db_row = None
-        db_state = _db_session_asdict(db_row) if db_row else {}
+        db_state = db_session_asdict(db_row) if db_row else {}
         db_meta = db_state.get("meta") if isinstance(db_state.get("meta"), dict) else {}
         state_meta = state.meta if state else {}
         return {
@@ -1605,73 +1309,7 @@ def routes():
         return {"ok": True, "steered": steered, "session_id": str(sid)}
 
     def tool_registry(client, _payload):
-        """GET /agent/tools — enumerate native tools.
-
-        Builds an ephemeral :class:`ToolRegistry` with the native
-        bootstrap so the dashboard can show every tool the workspace-
-        native loop is allowed to call, with risk / scope / provenance
-        metadata. The registry is rebuilt per-call so it always reflects
-        the live config (hot-loaded user skills, MCP-registered tools,
-        etc.).
-        """
-
-        from pathlib import Path as _Path
-
-        from ..agent.file_state import FileStateCache
-        from ..tools import ToolRegistry
-        from ..tools.native import build_native_tool_deps, register_native_tools
-
-        registry = ToolRegistry()
-        try:
-            workspace_root = _Path(client.config.paths.root)
-        except Exception:
-            workspace_root = _Path.cwd()
-
-        skill_roots: list[_Path] = []
-        try:
-            for entry in client.skills.registry.list():
-                root = getattr(entry, "skill_dir", None) or getattr(entry, "path", None)
-                if root:
-                    skill_roots.append(_Path(str(root)).parent)
-        except Exception:
-            pass
-
-        deps = build_native_tool_deps(
-            workspace_root=workspace_root,
-            skill_roots=skill_roots,
-            file_state=FileStateCache(),
-            paths=client.config.paths,
-            config=client.config,
-            skills=client.skills,
-        )
-        register_native_tools(registry, deps)
-
-        items = []
-        for descriptor in registry.list_tools():
-            items.append({
-                "name": descriptor.name,
-                "description": descriptor.description,
-                "namespace": descriptor.namespace,
-                "risk": getattr(descriptor.risk, "value", str(descriptor.risk)),
-                "permission_scope": getattr(
-                    descriptor.permission_scope, "value", str(descriptor.permission_scope)
-                ),
-                "read_only": bool(descriptor.read_only),
-                "is_concurrency_safe": bool(descriptor.is_concurrency_safe),
-                "requires_fresh_read": bool(descriptor.requires_fresh_read),
-                "mutates_paths": bool(descriptor.mutates_paths),
-                "result_kind": descriptor.result_kind,
-                "auto_approve": bool(descriptor.auto_approve),
-                "tags": list(descriptor.tags or []),
-                "input_schema": dict(descriptor.input_schema or {}),
-            })
-        items.sort(key=lambda r: (r["namespace"], r["name"]))
-        return {
-            "ok": True,
-            "count": len(items),
-            "tools": items,
-            "harness": "native",
-        }
+        return client.agent.list_tools()
 
     return [
         ("POST", "/agent/run_turn", run_turn),

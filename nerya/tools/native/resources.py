@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..resources import ResourceIndex
+from ..tool_errors import schema_validation_result
 from ..types import (
     ToolCall,
     ToolError,
@@ -76,14 +77,7 @@ def resource_read_handler(
     args = call.arguments or {}
     uri = (args.get("uri") or "").strip()
     if not uri:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="uri is required",
-            ),
-        )
+        return schema_validation_result(call, "uri is required")
     try:
         body = index.fetch(uri)
     except KeyError:

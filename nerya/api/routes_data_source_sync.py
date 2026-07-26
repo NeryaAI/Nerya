@@ -14,7 +14,6 @@ operator envelope so the dashboard renders them uniformly.
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..data_sources import sync_state as ss
 from ..runtime import feature_flags as ff

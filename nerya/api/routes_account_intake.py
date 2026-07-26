@@ -46,7 +46,6 @@ Credential schema lookup
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..security.secret_buffer import get_default_buffer
 from ..trading import account_intake as intake_mod

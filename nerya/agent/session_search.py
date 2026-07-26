@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from ..core import jsonl
 from . import session_search_fts
 
 
@@ -72,23 +73,13 @@ class SessionEvent:
 
 
 def _iter_journal(path: Path, journal: str) -> Iterable[SessionEvent]:
-    if not path.exists():
-        return []
-    out: list[SessionEvent] = []
     try:
-        text = path.read_text(encoding="utf-8")
+        rows = jsonl.read_all(path)
     except OSError:
         return []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(row, dict):
-            continue
+    out: list[SessionEvent] = []
+    for row in rows:
+        text = json.dumps(row, default=str, ensure_ascii=False)
         out.append(SessionEvent(
             journal=journal,
             turn_id=row.get("turn_id") or row.get("agent_turn_id"),
@@ -96,7 +87,7 @@ def _iter_journal(path: Path, journal: str) -> Iterable[SessionEvent]:
             strategy_id=row.get("strategy_id"),
             kind=str(row.get("kind") or row.get("event") or journal),
             ts=str(row.get("ts") or row.get("timestamp") or ""),
-            text=line,
+            text=text,
             payload=row,
         ))
     return out

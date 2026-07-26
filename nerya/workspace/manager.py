@@ -90,49 +90,17 @@ class WorkspaceManager:
 
 
 _DEFAULT_ENABLED_SKILLS = [
-    "market_data", "trading", "portfolio", "risk",
-    "trigger", "llm", "script", "message",
-    "strategy_review", "evolution", "onchain", "news_social",
-    "subagent", "exchange", "sdk_writer",
-    "strategy", "wallet", "exchange_author", "capability_developer",
-    # ``trace`` is a read-only self-introspection skill exposed to the main
-    # agent so natural-language questions like "walk me through that
-    # turn" can be answered without forcing the operator to paste
-    # trigger ids. Enabled by default alongside the other always-on
-    # skills because the journal it reads from is always present.
-    "trace",
-    # ``memory`` is the agent-visible surface for appending/reading
-    # ``memory/*.md`` and ``strategies/<id>/learnings.md``. Enabled by
-    # default so the planner prompt's recall/remember guidance has a
-    # live action endpoint from the first turn of a fresh workspace.
-    "memory",
-    # Optional generalist packs (always-on by default so
-    # backtests and replays can lean on them without extra bootstrap).
-    "creative", "devops", "data_science",
-    # General operator harness — Lets the agent inspect
-    # the workspace, search code, write text, and run terminal commands
-    # without bespoke routing. Mutating actions still go through the
-    # standard approval gate.
-    "operator",
-    # Agent team orchestrator — team-orchestration design. Lets the main agent
-    # spawn a durable multi-expert team run (market analysis,
-    # strategy design, etc.) without resorting to ad-hoc subagents.
-    "team",
-    # Strategy validation — research promotion workflow.
-    # Wires nerya.research (schemas, dataset router, signal engine
-    # contract, backtest runner, validation report) behind a skill
-    # surface so the agent can run deterministic backtests, fetch
-    # validation reports, and surface promotion blockers without
-    # touching live execution paths.
-    "strategy_validation",
-    # Workspace introspection stays load-on-demand. Single consolidated
-    # entry point that proxies to the
-    # underlying domain skills (strategy / script / portfolio /
-    # trading / trigger) for every read-only "what do I have here?"
-    # question. The context builder is intentionally thin — the
-    # agent loads ``workspace`` whenever the answer would otherwise
-    # require hallucinating workspace state.
-    "workspace",
+    # These are SKILL.md playbook ids. Native tool availability and approval
+    # live in the tool registry; do not duplicate tool/action names here.
+    "analysis", "backtest", "browser", "coding", "evolve",
+    "expert_investors", "finance-creators", "llm", "market_data_routing",
+    "market_research",
+    "markets", "memory", "news_social", "notify", "quant-strategy-loop",
+    "quant_research",
+    "research", "research_report", "strategy_author", "tasks", "team",
+    "trading", "triggers",
+    # Integration-gated: listed here but loaded only after configuration.
+    "dcf_valuation", "equity_research", "sec_filings",
 ]
 
 

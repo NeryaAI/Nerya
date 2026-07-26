@@ -41,8 +41,8 @@ from typing import Any, Iterable, Optional
 
 from ...core.sandbox import sandbox_exec
 from ...security.runtime_env import build_process_env
+from ..tool_errors import schema_validation_result
 from ..types import (
-    RiskLevel,
     ToolCall,
     ToolError,
     ToolErrorKind,
@@ -120,49 +120,60 @@ def _list_scripts(skill_dir: Path) -> list[str]:
     return out
 
 
-def index_skills(roots: Iterable[Path]) -> list[SkillRecord]:
+def index_skills(
+    roots: Iterable[Path],
+    *,
+    skill_files: Optional[Iterable[Path]] = None,
+) -> list[SkillRecord]:
     """Walk ``roots`` and return one record per ``SKILL.md`` discovered.
 
-    Roots are expected to contain ``<skill_id>/SKILL.md`` layouts.
-    Errors on individual skills are swallowed (logged via stderr in
-    debug builds); missing IDs default to the directory name.
+    When ``skill_files`` is provided it is the source of truth; production
+    passes the active :class:`SkillRegistry` paths so enabled/integration
+    filtering and nested namespaces cannot drift from this index. Root
+    scanning remains as a small compatibility path for standalone callers.
     """
 
     found: list[SkillRecord] = []
     seen_ids: set[str] = set()
-    for root in roots:
-        if not root.exists() or not root.is_dir():
+    files = (
+        [Path(path) for path in skill_files]
+        if skill_files is not None
+        else [
+            child / "SKILL.md"
+            for root in roots
+            if root.exists() and root.is_dir()
+            for child in sorted(root.iterdir())
+            if child.is_dir()
+        ]
+    )
+    for md in files:
+        if not md.is_file():
             continue
-        for child in sorted(root.iterdir()):
-            if not child.is_dir():
-                continue
-            md = child / "SKILL.md"
-            if not md.is_file():
-                continue
-            try:
-                text = md.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            fm, body = _parse_frontmatter(text)
-            sid = str(fm.get("id") or fm.get("name") or child.name).strip()
-            if not sid or sid in seen_ids:
-                continue
-            seen_ids.add(sid)
-            scripts = _list_scripts(child)
-            found.append(
-                SkillRecord(
-                    skill_id=sid,
-                    title=str(fm.get("title") or fm.get("name") or sid),
-                    description=str(fm.get("description") or "").strip(),
-                    triggers=list(fm.get("triggers") or fm.get("when_to_use") or []),
-                    tags=list(fm.get("tags") or []),
-                    permissions=list(fm.get("permissions") or []),
-                    path=str(md),
-                    body_chars=len(body),
-                    has_scripts=bool(scripts),
-                    scripts=scripts,
-                )
+        child = md.parent
+        try:
+            text = md.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        fm, body = _parse_frontmatter(text)
+        sid = str(fm.get("id") or fm.get("name") or child.name).strip()
+        if not sid or sid in seen_ids:
+            continue
+        seen_ids.add(sid)
+        scripts = _list_scripts(child)
+        found.append(
+            SkillRecord(
+                skill_id=sid,
+                title=str(fm.get("title") or fm.get("name") or sid),
+                description=str(fm.get("description") or "").strip(),
+                triggers=list(fm.get("triggers") or fm.get("when_to_use") or []),
+                tags=list(fm.get("tags") or []),
+                permissions=list(fm.get("permissions") or []),
+                path=str(md),
+                body_chars=len(body),
+                has_scripts=bool(scripts),
+                scripts=scripts,
             )
+        )
     found.sort(key=lambda r: r.skill_id)
     return found
 
@@ -175,14 +186,27 @@ def index_skills(roots: Iterable[Path]) -> list[SkillRecord]:
 class SkillIndex:
     """Cached SKILL.md index used by ``skill_index`` / ``skill_view``."""
 
-    def __init__(self, roots: Iterable[Path]) -> None:
+    def __init__(
+        self,
+        roots: Iterable[Path],
+        *,
+        skill_files: Optional[Iterable[Path]] = None,
+    ) -> None:
         self._roots = [Path(r) for r in roots]
+        self._skill_files = (
+            [Path(path) for path in skill_files]
+            if skill_files is not None
+            else None
+        )
         self._records: list[SkillRecord] = []
         self._by_id: dict[str, SkillRecord] = {}
         self._loaded_at = 0.0
 
     def reload(self) -> None:
-        self._records = index_skills(self._roots)
+        self._records = index_skills(
+            self._roots,
+            skill_files=self._skill_files,
+        )
         self._by_id = {r.skill_id: r for r in self._records}
         self._loaded_at = time.time()
 
@@ -254,14 +278,7 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
     args = call.arguments or {}
     sid = str(args.get("skill_id") or args.get("id") or "").strip()
     if not sid:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="skill_view requires 'skill_id'",
-            ),
-        )
+        return schema_validation_result(call, "skill_view requires 'skill_id'")
     record = skill_index.get(sid)
     if record is None:
         return ToolResult.from_error(
@@ -372,13 +389,8 @@ def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolRe
     sid = str(args.get("skill_id") or "").strip()
     name = str(args.get("name") or args.get("script") or "").strip()
     if not sid or not name:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="script_inspect requires 'skill_id' and 'name'",
-            ),
+        return schema_validation_result(
+            call, "script_inspect requires 'skill_id' and 'name'",
         )
     p = _script_path(skill_index, sid, name)
     if p is None:
@@ -433,23 +445,11 @@ def script_run_handler(
     name = str(args.get("name") or args.get("script") or "").strip()
     argv_extra = args.get("args") or []
     if not sid or not name:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="script_run requires 'skill_id' and 'name'",
-            ),
+        return schema_validation_result(
+            call, "script_run requires 'skill_id' and 'name'",
         )
     if not isinstance(argv_extra, list):
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="'args' must be a list of strings",
-            ),
-        )
+        return schema_validation_result(call, "'args' must be a list of strings")
     p = _script_path(skill_index, sid, name)
     if p is None:
         return ToolResult.from_error(

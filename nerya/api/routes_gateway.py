@@ -2245,47 +2245,6 @@ def _send_progress(client, cfg: dict[str, Any], chat_id: str, text: str | None) 
         pass
 
 
-def _attach_telegram_progress_hooks(kernel: AgentKernel, client, cfg: dict[str, Any], chat_id: str,
-                                    *, channel: str = "telegram",
-                                    session_id: str | None = None) -> None:
-    seen: set[str] = set()
-
-    def emit(ctx) -> None:
-        text = hook_status_text(ctx.phase, ctx.data, ctx.iteration)
-        if not text or text in seen:
-            return
-        seen.add(text)
-        _send_progress(client, cfg, chat_id, text)
-        # Mirror to the live-events ring so the dashboard surface sees the
-        # same agent phase even when the operator isn't watching Telegram.
-        _gateway_events_record(
-            {
-                "kind": "phase",
-                "platform": "telegram",
-                "channel": channel,
-                "chat_id": str(chat_id),
-                "session_id": session_id,
-                "phase": str(ctx.phase),
-                "iteration": int(getattr(ctx, "iteration", 0) or 0),
-                "text": text,
-            }
-        )
-
-    for phase in (
-        "after_plan",
-        "after_subagents",
-        "before_think",
-        "after_think",
-        "after_act",
-        "after_observe",
-        "before_close",
-    ):
-        try:
-            kernel.hooks.register(phase, emit)
-        except Exception:
-            pass
-
-
 def _handle_telegram_callback(client, cfg: dict[str, Any],
                               cb: dict[str, Any]) -> dict[str, Any]:
     """Dispatch a Telegram inline-keyboard button press.
@@ -2451,186 +2410,33 @@ def _handle_text(client, cfg: dict[str, Any], chat_id: str, text: str,
                  update_id: int | None = None,
                  identity: dict[str, str] | None = None,
                  attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    clean = (text or "").strip()
-    attachments = list(attachments or [])
-    identity = identity or _identity_from_payload(
-        {"chat_id": chat_id},
+    channel_cfg = {**cfg, "kind": "telegram", "chat_id": str(chat_id)}
+    result = _run_gateway_turn(
+        client,
         platform="telegram",
-    )
-    state = _load_state(client)
-    active_sessions = state.get("active_sessions") if isinstance(state, dict) else {}
-    if not isinstance(active_sessions, dict):
-        active_sessions = {}
-    session_key, session_id = _session_id_for_identity(
-        "telegram",
-        identity,
-        cfg,
-        active_sessions,
-    )
-
-    if clean.startswith("/"):
-        outcome = GATEWAY_COMMAND_REGISTRY.handle(
-            clean,
-            CommandContext(
-                client=client,
-                platform="telegram",
-                chat_id=str(chat_id),
-                session_id=session_id,
-                raw_text=clean,
-                session_key=session_key,
-                user_id=identity.get("user_id") or "",
-                thread_id=identity.get("thread_id") or "",
-                state=state,
-                save_state=lambda new_state: _save_state(client, dict(new_state)),
-                delete_session=lambda sid: _delete_session(client, sid),
-                dashboard_url=resolve_dashboard_url(client.config),
-            ),
-        )
-        if outcome.handled:
-            sent = _reply(client, cfg, chat_id, outcome.reply_text)
-            return {
-                "ok": True,
-                "command": outcome.command,
-                "reply_text": outcome.reply_text,
-                "delivery": sent,
-            }
-
-    scan = scan_and_redact(clean, buffer=get_default_buffer())
-    redacted = scan.redacted_text
-    captured_notice = ""
-    if scan.captured:
-        captured_notice = _format_capture_notice(scan.captures)
-        try:
-            _reply(client, cfg, chat_id, captured_notice)
-        except Exception:
-            pass
-
-    GatewayMirror(client.config.paths).record_inbound(
+        chat_id=str(chat_id),
+        text=(text or "").strip(),
+        progress_cfg=channel_cfg,
+        identity=identity,
         channel="telegram",
-        handle=str(chat_id),
-        session_id=session_id,
-        payload={
-            "text": redacted,
-            "update_id": update_id,
-            "session_key": session_key,
-            "user_id": identity.get("user_id") or "",
-            "actor_id": identity.get("actor_id") or "",
-            "thread_id": identity.get("thread_id") or "",
-            "chat_type": identity.get("chat_type") or "",
-            "secrets_captured": len(scan.captures),
-            "attachments": attachments,
-        },
+        attachments=attachments,
+        update_id=update_id,
+        auto_reply=True,
     )
-    _gateway_events_record(
-        {
-            "kind": "inbound",
-            "platform": "telegram",
-            "channel": "telegram",
-            "chat_id": str(chat_id),
-            "user_id": identity.get("user_id") or "",
-            "actor_id": identity.get("actor_id") or "",
-            "session_id": session_id,
-            "session_key": session_key,
-            "text": redacted[:280],
-            "update_id": update_id,
-            "attachments": attachments,
-        }
-    )
-    stop_typing = threading.Event()
-    typing_thread = threading.Thread(
-        target=_typing_until_done, args=(client, cfg, chat_id, stop_typing), daemon=True
-    )
-    typing_thread.start()
-    try:
-        kernel = AgentKernel(config=client.config, skills=client.skills)
-        _attach_telegram_progress_hooks(
-            kernel, client, cfg, chat_id, channel="telegram", session_id=session_id
-        )
-        result = kernel.run_turn(
-            trigger={
-                "source": "telegram",
-                "kind": "user.chat",
-                "target": "main",
-                "payload": {
-                    "text": redacted,
-                    "channel": "telegram",
-                    "chat_id": str(chat_id),
-                    "session_key": session_key,
-                    "user_id": identity.get("user_id") or "",
-                    "actor_id": identity.get("actor_id") or "",
-                    "thread_id": identity.get("thread_id") or "",
-                    "chat_type": identity.get("chat_type") or "",
-                    "secret_tokens": [c.token for c in scan.captures],
-                    "secret_kinds": [c.kind for c in scan.captures],
-                    "attachments": attachments,
-                },
-            },
-            session_id=session_id,
-        )
-    finally:
-        stop_typing.set()
-    trace_text = compact_turn_summary(result)
-    if trace_text:
-        _reply(client, cfg, chat_id, trace_text)
-    reply = agent_reply_text(result)
-    result_attachments = list(getattr(result, "attachments", []) or [])
-    sent = _reply(client, cfg, chat_id, reply, result_attachments)
-    state = _load_state(client)
-    active_sessions = state.get("active_sessions") if isinstance(state, dict) else {}
-    if not isinstance(active_sessions, dict):
-        active_sessions = {}
-    active_sessions[session_key] = session_id
-    state["active_sessions"] = active_sessions
-    state["last_turn_id"] = result.turn_id
-    state["last_trace"] = trace_text
-    _save_state(client, state)
-    GatewayMirror(client.config.paths).record_outbound(
-        channel="telegram",
-        handle=str(chat_id),
-        session_id=session_id,
-        payload={"text": reply, "delivery": sent, "attachments": result_attachments},
-    )
-    delivered = bool(sent.get("delivered", False))
-    _gateway_events_record(
-        {
-            "kind": "outbound",
-            "platform": "telegram",
-            "channel": "telegram",
-            "chat_id": str(chat_id),
-            "session_id": session_id,
-            "session_key": session_key,
-            "turn_id": result.turn_id,
-            "text": (reply or "")[:280],
-            "attachments": result_attachments,
-            "delivered": delivered,
-        }
-    )
-    if not delivered:
-        # Surface "we composed a reply but Telegram rejected it" (typical
-        # cause: invalid bot_token, bot was removed from the group, or
-        # parse_mode HTML escaping killed the message). The dashboard
-        # operator gets to see this immediately instead of wondering why
-        # nothing arrived in their app.
+    delivery = result.get("delivery") or {}
+    if delivery.get("delivered") is False:
         _record_gateway_error(
             platform="telegram",
             channel="telegram",
             reason="reply_not_delivered",
             chat_id=str(chat_id),
-            detail=str(sent.get("delivery_note") or sent.get("error") or "send failed"),
+            detail=str(
+                delivery.get("delivery_note") or delivery.get("error") or "send failed"
+            ),
             hint="Telegram returned a non-2xx. Verify your bot is still a member of "
                  "the chat and the bot_token is current.",
         )
-    return {
-        "ok": True,
-        "turn_id": result.turn_id,
-        "reply_text": reply,
-        "attachments": result_attachments,
-        "delivery": sent,
-        "events": turn_events(result),
-        "trace_text": trace_text,
-        "secrets_captured": [c.asdict() for c in scan.captures],
-        "captured_notice": captured_notice,
-    }
+    return result
 
 
 def _format_capture_notice(captures) -> str:
@@ -2660,11 +2466,15 @@ def _channel_cfg(client, channel: str, platform: str | None = None) -> dict[str,
     return cfg
 
 
-def _emit_status(client, cfg: dict[str, Any], text: str) -> None:
+def _emit_status(client, cfg: dict[str, Any], text: str, *,
+                 telegram_text: bool = False) -> None:
     try:
         kind = str(cfg.get("kind") or "")
         if kind == "telegram" and cfg.get("chat_id"):
-            _typing(client, cfg, str(cfg.get("chat_id")))
+            if telegram_text:
+                _send_progress(client, cfg, str(cfg.get("chat_id")), text)
+            else:
+                _typing(client, cfg, str(cfg.get("chat_id")))
             return
         generic_platform.send_status(
             channel_cfg=cfg,
@@ -2724,7 +2534,9 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
                       progress_cfg: dict[str, Any] | None = None,
                       identity: dict[str, str] | None = None,
                       channel: str | None = None,
-                      attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                      attachments: list[dict[str, Any]] | None = None,
+                      update_id: int | None = None,
+                      auto_reply: bool = False) -> dict[str, Any]:
     attachments = list(attachments or [])
     state = _load_state(client)
     active_sessions = state.get("active_sessions") if isinstance(state, dict) else {}
@@ -2784,19 +2596,32 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
             ),
         )
         if outcome.handled:
+            delivery = None
+            if auto_reply and outcome.reply_text:
+                delivery = _reply_gateway_channel(
+                    client,
+                    channel=channel_name,
+                    platform=platform,
+                    cfg=cfg,
+                    chat_id=str(chat_id),
+                    text=outcome.reply_text,
+                )
+            outbound_event = {
+                "kind": "outbound",
+                "platform": platform,
+                "channel": channel_name,
+                "chat_id": str(chat_id),
+                "session_id": session,
+                "session_key": session_key,
+                "command": str(outcome.command or ""),
+                "text": (outcome.reply_text or "")[:280],
+            }
+            if delivery is not None:
+                outbound_event["delivered"] = bool(delivery.get("delivered", False))
             _gateway_events_record(
-                {
-                    "kind": "outbound",
-                    "platform": platform,
-                    "channel": channel_name,
-                    "chat_id": str(chat_id),
-                    "session_id": session,
-                    "session_key": session_key,
-                    "command": str(outcome.command or ""),
-                    "text": (outcome.reply_text or "")[:280],
-                }
+                outbound_event
             )
-            return {
+            response = {
                 "ok": True,
                 "platform": platform,
                 "chat_id": str(chat_id),
@@ -2805,6 +2630,9 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
                 "command": outcome.command,
                 "reply_text": outcome.reply_text,
             }
+            if delivery is not None:
+                response["delivery"] = delivery
+            return response
 
     kernel = AgentKernel(config=client.config, skills=client.skills)
     seen_phase_text: set[str] = set()
@@ -2815,7 +2643,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
             return
         if status not in seen_phase_text:
             seen_phase_text.add(status)
-            _emit_status(client, cfg, status)
+            _emit_status(client, cfg, status, telegram_text=auto_reply)
         # Always mirror to live-events ring so the dashboard can subscribe
         # even when no status_webhook_url is configured. This is what gives
         # Slack/Feishu/Discord the same live "agent is thinking…"
@@ -2845,87 +2673,132 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
 
     scan = scan_and_redact(text, buffer=get_default_buffer())
     redacted = scan.redacted_text
+    captured_notice = ""
     if scan.captured:
-        notice = _format_capture_notice(scan.captures)
-        if notice:
+        captured_notice = _format_capture_notice(scan.captures)
+        if captured_notice:
             try:
-                _emit_status(client, cfg, notice)
+                _emit_status(
+                    client, cfg, captured_notice, telegram_text=auto_reply
+                )
             except Exception:
                 pass
 
+    inbound_payload = {
+        "text": redacted,
+        "session_key": session_key,
+        "user_id": identity.get("user_id") or "",
+        "actor_id": identity.get("actor_id") or "",
+        "thread_id": identity.get("thread_id") or "",
+        "chat_type": identity.get("chat_type") or "",
+        "secrets_captured": len(scan.captures),
+        "attachments": attachments,
+    }
+    inbound_event = {
+        "kind": "inbound",
+        "platform": platform,
+        "channel": channel_name,
+        "chat_id": str(chat_id),
+        "user_id": identity.get("user_id") or "",
+        "actor_id": identity.get("actor_id") or "",
+        "session_id": session,
+        "session_key": session_key,
+        "text": redacted[:280],
+        "attachments": attachments,
+    }
+    if update_id is not None:
+        inbound_payload["update_id"] = update_id
+        inbound_event["update_id"] = update_id
     GatewayMirror(client.config.paths).record_inbound(
         channel=platform,
         handle=str(chat_id),
         session_id=session,
-        payload={
-            "text": redacted,
-            "session_key": session_key,
-            "user_id": identity.get("user_id") or "",
-            "actor_id": identity.get("actor_id") or "",
-            "thread_id": identity.get("thread_id") or "",
-            "chat_type": identity.get("chat_type") or "",
-            "secrets_captured": len(scan.captures),
-            "attachments": attachments,
-        },
+        payload=inbound_payload,
     )
-    _gateway_events_record(
-        {
-            "kind": "inbound",
-            "platform": platform,
-            "channel": channel_name,
-            "chat_id": str(chat_id),
-            "user_id": identity.get("user_id") or "",
-            "actor_id": identity.get("actor_id") or "",
-            "session_id": session,
-            "session_key": session_key,
-            "text": redacted[:280],
-            "attachments": attachments,
-        }
-    )
-    result = kernel.run_turn(
-        trigger={
-            "source": platform,
-            "kind": "user.chat",
-            "target": "main",
-            "payload": {
-                "text": redacted,
-                "channel": platform,
-                "chat_id": str(chat_id),
-                "session_key": session_key,
-                "user_id": identity.get("user_id") or "",
-                "actor_id": identity.get("actor_id") or "",
-                "thread_id": identity.get("thread_id") or "",
-                "chat_type": identity.get("chat_type") or "",
-                "secret_tokens": [c.token for c in scan.captures],
-                "secret_kinds": [c.kind for c in scan.captures],
-                "attachments": attachments,
+    _gateway_events_record(inbound_event)
+    stop_typing = None
+    if auto_reply and platform == "telegram":
+        stop_typing = threading.Event()
+        threading.Thread(
+            target=_typing_until_done,
+            args=(client, cfg, chat_id, stop_typing),
+            daemon=True,
+        ).start()
+    try:
+        result = kernel.run_turn(
+            trigger={
+                "source": platform,
+                "kind": "user.chat",
+                "target": "main",
+                "payload": {
+                    "text": redacted,
+                    "channel": platform,
+                    "chat_id": str(chat_id),
+                    "session_key": session_key,
+                    "user_id": identity.get("user_id") or "",
+                    "actor_id": identity.get("actor_id") or "",
+                    "thread_id": identity.get("thread_id") or "",
+                    "chat_type": identity.get("chat_type") or "",
+                    "secret_tokens": [c.token for c in scan.captures],
+                    "secret_kinds": [c.kind for c in scan.captures],
+                    "attachments": attachments,
+                },
             },
-        },
-        session_id=session,
-    )
+            session_id=session,
+        )
+    finally:
+        if stop_typing is not None:
+            stop_typing.set()
     reply = agent_reply_text(result)
     result_attachments = list(getattr(result, "attachments", []) or [])
     events = turn_events(result)
     trace_text = compact_turn_summary(result)
+    delivery = None
+    if auto_reply:
+        if platform == "telegram" and trace_text:
+            _reply_gateway_channel(
+                client,
+                channel=channel_name,
+                platform=platform,
+                cfg=cfg,
+                chat_id=str(chat_id),
+                text=trace_text,
+            )
+        delivery = _reply_gateway_channel(
+            client,
+            channel=channel_name,
+            platform=platform,
+            cfg=cfg,
+            chat_id=str(chat_id),
+            text=reply,
+            attachments=result_attachments,
+        )
+    outbound_payload = {
+        "text": reply,
+        "events": events,
+        "attachments": result_attachments,
+    }
+    outbound_event = {
+        "kind": "outbound",
+        "platform": platform,
+        "channel": channel_name,
+        "chat_id": str(chat_id),
+        "session_id": session,
+        "session_key": session_key,
+        "turn_id": result.turn_id,
+        "text": (reply or "")[:280],
+        "attachments": result_attachments,
+    }
+    if delivery is not None:
+        outbound_payload["delivery"] = delivery
+        outbound_event["delivered"] = bool(delivery.get("delivered", False))
     GatewayMirror(client.config.paths).record_outbound(
         channel=platform,
         handle=str(chat_id),
         session_id=session,
-        payload={"text": reply, "events": events, "attachments": result_attachments},
+        payload=outbound_payload,
     )
-    _gateway_events_record(
-        {
-            "kind": "outbound",
-            "platform": platform,
-            "channel": channel_name,
-            "chat_id": str(chat_id),
-            "session_id": session,
-            "session_key": session_key,
-            "turn_id": result.turn_id,
-            "text": (reply or "")[:280],
-            "attachments": result_attachments,
-        }
-    )
+    _gateway_events_record(outbound_event)
     state = _load_state(client)
     active_sessions = state.get("active_sessions") if isinstance(state, dict) else {}
     if not isinstance(active_sessions, dict):
@@ -2935,7 +2808,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
     state["last_turn_id"] = result.turn_id
     state["last_trace"] = trace_text
     _save_state(client, state)
-    return {
+    response = {
         "ok": True,
         "platform": platform,
         "chat_id": str(chat_id),
@@ -2946,7 +2819,12 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         "attachments": result_attachments,
         "trace_text": trace_text,
         "events": events,
+        "secrets_captured": [capture.asdict() for capture in scan.captures],
+        "captured_notice": captured_notice,
     }
+    if delivery is not None:
+        response["delivery"] = delivery
+    return response
 
 
 def routes():

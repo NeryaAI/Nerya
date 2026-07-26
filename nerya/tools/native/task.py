@@ -26,11 +26,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ..tool_errors import schema_validation_result
 from ..types import (
     ContextModifier,
     ToolCall,
-    ToolError,
-    ToolErrorKind,
     ToolResult,
     ToolResultPart,
 )
@@ -133,50 +132,24 @@ def todo_write_handler(call: ToolCall, *, task_state: TaskState) -> ToolResult:
     args = call.arguments or {}
     raw = args.get("todos")
     if not isinstance(raw, list):
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="todo_write requires 'todos' as a list",
-            ),
-        )
+        return schema_validation_result(call, "todo_write requires 'todos' as a list")
 
     todos: list[TodoItem] = []
     in_progress = 0
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=call.name,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message=f"todo[{i}] must be an object",
-                ),
-            )
+            return schema_validation_result(call, f"todo[{i}] must be an object")
         item_id = str(item.get("id") or f"t{i+1}")
         content = str(item.get("content") or "").strip()
         active_form = str(item.get("activeForm") or item.get("active_form") or "").strip()
         status = str(item.get("status") or "pending").lower()
         if not content:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=call.name,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message=f"todo[{i}] missing 'content'",
-                ),
-            )
+            return schema_validation_result(call, f"todo[{i}] missing 'content'")
         if not active_form:
             active_form = content if content.endswith("ing") else f"Working on: {content}"
         if status not in _VALID_STATUSES:
-            return ToolResult.from_error(
-                tool_use_id=call.id,
-                name=call.name,
-                error=ToolError(
-                    kind=ToolErrorKind.SCHEMA_VALIDATION,
-                    message=f"todo[{i}] invalid status {status!r}",
-                ),
+            return schema_validation_result(
+                call, f"todo[{i}] invalid status {status!r}",
             )
         if status == "in_progress":
             in_progress += 1
@@ -185,13 +158,8 @@ def todo_write_handler(call: ToolCall, *, task_state: TaskState) -> ToolResult:
         )
 
     if in_progress > 1:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="only one todo may be in_progress at a time",
-            ),
+        return schema_validation_result(
+            call, "only one todo may be in_progress at a time",
         )
 
     task_state.set_todos(todos)
@@ -265,13 +233,8 @@ def exit_plan_mode_handler(
     args = call.arguments or {}
     plan = args.get("plan")
     if not isinstance(plan, str) or not plan.strip():
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="exit_plan_mode requires 'plan' (markdown body)",
-            ),
+        return schema_validation_result(
+            call, "exit_plan_mode requires 'plan' (markdown body)",
         )
     plan_id = task_state.submit_plan(plan)
     # Headless / unattended mode (env var set by the kernel boot path)

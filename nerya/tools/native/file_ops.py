@@ -29,8 +29,6 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
-import os
-import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -39,6 +37,7 @@ from ...agent.file_state import (
     StaleFileReadError,
     compute_file_hash,
 )
+from ..tool_errors import schema_validation_result
 from ..types import (
     ContextModifier,
     RiskLevel,
@@ -48,6 +47,7 @@ from ..types import (
     ToolResult,
     ToolResultPart,
 )
+from .conversation_files import place_new_conversation_file
 from .paths import (
     WorkspaceEscapeError,
     resolve_workspace_path,
@@ -120,6 +120,8 @@ def is_sensitive_mutation_path(path: Any) -> bool:
 def classify_file_mutation_risk(arguments: dict[str, Any]) -> RiskLevel:
     """Escalate safety-critical config writes while keeping code edits fluid."""
 
+    if bool((arguments or {}).get("allow_outside_conversation")):
+        return RiskLevel.DANGEROUS
     if is_sensitive_mutation_path((arguments or {}).get("path")):
         return RiskLevel.DANGEROUS
     return RiskLevel.WRITE
@@ -204,14 +206,7 @@ def read_file_handler(
     max_bytes = max(1024, min(max_bytes, _HARD_FILE_BYTES))
 
     if not raw_path:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="read_file requires a 'path' argument",
-            ),
-        )
+        return schema_validation_result(call, "read_file requires a 'path' argument")
 
     try:
         p = resolve_workspace_path(str(raw_path), root=root, must_exist=True)
@@ -238,14 +233,10 @@ def read_file_handler(
         )
 
     if p.is_dir():
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=f"{_short_path(p, root)} is a directory; use list_dir",
-                recovery_hint={"action": "list_dir", "path": _short_path(p, root)},
-            ),
+        return schema_validation_result(
+            call,
+            f"{_short_path(p, root)} is a directory; use list_dir",
+            recovery_hint={"action": "list_dir", "path": _short_path(p, root)},
         )
 
     try:
@@ -356,13 +347,8 @@ def list_dir_handler(call: ToolCall, *, root: Path) -> ToolResult:
             ),
         )
     if not p.is_dir():
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=f"{_short_path(p, root)} is not a directory; use read_file",
-            ),
+        return schema_validation_result(
+            call, f"{_short_path(p, root)} is not a directory; use read_file",
         )
 
     items: list[dict[str, Any]] = []
@@ -452,13 +438,8 @@ def edit_file_handler(
     replace_all = bool(args.get("replace_all", False))
 
     if not raw_path or old_string is None or new_string is None:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="edit_file requires path, old_string, new_string",
-            ),
+        return schema_validation_result(
+            call, "edit_file requires path, old_string, new_string",
         )
 
     try:
@@ -481,14 +462,7 @@ def edit_file_handler(
         )
 
     if p.is_dir():
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="cannot edit a directory",
-            ),
-        )
+        return schema_validation_result(call, "cannot edit a directory")
 
     rel_path = _short_path(p, root)
     proposal_tools = _proposal_required_tools(rel_path)
@@ -525,14 +499,7 @@ def edit_file_handler(
             )
 
     if old_string == new_string:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="old_string equals new_string; no-op edit",
-            ),
-        )
+        return schema_validation_result(call, "old_string equals new_string; no-op edit")
 
     occurrences = before.count(old_string)
     if occurrences == 0:
@@ -618,6 +585,7 @@ def write_file_handler(
     *,
     root: Path,
     file_state: Optional[FileStateCache],
+    session_id: Optional[str] = None,
 ) -> ToolResult:
     args = call.arguments or {}
     raw_path = args.get("path")
@@ -632,23 +600,13 @@ def write_file_handler(
     require_existing_read = bool(args.get("require_existing_read", True))
 
     if not raw_path or content is None:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="write_file requires path and contents (string body)",
-            ),
+        return schema_validation_result(
+            call, "write_file requires path and contents (string body)",
         )
 
     if not isinstance(content, str):
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="content must be a string (write binary via separate handler)",
-            ),
+        return schema_validation_result(
+            call, "content must be a string (write binary via separate handler)",
         )
 
     try:
@@ -669,7 +627,29 @@ def write_file_handler(
             tools=proposal_tools,
         )
 
-    existed = p.exists()
+    requested_path = p
+    existed = requested_path.exists()
+    placement_kind = "existing" if existed else ""
+    outside_reason = ""
+    if not existed:
+        try:
+            placement = place_new_conversation_file(
+                requested_path,
+                root=root,
+                session_id=session_id,
+                allow_outside_conversation=bool(
+                    args.get("allow_outside_conversation", False)
+                ),
+                outside_conversation_reason=str(
+                    args.get("outside_conversation_reason") or ""
+                ),
+            )
+        except ValueError as exc:
+            return schema_validation_result(call, str(exc))
+        p = placement.path
+        placement_kind = placement.kind
+        outside_reason = placement.outside_reason
+        existed = p.exists()
     before = ""
     if existed:
         try:
@@ -728,26 +708,46 @@ def write_file_handler(
             p, new_content=content, line_count=content.count("\n") + 1
         )
 
-    diff = _make_diff(before, content, _short_path(p, root)) if existed else (
-        f"--- /dev/null\n+++ b/{_short_path(p, root)}\n"
+    result_path = _short_path(p, root)
+    requested_rel = _short_path(requested_path, root)
+    diff = _make_diff(before, content, result_path) if existed else (
+        f"--- /dev/null\n+++ b/{result_path}\n"
         + "".join(f"+{line}\n" for line in content.splitlines())
     )
+    payload = {
+        "path": result_path,
+        "kind": "create" if not existed else "overwrite",
+        "placement": placement_kind,
+        "bytes": len(content.encode("utf-8")),
+        "lines": content.count("\n") + 1,
+        "content_hash": compute_file_hash(content),
+    }
+    if result_path != requested_rel:
+        payload["requested_path"] = requested_rel
+    if outside_reason:
+        payload["outside_conversation_reason"] = outside_reason
     return ToolResult(
         tool_use_id=call.id,
         name=call.name,
         content=[
-            ToolResultPart.diff_part(diff=diff, path=_short_path(p, root)),
-            ToolResultPart.json_part(
-                {
-                    "path": _short_path(p, root),
-                    "kind": "create" if not existed else "overwrite",
-                    "bytes": len(content.encode("utf-8")),
-                    "lines": content.count("\n") + 1,
-                    "content_hash": compute_file_hash(content),
-                }
-            ),
+            ToolResultPart.diff_part(diff=diff, path=result_path),
+            ToolResultPart.json_part(payload),
         ],
-        metadata={"path": _short_path(p, root), "kind": "write"},
+        metadata={
+            "path": result_path,
+            "kind": "write",
+            "placement": placement_kind,
+            **(
+                {"requested_path": requested_rel}
+                if result_path != requested_rel
+                else {}
+            ),
+            **(
+                {"outside_conversation_reason": outside_reason}
+                if outside_reason
+                else {}
+            ),
+        },
         context_modifiers=[
             ContextModifier(kind="file_mutate", path=str(p), payload={"created": not existed})
         ],

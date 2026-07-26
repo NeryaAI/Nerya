@@ -28,7 +28,7 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from .types import PermissionScope, RiskLevel, ToolDescriptor
 

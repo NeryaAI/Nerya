@@ -81,6 +81,7 @@ class RiskGate:
         intent: TradeIntent,
         *,
         market_snapshot: dict[str, Any] | None = None,
+        resume: bool = False,
     ) -> RiskDecision:
         paths = self.config.paths
         reasons: list[str] = []
@@ -400,13 +401,57 @@ class RiskGate:
                 decision = "reject"
 
         # 14. Duplicate / dedupe
-        if not risk_reducing:
+        # Skip on resume — an approved intent is replayed with the same
+        # strategy/market/side/notional, which would otherwise trip the
+        # dedupe key and reject the resumed order. The executor's
+        # ``client_order_id`` idempotency is the real double-submit guard.
+        if not risk_reducing and not resume:
             dedupe_key = f"{intent.strategy_id}:{intent.market}:{intent.side}:{round(notional, 2)}"
             dedupe = DedupeRepository(self._con_lazy())
             window = float(self.config.get("trading.dedupe_window_seconds", 300))
             if dedupe.seen("trade_intent", dedupe_key, window_s=window):
                 reasons.append("duplicate_intent")
                 decision = "reject"
+
+        # 14b. Manifest policy caps enforced as hard gates.
+        # ``max_daily_notional_usd`` sums today's executed order
+        # notionals from the strategy history; ``max_open_positions``
+        # counts the strategy's currently-open PositionBook entries.
+        # Both only apply to risk-*adding* intents (opens); a close can
+        # always proceed so an operator can de-risk when over-limit.
+        if not risk_reducing:
+            daily_cap = strategy.limits.max_daily_notional_usd
+            if daily_cap > 0:
+                spent_today = _strategy_daily_notional(paths, intent.strategy_id)
+                if spent_today + notional > daily_cap:
+                    reasons.append(
+                        f"max_daily_notional_exceeded:{spent_today:.2f}+{notional:.2f}>"
+                        f"{daily_cap:.2f}"
+                    )
+                    decision = "reject"
+            pos_cap = strategy.limits.max_open_positions
+            if pos_cap > 0:
+                open_count = 0
+                try:
+                    open_count = sum(
+                        1 for p in book.open_positions(account_id=account.id)
+                        if p.strategy_id == intent.strategy_id
+                    )
+                except Exception:
+                    open_count = 0
+                # A new open on a market the strategy already holds does
+                # not increase the position count (it adds to an existing
+                # merged position), so only count it when the strategy
+                # has no current exposure on this market.
+                already_open_here = any(
+                    p.market == intent.market and p.strategy_id == intent.strategy_id
+                    for p in (book_open or [])
+                )
+                if not already_open_here and open_count >= pos_cap:
+                    reasons.append(
+                        f"max_open_positions_exceeded:{open_count}>={pos_cap}"
+                    )
+                    decision = "reject"
 
         # 12 & 15 & 16. Slippage / conflicts / approval threshold (advisory)
         if (
@@ -500,3 +545,43 @@ class RiskGate:
                 time.time(),
             ),
         )
+
+
+def _strategy_daily_notional(paths, strategy_id: str) -> float:
+    """Sum the notional of every order the strategy placed today.
+
+    Reads the strategy's ``orders.jsonl`` history and totals
+    ``payload.notional_usd`` for entries whose session opened in the
+    last 24h. Best-effort: a read failure returns 0 so a missing or
+    corrupt log never blocks trading (the other gates still apply).
+    """
+    try:
+        from ..strategy_history import store as history_store
+
+        log_path = paths.strategy(strategy_id) / "orders.jsonl"
+        if not log_path.exists():
+            return 0.0
+        cutoff = time.time() - 86_400.0
+        total = 0.0
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                continue
+            ts = entry.get("ts")
+            # ``ts`` is an ISO string; parse defensively and skip if old.
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                if dt.timestamp() < cutoff:
+                    continue
+            except Exception:
+                pass
+            payload = entry.get("payload") or {}
+            total += float(payload.get("notional_usd") or 0.0)
+        return total
+    except Exception:
+        return 0.0

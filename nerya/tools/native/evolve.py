@@ -32,6 +32,7 @@ from ...evolution.patch_proposal import create_proposal, list_proposals
 from ...evolution.post_apply_observation import record_post_apply_observation
 from ...evolution.self_config import propose_core_config_patch
 from ...evolution.skill_proposal import propose_skill_from_workflow
+from ..tool_errors import schema_validation_result
 from ..types import (
     ToolCall,
     ToolError,
@@ -464,13 +465,8 @@ def evolve_core_config_patch_handler(call: ToolCall, *, config: Config) -> ToolR
     args = call.arguments or {}
     config_after = args.get("config_after")
     if not isinstance(config_after, dict):
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="config_after must be a full parsed YAML object",
-            ),
+        return schema_validation_result(
+            call, "config_after must be a full parsed YAML object",
         )
     try:
         proposal = propose_core_config_patch(
@@ -527,14 +523,7 @@ def evolve_provider_proposal_handler(call: ToolCall, *, config: Config) -> ToolR
     args = dict(call.arguments or {})
     venue = str(args.get("venue") or "").strip().lower().replace(" ", "_")
     if not venue:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="venue is required",
-            ),
-        )
+        return schema_validation_result(call, "venue is required")
     args["venue"] = venue
     summary = str(args.get("summary") or f"Add provider proposal for {venue}").strip()
     metadata = {

@@ -39,7 +39,7 @@ import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from ..core.redaction import redact_text
 from ..core.errors import (
@@ -71,14 +71,6 @@ from .microcompact import microcompact
 from .transcript_compact import compact_transcript
 from .finalizers.strategy_backtest import (
     _build_strategy_backtest_done_final_text,
-    _build_strategy_backtest_done_final_text_en,
-    _interpret_backtest_metrics,
-    _interpret_backtest_metrics_en,
-    _markdown_code_span,
-    _parse_display_number,
-    _requested_english_final,
-    _verdict_plain,
-    _verdict_plain_en,
 )
 
 
@@ -116,9 +108,7 @@ _LOG = logging.getLogger(__name__)
 EventSink = Callable[[BlockEnvelope], None]
 
 
-def _team_result_data(result: ToolResult) -> dict[str, Any] | None:
-    if result.name != "team_run" or result.is_error:
-        return None
+def _tool_json_data(result: ToolResult) -> dict[str, Any] | None:
     for part in result.content:
         if part.type == "json" and isinstance(part.data, dict):
             return part.data
@@ -127,6 +117,12 @@ def _team_result_data(result: ToolResult) -> dict[str, Any] | None:
     except Exception:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _team_result_data(result: ToolResult) -> dict[str, Any] | None:
+    if result.name != "team_run" or result.is_error:
+        return None
+    return _tool_json_data(result)
 
 
 def _team_result_should_finalize(data: dict[str, Any]) -> bool:
@@ -198,21 +194,6 @@ def _team_result_has_actionable_strategy_output(data: dict[str, Any]) -> bool:
     return bool(keys & sizing_keys) and bool(keys & execution_keys)
 
 
-def _team_result_requires_strategy_proposal(data: dict[str, Any]) -> bool:
-    template = str(
-        data.get("team_template")
-        or data.get("template")
-        or data.get("template_id")
-        or ""
-    ).strip().lower()
-    if template == "investment_committee_team":
-        return False
-    return (
-        template == "strategy_design_team"
-        or _team_result_has_actionable_strategy_output(data)
-    )
-
-
 def _required_artifacts_include_strategy_tool(
     required_artifacts: tuple[dict[str, Any], ...],
 ) -> bool:
@@ -246,6 +227,8 @@ def _team_result_can_trigger_strategy_proposal(
     ).strip().lower()
     if template == "strategy_design_team":
         return True
+    if template == "investment_committee_team":
+        return False
     if required_artifacts and not _required_artifacts_include_strategy_tool(
         required_artifacts
     ):
@@ -319,34 +302,6 @@ def _degraded_team_strategy_proposal_retry_prompt(
         "gaps. Do not finalize with only the team report while the strategy "
         "proposal tool remains unattempted."
     )
-
-
-def _team_result_footer(team_results: list[dict[str, Any]]) -> str:
-    rows: list[str] = []
-    for data in team_results:
-        run_id = str(data.get("team_run_id") or "").strip()
-        template = str(data.get("team_template") or "").strip()
-        status = str(data.get("status") or "").strip()
-        roles = ", ".join(str(x) for x in (data.get("roles_succeeded") or [])[:6])
-        bits = [bit for bit in (template, run_id, status) if bit]
-        if roles:
-            bits.append(f"roles={roles}")
-        if bits:
-            rows.append("- " + "; ".join(bits))
-    if not rows:
-        return ""
-    return "AgentTeam evidence:\n" + "\n".join(rows)
-
-
-def _tool_json_data(result: ToolResult) -> dict[str, Any] | None:
-    for part in result.content:
-        if part.type == "json" and isinstance(part.data, dict):
-            return part.data
-    try:
-        parsed = json.loads(result.text())
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 _TERMINAL_RISK_VALIDATION_BLOCK_REASONS = {
@@ -506,8 +461,11 @@ def _filter_provider_tools_by_names(
 
 
 def _tool_compacted_kept_data(result: ToolResult) -> dict[str, Any] | None:
+    return _parse_compacted_kept_jsonish(result.text())
+
+
+def _parse_compacted_kept_jsonish(text: str) -> dict[str, Any] | None:
     marker = "[compacted_kept]"
-    text = result.text()
     marker_index = text.find(marker)
     if marker_index < 0:
         return None
@@ -617,7 +575,6 @@ def _build_task_schedule_created_final_text(
     items: list[dict[str, Any]],
     *,
     proposal_items: list[dict[str, Any]] | None = None,
-    team_results: list[dict[str, Any]] | None = None,
 ) -> str:
     lines = [
         "任务调度已创建；schedule 已写入工作区。",
@@ -980,11 +937,6 @@ def _strategy_backtest_done_data(result: ToolResult) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return {"tool": result.name}
     next_required_action = data.get("next_required_action")
-    next_required_action_type = (
-        str(next_required_action.get("type") or "").strip()
-        if isinstance(next_required_action, dict)
-        else ""
-    )
     reason = str(data.get("reason") or "").strip()
     coverage_message = str(data.get("coverage_message") or "").strip()
     gap_text = " ".join(
@@ -1228,10 +1180,8 @@ def _build_strategy_proposal_created_final_text(items: list[dict[str, Any]]) -> 
 
 def _build_late_strategy_proposal_final_text(
     items: list[dict[str, Any]],
-    team_results: list[dict[str, Any]],
     skipped_tool_names: Iterable[str],
 ) -> str:
-    del team_results
     final_text = _build_strategy_proposal_created_final_text(items)
     skipped_tools = ", ".join(str(name) for name in skipped_tool_names if name)
     return (
@@ -1375,16 +1325,6 @@ _TEAM_RESEARCH_SKILL_NAMES = frozenset({
     "research_report",
     "sec_filings",
 })
-
-_STOCK_RESEARCH_TEAM_ROLE_NAMES = (
-    "fundamentals_analyst",
-    "technical_analyst",
-    "sentiment_analyst",
-    "bull_researcher",
-    "bear_researcher",
-    "risk_critic",
-    "research_manager",
-)
 
 _AD_HOC_RESEARCH_RECOVERY_ROLE_NAMES = (
     "market_analyst",
@@ -1889,10 +1829,8 @@ def _pending_reflection_tool_names(
 
 def _reflection_diagnostic_proposal_completed(
     *,
-    completed_tool_names: set[str],
     successful_tool_names: set[str],
 ) -> bool:
-    del completed_tool_names
     return "evolve_reflect" in successful_tool_names
 
 
@@ -2031,11 +1969,11 @@ def _next_required_artifact_tool_names(
     return missing[:1]
 
 
-_REQUIRED_ARTIFACT_TOOL_CONTRACT_KEYS = frozenset({
-    "output_language",
-    "analysis_language",
+_REQUIRED_ARTIFACT_TOOL_CONTRACT_KEYS = (
     "execution_mode",
     "after_has",
+    "output_language",
+    "analysis_language",
     "team_template",
     "subject",
     "metadata_contains",
@@ -2047,7 +1985,7 @@ _REQUIRED_ARTIFACT_TOOL_CONTRACT_KEYS = frozenset({
     "runtime",
     "market",
     "account",
-})
+)
 
 
 def _required_artifact_contract_for_tool(
@@ -2257,15 +2195,6 @@ def _infer_required_strategy_market_from_contract(
     return symbol or tail, market, explicit_account
 
 
-def _infer_required_agent_strategy_market(
-    *,
-    contract: dict[str, str],
-    original_user_text: str,
-) -> tuple[str, str, str] | None:
-    del original_user_text
-    return _infer_required_strategy_market_from_contract(contract)
-
-
 def _required_agent_strategy_recovery_files(
     *,
     strategy_id: str,
@@ -2347,10 +2276,7 @@ def _required_strategy_proposal_recovery_args(
     )
     execution_mode = str(contract.get("execution_mode") or "").strip().lower()
     if execution_mode in {"agent", "agent_task"}:
-        inferred = _infer_required_agent_strategy_market(
-            contract=contract,
-            original_user_text=original_user_text,
-        )
+        inferred = _infer_required_strategy_market_from_contract(contract)
         if inferred is None:
             return None
         subject = str(contract.get("subject") or "").strip() or inferred[0]
@@ -3291,7 +3217,6 @@ def _explicit_skill_authoring_request(text: str) -> bool:
 def _skill_proposal_retry_due(
     *,
     total_tool_calls: int,
-    threshold: int,
     original_user_text: str,
 ) -> bool:
     if not _explicit_skill_authoring_request(original_user_text):
@@ -3306,7 +3231,6 @@ def _skill_proposal_retry_pending(
     provider_tool_names: set[str],
     completed_tool_names: set[str],
     total_tool_calls: int,
-    threshold: int,
     original_user_text: str,
     allow_explicit_without_discovery: bool = False,
 ) -> bool:
@@ -3316,7 +3240,6 @@ def _skill_proposal_retry_pending(
     )
     retry_due = _skill_proposal_retry_due(
         total_tool_calls=total_tool_calls,
-        threshold=threshold,
         original_user_text=original_user_text,
     ) or (allow_explicit_without_discovery and explicit_authoring)
     return (
@@ -4026,59 +3949,6 @@ def _render_report_markdown(output: Any, *, limit: int = 4200) -> str:
     return _clip_report_text(text, limit=limit)
 
 
-def _synthesis_output(results: list[Any], aggregated: Any) -> Any:
-    for preferred in ("research_manager", "lead_analyst", "portfolio_manager"):
-        for entry in results:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("subagent") or "") == preferred:
-                output = entry.get("output")
-                if output not in (None, "", {}, []):
-                    return output
-    return aggregated
-
-
-def _build_team_run_final_report(data: dict[str, Any]) -> str:
-    title = _clip_team_final_text(
-        redact_text(str(data.get("task") or "")),
-        limit=160,
-    )
-    lines = [
-        f"# {title}" if title else "# AgentTeam evidence",
-        "",
-    ]
-
-    synthesis_sections = _team_bounded_synthesis_sections([data])
-    if synthesis_sections:
-        lines.extend(["", *synthesis_sections[:6]])
-    aggregated = data.get("aggregated")
-    if aggregated not in (None, "", [], {}):
-        aggregated_text = _team_final_output_summary(aggregated)
-        if aggregated_text and aggregated_text not in "\n".join(lines):
-            if not synthesis_sections:
-                lines.extend(["", "## Synthesis"])
-            lines.append(aggregated_text)
-
-    compact_runs = _compact_team_results_for_final_synthesis([data])
-    role_lines: list[str] = []
-    for run in compact_runs:
-        for role in run.get("role_results") or []:
-            if isinstance(role, dict):
-                role_lines.append(_team_bounded_fallback_role_line(role))
-        for failure in (run.get("failures") or [])[:8]:
-            if isinstance(failure, dict):
-                role_lines.append(_team_bounded_fallback_failure_line(failure))
-    if role_lines:
-        lines.extend(["", "## Role findings", *role_lines[:12]])
-    else:
-        lines.extend([
-            "",
-            "## Role findings",
-            "The team returned bounded evidence, but no role-level summary was available for final rendering.",
-        ])
-    return "\n".join(line for line in lines if str(line).strip()).strip()
-
-
 # ---------------------------------------------------------------------------
 # Loop config
 # ---------------------------------------------------------------------------
@@ -4261,11 +4131,6 @@ class LoopConfig:
     40 messages full of large tool results can overflow a 128k window
     long before ``compact_threshold=60`` trips. ``0`` disables the
     token-pressure trigger."""
-
-    skill_discovery_proposal_tool_threshold: int = 12
-    """After this many discovery/read calls that included skill discovery,
-    nudge once toward evolve_skill_proposal instead of allowing open-ended
-    docs/source exploration to consume the full turn budget."""
 
     task_automation_action_tool_threshold: int = 8
     """After task state has been inspected, nudge once toward the concrete
@@ -4493,15 +4358,12 @@ def _is_llm_safety_rejection(exc: BaseException) -> bool:
 
 def _build_deterministic_final_summary(
     *,
-    stop_reason: str,
-    abort_reason: str,
     iterations: int,
     tool_calls: int,
     error_count: int,
     had_model_text: bool,
     evidence_snippets: list[str] | None = None,
 ) -> str:
-    del stop_reason, abort_reason
     detail = f"I ran {iterations} step(s) and {tool_calls} tool call(s)"
     if error_count:
         detail += f", {error_count} of which hit an error"
@@ -4514,7 +4376,7 @@ def _build_deterministic_final_summary(
         lines.append("I'd started writing one but didn't reach a reliable result.")
     else:
         lines.append("I didn't get to write one after the last step ran.")
-    for idx, snippet in enumerate(evidence_snippets or [], start=1):
+    for snippet in evidence_snippets or []:
         lines.append(f"- found: {snippet}")
     lines.append(
         "Ask me to continue and I'll pull the finished results together, "
@@ -5761,21 +5623,6 @@ def _parse_evidence_jsonish(text: str) -> Any:
     return None
 
 
-def _parse_compacted_kept_jsonish(text: str) -> dict[str, Any] | None:
-    marker = "[compacted_kept]"
-    marker_index = text.find(marker)
-    if marker_index < 0:
-        return None
-    tail = text[marker_index + len(marker):].strip()
-    if not tail:
-        return None
-    try:
-        parsed, _end = json.JSONDecoder().raw_decode(tail)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
 def _short_evidence_value(value: Any) -> str:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return str(value)
@@ -6384,15 +6231,6 @@ def _string_list(value: Any, *, limit: int = 4) -> list[str]:
     return out
 
 
-def _result_nested_text(data: dict[str, Any], path: tuple[str, ...]) -> str:
-    node: Any = data
-    for key in path:
-        if not isinstance(node, dict):
-            return ""
-        node = node.get(key)
-    return _safe_finalizer_value(node)
-
-
 def _tool_result_blocker_summary(result: ToolResult, data: dict[str, Any] | None) -> str:
     if result.is_error and result.error is not None:
         reason = _safe_finalizer_value(result.error.message or result.error.kind.value)
@@ -6860,14 +6698,6 @@ def _required_action_retry_window_available(
     if not tool_names:
         return False
     return deadline - time.time() > _required_action_min_wall_seconds(tool_names)
-
-
-def _pending_required_action_tool_names(
-    pending_tool_names: tuple[str, ...],
-    registry: ToolRegistry,
-) -> set[str]:
-    del registry
-    return {name for name in pending_tool_names if name}
 
 
 def _stringify_user_message(message: str | list[dict[str, Any]]) -> str:
@@ -8043,30 +7873,6 @@ def _team_bounded_fallback_failure_line(failure: dict[str, Any]) -> str:
     return f"{heading}\n{detail}"
 
 
-def _team_run_output_language(team_results: list[dict[str, Any]]) -> str:
-    for run in team_results or []:
-        if not isinstance(run, dict):
-            continue
-        value = str(
-            run.get("output_language")
-            or run.get("target_language")
-            or ""
-        ).strip()
-        if value:
-            return value
-    return ""
-
-
-def _team_run_analysis_language(team_results: list[dict[str, Any]]) -> str:
-    for run in team_results or []:
-        if not isinstance(run, dict):
-            continue
-        value = str(run.get("analysis_language") or "").strip()
-        if value:
-            return value
-    return ""
-
-
 def _team_bounded_synthesis_sections(
     team_results: list[dict[str, Any]],
 ) -> list[str]:
@@ -8269,8 +8075,6 @@ def _wall_time_final_synthesis_prompt(*, remaining_seconds: float) -> str:
 def _wall_time_late_tool_abort_text(
     tool_names: list[str],
     *,
-    remaining_seconds: float | None = None,
-    reserve_seconds: float | None = None,
     original_user_text: str = "",
     pending_required_tool_names: tuple[str, ...] = (),
 ) -> str:
@@ -8314,7 +8118,6 @@ def _build_llm_timeout_evidence_fallback(
     *,
     transcript: list[dict[str, Any]],
     original_user_text: str,
-    error: BaseException,
     team_results: list[dict[str, Any]] | None = None,
 ) -> str:
     usable_team_results = [
@@ -8639,7 +8442,6 @@ class WorkspaceNativeAgentLoop:
     def _synthesize_team_run_final_answer(
         self,
         *,
-        system: str,
         user_message: str | list[dict[str, Any]],
         team_results: list[dict[str, Any]],
         deadline: float | None = None,
@@ -8743,10 +8545,10 @@ class WorkspaceNativeAgentLoop:
             if self.config.max_wall_seconds and self.config.max_wall_seconds > 0
             else None
         )
-        max_total_calls: Optional[int] = (
+        max_total_calls = (
             int(self.config.max_total_tool_calls)
-            if self.config.max_total_tool_calls
-            else None
+            if self.config.max_total_tool_calls is not None
+            else int(self.config.max_iterations) * 4
         )
 
         def emit(role: str, payload: dict[str, Any]) -> None:
@@ -9112,7 +8914,6 @@ class WorkspaceNativeAgentLoop:
                 provider_tool_names=provider_tool_names,
                 completed_tool_names=completed_tool_names,
                 total_tool_calls=total_tool_calls,
-                threshold=self.config.skill_discovery_proposal_tool_threshold,
                 original_user_text=original_user_text,
             ):
                 skill_proposal_retry_used = True
@@ -9190,10 +8991,9 @@ class WorkspaceNativeAgentLoop:
                 successful_tool_names,
                 registry=self.registry,
             )
-            pending_required_action_tools = _pending_required_action_tool_names(
-                pending_required_for_iteration,
-                self.registry,
-            )
+            pending_required_action_tools = {
+                name for name in pending_required_for_iteration if name
+            }
             if pending_required_action_tools and not text_only_final_attempt:
                 required_action_tools_for_iteration = _filter_provider_tools_by_names(
                     provider_tools,
@@ -9233,13 +9033,7 @@ class WorkspaceNativeAgentLoop:
                     1.0,
                     float(self.config.wall_time_final_synthesis_seconds or 0.0),
                 )
-                try:
-                    payload_chars = sum(
-                        len(json.dumps(m, ensure_ascii=False, default=str))
-                        for m in transcript
-                    )
-                except Exception:
-                    payload_chars = 0
+                payload_chars = _transcript_char_size(transcript)
                 if payload_chars >= _LARGE_FINAL_SYNTHESIS_PAYLOAD_CHARS:
                     threshold = max(
                         threshold,
@@ -9343,7 +9137,7 @@ class WorkspaceNativeAgentLoop:
             llm_cap = max(llm_base, float(self.config.llm_retry_max_delay))
             while True:
                 if (
-                    text_only_final_attempt
+                    (text_only_final_attempt or last_transient_error is not None)
                     and deadline is not None
                     and iterations > 1
                 ):
@@ -9377,14 +9171,11 @@ class WorkspaceNativeAgentLoop:
                             final_text = _build_llm_timeout_evidence_fallback(
                                 transcript=transcript,
                                 original_user_text=original_user_text,
-                                error=last_transient_error,
                                 team_results=observed_team_results,
                             )
                         else:
                             final_text = _wall_time_late_tool_abort_text(
                                 list(timeout_gap_tool_names),
-                                remaining_seconds=max(0.0, remaining),
-                                reserve_seconds=min_final_provider_window,
                                 original_user_text=original_user_text,
                                 pending_required_tool_names=timeout_gap_tool_names,
                             )
@@ -9395,64 +9186,6 @@ class WorkspaceNativeAgentLoop:
                                     "the required tool: "
                                     + redact_text(str(last_transient_error))[:240]
                                 )
-                        response = MessagesResponse(
-                            content=[{"type": "text", "text": final_text}],
-                            stop_reason="end_turn",
-                        )
-                        stop_reason = "end_turn"
-                        transition_reason = "wall_time_final_synthesis"
-                        break
-                if (
-                    last_transient_error is not None
-                    and deadline is not None
-                    and iterations > 1
-                ):
-                    remaining = deadline - time.time()
-                    late_transient_threshold = (
-                        _MIN_TEXT_ONLY_PROVIDER_WINDOW_SECONDS
-                    )
-                    if remaining <= late_transient_threshold:
-                        tool_names_for_timeout = {
-                            name
-                            for name in (
-                                _provider_tool_name(tool)
-                                for tool in tools_for_iteration
-                            )
-                            if name
-                        }
-                        timeout_gap_tool_names = tuple(
-                            sorted(
-                                set(pending_required_for_iteration)
-                                or pending_required_action_tools
-                                or tool_names_for_timeout
-                                or {"provider_response"}
-                            )
-                        )
-                        if (
-                            not pending_required_for_iteration
-                            and not pending_required_action_tools
-                            and has_tool_result_evidence
-                        ):
-                            final_text = _build_llm_timeout_evidence_fallback(
-                                transcript=transcript,
-                                original_user_text=original_user_text,
-                                error=last_transient_error,
-                                team_results=observed_team_results,
-                            )
-                        else:
-                            final_text = _wall_time_late_tool_abort_text(
-                                list(timeout_gap_tool_names),
-                                remaining_seconds=max(0.0, remaining),
-                                reserve_seconds=late_transient_threshold,
-                                original_user_text=original_user_text,
-                                pending_required_tool_names=timeout_gap_tool_names,
-                            )
-                            final_text = (
-                                final_text.rstrip()
-                                + "\nLast provider error while requesting "
-                                "the required tool: "
-                                + redact_text(str(last_transient_error))[:240]
-                            )
                         response = MessagesResponse(
                             content=[{"type": "text", "text": final_text}],
                             stop_reason="end_turn",
@@ -9961,21 +9694,17 @@ class WorkspaceNativeAgentLoop:
                             or offered_tool_names_for_timeout
                         )
                     )
-                    timeout_action_tool_names = (
-                        pending_required_action_tools
-                        or offered_action_tool_names_for_timeout
-                        or offered_tool_names_for_timeout
-                    )
                     if (
                         deadline is not None
                         and iterations > 1
                     ):
                         remaining = deadline - time.time()
-                        required_min_window = _required_action_min_wall_seconds(
-                            timeout_action_tool_names
-                        )
                         late_transient_threshold = (
-                            _MIN_TEXT_ONLY_PROVIDER_WINDOW_SECONDS
+                            _required_action_min_wall_seconds(
+                                pending_required_action_tools
+                            )
+                            if pending_required_action_tools
+                            else _MIN_TEXT_ONLY_PROVIDER_WINDOW_SECONDS
                         )
                         if remaining <= late_transient_threshold:
                             if not timeout_gap_tool_names:
@@ -9988,14 +9717,11 @@ class WorkspaceNativeAgentLoop:
                                 final_text = _build_llm_timeout_evidence_fallback(
                                     transcript=transcript,
                                     original_user_text=original_user_text,
-                                    error=exc,
                                     team_results=observed_team_results,
                                 )
                             else:
                                 final_text = _wall_time_late_tool_abort_text(
                                     list(timeout_gap_tool_names),
-                                    remaining_seconds=max(0.0, remaining),
-                                    reserve_seconds=late_transient_threshold,
                                     original_user_text=original_user_text,
                                     pending_required_tool_names=timeout_gap_tool_names,
                                 )
@@ -10023,7 +9749,6 @@ class WorkspaceNativeAgentLoop:
                             final_text = _build_llm_timeout_evidence_fallback(
                                 transcript=transcript,
                                 original_user_text=original_user_text,
-                                error=exc,
                                 team_results=observed_team_results,
                             )
                             response = MessagesResponse(
@@ -10211,15 +9936,8 @@ class WorkspaceNativeAgentLoop:
                     # payloads. Message count plus rough payload size makes
                     # it obvious whether the turn is blowing the context or
                     # the upstream is simply failing.
-                    try:
-                        _msg_count = len(transcript)
-                        _payload_chars = sum(
-                            len(json.dumps(m, ensure_ascii=False, default=str))
-                            for m in transcript
-                        )
-                    except Exception:
-                        _msg_count = -1
-                        _payload_chars = -1
+                    _msg_count = len(transcript)
+                    _payload_chars = _transcript_char_size(transcript)
                     _request_id = ""
                     for _attr in ("request_id", "x_request_id", "trace_id"):
                         v = getattr(exc, _attr, None)
@@ -10399,59 +10117,56 @@ class WorkspaceNativeAgentLoop:
                         ).as_dict(),
                     )
                     if not tool_uses:
+                        remaining_before_unoffered = (
+                            deadline - time.time()
+                            if deadline is not None
+                            else None
+                        )
+                        action_tool_reserve = _action_tool_wall_reserve_seconds(
+                            self.config
+                        )
+                        rejected_action_tool_names = {
+                            str(tool_use.get("name") or "")
+                            for tool_use in rejected_tool_uses
+                            if not _tool_use_is_read_only(tool_use, self.registry)
+                        }
+                        if (
+                            deadline is not None
+                            and rejected_action_tool_names
+                            and total_tool_calls > 0
+                            and has_tool_result_evidence
+                            and remaining_before_unoffered is not None
+                            and 0 < remaining_before_unoffered <= action_tool_reserve
+                        ):
+                            pending_required_for_unoffered = set(
+                                _pending_required_tool_names(
+                                    required_next_tool_names | todo_required_tool_names,
+                                    successful_tool_names,
+                                    registry=self.registry,
+                                )
+                            )
+                            late_strategy_proposals = (
+                                observed_strategy_proposals
+                                or _strategy_proposals_from_transcript(transcript)
+                            )
+                            if late_strategy_proposals:
+                                final_text = _build_late_strategy_proposal_final_text(
+                                    late_strategy_proposals,
+                                    rejected_tool_names,
+                                )
+                            else:
+                                final_text = _wall_time_late_tool_abort_text(
+                                    rejected_tool_names,
+                                    original_user_text=original_user_text,
+                                    pending_required_tool_names=tuple(
+                                        sorted(pending_required_for_unoffered)
+                                    ),
+                                )
+                            emit("assistant", TextBlock(text=final_text).as_dict())
+                            stop_reason = "end_turn"
+                            transition_reason = "wall_time_final_synthesis"
+                            break
                         if pending_required_action_tools:
-                            remaining_before_unoffered = (
-                                deadline - time.time()
-                                if deadline is not None
-                                else None
-                            )
-                            action_tool_reserve = _action_tool_wall_reserve_seconds(
-                                self.config
-                            )
-                            rejected_action_tool_names = {
-                                str(tool_use.get("name") or "")
-                                for tool_use in rejected_tool_uses
-                                if not _tool_use_is_read_only(tool_use, self.registry)
-                            }
-                            if (
-                                deadline is not None
-                                and rejected_action_tool_names
-                                and total_tool_calls > 0
-                                and has_tool_result_evidence
-                                and remaining_before_unoffered is not None
-                                and 0 < remaining_before_unoffered <= action_tool_reserve
-                            ):
-                                pending_required_for_unoffered = set(
-                                    _pending_required_tool_names(
-                                        required_next_tool_names | todo_required_tool_names,
-                                        successful_tool_names,
-                                        registry=self.registry,
-                                    )
-                                )
-                                late_strategy_proposals = (
-                                    observed_strategy_proposals
-                                    or _strategy_proposals_from_transcript(transcript)
-                                )
-                                if late_strategy_proposals:
-                                    final_text = _build_late_strategy_proposal_final_text(
-                                        late_strategy_proposals,
-                                        observed_team_results,
-                                        rejected_tool_names,
-                                    )
-                                else:
-                                    final_text = _wall_time_late_tool_abort_text(
-                                        rejected_tool_names,
-                                        remaining_seconds=remaining_before_unoffered,
-                                        reserve_seconds=action_tool_reserve,
-                                        original_user_text=original_user_text,
-                                        pending_required_tool_names=tuple(
-                                            sorted(pending_required_for_unoffered)
-                                        ),
-                                    )
-                                emit("assistant", TextBlock(text=final_text).as_dict())
-                                stop_reason = "end_turn"
-                                transition_reason = "wall_time_final_synthesis"
-                                break
                             retry_key = tuple(sorted(pending_required_action_tools))
                             skipped_tool_names = sorted(
                                 name for name in rejected_tool_names if name
@@ -10506,58 +10221,6 @@ class WorkspaceNativeAgentLoop:
                                 if only_read_only_tools
                                 else "next_required_action_wrong_tool_blocked"
                             )
-                            break
-                        remaining_before_unoffered = (
-                            deadline - time.time()
-                            if deadline is not None
-                            else None
-                        )
-                        action_tool_reserve = _action_tool_wall_reserve_seconds(
-                            self.config
-                        )
-                        rejected_action_tool_names = {
-                            str(tool_use.get("name") or "")
-                            for tool_use in rejected_tool_uses
-                            if not _tool_use_is_read_only(tool_use, self.registry)
-                        }
-                        if (
-                            deadline is not None
-                            and rejected_action_tool_names
-                            and total_tool_calls > 0
-                            and has_tool_result_evidence
-                            and remaining_before_unoffered is not None
-                            and 0 < remaining_before_unoffered <= action_tool_reserve
-                        ):
-                            pending_required_for_unoffered = set(
-                                _pending_required_tool_names(
-                                    required_next_tool_names | todo_required_tool_names,
-                                    successful_tool_names,
-                                    registry=self.registry,
-                                )
-                            )
-                            late_strategy_proposals = (
-                                observed_strategy_proposals
-                                or _strategy_proposals_from_transcript(transcript)
-                            )
-                            if late_strategy_proposals:
-                                final_text = _build_late_strategy_proposal_final_text(
-                                    late_strategy_proposals,
-                                    observed_team_results,
-                                    rejected_tool_names,
-                                )
-                            else:
-                                final_text = _wall_time_late_tool_abort_text(
-                                    rejected_tool_names,
-                                    remaining_seconds=remaining_before_unoffered,
-                                    reserve_seconds=action_tool_reserve,
-                                    original_user_text=original_user_text,
-                                    pending_required_tool_names=tuple(
-                                        sorted(pending_required_for_unoffered)
-                                    ),
-                                )
-                            emit("assistant", TextBlock(text=final_text).as_dict())
-                            stop_reason = "end_turn"
-                            transition_reason = "wall_time_final_synthesis"
                             break
                         if iterations < self.config.max_iterations:
                             transcript.append({
@@ -10768,11 +10431,10 @@ class WorkspaceNativeAgentLoop:
                             compact_text = _assistant_text_from_blocks(
                                 list(compact_response.content)
                             )
-                        except Exception as exc:  # noqa: BLE001
+                        except Exception:  # noqa: BLE001
                             final_text = _build_llm_timeout_evidence_fallback(
                                 transcript=transcript,
                                 original_user_text=original_user_text,
-                                error=exc,
                                 team_results=observed_team_results,
                             )
                             transition_reason = "llm_timeout_evidence_fallback"
@@ -10800,14 +10462,11 @@ class WorkspaceNativeAgentLoop:
                 if late_strategy_proposals:
                     final_text = _build_late_strategy_proposal_final_text(
                         late_strategy_proposals,
-                        observed_team_results,
                         skipped_tool_names,
                     )
                 else:
                     final_text = _wall_time_late_tool_abort_text(
                         skipped_tool_names,
-                        remaining_seconds=remaining_before_tools,
-                        reserve_seconds=action_tool_reserve,
                         original_user_text=original_user_text,
                         pending_required_tool_names=tuple(
                             sorted(pending_required_for_late_tools)
@@ -10976,8 +10635,8 @@ class WorkspaceNativeAgentLoop:
                 if (
                     len(recent_text_lengths) >= self.config.diminishing_returns_window
                     and all(
-                        l < self.config.diminishing_returns_threshold
-                        for l in recent_text_lengths
+                        text_length < self.config.diminishing_returns_threshold
+                        for text_length in recent_text_lengths
                     )
                     and tool_uses  # only trigger if model is still calling tools but getting nowhere
                 ):
@@ -10993,8 +10652,6 @@ class WorkspaceNativeAgentLoop:
                     cleaned_text = _assistant_text_from_blocks(assistant_blocks)
                     if text_only_final_attempt:
                         summary = _build_deterministic_final_summary(
-                            stop_reason=stop_reason or "end_turn",
-                            abort_reason="legacy_tool_call_in_final_synthesis",
                             iterations=iterations,
                             tool_calls=total_tool_calls,
                             error_count=error_count,
@@ -11045,6 +10702,7 @@ class WorkspaceNativeAgentLoop:
                 if final_text and transition_reason in {
                     "llm_safety_rejection_finalized",
                     "required_action_provider_exhausted",
+                    "wall_time_final_synthesis",
                 }:
                     break
                 pending_required_after_text = _pending_required_tool_names(
@@ -11105,7 +10763,6 @@ class WorkspaceNativeAgentLoop:
                     and "strategy_generate_proposal" in provider_tool_names
                     and "strategy_generate_proposal" not in completed_tool_names
                     and not _reflection_diagnostic_proposal_completed(
-                        completed_tool_names=completed_tool_names,
                         successful_tool_names=successful_tool_names,
                     )
                     and _strategy_proposal_deferral_text_observed(
@@ -11155,7 +10812,6 @@ class WorkspaceNativeAgentLoop:
                     and "strategy_generate_proposal" in provider_tool_names
                     and "strategy_generate_proposal" not in completed_tool_names
                     and not _reflection_diagnostic_proposal_completed(
-                        completed_tool_names=completed_tool_names,
                         successful_tool_names=successful_tool_names,
                     )
                     and (
@@ -11191,7 +10847,6 @@ class WorkspaceNativeAgentLoop:
                         provider_tool_names=provider_tool_names,
                         completed_tool_names=completed_tool_names,
                         total_tool_calls=total_tool_calls,
-                        threshold=self.config.skill_discovery_proposal_tool_threshold,
                         original_user_text=original_user_text,
                     )
                     and _provider_proposal_prep_context_observed(
@@ -11217,7 +10872,6 @@ class WorkspaceNativeAgentLoop:
                         provider_tool_names=provider_tool_names,
                         completed_tool_names=completed_tool_names,
                         total_tool_calls=total_tool_calls,
-                        threshold=self.config.skill_discovery_proposal_tool_threshold,
                         original_user_text=original_user_text,
                         allow_explicit_without_discovery=True,
                     )
@@ -11247,7 +10901,6 @@ class WorkspaceNativeAgentLoop:
                         provider_tool_names=provider_tool_names,
                         completed_tool_names=completed_tool_names,
                         total_tool_calls=total_tool_calls,
-                        threshold=self.config.skill_discovery_proposal_tool_threshold,
                         original_user_text=original_user_text,
                     )
                     and iterations < self.config.max_iterations
@@ -12065,7 +11718,6 @@ class WorkspaceNativeAgentLoop:
                 final_text = _build_task_schedule_created_final_text(
                     task_schedules,
                     proposal_items=observed_proposals,
-                    team_results=observed_team_results,
                 )
                 transcript.append({
                     "role": "assistant",
@@ -12458,7 +12110,6 @@ class WorkspaceNativeAgentLoop:
                     and "strategy_generate_proposal" in provider_tool_names
                     and "strategy_generate_proposal" not in successful_tool_names
                     and not _reflection_diagnostic_proposal_completed(
-                        completed_tool_names=completed_tool_names,
                         successful_tool_names=successful_tool_names,
                     )
                     and iterations < self.config.max_iterations
@@ -12557,61 +12208,6 @@ class WorkspaceNativeAgentLoop:
                 item for item in (_wallet_balance_blocker_data(r) for r in batch.results)
                 if item is not None
             ]
-            wallet_provider_readiness_blockers = [
-                item
-                for item in (
-                    _wallet_provider_readiness_blocker_data(r)
-                    for r in batch.results
-                )
-                if item is not None
-            ]
-            if (
-                wallet_provider_readiness_blockers
-                and not _has_strategy_proposal_created_result(batch.results)
-                and "strategy_generate_proposal" not in successful_tool_names
-            ):
-                wallet_signal_strategy_context = (
-                    _wallet_signal_strategy_context_observed(
-                        wallet_provider_readiness_blockers,
-                        completed_tool_names,
-                    )
-                )
-                pending_strategy_tools = _wallet_readiness_should_defer_to_strategy(
-                    provider_tool_names=provider_tool_names,
-                    required_next_tool_names=required_next_tool_names,
-                    todo_required_tool_names=todo_required_tool_names,
-                    successful_tool_names=successful_tool_names,
-                    completed_tool_names=completed_tool_names,
-                    strategy_authoring_context_observed=(
-                        strategy_authoring_context_observed
-                        or wallet_signal_strategy_context
-                    ),
-                    registry=self.registry,
-                )
-                if pending_strategy_tools and iterations < self.config.max_iterations:
-                    required_next_tool_names.update(pending_strategy_tools)
-                    transcript.append({
-                        "role": "user",
-                        "content": _required_next_action_retry_prompt(
-                            pending_strategy_tools
-                        ),
-                    })
-                    transition_reason = "wallet_readiness_strategy_continue"
-                    final_text = ""
-                    continue
-                final_text = _build_wallet_provider_readiness_blocker_final_text(
-                    wallet_provider_readiness_blockers
-                )
-                transcript.append({
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": final_text}],
-                })
-                emit("assistant", TextBlock(text=final_text).as_dict())
-                stop_reason = "end_turn"
-                transition_reason = (
-                    "wallet_provider_readiness_blocked_finalized"
-                )
-                break
             if wallet_balance_blockers and observed_account_rows:
                 final_text = _build_wallet_balance_blocker_final_text(
                     observed_account_rows,
@@ -12705,15 +12301,6 @@ class WorkspaceNativeAgentLoop:
                         for data in degraded_results
                         if not _team_result_has_usable_output(data)
                     ]
-                    degraded_strategy_results = [
-                        data
-                        for data in degraded_results
-                        if _team_result_has_usable_output(data)
-                        and _team_result_can_trigger_strategy_proposal(
-                            data,
-                            required_artifacts=self.config.required_artifacts,
-                        )
-                    ]
                     if (
                         "task_create" in completed_tool_names
                         and not strategy_proposal_retry_used
@@ -12728,24 +12315,6 @@ class WorkspaceNativeAgentLoop:
                             "content": _durable_workflow_proposal_retry_prompt(),
                         })
                         transition_reason = "durable_workflow_proposal_retry"
-                        continue
-                    if (
-                        degraded_strategy_results
-                        and not strategy_proposal_retry_used
-                        and "strategy_generate_proposal" in provider_tool_names
-                        and "strategy_generate_proposal" not in successful_tool_names
-                        and iterations < self.config.max_iterations
-                    ):
-                        strategy_proposal_retry_used = True
-                        required_next_tool_names.add("strategy_generate_proposal")
-                        transcript.append({
-                            "role": "user",
-                            "content": _degraded_team_strategy_proposal_retry_prompt(
-                                degraded_strategy_results
-                            ),
-                        })
-                        transition_reason = "degraded_team_strategy_proposal_retry"
-                        final_text = ""
                         continue
                     if (
                         empty_degraded_results
@@ -12774,7 +12343,6 @@ class WorkspaceNativeAgentLoop:
                         )
                         try:
                             final_text = self._synthesize_team_run_final_answer(
-                                system=system,
                                 user_message=user_message,
                                 team_results=degraded_results,
                                 deadline=deadline,
@@ -12828,7 +12396,6 @@ class WorkspaceNativeAgentLoop:
                     )
                     try:
                         final_text = self._synthesize_team_run_final_answer(
-                            system=system,
                             user_message=user_message,
                             team_results=usable_completed_results,
                             deadline=deadline,
@@ -12876,7 +12443,6 @@ class WorkspaceNativeAgentLoop:
                     if 0 < remaining_after_team <= team_final_threshold:
                         try:
                             final_text = self._synthesize_team_run_final_answer(
-                                system=system,
                                 user_message=user_message,
                                 team_results=team_results,
                                 deadline=deadline,
@@ -12887,13 +12453,11 @@ class WorkspaceNativeAgentLoop:
                                 "team_run compact final synthesis failed: %s",
                                 exc,
                             )
-                            final_text = "\n\n".join(
-                                _build_team_run_final_report(data)
-                                for data in team_results
+                            final_text = _build_team_run_bounded_fallback(
+                                user_message=user_message,
+                                team_results=team_results,
                             )
-                            transition_reason = (
-                                "team_result_deterministic_finalized"
-                            )
+                            transition_reason = "team_result_bounded_fallback"
                         else:
                             transition_reason = (
                                 "team_result_compact_final_synthesis"
@@ -12945,7 +12509,6 @@ class WorkspaceNativeAgentLoop:
                     provider_tool_names=provider_tool_names,
                     completed_tool_names=completed_tool_names,
                     total_tool_calls=total_tool_calls,
-                    threshold=self.config.skill_discovery_proposal_tool_threshold,
                     original_user_text=original_user_text,
                 )
                 and total_tool_calls
@@ -12960,31 +12523,6 @@ class WorkspaceNativeAgentLoop:
                     ),
                 })
                 transition_reason = "task_automation_action_retry"
-                final_text = ""
-                continue
-
-            if (
-                skill_discovery_context_observed
-                and not skill_proposal_retry_used
-                and "evolve_skill_proposal" in provider_tool_names
-                and "evolve_skill_proposal" not in completed_tool_names
-                and not (_EVOLVE_PROPOSAL_TOOLS & completed_tool_names)
-                and _skill_proposal_retry_due(
-                    total_tool_calls=total_tool_calls,
-                    threshold=self.config.skill_discovery_proposal_tool_threshold,
-                    original_user_text=original_user_text,
-                )
-                and iterations < self.config.max_iterations
-            ):
-                skill_proposal_retry_used = True
-                required_next_tool_names.add("evolve_skill_proposal")
-                transcript.append({
-                    "role": "user",
-                    "content": _skill_discovery_proposal_retry_prompt(
-                        total_tool_calls
-                    ),
-                })
-                transition_reason = "skill_discovery_proposal_retry"
                 final_text = ""
                 continue
 
@@ -13088,12 +12626,6 @@ class WorkspaceNativeAgentLoop:
         if was_aborted:
             existing_text = final_text.strip()
             summary = _build_deterministic_final_summary(
-                stop_reason=stop_reason or (
-                    "max_iterations"
-                    if iterations >= self.config.max_iterations
-                    else "aborted"
-                ),
-                abort_reason=aborted_reason,
                 iterations=iterations,
                 tool_calls=total_tool_calls,
                 error_count=error_count,
@@ -13481,17 +13013,6 @@ class WorkspaceNativeAgentLoop:
             # churn. Token pressure here means individual messages are
             # huge — microcompact (which runs right after) is the lever.
             return transcript
-        if self.event_sink is not None:
-            try:
-                self.event_sink("system", {
-                    "kind": "system",
-                    "event_kind": "compact.start",
-                    "before_count": len(transcript),
-                    "forced": forced,
-                    "reason": force_reason or "message_count",
-                })
-            except Exception:
-                pass
         if forced:
             # Compact down to (half of) the tail window so the very next
             # request actually relieves token pressure instead of barely
@@ -13526,21 +13047,6 @@ class WorkspaceNativeAgentLoop:
                 compacted = self.config.compact_preservation_cb(compacted)
             except Exception:
                 _LOG.exception("compact_preservation_cb failed")
-        if self.event_sink is not None:
-            try:
-                self.event_sink("system", {
-                    "kind": "system",
-                    "event_kind": "compact.complete",
-                    "kept": int(report.kept),
-                    "dropped": int(report.dropped),
-                    "pairs_dropped": int(report.pairs_dropped),
-                    "skills_preserved": list(report.skills_preserved or []),
-                    "after_count": len(compacted),
-                    "forced": forced,
-                    "reason": force_reason or "message_count",
-                })
-            except Exception:
-                pass
         return compacted
 
     def _reactive_compact(
@@ -13569,17 +13075,6 @@ class WorkspaceNativeAgentLoop:
         shrink = 2 ** attempt  # 2, 4, 8 …
         keep_tail = max(4, int(self.config.keep_tail_messages) // shrink)
         max_messages = max(keep_tail, len(transcript) - 1)
-        if self.event_sink is not None:
-            try:
-                self.event_sink("system", {
-                    "kind": "system",
-                    "event_kind": "compact.start",
-                    "before_count": len(transcript),
-                    "forced": True,
-                    "reason": f"context_overflow:attempt={attempt}",
-                })
-            except Exception:
-                pass
         compacted, report = compact_transcript(
             transcript,
             keep_tail_messages=keep_tail,
@@ -13611,23 +13106,6 @@ class WorkspaceNativeAgentLoop:
             attempt, report.kept, report.dropped, report.pairs_dropped,
             mc_report.truncated, mc_report.bytes_dropped,
         )
-        if self.event_sink is not None:
-            try:
-                self.event_sink("system", {
-                    "kind": "system",
-                    "event_kind": "compact.complete",
-                    "kept": int(report.kept),
-                    "dropped": int(report.dropped),
-                    "pairs_dropped": int(report.pairs_dropped),
-                    "skills_preserved": list(report.skills_preserved or []),
-                    "after_count": len(compacted),
-                    "forced": True,
-                    "reason": f"context_overflow:attempt={attempt}",
-                    "micro_truncated": int(mc_report.truncated),
-                    "micro_dropped_chars": int(mc_report.bytes_dropped),
-                })
-            except Exception:
-                pass
         return compacted
 
 

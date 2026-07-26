@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.errors import TradingError
-from .base import Balance, CEXConnectorBase, OrderAck, Ticker
+from .base import Balance, CEXConnectorBase, ContractPosition, OrderAck, Ticker
 from .cex_base import CEXCredentials
 
 
@@ -169,6 +169,107 @@ class CcxtConnector(CEXConnectorBase):
         if self._client is None:
             self._client = self._build_client()
         return self._client
+
+    @property
+    def markets(self) -> dict[str, Any]:
+        """Lazily-loaded ccxt ``markets`` map (per-symbol precision, contract
+        size, lot limits). Cached for the connector's lifetime so every
+        ``place_order`` / ``fetch_*`` call can precision-round without an
+        extra round-trip."""
+        cache = getattr(self, "_markets", None)
+        if cache is None:
+            try:
+                cache = self.client.load_markets()
+            except Exception:
+                cache = {}
+            self._markets = cache
+        return cache
+
+    def _is_derivatives(self, sym: str) -> bool:
+        mkt = self.markets.get(sym) or {}
+        contract = mkt.get("contract") or mkt.get("swap") or mkt.get("future")
+        return bool(contract)
+
+    def _contract_size(self, sym: str) -> float:
+        mkt = self.markets.get(sym) or {}
+        try:
+            return float(mkt.get("contractSize") or 1.0)
+        except Exception:
+            return 1.0
+
+    def _precision_amount(self, sym: str) -> int:
+        mkt = self.markets.get(sym) or {}
+        return int(mkt.get("precision", {}).get("amount") or 8) if mkt else 8
+
+    def _round_amount(self, sym: str, size: float) -> float:
+        """Round an order amount down without exceeding the approved size."""
+        mkt = self.markets.get(sym) or {}
+        lim = mkt.get("limits", {}).get("amount", {}) if isinstance(mkt, dict) else {}
+        amount = float(size)
+        if amount <= 0:
+            raise TradingError(f"{self.venue} order amount must be positive")
+        # Step size (lot) — round down so we never over-send.
+        step = lim.get("step") if isinstance(lim, dict) else None
+        try:
+            if step:
+                amount = (amount // float(step)) * float(step)
+        except Exception:
+            pass
+        try:
+            min_amt = float(lim.get("min") or 0.0) if isinstance(lim, dict) else 0.0
+        except Exception:
+            min_amt = 0.0
+        if min_amt > 0 and amount < min_amt:
+            raise TradingError(
+                f"{self.venue} order amount {amount:g} is below the "
+                f"exchange minimum {min_amt:g} for {sym}"
+            )
+        if amount <= 0:
+            raise TradingError(
+                f"{self.venue} order amount rounds to zero for {sym}"
+            )
+        return amount
+
+    def _round_price(self, sym: str, price: float | None) -> float | None:
+        if price is None:
+            return None
+        try:
+            return float(self.client.price_to_precision(sym, float(price)))
+        except Exception:
+            return float(price)
+
+    def _price_param(self, sym: str, price: float) -> str:
+        """Return an exchange-precision string for nested order params."""
+
+        try:
+            return str(self.client.price_to_precision(sym, float(price)))
+        except Exception:
+            return str(float(price))
+
+    def _ensure_leverage_and_margin(
+        self,
+        sym: str,
+        *,
+        leverage: float | None,
+        margin_mode: str | None,
+    ) -> None:
+        """Set requested derivative controls, failing closed on any error."""
+        if not self._is_derivatives(sym):
+            return
+        if leverage and float(leverage) > 0:
+            try:
+                self.client.set_leverage(int(float(leverage)), sym)
+            except Exception as exc:
+                raise TradingError(
+                    f"{self.venue} failed to set leverage for {sym}: {exc}"
+                ) from exc
+        if margin_mode and str(margin_mode).lower() in ("isolated", "cross"):
+            try:
+                self.client.set_margin_mode(str(margin_mode).lower(), sym)
+            except Exception as exc:
+                raise TradingError(
+                    f"{self.venue} failed to set margin mode for {sym}: {exc}"
+                ) from exc
 
     # --------------------------------------------------------- helpers
     def _normalise_symbol(self, market: str) -> str:
@@ -456,38 +557,95 @@ class CcxtConnector(CEXConnectorBase):
             ))
         return out
 
-    def place_order(self, *, market: str, side: str, order_type: str,
-                    size: float, price: float | None = None,
-                    client_order_id: str | None = None,
-                    time_in_force: str = "GTC") -> OrderAck:
+    def place_order(
+        self,
+        *,
+        market: str,
+        side: str,
+        order_type: str,
+        size: float,
+        price: float | None = None,
+        client_order_id: str | None = None,
+        time_in_force: str = "GTC",
+        reduce_only: bool = False,
+        leverage: float | None = None,
+        margin_mode: str | None = None,
+        position_side: str | None = None,
+        position_idx: int | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        trigger_price: float | None = None,
+        extra_params: dict[str, Any] | None = None,
+    ) -> OrderAck:
         self._check_live_and_keys()
         sym = self._normalise_symbol(market)
+        is_deriv = self._is_derivatives(sym)
+
+        # Pre-trade derivative setup (leverage / margin mode). Idempotent.
+        if is_deriv:
+            self._ensure_leverage_and_margin(
+                sym, leverage=leverage, margin_mode=margin_mode,
+            )
+
+        # Precision rounding.
+        contract_size = self._contract_size(sym) if is_deriv else 1.0
+        amount = float(size)
+        if is_deriv and contract_size and contract_size != 1.0:
+            # ccxt amounts for swaps are in *contracts*; convert from base.
+            amount = amount / float(contract_size or 1.0)
+        amount = self._round_amount(sym, amount)
+        px = self._round_price(sym, price)
+
+        # Build the ccxt params dict.
         params: dict[str, Any] = {}
         if client_order_id:
             params["clientOrderId"] = client_order_id
         if time_in_force and order_type.lower() == "limit":
             params["timeInForce"] = time_in_force
+        if is_deriv:
+            if reduce_only:
+                params["reduceOnly"] = True
+            if position_side:
+                params["positionSide"] = str(position_side)
+            if position_idx is not None:
+                params["positionIdx"] = int(position_idx)
+            # Native bracket — Bybit V5 uses stopLossPrice / takeProfitPrice;
+            # ccxt normalises these for other venues too.
+            if stop_loss is not None:
+                params["stopLossPrice"] = self._price_param(sym, float(stop_loss))
+            if take_profit is not None:
+                params["takeProfitPrice"] = self._price_param(sym, float(take_profit))
+            if trigger_price is not None:
+                params["triggerPrice"] = self._price_param(sym, float(trigger_price))
+        if extra_params:
+            for k, v in extra_params.items():
+                if v is not None and k not in params:
+                    params[k] = v
+
         try:
             raw = self.client.create_order(
-                sym, order_type.lower(), side.lower(), float(size),
-                None if price is None else float(price), params,
+                sym, order_type.lower(), side.lower(), float(amount),
+                None if px is None else float(px), params,
             )
         except Exception as exc:
             raise TradingError(f"{self.venue} place_order failed: {exc}") from exc
+
         fee_usd, fee_breakdown = self._extract_fee_usd(
             raw, market=market, avg_price=float(raw.get("average") or 0) or None,
         )
+        bracket = _extract_bracket_order_ids(raw)
         return OrderAck(
             order_id=str(raw.get("id") or ""),
             client_order_id=str(raw.get("clientOrderId") or client_order_id or ""),
             status=_map_order_status(raw.get("status")),
             market=market, side=side.lower(),
-            price=float(raw.get("price") or price or 0) or None,
-            size=float(raw.get("amount") or size or 0) or None,
+            price=float(raw.get("price") or px or 0) or None,
+            size=float(raw.get("amount") or amount or 0) or None,
             filled=float(raw.get("filled") or 0) or None,
             avg_price=float(raw.get("average") or 0) or None,
             fee_usd=fee_usd,
             fee_breakdown=fee_breakdown,
+            attached_bracket_order_ids=bracket,
             raw=dict(raw),
         )
 
@@ -530,6 +688,84 @@ class CcxtConnector(CEXConnectorBase):
             fee_breakdown=fee_breakdown,
             raw=dict(raw),
         )
+
+    # ------------------------------------------------------------------
+    # Derivatives reads — positions / open orders / fills
+    # ------------------------------------------------------------------
+    def fetch_positions(self, *, symbols: list[str] | None = None) -> list[ContractPosition]:
+        self._check_live_and_keys()
+        try:
+            raw_positions = self.client.fetch_positions(symbols)
+        except Exception as exc:
+            raise TradingError(f"{self.venue} fetch_positions failed: {exc}") from exc
+        out: list[ContractPosition] = []
+        for r in raw_positions or []:
+            try:
+                sym = str(r.get("symbol") or "")
+                side_raw = str(r.get("side") or "").lower() or "none"
+                contracts = float(r.get("contracts") or 0.0)
+                contract_size = float(r.get("contractSize") or 1.0)
+                entry = float(r.get("entryPrice") or r.get("entry_price") or 0.0)
+                mark = float(r.get("markPrice") or r.get("mark_price") or 0.0)
+                notional = float(r.get("notional") or 0.0) or (abs(contracts) * contract_size * mark)
+                margin = float(r.get("initialMargin") or r.get("initial_margin") or 0.0)
+                upnl = float(
+                    r.get("unrealisedPnl")
+                    or r.get("unrealizedPnl")
+                    or r.get("unrealized_pnl")
+                    or 0.0
+                )
+                lev = float(r.get("leverage") or 1.0) or 1.0
+                liq = r.get("liquidationPrice") or r.get("liquidation_price")
+                liq_f = float(liq) if liq else None
+                out.append(ContractPosition(
+                    market=f"{self.venue.lower()}:{sym}" if sym else "",
+                    side=side_raw,
+                    contracts=contracts,
+                    contract_size=contract_size,
+                    entry_price=entry,
+                    mark_price=mark,
+                    notional_usd=notional,
+                    initial_margin_usd=margin,
+                    unrealised_pnl_usd=upnl,
+                    leverage=lev,
+                    liquidation_price=liq_f,
+                    raw=dict(r) if isinstance(r, dict) else {"raw": str(r)},
+                ))
+            except Exception:
+                continue
+        return out
+
+    def fetch_open_orders(self, *, symbols: list[str] | None = None) -> list[OrderAck]:
+        self._check_live_and_keys()
+        try:
+            if symbols:
+                raw_orders = []
+                for s in symbols:
+                    sym = self._normalise_symbol(s) if ":" in str(s) or "/" not in str(s) else s
+                    raw_orders.extend(self.client.fetch_open_orders(sym))
+            else:
+                raw_orders = self.client.fetch_open_orders()
+        except Exception as exc:
+            raise TradingError(f"{self.venue} fetch_open_orders failed: {exc}") from exc
+        return [_raw_order_to_ack(self, r) for r in raw_orders or []]
+
+    def fetch_my_trades(
+        self,
+        *,
+        market: str | None = None,
+        since_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[OrderAck]:
+        self._check_live_and_keys()
+        sym = self._normalise_symbol(market) if market else None
+        try:
+            raw_trades = self.client.fetch_my_trades(
+                sym, params={"since": since_ms, "limit": limit} if since_ms else {"limit": limit}
+            )
+        except Exception as exc:
+            raise TradingError(f"{self.venue} fetch_my_trades failed: {exc}") from exc
+        return [_raw_order_to_ack(self, r) for r in raw_trades or []]
 
     # ------------------------------------------------------------------
     # Fee extraction
@@ -638,6 +874,76 @@ def _map_order_status(raw: str | None) -> str:
     if s == "rejected":
         return "rejected"
     return s or "new"
+
+
+def _extract_bracket_order_ids(raw: dict[str, Any]) -> dict[str, str]:
+    """Pull native SL/TP bracket order ids out of a create_order response.
+
+    Bybit V5 returns attached stop orders under ``stopLossOrder*`` /
+    ``takeProfitOrder*`` keys; other venues surface them under
+    ``stopLossOrderId`` / ``takeProfitOrderId`` or in an ``attachOrder``
+    list. We harvest every known shape so the executor can record them
+    for protection accounting and reconciliation.
+    """
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    # Bybit V5 specific: stopLoss / takeProfit can be dict or scalar.
+    sl = raw.get("stopLoss")
+    tp = raw.get("takeProfit")
+    sl_id: str | None = None
+    tp_id: str | None = None
+    if isinstance(sl, dict):
+        sl_id = sl.get("orderId") or sl.get("id")
+    elif isinstance(sl, str):
+        sl_id = sl or None
+    sl_id = sl_id or raw.get("stopLossOrderId")
+    if isinstance(tp, dict):
+        tp_id = tp.get("orderId") or tp.get("id")
+    elif isinstance(tp, str):
+        tp_id = tp or None
+    tp_id = tp_id or raw.get("takeProfitOrderId")
+    if sl_id:
+        out["stop_loss"] = str(sl_id)
+    if tp_id:
+        out["take_profit"] = str(tp_id)
+    # Generic attachOrder list (some venues)
+    attached = raw.get("attachOrders") or raw.get("attachedOrders")
+    if isinstance(attached, list):
+        for ao in attached:
+            if not isinstance(ao, dict):
+                continue
+            ao_id = str(ao.get("id") or ao.get("orderId") or "")
+            ao_type = str(ao.get("type") or ao.get("stopType") or "").lower()
+            if not ao_id:
+                continue
+            if "loss" in ao_type or "stop" in ao_type:
+                out.setdefault("stop_loss", ao_id)
+            elif "profit" in ao_type or "take" in ao_type:
+                out.setdefault("take_profit", ao_id)
+    return out
+
+
+def _raw_order_to_ack(conn: "CcxtConnector", r: dict[str, Any]) -> OrderAck:
+    """Map a raw ccxt order/trade dict to :class:`OrderAck` for reconciliation."""
+    avg = float(r.get("average") or 0.0) or None
+    fee_usd, fee_breakdown = conn._extract_fee_usd(
+        r, market=str(r.get("symbol") or ""), avg_price=avg,
+    )
+    return OrderAck(
+        order_id=str(r.get("id") or ""),
+        client_order_id=str(r.get("clientOrderId") or r.get("client_order_id") or ""),
+        status=_map_order_status(r.get("status")),
+        market=str(r.get("symbol") or ""),
+        side=str(r.get("side") or ""),
+        price=float(r.get("price") or 0.0) or None,
+        size=float(r.get("amount") or 0.0) or None,
+        filled=float(r.get("filled") or r.get("amount") or 0.0) or None,
+        avg_price=avg,
+        fee_usd=fee_usd,
+        fee_breakdown=fee_breakdown,
+        raw=dict(r),
+    )
 
 
 __all__ = ["CcxtConnector", "supported_exchanges"]

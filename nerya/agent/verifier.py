@@ -104,6 +104,10 @@ _TEST_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 _VERIFY_TOOL_PREFIXES: tuple[str, ...] = ("verify_", "check_", "validate_", "test_")
 
 
+def is_validation_command(command: str) -> bool:
+    return any(pattern.search(command or "") for pattern in _TEST_COMMAND_PATTERNS)
+
+
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------
@@ -303,7 +307,7 @@ def verify_hard(
             cmd = ""
             if orig_use:
                 cmd = str((orig_use.get("payload") or {}).get("command") or "")
-            if cmd and any(p.search(cmd) for p in _TEST_COMMAND_PATTERNS):
+            if is_validation_command(cmd):
                 is_validation = True
                 test_commands_seen.append(cmd[:120])
 
@@ -348,7 +352,7 @@ def verify_hard(
             is_validation = True
         elif action == "run_shell":
             cmd = str(payload.get("command") or "")
-            if cmd and any(p.search(cmd) for p in _TEST_COMMAND_PATTERNS):
+            if is_validation_command(cmd):
                 is_validation = True
                 test_commands_seen.append(cmd[:120])
         elif action == "script_run":
@@ -715,7 +719,7 @@ def compute_verifier_nudge(
                         edited_paths.append(p)
             elif action == "run_shell":
                 cmd = str(payload.get("command") or "")
-                if any(p.search(cmd) for p in _TEST_COMMAND_PATTERNS):
+                if is_validation_command(cmd):
                     test_evidence_seen += 1
                     validation_invocations.append(f"run_shell: {cmd[:80]}")
             elif action == "script_run":

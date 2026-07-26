@@ -117,6 +117,45 @@ class ApprovalRepository:
     def set_state(self, id: str, state: str) -> None:
         self.con.execute("UPDATE approvals SET state=? WHERE id=?", (state, id))
 
+    def claim_resume(self, id: str) -> bool:
+        """Atomically claim one approved record for execution."""
+        cursor = self.con.execute(
+            "UPDATE approvals SET state='resuming' WHERE id=? AND state='approved'",
+            (id,),
+        )
+        return cursor.rowcount == 1
+
+    def finish_resume(
+        self,
+        id: str,
+        *,
+        state: str,
+        intent_id: str | None,
+        response_status: str | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """Persist the terminal result of a claimed approval resume."""
+        if state not in {"resumed", "resume_failed"}:
+            raise ValueError(f"invalid approval resume state: {state}")
+        row = self.get(id)
+        if row is None:
+            return False
+        raw_payload = row.get("payload")
+        try:
+            payload = json.loads(raw_payload) if isinstance(raw_payload, str) else dict(raw_payload or {})
+        except (TypeError, ValueError):
+            payload = {}
+        payload.update({
+            "resumed_intent_id": intent_id,
+            "resume_status": response_status,
+            "resume_error": error,
+        })
+        cursor = self.con.execute(
+            "UPDATE approvals SET state=?, payload=? WHERE id=? AND state='resuming'",
+            (state, json.dumps(payload, default=str), id),
+        )
+        return cursor.rowcount == 1
+
     def list_pending(self) -> list[dict]:
         rows = self.con.execute(
             "SELECT id,kind,state,created_at,expires_at,payload FROM approvals WHERE state='pending' ORDER BY created_at"

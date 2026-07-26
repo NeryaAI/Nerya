@@ -22,9 +22,9 @@ having to reverse-engineer ad-hoc JSON.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Iterable
 
+from ..core import jsonl
 from ._envelope import (
     action,
     blocked,
@@ -49,23 +49,14 @@ def _safe(call, default):
 
 
 def _pending_approvals(client) -> list[dict[str, Any]]:
-    paths = client.config.paths
-    p = getattr(paths, "approvals_pending", None)
+    p = getattr(client.config.paths, "approvals_pending", None)
     if not p or not p.exists():
         return []
-    rows: list[dict[str, Any]] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
-        if rec.get("state") and rec["state"] != "pending":
-            continue
-        rows.append(rec)
-    return rows
+    return [
+        rec
+        for rec in jsonl.read_all(p)
+        if not rec.get("state") or rec["state"] == "pending"
+    ]
 
 
 def _open_turns(client) -> list[dict[str, Any]]:

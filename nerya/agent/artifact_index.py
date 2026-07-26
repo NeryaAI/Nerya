@@ -22,9 +22,8 @@ Categories tracked:
   can confirm "yes, the agent grounded its edits in the right
   context").
 * **Commands** — ``run_shell`` calls and their exit code.
-* **Tests** — commands whose pattern matches a test runner (handled
-  by :mod:`nerya.agent.verifier`'s catalogue). We re-derive locally
-  to keep the modules independent.
+* **Tests** — commands matched by :mod:`nerya.agent.verifier`'s validation
+  catalogue.
 * **Errors** — every ``tool_result`` that came back ``is_error=True``,
   with the kind, the tool, and the (truncated) message.
 * **Unverified risks** — heuristics that pair edits with their
@@ -48,22 +47,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
-
-_TEST_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"\bpytest\b",
-        r"\bpython\s+-m\s+(?:unittest|pytest)\b",
-        r"\bgo\s+test\b",
-        r"\bcargo\s+test\b",
-        r"\bnpm\s+(?:run\s+)?test\b",
-        r"\byarn\s+(?:run\s+)?test\b",
-        r"\bpnpm\s+(?:run\s+)?test\b",
-        r"\bmake\s+(?:test|check|verify)\b",
-        r"\bjest\b",
-        r"\bvitest\b",
-    )
-)
+from .verifier import is_validation_command
 
 _DESTRUCTIVE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
@@ -112,56 +96,6 @@ class ArtifactIndex:
             "counters": dict(self.counters),
         }
 
-    def render_markdown(self) -> str:
-        """Render a compact markdown summary for the dashboard / CLI."""
-
-        lines: list[str] = ["## Turn artifact index"]
-        if self.created or self.modified:
-            lines.append("")
-            lines.append("**Files touched**")
-            for p in self.created:
-                lines.append(f"- created: `{p}`")
-            for p in self.modified:
-                if p in self.created:
-                    continue
-                lines.append(f"- modified: `{p}`")
-        if self.read:
-            lines.append("")
-            lines.append(f"**Files read**: {len(self.read)} distinct path(s)")
-        if self.commands:
-            lines.append("")
-            lines.append("**Commands**")
-            for c in self.commands:
-                exit_code = c.get("exit_code")
-                cmd = c.get("command") or ""
-                cmd_short = cmd if len(cmd) <= 80 else cmd[:80] + "…"
-                lines.append(f"- `[exit={exit_code}]` `{cmd_short}`")
-        if self.errors:
-            lines.append("")
-            lines.append("**Errors**")
-            for e in self.errors:
-                lines.append(
-                    f"- {e.get('tool')}: {e.get('kind')} — "
-                    f"{e.get('message') or ''}"
-                )
-        if self.recovered_errors:
-            lines.append("")
-            lines.append("**Recovered errors**")
-            for e in self.recovered_errors:
-                lines.append(
-                    f"- {e.get('tool')}: {e.get('kind')} — "
-                    f"{e.get('message') or ''}"
-                )
-        if self.unverified_risks:
-            lines.append("")
-            lines.append("**Unverified risks**")
-            for r in self.unverified_risks:
-                lines.append(f"- {r.get('kind')}: {r.get('detail') or ''}")
-        if not lines[1:]:  # only header so far
-            lines.append("(no file-system changes, no commands, no errors)")
-        return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # Builder
 # ---------------------------------------------------------------------------
@@ -172,14 +106,7 @@ def _normalize_path(p: str) -> str:
 
     if not p:
         return ""
-    try:
-        return str(PurePosixPath(p.replace("\\", "/")))
-    except Exception:
-        return p
-
-
-def _is_test_command(command: str) -> bool:
-    return any(p.search(command or "") for p in _TEST_COMMAND_PATTERNS)
+    return str(PurePosixPath(p.replace("\\", "/")))
 
 
 def _is_destructive_command(command: str) -> bool:
@@ -331,7 +258,7 @@ def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
                     "ok": ok,
                 }
                 index.commands.append(entry)
-                if _is_test_command(command):
+                if is_validation_command(command):
                     index.tests_run.append(entry)
                 if _is_destructive_command(command):
                     destructive_commands_without_followup.append(entry)

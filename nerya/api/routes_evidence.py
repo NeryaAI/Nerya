@@ -16,7 +16,6 @@ into shared queries.
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..evidence import ingest as ev_ingest
 from ..evidence.store import open_store

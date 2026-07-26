@@ -51,7 +51,7 @@ Public API:
 from __future__ import annotations
 
 import fnmatch
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
 __all__ = [
@@ -251,16 +251,7 @@ def _glob_match(value: str, patterns: Iterable[str]) -> bool:
 def _is_mutating(row: Mapping[str, Any]) -> bool:
     risk = (row.get("risk_gate") or "").lower()
     approval = (row.get("approval_gate") or "").lower()
-    if risk in ("required", "always"):
-        return True
-    if approval in ("always", "required"):
-        return True
-    if not row.get("query_only"):
-        # If neither flag is set, fall back to "is the manifest tagging
-        # it as query_only?".  This matches the existing capability
-        # matrix logic.
-        return False
-    return False
+    return risk in {"required", "always"} or approval in {"required", "always"}
 
 
 def evaluate(

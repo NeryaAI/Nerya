@@ -22,10 +22,17 @@ job — the registry just produces text + bookkeeping instructions.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional
+
+from ..agent.session import (
+    SessionStore,
+    db_session_asdict,
+    file_session_asdict,
+    hydrate_db_session_counts,
+    merge_session_dict,
+    session_updated_ts,
+)
 
 
 @dataclass(frozen=True)
@@ -158,136 +165,16 @@ def _handle_trace(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
     return CommandOutcome(handled=True, reply_text=text, command=spec.name)
 
 
-def _iso_from_db_ts(value: Any) -> str:
-    try:
-        ts = float(value)
-    except Exception:
-        return ""
-    if ts <= 0:
-        return ""
-    return datetime.fromtimestamp(ts, timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def _parse_meta_json(raw: Any) -> dict[str, Any]:
-    try:
-        meta = json.loads(str(raw or "{}"))
-    except Exception:
-        meta = {}
-    return meta if isinstance(meta, dict) else {}
-
-
-def _file_session_asdict(row: Any) -> dict[str, Any]:
-    data = row.asdict() if hasattr(row, "asdict") else {}
-    data.setdefault("source", "session_file")
-    data.setdefault("turn_count", len(data.get("turn_ids") or []))
-    return data
-
-
-def _db_session_asdict(row: Mapping[str, Any]) -> dict[str, Any]:
-    title = str(row.get("title") or "").strip()
-    meta = _parse_meta_json(row.get("meta_json"))
-    if title and not meta.get("title"):
-        meta["title"] = title
-        meta.setdefault("title_source", "db")
-    return {
-        "session_id": str(row.get("session_id") or ""),
-        "strategy_id": row.get("strategy_id"),
-        "created_at": _iso_from_db_ts(row.get("created_at")),
-        "updated_at": _iso_from_db_ts(row.get("updated_at")),
-        "turn_ids": [],
-        "invoked_skills": [],
-        "skill_state": {},
-        "last_action": None,
-        "meta": meta,
-        "source": row.get("source") or "",
-        "message_count": int(row.get("message_count") or 0),
-        "turn_count": int(row.get("turn_count") or 0),
-    }
-
-
-def _merge_session_dict(file_state: dict[str, Any], db_row: Mapping[str, Any] | None) -> dict[str, Any]:
-    if not db_row:
-        return file_state
-    db_state = _db_session_asdict(db_row)
-    merged = dict(db_state)
-    merged.update(file_state)
-    file_meta = file_state.get("meta") if isinstance(file_state.get("meta"), dict) else {}
-    db_meta = db_state.get("meta") if isinstance(db_state.get("meta"), dict) else {}
-    meta = {**db_meta, **file_meta}
-    if not meta.get("title") and db_meta.get("title"):
-        meta["title"] = db_meta["title"]
-    merged["meta"] = meta
-    if not merged.get("created_at"):
-        merged["created_at"] = db_state.get("created_at") or ""
-    if _session_updated_ts(db_state) > _session_updated_ts(file_state):
-        merged["updated_at"] = db_state.get("updated_at") or merged.get("updated_at")
-    if not merged.get("source"):
-        merged["source"] = db_state.get("source") or ""
-    if not merged.get("message_count"):
-        merged["message_count"] = db_state.get("message_count") or 0
-    if not merged.get("turn_count"):
-        merged["turn_count"] = db_state.get("turn_count") or 0
-    return merged
-
-
-def _session_updated_ts(session: Mapping[str, Any]) -> float:
-    raw = session.get("updated_at")
-    if isinstance(raw, (int, float)):
-        return float(raw)
-    text = str(raw or "").strip()
-    if not text:
-        return 0.0
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
-
-
-def _db_message_counts(paths: Any, session_ids: list[str]) -> dict[str, dict[str, int]]:
-    if not session_ids:
-        return {}
-    from ..db.sqlite import connect
-
-    placeholders = ",".join("?" for _ in session_ids)
-    con = connect(paths.db)
-    try:
-        rows = con.execute(
-            f"""
-            SELECT
-                session_id,
-                COUNT(*) AS message_count,
-                COUNT(DISTINCT COALESCE(turn_id, message_id)) AS turn_count
-            FROM agent_messages
-            WHERE deleted=0 AND session_id IN ({placeholders})
-            GROUP BY session_id
-            """,
-            tuple(session_ids),
-        ).fetchall()
-        return {
-            str(row["session_id"]): {
-                "message_count": int(row["message_count"] or 0),
-                "turn_count": int(row["turn_count"] or 0),
-            }
-            for row in rows
-        }
-    finally:
-        con.close()
-
-
 def _list_db_sessions(paths: Any, *, limit: int) -> list[dict[str, Any]]:
     from ..db.repositories import AgentSessionRepository
     from ..db.sqlite import connect
 
     con = connect(paths.db)
     try:
-        rows = [dict(row) for row in AgentSessionRepository(con).list_sessions(limit=limit)]
-        ids = [str(row.get("session_id") or "") for row in rows if row.get("session_id")]
+        rows = AgentSessionRepository(con).list_sessions(limit=limit)
     finally:
         con.close()
-    counts = _db_message_counts(paths, ids)
-    for row in rows:
-        row.update(counts.get(str(row.get("session_id") or ""), {}))
-    return rows
+    return hydrate_db_session_counts(paths, rows)
 
 
 def _get_db_session(paths: Any, session_id: str) -> dict[str, Any] | None:
@@ -299,22 +186,18 @@ def _get_db_session(paths: Any, session_id: str) -> dict[str, Any] | None:
         row = AgentSessionRepository(con).get_session(session_id)
     finally:
         con.close()
-    if not row:
+    if row is None:
         return None
-    counts = _db_message_counts(paths, [session_id]).get(session_id, {})
-    row.update(counts)
-    return row
+    return hydrate_db_session_counts(paths, [row])[0]
 
 
 def _shared_session_rows(paths: Any, *, limit: int) -> list[dict[str, Any]]:
-    from ..agent.session import SessionStore
-
     errors: list[Exception] = []
     by_id: dict[str, dict[str, Any]] = {}
     try:
         store = SessionStore(paths.root)
         for row in store.list(limit=max(limit * 2, limit)):
-            data = _file_session_asdict(row)
+            data = file_session_asdict(row)
             sid = str(data.get("session_id") or "")
             if sid:
                 by_id[sid] = data
@@ -326,29 +209,27 @@ def _shared_session_rows(paths: Any, *, limit: int) -> list[dict[str, Any]]:
             if not sid:
                 continue
             if sid in by_id:
-                by_id[sid] = _merge_session_dict(by_id[sid], row)
+                by_id[sid] = merge_session_dict(by_id[sid], row)
             else:
-                by_id[sid] = _db_session_asdict(row)
+                by_id[sid] = db_session_asdict(row)
     except Exception as exc:
         errors.append(exc)
     if not by_id and errors:
         raise errors[0]
     rows = list(by_id.values())
-    rows.sort(key=_session_updated_ts, reverse=True)
+    rows.sort(key=session_updated_ts, reverse=True)
     return rows[:limit]
 
 
 def _load_shared_session(paths: Any, session_id: str) -> dict[str, Any] | None:
-    from ..agent.session import SessionStore
-
     store = SessionStore(paths.root)
     file_row = store.load(session_id)
     db_row = _get_db_session(paths, session_id)
     if file_row is None and db_row is None:
         return None
     if file_row is None:
-        return _db_session_asdict(db_row or {})
-    return _merge_session_dict(_file_session_asdict(file_row), db_row)
+        return db_session_asdict(db_row or {})
+    return merge_session_dict(file_row, db_row)
 
 
 def _session_title(row: Any) -> str:
@@ -368,12 +249,12 @@ def _session_title(row: Any) -> str:
 
 
 def _session_activity(row: Mapping[str, Any]) -> str:
-    turn_ids = row.get("turn_ids") if isinstance(row.get("turn_ids"), list) else []
-    if turn_ids:
-        return f"{len(turn_ids)} turn(s)"
     turn_count = int(row.get("turn_count") or 0)
     if turn_count:
         return f"{turn_count} turn(s)"
+    turn_ids = row.get("turn_ids") if isinstance(row.get("turn_ids"), list) else []
+    if turn_ids:
+        return f"{len(turn_ids)} turn(s)"
     message_count = int(row.get("message_count") or 0)
     if message_count:
         return f"{message_count} message(s)"

@@ -597,6 +597,29 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
                 nav_usd += total * price
 
     latency = int((time.perf_counter() - started) * 1000)
+
+    # Derivatives truth: pull real margin used, unrealised PnL, and open
+    # order notional from the venue. Previously these were hardcoded to
+    # 0, which silently hid all leveraged exposure. ``fetch_positions`` /
+    # ``fetch_open_orders`` are absent on spot-only connectors, so we
+    # degrade gracefully (stay at 0) for non-derivatives accounts.
+    margin_used_usd = 0.0
+    unrealized_pnl_usd = 0.0
+    open_order_notional_usd = 0.0
+    try:
+        if health in ("ok",) and hasattr(conn, "fetch_positions"):
+            for pos in conn.fetch_positions():
+                margin_used_usd += float(getattr(pos, "initial_margin_usd", 0.0) or 0.0)
+                unrealized_pnl_usd += float(getattr(pos, "unrealised_pnl_usd", 0.0) or 0.0)
+        if health in ("ok",) and hasattr(conn, "fetch_open_orders"):
+            for oo in conn.fetch_open_orders():
+                px = float(getattr(oo, "price", 0.0) or 0.0)
+                sz = float(getattr(oo, "size", 0.0) or 0.0)
+                if px > 0 and sz > 0:
+                    open_order_notional_usd += px * sz
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("live snapshot derivatives fetch failed for %s: %s", profile.id, exc)
+
     snap = AccountSnapshot(
         snapshot_id=_new_snapshot_id(),
         account_id=profile.id,
@@ -606,9 +629,9 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
         cash_by_asset=cash_by_asset,
         free_by_asset=free_by_asset,
         locked_by_asset=locked_by_asset,
-        margin_used_usd=0.0,
-        unrealized_pnl_usd=0.0,
-        open_order_notional_usd=0.0,
+        margin_used_usd=margin_used_usd,
+        unrealized_pnl_usd=unrealized_pnl_usd,
+        open_order_notional_usd=open_order_notional_usd,
         health=health,
         latency_ms=latency,
         raw_ref=raw_ref,

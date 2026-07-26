@@ -76,6 +76,7 @@ from ...strategies.validator import (
     validate_proposal_files,
     validate_strategy_package,
 )
+from ..tool_errors import schema_validation_result as _usage_error
 from ..types import ToolCall, ToolError, ToolErrorKind, ToolResult
 
 
@@ -530,23 +531,6 @@ STRATEGY_TUNING_SNAPSHOT_SCHEMA = STRATEGY_TUNING_STATUS_SCHEMA
 # ---------------------------------------------------------------------------
 
 
-def _usage_error(
-    call: ToolCall,
-    message: str,
-    *,
-    recovery_hint: dict[str, Any] | None = None,
-) -> ToolResult:
-    return ToolResult.from_error(
-        tool_use_id=call.id,
-        name=call.name,
-        error=ToolError(
-            kind=ToolErrorKind.SCHEMA_VALIDATION,
-            message=message,
-            recovery_hint=dict(recovery_hint or {}),
-        ),
-    )
-
-
 def _execution_error(call: ToolCall, message: str) -> ToolResult:
     return ToolResult.from_error(
         tool_use_id=call.id,
@@ -939,10 +923,6 @@ def _lower_tokens(lowered: str) -> set[str]:
     if token_chars:
         tokens.add("".join(token_chars))
     return tokens
-
-
-def _request_mentions_meme_or_onchain(request: StrategyGenerationRequest) -> bool:
-    return _request_mentions_markers(request, _MEME_OR_ONCHAIN_MARKERS)
 
 
 def _request_mentions_hard_to_replay(request: StrategyGenerationRequest) -> bool:

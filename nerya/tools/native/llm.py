@@ -27,6 +27,7 @@ from typing import Any
 
 from ...core.config import Config
 from ...llm import LLMGateway
+from ..tool_errors import schema_validation_result as _usage_error
 from ..types import (
     ToolCall,
     ToolError,
@@ -139,16 +140,6 @@ LLM_COMPRESS_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _usage_error(call: ToolCall, message: str) -> ToolResult:
-    return ToolResult.from_error(
-        tool_use_id=call.id,
-        name=call.name,
-        error=ToolError(
-            kind=ToolErrorKind.SCHEMA_VALIDATION, message=message,
-        ),
-    )
 
 
 def _exec_error(call: ToolCall, exc: Exception) -> ToolResult:

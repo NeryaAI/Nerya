@@ -38,6 +38,16 @@ def test_security_audit_records_audit_event_jsonl(tmp_path) -> None:
     assert row["audit_event"]["payload"]["authorization"]["__redacted__"] is True
 
 
+def test_jsonl_write_all_replaces_existing_rows(tmp_path) -> None:
+    path = tmp_path / "records.jsonl"
+    jsonl.append(path, {"id": "old"}, stamp=False)
+
+    written = jsonl.write_all(path, [{"id": "new"}])
+
+    assert written == [{"id": "new"}]
+    assert jsonl.read_all(path) == written
+
+
 def test_task_progress_formats_unfinished_work_for_injection() -> None:
     state = TaskState(
         todos=[

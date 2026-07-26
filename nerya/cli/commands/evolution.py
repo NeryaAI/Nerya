@@ -17,7 +17,7 @@ from ...evolution import patch_proposal, promotion, rollback as rollback_mod
 def cmd_reflect(args) -> int:
     from ...evolution.reflection_engine import run_reflection
     client = _client(args.workspace, getattr(args, "profile", None))
-    _print(run_reflection(client.config.paths))
+    _print(run_reflection(client.config.paths, config=client.config))
     return 0
 
 

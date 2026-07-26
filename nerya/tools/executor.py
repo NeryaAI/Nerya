@@ -29,13 +29,12 @@ import inspect
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from .permissions import (
     PermissionContext,
     PermissionDecision,
-    PermissionDecisionKind,
     PermissionEngine,
     PermissionRequest,
 )
@@ -45,15 +44,11 @@ from .tool_errors import (
     format_schema_validation_error,
 )
 from .types import (
-    ContextModifier,
-    PermissionScope,
-    RiskLevel,
     ToolCall,
     ToolDescriptor,
     ToolError,
     ToolErrorKind,
     ToolResult,
-    ToolResultPart,
 )
 
 

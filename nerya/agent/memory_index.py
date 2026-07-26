@@ -1,8 +1,7 @@
 """Long-term structured memory index.
 
-The original ``nerya.agent.memory.Memory`` API is great for "append a
-dated note to a markdown file and grab the tail" but it has zero query
-shape. The 2026-04-25 prompt-battery surfaced the resulting failure
+The original Markdown-only memory path could append a dated note but had
+no query shape. The 2026-04-25 prompt-battery surfaced the resulting failure
 mode: when the operator says "你还记得我之前告诉过你哪些关键偏好吗?"
 the LLM had to call ``recall`` repeatedly with no signal of what to
 look for, and ended up returning either an empty preview or a
@@ -40,13 +39,13 @@ the index stay in sync); the supersession is a logical
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
+from ..core import jsonl
 from ..core.paths import WorkspacePaths
 
 _TAG_SPLIT = re.compile(r"[\s,;]+")
@@ -128,38 +127,14 @@ class MemoryIndex:
         return self.paths.memory_index
 
     # ------------------------------------------------------------------ io
-    def _ensure_dir(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-
     def _read_all(self) -> list[FactRecord]:
-        path = self._path
-        if not path.exists():
-            return []
-        out: list[FactRecord] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                # Bad lines are ignored, never raised: the index is a
-                # best-effort log, never a single source of truth.
-                continue
-            if isinstance(obj, dict):
-                out.append(FactRecord.from_dict(obj))
-        return out
+        return [FactRecord.from_dict(row) for row in jsonl.read_all(self._path)]
 
     def _rewrite(self, records: list[FactRecord]) -> None:
-        self._ensure_dir()
-        with self._path.open("w", encoding="utf-8") as fh:
-            for rec in records:
-                fh.write(json.dumps(rec.to_dict(), ensure_ascii=False) + "\n")
+        jsonl.write_all(self._path, (record.to_dict() for record in records))
 
     def _append_line(self, rec: FactRecord) -> None:
-        self._ensure_dir()
-        with self._path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec.to_dict(), ensure_ascii=False) + "\n")
+        jsonl.append(self._path, rec.to_dict(), stamp=False)
 
     # ---------------------------------------------------------------- write
     def remember(

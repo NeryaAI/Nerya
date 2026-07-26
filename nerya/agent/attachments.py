@@ -19,7 +19,6 @@ from typing import Any
 from ..workspace.artifact_store import ArtifactStore
 
 
-_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 _TEXT_TYPES = {
     "application/json",
     "application/javascript",

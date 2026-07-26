@@ -41,6 +41,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from ..core import jsonl
+
 
 VALID_FACETS: frozenset[str] = frozenset({
     "style", "tooling", "universe", "risk_preference", "veto", "channel",
@@ -78,28 +80,6 @@ def _is_forbidden(key: str) -> bool:
     return False
 
 
-def _read_all(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            continue
-    return out
-
-
-def _write_all(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
 def list_facts(
     paths,
     *,
@@ -107,7 +87,7 @@ def list_facts(
     scope: Optional[str] = None,
     include_forgotten: bool = False,
 ) -> list[dict[str, Any]]:
-    rows = _read_all(_profile_file(paths))
+    rows = jsonl.read_all(_profile_file(paths))
     out: list[dict[str, Any]] = []
     for row in rows:
         if not include_forgotten and row.get("forgotten"):
@@ -154,15 +134,12 @@ def set_fact(
         "operator_id": operator_id,
     }
     path = _profile_file(paths)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    return rec
+    return jsonl.append(path, rec, stamp=False)
 
 
 def pin(paths, *, fact_id: str) -> dict[str, Any]:
     path = _profile_file(paths)
-    rows = _read_all(path)
+    rows = jsonl.read_all(path)
     found = None
     for row in rows:
         if row.get("id") == fact_id:
@@ -171,13 +148,13 @@ def pin(paths, *, fact_id: str) -> dict[str, Any]:
             break
     if found is None:
         raise KeyError(f"fact {fact_id!r} not found")
-    _write_all(path, rows)
+    jsonl.write_all(path, rows)
     return found
 
 
 def forget(paths, *, fact_id: str) -> dict[str, Any]:
     path = _profile_file(paths)
-    rows = _read_all(path)
+    rows = jsonl.read_all(path)
     found = None
     for row in rows:
         if row.get("id") == fact_id:
@@ -187,7 +164,7 @@ def forget(paths, *, fact_id: str) -> dict[str, Any]:
             break
     if found is None:
         raise KeyError(f"fact {fact_id!r} not found")
-    _write_all(path, rows)
+    jsonl.write_all(path, rows)
     return found
 
 
@@ -199,7 +176,7 @@ def rebuild_cache(paths) -> dict[str, Any]:
     """
 
     path = _profile_file(paths)
-    rows = _read_all(path)
+    rows = jsonl.read_all(path)
     by_facet: dict[str, int] = {}
     pinned = 0
     for row in rows:
@@ -224,7 +201,7 @@ def rebuild_cache(paths) -> dict[str, Any]:
 
 
 def stats(paths) -> dict[str, Any]:
-    rows = _read_all(_profile_file(paths))
+    rows = jsonl.read_all(_profile_file(paths))
     by_facet: dict[str, int] = {}
     by_scope: dict[str, int] = {}
     pinned = 0

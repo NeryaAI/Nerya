@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ...core.sandbox import sandbox_exec
+from ..tool_errors import schema_validation_result
 from ..types import (
     ToolCall,
     ToolError,
@@ -108,14 +109,7 @@ def glob_handler(call: ToolCall, *, root: Path) -> ToolResult:
     limit = max(1, min(limit, _HARD_GLOB_RESULTS))
 
     if not pattern:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="glob requires a 'pattern' argument",
-            ),
-        )
+        return schema_validation_result(call, "glob requires a 'pattern' argument")
 
     resolved = _glob_base_and_pattern(root=root, base=str(base), pattern=str(pattern))
     if isinstance(resolved, ToolResult):
@@ -202,20 +196,13 @@ def _grep_with_rg(
     pattern: str,
     glob: Optional[str],
     case_insensitive: bool,
-    multiline: bool,
-    context: int,
     limit: int,
     timeout_s: float,
     file_type: Optional[str],
 ) -> tuple[list[dict[str, Any]], bool]:
-    cmd = ["rg", "--json", "--heading=never", "--no-line-number", "--color=never"]
-    cmd.append("-n")
+    cmd = ["rg", "--json", "--no-heading", "--color=never", "-n"]
     if case_insensitive:
         cmd.append("-i")
-    if multiline:
-        cmd.extend(["-U", "--multiline-dotall"])
-    if context > 0:
-        cmd.extend(["-C", str(context)])
     if glob:
         cmd.extend(["--glob", glob])
     if file_type:
@@ -271,15 +258,9 @@ def _grep_python(
     pattern: str,
     glob: Optional[str],
     case_insensitive: bool,
-    multiline: bool,
-    context: int,
     limit: int,
 ) -> tuple[list[dict[str, Any]], bool]:
-    flags = re.MULTILINE
-    if case_insensitive:
-        flags |= re.IGNORECASE
-    if multiline:
-        flags |= re.DOTALL
+    flags = re.IGNORECASE if case_insensitive else 0
     rx = re.compile(pattern, flags)
     out: list[dict[str, Any]] = []
     truncated = False
@@ -316,22 +297,13 @@ def grep_handler(call: ToolCall, *, root: Path) -> ToolResult:
     base_arg = args.get("path") or "."
     glob = args.get("glob")
     case_insensitive = bool(args.get("case_insensitive", False))
-    multiline = bool(args.get("multiline", False))
-    context = int(args.get("context") or 0)
     file_type = args.get("type")
-    limit = int(args.get("limit") or _DEFAULT_RESULTS)
+    limit = int(args.get("max_results") or _DEFAULT_RESULTS)
     limit = max(1, min(limit, _HARD_RESULTS))
-    timeout_s = float(args.get("timeout_s") or 15)
+    timeout_s = 15.0
 
     if not pattern:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message="grep requires a 'pattern' argument",
-            ),
-        )
+        return schema_validation_result(call, "grep requires a 'pattern' argument")
 
     try:
         base = resolve_workspace_path(str(base_arg), root=root, default=".")
@@ -352,8 +324,6 @@ def grep_handler(call: ToolCall, *, root: Path) -> ToolResult:
                     pattern=pattern,
                     glob=str(glob) if glob else None,
                     case_insensitive=case_insensitive,
-                    multiline=multiline,
-                    context=context,
                     limit=limit,
                     timeout_s=timeout_s,
                     file_type=str(file_type) if file_type else None,
@@ -374,19 +344,10 @@ def grep_handler(call: ToolCall, *, root: Path) -> ToolResult:
                 pattern=pattern,
                 glob=str(glob) if glob else None,
                 case_insensitive=case_insensitive,
-                multiline=multiline,
-                context=context,
                 limit=limit,
             )
     except re.error as exc:
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.SCHEMA_VALIDATION,
-                message=f"invalid regex: {exc}",
-            ),
-        )
+        return schema_validation_result(call, f"invalid regex: {exc}")
     elapsed_ms = int((time.monotonic() - started) * 1000)
 
     head_lines = []

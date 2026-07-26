@@ -28,7 +28,6 @@ provides the equivalent without forcing it on small workspaces:
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,22 +130,17 @@ class FTSIndex:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._con = sqlite3.connect(str(self._db_path))
-        # Rows are already short, return tuples for speed.
-        self._con.row_factory = None
         self._init_schema()
 
     # ---- lifecycle --------------------------------------------------
 
     def close(self) -> None:
-        try:
-            self._con.close()
-        except Exception:
-            pass
+        self._con.close()
 
     def __enter__(self) -> "FTSIndex":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
         self.close()
 
     @property
@@ -175,7 +169,7 @@ class FTSIndex:
             return None
         try:
             payload = json.loads(line)
-        except Exception:
+        except json.JSONDecodeError:
             return None
         if not isinstance(payload, dict):
             return None
@@ -261,16 +255,13 @@ class FTSIndex:
             except OSError:
                 continue
 
-            inserted = 0
-            offset = prev_offset
-            buffer = ""
-            try:
-                buffer = raw_bytes.decode("utf-8", errors="replace")
-            except Exception:
-                buffer = ""
+            complete_bytes = raw_bytes
+            if raw_bytes and not raw_bytes.endswith((b"\n", b"\r")):
+                newline = max(raw_bytes.rfind(b"\n"), raw_bytes.rfind(b"\r"))
+                complete_bytes = raw_bytes[: newline + 1] if newline >= 0 else b""
+            buffer = complete_bytes.decode("utf-8", errors="replace")
 
-            for line in buffer.splitlines(keepends=True):
-                offset += len(line.encode("utf-8", errors="replace"))
+            for line in buffer.splitlines():
                 ev = self._row_event(journal, line)
                 if ev is None:
                     continue
@@ -297,8 +288,6 @@ class FTSIndex:
                         ev[4] or "", ev[5] or "", ev[7],
                     ),
                 )
-                inserted += 1
-
             cur.execute(
                 """
                 INSERT INTO journal_files(journal, size, mtime, last_offset, last_synced)
@@ -309,7 +298,12 @@ class FTSIndex:
                     last_offset = excluded.last_offset,
                     last_synced = excluded.last_synced
                 """,
-                (journal, current_size, current_mtime, current_size),
+                (
+                    journal,
+                    current_size,
+                    current_mtime,
+                    prev_offset + len(complete_bytes),
+                ),
             )
         self._con.commit()
 
@@ -405,7 +399,7 @@ class FTSIndex:
             journal, ts, kind, sess, strat, turn_id, payload_json, text_blob, _rowid = row
             try:
                 payload = json.loads(payload_json) if payload_json else {}
-            except Exception:
+            except json.JSONDecodeError:
                 payload = {}
             out.append({
                 "journal": journal,

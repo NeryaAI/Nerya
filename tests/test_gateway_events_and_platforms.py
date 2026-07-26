@@ -32,6 +32,7 @@ from nerya.messaging.platforms import (
     list_platforms,
     require_platform,
 )
+from nerya.messaging.mirror import GatewayMirror
 
 
 pytestmark = pytest.mark.smoke
@@ -682,6 +683,118 @@ def test_telegram_poll_downloads_photo_only_message_for_agent(tmp_path, monkeypa
     assert attachments[0]["artifact_uri"].startswith("nerya://artifact/attachments/uploads/")
     assert "data" not in attachments[0]
     assert (tmp_path / "artifacts" / "attachments").exists()
+
+
+def test_telegram_poll_route_runs_shared_turn_pipeline(tmp_path, monkeypatch):
+    routes_gateway.reset_gateway_events_for_tests()
+    routes_gateway.get_default_buffer().clear()
+    with routes_gateway._TELEGRAM_FIRST_POLL_LOCK:
+        routes_gateway._TELEGRAM_FIRST_POLL_PENDING.clear()
+
+    client = _client(tmp_path)
+    _write_telegram_channel(client, chat_id="100")
+    secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
+    calls: list[dict[str, object]] = []
+    sent: list[dict[str, object]] = []
+    updates = [{
+        "update_id": 51,
+        "message": {
+            "chat": {"id": 100, "type": "group"},
+            "from": {"id": 7, "username": "alice"},
+            "text": f"use {secret}",
+        },
+    }]
+
+    class _Hooks:
+        def register(self, _phase, _handler) -> None:
+            return None
+
+    class _FakeKernel:
+        def __init__(self, *, config, skills):
+            self.hooks = _Hooks()
+
+        def run_turn(self, *, trigger, session_id):
+            calls.append({"trigger": trigger, "session_id": session_id})
+            return SimpleNamespace(
+                turn_id="turn-telegram",
+                final_text="shared pipeline reply",
+                decision={},
+                tool_trace=[],
+                actions=[],
+                blocks=[{
+                    "role": "assistant",
+                    "block": {"kind": "thinking", "text": "checked request"},
+                }],
+            )
+
+    def _fake_send(outbox_messages, message, **_kwargs):
+        message["delivered"] = True
+        message["status"] = 200
+        sent.append(dict(message))
+        return outbox_messages / "telegram-test.json"
+
+    monkeypatch.setattr(routes_gateway, "AgentKernel", _FakeKernel)
+    monkeypatch.setattr(
+        routes_gateway.telegram,
+        "get_updates",
+        lambda **_kwargs: {"ok": True, "updates": updates},
+    )
+    monkeypatch.setattr(routes_gateway.telegram, "send", _fake_send)
+    monkeypatch.setattr(
+        routes_gateway.telegram,
+        "send_chat_action",
+        lambda **_kwargs: {"ok": True},
+    )
+
+    result = _route_map()[("POST", "/gateway/telegram/poll")](
+        client, {"channel": "telegram"}
+    )
+
+    turn = result["processed"][0]
+    assert turn["turn_id"] == "turn-telegram"
+    assert turn["session_key"] == "telegram:100:user:7"
+    assert turn["delivery"]["delivered"] is True
+    assert len(turn["secrets_captured"]) == 1
+    assert [row["text"] for row in sent] == [
+        turn["captured_notice"],
+        turn["trace_text"],
+        "shared pipeline reply",
+    ]
+    assert all(secret not in str(row) for row in sent)
+
+    trigger = calls[0]["trigger"]
+    assert trigger["source"] == "telegram"
+    assert trigger["payload"]["text"].startswith("use <<NERYA_SECRET:")
+    assert trigger["payload"]["user_id"] == "7"
+
+    mirror = GatewayMirror(client.config.paths).replay(channel="telegram")
+    assert [entry.direction for entry in mirror] == ["in", "out"]
+    assert mirror[0].payload["update_id"] == 51
+    assert mirror[1].payload["delivery"]["delivered"] is True
+
+    state = routes_gateway._load_state(client)
+    assert state["active_sessions"][turn["session_key"]] == turn["session_id"]
+    events = _route_map()[("GET", "/gateway/events")](client, {})["events"]
+    inbound = next(row for row in events if row["kind"] == "inbound")
+    outbound = next(row for row in events if row["kind"] == "outbound")
+    assert inbound["update_id"] == 51
+    assert outbound["delivered"] is True
+
+    updates[:] = [{
+        "update_id": 52,
+        "message": {
+            "chat": {"id": 100, "type": "group"},
+            "from": {"id": 7, "username": "alice"},
+            "text": "/help",
+        },
+    }]
+    command_result = _route_map()[("POST", "/gateway/telegram/poll")](
+        client, {"channel": "telegram"}
+    )["processed"][0]
+    assert command_result["command"] == "/help"
+    assert command_result["delivery"]["delivered"] is True
+    assert sent[-1]["text"] == command_result["reply_text"]
+    assert len(calls) == 1
 
 
 def test_second_poll_processes_every_update_normally(tmp_path, monkeypatch):

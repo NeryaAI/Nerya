@@ -59,114 +59,50 @@ class SubAgentSpec:
                    canonical_name=canonical_name)
 
 
+_RESEARCH_HINTS = [
+    "market_data", "markets", "market_data_routing", "research",
+    "web_search_fetch",
+]
+_MARKET_RESEARCH_HINTS = [*_RESEARCH_HINTS, "market_research"]
+_DECISION_HINTS = [*_MARKET_RESEARCH_HINTS, "portfolio_summary", "risk_check"]
+
 DEFAULT_SUBAGENT_SKILLS = {
-    # Research/analyst lanes get ``operator`` + ``script`` so they can
-    # write ad-hoc Python (yfinance, requests, ccxt, web3, …) when the
-    # built-in market_data / onchain / web_search_fetch tools don't cover the
-    # ask. ``web_search`` / ``web_search_fetch`` are added to research lanes
-    # so the subagent can pull live evidence before writing a fetcher script
-    # and then cross-check the result before summarising. The dispatcher's
-    # ``SUBAGENT_SKILL_DENYLIST`` still keeps trading_write / wallet /
-    # script_runtime out of these lanes.
-    #
-    # what used to be a blanket ``trading`` allow
-    # is split into ``trading_read`` (read-only / planning lanes:
-    # ``execution_planner``, ``portfolio_manager``, ``verification_lane``,
-    # …) and ``trading_write`` (only the main agent / runner). The
-    # dispatcher's denylist now enforces the read-only side, so listing
-    # ``trading_read`` here grants planning context without ever giving
-    # a subagent the ability to submit an order.
-    "market_analyst": ["market_data", "web_search_fetch",
-                       "operator", "script", "trace", "llm"],
-    "technical_analyst": [
-        "market_data", "markets", "market_data_routing", "market_research",
-        "quant_research", "analysis", "web_search_fetch", "operator", "script",
-        "trace", "llm",
-    ],
-    "fundamentals_analyst": [
-        "market_data", "markets", "market_data_routing", "market_research",
-        "research", "research_report", "analysis", "web_search_fetch", "operator",
-        "script", "trace", "llm",
-    ],
-    "sentiment_analyst": [
-        "market_data", "markets", "market_data_routing", "web_search_fetch",
-        "research", "market_research", "operator", "script", "trace", "llm",
-    ],
-    "macro_strategist": [
-        "research", "market_research", "market_data_routing",
-        "research_report", "analysis", "market_data", "web_search_fetch",
-        "operator", "script", "trace", "llm",
-    ],
+    "market_analyst": [*_MARKET_RESEARCH_HINTS, "analysis"],
+    "technical_analyst": [*_MARKET_RESEARCH_HINTS, "analysis", "quant_research"],
+    "fundamentals_analyst": [*_MARKET_RESEARCH_HINTS, "research_report", "analysis"],
+    "sentiment_analyst": [*_RESEARCH_HINTS, "news_social"],
+    "macro_strategist": [*_MARKET_RESEARCH_HINTS, "research_report", "analysis"],
     "quant_researcher": [
-        "quant_research", "analysis", "markets", "market_data",
-        "market_data_routing", "strategy_validation", "operator",
-        "script", "trace", "llm",
+        "market_data", "markets", "market_data_routing", "analysis",
+        "quant_research", "backtest",
     ],
-    "bull_researcher": [
-        "market_data", "markets", "market_data_routing",
-        "market_research", "research_report", "quant_research",
-        "portfolio_summary", "risk_check", "web_search_fetch", "llm",
-    ],
-    "bear_researcher": [
-        "market_data", "markets", "market_data_routing",
-        "market_research", "research_report", "quant_research",
-        "portfolio_summary", "risk_check", "web_search_fetch", "llm",
-    ],
-    "research_manager": [
-        "market_data", "markets", "market_data_routing",
-        "market_research", "research_report", "quant_research",
-        "portfolio_summary", "risk_check", "web_search_fetch", "llm",
-    ],
-    "research_editor": [
-        "research_report", "market_research", "quant_research",
-        "analysis", "llm",
-    ],
-    "risk_critic": [
-        "market_data", "markets", "market_data_routing",
-        "risk_check", "portfolio_summary", "web_search_fetch", "llm",
-    ],
-    "execution_planner": ["trading_read", "market_data", "llm"],
-    "onchain_watcher": ["onchain", "web_search_fetch",
-                        "operator", "script", "trace", "llm"],
-    "news_interpreter": ["web_search_fetch", "operator",
-                         "script", "trace", "llm"],
-    "portfolio_manager": ["portfolio", "trading_read", "llm"],
-    "portfolio_auditor": ["portfolio", "risk", "market_data",
-                          "message", "llm"],
-    "strategy_reviewer": ["strategy_review", "websearch", "llm"],
-    "message_writer": ["message", "llm"],
+    "bull_researcher": [*_DECISION_HINTS, "research_report", "quant_research"],
+    "bear_researcher": [*_DECISION_HINTS, "research_report", "quant_research"],
+    "research_manager": [*_DECISION_HINTS, "research_report"],
+    "research_editor": ["research_report", "market_research", "analysis", "llm"],
+    "risk_critic": [*_MARKET_RESEARCH_HINTS, "risk_check", "portfolio_summary"],
+    "execution_planner": ["market_data", "portfolio_summary", "risk_check", "trading_read"],
+    "onchain_watcher": [*_RESEARCH_HINTS],
+    "news_interpreter": ["news_social", "research", "web_search_fetch"],
+    "portfolio_manager": ["portfolio_summary", "trading_read"],
+    "portfolio_auditor": ["portfolio_summary", "risk_check", "market_data", "notify"],
+    "strategy_reviewer": ["strategy_author", "backtest", "coding"],
+    "message_writer": ["notify", "llm"],
     "verification_lane": [
-        "strategy", "strategy_review", "portfolio", "risk",
-        "market_data", "trading_read", "trace", "message",
-        "websearch", "llm",
+        "strategy_author", "backtest", "portfolio_summary", "risk_check",
+        "market_data", "coding",
     ],
     "plan_lane": [
-        "strategy", "strategy_review", "portfolio", "risk",
-        "market_data", "trading_read", "trace", "websearch", "llm",
+        "strategy_author", "markets", "market_data_routing",
+        "portfolio_summary", "risk_check",
     ],
-    "explore_lane": [
-        "market_data", "news_social", "websearch", "onchain", "portfolio",
-        "trading_read", "trace", "operator", "script", "llm",
-    ],
-    # strategy_tuner is the per-strategy
-    # self-evolution lane. It can read every read-only signal but never
-    # ships orders or applies its own proposals. Final promotion still
-    # routes through the operator's approval flow.
+    "explore_lane": [*_MARKET_RESEARCH_HINTS, "news_social", "analysis"],
     "strategy_tuner": [
-        "strategy", "strategy_review", "portfolio", "risk",
-        "market_data", "trading_read", "operator", "script",
-        "websearch", "trace", "llm",
+        "strategy_author", "backtest", "markets", "analysis",
+        "quant_research", "portfolio_summary", "risk_check",
     ],
-    # first-class coding lane. ``operator`` exposes
-    # file/dir/search/write/patch/terminal + the background process
-    # registry; ``script`` provides sandboxed code execution; ``trace``
-    # lets the lane self-report what it did. No trading skills are
-    # listed so the dispatcher denylist + workspace chroot keeps the
-    # lane safe. review/critic lane that can read but
-    # not mutate the repo (no operator.write_file / patch_file / terminal —
-    # the runtime enforces this through ``allowed_skills``).
-    "coding_agent": ["operator", "script", "websearch", "trace", "llm"],
-    "code_critic": ["operator", "trace", "strategy_review", "llm"],
+    "coding_agent": ["coding", "research"],
+    "code_critic": ["coding", "analysis"],
 }
 
 

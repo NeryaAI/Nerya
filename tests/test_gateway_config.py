@@ -106,7 +106,10 @@ def test_gateway_config_test_uses_message_pipeline_without_exposing_secrets(tmp_
         def __init__(self, *, config):
             self.config = config
 
-        def send(self, *, channel, text, strategy_id=None, template=None, context=None):
+        def send(
+            self, *, channel, text, strategy_id=None, template=None,
+            context=None, attachments=None,
+        ):
             return {
                 "message_id": "msg-test",
                 "channel": channel,
@@ -175,7 +178,10 @@ def test_gateway_config_test_runs_agent_turn_and_replies(tmp_path, monkeypatch):
         def __init__(self, *, config):
             self.config = config
 
-        def send(self, *, channel, text, strategy_id=None, template=None, context=None):
+        def send(
+            self, *, channel, text, strategy_id=None, template=None,
+            context=None, attachments=None,
+        ):
             sent.append({"channel": channel, "text": text, "context": context})
             return {
                 "message_id": "msg-agent-test",

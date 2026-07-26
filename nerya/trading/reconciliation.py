@@ -608,9 +608,9 @@ def _fetch_exchange_positions(config: Config, profile) -> list[dict[str, Any]]:
 
     For spot CEX this is derived from ``get_balances``: a non-zero
     base-asset balance for a market we hold is treated as an external
-    position. For derivatives venues that ccxt exposes a richer
-    ``fetch_positions`` API, callers can override by adding a hook on
-    the connector layer (out of scope for the first slice).
+    position. For derivatives venues the connector's ``fetch_positions``
+    returns :class:`ContractPosition` rows whose ``size_base`` already
+    folds in ``contractSize``.
     """
     if not profile.reads_real_balances:
         return []
@@ -624,9 +624,16 @@ def _fetch_exchange_positions(config: Config, profile) -> list[dict[str, Any]]:
                 raw = conn.fetch_positions()  # type: ignore[attr-defined]
                 out: list[dict[str, Any]] = []
                 for r in raw or []:
+                    # Connector returns ContractPosition dataclass-like
+                    # objects; fall back to dict access for raw shapes.
+                    market = getattr(r, "market", None)
+                    size_base = getattr(r, "size_base", None)
+                    if market is None and isinstance(r, dict):
+                        market = str(r.get("symbol") or r.get("market") or "")
+                        size_base = float(r.get("contracts") or r.get("size") or 0.0)
                     out.append({
-                        "market": str(r.get("symbol") or r.get("market") or ""),
-                        "size_base": float(r.get("contracts") or r.get("size") or 0.0),
+                        "market": str(market or ""),
+                        "size_base": float(size_base or 0.0),
                     })
                 return out
             except Exception:
@@ -653,6 +660,35 @@ def _fetch_exchange_positions(config: Config, profile) -> list[dict[str, Any]]:
 def _fetch_exchange_open_orders(config: Config, profile) -> list[dict[str, Any]]:
     if not profile.reads_real_balances:
         return []
+    try:
+        from ..connectors import ConnectorRegistry
+        registry = ConnectorRegistry(workspace=config.paths.root)
+        legacy_account = profile.to_connector_account(live=True)
+        conn = registry.get(profile.id, legacy_account.connector_cfg())
+        if hasattr(conn, "fetch_open_orders"):
+            raw = conn.fetch_open_orders()  # type: ignore[attr-defined]
+            out = []
+            for r in raw or []:
+                # Connector returns OrderAck-like objects; read attrs
+                # and fall back to dict access for raw shapes.
+                order_id = getattr(r, "order_id", None)
+                client_order_id = getattr(r, "client_order_id", None)
+                market = getattr(r, "market", None)
+                if order_id is None and isinstance(r, dict):
+                    order_id = str(r.get("id") or r.get("order_id") or "")
+                    client_order_id = str(
+                        r.get("clientOrderId") or r.get("client_order_id") or ""
+                    )
+                    market = str(r.get("symbol") or r.get("market") or "")
+                out.append({
+                    "order_id": str(order_id or ""),
+                    "client_order_id": str(client_order_id or ""),
+                    "market": str(market or ""),
+                })
+            return out
+    except Exception as exc:  # pragma: no cover
+        log.warning("reconcile_account: cannot fetch open orders for %s: %s", profile.id, exc)
+    return []
     try:
         from ..connectors import ConnectorRegistry
         registry = ConnectorRegistry(workspace=config.paths.root)

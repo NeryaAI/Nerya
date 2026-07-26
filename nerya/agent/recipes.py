@@ -30,7 +30,7 @@ Design goals:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -159,10 +159,6 @@ _BUILTIN_RECIPES: tuple[Recipe, ...] = (
         tags=("exchange", "setup"),
     ),
 )
-
-
-def builtin_recipes() -> list[Recipe]:
-    return list(_BUILTIN_RECIPES)
 
 
 def _recipes_dir(paths: WorkspacePaths) -> Path:

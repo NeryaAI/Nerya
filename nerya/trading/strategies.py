@@ -30,6 +30,13 @@ class StrategyLimits:
     max_stale_seconds: int = 30
     approval_threshold_usd: float = 0.0
     kill_switch: bool = False
+    # Manifest ``policy`` caps. These were previously surfaced only as
+    # advisory prompt context to agents (``max_daily_notional_usd`` /
+    # ``max_open_positions``); the Risk Gate now enforces them as hard
+    # reject gates so a runaway agent cannot exceed declared policy.
+    # Defaults to 0 (== off) for backwards compatibility.
+    max_daily_notional_usd: float = 0.0
+    max_open_positions: int = 0
 
 
 @dataclass
@@ -67,6 +74,21 @@ def load_strategy(paths: WorkspacePaths, strategy_id: str) -> Strategy:
         raise TradingError(f"unknown strategy: {strategy_id}")
     s = yaml_io.load(root / "strategy.yml") or {}
     limits_raw = yaml_io.load(root / "limits.yml", default={}) or {}
+    # Manifest ``policy`` block carries daily notional / open-positions
+    # caps that were previously advisory only. Pull them in here so the
+    # Risk Gate can enforce them as hard gates. ``limits.yml`` wins when
+    # both declare a value (operator override).
+    policy_raw = s.get("policy") if isinstance(s.get("policy"), dict) else {}
+    max_daily = float(
+        limits_raw.get("max_daily_notional_usd")
+        or policy_raw.get("max_daily_notional_usd")
+        or 0
+    )
+    max_positions = int(
+        limits_raw.get("max_open_positions")
+        or policy_raw.get("max_open_positions")
+        or 0
+    )
     limits = StrategyLimits(
         allowed_markets=list(limits_raw.get("allowed_markets") or []),
         max_single_order_usd=float(limits_raw.get("max_single_order_usd", 0)),
@@ -79,6 +101,8 @@ def load_strategy(paths: WorkspacePaths, strategy_id: str) -> Strategy:
         max_stale_seconds=int(limits_raw.get("max_stale_seconds", 30)),
         approval_threshold_usd=float(limits_raw.get("approval_threshold_usd", 0)),
         kill_switch=bool(limits_raw.get("kill_switch", False)),
+        max_daily_notional_usd=max_daily,
+        max_open_positions=max_positions,
     )
 
     sid = str(s.get("id") or s.get("strategy_id") or strategy_id)

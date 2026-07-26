@@ -24,6 +24,40 @@ from ..core.errors import SkillNotFoundError
 from .manifest import ActionSpec, SkillManifest
 
 
+_LEGACY_ENABLED_ALIASES: dict[str, tuple[str, ...]] = {
+    "market_data": ("markets", "market_data_routing"),
+    "portfolio": ("trading",),
+    "risk": ("trading",),
+    "trigger": ("triggers",),
+    "script": ("coding",),
+    "message": ("notify",),
+    "strategy_review": ("strategy_author",),
+    "evolution": ("evolve",),
+    "onchain": ("markets",),
+    "subagent": ("team",),
+    "exchange": ("markets",),
+    "sdk_writer": ("strategy_author", "coding"),
+    "strategy": ("strategy_author",),
+    "wallet": ("markets",),
+    "exchange_author": ("coding",),
+    "capability_developer": ("coding", "evolve"),
+    "trace": ("analysis",),
+    "operator": ("coding",),
+    "strategy_validation": ("backtest", "quant_research"),
+    "workspace": ("analysis",),
+    "data_science": ("analysis", "quant_research"),
+    "devops": ("coding",),
+}
+
+
+def _expand_legacy_enabled_ids(enabled: set[str]) -> set[str]:
+    expanded = set(enabled)
+    for legacy_id, playbook_ids in _LEGACY_ENABLED_ALIASES.items():
+        if legacy_id in enabled:
+            expanded.update(playbook_ids)
+    return expanded
+
+
 @dataclass
 class SkillEntry:
     manifest: SkillManifest
@@ -108,7 +142,7 @@ class SkillRegistry:
         if workspace_paths is not None:
             doc = yaml_io.load(workspace_paths.skills_enabled, default={}) or {}
             if doc.get("enabled"):
-                enabled = set(doc["enabled"])
+                enabled = _expand_legacy_enabled_ids(set(doc["enabled"]))
 
         def _integration_ok(manifest: SkillManifest) -> bool:
             req = (getattr(manifest, "requires_integration", "") or "").strip()
