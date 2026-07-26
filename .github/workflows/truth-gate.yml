@@ -48,7 +48,7 @@ jobs:
 
       - name: Build and verify distributions
         run: |
-          uv build --no-sources --clear
+          python -m build
           python scripts/verify_distribution.py dist
 
       - name: Run + truth gates (quick)
