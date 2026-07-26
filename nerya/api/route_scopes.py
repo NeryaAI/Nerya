@@ -119,6 +119,8 @@ _RULES: tuple[RouteRule, ...] = (
     # workspace
     RouteRule(None, "/workspace", "read:runtime", ""),
     RouteRule(None, "/workspace/", "read:runtime", "writes still pass through specific routes"),
+    RouteRule("POST", "/workspace/sync/config", "write:config", "configure Git/WebDAV workspace sync"),
+    RouteRule("POST", "/workspace/sync/run", "admin:ops", "operator-only workspace snapshot restore/publish"),
     RouteRule("POST", "/workspace/file/save", "write:config", "dashboard files drawer save"),
     RouteRule("POST", "/workspace/file/delete", "write:config", "dashboard files drawer delete"),
     RouteRule("POST", "/workspace/file/create", "write:config", "dashboard files drawer create"),

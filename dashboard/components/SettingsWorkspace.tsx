@@ -7,6 +7,7 @@ import { GatewayChannelsPanel } from "./GatewayChannelsPanel";
 import { MemoryEvidencePanel } from "./MemoryEvidencePanel";
 import { MemoryProfilePanel } from "./MemoryProfilePanel";
 import { RuntimeFlagsPanel } from "./RuntimeFlagsPanel";
+import { WorkspaceSyncPanel } from "./WorkspaceSyncPanel";
 import { SwitchControl } from "./SwitchControl";
 import { Select as PortalSelect, type SelectOption as PortalSelectOption } from "./Select";
 import { PortalDropdown, useDropdown } from "./PortalDropdown";
@@ -4737,6 +4738,9 @@ export function SettingsWorkspace({
           aria-labelledby={settingsTabId("runtime")}
           className="grid grid-cols-1 gap-5 xl:grid-cols-[380px_1fr]"
         >
+          <div className="xl:col-span-2">
+            <WorkspaceSyncPanel />
+          </div>
           <div className="xl:col-span-2">
             <Card
               title={tProxy("title")}

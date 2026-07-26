@@ -14,7 +14,7 @@ from ..core.paths import WorkspacePaths
 
 def required_dirs(p: WorkspacePaths) -> list[Path]:
     return [
-        p.state, p.snapshots, p.virtual_ledgers,
+        p.state, p.snapshots, p.virtual_ledgers, p.workspace_sync_state,
         p.journals,
         p.inbox, p.inbox_triggers, p.inbox_sdk_orders,
         p.inbox_llm_requests, p.inbox_tasks, p.inbox_messages,

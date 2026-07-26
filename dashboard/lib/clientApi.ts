@@ -1859,6 +1859,49 @@ export interface WorkspaceFileEntry {
   is_symlink?: boolean;
 }
 
+export interface WorkspaceSyncConfig {
+  enabled: boolean;
+  provider: "git" | "webdav";
+  remote: string;
+  branch: string;
+  git_path: string;
+  remote_path: string;
+  username_ref: string;
+  password_ref: string;
+  includes: string[];
+  excludes: string[];
+}
+
+export interface WorkspaceSyncStatus {
+  ok: boolean;
+  error?: string;
+  detail?: string;
+  config: WorkspaceSyncConfig;
+  configured: boolean;
+  credential_ready: boolean | null;
+  git_available: boolean;
+  last_sync?: {
+    ok: boolean;
+    action: "pull" | "push" | "sync";
+    provider: "git" | "webdav";
+    finished_at: string;
+    results: Array<Record<string, unknown>>;
+  } | null;
+  config_path: string;
+  safety: { hard_excludes: string[]; credentials: string };
+}
+
+export interface WorkspaceSyncRunResult {
+  ok: boolean;
+  error?: string;
+  detail?: string;
+  conflicts?: string[];
+  action?: "pull" | "push" | "sync";
+  provider?: "git" | "webdav";
+  finished_at?: string;
+  results?: Array<Record<string, unknown>>;
+}
+
 export const clientApi = {
   authStatus: () => get<AuthStatus>("/auth/status"),
   authLogin: (body: { password: string }) =>
@@ -1868,6 +1911,13 @@ export const clientApi = {
   authLogout: () => post<{ ok: boolean }>("/auth/logout", {}),
   health: () => get<{ status: string }>("/health"),
   workspace: () => get<{ root: string; live_trading_enabled: boolean; kill_switch: boolean }>("/workspace"),
+  workspaceSyncStatus: () => get<WorkspaceSyncStatus>("/workspace/sync"),
+  workspaceSyncConfig: (body: Partial<WorkspaceSyncConfig>) =>
+    post<WorkspaceSyncStatus>("/workspace/sync/config", body),
+  workspaceSyncRun: (body: {
+    action: "pull" | "push" | "sync";
+    force?: boolean;
+  }) => post<WorkspaceSyncRunResult>("/workspace/sync/run", body),
   workspaceFilesList: (
     path: string = ".",
     show_hidden: boolean = false,

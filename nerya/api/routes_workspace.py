@@ -67,6 +67,56 @@ def routes():
         }
 
     # ------------------------------------------------------------------
+    # workspace synchronization
+    # ------------------------------------------------------------------
+
+    def sync_status(client, _payload):
+        from ..workspace.sync import WorkspaceSyncError, WorkspaceSyncManager
+
+        try:
+            return WorkspaceSyncManager(client.config.paths.root).status()
+        except WorkspaceSyncError as exc:
+            return {"ok": False, "error": exc.code, "detail": exc.detail}
+
+    def sync_config(client, payload):
+        from ..workspace.sync import WorkspaceSyncError, WorkspaceSyncManager
+
+        try:
+            return WorkspaceSyncManager(client.config.paths.root).save_config(payload or {})
+        except WorkspaceSyncError as exc:
+            return {
+                "ok": False,
+                "error": exc.code,
+                "detail": exc.detail,
+                "conflicts": list(exc.conflicts),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": "sync_config_failed", "detail": str(exc)}
+
+    def sync_run(client, payload):
+        # Deliberately an admin-only operator restore surface, not an agent
+        # tool/action. Agent-authored strategy/skill/script changes still go
+        # through PatchProposal; this endpoint applies a remote snapshot only
+        # when an authenticated operator explicitly clicks pull/sync/push.
+        from ..workspace.sync import WorkspaceSyncError, WorkspaceSyncManager
+
+        body = payload or {}
+        try:
+            return WorkspaceSyncManager(client.config.paths.root).run(
+                str(body.get("action") or "sync"),
+                force=bool(body.get("force", False)),
+            )
+        except WorkspaceSyncError as exc:
+            return {
+                "ok": False,
+                "error": exc.code,
+                "detail": exc.detail,
+                "conflicts": list(exc.conflicts),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": "sync_failed", "detail": str(exc)}
+
+    # ------------------------------------------------------------------
     # files browser
     # ------------------------------------------------------------------
 
@@ -415,6 +465,9 @@ def routes():
 
     return [
         ("GET", "/workspace", workspace_info),
+        ("GET", "/workspace/sync", sync_status),
+        ("POST", "/workspace/sync/config", sync_config),
+        ("POST", "/workspace/sync/run", sync_run),
         ("GET", "/workspace/files", files_list),
         ("GET", "/workspace/file", files_read),
         ("GET", "/workspace/file/raw", files_raw),

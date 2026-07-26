@@ -23,6 +23,15 @@ class WorkspacePaths:
     def snapshots(self) -> Path: return self.state / "snapshots"
     @property
     def virtual_ledgers(self) -> Path: return self.state / "virtual_ledgers"
+    @property
+    def workspace_sync_state(self) -> Path: return self.state / "workspace_sync"
+    @property
+    def workspace_sync_status(self) -> Path: return self.workspace_sync_state / "status.json"
+    @property
+    def workspace_sync_git_checkout(self) -> Path: return self.workspace_sync_state / "git_checkout"
+
+    @property
+    def workspace_sync_config(self) -> Path: return self.root / "workspace-sync.yml"
 
     # journals
     @property
