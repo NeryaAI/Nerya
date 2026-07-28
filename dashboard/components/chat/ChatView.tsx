@@ -169,6 +169,7 @@ function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
       title: cached.title || sessionTitle(session, sid),
       created_ts: created || cached.created_ts,
       updated_ts: Math.max(updated, cached.updated_ts),
+      strategy_id: cached.strategy_id ?? session.strategy_id ?? undefined,
       message_count: Math.max(
         cached.message_count ?? 0,
         Number(session.message_count || 0),
@@ -187,6 +188,7 @@ function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
     imported_at: Date.now(),
     transcript_loaded: false,
     backend_updated_ts: updated,
+    strategy_id: session.strategy_id ?? undefined,
   };
 }
 
@@ -735,6 +737,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       imported_at: Date.now(),
       transcript_loaded: true,
       backend_updated_ts: updated,
+      strategy_id: t.strategy_id ?? undefined,
     };
     return cacheThreadTranscript(thread);
   }
@@ -998,8 +1001,22 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     return () => window.clearInterval(timer);
   }, [active?.id, active?.messages.length, sending]);
 
+  /** Strategy binding requested via ``/chat?strategy=<id>`` (the "+"
+   * button on a sidebar strategy). Read lazily from the location so we
+   * don't need a Suspense boundary for ``useSearchParams``. */
+  function strategyIdFromLocation(): string {
+    if (typeof window === "undefined") return "";
+    try {
+      return new URLSearchParams(window.location.search).get("strategy") || "";
+    } catch {
+      return "";
+    }
+  }
+
   function createThread(seedText?: string, id?: string): ChatThread {
-    const t = id ? { ...newThread(seedText), id } : newThread(seedText);
+    const minted = id ? { ...newThread(seedText), id } : newThread(seedText);
+    const strategyId = strategyIdFromLocation();
+    const t = strategyId ? { ...minted, strategy_id: strategyId } : minted;
     setThreads((prev) => upsertThread(prev, t));
     return t;
   }
@@ -1399,6 +1416,12 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           // here (any caller that supplies the same session id is
           // grouped under the same thread).
           session_id: threadId,
+          // Strategy sub-sessions forward their binding so the backend
+          // session locks to the strategy and the kernel injects the
+          // full strategy file context into the system prompt.
+          ...(thread.strategy_id
+            ? { strategy_id: thread.strategy_id }
+            : {}),
           reasoning_effort:
             settings.reasoning_effort === "off"
               ? undefined

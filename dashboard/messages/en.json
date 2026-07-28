@@ -55,7 +55,11 @@
     "settings": "Settings",
     "viewAll": "View all",
     "sectionChats": "Chats",
-    "untitledChat": "Untitled chat"
+    "untitledChat": "Untitled chat",
+    "sectionStrategies": "Running strategies",
+    "newStrategyChat": "New strategy chat",
+    "strategyEvolution": "Evolution",
+    "noStrategySessions": "No sessions yet"
   },
   "topHeader": {
     "pinToFavorites": "Pin to favorites",

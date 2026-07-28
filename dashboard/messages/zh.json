@@ -55,7 +55,11 @@
     "settings": "设置",
     "viewAll": "查看全部",
     "sectionChats": "对话",
-    "untitledChat": "未命名对话"
+    "untitledChat": "未命名对话",
+    "sectionStrategies": "运行中策略",
+    "newStrategyChat": "新建策略会话",
+    "strategyEvolution": "进化",
+    "noStrategySessions": "暂无会话"
   },
   "topHeader": {
     "pinToFavorites": "固定到收藏",

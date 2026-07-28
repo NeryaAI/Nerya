@@ -43,6 +43,7 @@ import { confirm as confirmDialog } from "../../lib/dialogs";
 import { useOperatorNav } from "../../lib/useOperatorNav";
 import { NeryaLogo } from "../NeryaLogo";
 import { useCommandPalette } from "./CommandPalette";
+import { SidebarStrategies } from "./SidebarStrategies";
 import {
   AgentsIcon,
   ChevronDownIcon,
@@ -241,12 +242,14 @@ export function CodexSidebar() {
 
   // Recent conversations live here now (the chat view no longer carries
   // its own rail). ChatView broadcasts on every save/delete, so we just
-  // re-read the local store whenever it changes.
+  // re-read the local store whenever it changes. Threads bound to a
+  // strategy render in the SidebarStrategies block instead of the flat
+  // CHATS list, so they're filtered out here.
   useEffect(() => {
     const read = () =>
       setChats(
         loadThreads()
-          .slice()
+          .filter((t) => !t.strategy_id)
           .sort((a, b) => (b.updated_ts || 0) - (a.updated_ts || 0)),
       );
     read();
@@ -392,47 +395,55 @@ export function CodexSidebar() {
           )}
         </div>
 
-        {/* Chats — recent conversations (the folded-in chat rail) */}
-        {!railCollapsed && chats.length > 0 ? (
+        {/* Running strategies + chats — one shared scroll region. The
+            strategies block pins above the CHATS list so the operator sees
+            what's live without opening the strategies page; each strategy
+            expands into its second-level sessions (incl. evolution runs). */}
+        {!railCollapsed ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            <SectionLabel>{t("sectionChats")}</SectionLabel>
             <div className="embedded-scroll min-h-0 flex-1 pr-1">
-              <div className="space-y-0.5">
-                {chats.map((c) => {
-                  const active = pathMatches(pathname, `/chat/${c.id}`);
-                  return (
-                    <div
-                      key={c.id}
-                      className={`group sidebar-item pr-1 ${active ? "sidebar-item-active" : "sidebar-item-idle"}`}
-                    >
-                      <Link
-                        href={`/chat/${encodeURIComponent(c.id)}`}
-                        className="flex min-w-0 flex-1 items-center gap-2"
-                        title={c.title}
-                      >
-                        <MessagesIcon
-                          size={14}
-                          className={`shrink-0 ${active ? "text-brand-200" : "text-[color:var(--text-muted)]"}`}
-                        />
-                        <span className="truncate">{c.title || t("untitledChat")}</span>
-                      </Link>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          void removeChat(c.id);
-                        }}
-                        className="ml-1 shrink-0 rounded p-1 text-[color:var(--text-muted)] opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
-                        title={tCommon("delete")}
-                        aria-label={tCommon("delete")}
-                      >
-                        <TrashIcon size={13} />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
+              <SidebarStrategies />
+              {chats.length > 0 ? (
+                <>
+                  <SectionLabel>{t("sectionChats")}</SectionLabel>
+                  <div className="space-y-0.5">
+                    {chats.map((c) => {
+                      const active = pathMatches(pathname, `/chat/${c.id}`);
+                      return (
+                        <div
+                          key={c.id}
+                          className={`group sidebar-item pr-1 ${active ? "sidebar-item-active" : "sidebar-item-idle"}`}
+                        >
+                          <Link
+                            href={`/chat/${encodeURIComponent(c.id)}`}
+                            className="flex min-w-0 flex-1 items-center gap-2"
+                            title={c.title}
+                          >
+                            <MessagesIcon
+                              size={14}
+                              className={`shrink-0 ${active ? "text-brand-200" : "text-[color:var(--text-muted)]"}`}
+                            />
+                            <span className="truncate">{c.title || t("untitledChat")}</span>
+                          </Link>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void removeChat(c.id);
+                            }}
+                            className="ml-1 shrink-0 rounded p-1 text-[color:var(--text-muted)] opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
+                            title={tCommon("delete")}
+                            aria-label={tCommon("delete")}
+                          >
+                            <TrashIcon size={13} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : null}
             </div>
           </div>
         ) : null}

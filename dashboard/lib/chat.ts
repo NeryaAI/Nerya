@@ -402,6 +402,12 @@ export type ChatThread = {
    * the conversation continues against the same on-disk session.
    */
   imported?: boolean;
+  /** Strategy this thread is bound to (strategy sub-session). Threads
+   * carrying a strategy_id render under their strategy in the sidebar
+   * (not in the flat CHATS list) and every ``run_turn`` sent from them
+   * passes the id along so the backend session binds the strategy and
+   * the kernel injects the strategy file context. */
+  strategy_id?: string | null;
   /** Last time we re-pulled this thread's transcript from the backend.
    * Used to decide whether a refresh on focus is worth doing. */
   imported_at?: number;

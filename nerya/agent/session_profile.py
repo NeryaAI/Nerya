@@ -119,10 +119,81 @@ def render_strategy_agent_profile_block(profile_record: dict[str, Any] | None) -
     return "\n".join(lines)
 
 
+def render_strategy_context_block(
+    paths: WorkspacePaths,
+    strategy_id: str | None,
+    *,
+    max_chars: int = 4000,
+) -> str:
+    """Render the strategy file context for a strategy-bound session.
+
+    Dashboard-initiated strategy chats bind a ``strategy_id`` without a
+    ``strategy_agent_profile`` in the session meta (that profile is only
+    written by the strategy agent-task executor). This block gives every
+    strategy-bound session the same grounding: the strategy record plus
+    the on-disk package files (strategy.yml / config.yml / limits.yml /
+    prompts / learnings), clipped to ``max_chars`` so a large package
+    cannot crowd out the rest of the system prompt.
+    """
+
+    sid = str(strategy_id or "").strip()
+    if not sid:
+        return ""
+    try:
+        from ..trading import strategy_crud
+
+        detail = strategy_crud.get_detail(paths, sid)
+    except Exception:
+        return ""
+
+    record = dict(detail.get("strategy") or {})
+    lines = [f"Strategy Context (strategy_id={sid}):"]
+    for key in (
+        "title", "status", "mode", "enabled", "account_id",
+        "wallet_id", "markets", "trigger_kinds", "subagents", "path",
+    ):
+        value = record.get(key)
+        if value in (None, "", [], ()):
+            continue
+        if isinstance(value, (list, tuple)):
+            value = ", ".join(str(v) for v in value)
+        lines.append(f"- {key}: {value}")
+    for label, key in (
+        ("strategy.yml", "strategy_yml"),
+        ("config.yml", "config"),
+        ("limits.yml", "limits"),
+    ):
+        data = detail.get(key)
+        if isinstance(data, dict) and data:
+            lines.append(f"{label}: {canonical_json(data)}")
+    prompts = detail.get("prompts")
+    if isinstance(prompts, dict) and prompts:
+        lines.append("Prompts:")
+        for name in sorted(prompts):
+            body = str(prompts[name] or "").strip()
+            if body:
+                lines.append(f"--- {name} ---")
+                lines.append(body)
+    learnings = str(detail.get("learnings") or "").strip()
+    if learnings:
+        lines.append("Learnings:")
+        lines.append(learnings)
+
+    block = "\n".join(lines)
+    if max_chars > 0 and len(block) > max_chars:
+        block = block[:max_chars].rstrip() + "\n…[truncated]"
+    return block + (
+        "\nTreat this strategy's files as the authoritative configuration "
+        "for this session; re-read them from the package path with fs "
+        "tools (or strategy_view) when you need untruncated detail."
+    )
+
+
 __all__ = [
     "canonical_json",
     "ensure_strategy_agent_profile",
     "load_strategy_agent_profile",
     "render_strategy_agent_profile_block",
+    "render_strategy_context_block",
     "strategy_agent_session_id",
 ]

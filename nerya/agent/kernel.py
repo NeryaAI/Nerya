@@ -3986,6 +3986,26 @@ class AgentKernel:
             except Exception:
                 profile_block = ""
 
+        # Strategy-bound sessions (dashboard strategy chats, evolution /
+        # tuning runs) also carry the full strategy file context so the
+        # model sees the package configuration without a tool round-trip.
+        strategy_context_block = ""
+        if deps.paths is not None and strategy_id:
+            try:
+                from .session_profile import render_strategy_context_block
+
+                strategy_context_block = render_strategy_context_block(
+                    deps.paths,
+                    strategy_id,
+                    max_chars=int(
+                        self.config.get(
+                            "agent.native.strategy_context_chars", 4000
+                        )
+                    ),
+                )
+            except Exception:
+                strategy_context_block = ""
+
         market_context_block = ""
         if session_id:
             try:
@@ -4056,6 +4076,8 @@ class AgentKernel:
             rolling_sections.append(dynamic_memory_block)
         if profile_block:
             sections.append(profile_block)
+        if strategy_context_block:
+            sections.append(strategy_context_block)
         if market_context_block:
             sections.append(market_context_block)
         if recipe_block:
