@@ -343,7 +343,7 @@ export default function AccountsPage() {
                   {accounts.map((acc) => {
                     const p = acc.profile;
                     return (
-                      <tr key={p.id} className="text-xs">
+                      <tr key={p.id} className="group text-xs">
                         <td>
                           <Link
                             href={`/accounts/${encodeURIComponent(p.id)}`}
@@ -375,7 +375,10 @@ export default function AccountsPage() {
                         </td>
                         <td>{acc.open_position_count}</td>
                         <td>{acc.active_executors.length}</td>
-                        <td className="flex flex-wrap gap-1.5">
+                        {/* Row actions (incl. the destructive quarantine)
+                            reveal on hover/focus so nine rows don't render
+                            27 permanent buttons. */}
+                        <td className="flex flex-wrap gap-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
                           {p.status === "active" ? (
                             <>
                               <button

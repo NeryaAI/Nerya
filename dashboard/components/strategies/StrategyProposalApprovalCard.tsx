@@ -451,14 +451,18 @@ export function StrategyProposalApprovalCard({
             </Link>
           ) : null}
           {!TERMINAL_STATES.has(state) ? (
+            // Icon-only: delete is the rare escape hatch here, so it
+            // shouldn't carry the same visual weight as the primary
+            // "Approve and add" action on every proposal row.
             <button
               onClick={() => void remove()}
               disabled={busy || deleting}
               className="btn btn-ghost cursor-pointer text-xs text-rose-300 hover:text-rose-200 disabled:opacity-50 disabled:cursor-not-allowed"
-              title={t("deleteConfirmOk")}
+              title={t("delete")}
+              aria-label={t("delete")}
             >
               <TrashIcon size={14} />
-              {deleting ? tCommon("working") : t("delete")}
+              {deleting ? tCommon("working") : null}
             </button>
           ) : null}
           {!TERMINAL_STATES.has(state) ? (

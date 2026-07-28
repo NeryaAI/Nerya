@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Card, Pill } from "../Page";
+import { Advanced, Card, Pill } from "../Page";
 import { Select } from "../Select";
 import {
   clientApi,
@@ -164,20 +164,42 @@ export function StrategyBindCard({
     }
   }
 
+  const boundAccount = accounts.find(
+    (a) => a.profile.id === (currentAccountId ?? ""),
+  );
+
   return (
-    <Card
-      title={t("title")}
-      description={t("description")}
-      actions={
-        <button
-          onClick={() => void load()}
-          disabled={loading}
-          className="btn-ghost text-xs"
-        >
-          {loading ? "…" : t("refreshRoster")}
-        </button>
-      }
-    >
+    // No "Refresh roster" button — the roster loads on mount and reloads
+    // after every bind, so the manual refresh only duplicated that.
+    <Card title={t("title")} description={t("description")}>
+      {/* Read-only summary first: most visits just check the wiring. */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="text-ink-400">{t("account")}</span>
+          <span className="font-mono text-ink-200">{currentAccountId || "–"}</span>
+          {boundAccount ? (
+            <Pill
+              tone={
+                boundAccount.profile.status === "active"
+                  ? "ok"
+                  : boundAccount.profile.status === "read_only"
+                  ? "warn"
+                  : "danger"
+              }
+            >
+              {boundAccount.profile.mode} · {boundAccount.profile.status}
+            </Pill>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-ink-400">{t("wallet")}</span>
+          <span className="font-mono text-ink-200">
+            {currentWalletId || t("accountFallbackInline")}
+          </span>
+        </div>
+      </div>
+
+      <Advanced title={t("changeBindings")}>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
         <div>
           <label className="text-[11px] text-ink-400">{t("account")}</label>
@@ -295,6 +317,7 @@ export function StrategyBindCard({
           ) : null}
         </div>
       </div>
+      </Advanced>
     </Card>
   );
 }

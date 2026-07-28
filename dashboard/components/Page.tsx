@@ -121,7 +121,6 @@ export function Advanced({
   onToggle?: (next: boolean) => void;
   children: ReactNode;
 }) {
-  const tCommon = useTranslations("pageCommon");
   const controlled = controlledOpen != null;
   const [internalOpen, setInternalOpen] = useState<boolean>(() => {
     if (controlled) return false;
@@ -165,7 +164,9 @@ export function Advanced({
             <span className="shrink-0 text-[12px] text-[color:var(--text-muted)]">· {count}</span>
           ) : null}
         </span>
-        <span className="shrink-0 text-[12px]">{open ? tCommon("advancedHide") : tCommon("advancedShow")}</span>
+        {/* The chevron already communicates open/closed — the old
+            trailing "Show/Hide" label was a second control for the same
+            action on every collapsible row. */}
       </button>
       {open && description ? (
         <p className="ml-5 mt-1 text-[12px] text-[color:var(--text-muted)]">{description}</p>

@@ -546,14 +546,11 @@ export default function WorkflowsPage() {
           description={t("description")}
           actions={
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => openCreate("agent")}
-              >
-                <PlusIcon size={14} />
-                {t("newTask")}
-              </button>
+              {/* "+ New task" was removed here — the Scheduled-tasks card
+                  already offers the typed entry points (+ Agent / + Script /
+                  + Trigger), and two create paths for one action doubled the
+                  learning cost. "Run scheduler tick" is a debug affordance,
+                  so it renders icon-only and quiet. */}
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -567,9 +564,11 @@ export default function WorkflowsPage() {
                 className="btn btn-ghost"
                 disabled={busy === "tick"}
                 onClick={() => void tickSchedules()}
+                title={t("tickNow")}
+                aria-label={t("tickNow")}
               >
                 <WrenchIcon size={14} />
-                {busy === "tick" ? tCommon("working") : t("tickNow")}
+                {busy === "tick" ? tCommon("working") : null}
               </button>
             </div>
           }

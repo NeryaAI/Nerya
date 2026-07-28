@@ -866,8 +866,22 @@ export function saveRunSettings(settings: ChatRunSettings) {
   }
 }
 
+/** Leading output-language instructions that templates prepend to the
+ * first user message. Without stripping them, every auto-titled thread
+ * reads "Answer in English. …" and the sidebar becomes indistinguishable. */
+const TITLE_NOISE_PREFIXES: RegExp[] = [
+  /^answer in [a-z]+[.!,;:]?\s*/i,
+  /^respond in [a-z]+[.!,;:]?\s*/i,
+  /^(请)?用中文回答[。！，.!,]?\s*/,
+  /^(请)?用英文回答[。！，.!,]?\s*/,
+];
+
 export function deriveTitle(text: string): string {
-  const clean = text.trim().replace(/\s+/g, " ");
+  let clean = text.trim().replace(/\s+/g, " ");
+  for (const re of TITLE_NOISE_PREFIXES) {
+    clean = clean.replace(re, "");
+  }
+  clean = clean.trim() || text.trim().replace(/\s+/g, " ");
   if (clean.length <= 60) return clean;
   return clean.slice(0, 57) + "...";
 }

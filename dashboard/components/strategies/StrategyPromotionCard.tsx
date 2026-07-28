@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Card, Empty, Pill } from "../Page";
+import { Advanced, Card, Empty, Pill } from "../Page";
 import { Select } from "../Select";
 import { clientApi } from "../../lib/clientApi";
 import { formatTsShort } from "../../lib/format";
@@ -193,19 +193,9 @@ export function StrategyPromotionCard({
   }
 
   return (
-    <Card
-      title={t("title")}
-      description={t("description")}
-      actions={
-        <button
-          onClick={loadPromotions}
-          disabled={loading}
-          className="btn-ghost text-xs"
-        >
-          {loading ? t("refreshing") : t("refresh")}
-        </button>
-      }
-    >
+    // No card-level Refresh — the page-level refresh already re-pulls the
+    // workspace, and both mutations below reload the list themselves.
+    <Card title={t("title")} description={t("description")}>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="space-y-3">
           <div className="space-y-1.5 text-xs">
@@ -222,45 +212,43 @@ export function StrategyPromotionCard({
             </div>
           </div>
 
-          <div className="rounded-md border border-brand-500/10 p-3 space-y-2">
-            <div className="text-[12px] text-ink-400 font-medium">
-              {t("requestPromotion")}
-            </div>
-            <div className="flex gap-2 items-center text-xs">
-              <span className="text-ink-400">{t("target")}</span>
-              <div className="min-w-[180px]">
-                <Select<(typeof PROMOTION_TARGETS)[number]>
-                  value={target}
-                  onChange={(value) => setTarget(value)}
-                  options={allowedTargets.map((tgt) => ({
-                    value: tgt,
-                    label: tgt,
-                  }))}
-                  size="sm"
-                  ariaLabel={t("target")}
-                />
+          {/* Operator forms fold away by default — most visits are
+              read-only status checks, not promotion paperwork. */}
+          <Advanced title={t("requestPromotion")}>
+            <div className="space-y-2">
+              <div className="flex gap-2 items-center text-xs">
+                <span className="text-ink-400">{t("target")}</span>
+                <div className="min-w-[180px]">
+                  <Select<(typeof PROMOTION_TARGETS)[number]>
+                    value={target}
+                    onChange={(value) => setTarget(value)}
+                    options={allowedTargets.map((tgt) => ({
+                      value: tgt,
+                      label: tgt,
+                    }))}
+                    size="sm"
+                    ariaLabel={t("target")}
+                  />
+                </div>
+                <button
+                  onClick={requestPromotion}
+                  disabled={busy === "request"}
+                  className="btn-ghost text-xs"
+                >
+                  {busy === "request" ? "…" : t("request")}
+                </button>
               </div>
-              <button
-                onClick={requestPromotion}
-                disabled={busy === "request"}
-                className="btn-ghost text-xs"
-              >
-                {busy === "request" ? "…" : t("request")}
-              </button>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={2}
+                placeholder={t("notesPlaceholder")}
+                className="w-full bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-xs text-ink-200"
+              />
             </div>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={2}
-              placeholder={t("notesPlaceholder")}
-              className="w-full bg-ink-900 border border-brand-500/20 rounded-md px-2 py-1 text-xs text-ink-200"
-            />
-          </div>
+          </Advanced>
 
-          <div className="rounded-md border border-brand-500/10 p-3 space-y-2">
-            <div className="text-[12px] text-ink-400 font-medium">
-              {t("recordEvidence")}
-            </div>
+          <Advanced title={t("recordEvidence")}>
             <div className="flex gap-2 items-center text-xs flex-wrap">
               <span className="text-ink-400">{t("kind")}</span>
               <div className="min-w-[180px]">
@@ -291,7 +279,7 @@ export function StrategyPromotionCard({
                 {busy === "evidence" ? "…" : t("record")}
               </button>
             </div>
-          </div>
+          </Advanced>
         </div>
 
         <div>

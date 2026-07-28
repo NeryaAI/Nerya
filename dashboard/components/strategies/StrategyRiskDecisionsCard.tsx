@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Card, Empty, Pill } from "../Page";
+import { Card, Pill } from "../Page";
 import { clientApi, type RiskEvaluationRow } from "../../lib/clientApi";
 
 interface Props {
@@ -60,26 +60,18 @@ export function StrategyRiskDecisionsCard({ strategyId }: Props) {
   }, [strategyId]);
 
   return (
-    <Card
-      title={t("title")}
-      description={t("description")}
-      actions={
-        <button
-          onClick={() => void load()}
-          disabled={loading}
-          className="btn-ghost text-xs"
-        >
-          {loading ? "…" : t("refresh")}
-        </button>
-      }
-    >
+    // Auto-refreshes every 30s — a manual Refresh button here was the
+    // fourth one on the page. Empty state stays a single quiet line.
+    <Card title={t("title")} description={t("description")}>
       {error && (
         <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
           {error}
         </div>
       )}
       {!loading && rows.length === 0 ? (
-        <Empty label={t("noRejections")} />
+        <div className="text-[12px] italic text-[color:var(--text-muted)]">
+          {t("noRejections")}
+        </div>
       ) : null}
       <div className="embedded-list-scroll-lg grid gap-3">
         {rows.map((row) => (

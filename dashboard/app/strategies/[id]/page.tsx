@@ -43,7 +43,6 @@ import {
   PageHeader,
   Pill,
 } from "../../../components/Page";
-import { SectionTabs } from "../../../components/SectionTabs";
 import { EditIcon, PauseIcon, TrashIcon } from "../../../components/icons";
 import {
   clientApi,
@@ -429,7 +428,9 @@ export default function StrategyDetailPage({
           </div>
         }
       />
-      <SectionTabs section="strategy" />
+      {/* Page-level Strategies|Workflows tabs intentionally omitted on the
+          detail page — "← All strategies" already anchors the hierarchy and
+          a second tab bar above the workspace tabs doubled the navigation. */}
       <PageBody>
         {error && <ErrorBanner error={error} />}
         {notice && (
@@ -636,22 +637,20 @@ function StrategyDetailTabBar({
               type="button"
               onClick={() => onChange(tab)}
               className={[
-                "group min-w-[150px] shrink-0 rounded-md border px-3 py-2 text-left transition-colors",
+                "group shrink-0 rounded-md border px-3 py-1.5 text-left transition-colors",
                 selected
                   ? "border-brand-500/45 bg-brand-500/20 text-white"
                   : "border-transparent text-ink-300 hover:border-brand-500/15 hover:bg-brand-500/10",
               ].join(" ")}
+              title={t(`tabs.${tab}.description`)}
             >
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
                 <span className="text-[12px] font-semibold">{t(`tabs.${tab}.label`)}</span>
                 {badge !== null ? (
                   <span className="rounded-full border border-brand-500/20 px-1.5 py-0.5 text-[10px] text-ink-300">
                     {badge}
                   </span>
                 ) : null}
-              </div>
-              <div className="mt-1 line-clamp-2 text-[10.5px] leading-snug text-ink-500 group-hover:text-ink-400">
-                {t(`tabs.${tab}.description`)}
               </div>
             </button>
           );
@@ -672,18 +671,14 @@ function StrategyDefinitionCard({ detail }: { detail: StrategyDetail }) {
       title={t("definitionTitle")}
       description={description || t("definitionDescription")}
     >
-      <div className="grid gap-3 text-sm md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 text-sm md:grid-cols-3">
         <DefinitionBlock label={t("definitionMarkets")} values={detail.strategy.markets} />
         <DefinitionBlock label={t("definitionTriggers")} values={detail.strategy.trigger_kinds} />
         <DefinitionBlock label={t("definitionSubagents")} values={detail.strategy.subagents} />
-        <DefinitionBlock
-          label={t("definitionMode")}
-          values={[
-            `status:${detail.strategy.status}`,
-            `mode:${detail.strategy.mode}`,
-            `account:${detail.strategy.account_id || "-"}`,
-          ]}
-        />
+        {/* status/mode/account intentionally omitted here — status+mode
+            already lead the KPI row above and the account binding lives
+            in the Bindings card, so repeating them as badges only added
+            noise. */}
       </div>
     </Card>
   );

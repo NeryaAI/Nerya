@@ -40,7 +40,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
   const pageFrameClass = isSettingsSurface
     ? "mx-auto w-full max-w-[1120px] px-5 pb-10 pt-1 lg:px-8"
-    : "mx-auto w-full max-w-[1500px] px-4 pb-12 pt-2 lg:px-8";
+    : // 1360px keeps tables readable on ultrawide monitors — at 1500px the
+      // 6-column strategy/portfolio tables spread so far apart the eye has
+      // to jump between columns.
+      "mx-auto w-full max-w-[1360px] px-4 pb-12 pt-2 lg:px-8";
 
   return (
     <AuthGate>

@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 
-import { Card, Kpi, Pill } from "../Page";
+import { Card, Kpi } from "../Page";
 import { clientApi } from "../../lib/clientApi";
 import { prompt as promptDialog } from "../../lib/dialogs";
 import type { StrategyWorkspaceEnvelope } from "../../lib/strategyTypes";
@@ -35,7 +35,6 @@ export function StrategyStatusBar({
   onNotice,
 }: Props) {
   const t = useTranslations("strategyStatus");
-  const manifest = envelope.manifest;
   const last = envelope.last_run;
   const kill = envelope.kill_switch;
 
@@ -97,13 +96,10 @@ export function StrategyStatusBar({
   }
 
   return (
+    // Title/description intentionally omitted — the page header already
+    // shows the strategy name, and status/mode lead the KPI row above.
+    // This card is just the runtime controls + package/run/kill state.
     <Card
-      title={manifest?.title || envelope.strategy_id}
-      description={
-        manifest
-          ? `${manifest.strategy_id} · v${manifest.version} · ${manifest.markets.join(", ") || t("noMarkets")}`
-          : t("manifestUnavailable")
-      }
       actions={
         <div className="flex items-center gap-2">
           <button
@@ -133,18 +129,7 @@ export function StrategyStatusBar({
         </div>
       }
     >
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <Kpi
-          label={t("mode")}
-          value={manifest?.mode ?? "–"}
-          tone={
-            manifest?.mode === "live"
-              ? "danger"
-              : manifest?.mode === "shadow"
-                ? "warn"
-                : "brand"
-          }
-        />
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <Kpi
           label={t("package")}
           value={
@@ -181,18 +166,6 @@ export function StrategyStatusBar({
           {t("armedBy")} <span className="font-mono">{kill.by || "?"}</span> {t("at")}{" "}
           {kill.at ? new Date(kill.at).toLocaleString() : "?"}:{" "}
           {kill.reason || t("noReason")}
-        </div>
-      )}
-      {manifest && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {manifest.markets.map((m) => (
-            <Pill key={m} tone="brand">
-              {m}
-            </Pill>
-          ))}
-          {manifest.subagents.map((a) => (
-            <Pill key={a}>{a}</Pill>
-          ))}
         </div>
       )}
     </Card>

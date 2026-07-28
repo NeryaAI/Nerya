@@ -690,7 +690,7 @@ function AccountHealthCard({
       ? Math.min(1, entry.reserved_usd / Math.max(1, Number(snapshot.total_usd)))
       : 0;
   return (
-    <div className="rounded-lg border border-[color:var(--line)] p-3.5 space-y-3">
+    <div className="group rounded-lg border border-[color:var(--line)] p-3.5 space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
         <Link
           href={`/accounts/${encodeURIComponent(entry.account_id)}`}
@@ -778,25 +778,21 @@ function AccountHealthCard({
             <span className="ml-2">· {t("tradesLower")}: {tradeCount}</span>
           ) : null}
         </span>
-        <span className="ml-auto flex gap-1.5 flex-wrap">
+        <span className="ml-auto flex gap-1.5 flex-wrap items-center">
+          {/* "live disabled" is the default for paper accounts — repeating
+              it on every card was pure noise, so only the live state gets a
+              pill. Reconcile reveals on hover; "Inspect" was removed because
+              the account id link above opens the same page. */}
           {entry.live_trading_enabled ? (
             <Pill tone="warn">{t("liveOk")}</Pill>
-          ) : (
-            <Pill tone="brand">{t("liveDisabled")}</Pill>
-          )}
+          ) : null}
           <button
             onClick={onReconcile}
             disabled={busy}
-            className="btn-ghost text-[12px] py-0.5"
+            className="btn-ghost text-[12px] py-0.5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
           >
             {busy ? t("running") : t("reconcile")}
           </button>
-          <Link
-            href={`/accounts/${encodeURIComponent(entry.account_id)}`}
-            className="btn-ghost text-[12px] py-0.5"
-          >
-            {t("inspect")}
-          </Link>
         </span>
       </div>
 

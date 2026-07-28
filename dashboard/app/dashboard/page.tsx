@@ -51,7 +51,7 @@ export default function DashboardOverview() {
   const t = useTranslations("home");
   const tHero = useTranslations("operatorHero");
   const [settings, patchSettings] = useUiSettings();
-  const [currentAccountId] = useCurrentAccountId();
+  const [currentAccountId, setCurrentAccountId] = useCurrentAccountId();
 
   const [workspace, setWorkspace] = useState<{ root: string; live_trading_enabled: boolean; kill_switch: boolean } | null>(null);
   const [apiOnline, setApiOnline] = useState(false);
@@ -460,7 +460,10 @@ export default function DashboardOverview() {
                 currency={focusedCurrency}
               />
             ) : (
-              <NoFocusedAccountStrip hasAccounts={accounts.length > 0} />
+              <NoFocusedAccountStrip
+                accounts={accounts}
+                onPick={setCurrentAccountId}
+              />
             )}
 
             {/* Equity curve */}
@@ -814,20 +817,57 @@ function FocusedKpi({
   );
 }
 
-function NoFocusedAccountStrip({ hasAccounts }: { hasAccounts: boolean }) {
+/**
+ * Inline focus picker — shown when no account is focused yet. The old
+ * version was a dead-end hint pointing at a "dropdown in the top header"
+ * that the Codex shell no longer renders; picking directly here removes
+ * that hunt entirely.
+ */
+function NoFocusedAccountStrip({
+  accounts,
+  onPick,
+}: {
+  accounts: AccountSummary[];
+  onPick: (id: string) => void;
+}) {
   const t = useTranslations("home");
+  if (accounts.length === 0) {
+    return (
+      <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2.5 text-[13px] text-amber-300">
+        {t("noAccountsPrefix")}{" "}
+        <Link href="/accounts" className="underline hover:text-amber-100">
+          {t("addAccountLink")}
+        </Link>
+      </div>
+    );
+  }
   return (
-    <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2.5 text-[13px] text-amber-300">
-      {hasAccounts ? (
-        <>{t("noFocusPickOne")}</>
-      ) : (
-        <>
-          {t("noAccountsPrefix")}{" "}
-          <Link href="/accounts" className="underline hover:text-amber-100">
-            {t("addAccountLink")}
-          </Link>
-        </>
-      )}
+    <div
+      className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2.5 text-[13px]"
+      style={{ borderColor: "var(--line)", background: "var(--card)" }}
+    >
+      <span className="text-[color:var(--text-muted)]">{t("pickFocusInline")}</span>
+      {accounts.slice(0, 8).map((acc) => (
+        <button
+          key={acc.profile.id}
+          type="button"
+          onClick={() => onPick(acc.profile.id)}
+          className="pill hover:border-brand-500/40 hover:text-[color:var(--text-base)]"
+          title={`${acc.profile.venue} · ${acc.profile.kind} · ${acc.profile.mode}`}
+        >
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              acc.profile.mode === "live" ? "bg-rose-400" : "bg-emerald-400"
+            }`}
+          />
+          <span className="font-mono">{acc.profile.id}</span>
+        </button>
+      ))}
+      {accounts.length > 8 ? (
+        <Link href="/accounts" className="text-[12px] text-brand-300 hover:text-brand-200">
+          {t("viewAll")}
+        </Link>
+      ) : null}
     </div>
   );
 }

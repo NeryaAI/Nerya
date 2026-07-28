@@ -232,8 +232,11 @@ body::after {
     color: var(--text-muted);
     letter-spacing: 0;
     text-transform: none;
-    overflow-wrap: anywhere;
-    white-space: normal;
+    /* Badges must never wrap into a vertical stack inside narrow list
+       rows ("workspace" → "workspac/e", "工作区" → two CJK lines).
+       Long content (market codes) clips instead of wrapping. */
+    white-space: nowrap;
+    overflow: hidden;
   }
   .pill-ok { @apply border-emerald-500/30 bg-emerald-500/10 text-emerald-500; }
   .pill-warn { @apply border-amber-500/30 bg-amber-500/10 text-amber-500; }
