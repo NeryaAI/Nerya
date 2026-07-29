@@ -6,11 +6,12 @@
 
 # Nerya
 
-### 本地运行、会自己进化的 AI 交易团队
+### 本地运行的投研 Agent 团队，让你的交易策略自我进化
 
-以技能为单元搭建，原生面向交易，还能自我反思迭代。一套完整的 Agent 系统，从内核到网关、
-子智能体、记忆、触发器、**Agent Team**、交易内核、进化流水线，全在一个仓库里，不挂任何外部
-Agent 框架。
+Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负责调度全局，市场、链上、新闻、
+技术面分析师分头收集证据，风控批评家给每一个论点做压力测试，组合经理核对敞口。团队起草
+策略，让它们过一遍 Risk Gate 和 Approval Gate，再把每个会话沉淀下来的证据，变成需要操作员
+签字的补丁：提示词、技能、脚本、触发器、策略配置——所以每一版策略都比上一版更强。
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -55,7 +56,7 @@ Agent 框架。
 | **交易能力** | 套个壳直接调交易所 SDK | 原生 Risk Gate、Approval Gate、纸面/实盘分离、虚拟账本、对账 |
 | **记忆** | 随手糊一个向量库 | 5 份带语义的 markdown 记忆面：全局、错题本、行情画像、技能心得、策略复盘 |
 | **自我进化** | 你给它写 prompt | 反思自动出提案，操作员签字，运行时上线还留快照 |
-| **多 Agent** | 几个 function call 串一下 | 持久化的 Agent Team：队长、分析师、风控批评家、任务板、邮箱、共享黑板、审批门 |
+| **多 Agent** | 几个 function call 串一下 | 持久化的投研团队：策略队长、市场/链上/新闻/技术面分析师、风控批评家、组合经理、共享黑板、任务板、邮箱、审批门 |
 | **连接器** | 一家一套 SDK | Binance、Bybit、OKX、Hyperliquid、PancakeSwap、Jupiter、通用 EVM，再加 CCXT 桥的 100+ 家。**还没？让 Agent 自己写一个**。 |
 | **安全** | 「别把 key 打进日志」 | 密钥只进 Vault；prompt 里只看 `vault://` 引用；提示词防火墙、签名策略、脚本沙箱 |
 | **运维** | 自己写 supervisor | 一行命令装好，自动注册 systemd / launchd / NSSM 系统服务 |
@@ -117,10 +118,12 @@ Agent 框架。
 
 ### Agent Team
 
-一个 `TeamRun` 就是一份持久化的团队配置，不是 LLM 并行调一下完事。它带：
+一个 `TeamRun` 就是给策略队长的一张持久化投研台，不是 LLM 并行调一下完事。分析师分头覆盖
+各条线，风控批评家把住下行，组合经理管住敞口。它带：
 
 - 角色分明：策略队长、市场分析师、链上分析师、新闻分析师、技术面分析师、风控批评家、
   执行规划员、组合经理
+- 投研覆盖分到价格与行情、链上资金流、新闻与情绪、技术面各条线，再综合成一个站得住脚的论点
 - 每个角色独立的技能黑/白名单——比如 `execution_planner` 就不让动 `trading`
 - 任务板，支持依赖、锁、优先级、Owner
 - 邮箱让成员相互留言、广播；共享黑板让所有证据落盘，谁都能引用
@@ -132,8 +135,9 @@ Agent 框架。
 
 ### 自我进化
 
-每个会话收尾，`nerya/agent/reflection.py` 把心得写进记忆。`nerya/evolution/` 再把这些记忆
-变成结构化的进化提案：
+Nerya 的策略不是一成不变的。每个收尾的会话都会变成证据，Agent 用它把下一版策略打磨得更锋利，
+并适应当前的行情。每个会话收尾，`nerya/agent/reflection.py` 把心得写进记忆。`nerya/evolution/`
+再把这些记忆变成结构化的进化提案：
 
 ```
 learning_update        记忆 markdown 补丁
@@ -173,10 +177,17 @@ references/    按需懒加载的方法论、研究剧本
 templates/     代码、配置模板
 ```
 
-内置 20+ 技能：`market_data`、`trading`、`portfolio`、`risk`、`triggers`、`llm`、`script`、
-`message`、`strategy`、`strategy_review`、`strategy_author`、`evolution`、`onchain`、
-`news_social`、`exchange`、`exchange_author`、`sdk_writer`、`wallet`、`subagent`、`trace`、
-`creative`、`data_science`、`devops`、`team`。
+内置 25 个技能，分成五大家族：
+
+- **交易与策略**：`trading`、`strategy_author`、`backtest`、`triggers`、`tasks`
+- **市场与数据**：`markets`、`market_data_routing`、`news_social`、`research`、`analysis`
+- **研究与估值**：`market_research`、`quant_research`、`equity_research`、`dcf_valuation`、
+  `sec_filings`、`research_report`、`expert_investors`
+- **Agent、记忆与成长**：`agents`、`team`、`memory`、`evolve`、`llm`
+- **构建与连接**：`coding`、`browser`、`notify`
+
+其中「研究与估值」这一族本身就是一支完整的投研团队：多源市场研究、因子与信号验证、个股深挖、
+DCF 估值、SEC 申报、具名投资者视角，以及研报生成。
 
 ### 交易内核
 
@@ -418,7 +429,7 @@ python sdk/python/examples/whale_wallet_trigger.py   # 巨鲸钱包活动触发
 | `subagents/`         | 类型化子智能体运行时、技能黑/白名单、预算上限、并行分发器、结果聚合                                  |
 | `teams/`             | Agent Team：配置、存储、邮箱、黑板、模板、编排器、审批门、综合器                                    |
 | `triggers/`          | Cron + 触发器路由、`schedules.yml`、幂等键、dry-run                                                |
-| `skills/`            | `SKILL.md` 内核 + 20+ 内置技能                                                                     |
+| `skills/`            | `SKILL.md` 内核 + 25 个内置技能，覆盖交易、数据、投研、Agent 与构建                                |
 | `trading/`           | TradeIntent、RiskGate、ApprovalGate、纸面执行、虚拟账本、持仓、PnL、对账                           |
 | `connectors/`        | CCXT 适配器（Binance/Bybit/OKX/Hyperliquid）、原生 EVM/BSC/Solana、动态 Provider Spec               |
 | `wallet/`            | 自托管、OKX OS、Bitget、Binance Agentic、Coinbase 钱包提供商                                       |

@@ -6,13 +6,14 @@
 
 # Nerya
 
-### A local Agent Team that builds and evolves trading strategies.
+### A local investment-research Agent Team that self-evolves your trading strategies.
 
-Nerya runs a role-typed trading team on your machine: strategy lead, market analyst,
-on-chain analyst, news analyst, technical analyst, risk critic, execution planner,
-and portfolio manager. The team drafts strategies, runs them through the Risk Gate
-and Approval Gate, then turns session logs into operator-approved patches for prompts,
-skills, scripts, triggers, and strategy configs.
+Nerya runs a full investment-research desk on your machine. A strategy lead routes the
+work while market, on-chain, news, and technical analysts gather the evidence, a risk
+critic stress-tests every thesis, and a portfolio manager checks exposure. The desk
+drafts strategies, runs them through the Risk Gate and Approval Gate, then turns each
+session's evidence into operator-approved patches for prompts, skills, scripts,
+triggers, and strategy configs, so every strategy comes back sharper than the last.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -90,7 +91,7 @@ Applied proposals carry rollback snapshots.
 
 |   | Generic agent frameworks | Nerya |
 |---|---|---|
-| **Agent work** | Single planner or loose function calls | Durable Agent Team with leader, analysts, risk critic, blackboard, task board, mailbox, gates |
+| **Agent work** | Single planner or loose function calls | Durable investment-research desk: strategy lead, market/on-chain/news/technical analysts, risk critic, portfolio manager, shared blackboard, task board, mailbox, gates |
 | **Strategy creation** | Manual prompt-to-code handoff | `strategy_author` builds triggers, prompts, data sources, account binding, limits, and ledgers |
 | **Strategy evolution** | Operator rewrites prompts after failures | Reflection drafts typed proposals. Operator signs. Runtime applies them with rollback snapshots. |
 | **Trading execution** | Tool calls against exchange SDKs | Risk Gate, Approval Gate, paper/live separation, virtual ledger, reconciliation |
@@ -161,10 +162,14 @@ proposal is approved or promoted.
 
 ### Agent Team
 
-A `TeamRun` gives the strategy lead a durable room for the trade:
+A `TeamRun` gives the strategy lead a durable investment-research desk for the trade.
+The analysts divide the coverage, the risk critic owns the downside, and the portfolio
+manager owns exposure:
 
 - typed members: strategy lead, market analyst, on-chain analyst, news analyst,
   technical analyst, risk critic, execution planner, portfolio manager
+- research coverage split across price and regime, on-chain flows, news and sentiment,
+  and technicals, then synthesized into one defensible thesis
 - per-role skill allowlist + denylist. `execution_planner` cannot touch `trading`
 - task board with dependencies, locks, priorities, owners
 - mailbox for inter-agent messages, plus a shared blackboard for evidence
@@ -178,9 +183,11 @@ Three templates ship today: `market_analysis_team`, `strategy_design_team`,
 
 ### Strategy and agent evolution
 
-Nerya keeps strategy code, prompts, triggers, limits, sessions, and reviews under
-one workspace. After a strategy run closes, `nerya/agent/reflection.py` writes memory
-entries. `nerya/evolution/` reads those entries and opens typed proposals:
+Nerya's strategies are not static. Every closed session becomes evidence the agent uses
+to sharpen the next version and adapt to the current regime. Nerya keeps strategy code,
+prompts, triggers, limits, sessions, and reviews under one workspace. After a strategy
+run closes, `nerya/agent/reflection.py` writes memory entries. `nerya/evolution/` reads
+those entries and opens typed proposals:
 
 ```
 learning_update        markdown patch to memory
@@ -221,11 +228,18 @@ references/    lazy-loaded methodology and research playbooks
 templates/     code and config templates
 ```
 
-Twenty-plus built-ins ship today: `market_data`, `trading`, `portfolio`, `risk`,
-`triggers`, `llm`, `script`, `message`, `strategy`, `strategy_review`,
-`strategy_author`, `evolution`, `onchain`, `news_social`, `exchange`,
-`exchange_author`, `sdk_writer`, `wallet`, `subagent`, `trace`, `creative`,
-`data_science`, `devops`, `team`.
+Twenty-five built-ins ship today across five families:
+
+- **Trading & strategy**: `trading`, `strategy_author`, `backtest`, `triggers`, `tasks`
+- **Market & data**: `markets`, `market_data_routing`, `news_social`, `research`, `analysis`
+- **Research & valuation**: `market_research`, `quant_research`, `equity_research`,
+  `dcf_valuation`, `sec_filings`, `research_report`, `expert_investors`
+- **Agents, memory & growth**: `agents`, `team`, `memory`, `evolve`, `llm`
+- **Build & connect**: `coding`, `browser`, `notify`
+
+The research and valuation family is a full investment-research desk in itself:
+multi-source market research, factor and signal validation, equity deep-dives, DCF
+valuation, SEC filings, named-investor lenses, and report generation.
 
 ### Trading kernel
 
@@ -472,7 +486,7 @@ python sdk/python/examples/whale_wallet_trigger.py   # whale wallet activity tri
 | `subagents/`         | Per-role runtimes with skill allow/denylists, budget caps, parallel dispatcher, result aggregator   |
 | `teams/`             | Durable Agent Team: config, store, mailbox, blackboard, templates, orchestrator, gates, aggregator  |
 | `triggers/`          | Cron + trigger router, `schedules.yml`, idempotency, dry-run                                        |
-| `skills/`            | `SKILL.md` kernel + 20+ built-in skills                                                             |
+| `skills/`            | `SKILL.md` kernel + 25 built-in skills across trading, data, investment research, agents, and build |
 | `trading/`           | TradeIntent, RiskGate, ApprovalGate, paper execution, virtual ledger, positions, PnL, reconciliation |
 | `connectors/`        | CCXT adapter (Binance/Bybit/OKX/Hyperliquid), native EVM/BSC/Solana, dynamic provider spec          |
 | `wallet/`            | Self-custody, OKX OS, Bitget, Binance Agentic, Coinbase wallet providers                            |
