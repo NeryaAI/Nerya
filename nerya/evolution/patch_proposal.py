@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import fnmatch
 import shutil
 from dataclasses import asdict, dataclass
@@ -50,7 +49,8 @@ class Proposal:
     id: str
     kind: str          # learning_update|prompt_patch|script_proposal|skill_proposal
                        # |trigger_route_patch|strategy_config_patch|risk_limit_suggestion
-    state: str         # draft|pending_review|approved|applied|rejected|rolled_back
+    state: str         # draft|pending_review|approved|applied|rejected
+                       # |rolled_back|superseded
     path: Path
     summary: str
     ts: str
@@ -175,6 +175,49 @@ def create_proposal(
 
 def _meta_file(pdir: Path) -> Path:
     return pdir / "proposal.yml"
+
+
+# Proposal states that still sit in the operator's review queue. A recurring
+# generator (e.g. the per-strategy tuning cron) should collapse these into
+# its newest proposal instead of stacking one per run.
+OPEN_STATES = ("draft", "pending_review", "proposed")
+
+
+def supersede_pending_siblings(
+    paths: WorkspacePaths,
+    *,
+    kind: str,
+    target: str | None,
+    keep_id: str,
+    note: str = "",
+) -> list[str]:
+    """Mark older open proposals for the same ``kind`` + ``target`` as
+    ``superseded``.
+
+    Recurring generators (strategy tuning crons and similar) emit a fresh
+    proposal every run; without this, a strategy that misbehaves for weeks
+    piles up hundreds of near-identical ``pending_review`` items and the
+    operator inbox becomes unreadable. The newest proposal carries the same
+    root-cause evidence, so older open siblings are historical noise —
+    they stay on disk for the audit trail but leave the review queue.
+    """
+
+    if not target:
+        return []
+    superseded: list[str] = []
+    for p in list_proposals(paths):
+        if p.id == keep_id:
+            continue
+        if p.kind != kind or p.target != target:
+            continue
+        if p.state not in OPEN_STATES:
+            continue
+        set_state(
+            paths, p.id, "superseded",
+            note=note or f"superseded_by:{keep_id}",
+        )
+        superseded.append(p.id)
+    return superseded
 
 
 def list_proposals(paths: WorkspacePaths) -> list[Proposal]:

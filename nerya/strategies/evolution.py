@@ -81,7 +81,13 @@ from ..evolution.observation_summary import (
     POST_APPLY_NEGATIVE_STATUSES,
 )
 from ..evolution import assets as evolution_assets
-from ..evolution.patch_proposal import Proposal, create_proposal, is_protected, list_proposals
+from ..evolution.patch_proposal import (
+    Proposal,
+    create_proposal,
+    is_protected,
+    list_proposals,
+    supersede_pending_siblings,
+)
 from ..evolution.event_store import record_event
 from ..evolution.events import EvolutionSignal
 from ..evolution.event_store import append_signal
@@ -707,7 +713,7 @@ class StrategyEvolutionRunner:
                 ),
             }
             extra_files.update(materialized_files)
-            return create_proposal(
+            proposal = create_proposal(
                 self.paths,
                 kind="strategy_tuning_proposal",
                 summary=str(
@@ -739,6 +745,22 @@ class StrategyEvolutionRunner:
                     "optimizer": _optimizer_metadata(optimizer_report or {}),
                 },
             )
+            # The tuning cron re-diagnoses the same package every run, so
+            # only the newest proposal per strategy should sit in the
+            # review queue — older open ones are folded into it.
+            try:
+                supersede_pending_siblings(
+                    self.paths,
+                    kind="strategy_tuning_proposal",
+                    target=f"strategies/{pkg.strategy_id}",
+                    keep_id=proposal.id,
+                )
+            except Exception:
+                _LOG.exception(
+                    "supersede of older tuning proposals failed for %s",
+                    pkg.strategy_id,
+                )
+            return proposal
         except Exception:
             _LOG.exception("create_proposal failed for tuning run %s", run_id)
             return None

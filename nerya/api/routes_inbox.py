@@ -59,7 +59,14 @@ def _read_proposals(client) -> list[dict[str, Any]]:
     try:
         from ..evolution.patch_proposal import list_proposals
 
-        return [p.asdict() for p in list_proposals(client.config.paths)]
+        # Superseded proposals were folded into a newer sibling — they
+        # stay on the evolution surfaces for audit, but the inbox only
+        # shows the current head of each recurring proposal chain.
+        return [
+            p.asdict()
+            for p in list_proposals(client.config.paths)
+            if p.state != "superseded"
+        ]
     except Exception:
         return []
 
