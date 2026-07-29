@@ -1,7 +1,10 @@
 # Expert Investor Committee Playbook
 
-Use this playbook only after loading `../SKILL.md`. Load
-`investor-lenses.md` for persona knowledge and citations.
+Use this playbook only after loading the hub `../SKILL.md`. Load each
+selected lens via its sub-skill (`expert_investors.buffett`,
+`expert_investors.damodaran`, `expert_investors.marks`,
+`expert_investors.mauboussin`, `expert_investors.druckenmiller`) for
+persona knowledge and citations.
 
 ## 1. Intake
 

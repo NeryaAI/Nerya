@@ -494,6 +494,15 @@ _SKILL_VIEW_SCHEMA = {
     "type": "object",
     "properties": {
         "skill_id": {"type": "string"},
+        "file": {
+            "type": "string",
+            "description": (
+                "Optional path relative to the skill directory (e.g. "
+                "'references/full-playbook.md') to read a skill asset "
+                "instead of SKILL.md. Builtin skill assets are not "
+                "reachable via read_file, so use this."
+            ),
+        },
     },
     "required": ["skill_id"],
 }

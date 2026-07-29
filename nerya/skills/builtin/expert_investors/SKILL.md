@@ -1,59 +1,80 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: expert_investors
-description: "Use when asked what Buffett, Damodaran, Howard Marks, Mauboussin, or Druckenmiller would emphasize; to analyze an investment like a named expert; to compare investor frameworks; or to run an investor committee on business quality, DCF, expectations, cycles, macro liquidity, sizing, or downside risk. Produces source-backed framework inferences, not generic market data, impersonation, or autonomous trading."
-version: 0.2.0
+description: "Hub for the distilled investor lenses. Use to pick which expert lens fits a decision (business quality, DCF, cycles, expectations, macro) or to run a multi-lens committee. Load one expert sub-skill (expert_investors.buffett / .damodaran / .marks / .mauboussin / .druckenmiller) instead of all five — each lens lives in its own sub-skill to keep context small."
+version: 0.3.0
 license: MIT
 author: Nerya
 ---
 <!-- nerya-skill-frontmatter-end -->
 
-# Expert Investors
+# Expert Investors (Hub)
 
-Apply named analytical personas as a judgment overlay. Never treat this
-skill as a market-data source, a claim to speak for an expert, or authority
-to place a trade.
+Apply named analytical personas as a judgment overlay — never a market-data
+source, a claim to speak for an expert, or authority to place a trade. This
+hub is an index: each expert lens is a separate sub-skill, so loading one
+lens does not pull the other four into context.
+
+## Lens Router
+
+| Decision | Primary lens | Useful challenger | Load |
+|---|---|---|---|
+| Durable business quality and capital allocation | Buffett | Mauboussin | `skill_view("expert_investors.buffett")` |
+| Intrinsic value or a disputed DCF | Damodaran | Marks | `skill_view("expert_investors.damodaran")` |
+| Market temperature, credit, or permanent-loss risk | Marks | Druckenmiller | `skill_view("expert_investors.marks")` |
+| Price-implied expectations or forecast quality | Mauboussin | Damodaran | `skill_view("expert_investors.mauboussin")` |
+| Tactical macro, liquidity, or position expression | Druckenmiller | Marks | `skill_view("expert_investors.druckenmiller")` |
+
+Run one lens by default; state why each lens was selected.
 
 ## Activation Flow
 
 1. CLASSIFY the request as `pure framework`, `fact-dependent`, or
-   `action-oriented`.
-2. LOAD `references/investor-lenses.md`. Also load
-   `references/full-playbook.md` for multiple lenses, portfolio or sizing
-   questions, structured committee memos, and every paper/live proposal.
-3. For a fact-dependent or action-oriented request, DEFINE the instrument,
-   decision, horizon, and evidence cutoff. GATHER current facts with
-   `market_research`, `equity_research`, `sec_filings`, `markets`, or
-   `trading`; give each material fact a source, `as_of` date, and stable ID.
-   If critical evidence cannot be verified, return `Watchlist` and withhold
-   position guidance.
-4. SELECT the smallest useful set: one lens by default, two for a challenge,
-   and no more than three unless the user explicitly requests the full panel.
-5. RUN each lens independently. Keep its horizon, assumptions, framework
-   inferences, invalidation conditions, and source IDs distinct.
-6. SYNTHESIZE disagreement by naming the governing assumption and evidence
-   that would resolve it; never average incompatible horizons or vote.
-7. RETURN implications, adverse and tail cases, invalidation, data gaps,
-   confidence, and risk limits. A recommendation is a proposal, not an order.
+   `action-oriented`, then ROUTE with the table above. For a single-lens
+   question, load that one sub-skill and answer inline.
+2. For a committee of two or more lenses, do NOT `skill_view` the lens
+   sub-skills into your own context — dispatch one subagent lane per
+   expert with ``team_run`` using the matching roles (`buffett_lens`,
+   `damodaran_lens`, `marks_lens`, `mauboussin_lens`,
+   `druckenmiller_lens`); never seat a generic analyst lane to simulate
+   a named expert. If the user does not name experts, pick 2-3
+   complementary lenses from the router table and say why. Load the
+   synthesis contract (fact register + lens output JSON, REQUIRED for
+   committee output) via
+   ``skill_view("expert_investors", file="references/full-playbook.md")``
+   — builtin assets are not reachable with read_file.
+3. For a fact-dependent or action-oriented request, DEFINE the
+   instrument, decision, horizon, and evidence cutoff, then GATHER
+   current facts with `market_research`, `equity_research`,
+   `sec_filings`, `markets`, or `trading`; give each material fact a
+   source, `as_of` date, and stable ID. If critical evidence cannot be
+   verified, return `Watchlist` and withhold position guidance.
+4. RUN each selected lens independently (no lens sees another's
+   conclusion first), then synthesize disagreement — do not vote.
 
-## Boundaries
+## Disagreement Matrix
 
-- Use reasoning patterns, not first-person impersonation.
-- Framework source IDs support methods, never current prices, filings,
-  holdings, liquidity conditions, or portfolio facts.
-- If an exact quotation cannot be verified, paraphrase it and label the
-  application `framework inference`.
-- Never infer a complete portfolio from interviews or Form 13F filings.
-- Never fill a missing current fact from model memory; expose the gap.
-- Do not present valuation as a point fact or a macro view as certainty.
-- Require Risk Gate and Approval Gate for any later live-trading action.
+Preserve these tensions rather than blending them into generic advice:
 
-## Reference Routing
+| Tension | Route by |
+|---|---|
+| Buffett long-duration ownership vs. Druckenmiller active reversal | Horizon, instrument, and evidence cadence |
+| Damodaran explicit forecasts vs. Marks forecast humility | Scenario width and cost of estimation error |
+| Mauboussin base rates vs. company-specific narrative | Reference-class fit and structural change evidence |
+| Marks measured posture vs. Druckenmiller concentration | Conviction, catalyst, liquidity, and loss capacity |
 
-- Always load `references/investor-lenses.md` for lens selection, mental
-  models, failure boundaries, and framework source IDs.
-- Load `references/full-playbook.md` for debate, position guidance, portfolio
-  decisions, structured output, and paper/live proposals.
-- Load only the needed provenance file under `references/research/`:
-  `01-writings.md`, `02-conversations.md`, `03-expression-dna.md`,
-  `04-external-views.md`, `05-decisions.md`, or `06-timeline.md`.
+When lenses disagree, return the disagreement, its governing assumption, and the resolving evidence.
+
+## Shared Rules (apply to every lens)
+
+- Do not impersonate the named person, invent a quotation, or imply
+  endorsement. Applying a model to a new asset must be labelled
+  `framework inference`.
+- Never fill a missing current fact from model memory, and never infer
+  a complete portfolio from interviews or Form 13F filings.
+- Cite at least one framework source ID per lens used; attach an `as_of`
+  date to current market facts.
+- A recommendation is never an order: paper/live separation, Risk Gate,
+  and Approval Gate always apply.
+- Deep provenance: `references/research/` (cutoff 2026-07-27). Distilled
+  with [Nuwa](https://github.com/alchaincyf/nuwa-skill) by [Huashu](https://x.com/AlchainHust).

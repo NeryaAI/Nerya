@@ -58,6 +58,23 @@ def _expand_legacy_enabled_ids(enabled: set[str]) -> set[str]:
     return expanded
 
 
+def _enabled_ok(skill_id: str, enabled: set[str] | None) -> bool:
+    """True when ``skill_id`` passes the operator allow-list.
+
+    A namespaced sub-skill inherits its hub's entry: enabling
+    ``expert_investors`` also enables ``expert_investors.buffett`` so
+    operators list one hub id instead of chasing every expert added
+    later. An exact id in the list always works too (e.g. enabling a
+    single ``finance.equity_research.earnings_analysis`` leaf).
+    """
+
+    if enabled is None:
+        return True
+    if skill_id in enabled:
+        return True
+    return any(skill_id.startswith(f"{parent}.") for parent in enabled)
+
+
 @dataclass
 class SkillEntry:
     manifest: SkillManifest
@@ -163,7 +180,7 @@ class SkillRegistry:
                 except Exception:
                     continue
                 manifest.source = "builtin"
-                if enabled is not None and manifest.id not in enabled:
+                if not _enabled_ok(manifest.id, enabled):
                     continue
                 if not _integration_ok(manifest):
                     continue
@@ -190,7 +207,7 @@ class SkillRegistry:
                         manifest = None
                     if manifest is not None:
                         manifest.source = "workspace_installed"
-                        if enabled is None or manifest.id in enabled:
+                        if _enabled_ok(manifest.id, enabled):
                             if _integration_ok(manifest):
                                 reg.register(SkillEntry(
                                     manifest=manifest, module=None, actions={},
@@ -234,7 +251,7 @@ class SkillRegistry:
                         and reg.by_id[manifest.id].manifest.source == "workspace"
                     ):
                         continue
-                    if enabled is None or manifest.id in enabled:
+                    if _enabled_ok(manifest.id, enabled):
                         if _integration_ok(manifest):
                             reg.register(SkillEntry(
                                 manifest=manifest, module=None, actions={},
@@ -303,10 +320,16 @@ def _walk_skill_dirs(root: Path):
     """Yield ``(skill_dir, SKILL.md path)`` for every skill below *root*.
 
     The walker treats *any* directory whose direct child is ``SKILL.md``
-    as a skill and stops descending into it — that subtree is the
-    skill's own assets (``scripts/``, ``references/``, …). When a
-    directory has no ``SKILL.md`` of its own and is not an asset
-    directory, the walker recurses into it so namespaces like
+    as a skill. It then keeps scanning that skill's *direct* non-asset
+    subdirectories so a hub skill can index expert sub-skills, e.g.
+    ``expert_investors/SKILL.md`` (router) plus
+    ``expert_investors/buffett/SKILL.md`` (one lens per sub-skill —
+    loading a single expert must not pull every expert into context).
+    Asset directories (``scripts/``, ``references/``, …) are never
+    scanned, which is what stops a SKILL.md under ``references/`` from
+    being mis-registered as its own skill. When a directory has no
+    ``SKILL.md`` of its own and is not an asset directory, the walker
+    recurses into it so namespaces like
     ``finance/private_equity/ic_memo/SKILL.md`` are picked up.
 
     Hidden directories (``.something``), the ``installed`` subtree
@@ -326,8 +349,8 @@ def _walk_skill_dirs(root: Path):
         md = entry / "SKILL.md"
         if md.exists():
             yield entry, md
-            continue
-        # No SKILL.md here — keep recursing.
+        # Recurse either way: a skill directory may host nested
+        # sub-skills in its non-asset subdirectories.
         yield from _walk_skill_dirs(entry)
 
 

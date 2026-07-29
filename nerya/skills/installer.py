@@ -224,13 +224,19 @@ def promote_installed(paths: WorkspacePaths, skill_id: str) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(pending), str(target))
 
-    # enable it so the next registry load will pick it up
-    doc = yaml_io.load(paths.skills_enabled, default={}) or {}
-    enabled = list(doc.get("enabled") or [])
-    if skill_id not in enabled:
-        enabled.append(skill_id)
-        doc["enabled"] = enabled
-        yaml_io.dump(paths.skills_enabled, doc)
+    # Enable it so the next registry load will pick it up. Only append
+    # when an allow-list file actually exists: with no enabled.yml every
+    # skill loads by default, and creating one here would instantly
+    # shrink the roster to just this skill (real regression — a stale
+    # allow-list once hid 61 builtins including the distilled investor
+    # playbooks).
+    if paths.skills_enabled.exists():
+        doc = yaml_io.load(paths.skills_enabled, default={}) or {}
+        enabled = list(doc.get("enabled") or [])
+        if skill_id not in enabled:
+            enabled.append(skill_id)
+            doc["enabled"] = enabled
+            yaml_io.dump(paths.skills_enabled, doc)
 
     # refresh the lock entry. Source/version come from
     # the staged report; sha256 is recomputed from the promoted tree so

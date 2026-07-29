@@ -180,7 +180,29 @@ SKILL_SURFACES: dict[str, tuple[str, ...]] = {
     "memory": ("memory",),
     "notify": ("notify",),
     "news_social": ("research",),
+    # Expert-lens hubs: a committee of two or more lenses dispatches one
+    # subagent lane per expert with team_run, so viewing the hub (or a
+    # lens sub-skill) must reveal the team surface + heavier research.
+    "expert_investors": ("team", "research"),
+    "finance-creators": ("team", "research"),
 }
+
+
+def surfaces_for_skill(skill_id: str) -> tuple[str, ...]:
+    """Return the surfaces a skill reveals when viewed.
+
+    Namespaced sub-skills (``expert_investors.buffett``) inherit their
+    hub's surfaces so viewing a single lens still unlocks the same
+    toolset the hub promises.
+    """
+
+    sid = (skill_id or "").strip()
+    direct = SKILL_SURFACES.get(sid)
+    if direct is not None:
+        return direct
+    if "." in sid:
+        return SKILL_SURFACES.get(sid.split(".", 1)[0], ())
+    return ()
 
 
 # Reverse index: tool name -> surface. Built once at import.
@@ -213,12 +235,6 @@ def native_surface_of(descriptor: ToolDescriptor) -> Optional[str]:
         if tag.startswith(SURFACE_TAG_PREFIX):
             return tag[len(SURFACE_TAG_PREFIX):]
     return None
-
-
-def surfaces_for_skill(skill_id: str) -> tuple[str, ...]:
-    """Return the surfaces a skill reveals when viewed."""
-
-    return SKILL_SURFACES.get((skill_id or "").strip(), ())
 
 
 def described_key(surface: str) -> str:

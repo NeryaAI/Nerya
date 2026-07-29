@@ -103,6 +103,41 @@ DEFAULT_SUBAGENT_SKILLS = {
     ],
     "coding_agent": ["coding", "research"],
     "code_critic": ["coding", "analysis"],
+    # Distilled investor lenses — each lane preloads exactly one
+    # expert sub-skill (expert_investors.<name>) so a five-expert
+    # committee never drags all five playbooks into every lane.
+    "buffett_lens": [
+        "expert_investors.buffett", *_MARKET_RESEARCH_HINTS,
+        "research_report",
+    ],
+    "damodaran_lens": [
+        "expert_investors.damodaran", *_MARKET_RESEARCH_HINTS,
+        "research_report", "analysis",
+    ],
+    "marks_lens": [
+        "expert_investors.marks", *_MARKET_RESEARCH_HINTS,
+        "research_report", "risk_check",
+    ],
+    "mauboussin_lens": [
+        "expert_investors.mauboussin", *_MARKET_RESEARCH_HINTS,
+        "research_report", "quant_research",
+    ],
+    "druckenmiller_lens": [
+        "expert_investors.druckenmiller", *_MARKET_RESEARCH_HINTS,
+        "research_report", "news_social",
+    ],
+    "serenity_lens": [
+        "finance-creators.serenity", *_MARKET_RESEARCH_HINTS,
+        "research_report", "news_social",
+    ],
+    "unusual_whales_lens": [
+        "finance-creators.unusual_whales", *_MARKET_RESEARCH_HINTS,
+        "research_report", "news_social",
+    ],
+    "kobeissi_lens": [
+        "finance-creators.kobeissi", *_MARKET_RESEARCH_HINTS,
+        "research_report", "news_social",
+    ],
 }
 
 
@@ -120,6 +155,18 @@ DEFAULT_SUBAGENT_PROFILES: dict[str, str] = {
     "investor_perspective": "fundamentals_analyst",
     "guru_perspective": "fundamentals_analyst",
     "investment_gurus": "fundamentals_analyst",
+    # Distilled expert lenses: a role requested under the bare expert
+    # name executes on the matching lens lane. Pure data — discovery
+    # stays with role_list and the expert hub skills.
+    "buffett": "buffett_lens",
+    "damodaran": "damodaran_lens",
+    "marks": "marks_lens",
+    "howard_marks": "marks_lens",
+    "mauboussin": "mauboussin_lens",
+    "druckenmiller": "druckenmiller_lens",
+    "serenity": "serenity_lens",
+    "unusual_whales": "unusual_whales_lens",
+    "kobeissi": "kobeissi_lens",
 }
 
 
@@ -590,6 +637,92 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
 }
 
 
+def _expert_lens_prompt(
+    role: str, skill_id: str, display: str, focus: str,
+) -> str:
+    """Default prompt body for one distilled expert-lens lane.
+
+    The lane loads its single expert sub-skill first, so the framework
+    never has to live inside this prompt — the prompt only pins the
+    workflow and the lens output contract from the committee playbook.
+    """
+
+    lens = skill_id.rsplit(".", 1)[-1]
+    return (
+        f"You are the **{role}** lane — apply the {display} framework\n"
+        "from the distilled expert-lens skill family.\n\n"
+        "How you work.\n"
+        f"1. FIRST call ``skill_view(\"{skill_id}\")`` and\n"
+        "   follow that lens exactly: core models, decision heuristics,\n"
+        "   reasoning voice, and failure boundaries.\n"
+        f"2. Focus on {focus}.\n"
+        "3. Gather at least one current fact with your own market/research\n"
+        "   tools (or state explicitly why the facts supplied by the parent\n"
+        "   are sufficient); give every material fact a source and an\n"
+        "   ``as_of`` date. Never fill a gap from memory.\n"
+        "4. This is framework inference, not impersonation: never invent\n"
+        f"   a quotation or claim to speak for {display}.\n\n"
+        "Output contract (strict JSON):\n"
+        f"  - ``lens``: \"{lens}\"\n"
+        "  - ``diagnosis``: short paragraph in the lens's reasoning voice\n"
+        "  - ``facts_used``: list[{claim, source, as_of}]\n"
+        "  - ``framework_inferences``: list[str]\n"
+        "  - ``decision_implication``: short string\n"
+        "  - ``invalidation``: list[str]\n"
+        "  - ``failure_modes``: list[str]\n"
+        "  - ``source_ids``: framework source IDs used by the lens\n"
+        "  - ``confidence``: float in [0, 1]\n"
+        "  - ``done``: true.\n\n"
+        "Never submit orders. The parent agent owns execution."
+    )
+
+
+DEFAULT_SUBAGENT_PROMPTS.update({
+    "buffett_lens": _expert_lens_prompt(
+        "buffett_lens", "expert_investors.buffett", "Warren Buffett",
+        "owner earnings, business durability, circle of competence, and "
+        "price versus intrinsic-value range",
+    ),
+    "damodaran_lens": _expert_lens_prompt(
+        "damodaran_lens", "expert_investors.damodaran", "Aswath Damodaran",
+        "the story-to-number bridge, growth versus excess returns, and "
+        "pricing versus valuation",
+    ),
+    "marks_lens": _expert_lens_prompt(
+        "marks_lens", "expert_investors.marks", "Howard Marks",
+        "cycle position, what the price already discounts, and the risk "
+        "of permanent loss",
+    ),
+    "mauboussin_lens": _expert_lens_prompt(
+        "mauboussin_lens", "expert_investors.mauboussin", "Michael Mauboussin",
+        "market-implied expectations, base rates from the reference "
+        "class, and process quality",
+    ),
+    "druckenmiller_lens": _expert_lens_prompt(
+        "druckenmiller_lens", "expert_investors.druckenmiller",
+        "Stanley Druckenmiller",
+        "the 12-24 month liquidity/policy/earnings path, position "
+        "expression, and blunt invalidation",
+    ),
+    "serenity_lens": _expert_lens_prompt(
+        "serenity_lens", "finance-creators.serenity", "Serenity",
+        "supply-chain mapping, commercialization stage, channel conflict, "
+        "and evidence-graded channel checks",
+    ),
+    "unusual_whales_lens": _expert_lens_prompt(
+        "unusual_whales_lens", "finance-creators.unusual_whales",
+        "Unusual Whales",
+        "options-flow anomalies, market-maker gamma exposure, and lagged "
+        "public-official disclosures — always testing benign explanations",
+    ),
+    "kobeissi_lens": _expert_lens_prompt(
+        "kobeissi_lens", "finance-creators.kobeissi", "The Kobeissi Letter",
+        "macro surprise versus consensus, cross-asset confirmation, and "
+        "the event-calendar risk map",
+    ),
+})
+
+
 DEFAULT_TIERS = {
     "market_analyst": "medium",
     "technical_analyst": "medium",
@@ -615,6 +748,14 @@ DEFAULT_TIERS = {
     "explore_lane": "medium",
     "coding_agent": "high",
     "code_critic": "high",
+    "buffett_lens": "medium",
+    "damodaran_lens": "medium",
+    "marks_lens": "medium",
+    "mauboussin_lens": "medium",
+    "druckenmiller_lens": "medium",
+    "serenity_lens": "medium",
+    "unusual_whales_lens": "medium",
+    "kobeissi_lens": "medium",
 }
 
 

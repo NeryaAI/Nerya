@@ -289,15 +289,40 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
                 message=f"skill not found: {sid!r}",
             ),
         )
+    # Optional asset read: builtin skill directories live inside the
+    # installed package, outside the workspace sandbox, so read_file
+    # cannot reach references/ playbooks. ``file`` reads an asset path
+    # relative to (and confined to) the skill's own directory.
+    target = Path(record.path)
+    rel = str(args.get("file") or "").strip()
+    if rel:
+        base = Path(record.path).parent.resolve()
+        candidate = (base / rel).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            return schema_validation_result(
+                call, f"'file' must stay inside the skill directory: {rel!r}",
+            )
+        if not candidate.is_file():
+            return ToolResult.from_error(
+                tool_use_id=call.id,
+                name=call.name,
+                error=ToolError(
+                    kind=ToolErrorKind.NOT_FOUND,
+                    message=f"skill asset not found: {sid}/{rel}",
+                ),
+            )
+        target = candidate
     try:
-        text = Path(record.path).read_text(encoding="utf-8")
+        text = target.read_text(encoding="utf-8")
     except OSError as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
             error=ToolError(
                 kind=ToolErrorKind.IO_ERROR,
-                message=f"failed to read SKILL.md: {exc}",
+                message=f"failed to read skill file: {exc}",
             ),
         )
     return ToolResult(
@@ -306,7 +331,7 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
         content=[
             ToolResultPart.text_part(text),
             ToolResultPart.json_part(
-                {"skill": record.asdict(), "path": record.path}
+                {"skill": record.asdict(), "path": str(target)}
             ),
         ],
     )

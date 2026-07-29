@@ -38,8 +38,15 @@ def test_builtin_skill_md_files_parse_and_stay_compact() -> None:
 
         line_count = len(md.read_text(encoding="utf-8").splitlines())
         assert line_count <= 80, f"{skill_dir.name} SKILL.md is too large: {line_count}"
-        assert (skill_dir / "references" / "full-playbook.md").exists(), (
-            f"{skill_dir.name} should keep the expanded playbook under references/"
+        # A nested sub-skill (hub/<expert>/SKILL.md) shares its hub's
+        # expanded playbook instead of shipping its own copy.
+        has_playbook = (
+            (skill_dir / "references" / "full-playbook.md").exists()
+            or (skill_dir.parent / "references" / "full-playbook.md").exists()
+        )
+        assert has_playbook, (
+            f"{skill_dir.name} should keep the expanded playbook under "
+            "references/ (own or hub)"
         )
 
 
@@ -123,21 +130,32 @@ def test_builtin_registry_loads_finance_namespace_skills() -> None:
 def test_expert_investors_is_source_backed_and_self_contained() -> None:
     skill_dir = BUILTIN_ROOT / "expert_investors"
     manifest = SkillManifest.from_skill_md(skill_dir / "SKILL.md")
-    lenses = (skill_dir / "references" / "investor-lenses.md").read_text(
-        encoding="utf-8",
-    )
 
     assert manifest.id == "expert_investors"
-    assert manifest.version == "0.2.0"
-    assert {
-        "Warren Buffett",
-        "Aswath Damodaran",
-        "Howard Marks",
-        "Michael Mauboussin",
-        "Stanley Druckenmiller",
-    } <= {line.removeprefix("## ").split(":", 1)[0] for line in lenses.splitlines()}
-    assert "framework inference" in lenses
-    assert lenses.count("https://") >= 20
+    assert manifest.version == "0.3.0"
+
+    # One sub-skill per expert; the hub routes to each of them.
+    experts = {
+        "buffett": "Warren Buffett",
+        "damodaran": "Aswath Damodaran",
+        "marks": "Howard Marks",
+        "mauboussin": "Michael Mauboussin",
+        "druckenmiller": "Stanley Druckenmiller",
+    }
+    hub_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    sub_skill_files: list[Path] = []
+    for slug, display in experts.items():
+        sub_md = skill_dir / slug / "SKILL.md"
+        sub_manifest = SkillManifest.from_skill_md(sub_md)
+        assert sub_manifest.id == f"expert_investors.{slug}"
+        sub_text = sub_md.read_text(encoding="utf-8")
+        assert display in sub_text
+        assert "framework inference" in sub_text
+        assert f"expert_investors.{slug}" in hub_text
+        sub_skill_files.append(sub_md)
+    assert sum(t.count("https://") for t in (
+        p.read_text(encoding="utf-8") for p in sub_skill_files
+    )) >= 20
 
     research_dir = skill_dir / "references" / "research"
     assert {path.name for path in research_dir.glob("*.md")} == {
@@ -152,7 +170,7 @@ def test_expert_investors_is_source_backed_and_self_contained() -> None:
     bindings: dict[str, set[str]] = {}
     source_id = re.compile(r"\*\*(?:\[[^]:]+:\s*)?([BDHMS]\d+)")
     url = re.compile(r"https?://[^ )]+")
-    for path in [skill_dir / "references" / "investor-lenses.md", *research_dir.glob("*.md")]:
+    for path in [*sub_skill_files, *research_dir.glob("*.md")]:
         pending_id: str | None = None
         for line in path.read_text(encoding="utf-8").splitlines():
             if match := source_id.search(line):
@@ -168,19 +186,28 @@ def test_expert_investors_is_source_backed_and_self_contained() -> None:
 def test_finance_creators_is_english_source_backed_and_self_contained() -> None:
     skill_dir = BUILTIN_ROOT / "finance-creators"
     manifest = SkillManifest.from_skill_md(skill_dir / "SKILL.md")
-    lenses = (skill_dir / "references" / "creator-lenses.md").read_text(
-        encoding="utf-8",
-    )
 
     assert manifest.id == "finance-creators"
-    assert manifest.version == "0.1.0"
+    assert manifest.version == "0.2.0"
     assert manifest.id in _DEFAULT_ENABLED_SKILLS
-    assert {
-        "Serenity",
-        "Unusual Whales",
-        "The Kobeissi Letter",
-    } <= {line.removeprefix("## ").split(":", 1)[0] for line in lenses.splitlines()}
-    assert "framework inference" in lenses
+
+    # One sub-skill per creator; the hub routes to each of them.
+    creators = {
+        "serenity": "Serenity",
+        "unusual_whales": "Unusual Whales",
+        "kobeissi": "The Kobeissi Letter",
+    }
+    hub_text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    sub_skill_files: list[Path] = []
+    for slug, display in creators.items():
+        sub_md = skill_dir / slug / "SKILL.md"
+        sub_manifest = SkillManifest.from_skill_md(sub_md)
+        assert sub_manifest.id == f"finance-creators.{slug}"
+        sub_text = sub_md.read_text(encoding="utf-8")
+        assert display in sub_text
+        assert "framework inference" in sub_text
+        assert f"finance-creators.{slug}" in hub_text
+        sub_skill_files.append(sub_md)
 
     research_dir = skill_dir / "references" / "research"
     research_files = sorted(research_dir.glob("*.md"))
@@ -195,6 +222,7 @@ def test_finance_creators_is_english_source_backed_and_self_contained() -> None:
 
     all_docs = [
         skill_dir / "SKILL.md",
+        *sub_skill_files,
         skill_dir / "references" / "creator-lenses.md",
         skill_dir / "references" / "full-playbook.md",
         *research_files,
@@ -205,9 +233,9 @@ def test_finance_creators_is_english_source_backed_and_self_contained() -> None:
     )
 
     bindings: dict[str, set[str]] = {}
-    source_id = re.compile(r"\b((?:FW|FC|FE|FX|FD|FT)-(?:SER|UW|KOB)-\d+)\b")
+    source_id = re.compile(r"\b((?:FW|FC|FE|FX|FD|FT|CL)-(?:SER|UW|KOB)-\d+)\b")
     url = re.compile(r"https?://[^ )]+")
-    for path in [skill_dir / "references" / "creator-lenses.md", *research_files]:
+    for path in [*sub_skill_files, *research_files]:
         pending_id: str | None = None
         for line in path.read_text(encoding="utf-8").splitlines():
             if match := source_id.search(line):
