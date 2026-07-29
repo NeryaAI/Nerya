@@ -6939,6 +6939,13 @@ _TEAM_FINAL_SUMMARY_KEYS = (
     "summary",
     "key_findings",
     "conclusion",
+    # Expert-lens committee contract (expert_investors / finance-creators
+    # lanes): the diagnosis carries the lens narrative and
+    # decision_implication carries its conclusion. Without these keys the
+    # role summary degrades to the shared facts_used register and every
+    # lane reads identically in the final synthesis prompt.
+    "diagnosis",
+    "decision_implication",
     "recommendation",
     "investment_judgment",
     "analysis",
@@ -7494,13 +7501,23 @@ def _team_final_output_summary(output: Any) -> str:
         if not isinstance(cleaned, dict):
             cleaned = {}
         parts: list[str] = []
+        # Collect up to three distinct summary fields instead of stopping
+        # at the first hit: an expert-lens lane carries its narrative in
+        # ``diagnosis`` and its conclusion in ``decision_implication`` —
+        # taking only one of them (or falling through to the shared fact
+        # register) made all committee lanes read identically.
         for key in _TEAM_FINAL_SUMMARY_KEYS:
             value = cleaned.get(key)
-            if value not in (None, "", [], {}):
-                summary = _team_final_render_summary_fragment(value)
-                if summary:
-                    parts.append(summary)
+            if value in (None, "", [], {}):
+                continue
+            summary = _team_final_render_summary_fragment(value)
+            if summary and summary not in parts:
+                parts.append(summary)
+            if len(parts) >= 3:
                 break
+        confidence = cleaned.get("confidence")
+        if parts and isinstance(confidence, (int, float)):
+            parts.append(f"confidence: {confidence}")
         if not parts:
             for summary in _team_final_summary_fragments(cleaned):
                 if summary:
@@ -7511,7 +7528,7 @@ def _team_final_output_summary(output: Any) -> str:
         if gap_lines:
             parts.append("evidence gaps: " + "; ".join(gap_lines[:4]))
         if parts:
-            return _clip_team_final_text(" ".join(parts), limit=900)
+            return _clip_team_final_text(" ".join(parts), limit=1300)
         if _team_final_is_telemetry_only(cleaned):
             return ""
         if quality == "tool_observation_fallback" or partial:
@@ -8007,6 +8024,9 @@ def _build_team_run_final_synthesis_prompt(
         "fields, failed sources, low-confidence evidence, or data gaps; carry "
         "those gaps into the final report with the exact attempted source or "
         "tool when available.\n"
+        "- When two members attribute conflicting conclusions to the same "
+        "expert, framework, or asset, surface the conflict explicitly in the "
+        "disagreement section — never silently pick one side.\n"
         "- Prefer member ``data_coverage`` / ``tools_used`` over stale prose "
         "inside a member output when they conflict. If prose says a source is "
         "missing but data_coverage shows a successful tool call, use the tool "
