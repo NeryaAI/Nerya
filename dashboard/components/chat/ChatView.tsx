@@ -1597,9 +1597,25 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
 
   const conversationEmpty = !active || active.messages.length === 0;
   const showMissing = Boolean(sessionId && missingSession && conversationEmpty);
-  const showLoading = conversationEmpty && !showMissing && activeTranscriptLoading;
+  // A URL that addresses a session is still being resolved until we either
+  // load its transcript or confirm it's missing. Treat that window as
+  // "loading" so we never flash the new-chat hero for a session the user
+  // deliberately opened (cold cache / slow transcript fetch). The pending
+  // first-message case is the one exception: that thread is genuinely a
+  // brand-new local chat the composer is about to populate.
+  const resolvingAddressedSession =
+    Boolean(sessionId) &&
+    conversationEmpty &&
+    !showMissing &&
+    pendingFirstMessageThreadId() !== sessionId;
+  const showLoading =
+    conversationEmpty &&
+    !showMissing &&
+    (activeTranscriptLoading || resolvingAddressedSession);
   // Codex-style new-chat surface: a centred composer in the middle of
-  // the canvas instead of a docked input + suggestion page.
+  // the canvas instead of a docked input + suggestion page. Only the
+  // home route (no sessionId) or a fresh pending-first-message thread
+  // reaches it now.
   const showHero = conversationEmpty && !showMissing && !showLoading;
 
   const composerProps = {
