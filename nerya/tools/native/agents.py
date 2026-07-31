@@ -25,6 +25,7 @@ import json
 import re
 import time
 import uuid
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -1057,6 +1058,9 @@ def _compact_tool_records(records: Any, *, limit: int = 16) -> list[dict[str, An
         }
         if rec.get("error"):
             item["error"] = _compact_text(rec.get("error"), limit=500)
+        for key in ("error_kind", "reason", "retryable"):
+            if rec.get(key) is not None:
+                item[key] = rec.get(key)
         result = rec.get("result") if isinstance(rec.get("result"), dict) else {}
         delegated = result.get("data") if isinstance(result.get("data"), dict) else {}
         if delegated.get("subagent"):
@@ -1065,6 +1069,7 @@ def _compact_tool_records(records: Any, *, limit: int = 16) -> list[dict[str, An
                 for key in (
                     "ok", "subagent", "tier", "provider", "model",
                     "tokens", "usd", "wall_ms", "error", "error_kind",
+                    "capture_paths",
                 )
                 if delegated.get(key) is not None
             }
@@ -1644,8 +1649,25 @@ RESEARCH_RUN_SCHEMA: dict[str, Any] = {
             ),
         },
         "queries": {
-            "type": "array",
-            "items": {"type": "string"},
+            "anyOf": [
+                {"type": "string"},
+                {
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string"},
+                                    "type": {"type": "string"},
+                                },
+                                "required": ["query"],
+                            },
+                        ],
+                    },
+                },
+            ],
             "description": (
                 "Related research questions to combine into one delegated "
                 "collection run. Prefer this over several separate calls."
@@ -1680,6 +1702,69 @@ RESEARCH_RUN_SCHEMA: dict[str, Any] = {
 }
 
 
+def _delegated_capture_paths(
+    envelope: dict[str, Any],
+    *,
+    workspace_root: Path | str | None,
+) -> list[str]:
+    """Return validated persisted captures produced by one delegated run.
+
+    The child model's prose is not proof that collection happened. Only paths
+    emitted by successful tool records count, and every path must resolve to an
+    existing file inside the active workspace. This keeps the contract generic:
+    any collector tool may emit ``saved_path`` or ``capture_paths`` without the
+    delegation handler knowing its concrete tool name.
+    """
+
+    if workspace_root is None:
+        return []
+    root = Path(workspace_root).resolve()
+    metrics = envelope.get("metrics") if isinstance(envelope.get("metrics"), dict) else {}
+    records = metrics.get("skill_calls") if isinstance(metrics.get("skill_calls"), list) else []
+    candidates: list[str] = []
+
+    def _collect(value: Any) -> None:
+        if isinstance(value, dict):
+            saved = value.get("saved_path")
+            if isinstance(saved, str) and saved.strip():
+                candidates.append(saved.strip())
+            paths = value.get("capture_paths")
+            if isinstance(paths, list):
+                candidates.extend(
+                    str(item).strip()
+                    for item in paths
+                    if isinstance(item, str) and item.strip()
+                )
+            for nested in value.values():
+                if isinstance(nested, (dict, list)):
+                    _collect(nested)
+        elif isinstance(value, list):
+            for item in value:
+                _collect(item)
+
+    for record in records:
+        if not isinstance(record, dict) or record.get("ok") is not True:
+            continue
+        result = record.get("result")
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict) and data.get("ok") is False:
+                continue
+            _collect(data)
+
+    valid: list[str] = []
+    for candidate in dict.fromkeys(candidates):
+        path = Path(candidate)
+        resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            continue
+        if resolved.is_file():
+            valid.append(relative.as_posix())
+    return valid
+
+
 def research_run_handler(
     call: ToolCall,
     *,
@@ -1691,11 +1776,27 @@ def research_run_handler(
 
     args = call.arguments or {}
     query = str(args.get("query") or "").strip()
-    queries = [
-        str(item).strip()
-        for item in (args.get("queries") or [])
-        if isinstance(item, (str, bytes)) and str(item).strip()
-    ] if isinstance(args.get("queries"), list) else []
+
+    def _query_text(item: Any) -> str:
+        if isinstance(item, (str, bytes)):
+            return str(item).strip()
+        if isinstance(item, dict):
+            for key in ("query", "request", "text"):
+                value = item.get(key)
+                if isinstance(value, (str, bytes)) and str(value).strip():
+                    return str(value).strip()
+        return ""
+
+    queries_arg = args.get("queries")
+    if isinstance(queries_arg, list):
+        queries = [
+            text for item in queries_arg if (text := _query_text(item))
+        ]
+    elif isinstance(queries_arg, (str, bytes)):
+        query_text = _query_text(queries_arg)
+        queries = [query_text] if query_text else []
+    else:
+        queries = []
     if queries:
         unique_queries = list(dict.fromkeys(queries))
         if query:
@@ -1789,6 +1890,27 @@ def research_run_handler(
                 detail={"envelope": envelope},
             ),
         )
+    capture_paths = _delegated_capture_paths(
+        envelope,
+        workspace_root=getattr(getattr(config, "paths", None), "root", None),
+    )
+    if not capture_paths:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.EXECUTION_ERROR,
+                message="delegated researcher produced no persisted captures",
+                detail={
+                    "subagent": envelope.get("subagent"),
+                    "tier": envelope.get("tier"),
+                    "provider": envelope.get("provider"),
+                    "model": envelope.get("model"),
+                },
+                retryable=False,
+            ),
+        )
+    envelope["capture_paths"] = capture_paths
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,

@@ -103,10 +103,13 @@ def _save_raw_capture(
     subject: str,
     data: dict[str, Any],
 ) -> str | None:
-    """Write the full tool payload under ``state/research_data/`` and
-    return the workspace-relative path (or ``None`` when no workspace
-    root is wired in / the write fails). Failures never break the tool
-    result — the caller still gets the inline data.
+    """Write operational evidence under ``state/research_data/``.
+
+    Research captures are runtime records, like journals and tool results;
+    they are not agent-authored strategy/skill/config changes and therefore
+    do not use the PatchProposal workflow. Returns the workspace-relative path
+    (or ``None`` when no workspace root is wired in / the write fails).
+    Failures never break the tool result — the caller still gets inline data.
     """
 
     if not workspace_root:
@@ -135,6 +138,29 @@ def _save_raw_capture(
             return str(path)
     except Exception:
         return None
+
+
+def _attach_saved_capture(
+    data: Any,
+    *,
+    enabled: bool,
+    workspace_root: Path | str | None,
+    kind: str,
+    subject: str,
+) -> Any:
+    """Attach a persisted evidence path to one web-tool result."""
+
+    if not enabled or not isinstance(data, dict):
+        return data
+    saved = _save_raw_capture(
+        workspace_root,
+        kind=kind,
+        subject=subject,
+        data=data,
+    )
+    if saved:
+        data["saved_path"] = saved
+    return data
 
 
 WEB_SEARCH_SCHEMA: dict[str, Any] = {
@@ -297,12 +323,13 @@ def web_search_handler(
         keys=_coerce_keys(args.get("keys")),
         base_urls=_coerce_base_urls(args.get("base_urls")),
     )
-    if bool(args.get("save_raw")) and isinstance(data, dict):
-        saved = _save_raw_capture(
-            workspace_root, kind="web_search", subject=query, data=data,
-        )
-        if saved:
-            data["saved_path"] = saved
+    data = _attach_saved_capture(
+        data,
+        enabled=bool(args.get("save_raw")),
+        workspace_root=workspace_root,
+        kind="web_search",
+        subject=query,
+    )
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
 
 
@@ -322,12 +349,13 @@ def web_fetch_handler(
         use_scrapling_fallback=bool(args.get("use_scrapling_fallback", True)),
         min_content_chars=int(args.get("min_content_chars") or 160),
     )
-    if bool(args.get("save_raw")) and isinstance(data, dict):
-        saved = _save_raw_capture(
-            workspace_root, kind="web_fetch", subject=url, data=data,
-        )
-        if saved:
-            data["saved_path"] = saved
+    data = _attach_saved_capture(
+        data,
+        enabled=bool(args.get("save_raw")),
+        workspace_root=workspace_root,
+        kind="web_fetch",
+        subject=url,
+    )
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
 
 
@@ -354,12 +382,13 @@ def web_search_fetch_handler(
         use_scrapling_fallback=bool(args.get("use_scrapling_fallback", True)),
         min_content_chars=int(args.get("min_content_chars") or 160),
     )
-    if bool(args.get("save_raw")) and isinstance(data, dict):
-        saved = _save_raw_capture(
-            workspace_root, kind="web_search_fetch", subject=query, data=data,
-        )
-        if saved:
-            data["saved_path"] = saved
+    data = _attach_saved_capture(
+        data,
+        enabled=bool(args.get("save_raw")),
+        workspace_root=workspace_root,
+        kind="web_search_fetch",
+        subject=query,
+    )
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
 
 

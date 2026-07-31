@@ -2723,8 +2723,14 @@ def register_native_tools(
                     delegates_to="web_researcher",
                     invocation_aliases=(
                         "research",
+                        "research.run",
                         "research.research_run",
                         "research.web_search",
+                    ),
+                    argument_aliases=(
+                        ("request", "query"),
+                        ("task", "query"),
+                        ("fetch_urls", "urls"),
                     ),
                 ),
                 make_native_descriptor(

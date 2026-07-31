@@ -1188,6 +1188,23 @@ class SubAgentRuntime:
             skill_calls=skill_calls,
             rejected_actions=rejected_actions,
         )
+        if close_reason == "required_native_tool_missing":
+            successful_tools = {
+                str(record.get("skill") or "")
+                for record in skill_calls
+                if record.get("ok")
+            }
+            missing_tools = [
+                name for name in required_native_tools
+                if name not in successful_tools
+            ]
+            final_output["degraded"] = True
+            final_output["error_kind"] = "required_native_tool_missing"
+            final_output["summary"] = (
+                "subagent did not satisfy its explicit execution contract; "
+                f"missing successful tool calls: {', '.join(missing_tools)}"
+            )
+            final_output["required_tools_missing"] = missing_tools
         contribution_metrics = {
             "signals_used": signals_used,
             "skill_calls": skill_calls,
@@ -1373,7 +1390,11 @@ class SubAgentRuntime:
                 "\nYou already have tool observations. Prefer producing the "
                 'final role analysis now with ``"done": true``. Do not '
                 "request the same data again; if a field is missing, state "
-                "the evidence gap instead of looping on more tools."
+                "the evidence gap instead of looping on more tools. When the "
+                "observations contain evidence-bearing source URLs or saved "
+                "paths, cite at least one of those exact references in the "
+                "role's final evidence/source fields instead of discarding "
+                "the collected dataset."
             )
         assignment_block = _render_subagent_task_assignment(
             spec_name=spec.name,
@@ -1399,10 +1420,29 @@ class SubAgentRuntime:
             "from memory, may be stale' — never present remembered figures "
             "or pre-cutoff timelines as current facts.\n\n"
         )
+        observed_successes = {
+            str(item.get("skill") or "")
+            for item in observations
+            if isinstance(item, dict) and item.get("ok") is True
+        }
+        required_remaining = [
+            name for name in spec.execution_policy.required_native_tools
+            if name in (native_tools or []) and name not in observed_successes
+        ]
+        execution_contract_section = ""
+        if required_remaining and not finalization_mode:
+            execution_contract_section = (
+                "=== explicit execution contract ===\n"
+                "Before returning final output, successfully call each required "
+                "native tool exactly once: "
+                f"{', '.join(required_remaining)}. This is a caller-supplied "
+                "acceptance contract, not an inferred workflow.\n\n"
+            )
         return (
             f"You are the {spec.name} subagent.\n"
             f"{spec.prompt or ''}\n\n"
             f"{grounding_section}"
+            f"{execution_contract_section}"
             f"{assignment_section}"
             f"=== task payload ===\n"
             f"{wrap_untrusted('payload', json.dumps(payload, ensure_ascii=False, default=str))}\n\n"
@@ -1700,6 +1740,18 @@ class SubAgentRuntime:
         policy = SubAgentExecutionPolicy.from_dict(execution_policy)
         defaults = policy.tool_argument_defaults.get(tool_name) or {}
         payload = {**dict(defaults), **dict(payload or {})}
+        for alias, canonical in (
+            getattr(descriptor, "argument_aliases", ()) or ()
+        ):
+            alias_name = str(alias or "").strip()
+            canonical_name = str(canonical or "").strip()
+            if (
+                alias_name
+                and canonical_name
+                and canonical_name not in payload
+                and alias_name in payload
+            ):
+                payload[canonical_name] = payload.pop(alias_name)
         payload = _normalise_native_payload(tool_name, payload)
         safe_payload = redact_display_dict(dict(payload or {}))
         call = ToolCall(
@@ -2083,7 +2135,13 @@ def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
 
 
 def _is_unstructured_protocol_miss(parsed: dict[str, Any], raw: str) -> bool:
-    """Return true for text-only child responses that did not follow protocol."""
+    """Return true for child responses that did not produce a usable envelope.
+
+    A JSON-looking ``skill_calls`` marker inside a raw/text wrapper is still a
+    protocol miss when no parsed calls exist. Treating it as finished forces the
+    parent to rerun the entire child; the runtime can repair it once in-place
+    using its existing bounded protocol retry instead.
+    """
 
     if not isinstance(parsed, dict) or not parsed:
         return bool(str(raw or "").strip())
@@ -2098,7 +2156,7 @@ def _is_unstructured_protocol_miss(parsed: dict[str, Any], raw: str) -> bool:
     if (
         "<tool_call" in raw_text or '"skill_calls"' in raw_text or '"tool_calls"' in raw_text
     ):
-        return False
+        return True
     return set(parsed).issubset({"raw", "text", "message", "content"})
 
 

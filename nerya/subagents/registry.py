@@ -45,6 +45,7 @@ class SubAgentExecutionPolicy:
     """
 
     locked_tier: str = ""
+    allow_model_override: bool = True
     native_tool_allow: list[str] = field(default_factory=list)
     native_tool_deny: list[str] = field(default_factory=list)
     required_native_tools: list[str] = field(default_factory=list)
@@ -92,6 +93,7 @@ class SubAgentExecutionPolicy:
             max_wall_seconds = None
         return cls(
             locked_tier=str(data.get("locked_tier") or "").strip(),
+            allow_model_override=data.get("allow_model_override") is not False,
             native_tool_allow=_names(native.get("allow")),
             native_tool_deny=_names(native.get("deny")),
             required_native_tools=_names(data.get("required_native_tools")),
@@ -107,6 +109,8 @@ class SubAgentExecutionPolicy:
         out: dict[str, Any] = {}
         if self.locked_tier:
             out["locked_tier"] = self.locked_tier
+        if not self.allow_model_override:
+            out["allow_model_override"] = False
         native: dict[str, Any] = {}
         if self.native_tool_allow:
             native["allow"] = list(self.native_tool_allow)
@@ -157,6 +161,9 @@ class SubAgentExecutionPolicy:
 
         return SubAgentExecutionPolicy(
             locked_tier=self.locked_tier or other.locked_tier,
+            allow_model_override=(
+                self.allow_model_override and other.allow_model_override
+            ),
             native_tool_allow=allow,
             native_tool_deny=sorted(set(self.native_tool_deny) | set(other.native_tool_deny)),
             required_native_tools=list(dict.fromkeys([
@@ -201,6 +208,9 @@ class SubAgentSpec:
             )
         if self.execution_policy.locked_tier:
             self.tier = self.execution_policy.locked_tier
+        if not self.execution_policy.allow_model_override:
+            self.provider = ""
+            self.model = ""
 
     @classmethod
     def load(cls, path: Path, *, name: str | None = None,
@@ -440,14 +450,7 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "3. If one financial statement source fails, try an alternate path:\n"
         "   direct provider tool, ``market_data``, ``market_data_routing``,\n"
         "   or ``web_search_fetch`` for the missing headline metrics.\n"
-        "4. For primary-source facts (guidance, segment data, buybacks,\n"
-        "   management commentary), fetch the company IR page / annual\n"
-        "   report / filing directly with ``web_fetch`` — it renders\n"
-        "   JS-heavy pages through the configured browser engine. Open an\n"
-        "   interactive ``browser`` session (script_run\n"
-        "   browser_session.py) only when the document sits behind\n"
-        "   navigation or clicks. Cite the exact URL and as-of date.\n"
-        "5. Do not mark valuation unavailable when you have enough inputs\n"
+        "4. Do not mark valuation unavailable when you have enough inputs\n"
         "   for a bounded estimate (price, market cap, EPS, revenue,\n"
         "   EBITDA, or analyst multiples). State missing fields and lower\n"
         "   confidence instead of dropping the section.\n\n"
@@ -511,12 +514,6 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "Mission. Build the strongest evidence-backed upside case.\n"
         "Load ``market_research`` / ``research_report`` only when the\n"
         "task needs the detailed research or report playbook.\n\n"
-        "Evidence duty. Ground every claim in a tool result: use\n"
-        "``web_search_fetch`` for current coverage and ``web_fetch`` to\n"
-        "pull company primary sources (IR pages, filings, annual\n"
-        "reports, product pages) — it renders JS pages via the browser\n"
-        "engine. Cite URL + as-of date per claim; unsourced points must\n"
-        "be labelled as inference with lowered confidence.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``bull_points``: list[{claim, evidence, confidence}]\n"
         "  - ``upside_drivers``: list[str]\n"
@@ -531,12 +528,6 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "Mission. Build the strongest evidence-backed downside and risk\n"
         "case. Load ``market_research`` / ``quant_research`` only when\n"
         "the detailed playbook is needed.\n\n"
-        "Evidence duty. Ground every claim in a tool result: use\n"
-        "``web_search_fetch`` for current coverage and ``web_fetch`` to\n"
-        "pull primary sources (filings, IR pages, regulator releases) —\n"
-        "it renders JS pages via the browser engine. Cite URL + as-of\n"
-        "date per claim; unsourced points must be labelled as inference\n"
-        "with lowered confidence.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``bear_points``: list[{claim, evidence, severity}]\n"
         "  - ``downside_drivers``: list[str]\n"
@@ -806,41 +797,6 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "  - ``confidence``: float in [0, 1]\n"
         "  - ``done``: true.\n"
     ),
-    "web_researcher": (
-        "You are the **web_researcher** lane — the team's dedicated\n"
-        "web-data collector. You do NOT analyse or form opinions; you\n"
-        "fetch, capture, and hand over data as completely as possible so\n"
-        "other agents can analyse it.\n\n"
-        "How you work.\n"
-        "1. Read the task payload (``query`` / ``urls`` / ``focus`` /\n"
-        "   ``instructions``) and plan 1-4 tool calls, no more.\n"
-        "2. Use ``web_search`` for discovery, ``web_fetch`` for known\n"
-        "   URLs, and ``web_search_fetch`` to search + pull the top pages\n"
-        "   in one pass. ALWAYS pass ``save_raw: true`` so the complete\n"
-        "   un-truncated capture is persisted under\n"
-        "   ``state/research_data/`` — the tool result then includes a\n"
-        "   ``saved_path`` you must report back. Keep browser and\n"
-        "   Scrapling fallbacks enabled (they are on by default) so\n"
-        "   JS-heavy pages still render; raise ``max_bytes`` instead of\n"
-        "   truncating when a source is long.\n"
-        "3. Prefer primary sources (official sites, IR pages, filings,\n"
-        "   original posts) over aggregators. Record the exact URL and\n"
-        "   an ``as_of`` timestamp for every capture.\n"
-        "4. If a source is unreachable or paywalled, say so plainly —\n"
-        "   never substitute invented or remembered content.\n\n"
-        "Output contract (strict JSON):\n"
-        "  - ``captures``: list[{url, title?, as_of, saved_path?,\n"
-        "    excerpt}] — one entry per fetched source, ``excerpt`` is a\n"
-        "    short verbatim snippet, ``saved_path`` the full on-disk\n"
-        "    capture other agents can read.\n"
-        "  - ``key_facts``: list[str] — factual bullets only, no\n"
-        "    interpretation.\n"
-        "  - ``gaps``: list[str] — sources you could not reach and why.\n"
-        "  - ``summary``: 2-3 sentences describing what was collected.\n"
-        "  - ``done``: true.\n\n"
-        "Never trade, never analyse, never speculate — collect and\n"
-        "report."
-    ),
 }
 
 
@@ -858,20 +814,10 @@ def _expert_lens_prompt(
     return (
         f"You are the **{role}** lane — apply the {display} framework\n"
         "from the distilled expert-lens skill family.\n\n"
-        "How you work.\n"
-        "1. Your already-loaded expert lens and research playbook are the\n"
-        "   operating instructions for this run. Follow the lens's core\n"
-        "   models, decision heuristics, reasoning voice, and failure\n"
-        "   boundaries directly; do not reload it.\n"
-        f"2. Focus on {focus}.\n"
-        "3. When the assignment requires current online evidence, follow the\n"
-        "   loaded research playbook and obtain a delegated web dataset before\n"
-        "   drawing conclusions. Structured market quotes are complementary,\n"
-        "   not a substitute for the requested source collection. Give every\n"
-        "   material fact a source and an ``as_of`` date; never fill a gap\n"
-        "   from memory.\n"
-        "4. This is framework inference, not impersonation: never invent\n"
-        f"   a quotation or claim to speak for {display}.\n\n"
+        "Preferred skills. Follow the already-loaded expert lens and research\n"
+        "playbook; they contain the operating method and collection choices.\n"
+        f"Focus on {focus}. This is framework inference, not impersonation: \n"
+        f"never invent a quotation or claim to speak for {display}.\n\n"
         "Output contract (strict JSON):\n"
         f"  - ``lens``: \"{lens}\"\n"
         "  - ``diagnosis``: short paragraph in the lens's reasoning voice\n"
@@ -1200,6 +1146,9 @@ def save_role(
     final_policy = default_execution_policy(canonical, execution_policy)
     if final_policy.locked_tier:
         final_tier = final_policy.locked_tier
+    if not final_policy.allow_model_override:
+        final_provider = ""
+        final_model = ""
 
     meta = {
         "name": name,

@@ -66,6 +66,7 @@ nerya = [
     "skills/builtin/**/*.md",
     "skills/builtin/**/*.yml",
     "workspace/_prompt_bundles/**/*.md",
+    "workspace/_prompt_bundles/**/*.json",
     "workspace/_prompt_bundles/**/*.yml",
 ]
 

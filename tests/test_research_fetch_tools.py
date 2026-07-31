@@ -1121,6 +1121,8 @@ def test_native_registry_exposes_web_research_tools(tmp_path) -> None:
     deps = build_native_tool_deps(
         workspace_root=tmp_path,
         skill_roots=[],
+        config=SimpleNamespace(),
+        skills=SimpleNamespace(registry=SimpleNamespace(list=lambda: [])),
     )
     register_native_tools(registry, deps)
 
@@ -1131,6 +1133,8 @@ def test_native_registry_exposes_web_research_tools(tmp_path) -> None:
     web_fetch = registry.get("web_fetch")
     assert web_fetch.permission_scope.value == "network"
     assert web_fetch.auto_approve is True
+    research_run = registry.get("research_run")
+    assert "research.run" in research_run.invocation_aliases
 
 
 def test_news_social_skill_is_lazy_loaded_not_native_tool(tmp_path) -> None:

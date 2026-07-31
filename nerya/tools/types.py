@@ -192,6 +192,14 @@ class ToolDescriptor:
     subject_argument: str = ""
     """Argument that receives the original ``skill`` subject for aliases."""
 
+    argument_aliases: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    """Declarative ``(accepted_name, canonical_name)`` input aliases.
+
+    Subagent/native dispatch applies these before invoking the handler. This
+    absorbs provider vocabulary differences without adding tool-name branches
+    or natural-language routing heuristics to the agent loop.
+    """
+
     # ----- helpers ---------------------------------------------------
 
     def to_provider_tool(self) -> dict[str, Any]:

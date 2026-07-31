@@ -14,6 +14,7 @@ Covers the four new surfaces:
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -37,11 +38,13 @@ from nerya.subagents.registry import (
     save_role,
 )
 from nerya.subagents.runtime import SubAgentRuntime
+from nerya.subagents import runtime as subagent_runtime
 from nerya.tools.native import agents as native_agents
 from nerya.tools.native.web import _save_raw_capture
 from nerya.tools.registry import ToolRegistry, make_native_descriptor
 from nerya.tools.types import PermissionScope, RiskLevel, ToolCall, ToolResult
 from nerya.workspace.prompt_bundles import load_bundle
+from nerya.workspace import prompt_bundles
 
 
 pytestmark = pytest.mark.smoke
@@ -172,7 +175,11 @@ def test_web_researcher_default_role_shape():
     assert bundled.subagents["web_researcher"] == prompt
     policy = DEFAULT_SUBAGENT_EXECUTION_POLICIES["web_researcher"]
     assert policy.locked_tier == "light"
+    assert policy.allow_model_override is False
     assert policy.tool_argument_defaults["web_fetch"]["save_raw"] is True
+    assert "research_run" not in (
+        DEFAULT_SUBAGENT_EXECUTION_POLICIES["buffett_lens"].required_native_tools
+    )
 
 
 def test_web_researcher_tier_is_locked_for_inline_overrides(tmp_path):
@@ -186,10 +193,23 @@ def test_web_researcher_tier_is_locked_for_inline_overrides(tmp_path):
     )
 
     assert spec.tier == "light"
-    assert spec.provider == "openai"
-    assert spec.model == "gpt-5-mini"
+    assert spec.provider == ""
+    assert spec.model == ""
+    assert spec.execution_policy.allow_model_override is False
     assert spec.execution_policy.max_iterations == 4
     assert spec.execution_policy.llm_max_attempts == 1
+
+
+def test_non_collector_role_keeps_custom_model_override(tmp_path):
+    spec = build_inline_spec(
+        WorkspacePaths(tmp_path),
+        name="buffett_lens",
+        provider="openai",
+        model="gpt-5-mini",
+    )
+
+    assert spec.provider == "openai"
+    assert spec.model == "gpt-5-mini"
 
 
 def test_web_researcher_aliases_route_to_lane():
@@ -214,6 +234,78 @@ def test_light_tier_accepts_subagent_analysis():
         requested_tier="medium",
         caller_allowed_tiers=None,
     ) == "medium"
+
+
+def _write_minimal_bundle(root: Path, policy_text: str) -> None:
+    bundle = root / "test"
+    bundle.mkdir(parents=True)
+    (bundle / "bundle.yml").write_text(
+        "\n".join([
+            "version: 1",
+            "id: test",
+            "profile: test",
+            "agents: {}",
+            "subagents: {}",
+            "execution_policies: execution-policies.json",
+        ]),
+        encoding="utf-8",
+    )
+    (bundle / "execution-policies.json").write_text(
+        policy_text,
+        encoding="utf-8",
+    )
+
+
+def test_external_execution_policy_json_resolves_profiles(monkeypatch, tmp_path):
+    _write_minimal_bundle(
+        tmp_path,
+        """
+        {
+          "subagent_policy_profiles": {
+            "collector": {
+              "locked_tier": "light",
+              "allow_model_override": false,
+              "native_tools": {"allow": ["collect"]}
+            }
+          },
+          "subagent_policies": {
+            "scout": {"extends": "collector", "max_iterations": 3}
+          }
+        }
+        """,
+    )
+    monkeypatch.setattr(prompt_bundles, "bundles_root", lambda: tmp_path)
+
+    bundle = prompt_bundles.load_bundle("test")
+
+    assert bundle.sources["execution_policies"] == "execution-policies.json"
+    assert bundle.subagent_policies["scout"] == {
+        "locked_tier": "light",
+        "allow_model_override": False,
+        "native_tools": {"allow": ["collect"]},
+        "max_iterations": 3,
+    }
+
+
+@pytest.mark.parametrize("policy_text", ["[]", "{not-json"])
+def test_external_execution_policy_json_rejects_invalid_content(
+    monkeypatch,
+    tmp_path,
+    policy_text,
+):
+    _write_minimal_bundle(tmp_path, policy_text)
+    monkeypatch.setattr(prompt_bundles, "bundles_root", lambda: tmp_path)
+
+    with pytest.raises(ValueError):
+        prompt_bundles.load_bundle("test")
+
+
+def test_prompt_bundle_package_data_includes_json():
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8",
+    )
+
+    assert '"workspace/_prompt_bundles/**/*.json"' in pyproject
 
 
 # --------------------------------------------------------------- raw capture
@@ -253,6 +345,7 @@ class _FakeDescriptor:
     invocation_aliases: tuple[str, ...] = ()
     subject_action_aliases: tuple[str, ...] = ()
     subject_argument: str = ""
+    argument_aliases: tuple[tuple[str, str], ...] = ()
 
 
 class _FakeRegistry:
@@ -320,8 +413,14 @@ def test_delegation_tool_hidden_at_its_declared_depth(tmp_path):
     assert "web_fetch" in allowed
 
 
-def test_research_run_handler_uses_descriptor_target_and_metadata_depth(monkeypatch):
+def test_research_run_handler_uses_descriptor_target_and_metadata_depth(
+    monkeypatch,
+    tmp_path,
+):
     captured: dict = {}
+    capture = tmp_path / "state" / "research_data" / "capture.json"
+    capture.parent.mkdir(parents=True)
+    capture.write_text('{"ok": true}', encoding="utf-8")
 
     class _FakeDispatcher:
         def __init__(self, **kwargs):
@@ -331,7 +430,23 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(monkeypa
             captured["target"] = target
             captured["payload"] = payload
             captured["dispatch_kwargs"] = kwargs
-            return {"ok": True, "subagent": "web_researcher", "output": {}}
+            return {
+                "ok": True,
+                "subagent": "web_researcher",
+                "tier": "light",
+                "output": {},
+                "metrics": {
+                    "skill_calls": [{
+                        "ok": True,
+                        "skill": "collector_tool",
+                        "result": {
+                            "data": {
+                                "saved_path": "state/research_data/capture.json",
+                            },
+                        },
+                    }],
+                },
+            }
 
     monkeypatch.setattr(native_agents, "SubAgentDispatcher", _FakeDispatcher)
 
@@ -348,7 +463,7 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(monkeypa
     ])
     result = native_agents.research_run_handler(
         call,
-        config=SimpleNamespace(paths=None),
+        config=SimpleNamespace(paths=WorkspacePaths(tmp_path)),
         skills=SimpleNamespace(),
         tool_registry=registry,
     )
@@ -359,6 +474,9 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(monkeypa
     assert captured["dispatch_kwargs"]["delegation_depth"] == 1
     assert captured["payload"]["query"] == "TSLA deliveries"
     assert captured["payload"]["urls"] == ["https://ir.tesla.com"]
+    assert result.content[0].data["capture_paths"] == [
+        "state/research_data/capture.json"
+    ]
 
     multi_query_call = ToolCall(
         id="t1-multi",
@@ -368,13 +486,111 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(monkeypa
     )
     multi_query_result = native_agents.research_run_handler(
         multi_query_call,
-        config=SimpleNamespace(paths=None),
+        config=SimpleNamespace(paths=WorkspacePaths(tmp_path)),
         skills=SimpleNamespace(),
         tool_registry=registry,
     )
     assert multi_query_result.is_error is False
     assert "AI capex" in captured["payload"]["query"]
     assert "data-center power bottlenecks" in captured["payload"]["query"]
+
+    structured_query_result = native_agents.research_run_handler(
+        ToolCall(
+            id="t1-structured",
+            name="research_run",
+            arguments={
+                "queries": [
+                    {"query": "AI capex", "type": "web"},
+                    {"query": "GPU supply", "type": "web"},
+                ],
+            },
+            metadata={"delegation_depth": 0},
+        ),
+        config=SimpleNamespace(paths=WorkspacePaths(tmp_path)),
+        skills=SimpleNamespace(),
+        tool_registry=registry,
+    )
+    assert structured_query_result.is_error is False
+    assert "AI capex" in captured["payload"]["query"]
+    assert "GPU supply" in captured["payload"]["query"]
+
+    string_queries_result = native_agents.research_run_handler(
+        ToolCall(
+            id="t1-string-queries",
+            name="research_run",
+            arguments={"queries": "AI capex and GPU supply"},
+            metadata={"delegation_depth": 0},
+        ),
+        config=SimpleNamespace(paths=WorkspacePaths(tmp_path)),
+        skills=SimpleNamespace(),
+        tool_registry=registry,
+    )
+    assert string_queries_result.is_error is False
+    assert "AI capex and GPU supply" in captured["payload"]["query"]
+
+
+def test_research_run_handler_rejects_success_without_persisted_capture(
+    monkeypatch,
+    tmp_path,
+):
+    class _FakeDispatcher:
+        def __init__(self, **kwargs):  # noqa: ARG002
+            pass
+
+        def dispatch(self, target, *, payload, **kwargs):  # noqa: ARG002
+            return {
+                "ok": True,
+                "subagent": "web_researcher",
+                "tier": "light",
+                "output": {"done": True},
+                "metrics": {"skill_calls": []},
+            }
+
+    monkeypatch.setattr(native_agents, "SubAgentDispatcher", _FakeDispatcher)
+    registry = _FakeRegistry([
+        _FakeDescriptor(
+            "research_run", delegates_to="web_researcher", child_max_depth=1,
+        ),
+    ])
+
+    result = native_agents.research_run_handler(
+        ToolCall(
+            id="t-no-capture",
+            name="research_run",
+            arguments={"query": "AI capex"},
+        ),
+        config=SimpleNamespace(paths=WorkspacePaths(tmp_path)),
+        skills=SimpleNamespace(),
+        tool_registry=registry,
+    )
+
+    assert result.is_error is True
+    assert result.error is not None
+    assert "no persisted captures" in result.error.message
+
+
+def test_failed_web_payload_does_not_count_as_evidence_capture(tmp_path):
+    capture = tmp_path / "state" / "research_data" / "failed.json"
+    capture.parent.mkdir(parents=True)
+    capture.write_text('{"data":{"ok":false}}', encoding="utf-8")
+    envelope = {
+        "metrics": {
+            "skill_calls": [{
+                "ok": True,
+                "result": {
+                    "data": {
+                        "ok": False,
+                        "saved_path": "state/research_data/failed.json",
+                    },
+                },
+            }],
+        },
+    }
+
+    assert native_agents._delegated_capture_paths(
+        envelope,
+        workspace_root=tmp_path,
+    ) == []
 
 
 def test_research_run_handler_requires_query_or_urls():
@@ -386,6 +602,47 @@ def test_research_run_handler_requires_query_or_urls():
     )
 
     assert result.is_error is True
+
+
+def test_raw_tool_request_without_parsed_calls_gets_one_protocol_repair():
+    raw = '{"skill_calls":[{"skill":"web_search_fetch","payload":'
+
+    assert subagent_runtime._is_unstructured_protocol_miss(
+        {"raw": raw},
+        raw,
+    ) is True
+
+
+def test_compact_tool_records_preserves_delegated_capture_paths():
+    compacted = native_agents._compact_tool_records([{
+        "ok": True,
+        "skill": "research_run",
+        "action": "(native)",
+        "result": {
+            "data": {
+                "ok": True,
+                "subagent": "web_researcher",
+                "tier": "light",
+                "capture_paths": ["state/research_data/capture.json"],
+                "output": {"done": True},
+            },
+        },
+    }])
+
+    assert compacted[0]["delegated_run"]["capture_paths"] == [
+        "state/research_data/capture.json"
+    ]
+
+    rejected = native_agents._compact_tool_records([{
+        "ok": False,
+        "skill": "research_run",
+        "action": "(native)",
+        "error": "bad arguments",
+        "error_kind": "schema_validation",
+        "retryable": False,
+    }])
+    assert rejected[0]["error_kind"] == "schema_validation"
+    assert rejected[0]["retryable"] is False
 
 
 # ------------------------------------------------ generic intent/error repair
@@ -411,6 +668,7 @@ class _RecordingHandlerRegistry:
             invocation_aliases = getattr(configured, "invocation_aliases", ())
             subject_action_aliases = getattr(configured, "subject_action_aliases", ())
             subject_argument = getattr(configured, "subject_argument", "")
+            argument_aliases = getattr(configured, "argument_aliases", ())
             child_max_depth = getattr(configured, "child_max_depth", None)
 
             def handler(self, call):
@@ -472,6 +730,11 @@ def test_view_action_rewritten_onto_skill_view_native():
         },
         {
             "skill": "research",
+            "action": "run",
+            "payload": {"query": "AI capex"},
+        },
+        {
+            "skill": "research",
             "payload": {
                 "action": "research_run",
                 "inputs": {"query": "AI capex"},
@@ -487,6 +750,7 @@ def test_descriptor_invocation_alias_routes_skill_intent_onto_native(entry):
                 "research_run",
                 invocation_aliases=(
                     "research",
+                    "research.run",
                     "research.research_run",
                     "research.web_search",
                 ),
@@ -599,9 +863,78 @@ def test_required_native_tool_policy_requests_one_corrective_turn(tmp_path):
 
     assert len(calls) == 1
     assert len(llm.prompts) == 3
+    assert "explicit execution contract" in llm.prompts[0]
     assert "research_run" in llm.prompts[1]
+    assert "cite at least one of those exact references" in llm.prompts[2]
     assert result["output"]["summary"] == "grounded"
     assert result["metrics"]["rejected_actions"] == []
+
+
+def test_missing_required_native_tool_marks_output_degraded(tmp_path):
+    class _SkillRegistry:
+        def list(self):
+            return []
+
+        def get(self, _name):
+            raise KeyError(_name)
+
+    class _Skills:
+        registry = _SkillRegistry()
+
+    class _FinalOnlyLLM:
+        def call(self, **kwargs):
+            return LLMCall(
+                tier="medium",
+                task=kwargs["task"],
+                caller=kwargs["caller"],
+                tokens=1,
+                usd=0.0,
+                raw='{"summary":"memory only","done":true}',
+                parsed={"summary": "memory only", "done": True},
+                provider="fake",
+                model="fake-model",
+            )
+
+    registry = ToolRegistry()
+    registry.register(make_native_descriptor(
+        name="research_run",
+        description="delegate research",
+        input_schema={"type": "object"},
+        handler=lambda call: ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={"ok": True},
+        ),
+        risk=RiskLevel.READ,
+        permission_scope=PermissionScope.NONE,
+        auto_approve=True,
+    ))
+    runtime = SubAgentRuntime(
+        config=Config(paths=WorkspacePaths(tmp_path), data={}),
+        skills=_Skills(),
+        llm=_FinalOnlyLLM(),
+        tool_registry=registry,
+    )
+    spec = SubAgentSpec(
+        name="expert",
+        prompt_path=tmp_path / "expert.agent.md",
+        prompt="Return evidence.",
+        execution_policy=SubAgentExecutionPolicy(
+            native_tool_allow=["research_run"],
+            required_native_tools=["research_run"],
+            max_iterations=2,
+        ),
+    )
+
+    result = runtime.run(
+        spec,
+        trigger_event_id=None,
+        payload={"task": "Research AI"},
+    )
+
+    assert result["output"]["degraded"] is True
+    assert result["output"]["error_kind"] == "required_native_tool_missing"
+    assert result["output"]["required_tools_missing"] == ["research_run"]
 
 
 def test_tool_argument_defaults_are_applied_declaratively(tmp_path):
@@ -648,6 +981,59 @@ def test_declarative_tool_defaults_respect_explicit_arguments():
     assert reg.calls[-1].arguments["save_raw"] is False
 
 
+def test_descriptor_argument_alias_avoids_schema_retry():
+    descriptor = _FakeDescriptor(
+        name="collector",
+        argument_aliases=(
+            ("request", "query"),
+            ("task", "query"),
+            ("fetch_urls", "urls"),
+        ),
+    )
+    reg = _RecordingHandlerRegistry(
+        ["collector"],
+        descriptors={"collector": descriptor},
+    )
+    runtime = SubAgentRuntime(
+        config=SimpleNamespace(),
+        skills=SimpleNamespace(),
+        llm=SimpleNamespace(),
+        tool_registry=reg,
+    )
+
+    record = runtime._dispatch_native(
+        "collector",
+        payload={
+            "request": "AI capex",
+            "fetch_urls": ["https://example.com"],
+        },
+        entry={},
+        spec_name="expert",
+        strategy_id=None,
+        session_id=None,
+        trigger_event_id=None,
+    )
+
+    assert record["ok"] is True
+    assert reg.calls[-1].arguments == {
+        "query": "AI capex",
+        "urls": ["https://example.com"],
+    }
+
+    second = runtime._dispatch_native(
+        "collector",
+        payload={"task": "Fetch the supplied sources"},
+        entry={},
+        spec_name="expert",
+        strategy_id=None,
+        session_id=None,
+        trigger_event_id=None,
+    )
+
+    assert second["ok"] is True
+    assert reg.calls[-1].arguments == {"query": "Fetch the supplied sources"}
+
+
 @pytest.mark.parametrize(
     ("role", "expert_skill"),
     [
@@ -661,7 +1047,7 @@ def test_declarative_tool_defaults_respect_explicit_arguments():
         ("kobeissi_lens", "finance-creators.kobeissi"),
     ],
 )
-def test_expert_policy_preloads_lens_and_keeps_research_delegate(
+def test_expert_policy_preloads_lens_and_allows_autonomous_research_delegate(
     tmp_path, role, expert_skill,
 ):
     runtime = _runtime_with_tools([
@@ -680,7 +1066,7 @@ def test_expert_policy_preloads_lens_and_keeps_research_delegate(
     assert "web_search" not in allowed
     assert "web_fetch" not in allowed
     assert "web_search_fetch" not in allowed
-    assert spec.execution_policy.required_native_tools == ["research_run"]
+    assert spec.execution_policy.required_native_tools == []
     assert spec.execution_policy.preload_skills == ["research", expert_skill]
     assert "FIRST call ``skill_view" not in spec.prompt
     assert "already-loaded expert lens" in spec.prompt

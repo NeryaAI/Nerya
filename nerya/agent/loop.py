@@ -4082,7 +4082,7 @@ class LoopConfig:
     task action instead of letting automation requests drift into open-ended
     portfolio/config/skill discovery."""
 
-    workflow_forcing: bool = True
+    workflow_forcing: bool = False
     """Master switch for the loop's heuristic workflow-forcing behaviors.
 
     When ``True`` the loop may infer intent from observed tool/skill names and
@@ -4094,11 +4094,10 @@ class LoopConfig:
     that explicitly declares ``next_required_action``, and provider/LLM error
     recovery (transient errors, safety refusals, truncated output).
 
-    The dataclass default is ``True`` so standalone loop unit tests keep
-    exercising the opt-in forcing mechanism. Production wires this from
-    ``agent.native.workflow_forcing`` (default ``False``) via the kernel, so
-    every real agent turn is skill/tool/state-driven rather than pinned to a
-    hardcoded workflow.
+    The default is ``False`` for every caller. Tests or operator configuration
+    that exercise legacy convergence nudges must opt in explicitly; normal
+    turns stay skill/tool/state-driven rather than pinned to a hardcoded
+    workflow.
     """
 
 

@@ -247,6 +247,7 @@ def make_native_descriptor(
     invocation_aliases: Iterable[str] = (),
     subject_action_aliases: Iterable[str] = (),
     subject_argument: str = "",
+    argument_aliases: Iterable[tuple[str, str]] = (),
 ) -> ToolDescriptor:
     """Build a :class:`ToolDescriptor` for a native tool.
 
@@ -286,6 +287,10 @@ def make_native_descriptor(
         invocation_aliases=tuple(invocation_aliases),
         subject_action_aliases=tuple(subject_action_aliases),
         subject_argument=str(subject_argument or ""),
+        argument_aliases=tuple(
+            (str(alias), str(canonical))
+            for alias, canonical in argument_aliases
+        ),
     )
 
 

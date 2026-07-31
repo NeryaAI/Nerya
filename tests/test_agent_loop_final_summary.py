@@ -13,7 +13,7 @@ from nerya.agent.kernel import (
 from nerya.agent.finalizers.strategy_backtest import _interpret_backtest_metrics
 from nerya.agent.loop import (
     _COMPACT_REQUIRED_TOOL_SYSTEM,
-    LoopConfig,
+    LoopConfig as _ProductionLoopConfig,
     LoopOutcome,
     WorkspaceNativeAgentLoop,
     _build_llm_timeout_evidence_fallback,
@@ -80,6 +80,17 @@ def _tool_result_payload(outcome: LoopOutcome, action: str) -> dict:
 
 
 pytestmark = pytest.mark.smoke
+
+
+def LoopConfig(*args, **kwargs) -> _ProductionLoopConfig:  # noqa: N802
+    """Opt this legacy forcing-focused test module into convergence nudges."""
+
+    kwargs.setdefault("workflow_forcing", True)
+    return _ProductionLoopConfig(*args, **kwargs)
+
+
+def test_loop_config_defaults_to_autonomous_workflow() -> None:
+    assert _ProductionLoopConfig().workflow_forcing is False
 
 
 class _ToolOnlyGateway:

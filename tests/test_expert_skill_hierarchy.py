@@ -99,7 +99,8 @@ def test_expert_lens_default_roles_are_wired() -> None:
         assert role in DEFAULT_TIERS
         prompt = DEFAULT_SUBAGENT_PROMPTS[role]
         assert skill_id in DEFAULT_SUBAGENT_EXECUTION_POLICIES[role].preload_skills
-        assert "do not reload it" in prompt
+        assert "already-loaded expert lens and research" in prompt
+        assert "How you work" not in prompt
         assert "skill_view" not in prompt
         assert "Never submit orders" in prompt
 

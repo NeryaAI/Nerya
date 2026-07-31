@@ -31,6 +31,7 @@ sibling directory next to ``default/``.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -172,12 +173,29 @@ def load_bundle(bundle_id: str = DEFAULT_BUNDLE_ID) -> PromptBundle:
         bundle.subagents[str(sid)] = body
         bundle.sources[f"subagents/{sid}"] = str(rel)
 
-    policy_profiles = manifest_raw.get("subagent_policy_profiles") or {}
+    policy_config: Dict[str, Any] = manifest_raw
+    policy_ref = str(manifest_raw.get("execution_policies") or "").strip()
+    if policy_ref:
+        policy_text = _read_relative(root, policy_ref)
+        try:
+            parsed_policy_config = json.loads(policy_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"prompt bundle '{bundle_id}': invalid execution policy JSON: {exc}"
+            ) from exc
+        if not isinstance(parsed_policy_config, dict):
+            raise ValueError(
+                f"prompt bundle '{bundle_id}': execution policies must be a mapping"
+            )
+        policy_config = parsed_policy_config
+        bundle.sources["execution_policies"] = policy_ref
+
+    policy_profiles = policy_config.get("subagent_policy_profiles") or {}
     if not isinstance(policy_profiles, dict):
         raise ValueError(
             f"prompt bundle '{bundle_id}': 'subagent_policy_profiles' must be a mapping"
         )
-    subagent_policies = manifest_raw.get("subagent_policies") or {}
+    subagent_policies = policy_config.get("subagent_policies") or {}
     if not isinstance(subagent_policies, dict):
         raise ValueError(
             f"prompt bundle '{bundle_id}': 'subagent_policies' must be a mapping"
