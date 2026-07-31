@@ -17,13 +17,10 @@ when the kwargs are omitted.
 
 from __future__ import annotations
 
-import json
-import re
-import time
-import uuid
 from pathlib import Path
 from typing import Any
 
+from ...research.captures import ResearchCaptureStore
 from ...skills.builtin.research.scripts import fetch_url, search_fetch, web_search
 from ..types import ToolCall, ToolResult
 
@@ -91,11 +88,6 @@ _SAVE_RAW_PROP = {
 }
 
 
-def _slugify(text: str, max_len: int = 60) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(text or "")).strip("-").lower()
-    return slug[:max_len] or "capture"
-
-
 def _save_raw_capture(
     workspace_root: Path | str | None,
     *,
@@ -115,27 +107,11 @@ def _save_raw_capture(
     if not workspace_root:
         return None
     try:
-        root = Path(workspace_root)
-        day = time.strftime("%Y-%m-%d", time.gmtime())
-        out_dir = root / "state" / "research_data" / day
-        out_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%H%M%S", time.gmtime())
-        suffix = uuid.uuid4().hex[:6]
-        path = out_dir / f"{stamp}_{suffix}_{kind}_{_slugify(subject)}.json"
-        record = {
-            "kind": kind,
-            "subject": subject,
-            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "data": data,
-        }
-        path.write_text(
-            json.dumps(record, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
+        return ResearchCaptureStore(Path(workspace_root)).store(
+            kind=kind,
+            subject=subject,
+            data=data,
         )
-        try:
-            return str(path.relative_to(root))
-        except ValueError:
-            return str(path)
     except Exception:
         return None
 

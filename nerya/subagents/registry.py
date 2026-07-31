@@ -46,6 +46,7 @@ class SubAgentExecutionPolicy:
 
     locked_tier: str = ""
     allow_model_override: bool = True
+    model_override_scope: str = "any"
     native_tool_allow: list[str] = field(default_factory=list)
     native_tool_deny: list[str] = field(default_factory=list)
     required_native_tools: list[str] = field(default_factory=list)
@@ -94,6 +95,12 @@ class SubAgentExecutionPolicy:
         return cls(
             locked_tier=str(data.get("locked_tier") or "").strip(),
             allow_model_override=data.get("allow_model_override") is not False,
+            model_override_scope=(
+                str(data.get("model_override_scope") or "any").strip().lower()
+                if str(data.get("model_override_scope") or "any").strip().lower()
+                in {"any", "tier_routes", "none"}
+                else "any"
+            ),
             native_tool_allow=_names(native.get("allow")),
             native_tool_deny=_names(native.get("deny")),
             required_native_tools=_names(data.get("required_native_tools")),
@@ -111,6 +118,8 @@ class SubAgentExecutionPolicy:
             out["locked_tier"] = self.locked_tier
         if not self.allow_model_override:
             out["allow_model_override"] = False
+        if self.model_override_scope != "any":
+            out["model_override_scope"] = self.model_override_scope
         native: dict[str, Any] = {}
         if self.native_tool_allow:
             native["allow"] = list(self.native_tool_allow)
@@ -159,11 +168,18 @@ class SubAgentExecutionPolicy:
                 return base
             return min(base, incoming)
 
+        scope_order = {"any": 0, "tier_routes": 1, "none": 2}
+        model_override_scope = max(
+            (self.model_override_scope, other.model_override_scope),
+            key=lambda value: scope_order.get(value, 0),
+        )
+
         return SubAgentExecutionPolicy(
             locked_tier=self.locked_tier or other.locked_tier,
             allow_model_override=(
                 self.allow_model_override and other.allow_model_override
             ),
+            model_override_scope=model_override_scope,
             native_tool_allow=allow,
             native_tool_deny=sorted(set(self.native_tool_deny) | set(other.native_tool_deny)),
             required_native_tools=list(dict.fromkeys([
@@ -208,7 +224,10 @@ class SubAgentSpec:
             )
         if self.execution_policy.locked_tier:
             self.tier = self.execution_policy.locked_tier
-        if not self.execution_policy.allow_model_override:
+        if (
+            not self.execution_policy.allow_model_override
+            or self.execution_policy.model_override_scope == "none"
+        ):
             self.provider = ""
             self.model = ""
 
@@ -1146,7 +1165,10 @@ def save_role(
     final_policy = default_execution_policy(canonical, execution_policy)
     if final_policy.locked_tier:
         final_tier = final_policy.locked_tier
-    if not final_policy.allow_model_override:
+    if (
+        not final_policy.allow_model_override
+        or final_policy.model_override_scope == "none"
+    ):
         final_provider = ""
         final_model = ""
 

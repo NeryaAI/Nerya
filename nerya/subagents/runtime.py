@@ -37,6 +37,7 @@ from ..core.errors import (
 from ..core.redaction import redact_display_dict, redact_text
 from ..core.time import now_iso
 from ..llm.gateway import LLMGateway
+from ..llm.route_candidates import configured_models, configured_routes
 from ..security.prompt_injection import wrap_untrusted
 from ..skills.kernel import SkillKernel
 from .context_policy import build_context
@@ -341,6 +342,42 @@ class SubAgentRuntime:
             return max(1, int(policy_value))
         configured = self.config.get("agent.subagents.llm_max_attempts", 2)
         return max(1, int(2 if configured is None else configured))
+
+    def _model_override(self, spec: SubAgentSpec) -> tuple[str | None, str | None]:
+        """Return a policy-approved per-role provider/model override.
+
+        ``tier_routes`` lets a locked role select among provider/model pairs
+        already assigned to its tier, without allowing an expensive route to
+        masquerade as ``light``. Other roles retain unrestricted overrides.
+        """
+
+        provider = str(spec.provider or "").strip().lower()
+        model = str(spec.model or "").strip()
+        if not provider and not model:
+            return None, None
+        policy = spec.execution_policy
+        if not policy.allow_model_override or policy.model_override_scope == "none":
+            return None, None
+        if policy.model_override_scope != "tier_routes":
+            return provider or None, model or None
+
+        tier_cfg = self.config.get(f"llm.tiers.{spec.tier}", {}) or {}
+        if not isinstance(tier_cfg, dict):
+            return None, None
+        matches: list[tuple[str, str]] = []
+        for route in configured_routes(tier_cfg):
+            route_provider = str(route.get("provider") or "").strip().lower()
+            for route_model in configured_models(route):
+                candidate_model = str(route_model or "").strip()
+                if provider and provider != route_provider:
+                    continue
+                if model and model != candidate_model:
+                    continue
+                matches.append((route_provider, candidate_model))
+        if not matches:
+            return None, None
+        matched_provider, matched_model = matches[0]
+        return matched_provider or None, matched_model or None
 
     def _finalization_reserve_seconds(self) -> float:
         configured = self.config.get(
@@ -700,13 +737,14 @@ class SubAgentRuntime:
             t0 = time.monotonic()
             result = None
             llm_max_attempts = self._llm_max_attempts(spec)
+            model_provider, model_id = self._model_override(spec)
             for llm_attempt in range(llm_max_attempts):
                 try:
                     result = self.llm.call(
                         task="subagent_analysis", caller=f"subagent:{spec.name}",
                         tier=spec.tier, prompt=prompt,
-                        model_provider=spec.provider or None,
-                        model_id=spec.model or None,
+                        model_provider=model_provider,
+                        model_id=model_id,
                         metadata={
                             "session_id": session_id,
                             "turn_id": turn_id,
@@ -1065,13 +1103,14 @@ class SubAgentRuntime:
             )
             t0 = time.monotonic()
             try:
+                model_provider, model_id = self._model_override(spec)
                 result = self.llm.call(
                     task="subagent_analysis",
                     caller=f"subagent:{spec.name}",
                     tier=spec.tier,
                     prompt=prompt,
-                    model_provider=spec.provider or None,
-                    model_id=spec.model or None,
+                    model_provider=model_provider,
+                    model_id=model_id,
                     metadata={
                         "session_id": session_id,
                         "turn_id": turn_id,

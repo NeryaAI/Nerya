@@ -19,7 +19,7 @@
     "web_collector": {
       "preload_skills": ["research"],
       "locked_tier": "light",
-      "allow_model_override": false,
+      "model_override_scope": "tier_routes",
       "max_iterations": 4,
       "max_skill_calls": 6,
       "max_wall_seconds": 180,

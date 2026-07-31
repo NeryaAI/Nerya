@@ -175,7 +175,8 @@ def test_web_researcher_default_role_shape():
     assert bundled.subagents["web_researcher"] == prompt
     policy = DEFAULT_SUBAGENT_EXECUTION_POLICIES["web_researcher"]
     assert policy.locked_tier == "light"
-    assert policy.allow_model_override is False
+    assert policy.allow_model_override is True
+    assert policy.model_override_scope == "tier_routes"
     assert policy.tool_argument_defaults["web_fetch"]["save_raw"] is True
     assert "research_run" not in (
         DEFAULT_SUBAGENT_EXECUTION_POLICIES["buffett_lens"].required_native_tools
@@ -193,9 +194,9 @@ def test_web_researcher_tier_is_locked_for_inline_overrides(tmp_path):
     )
 
     assert spec.tier == "light"
-    assert spec.provider == ""
-    assert spec.model == ""
-    assert spec.execution_policy.allow_model_override is False
+    assert spec.provider == "openai"
+    assert spec.model == "gpt-5-mini"
+    assert spec.execution_policy.model_override_scope == "tier_routes"
     assert spec.execution_policy.max_iterations == 4
     assert spec.execution_policy.llm_max_attempts == 1
 
@@ -210,6 +211,48 @@ def test_non_collector_role_keeps_custom_model_override(tmp_path):
 
     assert spec.provider == "openai"
     assert spec.model == "gpt-5-mini"
+
+
+def test_collector_model_override_must_belong_to_light_tier(tmp_path):
+    config = Config(
+        paths=WorkspacePaths(tmp_path),
+        data={
+            "llm": {
+                "tiers": {
+                    "light": {
+                        "routes": [
+                            {"provider": "openai", "model": "gpt-5-mini"},
+                            {"provider": "gemini", "model": "gemini-flash"},
+                        ],
+                    },
+                    "high": {
+                        "provider": "openai",
+                        "model": "gpt-5-pro",
+                    },
+                },
+            },
+        },
+    )
+    runtime = SubAgentRuntime(
+        config=config,
+        skills=SimpleNamespace(),
+        llm=SimpleNamespace(),
+    )
+    allowed = build_inline_spec(
+        WorkspacePaths(tmp_path),
+        name="web_researcher",
+        provider="gemini",
+        model="gemini-flash",
+    )
+    rejected = build_inline_spec(
+        WorkspacePaths(tmp_path),
+        name="web_researcher",
+        provider="openai",
+        model="gpt-5-pro",
+    )
+
+    assert runtime._model_override(allowed) == ("gemini", "gemini-flash")
+    assert runtime._model_override(rejected) == (None, None)
 
 
 def test_web_researcher_aliases_route_to_lane():

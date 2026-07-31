@@ -8629,8 +8629,8 @@ class WorkspaceNativeAgentLoop:
         # never injects heuristic "you must call tool X" retries inferred from
         # tool/skill-name intent guesses. Only caller-contract required
         # artifacts, tool-declared next_required_action, and provider/LLM
-        # error recovery may still steer the turn. Direct LoopConfig
-        # construction (unit tests) defaults to True to exercise the mechanism.
+        # error recovery may still steer the turn. Legacy tests and operators
+        # that need the convergence mechanism must opt in explicitly.
         workflow_forcing = bool(self.config.workflow_forcing)
         empty_team_result_retry_used = False
         truncated_no_tool_retry_used = False
