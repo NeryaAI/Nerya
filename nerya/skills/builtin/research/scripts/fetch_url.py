@@ -268,6 +268,72 @@ def _extract_html(html_text: str, *, url: str, min_content_chars: int) -> _Extra
     return fallback
 
 
+def _is_pdf_response(content_type: str, url: str, body: bytes) -> bool:
+    if "application/pdf" in content_type:
+        return True
+    if urlparse(url).path.lower().endswith(".pdf"):
+        return True
+    # Some IR portals serve PDFs as application/octet-stream; sniff magic.
+    return body[:5] == b"%PDF-"
+
+
+# Text budget for extracted PDF pages. Filings run to hundreds of pages;
+# keep enough for statements + MD&A while staying inside the child
+# runtime's observation window.
+_PDF_MAX_TEXT_CHARS = 120_000
+
+
+def _extract_pdf(body: bytes, *, url: str) -> dict[str, Any] | None:
+    """Extract text from PDF bytes via pypdf. Returns None when the
+    dependency is missing or the document yields no text (scanned/image
+    PDFs) so the caller can fall through to the error path."""
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    import io
+    try:
+        reader = PdfReader(io.BytesIO(body))
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+            except Exception:
+                return None
+        pages_total = len(reader.pages)
+        chunks: list[str] = []
+        chars = 0
+        pages_read = 0
+        for page in reader.pages:
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            if text.strip():
+                chunks.append(text)
+                chars += len(text)
+            pages_read += 1
+            if chars >= _PDF_MAX_TEXT_CHARS:
+                break
+        merged = _normalize_markdown("\n\n".join(chunks))[:_PDF_MAX_TEXT_CHARS]
+        if not merged.strip():
+            return None
+        title = ""
+        try:
+            meta = reader.metadata
+            title = str(getattr(meta, "title", "") or "") if meta else ""
+        except Exception:
+            pass
+        return {
+            "text": merged,
+            "title": title,
+            "pages_total": pages_total,
+            "pages_read": pages_read,
+            "truncated_pages": pages_read < pages_total,
+        }
+    except Exception:
+        return None
+
+
 def _jina_reader_url(url: str) -> str:
     # Reader's public contract is prefix-based:
     # https://r.jina.ai/https://example.com/page
@@ -585,8 +651,73 @@ def run(
         }
 
     truncated = len(body) > max_bytes
-    body = body[:max_bytes]
     content_type = (headers.get("content-type") or "").lower()
+    # ---- PDF branch: must run BEFORE the max_bytes cut. The xref table
+    # sits at the end of the file, so a byte-capped PDF is unparseable;
+    # http_get already hard-caps the download at HARD_FETCH_BYTES.
+    if _is_pdf_response(content_type, safety.url, body) and status < 400:
+        pdf = _extract_pdf(body, url=safety.url)
+        if pdf is not None:
+            return {
+                "ok": True,
+                "status": status,
+                "url": safety.url,
+                "title": pdf["title"],
+                "content_type": "application/pdf",
+                "bytes": len(body),
+                "truncated": bool(pdf["truncated_pages"]),
+                "fetch_method": "direct_pdf_pypdf",
+                "pdf_pages_total": pdf["pages_total"],
+                "pdf_pages_read": pdf["pages_read"],
+                "fallback_errors": fallback_errors,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "markdown": pdf["text"],
+                "text": pdf["text"],
+                "safety": safety.to_dict(),
+            }
+        fallback_errors.append(
+            "pdf_extract: no text extracted (scanned/encrypted PDF or "
+            "pypdf missing)"
+        )
+        # Jina Reader natively converts PDFs to text — try it before
+        # giving up instead of decoding raw PDF bytes into mojibake.
+        if use_jina_fallback:
+            step_timeout = next_timeout("jina_reader")
+            if step_timeout is not None:
+                jina, err = _fetch_jina_reader(
+                    safe_url=safety.url,
+                    max_bytes=max_bytes,
+                    timeout_s=step_timeout,
+                )
+                if jina is not None and not _looks_low_quality(
+                    jina["markdown"], min_chars=min_content_chars,
+                ):
+                    jina["ok"] = True
+                    jina["direct_status"] = status
+                    jina["direct_fetch_method"] = "direct_pdf"
+                    jina["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+                    jina["fallback_errors"] = fallback_errors
+                    jina["safety"] = safety.to_dict()
+                    return jina
+                if err:
+                    fallback_errors.append(err)
+        return {
+            "ok": False,
+            "status": status,
+            "url": safety.url,
+            "title": "",
+            "content_type": "application/pdf",
+            "bytes": len(body),
+            "truncated": truncated,
+            "fetch_method": "direct_pdf",
+            "fallback_errors": fallback_errors,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "error": "pdf_text_extraction_failed",
+            "markdown": "",
+            "text": "",
+            "safety": safety.to_dict(),
+        }
+    body = body[:max_bytes]
     markdown = ""
     title = ""
     fetch_method = "direct_text"

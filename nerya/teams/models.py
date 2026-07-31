@@ -31,6 +31,11 @@ class TeamMemberSpec:
     allowed_skills: list[str] = field(default_factory=list)
     tier: str = "medium"
     description: str = ""
+    # Optional per-member model override (provider + model id). Empty
+    # strings keep the member on its tier's default routing.
+    provider: str = ""
+    model: str = ""
+    execution_policy: dict[str, Any] = field(default_factory=dict)
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
@@ -102,6 +107,9 @@ class TeamMember:
     required: bool = True
     allowed_skills: list[str] = field(default_factory=list)
     tier: str = "medium"
+    provider: str = ""
+    model: str = ""
+    execution_policy: dict[str, Any] = field(default_factory=dict)
     status: str = "idle"
     last_task_id: Optional[str] = None
 
@@ -117,6 +125,9 @@ class TeamMember:
             required=spec.required,
             allowed_skills=list(spec.allowed_skills),
             tier=spec.tier,
+            provider=spec.provider,
+            model=spec.model,
+            execution_policy=dict(spec.execution_policy),
         )
 
 

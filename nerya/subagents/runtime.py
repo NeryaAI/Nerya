@@ -40,7 +40,7 @@ from ..llm.gateway import LLMGateway
 from ..security.prompt_injection import wrap_untrusted
 from ..skills.kernel import SkillKernel
 from .context_policy import build_context
-from .registry import SubAgentSpec
+from .registry import SubAgentExecutionPolicy, SubAgentSpec
 
 
 # Skills that the subagent is never allowed to dispatch directly, even when
@@ -64,12 +64,11 @@ CHILD_SKILL_DENYLIST: frozenset[str] = frozenset({
 #   * fetch the full SKILL.md for any tool (``skill_index`` — the
 #     documented escape hatch when the model needs the precise schema),
 #   * pull live web evidence to ground a claim before reporting back
-#     (``web_search`` / ``web_search_fetch`` — current native web tools).
-# These are all read-only, so they're safe to grant universally. The
+# These are read-only, so they're safe to grant universally. The
 # operator can still blacklist them via ``skills.disabled`` or per-spec
 # ``allowed_skills`` overrides if they need a hard-locked subagent.
 CHILD_CORE_SELF_CONTROL_SKILLS: tuple[str, ...] = (
-    "workspace", "skill_index", "web_search", "web_search_fetch",
+    "workspace", "skill_index",
 )
 
 
@@ -92,25 +91,12 @@ CHILD_NATIVE_TOOL_DENYLIST_PREFIXES: tuple[str, ...] = (
     # Children should not spawn more children directly — that path
     # only exists on the parent so the dispatcher can budget total
     # subagent fan-out.
-    "subagent_run",
+    "subagent_run", "team_run",
 )
 # Risk levels the child may invoke directly. Anything DANGEROUS is
 # always denied, no matter how the parent classified it.
 CHILD_NATIVE_TOOL_DENY_RISK: tuple[str, ...] = ("dangerous",)
 
-STOCK_RESEARCH_SUBAGENTS: frozenset[str] = frozenset({
-    "technical_analyst",
-    "fundamentals_analyst",
-    "valuation_analyst",
-    "sec_analyst",
-    "investor_perspective",
-    "sentiment_analyst",
-    "bull_researcher",
-    "bear_researcher",
-    "risk_critic",
-    "research_manager",
-    "research_editor",
-})
 SUBAGENT_FINALIZATION_RESERVE_SECONDS = 45.0
 SubAgentContextScope = Literal["subagent", "explicit_payload_only"]
 DEFAULT_CONTEXT_SCOPE: SubAgentContextScope = "subagent"
@@ -121,12 +107,6 @@ def _spec_profile_name(spec: SubAgentSpec | None) -> str:
     if spec is None:
         return ""
     return str(getattr(spec, "canonical_name", None) or spec.name or "")
-
-
-def _is_stock_research_spec(spec: SubAgentSpec | None) -> bool:
-    if spec is None:
-        return False
-    return spec.name in STOCK_RESEARCH_SUBAGENTS or _spec_profile_name(spec) in STOCK_RESEARCH_SUBAGENTS
 
 
 _TASK_CONTROL_PAYLOAD_KEYS: frozenset[str] = frozenset({
@@ -312,44 +292,55 @@ class SubAgentRuntime:
 
     # ---------------------------------------------------------------- config
     def _max_iterations(self, spec: SubAgentSpec | None = None) -> int:
-        # Keep the default ceiling high enough for research-oriented
-        # subagents to inspect sources, run small scripts, retry failures,
-        # and still produce a structured report without stopping mid-run.
+        policy_value = getattr(
+            getattr(spec, "execution_policy", None),
+            "max_iterations",
+            None,
+        )
+        if policy_value is not None:
+            return max(1, int(policy_value))
         explicit = self.config.get("agent.subagents.max_iterations", None)
         if explicit is not None:
             return max(1, int(explicit))
-        if _is_stock_research_spec(spec):
-            configured = self.config.get(
-                "agent.subagents.stock_research_max_iterations", 8,
-            )
-            return max(1, int(8 if configured is None else configured))
         return 60
 
-    def _max_skill_calls(self) -> int:
-        # Aligned with the iteration bump: a research subagent now has room
-        # to sequence ``operator.write_file`` → ``operator.run_python`` →
-        # ``websearch.search`` → ``operator.read_file`` → ``write_file``
-        # several times before summarising. Hard cap stays in place so a
-        # genuinely runaway loop still trips an error.
+    def _max_skill_calls(self, spec: SubAgentSpec | None = None) -> int:
+        policy_value = getattr(
+            getattr(spec, "execution_policy", None),
+            "max_skill_calls",
+            None,
+        )
+        if policy_value is not None:
+            return max(0, int(policy_value))
         configured = self.config.get("agent.subagents.max_skill_calls", 120)
         return max(0, int(120 if configured is None else configured))
 
     def _max_wall_seconds(self, spec: SubAgentSpec | None = None) -> float:
+        policy_value = getattr(
+            getattr(spec, "execution_policy", None),
+            "max_wall_seconds",
+            None,
+        )
+        if policy_value is not None:
+            return max(5.0, float(policy_value))
         explicit = self.config.get("agent.subagents.max_wall_seconds", None)
         if explicit is not None:
             try:
                 return max(5.0, float(explicit))
             except (TypeError, ValueError):
                 return 120.0
-        if _is_stock_research_spec(spec):
-            configured = self.config.get(
-                "agent.subagents.stock_research_max_wall_seconds", 360,
-            )
-            try:
-                return max(5.0, float(360 if configured is None else configured))
-            except (TypeError, ValueError):
-                return 360.0
         return 600.0
+
+    def _llm_max_attempts(self, spec: SubAgentSpec | None = None) -> int:
+        policy_value = getattr(
+            getattr(spec, "execution_policy", None),
+            "llm_max_attempts",
+            None,
+        )
+        if policy_value is not None:
+            return max(1, int(policy_value))
+        configured = self.config.get("agent.subagents.llm_max_attempts", 2)
+        return max(1, int(2 if configured is None else configured))
 
     def _finalization_reserve_seconds(self) -> float:
         configured = self.config.get(
@@ -368,6 +359,29 @@ class SubAgentRuntime:
         except (TypeError, ValueError):
             return SUBAGENT_FINALIZATION_RESERVE_SECONDS
 
+    def _preloaded_skill_context(self, spec: SubAgentSpec) -> str:
+        """Load only skill bodies selected by declarative role policy."""
+
+        selected = list(spec.execution_policy.preload_skills or [])
+        if not selected:
+            return ""
+        blocks: list[str] = []
+        registry = getattr(self.skills, "registry", None)
+        if registry is None:
+            return ""
+        for skill_id in selected:
+            try:
+                entry = registry.get(skill_id)
+            except Exception:
+                continue
+            manifest = getattr(entry, "manifest", None)
+            instructions = str(
+                getattr(manifest, "instructions", "") or ""
+            ).strip()
+            if instructions:
+                blocks.append(f"-- skill:{skill_id} --\n{instructions}")
+        return "\n\n".join(blocks)
+
     # ---------------------------------------------------------------- core
     def run(
         self,
@@ -380,6 +394,7 @@ class SubAgentRuntime:
         turn_id: str | None = None,
         parent_call_id: str | None = None,
         context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
+        delegation_depth: int = 0,
     ) -> dict[str, Any]:
         t_start = time.monotonic()
         steps: list[_StepRecord] = []
@@ -416,7 +431,10 @@ class SubAgentRuntime:
                 sid for sid in registry_ids
                 if sid and sid not in CHILD_SKILL_DENYLIST
             })
-            callable_native_tools = self._allowed_native_tool_names()
+            callable_native_tools = self._allowed_native_tool_names(
+                spec=spec,
+                delegation_depth=delegation_depth,
+            )
             preloaded = _normalise_preloaded_tools(
                 preloaded,
                 callable_skills=callable_skills,
@@ -476,11 +494,19 @@ class SubAgentRuntime:
                 self.config, self.skills, spec,
                 payload=payload, strategy_id=strategy_id,
             )
+            skill_context = self._preloaded_skill_context(spec)
+            if skill_context:
+                base_context = f"{base_context}\n\n{skill_context}"
 
         max_iter = self._max_iterations(spec)
-        max_calls = 0 if explicit_payload_only else self._max_skill_calls()
+        max_calls = 0 if explicit_payload_only else self._max_skill_calls(spec)
         max_wall_seconds = self._max_wall_seconds(spec)
         finalization_reserve_seconds = self._finalization_reserve_seconds()
+        required_native_tools = [
+            name for name in spec.execution_policy.required_native_tools
+            if name in callable_native_tools
+        ]
+        required_tool_reminder_attempted = False
         consecutive_unproductive_batches = 0
         successful_call_signatures: set[str] = set()
         last_parsed: dict[str, Any] = {}
@@ -542,6 +568,8 @@ class SubAgentRuntime:
                 session_id=session_id,
                 trigger_event_id=trigger_event_id,
                 context_metadata=team_event_fields,
+                execution_policy=spec.execution_policy,
+                delegation_depth=delegation_depth,
             )
             if record is None:
                 return None
@@ -575,25 +603,54 @@ class SubAgentRuntime:
             return observation
 
         accumulated_obs: list[dict[str, Any]] = []
-        for entry in _stock_research_data_prefetch_calls(
-            _spec_profile_name(spec),
-            payload,
-            native_tools=callable_native_tools,
-        ):
-            if len(skill_calls) >= max_calls:
-                rejected_actions.append({
-                    "entry": entry,
-                    "reason": "skill_call_budget_exhausted",
-                })
-                break
-            observation = _dispatch_action(
-                entry,
-                observation_iteration="prefetch",
-                event_iteration=-1,
-                signature=_skill_call_signature(entry),
+
+        def _required_tool_gate(iteration: int) -> str:
+            """Return ``retry``, ``close``, or ``""`` for policy requirements."""
+
+            nonlocal required_tool_reminder_attempted, close_reason
+            successful = {
+                str(record.get("skill") or "")
+                for record in skill_calls
+                if record.get("ok")
+            }
+            missing = [
+                name for name in required_native_tools
+                if name not in successful
+            ]
+            if not missing:
+                return ""
+            has_retry_budget = (
+                not required_tool_reminder_attempted
+                and iteration + 1 < max_iter
+                and max_wall_seconds - (time.monotonic() - t_start)
+                > finalization_reserve_seconds
             )
-            if observation is not None:
-                accumulated_obs.append(observation)
+            if has_retry_budget:
+                required_tool_reminder_attempted = True
+                accumulated_obs.append({
+                    "iteration": iteration,
+                    "ok": False,
+                    "reason": "required_native_tool_missing",
+                    "required_tools": missing,
+                    "summary": (
+                        "Execution policy requires one successful call to each "
+                        "listed native tool before final output. Call the missing "
+                        f"tool(s) now with valid arguments: {', '.join(missing)}."
+                    ),
+                })
+                steps.append(_StepRecord(
+                    kind="observe",
+                    iteration=iteration,
+                    status="retry",
+                    detail={
+                        "reason": "required_native_tool_missing",
+                        "required_tools": missing,
+                    },
+                ))
+                return "retry"
+            close_reason = "required_native_tool_missing"
+            return "close"
+
         for i in range(max_iter):
             if time.monotonic() - t_start >= max_wall_seconds:
                 close_reason = "subagent_wall_time_exceeded"
@@ -642,11 +699,14 @@ class SubAgentRuntime:
             )
             t0 = time.monotonic()
             result = None
-            for llm_attempt in range(2):
+            llm_max_attempts = self._llm_max_attempts(spec)
+            for llm_attempt in range(llm_max_attempts):
                 try:
                     result = self.llm.call(
                         task="subagent_analysis", caller=f"subagent:{spec.name}",
                         tier=spec.tier, prompt=prompt,
+                        model_provider=spec.provider or None,
+                        model_id=spec.model or None,
                         metadata={
                             "session_id": session_id,
                             "turn_id": turn_id,
@@ -665,7 +725,7 @@ class SubAgentRuntime:
                 except Exception as exc:
                     err_msg = f"{type(exc).__name__}: {exc}"
                     can_retry = (
-                        llm_attempt == 0
+                        llm_attempt + 1 < llm_max_attempts
                         and _is_transient_subagent_llm_error(exc)
                         and time.monotonic() - t_start < max_wall_seconds
                     )
@@ -867,6 +927,11 @@ class SubAgentRuntime:
                 close_reason = "duplicate_successful_tool_request"
                 break
             if batch_obs and settle_after_actions:
+                required_status = _required_tool_gate(i)
+                if required_status == "retry":
+                    continue
+                if required_status == "close":
+                    break
                 close_reason = "tool_calls_without_replan_settled"
                 steps.append(_StepRecord(
                     kind="observe",
@@ -911,6 +976,20 @@ class SubAgentRuntime:
             # the subagent explicitly asked for another pass. When the model
             # requested tool/skill calls we always give it one more turn with
             # those observations, even if it forgot to set replan=true.
+            finishing_without_more_work = (
+                parsed.get("done") is True
+                or parsed.get("final") is True
+                or (
+                    not batch_obs
+                    and not (parsed.get("continue") or parsed.get("replan"))
+                )
+            )
+            if finishing_without_more_work:
+                required_status = _required_tool_gate(i)
+                if required_status == "retry":
+                    continue
+                if required_status == "close":
+                    break
             if parsed.get("done") is True or parsed.get("final") is True:
                 break
             if batch_obs:
@@ -991,6 +1070,8 @@ class SubAgentRuntime:
                     caller=f"subagent:{spec.name}",
                     tier=spec.tier,
                     prompt=prompt,
+                    model_provider=spec.provider or None,
+                    model_id=spec.model or None,
                     metadata={
                         "session_id": session_id,
                         "turn_id": turn_id,
@@ -1331,7 +1412,12 @@ class SubAgentRuntime:
         )
 
     # ---------------------------------------------------------------- dispatch
-    def _allowed_native_tool_names(self) -> list[str]:
+    def _allowed_native_tool_names(
+        self,
+        *,
+        spec: SubAgentSpec | None = None,
+        delegation_depth: int = 0,
+    ) -> list[str]:
         """Return the subset of parent native tools children may invoke.
 
         The child inherits the parent's native-tool surface
@@ -1341,11 +1427,25 @@ class SubAgentRuntime:
         evolve_promote, subagent_run) and any DANGEROUS-tier tool stays
         parent-only — the dispatcher itself
         plus :data:`CHILD_NATIVE_TOOL_DENYLIST_PREFIXES` enforce that.
+
+        Role-specific visibility comes from ``SubAgentExecutionPolicy``.
+        Delegating tools declare their own depth ceiling on the descriptor,
+        so nested fan-out is bounded without payload markers or tool-name
+        branches in this runtime.
         """
 
         registry = self.tool_registry
         if registry is None:
             return []
+        policy = SubAgentExecutionPolicy.from_dict(
+            getattr(spec, "execution_policy", None),
+        )
+        allow = set(policy.native_tool_allow)
+        deny = set(policy.native_tool_deny)
+        try:
+            current_depth = max(0, int(delegation_depth))
+        except (TypeError, ValueError):
+            current_depth = 0
         out: list[str] = []
         for descriptor in registry.list_tools():
             name = str(getattr(descriptor, "name", "") or "")
@@ -1353,6 +1453,17 @@ class SubAgentRuntime:
                 continue
             if any(name.startswith(p) for p in CHILD_NATIVE_TOOL_DENYLIST_PREFIXES):
                 continue
+            if allow and name not in allow:
+                continue
+            if name in deny:
+                continue
+            max_depth = getattr(descriptor, "child_max_depth", None)
+            if max_depth is not None:
+                try:
+                    if current_depth >= int(max_depth):
+                        continue
+                except (TypeError, ValueError):
+                    continue
             risk = str(getattr(getattr(descriptor, "risk", None), "value", "") or "")
             if risk and risk.lower() in CHILD_NATIVE_TOOL_DENY_RISK:
                 continue
@@ -1370,6 +1481,8 @@ class SubAgentRuntime:
         strategy_id: str | None,
         session_id: str | None,
         context_metadata: dict[str, Any] | None = None,
+        execution_policy: SubAgentExecutionPolicy | None = None,
+        delegation_depth: int = 0,
     ) -> dict[str, Any] | None:
         if not isinstance(entry, dict):
             return {
@@ -1397,6 +1510,87 @@ class SubAgentRuntime:
         # first and fall back to the skill kernel only when the name is
         # unknown to the native registry.
         native_names = allowed_native_tools or []
+        # A playbook may describe an operation using skill-call language even
+        # when the executable surface is a native tool. Resolve those shapes
+        # from descriptor metadata, including the common nested
+        # ``payload={action, inputs}`` wrapper emitted by some providers. The
+        # runtime remains agnostic to concrete skills, actions, and roles.
+        if skill not in native_names and self.tool_registry is not None:
+            nested_action = str(payload.get("action") or "").strip()
+            action_candidates = list(dict.fromkeys([
+                candidate for candidate in (action, nested_action) if candidate
+            ]))
+            intent_keys = (
+                [f"{skill}.{candidate}" for candidate in action_candidates]
+                if action_candidates
+                else [skill]
+            )
+            for native_name in native_names:
+                try:
+                    descriptor = self.tool_registry.get(native_name)
+                except Exception:
+                    continue
+                aliases = {
+                    str(value).strip()
+                    for value in (
+                        getattr(descriptor, "invocation_aliases", ()) or ()
+                    )
+                    if str(value).strip()
+                }
+                if not aliases.intersection(intent_keys):
+                    continue
+                native_payload = dict(payload or {})
+                wrapped_inputs = native_payload.pop("inputs", None)
+                native_payload.pop("action", None)
+                if isinstance(wrapped_inputs, dict):
+                    native_payload.update(wrapped_inputs)
+                return self._dispatch_native(
+                    native_name,
+                    payload=native_payload,
+                    entry=entry,
+                    spec_name=spec_name,
+                    strategy_id=strategy_id,
+                    session_id=session_id,
+                    trigger_event_id=trigger_event_id,
+                    context_metadata=context_metadata,
+                    execution_policy=execution_policy,
+                    delegation_depth=delegation_depth,
+                )
+        # Descriptor-driven intent resolution avoids burning a retry when a
+        # model expresses a native operation in ``{skill, action}`` form.
+        # The descriptor declares both accepted action aliases and the
+        # argument that receives the subject; no action names live here.
+        if action and skill not in native_names and self.tool_registry is not None:
+            for native_name in native_names:
+                try:
+                    descriptor = self.tool_registry.get(native_name)
+                except Exception:
+                    continue
+                aliases = tuple(
+                    str(value)
+                    for value in (
+                        getattr(descriptor, "subject_action_aliases", ()) or ()
+                    )
+                )
+                subject_argument = str(
+                    getattr(descriptor, "subject_argument", "") or ""
+                )
+                if action not in aliases or not subject_argument:
+                    continue
+                native_payload = dict(payload or {})
+                native_payload.setdefault(subject_argument, skill)
+                return self._dispatch_native(
+                    native_name,
+                    payload=native_payload,
+                    entry=entry,
+                    spec_name=spec_name,
+                    strategy_id=strategy_id,
+                    session_id=session_id,
+                    trigger_event_id=trigger_event_id,
+                    context_metadata=context_metadata,
+                    execution_policy=execution_policy,
+                    delegation_depth=delegation_depth,
+                )
         if skill in native_names:
             native_payload = dict(payload or {})
             if action and "action" not in native_payload:
@@ -1407,6 +1601,8 @@ class SubAgentRuntime:
                 strategy_id=strategy_id, session_id=session_id,
                 trigger_event_id=trigger_event_id,
                 context_metadata=context_metadata,
+                execution_policy=execution_policy,
+                delegation_depth=delegation_depth,
             )
         if not action:
             return {
@@ -1441,11 +1637,21 @@ class SubAgentRuntime:
                 trigger_event_id=trigger_event_id,
             )
         except Exception as exc:
-            return {
+            failure: dict[str, Any] = {
                 "ok": False, "skill": skill, "action": action,
                 "error": f"{type(exc).__name__}: {exc}",
                 "entry": entry,
             }
+            # Structured recovery hint so the model fixes the call on the
+            # very next step instead of probing action names blindly.
+            if type(exc).__name__ == "SkillNotFoundError":
+                failure["recovery_hint"] = (
+                    "To read a skill's playbook use "
+                    '{"skill": "skill_view", "payload": {"skill_id": '
+                    f'"{skill}"}}}}. To execute, pick an action that the '
+                    "skill actually declares (see the allowed tools list)."
+                )
+            return failure
         return {
             "ok": True, "skill": skill, "action": action,
             "result": result,
@@ -1462,6 +1668,8 @@ class SubAgentRuntime:
         session_id: str | None,
         trigger_event_id: str | None,
         context_metadata: dict[str, Any] | None = None,
+        execution_policy: SubAgentExecutionPolicy | None = None,
+        delegation_depth: int = 0,
     ) -> dict[str, Any]:
         """Invoke a parent native tool from inside a subagent.
 
@@ -1489,6 +1697,9 @@ class SubAgentRuntime:
             }
         from ..tools.types import ToolCall  # local import to avoid cycles
 
+        policy = SubAgentExecutionPolicy.from_dict(execution_policy)
+        defaults = policy.tool_argument_defaults.get(tool_name) or {}
+        payload = {**dict(defaults), **dict(payload or {})}
         payload = _normalise_native_payload(tool_name, payload)
         safe_payload = redact_display_dict(dict(payload or {}))
         call = ToolCall(
@@ -1501,6 +1712,7 @@ class SubAgentRuntime:
                 "strategy_id": strategy_id,
                 "session_id": session_id,
                 "trigger_event_id": trigger_event_id,
+                "delegation_depth": max(0, int(delegation_depth or 0)),
             },
         )
         try:
@@ -1717,91 +1929,6 @@ def _native_tool_usage_hints(native_tools: list[str]) -> str:
     if len(lines) == 1:
         return ""
     return "\n".join(lines)
-
-
-def _prefetch_symbol(payload: dict[str, Any]) -> str:
-    for key in ("ticker", "symbol", "identifier"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            return value
-    return ""
-
-
-def _stock_research_data_prefetch_calls(
-    spec_name: str,
-    payload: dict[str, Any],
-    *,
-    native_tools: list[str],
-) -> list[dict[str, Any]]:
-    if spec_name not in {"fundamentals_analyst", "risk_critic"}:
-        return []
-    symbol = _prefetch_symbol(payload)
-    if not symbol:
-        return []
-    available = set(native_tools or [])
-    venue = str(payload.get("venue") or "yahoo")
-    calls: list[dict[str, Any]] = []
-
-    def add(skill: str, payload: dict[str, Any]) -> None:
-        if skill not in available:
-            return
-        calls.append({"skill": skill, "payload": payload})
-
-    add("market_data", {"action": "get_ticker", "venue": venue, "market": symbol})
-
-    if spec_name == "risk_critic":
-        add(
-            "market_data",
-            {
-                "action": "get_candles",
-                "venue": venue,
-                "market": symbol,
-                "interval": "1d",
-                "count": 90,
-            },
-        )
-
-    if spec_name == "fundamentals_analyst":
-        if "data_api" in available:
-            add(
-                "data_api",
-                {
-                    "op": "call",
-                    "provider": "financial_datasets",
-                    "action": "all_statements",
-                    "args": {"ticker": symbol, "period": "annual", "limit": 4},
-                    "limit": 12,
-                },
-            )
-            add(
-                "data_api",
-                {
-                    "op": "call",
-                    "provider": "financial_datasets",
-                    "action": "metrics_snapshot",
-                    "args": {"ticker": symbol},
-                    "limit": 20,
-                },
-            )
-            add(
-                "data_api",
-                {
-                    "op": "call",
-                    "provider": "financial_datasets",
-                    "action": "filings",
-                    "args": {"ticker": symbol, "form": "10-K", "limit": 3},
-                    "limit": 5,
-                },
-            )
-        else:
-            add("mcp__yahoo__get_stock_info", {"ticker": symbol})
-            for financial_type in ("income_stmt", "balance_sheet", "cashflow"):
-                add(
-                    "mcp__yahoo__get_financial_statement",
-                    {"ticker": symbol, "financial_type": financial_type},
-                )
-
-    return calls
 
 
 def _normalise_native_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:

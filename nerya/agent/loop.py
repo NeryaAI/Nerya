@@ -3164,66 +3164,6 @@ def _skill_discovery_proposal_retry_prompt(total_tool_calls: int) -> str:
     )
 
 
-def _explicit_skill_authoring_request(text: str) -> bool:
-    normalized = " ".join(str(text or "").lower().replace("_", " ").split())
-    if not normalized:
-        return False
-    skill_terms = (
-        "skill",
-        "workflow",
-        "playbook",
-        "技能",
-        "工作流",
-        "流程",
-    )
-    authoring_terms = (
-        "create",
-        "write",
-        "add",
-        "build",
-        "draft",
-        "generate",
-        "scaffold",
-        "update",
-        "capture",
-        "learn",
-        "reusable",
-        "写",
-        "创建",
-        "新增",
-        "生成",
-        "更新",
-        "沉淀",
-        "固化",
-        "封装",
-    )
-    read_only_terms = (
-        "list skills",
-        "show skills",
-        "view skill",
-        "read skill",
-        "列出 skill",
-        "查看 skill",
-        "读取 skill",
-    )
-    if any(term in normalized for term in read_only_terms):
-        return False
-    return (
-        any(term in normalized for term in skill_terms)
-        and any(term in normalized for term in authoring_terms)
-    )
-
-
-def _skill_proposal_retry_due(
-    *,
-    total_tool_calls: int,
-    original_user_text: str,
-) -> bool:
-    if not _explicit_skill_authoring_request(original_user_text):
-        return False
-    return total_tool_calls > 0
-
-
 def _skill_proposal_retry_pending(
     *,
     skill_discovery_context_observed: bool,
@@ -3231,24 +3171,29 @@ def _skill_proposal_retry_pending(
     provider_tool_names: set[str],
     completed_tool_names: set[str],
     total_tool_calls: int,
-    original_user_text: str,
+    original_user_text: str = "",
     allow_explicit_without_discovery: bool = False,
 ) -> bool:
-    explicit_authoring = _explicit_skill_authoring_request(original_user_text)
-    has_skill_context = skill_discovery_context_observed or (
-        allow_explicit_without_discovery and explicit_authoring
-    )
-    retry_due = _skill_proposal_retry_due(
-        total_tool_calls=total_tool_calls,
-        original_user_text=original_user_text,
-    ) or (allow_explicit_without_discovery and explicit_authoring)
+    """Nudge toward ``evolve_skill_proposal`` from tool evidence only.
+
+    ``original_user_text`` / ``allow_explicit_without_discovery`` are accepted
+    for call-site compatibility but intentionally ignored: the loop no longer
+    infers "author a skill" intent by keyword-matching the operator's
+    natural-language request. The nudge fires purely from tool evidence — the
+    turn actually discovered/inspected skills and ran at least one tool call
+    without attempting any self-evolution proposal tool. It is additionally
+    gated by ``workflow_forcing`` at the call sites, so production stays
+    autonomous and this never runs unless an operator opts back in.
+    """
+
+    del original_user_text, allow_explicit_without_discovery  # NL routing removed
     return (
-        has_skill_context
+        skill_discovery_context_observed
+        and total_tool_calls > 0
         and not skill_proposal_retry_used
         and "evolve_skill_proposal" in provider_tool_names
         and "evolve_skill_proposal" not in completed_tool_names
         and not (_EVOLVE_PROPOSAL_TOOLS & completed_tool_names)
-        and retry_due
     )
 
 
@@ -4136,6 +4081,25 @@ class LoopConfig:
     """After task state has been inspected, nudge once toward the concrete
     task action instead of letting automation requests drift into open-ended
     portfolio/config/skill discovery."""
+
+    workflow_forcing: bool = True
+    """Master switch for the loop's heuristic workflow-forcing behaviors.
+
+    When ``True`` the loop may infer intent from observed tool/skill names and
+    inject synthetic "you must call tool X now" retry messages (the strategy
+    authoring / team_run / provider / skill / task-automation / risk_check
+    convergence nudges). When ``False`` the loop stays autonomous: it never
+    guesses a required workflow from tool/skill-name evidence and only steers
+    the turn from *contracts* — caller ``required_artifacts``, a tool result
+    that explicitly declares ``next_required_action``, and provider/LLM error
+    recovery (transient errors, safety refusals, truncated output).
+
+    The dataclass default is ``True`` so standalone loop unit tests keep
+    exercising the opt-in forcing mechanism. Production wires this from
+    ``agent.native.workflow_forcing`` (default ``False``) via the kernel, so
+    every real agent turn is skill/tool/state-driven rather than pinned to a
+    hardcoded workflow.
+    """
 
 
 @dataclass
@@ -8662,6 +8626,13 @@ class WorkspaceNativeAgentLoop:
         required_artifact_announcements: set[tuple[str, ...]] = set()
         required_action_read_only_retries: set[tuple[str, ...]] = set()
         interrupted_required_tool_retry_keys: set[tuple[str, ...]] = set()
+        # Master switch: when False (production default via kernel), the loop
+        # never injects heuristic "you must call tool X" retries inferred from
+        # tool/skill-name intent guesses. Only caller-contract required
+        # artifacts, tool-declared next_required_action, and provider/LLM
+        # error recovery may still steer the turn. Direct LoopConfig
+        # construction (unit tests) defaults to True to exercise the mechanism.
+        workflow_forcing = bool(self.config.workflow_forcing)
         empty_team_result_retry_used = False
         truncated_no_tool_retry_used = False
         strategy_authoring_context_observed = False
@@ -8865,7 +8836,8 @@ class WorkspaceNativeAgentLoop:
                     )
 
             if (
-                not agent_team_run_required_retry_used
+                workflow_forcing
+                and not agent_team_run_required_retry_used
                 and "team_run" in provider_tool_names
                 and "team_run" not in successful_tool_names
                 and _agent_team_strategy_prep_context_observed(
@@ -8882,7 +8854,8 @@ class WorkspaceNativeAgentLoop:
                 })
                 transition_reason = "agent_team_strategy_prep_team_run_retry"
             if (
-                not team_research_run_required_retry_used
+                workflow_forcing
+                and not team_research_run_required_retry_used
                 and "team_run" in provider_tool_names
                 and "team_run" not in successful_tool_names
                 and _team_research_context_observed(
@@ -8900,7 +8873,8 @@ class WorkspaceNativeAgentLoop:
                 })
                 transition_reason = "team_research_team_run_retry"
             if (
-                not strategy_proposal_retry_used
+                workflow_forcing
+                and not strategy_proposal_retry_used
                 and "strategy_generate_proposal" in provider_tool_names
                 and "strategy_generate_proposal" not in completed_tool_names
                 and "team_run" not in required_next_tool_names
@@ -8928,7 +8902,7 @@ class WorkspaceNativeAgentLoop:
                     "content": _strategy_authoring_convergence_retry_prompt(),
                 })
                 transition_reason = "strategy_authoring_convergence_retry"
-            if _skill_proposal_retry_pending(
+            if workflow_forcing and _skill_proposal_retry_pending(
                 skill_discovery_context_observed=skill_discovery_context_observed,
                 skill_proposal_retry_used=skill_proposal_retry_used,
                 provider_tool_names=provider_tool_names,
@@ -8946,7 +8920,8 @@ class WorkspaceNativeAgentLoop:
                 })
                 transition_reason = "skill_discovery_proposal_retry"
             if (
-                not provider_proposal_retry_used
+                workflow_forcing
+                and not provider_proposal_retry_used
                 and not available_provider_connector_observed
                 and "evolve_provider_proposal" in provider_tool_names
                 and "evolve_provider_proposal" not in completed_tool_names
@@ -8965,7 +8940,8 @@ class WorkspaceNativeAgentLoop:
                 transition_reason = "provider_proposal_retry"
 
             if (
-                not trade_risk_check_retry_used
+                workflow_forcing
+                and not trade_risk_check_retry_used
                 and "risk_check" in provider_tool_names
                 and "risk_check" not in successful_tool_names
                 and _trade_risk_check_required_context_observed(
@@ -10759,7 +10735,8 @@ class WorkspaceNativeAgentLoop:
                     transition_reason = "next_required_action_text_blocked"
                     break
                 if (
-                    final_text
+                    workflow_forcing
+                    and final_text
                     and not source_fetch_fallback_retry_used
                     and source_search_fetch_failure_without_documents_observed
                     and not source_search_fetch_document_observed
@@ -10777,7 +10754,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 if (
-                    final_text
+                    workflow_forcing
+                    and final_text
                     and not strategy_proposal_retry_used
                     and not strategy_target_missing_observed
                     and "strategy_generate_proposal" in provider_tool_names
@@ -10812,7 +10790,8 @@ class WorkspaceNativeAgentLoop:
                     ),
                 )
                 if (
-                    final_text
+                    workflow_forcing
+                    and final_text
                     and pending_reflection_tools
                     and not evolution_read_only_retry_used
                     and iterations < self.config.max_iterations
@@ -10827,7 +10806,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 if (
-                    not strategy_proposal_retry_used
+                    workflow_forcing
+                    and not strategy_proposal_retry_used
                     and not strategy_target_missing_observed
                     and "strategy_generate_proposal" in provider_tool_names
                     and "strategy_generate_proposal" not in completed_tool_names
@@ -10856,7 +10836,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 if (
-                    not provider_proposal_retry_used
+                    workflow_forcing
+                    and not provider_proposal_retry_used
                     and not available_provider_connector_observed
                     and "evolve_provider_proposal" in provider_tool_names
                     and "evolve_provider_proposal" not in completed_tool_names
@@ -10885,7 +10866,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 if (
-                    final_text
+                    workflow_forcing
+                    and final_text
                     and _skill_proposal_retry_pending(
                         skill_discovery_context_observed=skill_discovery_context_observed,
                         skill_proposal_retry_used=skill_proposal_retry_used,
@@ -10909,7 +10891,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 if (
-                    task_automation_context_observed
+                    workflow_forcing
+                    and task_automation_context_observed
                     and not task_automation_action_retry_used
                     and "task_create" in provider_tool_names
                     and "task_create" not in completed_tool_names
@@ -10960,7 +10943,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 if (
-                    final_text
+                    workflow_forcing
+                    and final_text
                     and not evolution_read_only_retry_used
                     and not strategy_target_missing_observed
                     and "evolve_reflect" in provider_tool_names
@@ -11254,7 +11238,14 @@ class WorkspaceNativeAgentLoop:
             for call in calls:
                 if call.name:
                     completed_tool_names.add(call.name)
-                if call.name in {"skill_index", "skill_view", "Skill", "skill"}:
+                if call.name == "skill_index":
+                    # Skill *discovery* (searching the catalog for a gap) is
+                    # the only tool signal that can motivate a skill
+                    # proposal. Loading a known skill to *use* it
+                    # (skill_view / Skill) is not evidence that the operator
+                    # wants to author a new skill, so it must not by itself
+                    # trigger the proposal nudge; intent is never inferred
+                    # from prompt text.
                     skill_discovery_context_observed = True
                 if call.name in _TASK_AUTOMATION_CONTEXT_TOOL_NAMES:
                     task_automation_context_observed = True
@@ -11833,7 +11824,8 @@ class WorkspaceNativeAgentLoop:
             }
             agent_team_run_tool_names = successful_tool_names & {"team_run"}
             if (
-                has_agent_team_proposal
+                workflow_forcing
+                and has_agent_team_proposal
                 and "role_list" in successful_tool_names
                 and not agent_team_run_tool_names
                 and not agent_team_run_required_retry_used
@@ -11852,7 +11844,8 @@ class WorkspaceNativeAgentLoop:
                 final_text = ""
                 continue
             if (
-                agent_team_proposal_needs_team_reconcile
+                workflow_forcing
+                and agent_team_proposal_needs_team_reconcile
                 and agent_team_run_tool_names
                 and not agent_team_proposal_after_team_retry_used
                 and "strategy_generate_proposal" in provider_tool_names
@@ -11887,7 +11880,8 @@ class WorkspaceNativeAgentLoop:
                     ),
                 )
                 if (
-                    pending_reflection_tools
+                    workflow_forcing
+                    and pending_reflection_tools
                     and not evolution_read_only_retry_used
                     and iterations < self.config.max_iterations
                 ):
@@ -11906,7 +11900,8 @@ class WorkspaceNativeAgentLoop:
                     successful_tool_names=successful_tool_names,
                 )
                 if (
-                    pending_task_automation_tools
+                    workflow_forcing
+                    and pending_task_automation_tools
                     and not task_automation_action_retry_used
                     and iterations < self.config.max_iterations
                 ):
@@ -11928,7 +11923,8 @@ class WorkspaceNativeAgentLoop:
                     != "agent_team"
                 ]
                 if (
-                    observed_agent_team_mode_mismatches
+                    workflow_forcing
+                    and observed_agent_team_mode_mismatches
                     and not has_agent_team_proposal
                     and (
                         not self.config.required_artifacts
@@ -11974,7 +11970,8 @@ class WorkspaceNativeAgentLoop:
                 )
                 break
             if (
-                agent_team_mode_mismatches
+                workflow_forcing
+                and agent_team_mode_mismatches
                 and not has_agent_team_proposal
                 and not agent_team_proposal_mode_retry_used
                 and agent_team_mode_hint_tool_names
@@ -12093,7 +12090,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 if (
-                    provider_proposals_are_auxiliary
+                    workflow_forcing
+                    and provider_proposals_are_auxiliary
                     and not provider_proposal_auxiliary_continuation_used
                     and iterations < self.config.max_iterations
                 ):
@@ -12106,7 +12104,8 @@ class WorkspaceNativeAgentLoop:
                     final_text = ""
                     continue
                 if (
-                    not observed_strategy_proposals
+                    workflow_forcing
+                    and not observed_strategy_proposals
                     and (
                         strategy_authoring_context_observed
                         or (
@@ -12295,7 +12294,8 @@ class WorkspaceNativeAgentLoop:
                     )
                 ]
                 if (
-                    team_strategy_results
+                    workflow_forcing
+                    and team_strategy_results
                     and not strategy_proposal_retry_used
                     and "strategy_generate_proposal" in provider_tool_names
                     and "strategy_generate_proposal" not in successful_tool_names
@@ -12322,7 +12322,8 @@ class WorkspaceNativeAgentLoop:
                         if not _team_result_has_usable_output(data)
                     ]
                     if (
-                        "task_create" in completed_tool_names
+                        workflow_forcing
+                        and "task_create" in completed_tool_names
                         and not strategy_proposal_retry_used
                         and "strategy_generate_proposal" in provider_tool_names
                         and "strategy_generate_proposal" not in successful_tool_names
@@ -12337,7 +12338,8 @@ class WorkspaceNativeAgentLoop:
                         transition_reason = "durable_workflow_proposal_retry"
                         continue
                     if (
-                        empty_degraded_results
+                        workflow_forcing
+                        and empty_degraded_results
                         and not empty_team_result_retry_used
                         and iterations < self.config.max_iterations
                     ):
@@ -12518,6 +12520,7 @@ class WorkspaceNativeAgentLoop:
 
             if (
                 task_automation_context_observed
+                and workflow_forcing
                 and not task_automation_action_retry_used
                 and "task_create" in provider_tool_names
                 and "task_create" not in completed_tool_names

@@ -3177,7 +3177,7 @@ def test_subagent_runtime_falls_back_after_raw_tool_request_followup(
     assert result["metrics"]["skill_calls"][0]["skill"] == "market_data"
 
 
-def test_subagent_runtime_prefetches_required_fundamental_data(tmp_path) -> None:
+def test_subagent_runtime_does_not_prefetch_from_role_name(tmp_path) -> None:
     class FakeRegistry:
         def list(self):  # noqa: ANN201
             return []
@@ -3260,49 +3260,11 @@ def test_subagent_runtime_prefetches_required_fundamental_data(tmp_path) -> None
         payload={"ticker": "NVDA"},
     )
 
-    assert (
-        "market_data",
-        {"market": "NVDA", "action": "get_ticker", "venue": "yahoo"},
-    ) in native_calls
-    statement_types = [
-        payload.get("financial_type")
-        for name, payload in native_calls
-        if name == "mcp__yahoo__get_financial_statement"
-    ]
-    assert statement_types == []
-    data_api_calls = [payload for name, payload in native_calls if name == "data_api"]
-    assert data_api_calls == [
-        {
-            "op": "call",
-            "provider": "financial_datasets",
-            "action": "all_statements",
-            "args": {"ticker": "NVDA", "period": "annual", "limit": 4},
-            "limit": 12,
-        },
-        {
-            "op": "call",
-            "provider": "financial_datasets",
-            "action": "metrics_snapshot",
-            "args": {"ticker": "NVDA"},
-            "limit": 20,
-        },
-        {
-            "op": "call",
-            "provider": "financial_datasets",
-            "action": "filings",
-            "args": {"ticker": "NVDA", "form": "10-K", "limit": 3},
-            "limit": 5,
-        },
-    ]
-    assert "prior observations" in llm.prompts[0]
-    assert [call["skill"] for call in result["metrics"]["skill_calls"][:5]] == [
-        "market_data",
-        "data_api",
-        "data_api",
-        "data_api",
-    ]
-    assert result["output"]["data_coverage"]["has_market_data"] is True
-    assert result["output"]["data_coverage"]["has_financial_statement"] is True
+    assert native_calls == []
+    assert "prior observations" not in llm.prompts[0]
+    assert result["metrics"]["skill_calls"] == []
+    assert result["output"]["data_coverage"]["has_market_data"] is False
+    assert result["output"]["data_coverage"]["has_financial_statement"] is False
 
 
 def test_subagent_native_tool_error_preserves_provider_action_and_detail(
@@ -3409,7 +3371,7 @@ def test_subagent_native_tool_error_preserves_provider_action_and_detail(
     assert rejected["retryable"] is False
 
 
-def test_subagent_runtime_returns_prefetch_evidence_when_initial_llm_transient_fails(
+def test_subagent_runtime_does_not_fabricate_prefetch_on_transient_llm_failure(
     tmp_path,
 ) -> None:
     class FakeRegistry:
@@ -3476,22 +3438,16 @@ def test_subagent_runtime_returns_prefetch_evidence_when_initial_llm_transient_f
         tier="medium",
     )
 
-    result = runtime.run(
-        spec,
-        trigger_event_id="trigger-1",
-        session_id="sess-1",
-        payload={"ticker": "NVDA"},
-    )
+    with pytest.raises(SubAgentLLMError):
+        runtime.run(
+            spec,
+            trigger_event_id="trigger-1",
+            session_id="sess-1",
+            payload={"ticker": "NVDA"},
+        )
 
-    assert llm.calls == 3
-    assert "Finalization mode" in llm.prompts[-1]
-    assert "Preferred callable tools" not in llm.prompts[-1]
-    assert native_calls
-    assert result["output"]["quality"] == "tool_observation_fallback"
-    assert result["output"]["close_reason"] == "llm_error_after_tool_observations"
-    assert result["output"]["observations"]
-    assert result["output"]["data_coverage"]["has_financial_statement"] is True
-    assert result["metrics"]["skill_calls"]
+    assert llm.calls == 2
+    assert native_calls == []
 
 
 def test_subagent_runtime_marks_unfinished_tool_request_degraded(tmp_path) -> None:

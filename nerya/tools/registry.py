@@ -242,6 +242,11 @@ def make_native_descriptor(
     auto_approve_when: Any = None,
     risk_classifier: Any = None,
     permission_scope: Any = None,
+    child_max_depth: int | None = None,
+    delegates_to: str = "",
+    invocation_aliases: Iterable[str] = (),
+    subject_action_aliases: Iterable[str] = (),
+    subject_argument: str = "",
 ) -> ToolDescriptor:
     """Build a :class:`ToolDescriptor` for a native tool.
 
@@ -276,6 +281,11 @@ def make_native_descriptor(
         risk_classifier=risk_classifier,
         auto_approve=auto_approve,
         auto_approve_when=auto_approve_when,
+        child_max_depth=child_max_depth,
+        delegates_to=str(delegates_to or ""),
+        invocation_aliases=tuple(invocation_aliases),
+        subject_action_aliases=tuple(subject_action_aliases),
+        subject_argument=str(subject_argument or ""),
     )
 
 

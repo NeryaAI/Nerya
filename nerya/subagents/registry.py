@@ -35,6 +35,147 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 @dataclass
+class SubAgentExecutionPolicy:
+    """Declarative runtime constraints for a subagent role.
+
+    Role prompts decide *what* to do. This policy only supplies generic
+    execution boundaries: tool visibility, argument defaults, budgets, and an
+    optional locked tier. It is serialisable in ``*.role.yaml`` and in prompt
+    bundle manifests, so the runtime never needs role-name branches.
+    """
+
+    locked_tier: str = ""
+    native_tool_allow: list[str] = field(default_factory=list)
+    native_tool_deny: list[str] = field(default_factory=list)
+    required_native_tools: list[str] = field(default_factory=list)
+    preload_skills: list[str] = field(default_factory=list)
+    tool_argument_defaults: dict[str, dict[str, Any]] = field(default_factory=dict)
+    max_iterations: int | None = None
+    max_skill_calls: int | None = None
+    max_wall_seconds: float | None = None
+    llm_max_attempts: int | None = None
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> "SubAgentExecutionPolicy":
+        if isinstance(raw, cls):
+            return cls.from_dict(raw.asdict())
+        data = raw if isinstance(raw, dict) else {}
+        native = data.get("native_tools") if isinstance(data.get("native_tools"), dict) else {}
+        defaults_raw = data.get("tool_argument_defaults")
+        defaults = {
+            str(name): dict(values)
+            for name, values in (defaults_raw.items() if isinstance(defaults_raw, dict) else [])
+            if isinstance(values, dict)
+        }
+
+        def _names(value: Any) -> list[str]:
+            if not isinstance(value, (list, tuple)):
+                return []
+            return [str(item).strip() for item in value if str(item).strip()]
+
+        def _positive_int(key: str) -> int | None:
+            value = data.get(key)
+            if value is None:
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed > 0 else None
+
+        wall_value = data.get("max_wall_seconds")
+        try:
+            max_wall_seconds = float(wall_value) if wall_value is not None else None
+        except (TypeError, ValueError):
+            max_wall_seconds = None
+        if max_wall_seconds is not None and max_wall_seconds <= 0:
+            max_wall_seconds = None
+        return cls(
+            locked_tier=str(data.get("locked_tier") or "").strip(),
+            native_tool_allow=_names(native.get("allow")),
+            native_tool_deny=_names(native.get("deny")),
+            required_native_tools=_names(data.get("required_native_tools")),
+            preload_skills=_names(data.get("preload_skills")),
+            tool_argument_defaults=defaults,
+            max_iterations=_positive_int("max_iterations"),
+            max_skill_calls=_positive_int("max_skill_calls"),
+            max_wall_seconds=max_wall_seconds,
+            llm_max_attempts=_positive_int("llm_max_attempts"),
+        )
+
+    def asdict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.locked_tier:
+            out["locked_tier"] = self.locked_tier
+        native: dict[str, Any] = {}
+        if self.native_tool_allow:
+            native["allow"] = list(self.native_tool_allow)
+        if self.native_tool_deny:
+            native["deny"] = list(self.native_tool_deny)
+        if native:
+            out["native_tools"] = native
+        if self.required_native_tools:
+            out["required_native_tools"] = list(self.required_native_tools)
+        if self.preload_skills:
+            out["preload_skills"] = list(self.preload_skills)
+        if self.tool_argument_defaults:
+            out["tool_argument_defaults"] = {
+                name: dict(values)
+                for name, values in self.tool_argument_defaults.items()
+            }
+        for key in (
+            "max_iterations",
+            "max_skill_calls",
+            "max_wall_seconds",
+            "llm_max_attempts",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = value
+        return out
+
+    def merged(self, override: Any) -> "SubAgentExecutionPolicy":
+        """Merge a downstream role policy without widening base constraints."""
+
+        other = SubAgentExecutionPolicy.from_dict(override)
+        if self.native_tool_allow and other.native_tool_allow:
+            allow = [name for name in self.native_tool_allow if name in other.native_tool_allow]
+        else:
+            allow = list(self.native_tool_allow or other.native_tool_allow)
+        defaults = {
+            name: dict(values) for name, values in self.tool_argument_defaults.items()
+        }
+        for name, values in other.tool_argument_defaults.items():
+            defaults.setdefault(name, {}).update(values)
+
+        def _bounded(base: Any, incoming: Any) -> Any:
+            if base is None:
+                return incoming
+            if incoming is None:
+                return base
+            return min(base, incoming)
+
+        return SubAgentExecutionPolicy(
+            locked_tier=self.locked_tier or other.locked_tier,
+            native_tool_allow=allow,
+            native_tool_deny=sorted(set(self.native_tool_deny) | set(other.native_tool_deny)),
+            required_native_tools=list(dict.fromkeys([
+                *self.required_native_tools,
+                *other.required_native_tools,
+            ])),
+            preload_skills=list(dict.fromkeys([
+                *self.preload_skills,
+                *other.preload_skills,
+            ])),
+            tool_argument_defaults=defaults,
+            max_iterations=_bounded(self.max_iterations, other.max_iterations),
+            max_skill_calls=_bounded(self.max_skill_calls, other.max_skill_calls),
+            max_wall_seconds=_bounded(self.max_wall_seconds, other.max_wall_seconds),
+            llm_max_attempts=_bounded(self.llm_max_attempts, other.llm_max_attempts),
+        )
+
+
+@dataclass
 class SubAgentSpec:
     name: str
     prompt_path: Path
@@ -42,26 +183,45 @@ class SubAgentSpec:
     allowed_skills: list[str] = field(default_factory=list)
     tier: str = "medium"
     canonical_name: str | None = None
+    # Optional per-role model override. When set, the runtime routes this
+    # role's LLM calls to ``provider``/``model`` instead of the tier's
+    # default pair (tier still governs task gating and budgets).
+    provider: str = ""
+    model: str = ""
+    execution_policy: SubAgentExecutionPolicy = field(
+        default_factory=SubAgentExecutionPolicy,
+    )
 
     def __post_init__(self) -> None:
         if not self.canonical_name:
             self.canonical_name = self.name
+        if not isinstance(self.execution_policy, SubAgentExecutionPolicy):
+            self.execution_policy = SubAgentExecutionPolicy.from_dict(
+                self.execution_policy,
+            )
+        if self.execution_policy.locked_tier:
+            self.tier = self.execution_policy.locked_tier
 
     @classmethod
     def load(cls, path: Path, *, name: str | None = None,
              allowed_skills: list[str] | None = None,
              tier: str = "medium",
-             canonical_name: str | None = None) -> "SubAgentSpec":
+             canonical_name: str | None = None,
+             provider: str = "",
+             model: str = "",
+             execution_policy: Any = None) -> "SubAgentSpec":
         n = name or path.stem.replace(".agent", "")
         prompt = path.read_text(encoding="utf-8") if path.exists() else ""
         return cls(name=n, prompt_path=path, prompt=prompt,
                    allowed_skills=allowed_skills or [], tier=tier,
-                   canonical_name=canonical_name)
+                   canonical_name=canonical_name,
+                   provider=provider, model=model,
+                   execution_policy=SubAgentExecutionPolicy.from_dict(execution_policy))
 
 
 _RESEARCH_HINTS = [
     "market_data", "markets", "market_data_routing", "research",
-    "web_search_fetch",
+    "web_search_fetch", "browser",
 ]
 _MARKET_RESEARCH_HINTS = [*_RESEARCH_HINTS, "market_research"]
 _DECISION_HINTS = [*_MARKET_RESEARCH_HINTS, "portfolio_summary", "risk_check"]
@@ -138,6 +298,14 @@ DEFAULT_SUBAGENT_SKILLS = {
         "finance-creators.kobeissi", *_MARKET_RESEARCH_HINTS,
         "research_report", "news_social",
     ],
+    # Dedicated web-data collection lane. Cheap (light tier) by design:
+    # it fetches with the built-in search-engine chain + browser fallback,
+    # persists the *complete* raw captures under
+    # ``workspace/state/research_data/`` and hands the file paths back so
+    # analyst / expert lanes read the full data instead of re-fetching.
+    "web_researcher": [
+        "research", "web_search_fetch", "browser", "news_social",
+    ],
 }
 
 
@@ -167,6 +335,12 @@ DEFAULT_SUBAGENT_PROFILES: dict[str, str] = {
     "serenity": "serenity_lens",
     "unusual_whales": "unusual_whales_lens",
     "kobeissi": "kobeissi_lens",
+    # Web-data collection synonyms all land on the dedicated researcher
+    # lane so ad-hoc names like "web_scraper" reuse its prompt/tier.
+    "web_scraper": "web_researcher",
+    "data_scout": "web_researcher",
+    "web_research": "web_researcher",
+    "data_collector": "web_researcher",
 }
 
 
@@ -189,27 +363,6 @@ def canonical_subagent_name(name: str) -> str:
     explicit = DEFAULT_SUBAGENT_PROFILES.get(normalised)
     if explicit:
         return explicit
-    tokens = {token for token in normalised.split("_") if token}
-    if tokens & {
-        "fundamental",
-        "fundamentals",
-        "financial",
-        "valuation",
-        "dcf",
-        "sec",
-        "filing",
-        "filings",
-        "investor",
-        "guru",
-        "gurus",
-    }:
-        return "fundamentals_analyst"
-    if tokens & {"technical", "chart", "momentum"}:
-        return "technical_analyst"
-    if tokens & {"sentiment", "social", "news"}:
-        return "sentiment_analyst"
-    if tokens & {"risk", "critic"}:
-        return "risk_critic"
     return raw
 
 
@@ -287,7 +440,14 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "3. If one financial statement source fails, try an alternate path:\n"
         "   direct provider tool, ``market_data``, ``market_data_routing``,\n"
         "   or ``web_search_fetch`` for the missing headline metrics.\n"
-        "4. Do not mark valuation unavailable when you have enough inputs\n"
+        "4. For primary-source facts (guidance, segment data, buybacks,\n"
+        "   management commentary), fetch the company IR page / annual\n"
+        "   report / filing directly with ``web_fetch`` — it renders\n"
+        "   JS-heavy pages through the configured browser engine. Open an\n"
+        "   interactive ``browser`` session (script_run\n"
+        "   browser_session.py) only when the document sits behind\n"
+        "   navigation or clicks. Cite the exact URL and as-of date.\n"
+        "5. Do not mark valuation unavailable when you have enough inputs\n"
         "   for a bounded estimate (price, market cap, EPS, revenue,\n"
         "   EBITDA, or analyst multiples). State missing fields and lower\n"
         "   confidence instead of dropping the section.\n\n"
@@ -351,6 +511,12 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "Mission. Build the strongest evidence-backed upside case.\n"
         "Load ``market_research`` / ``research_report`` only when the\n"
         "task needs the detailed research or report playbook.\n\n"
+        "Evidence duty. Ground every claim in a tool result: use\n"
+        "``web_search_fetch`` for current coverage and ``web_fetch`` to\n"
+        "pull company primary sources (IR pages, filings, annual\n"
+        "reports, product pages) — it renders JS pages via the browser\n"
+        "engine. Cite URL + as-of date per claim; unsourced points must\n"
+        "be labelled as inference with lowered confidence.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``bull_points``: list[{claim, evidence, confidence}]\n"
         "  - ``upside_drivers``: list[str]\n"
@@ -365,6 +531,12 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "Mission. Build the strongest evidence-backed downside and risk\n"
         "case. Load ``market_research`` / ``quant_research`` only when\n"
         "the detailed playbook is needed.\n\n"
+        "Evidence duty. Ground every claim in a tool result: use\n"
+        "``web_search_fetch`` for current coverage and ``web_fetch`` to\n"
+        "pull primary sources (filings, IR pages, regulator releases) —\n"
+        "it renders JS pages via the browser engine. Cite URL + as-of\n"
+        "date per claim; unsourced points must be labelled as inference\n"
+        "with lowered confidence.\n\n"
         "Output contract (strict JSON):\n"
         "  - ``bear_points``: list[{claim, evidence, severity}]\n"
         "  - ``downside_drivers``: list[str]\n"
@@ -634,6 +806,41 @@ DEFAULT_SUBAGENT_PROMPTS: dict[str, str] = {
         "  - ``confidence``: float in [0, 1]\n"
         "  - ``done``: true.\n"
     ),
+    "web_researcher": (
+        "You are the **web_researcher** lane — the team's dedicated\n"
+        "web-data collector. You do NOT analyse or form opinions; you\n"
+        "fetch, capture, and hand over data as completely as possible so\n"
+        "other agents can analyse it.\n\n"
+        "How you work.\n"
+        "1. Read the task payload (``query`` / ``urls`` / ``focus`` /\n"
+        "   ``instructions``) and plan 1-4 tool calls, no more.\n"
+        "2. Use ``web_search`` for discovery, ``web_fetch`` for known\n"
+        "   URLs, and ``web_search_fetch`` to search + pull the top pages\n"
+        "   in one pass. ALWAYS pass ``save_raw: true`` so the complete\n"
+        "   un-truncated capture is persisted under\n"
+        "   ``state/research_data/`` — the tool result then includes a\n"
+        "   ``saved_path`` you must report back. Keep browser and\n"
+        "   Scrapling fallbacks enabled (they are on by default) so\n"
+        "   JS-heavy pages still render; raise ``max_bytes`` instead of\n"
+        "   truncating when a source is long.\n"
+        "3. Prefer primary sources (official sites, IR pages, filings,\n"
+        "   original posts) over aggregators. Record the exact URL and\n"
+        "   an ``as_of`` timestamp for every capture.\n"
+        "4. If a source is unreachable or paywalled, say so plainly —\n"
+        "   never substitute invented or remembered content.\n\n"
+        "Output contract (strict JSON):\n"
+        "  - ``captures``: list[{url, title?, as_of, saved_path?,\n"
+        "    excerpt}] — one entry per fetched source, ``excerpt`` is a\n"
+        "    short verbatim snippet, ``saved_path`` the full on-disk\n"
+        "    capture other agents can read.\n"
+        "  - ``key_facts``: list[str] — factual bullets only, no\n"
+        "    interpretation.\n"
+        "  - ``gaps``: list[str] — sources you could not reach and why.\n"
+        "  - ``summary``: 2-3 sentences describing what was collected.\n"
+        "  - ``done``: true.\n\n"
+        "Never trade, never analyse, never speculate — collect and\n"
+        "report."
+    ),
 }
 
 
@@ -652,14 +859,17 @@ def _expert_lens_prompt(
         f"You are the **{role}** lane — apply the {display} framework\n"
         "from the distilled expert-lens skill family.\n\n"
         "How you work.\n"
-        f"1. FIRST call ``skill_view(\"{skill_id}\")`` and\n"
-        "   follow that lens exactly: core models, decision heuristics,\n"
-        "   reasoning voice, and failure boundaries.\n"
+        "1. Your already-loaded expert lens and research playbook are the\n"
+        "   operating instructions for this run. Follow the lens's core\n"
+        "   models, decision heuristics, reasoning voice, and failure\n"
+        "   boundaries directly; do not reload it.\n"
         f"2. Focus on {focus}.\n"
-        "3. Gather at least one current fact with your own market/research\n"
-        "   tools (or state explicitly why the facts supplied by the parent\n"
-        "   are sufficient); give every material fact a source and an\n"
-        "   ``as_of`` date. Never fill a gap from memory.\n"
+        "3. When the assignment requires current online evidence, follow the\n"
+        "   loaded research playbook and obtain a delegated web dataset before\n"
+        "   drawing conclusions. Structured market quotes are complementary,\n"
+        "   not a substitute for the requested source collection. Give every\n"
+        "   material fact a source and an ``as_of`` date; never fill a gap\n"
+        "   from memory.\n"
         "4. This is framework inference, not impersonation: never invent\n"
         f"   a quotation or claim to speak for {display}.\n\n"
         "Output contract (strict JSON):\n"
@@ -723,6 +933,25 @@ DEFAULT_SUBAGENT_PROMPTS.update({
 })
 
 
+# The packaged prompt bundle is the active source of truth for every role it
+# declares. Older literal prompts above remain only as a compatibility fallback
+# for installations that package Python without data files.
+try:
+    from ..workspace.prompt_bundles import load_bundle as _load_prompt_bundle
+
+    _DEFAULT_PROMPT_BUNDLE = _load_prompt_bundle()
+except Exception:  # pragma: no cover - broken package-data fallback
+    _DEFAULT_PROMPT_BUNDLE = None
+else:
+    # New roles are sourced from the bundle immediately. Existing roles keep
+    # their richer compatibility bodies until each legacy literal has been
+    # migrated and parity-tested against its bundled file.
+    if "web_researcher" in _DEFAULT_PROMPT_BUNDLE.subagents:
+        DEFAULT_SUBAGENT_PROMPTS["web_researcher"] = (
+            _DEFAULT_PROMPT_BUNDLE.subagents["web_researcher"]
+        )
+
+
 DEFAULT_TIERS = {
     "market_analyst": "medium",
     "technical_analyst": "medium",
@@ -756,7 +985,35 @@ DEFAULT_TIERS = {
     "serenity_lens": "medium",
     "unusual_whales_lens": "medium",
     "kobeissi_lens": "medium",
+    # Data collection is deliberately cheap: the researcher only drives
+    # search/fetch tools and summarises what it saved, so the light tier
+    # is enough. The bundle execution policy locks this role to light.
+    "web_researcher": "light",
 }
+
+
+DEFAULT_SUBAGENT_EXECUTION_POLICIES: dict[str, SubAgentExecutionPolicy] = {
+    name: SubAgentExecutionPolicy.from_dict(raw)
+    for name, raw in (
+        (_DEFAULT_PROMPT_BUNDLE.subagent_policies or {}).items()
+        if _DEFAULT_PROMPT_BUNDLE is not None
+        else []
+    )
+}
+
+
+def default_execution_policy(
+    name: str,
+    override: Any = None,
+) -> SubAgentExecutionPolicy:
+    """Resolve a canonical bundle policy plus an optional stricter override."""
+
+    canonical = canonical_subagent_name(name)
+    base = DEFAULT_SUBAGENT_EXECUTION_POLICIES.get(
+        canonical,
+        SubAgentExecutionPolicy(),
+    )
+    return SubAgentExecutionPolicy.from_dict(base).merged(override)
 
 
 def load_registry(paths: WorkspacePaths) -> dict[str, SubAgentSpec]:
@@ -775,6 +1032,12 @@ def load_registry(paths: WorkspacePaths) -> dict[str, SubAgentSpec]:
             allowed_skills=list(allowed),
             tier=str(tier),
             canonical_name=canonical,
+            provider=str(meta.get("provider") or ""),
+            model=str(meta.get("model") or ""),
+            execution_policy=default_execution_policy(
+                canonical,
+                meta.get("execution_policy"),
+            ),
         )
     return out
 
@@ -834,6 +1097,9 @@ def list_roles(paths: WorkspacePaths) -> list[dict[str, Any]]:
             "persistent": True,
             "source": "workspace",
             "canonical_name": spec.canonical_name or name,
+            "provider": spec.provider,
+            "model": spec.model,
+            "execution_policy": spec.execution_policy.asdict(),
             "prompt_path": str(spec.prompt_path),
             "prompt_excerpt": (spec.prompt or "")[:280],
         })
@@ -849,6 +1115,9 @@ def list_roles(paths: WorkspacePaths) -> list[dict[str, Any]]:
             "persistent": False,
             "source": "default",
             "canonical_name": name,
+            "provider": "",
+            "model": "",
+            "execution_policy": default_execution_policy(name).asdict(),
             "prompt_path": None,
             "prompt_excerpt": "",
         })
@@ -869,6 +1138,9 @@ def describe_role(paths: WorkspacePaths, name: str) -> Optional[dict[str, Any]]:
             "persistent": True,
             "source": "workspace",
             "canonical_name": spec.canonical_name or name,
+            "provider": spec.provider,
+            "model": spec.model,
+            "execution_policy": spec.execution_policy.asdict(),
             "prompt_path": str(spec.prompt_path),
             "prompt": spec.prompt,
         }
@@ -881,6 +1153,9 @@ def describe_role(paths: WorkspacePaths, name: str) -> Optional[dict[str, Any]]:
             "persistent": False,
             "source": "default" if canonical == name else "default_profile",
             "canonical_name": canonical,
+            "provider": "",
+            "model": "",
+            "execution_policy": default_execution_policy(canonical).asdict(),
             "prompt_path": None,
             "prompt": DEFAULT_SUBAGENT_PROMPTS.get(canonical, ""),
         }
@@ -894,6 +1169,9 @@ def save_role(
     prompt: str,
     allowed_skills: Optional[list[str]] = None,
     tier: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    execution_policy: Any = None,
 ) -> dict[str, Any]:
     """Upsert a persistent role. Creates ``<name>.agent.md`` + ``<name>.role.yaml``.
 
@@ -917,6 +1195,11 @@ def save_role(
     canonical = canonical_subagent_name(name)
     final_skills = list(allowed_skills or DEFAULT_SUBAGENT_SKILLS.get(canonical, []))
     final_tier = str(tier or DEFAULT_TIERS.get(canonical, "medium"))
+    final_provider = str(provider or "").strip()
+    final_model = str(model or "").strip()
+    final_policy = default_execution_policy(canonical, execution_policy)
+    if final_policy.locked_tier:
+        final_tier = final_policy.locked_tier
 
     meta = {
         "name": name,
@@ -924,6 +1207,12 @@ def save_role(
         "allowed_skills": final_skills,
         "canonical_name": canonical,
     }
+    if final_provider:
+        meta["provider"] = final_provider
+    if final_model:
+        meta["model"] = final_model
+    if final_policy.asdict():
+        meta["execution_policy"] = final_policy.asdict()
     yaml_io.dump(_meta_path(paths, name), meta)
 
     return {
@@ -931,6 +1220,9 @@ def save_role(
         "tier": final_tier,
         "allowed_skills": final_skills,
         "canonical_name": canonical,
+        "provider": final_provider,
+        "model": final_model,
+        "execution_policy": final_policy.asdict(),
         "persistent": True,
         "source": "workspace",
         "prompt_path": str(prompt_path),
@@ -952,6 +1244,7 @@ GENERIC_ADHOC_SKILLS: tuple[str, ...] = (
     "analysis",
     "llm",
     "trace",
+    "browser",
 )
 
 
@@ -977,7 +1270,12 @@ def generic_role_prompt(name: str) -> str:
         "fields) before doing anything else.\n"
         "2. Gather evidence with the tools you are granted (web_search / "
         "web_search_fetch / news_social / market_data when available). Every "
-        "material claim must cite a tool result or a fetched source.\n"
+        "material claim must cite a tool result or a fetched source. For "
+        "company primary sources (IR pages, filings, annual reports) prefer "
+        "web_fetch — it renders JS pages via the configured browser engine "
+        "automatically; open an interactive ``browser`` session (via "
+        "script_run browser_session.py) only when navigation or clicks are "
+        "required.\n"
         "3. If a required source, credential, feed, or dataset is missing, say "
         "so plainly and report the evidence gap — never invent mock, "
         "placeholder, synthetic, or proxy data, and mark every estimate or "
@@ -995,6 +1293,9 @@ def build_inline_spec(
     prompt: Optional[str] = None,
     allowed_skills: Optional[list[str]] = None,
     tier: Optional[str] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    execution_policy: Any = None,
 ) -> SubAgentSpec:
     """Build an *ephemeral* role spec from inline fields (never written to disk).
 
@@ -1017,6 +1318,7 @@ def build_inline_spec(
     if not skills:
         skills = list(GENERIC_ADHOC_SKILLS)
     final_tier = str(tier or DEFAULT_TIERS.get(canonical, "medium"))
+    final_policy = default_execution_policy(canonical, execution_policy)
     return SubAgentSpec(
         name=name,
         prompt_path=_prompt_path(paths, name),
@@ -1024,6 +1326,9 @@ def build_inline_spec(
         allowed_skills=skills,
         tier=final_tier,
         canonical_name=canonical,
+        provider=str(provider or "").strip(),
+        model=str(model or "").strip(),
+        execution_policy=final_policy,
     )
 
 
@@ -1048,15 +1353,18 @@ def delete_role(paths: WorkspacePaths, name: str) -> bool:
 
 __all__ = [
     "DEFAULT_SUBAGENT_PROMPTS",
+    "DEFAULT_SUBAGENT_EXECUTION_POLICIES",
     "DEFAULT_SUBAGENT_PROFILES",
     "DEFAULT_SUBAGENT_SKILLS",
     "DEFAULT_TIERS",
     "GENERIC_ADHOC_SKILLS",
     "SubAgentSpec",
+    "SubAgentExecutionPolicy",
     "build_inline_spec",
     "canonical_subagent_name",
     "delete_role",
     "describe_role",
+    "default_execution_policy",
     "generic_role_prompt",
     "list_roles",
     "load_registry",

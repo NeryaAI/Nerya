@@ -1146,6 +1146,9 @@ def _loop_config_from_config(
         strategy_id=strategy_id,
         trigger_event_id=trigger_event_id,
         required_artifacts=required_artifacts,
+        workflow_forcing=bool(
+            config.get("agent.native.workflow_forcing", False)
+        ),
         compact_preservation_cb=compact_preservation_cb,
     )
 

@@ -32,3 +32,106 @@ subagents:
   plan_lane: subagents/plan_lane.agent.md
   explore_lane: subagents/explore_lane.agent.md
   verification_lane: subagents/verification_lane.agent.md
+  web_researcher: subagents/web_researcher.agent.md
+
+subagent_policy_profiles:
+  bounded_research:
+    max_iterations: 8
+    max_wall_seconds: 360
+  expert_web_delegate:
+    preload_skills:
+      - research
+    required_native_tools:
+      - research_run
+    native_tools:
+      allow:
+        - skill_index
+        - skill_view
+        - research_run
+        - read_file
+        - market_data
+  web_collector:
+    preload_skills:
+      - research
+    locked_tier: light
+    max_iterations: 4
+    max_skill_calls: 6
+    max_wall_seconds: 180
+    llm_max_attempts: 1
+    native_tools:
+      allow:
+        - skill_index
+        - skill_view
+        - script_inspect
+        - script_run
+        - read_file
+        - web_search
+        - web_fetch
+        - web_search_fetch
+    tool_argument_defaults:
+      web_search:
+        save_raw: true
+      web_fetch:
+        save_raw: true
+      web_search_fetch:
+        save_raw: true
+
+subagent_policies:
+  fundamentals_analyst:
+    extends: bounded_research
+  technical_analyst:
+    extends: bounded_research
+  sentiment_analyst:
+    extends: bounded_research
+  bull_researcher:
+    extends: bounded_research
+  bear_researcher:
+    extends: bounded_research
+  risk_critic:
+    extends: bounded_research
+  research_manager:
+    extends: bounded_research
+  research_editor:
+    extends: bounded_research
+  buffett_lens:
+    extends: [bounded_research, expert_web_delegate]
+    preload_skills:
+      - research
+      - expert_investors.buffett
+  damodaran_lens:
+    extends: [bounded_research, expert_web_delegate]
+    preload_skills:
+      - research
+      - expert_investors.damodaran
+  marks_lens:
+    extends: [bounded_research, expert_web_delegate]
+    preload_skills:
+      - research
+      - expert_investors.marks
+  mauboussin_lens:
+    extends: [bounded_research, expert_web_delegate]
+    preload_skills:
+      - research
+      - expert_investors.mauboussin
+  druckenmiller_lens:
+    extends: [bounded_research, expert_web_delegate]
+    preload_skills:
+      - research
+      - expert_investors.druckenmiller
+  serenity_lens:
+    extends: [bounded_research, expert_web_delegate]
+    preload_skills:
+      - research
+      - finance-creators.serenity
+  unusual_whales_lens:
+    extends: [bounded_research, expert_web_delegate]
+    preload_skills:
+      - research
+      - finance-creators.unusual_whales
+  kobeissi_lens:
+    extends: [bounded_research, expert_web_delegate]
+    preload_skills:
+      - research
+      - finance-creators.kobeissi
+  web_researcher:
+    extends: web_collector

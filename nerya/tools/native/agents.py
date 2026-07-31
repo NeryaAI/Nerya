@@ -77,6 +77,9 @@ def _build_inline_role_spec(
     prompt: Any = None,
     allowed_skills: Any = None,
     tier: Any = None,
+    provider: Any = None,
+    model: Any = None,
+    execution_policy: Any = None,
 ):
     """Build an ephemeral :class:`SubAgentSpec` from inline tool args, or None.
 
@@ -94,7 +97,12 @@ def _build_inline_role_spec(
         else []
     )
     tier_str = tier.strip() if isinstance(tier, str) else ""
-    if not (prompt_str or skills_list or tier_str):
+    provider_str = provider.strip() if isinstance(provider, str) else ""
+    model_str = model.strip() if isinstance(model, str) else ""
+    policy_dict = dict(execution_policy) if isinstance(execution_policy, dict) else {}
+    if not (
+        prompt_str or skills_list or tier_str or provider_str or model_str or policy_dict
+    ):
         return None
     paths = getattr(config, "paths", None)
     if paths is None:
@@ -106,6 +114,9 @@ def _build_inline_role_spec(
             prompt=prompt_str or None,
             allowed_skills=skills_list or None,
             tier=tier_str or None,
+            provider=provider_str or None,
+            model=model_str or None,
+            execution_policy=policy_dict or None,
         )
     except Exception:
         return None
@@ -1046,6 +1057,22 @@ def _compact_tool_records(records: Any, *, limit: int = 16) -> list[dict[str, An
         }
         if rec.get("error"):
             item["error"] = _compact_text(rec.get("error"), limit=500)
+        result = rec.get("result") if isinstance(rec.get("result"), dict) else {}
+        delegated = result.get("data") if isinstance(result.get("data"), dict) else {}
+        if delegated.get("subagent"):
+            delegated_summary = {
+                key: delegated.get(key)
+                for key in (
+                    "ok", "subagent", "tier", "provider", "model",
+                    "tokens", "usd", "wall_ms", "error", "error_kind",
+                )
+                if delegated.get(key) is not None
+            }
+            delegated_summary["output"] = _compact_json_value(
+                delegated.get("output") or {},
+                limit=4000,
+            )
+            item["delegated_run"] = delegated_summary
         out.append(item)
     if len(records) > limit:
         out.append({"truncated_records": len(records) - limit})
@@ -1068,6 +1095,8 @@ def _compact_member_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "subagent": entry.get("subagent"),
         "ok": bool(entry.get("ok")),
         "tier": entry.get("tier"),
+        "provider": entry.get("provider"),
+        "model": entry.get("model"),
         "tokens": entry.get("tokens", 0),
         "usd": entry.get("usd", 0.0),
         "wall_ms": entry.get("wall_ms", 0),
@@ -1410,6 +1439,31 @@ SUBAGENT_RUN_SCHEMA: dict[str, Any] = {
             "enum": ["light", "medium", "high"],
             "description": "Optional LLM tier for an inline ad-hoc role.",
         },
+        "provider": {
+            "type": "string",
+            "description": (
+                "Optional LLM provider override for this run (e.g. "
+                "'openai', 'anthropic', 'deepseek'). Pair with ``model`` "
+                "to pin the child to a custom model instead of the tier's "
+                "default routing."
+            ),
+        },
+        "model": {
+            "type": "string",
+            "description": (
+                "Optional model id override for this run (e.g. "
+                "'gpt-5-mini'). Used with the tier's provider unless "
+                "``provider`` is also set."
+            ),
+        },
+        "execution_policy": {
+            "type": "object",
+            "description": (
+                "Optional declarative runtime policy for this ephemeral role: "
+                "native_tools allow/deny lists, tool_argument_defaults, "
+                "budgets, and an optional locked_tier."
+            ),
+        },
         "strategy_id": {
             "type": "string",
             "description": "Optional strategy scope (forwarded to the child).",
@@ -1497,6 +1551,9 @@ def subagent_run_handler(
         prompt=args.get("prompt"),
         allowed_skills=args.get("allowed_skills"),
         tier=args.get("tier"),
+        provider=args.get("provider"),
+        model=args.get("model"),
+        execution_policy=args.get("execution_policy"),
     )
     cached_team = _get_cached_team_run_summary(_team_run_turn_key(call, args))
     if cached_team is not None and cached_team.get("ok") is True:
@@ -1566,6 +1623,169 @@ def subagent_run_handler(
             error=ToolError(
                 kind=ToolErrorKind.EXECUTION_ERROR,
                 message=str(envelope.get("error") or "subagent failed"),
+                detail={"envelope": envelope},
+            ),
+        )
+    return ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data=envelope,
+    )
+
+
+RESEARCH_RUN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "What to research on the public web (search-engine style "
+                "query or a short mission statement)."
+            ),
+        },
+        "queries": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Related research questions to combine into one delegated "
+                "collection run. Prefer this over several separate calls."
+            ),
+        },
+        "urls": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Specific URLs the researcher must fetch and capture in "
+                "full (IR pages, filings, articles, posts)."
+            ),
+        },
+        "instructions": {
+            "type": "string",
+            "description": (
+                "Optional extra guidance: which sources to prefer, date "
+                "ranges, fields to extract, output language, etc."
+            ),
+        },
+        "payload": {
+            "type": "object",
+            "description": (
+                "Optional extra payload fields merged into the researcher's "
+                "task payload."
+            ),
+        },
+        "strategy_id": {"type": "string"},
+        "session_id": {"type": "string"},
+        "trigger_event_id": {"type": "string"},
+    },
+}
+
+
+def research_run_handler(
+    call: ToolCall,
+    *,
+    config: Config,
+    skills: SkillKernel,
+    tool_registry: Any = None,
+) -> ToolResult:
+    """Delegate collection to the target declared on this tool descriptor."""
+
+    args = call.arguments or {}
+    query = str(args.get("query") or "").strip()
+    queries = [
+        str(item).strip()
+        for item in (args.get("queries") or [])
+        if isinstance(item, (str, bytes)) and str(item).strip()
+    ] if isinstance(args.get("queries"), list) else []
+    if queries:
+        unique_queries = list(dict.fromkeys(queries))
+        if query:
+            query = "\n".join([
+                query,
+                "Related questions:",
+                *(f"- {item}" for item in unique_queries if item != query),
+            ]).strip()
+        else:
+            query = "\n".join([
+                "Research all of the following in one collection run:",
+                *(f"- {item}" for item in unique_queries),
+            ])
+    urls = [
+        str(u).strip() for u in (args.get("urls") or [])
+        if isinstance(u, (str, bytes)) and str(u).strip()
+    ] if isinstance(args.get("urls"), list) else []
+    if not query and not urls:
+        return _schema_error(call, "query or urls is required")
+
+    payload: dict[str, Any] = (
+        dict(args.get("payload")) if isinstance(args.get("payload"), dict) else {}
+    )
+    if query:
+        payload["query"] = query
+    if urls:
+        payload["urls"] = urls
+    instructions = str(args.get("instructions") or "").strip()
+    if instructions:
+        payload["instructions"] = instructions
+    try:
+        descriptor = tool_registry.get(call.name) if tool_registry is not None else None
+    except Exception as exc:
+        return _schema_error(call, f"delegation descriptor unavailable: {exc}")
+    target_name = str(getattr(descriptor, "delegates_to", "") or "").strip()
+    if not target_name:
+        return _schema_error(call, "delegation target is not configured")
+    try:
+        delegation_depth = max(0, int(_call_meta(call, "delegation_depth") or 0))
+    except (TypeError, ValueError):
+        delegation_depth = 0
+    child_max_depth = getattr(descriptor, "child_max_depth", None)
+    if child_max_depth is not None:
+        try:
+            if delegation_depth >= int(child_max_depth):
+                return _schema_error(call, "delegation depth limit reached")
+        except (TypeError, ValueError):
+            return _schema_error(call, "delegation depth policy is invalid")
+
+    strategy_id = args.get("strategy_id") or _call_meta(call, "strategy_id") or None
+    session_id = args.get("session_id") or _call_meta(call, "session_id") or None
+    trigger_event_id = (
+        args.get("trigger_event_id")
+        or _call_meta(call, "trigger_event_id")
+        or None
+    )
+
+    dispatcher_kwargs = {"config": config, "skills": skills}
+    if tool_registry is not None:
+        dispatcher_kwargs["tool_registry"] = tool_registry
+    dispatcher = SubAgentDispatcher(**dispatcher_kwargs)
+
+    try:
+        envelope = dispatcher.dispatch(
+            f"subagent:{target_name}",
+            payload=payload,
+            trigger_event_id=trigger_event_id,
+            strategy_id=strategy_id,
+            session_id=session_id,
+            turn_id=call.turn_id,
+            parent_call_id=call.id,
+            delegation_depth=delegation_depth + 1,
+        )
+    except Exception as exc:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.EXECUTION_ERROR,
+                message=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+
+    if not envelope.get("ok", True):
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.EXECUTION_ERROR,
+                message=str(envelope.get("error") or "delegated researcher failed"),
                 detail={"envelope": envelope},
             ),
         )
@@ -1653,6 +1873,29 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
                         "enum": ["light", "medium", "high"],
                         "description": (
                             "Optional LLM tier for an inline ad-hoc role."
+                        ),
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": (
+                            "Optional LLM provider override for this role "
+                            "(e.g. 'openai', 'anthropic'). Pair with "
+                            "``model`` to pin the member to a custom model."
+                        ),
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Optional model id override for this role (e.g. "
+                            "'gpt-5-mini'). Used with the tier's provider "
+                            "unless ``provider`` is also set."
+                        ),
+                    },
+                    "execution_policy": {
+                        "type": "object",
+                        "description": (
+                            "Optional declarative runtime policy for this "
+                            "ephemeral team member."
                         ),
                     },
                 },
@@ -1762,6 +2005,27 @@ ROLE_SAVE_SCHEMA: dict[str, Any] = {
             "enum": ["light", "medium", "high"],
             "description": "LLM tier the runtime should use.",
         },
+        "provider": {
+            "type": "string",
+            "description": (
+                "Optional LLM provider override persisted with the role "
+                "(e.g. 'openai'). Empty keeps tier-default routing."
+            ),
+        },
+        "model": {
+            "type": "string",
+            "description": (
+                "Optional model id override persisted with the role "
+                "(e.g. 'gpt-5-mini'). Empty keeps tier-default routing."
+            ),
+        },
+        "execution_policy": {
+            "type": "object",
+            "description": (
+                "Optional persisted runtime policy: native_tools allow/deny, "
+                "tool_argument_defaults, budgets, and locked_tier."
+            ),
+        },
     },
     "required": ["name", "prompt"],
 }
@@ -1827,6 +2091,10 @@ def team_run_handler(
     if not team_run_id:
         team_run_id = f"team-{uuid.uuid4().hex[:10]}"
     team_template = str(args.get("team_template") or "ad_hoc_parallel_team")
+    try:
+        delegation_depth = max(0, int(_call_meta(call, "delegation_depth") or 0))
+    except (TypeError, ValueError):
+        delegation_depth = 0
     guard_key = _team_run_turn_key(call, args)
     allow_additional_team_run = _allow_additional_team_run(call, args)
     role_names: list[str] = []
@@ -1866,6 +2134,9 @@ def team_run_handler(
             prompt=entry.get("prompt"),
             allowed_skills=entry.get("allowed_skills"),
             tier=entry.get("tier"),
+            provider=entry.get("provider"),
+            model=entry.get("model"),
+            execution_policy=entry.get("execution_policy"),
         )
         if inline_spec is not None:
             inline_specs[role_name] = inline_spec
@@ -1974,6 +2245,9 @@ def team_run_handler(
     }
     _publish_team_event("team.start", **common_event)
     pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="team")
+    nested_dispatch_kwargs = (
+        {"delegation_depth": delegation_depth} if delegation_depth else {}
+    )
     futs = {
         pool.submit(
             dispatcher.dispatch,
@@ -1985,6 +2259,7 @@ def team_run_handler(
             turn_id=call.turn_id,
             parent_call_id=call.id,
             inline_spec=inline_specs.get(r),
+            **nested_dispatch_kwargs,
         ): r
         for r in role_names
     }
@@ -2037,6 +2312,8 @@ def team_run_handler(
                 "subagent": role_name,
                 "ok": ok,
                 "tier": envelope.get("tier"),
+                "provider": envelope.get("provider"),
+                "model": envelope.get("model"),
                 "tokens": envelope.get("tokens", 0),
                 "usd": usd,
                 "wall_ms": envelope.get("wall_ms", 0),
@@ -2065,6 +2342,8 @@ def team_run_handler(
                 tokens=entry.get("tokens"),
                 usd=entry.get("usd"),
                 wall_ms=entry.get("wall_ms"),
+                provider=entry.get("provider"),
+                model=entry.get("model"),
                 team_task_id=f"role-{role_name}",
                 team_task_owner=role_name,
                 team_task_subject=task,
@@ -2272,6 +2551,9 @@ def role_save_handler(
             prompt=args.get("prompt") or "",
             allowed_skills=list(args.get("allowed_skills") or []) or None,
             tier=args.get("tier"),
+            provider=args.get("provider"),
+            model=args.get("model"),
+            execution_policy=args.get("execution_policy"),
         )
     except (ValueError, OSError) as exc:
         return _schema_error(call, str(exc))
@@ -2303,6 +2585,7 @@ def role_delete_handler(
 
 
 __all__ = [
+    "RESEARCH_RUN_SCHEMA",
     "ROLE_DELETE_SCHEMA",
     "ROLE_GET_SCHEMA",
     "ROLE_LIST_SCHEMA",
@@ -2311,6 +2594,7 @@ __all__ = [
     "SUBAGENT_RUN_SCHEMA",
     "TEAM_RUN_SCHEMA",
     "cached_team_run_summary_for_call",
+    "research_run_handler",
     "role_delete_handler",
     "role_get_handler",
     "role_list_handler",

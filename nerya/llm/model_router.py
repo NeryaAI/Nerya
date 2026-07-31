@@ -158,8 +158,13 @@ class ModelRouter:
         prompt: str,
         schema: dict | None = None,
         caller: str | None = None,
+        cfg_override: dict[str, Any] | None = None,
     ) -> CallResult:
-        cfg = self.tiers.get(tier) or {}
+        # ``cfg_override`` lets the gateway route a call to a per-agent
+        # provider/model choice (already merged with the tier defaults by
+        # ``LLMGateway._effective_tier_cfg``) without mutating the shared
+        # tier table.
+        cfg = cfg_override if cfg_override is not None else (self.tiers.get(tier) or {})
         max_tokens = int(cfg.get("max_tokens") or 1024)
         temperature = float(cfg.get("temperature") or 0.1)
         price_overrides = cfg.get("prices") or None

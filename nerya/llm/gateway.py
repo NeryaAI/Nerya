@@ -436,6 +436,8 @@ class LLMGateway:
         session: LLMSession | None = None,
         debug_full_prompt_journal: bool = False,
         metadata: dict[str, Any] | None = None,
+        model_provider: str | None = None,
+        model_id: str | None = None,
     ) -> LLMCall:
         # resolve tier (task advertised by tier.allowed_tasks)
         resolved_tier = self.tier_policy.resolve(
@@ -443,6 +445,20 @@ class LLMGateway:
             requested_tier=tier,
             caller_allowed_tiers=caller_allowed_tiers,
         )
+
+        # Optional per-call provider/model override (used by subagents /
+        # team members whose role pins a custom model). The tier still
+        # controls task gating, budgets, and journals; only the routed
+        # provider+model change.
+        override_provider = str(model_provider or "").strip() or None
+        override_model = str(model_id or "").strip() or None
+        cfg_override: dict[str, Any] | None = None
+        if override_provider or override_model:
+            cfg_override = self._effective_tier_cfg(
+                resolved_tier,
+                provider_override=override_provider,
+                model_override=override_model,
+            )
 
         clean_prompt = scrub(prompt)
         request_metadata = dict(metadata or {})
@@ -490,7 +506,11 @@ class LLMGateway:
         # gap between "matrix lists it as unsupported" and "runtime still
         # tries it and pretends to succeed".
         from .capability_matrix import capability_of
-        tier_cfg = (self.config.get("llm.tiers") or {}).get(resolved_tier) or {}
+        tier_cfg = (
+            cfg_override
+            if cfg_override is not None
+            else (self.config.get("llm.tiers") or {}).get(resolved_tier) or {}
+        )
         active_provider = tier_cfg.get("provider") or "mock"
         cap = capability_of(active_provider)
         if schema is not None and cap.tiers.get("schema_json_mode") == "unsupported":
@@ -542,6 +562,7 @@ class LLMGateway:
                 result: CallResult = self.router.dispatch(
                     tier=resolved_tier, task=task, prompt=clean_prompt,
                     schema=schema, caller=caller,
+                    cfg_override=cfg_override,
                 )
         except Exception as exc:  # pragma: no cover
             err = LLMError(f"router dispatch failed: {exc}")

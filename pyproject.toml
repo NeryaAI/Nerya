@@ -30,6 +30,10 @@ dependencies = [
     # "backtest failed: ModuleNotFoundError: No module named 'numpy'".
     "numpy>=1.26",
     "pandas>=2.0",
+    # PDF text extraction for the research fetch chain (fetch_url.py):
+    # company filings / annual reports / IR decks are routinely PDF and
+    # must enter the evidence chain as text, not mojibake.
+    "pypdf>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +65,8 @@ nerya = [
     "agent/route_manifest_presets/*.yml",
     "skills/builtin/**/*.md",
     "skills/builtin/**/*.yml",
+    "workspace/_prompt_bundles/**/*.md",
+    "workspace/_prompt_bundles/**/*.yml",
 ]
 
 [tool.pytest.ini_options]

@@ -4,6 +4,7 @@ import pytest
 
 from nerya.skills.registry import SkillRegistry, _enabled_ok, _walk_skill_dirs
 from nerya.subagents.registry import (
+    DEFAULT_SUBAGENT_EXECUTION_POLICIES,
     DEFAULT_SUBAGENT_PROMPTS,
     DEFAULT_SUBAGENT_SKILLS,
     DEFAULT_TIERS,
@@ -97,7 +98,9 @@ def test_expert_lens_default_roles_are_wired() -> None:
         assert skill_id in DEFAULT_SUBAGENT_SKILLS[role]
         assert role in DEFAULT_TIERS
         prompt = DEFAULT_SUBAGENT_PROMPTS[role]
-        assert f'skill_view("{skill_id}")' in prompt
+        assert skill_id in DEFAULT_SUBAGENT_EXECUTION_POLICIES[role].preload_skills
+        assert "do not reload it" in prompt
+        assert "skill_view" not in prompt
         assert "Never submit orders" in prompt
 
 

@@ -17,6 +17,11 @@ when the kwargs are omitted.
 
 from __future__ import annotations
 
+import json
+import re
+import time
+import uuid
+from pathlib import Path
 from typing import Any
 
 from ...skills.builtin.research.scripts import fetch_url, search_fetch, web_search
@@ -73,6 +78,64 @@ _BASE_URLS_PROP = {
     ),
 }
 
+_SAVE_RAW_PROP = {
+    "type": "boolean",
+    "default": False,
+    "description": (
+        "Persist the complete, un-truncated tool result to "
+        "``<workspace>/state/research_data/<date>/<slug>.json`` and "
+        "include the file path as ``saved_path`` in the response. Use "
+        "this when collecting data other agents must analyse later so "
+        "nothing is lost to context compaction."
+    ),
+}
+
+
+def _slugify(text: str, max_len: int = 60) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(text or "")).strip("-").lower()
+    return slug[:max_len] or "capture"
+
+
+def _save_raw_capture(
+    workspace_root: Path | str | None,
+    *,
+    kind: str,
+    subject: str,
+    data: dict[str, Any],
+) -> str | None:
+    """Write the full tool payload under ``state/research_data/`` and
+    return the workspace-relative path (or ``None`` when no workspace
+    root is wired in / the write fails). Failures never break the tool
+    result — the caller still gets the inline data.
+    """
+
+    if not workspace_root:
+        return None
+    try:
+        root = Path(workspace_root)
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        out_dir = root / "state" / "research_data" / day
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%H%M%S", time.gmtime())
+        suffix = uuid.uuid4().hex[:6]
+        path = out_dir / f"{stamp}_{suffix}_{kind}_{_slugify(subject)}.json"
+        record = {
+            "kind": kind,
+            "subject": subject,
+            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "data": data,
+        }
+        path.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        try:
+            return str(path.relative_to(root))
+        except ValueError:
+            return str(path)
+    except Exception:
+        return None
+
 
 WEB_SEARCH_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -97,6 +160,7 @@ WEB_SEARCH_SCHEMA: dict[str, Any] = {
         "engines": _ENGINES_PROP,
         "keys": _KEYS_PROP,
         "base_urls": _BASE_URLS_PROP,
+        "save_raw": _SAVE_RAW_PROP,
     },
     "required": ["query"],
 }
@@ -138,6 +202,7 @@ WEB_FETCH_SCHEMA: dict[str, Any] = {
             ),
         },
         "min_content_chars": {"type": "integer", "minimum": 0, "default": 160},
+        "save_raw": _SAVE_RAW_PROP,
     },
     "required": ["url"],
 }
@@ -169,6 +234,7 @@ WEB_SEARCH_FETCH_SCHEMA: dict[str, Any] = {
             ),
         },
         "min_content_chars": {"type": "integer", "minimum": 0, "default": 160},
+        "save_raw": _SAVE_RAW_PROP,
     },
     "required": ["query"],
 }
@@ -216,7 +282,9 @@ def _coerce_base_urls(value: Any) -> dict[str, str] | None:
     return out or None
 
 
-def web_search_handler(call: ToolCall) -> ToolResult:
+def web_search_handler(
+    call: ToolCall, *, workspace_root: Path | str | None = None,
+) -> ToolResult:
     args = call.arguments or {}
     query = str(args.get("query") or "")
     data = web_search.run(
@@ -229,10 +297,18 @@ def web_search_handler(call: ToolCall) -> ToolResult:
         keys=_coerce_keys(args.get("keys")),
         base_urls=_coerce_base_urls(args.get("base_urls")),
     )
+    if bool(args.get("save_raw")) and isinstance(data, dict):
+        saved = _save_raw_capture(
+            workspace_root, kind="web_search", subject=query, data=data,
+        )
+        if saved:
+            data["saved_path"] = saved
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
 
 
-def web_fetch_handler(call: ToolCall) -> ToolResult:
+def web_fetch_handler(
+    call: ToolCall, *, workspace_root: Path | str | None = None,
+) -> ToolResult:
     args = call.arguments or {}
     url = str(args.get("url") or "")
     data = fetch_url.run(
@@ -246,10 +322,18 @@ def web_fetch_handler(call: ToolCall) -> ToolResult:
         use_scrapling_fallback=bool(args.get("use_scrapling_fallback", True)),
         min_content_chars=int(args.get("min_content_chars") or 160),
     )
+    if bool(args.get("save_raw")) and isinstance(data, dict):
+        saved = _save_raw_capture(
+            workspace_root, kind="web_fetch", subject=url, data=data,
+        )
+        if saved:
+            data["saved_path"] = saved
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
 
 
-def web_search_fetch_handler(call: ToolCall) -> ToolResult:
+def web_search_fetch_handler(
+    call: ToolCall, *, workspace_root: Path | str | None = None,
+) -> ToolResult:
     args = call.arguments or {}
     query = str(args.get("query") or "")
     data = search_fetch.run(
@@ -270,6 +354,12 @@ def web_search_fetch_handler(call: ToolCall) -> ToolResult:
         use_scrapling_fallback=bool(args.get("use_scrapling_fallback", True)),
         min_content_chars=int(args.get("min_content_chars") or 160),
     )
+    if bool(args.get("save_raw")) and isinstance(data, dict):
+        saved = _save_raw_capture(
+            workspace_root, kind="web_search_fetch", subject=query, data=data,
+        )
+        if saved:
+            data["saved_path"] = saved
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
 
 

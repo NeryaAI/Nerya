@@ -46,6 +46,7 @@ from .registry import (
     GENERIC_ADHOC_SKILLS,
     SubAgentSpec,
     canonical_subagent_name,
+    default_execution_policy,
     generic_role_prompt,
     load_registry,
 )
@@ -126,6 +127,7 @@ class StrategySubAgentRegistry:
                 allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get(canonical, [])),
                 tier=self._strategy_tier(name),
                 canonical_name=canonical,
+                execution_policy=default_execution_policy(canonical),
             )
         spec = self._load_global().get(name)
         if spec is not None:
@@ -164,6 +166,7 @@ class StrategySubAgentRegistry:
             allowed_skills=allowed,
             tier=DEFAULT_TIERS.get(canonical, "medium"),
             canonical_name=canonical,
+            execution_policy=default_execution_policy(canonical),
         )
 
     def list_names(self) -> list[str]:
@@ -230,6 +233,7 @@ def build_strategy_tuner_spec(
         allowed_skills=list(DEFAULT_SUBAGENT_SKILLS.get("strategy_tuner", [])),
         tier=str(tuning.subagent.tier or "medium"),
         canonical_name="strategy_tuner",
+        execution_policy=default_execution_policy("strategy_tuner"),
     )
 
 

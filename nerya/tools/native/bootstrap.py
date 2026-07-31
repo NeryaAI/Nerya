@@ -39,6 +39,7 @@ from .accounts import (
     account_upsert_handler,
 )
 from .agents import (
+    RESEARCH_RUN_SCHEMA,
     ROLE_DELETE_SCHEMA,
     ROLE_GET_SCHEMA,
     ROLE_LIST_SCHEMA,
@@ -46,6 +47,7 @@ from .agents import (
     SUBAGENT_LIST_SCHEMA,
     SUBAGENT_RUN_SCHEMA,
     TEAM_RUN_SCHEMA,
+    research_run_handler,
     role_delete_handler,
     role_get_handler,
     role_list_handler,
@@ -1076,6 +1078,39 @@ def _wrap_team_run(deps: NativeToolDeps):
     return handler
 
 
+def _wrap_research_run(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return research_run_handler(
+            call,
+            config=deps.config,
+            skills=deps.skills,
+            tool_registry=deps.tool_registry,
+        )
+
+    return handler
+
+
+def _wrap_web_search(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return web_search_handler(call, workspace_root=deps.workspace_root)
+
+    return handler
+
+
+def _wrap_web_fetch(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return web_fetch_handler(call, workspace_root=deps.workspace_root)
+
+    return handler
+
+
+def _wrap_web_search_fetch(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return web_search_fetch_handler(call, workspace_root=deps.workspace_root)
+
+    return handler
+
+
 def _wrap_role_list(deps: NativeToolDeps):
     def handler(call: ToolCall):
         return role_list_handler(call, config=deps.config)
@@ -1955,6 +1990,8 @@ def register_native_tools(
             permission_scope=PermissionScope.NONE,
             tags=("skill", "discovery"),
             auto_approve=True,
+            subject_action_aliases=("view", "skill_view"),
+            subject_argument="skill_id",
             result_kind="text",
         ),
         make_native_descriptor(
@@ -1994,7 +2031,7 @@ def register_native_tools(
                 "top-N pages in one bounded pass."
             ),
             input_schema=WEB_SEARCH_SCHEMA,
-            handler=web_search_handler,
+            handler=_wrap_web_search(deps),
             risk=RiskLevel.READ,
             permission_scope=PermissionScope.NETWORK,
             read_only=True,
@@ -2015,7 +2052,7 @@ def register_native_tools(
                 "use_browser_fallback / use_scrapling_fallback."
             ),
             input_schema=WEB_FETCH_SCHEMA,
-            handler=web_fetch_handler,
+            handler=_wrap_web_fetch(deps),
             risk=RiskLevel.READ,
             permission_scope=PermissionScope.NETWORK,
             read_only=True,
@@ -2034,7 +2071,7 @@ def register_native_tools(
                 "that need source content, not just snippets."
             ),
             input_schema=WEB_SEARCH_FETCH_SCHEMA,
-            handler=web_search_fetch_handler,
+            handler=_wrap_web_search_fetch(deps),
             risk=RiskLevel.READ,
             permission_scope=PermissionScope.NETWORK,
             read_only=True,
@@ -2657,6 +2694,38 @@ def register_native_tools(
                     tags=("subagent", "team", "exec"),
                     result_kind="json",
                     auto_approve=True,
+                ),
+                make_native_descriptor(
+                    name="research_run",
+                    description=(
+                        "Delegate web-data collection to the dedicated "
+                        "``web_researcher`` lane (light-tier by default). It "
+                        "drives the built-in search-engine chain + headless "
+                        "browser fallback, persists complete raw captures "
+                        "under state/research_data/ and returns capture "
+                        "paths + key facts for downstream analysis. Unlike "
+                        "subagent_run this tool is also callable from inside "
+                        "team members, so an expert lane can pull fresh web "
+                        "data mid-run; the researcher itself cannot nest "
+                        "further. Provide ``query`` and/or explicit "
+                        "``urls``."
+                    ),
+                    input_schema=RESEARCH_RUN_SCHEMA,
+                    handler=_wrap_research_run(deps),
+                    risk=RiskLevel.EXEC,
+                    permission_scope=PermissionScope.WORKSPACE,
+                    read_only=False,
+                    is_concurrency_safe=True,
+                    tags=("subagent", "research", "web", "exec"),
+                    result_kind="json",
+                    auto_approve=True,
+                    child_max_depth=1,
+                    delegates_to="web_researcher",
+                    invocation_aliases=(
+                        "research",
+                        "research.research_run",
+                        "research.web_search",
+                    ),
                 ),
                 make_native_descriptor(
                     name="role_list",

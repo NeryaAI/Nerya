@@ -71,6 +71,58 @@ def test_fetch_url_extracts_html_to_markdown_without_jina(monkeypatch) -> None:
     assert result["text"] == result["markdown"]
 
 
+def test_fetch_url_detects_pdf_from_content_type_extension_or_magic() -> None:
+    assert fetch_url._is_pdf_response(
+        "application/pdf", "https://example.com/report", b"not-pdf",
+    )
+    assert fetch_url._is_pdf_response(
+        "application/octet-stream", "https://example.com/report.PDF", b"x",
+    )
+    assert fetch_url._is_pdf_response(
+        "application/octet-stream", "https://example.com/download", b"%PDF-1.7",
+    )
+    assert not fetch_url._is_pdf_response(
+        "text/html", "https://example.com/report", b"<html>",
+    )
+
+
+def test_fetch_url_extracts_pdf_before_max_bytes_truncation(monkeypatch) -> None:
+    body = b"%PDF-1.7\n" + (b"x" * 5000)
+    extracted_lengths = []
+
+    def fake_http_get(url: str, **kwargs):
+        assert url == "https://example.com/filing.pdf"
+        return 200, {"content-type": "application/pdf"}, body
+
+    def fake_extract_pdf(received: bytes, *, url: str):
+        extracted_lengths.append(len(received))
+        assert url == "https://example.com/filing.pdf"
+        return {
+            "text": "Primary filing text",
+            "title": "Annual filing",
+            "pages_total": 12,
+            "pages_read": 12,
+            "truncated_pages": False,
+        }
+
+    monkeypatch.setattr(fetch_url, "http_get", fake_http_get)
+    monkeypatch.setattr(fetch_url, "_extract_pdf", fake_extract_pdf)
+
+    result = fetch_url.run(
+        url="https://example.com/filing.pdf",
+        max_bytes=1024,
+        use_jina_fallback=False,
+        use_browser_fallback=False,
+        use_scrapling_fallback=False,
+    )
+
+    assert extracted_lengths == [len(body)]
+    assert result["ok"] is True
+    assert result["fetch_method"] == "direct_pdf_pypdf"
+    assert result["markdown"] == "Primary filing text"
+    assert result["pdf_pages_total"] == 12
+
+
 def test_fetch_url_uses_jina_reader_for_low_quality_direct_html(monkeypatch) -> None:
     calls: list[str] = []
 

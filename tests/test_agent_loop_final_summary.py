@@ -18649,8 +18649,11 @@ def test_pending_skill_proposal_required_action_hides_read_only_discovery_tools(
                         {
                             "type": "tool_use",
                             "id": "toolu_skill_doc",
-                            "name": "Skill",
-                            "input": {"skill": "tasks"},
+                            # skill_index (catalog search) is the discovery
+                            # signal that can motivate a skill proposal;
+                            # skill_view/Skill is "use", not "discover".
+                            "name": "skill_index",
+                            "input": {"query": "x kol sync tasks"},
                         },
                     ],
                     stop_reason="tool_use",
@@ -18833,7 +18836,7 @@ def test_pending_skill_proposal_required_action_hides_read_only_discovery_tools(
     assert "prp_x_kol_sync" in outcome.final_text
 
 
-def test_explicit_skill_authoring_clarification_text_gets_skill_proposal_retry() -> None:
+def test_clarification_text_without_skill_discovery_does_not_force_skill_proposal() -> None:
     class ClarifyingSkillGateway:
         def __init__(self) -> None:
             self.calls: list[dict] = []
@@ -18853,32 +18856,11 @@ def test_explicit_skill_authoring_clarification_text_gets_skill_proposal_retry()
                     ],
                     stop_reason="end_turn",
                 )
-            if len(self.calls) == 2:
-                latest = str(self.calls[-1]["messages"][-1]["content"])
-                assert "evolve_skill_proposal" in latest
-                assert self.calls[-1]["metadata"]["required_next_tool_names"] == [
-                    "evolve_skill_proposal"
-                ]
-                return MessagesResponse(
-                    content=[
-                        {
-                            "type": "tool_use",
-                            "id": "toolu_skill_proposal",
-                            "name": "evolve_skill_proposal",
-                            "input": {
-                                "name": "x_kol_sync",
-                                "description": "Sync X KOL list on a schedule.",
-                                "workflow": [
-                                    "Read the configured KOL source.",
-                                    "Persist a local snapshot.",
-                                    "Record missing source/auth fields as proposal gaps.",
-                                ],
-                            },
-                        }
-                    ],
-                    stop_reason="tool_use",
-                )
-            raise AssertionError("clarification text should not end explicit skill authoring")
+            raise AssertionError(
+                "NL 'write a skill' text with no skill_index discovery must "
+                "not force evolve_skill_proposal; the loop should stay "
+                "autonomous and finalize the model's own response."
+            )
 
     registry = ToolRegistry()
     registry.register(
@@ -18922,9 +18904,12 @@ def test_explicit_skill_authoring_clarification_text_gets_skill_proposal_retry()
         user_message="每天凌晨把 X 平台关键 KOL 列表同步到本地，写个 skill",
     )
 
-    assert len(gateway.calls) == 2
-    assert outcome.transition_reason == "proposal_created_finalized"
-    assert "prp_x_kol_sync" in outcome.final_text
+    # NL authoring intent with no skill-discovery tool evidence must not
+    # force a skill proposal - the loop stays autonomous and finalizes the
+    # model's own clarification text instead of injecting the proposal.
+    assert len(gateway.calls) == 1
+    assert "evolve_skill_proposal" not in (outcome.final_text or "")
+    assert "confirm the source of truth" in outcome.final_text
 
 
 def test_skill_proposal_finalizes_despite_auxiliary_provider_followup_debt() -> None:

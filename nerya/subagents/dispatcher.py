@@ -119,6 +119,7 @@ class SubAgentDispatcher:
         parent_call_id: str | None = None,
         inline_spec: SubAgentSpec | None = None,
         context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
+        delegation_depth: int = 0,
     ) -> SubAgentResult:
         import time as _t
         t0 = _t.monotonic()
@@ -141,6 +142,7 @@ class SubAgentDispatcher:
                 turn_id=turn_id,
                 parent_call_id=parent_call_id,
                 context_scope=context_scope,
+                delegation_depth=delegation_depth,
             )
             return SubAgentResult(
                 ok=True,
@@ -210,6 +212,7 @@ class SubAgentDispatcher:
         parent_call_id: str | None = None,
         inline_spec: SubAgentSpec | None = None,
         context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
+        delegation_depth: int = 0,
     ) -> dict[str, Any]:
         if not target.startswith("subagent:"):
             return {"ok": False, "reason": "not_subagent_target"}
@@ -222,6 +225,7 @@ class SubAgentDispatcher:
             parent_call_id=parent_call_id,
             inline_spec=inline_spec,
             context_scope=context_scope,
+            delegation_depth=delegation_depth,
         )
         self._journal(
             res,

@@ -31,6 +31,7 @@ from ..core.redaction import redact_display_dict
 from ..core.time import now_iso
 from ..skills.kernel import SkillKernel
 from ..subagents.dispatcher import SubAgentDispatcher, SubAgentResult
+from ..subagents.registry import build_inline_spec
 from .aggregator import TeamAggregator
 from .blackboard import Blackboard
 from .gates import evaluate_gates
@@ -219,6 +220,7 @@ class TeamOrchestrator:
         max_parallel = max(1, int(template.max_parallel or 1))
         index = {t.id: t for t in tasks}
         remaining = {t.id for t in tasks}
+        members = {member.name: member for member in template.members}
         while remaining:
             ready = [
                 tid for tid in remaining
@@ -268,6 +270,7 @@ class TeamOrchestrator:
                         task=t, payload=payload,
                         trigger_event_id=run.trigger_event_id,
                         strategy_id=strategy_id, session_id=session_id,
+                        member_spec=members.get(t.owner),
                     )] = tid
                 for fut in futures:
                     tid = futures[fut]
@@ -341,14 +344,27 @@ class TeamOrchestrator:
         trigger_event_id: Optional[str],
         strategy_id: Optional[str],
         session_id: Optional[str],
+        member_spec: Any = None,
     ) -> SubAgentResult:
         assert self.dispatcher is not None
+        inline_spec = None
+        if member_spec is not None:
+            inline_spec = build_inline_spec(
+                self.config.paths,
+                name=task.subagent_name,
+                allowed_skills=list(member_spec.allowed_skills or []) or None,
+                tier=member_spec.tier or None,
+                provider=member_spec.provider or None,
+                model=member_spec.model or None,
+                execution_policy=member_spec.execution_policy or None,
+            )
         return self.dispatcher._run_one(
             task.subagent_name,
             payload=payload,
             trigger_event_id=trigger_event_id,
             strategy_id=strategy_id,
             session_id=session_id,
+            inline_spec=inline_spec,
         )
 
     def _integrate_result(

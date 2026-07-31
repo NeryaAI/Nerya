@@ -80,6 +80,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
                     "news_filtering", "compress", "classify",
                     "trigger_triage", "extract_json",
                     "auto_session_title",
+                    # Cheap subagent lanes (web_researcher, sentiment_analyst,
+                    # news_interpreter, …) run their reasoning loop on the
+                    # light tier. Without this entry a light-tier role was
+                    # silently upgraded to medium by TierPolicy.
+                    "subagent_analysis",
                 ],
                 # Capability families the tier advertises. A tier matches a
                 # task when the task normalises to any of these classes

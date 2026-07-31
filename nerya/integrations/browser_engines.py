@@ -1572,12 +1572,25 @@ def fetch(
                 return opened
             runtime = opened.get("runtime") if isinstance(opened.get("runtime"), dict) else {}
             try:
-                snapshot = camofox_snapshot_runtime(
-                    runtime,
-                    max_chars=80000,
-                    timeout_s=timeout_s,
-                )
-                body = str(snapshot.get("snapshot") or "")
+                # The tab starts loading asynchronously; an immediate
+                # snapshot on a JS-heavy page (IR portals, SPAs) returns
+                # an empty accessibility tree. Poll with short waits until
+                # content appears or the budget is spent.
+                body = ""
+                snapshot: dict[str, Any] = {}
+                deadline = time.monotonic() + max(10.0, min(timeout_s, 60.0))
+                delay = 1.0
+                while True:
+                    snapshot = camofox_snapshot_runtime(
+                        runtime,
+                        max_chars=80000,
+                        timeout_s=timeout_s,
+                    )
+                    body = str(snapshot.get("snapshot") or "")
+                    if len(body) >= 200 or time.monotonic() >= deadline:
+                        break
+                    time.sleep(delay)
+                    delay = min(delay * 1.6, 4.0)
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 return {
                     "ok": True,

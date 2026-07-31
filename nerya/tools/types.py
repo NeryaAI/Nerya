@@ -167,6 +167,31 @@ class ToolDescriptor:
     the model actively calls ``mcp_describe`` for that namespace.
     """
 
+    child_max_depth: Optional[int] = None
+    """Maximum child-delegation depth at which this tool is visible.
+
+    ``None`` leaves depth unrestricted. A value of ``1`` allows a
+    first-level child at depth 0 to call the tool and hides it from the
+    delegated child at depth 1.
+    """
+
+    delegates_to: str = ""
+    """Optional declarative subagent target used by delegation handlers."""
+
+    invocation_aliases: tuple[str, ...] = field(default_factory=tuple)
+    """Skill-call intents that route to this native tool.
+
+    Entries use ``skill`` or ``skill.action`` notation. This lets a native
+    tool declare compatibility with playbook-shaped calls without adding
+    skill names, action names, or role branches to the agent runtime.
+    """
+
+    subject_action_aliases: tuple[str, ...] = field(default_factory=tuple)
+    """Action intents that route a ``{skill, action}`` shape to this tool."""
+
+    subject_argument: str = ""
+    """Argument that receives the original ``skill`` subject for aliases."""
+
     # ----- helpers ---------------------------------------------------
 
     def to_provider_tool(self) -> dict[str, Any]:

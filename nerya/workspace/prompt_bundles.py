@@ -96,6 +96,10 @@ class PromptBundle:
     agents: Dict[str, str] = field(default_factory=dict)
     #: Mapping of subagent id to prompt body.
     subagents: Dict[str, str] = field(default_factory=dict)
+    #: Declarative runtime policy per subagent. These values shape budgets,
+    #: tool exposure, argument defaults, and tier locks without branching on
+    #: role names inside the agent loop.
+    subagent_policies: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     #: Mapping of slot/subagent id to the relative bundle path.  Used
     #: when recording provenance.
     sources: Dict[str, str] = field(default_factory=dict)
@@ -168,7 +172,56 @@ def load_bundle(bundle_id: str = DEFAULT_BUNDLE_ID) -> PromptBundle:
         bundle.subagents[str(sid)] = body
         bundle.sources[f"subagents/{sid}"] = str(rel)
 
+    policy_profiles = manifest_raw.get("subagent_policy_profiles") or {}
+    if not isinstance(policy_profiles, dict):
+        raise ValueError(
+            f"prompt bundle '{bundle_id}': 'subagent_policy_profiles' must be a mapping"
+        )
+    subagent_policies = manifest_raw.get("subagent_policies") or {}
+    if not isinstance(subagent_policies, dict):
+        raise ValueError(
+            f"prompt bundle '{bundle_id}': 'subagent_policies' must be a mapping"
+        )
+    for sid, raw_policy in sorted(subagent_policies.items()):
+        if not isinstance(raw_policy, dict):
+            raise ValueError(
+                f"prompt bundle '{bundle_id}': policy for {sid!r} must be a mapping"
+            )
+        resolved: Dict[str, Any] = {}
+        extends = raw_policy.get("extends") or []
+        if isinstance(extends, str):
+            extends = [extends]
+        if not isinstance(extends, list):
+            raise ValueError(
+                f"prompt bundle '{bundle_id}': policy extends for {sid!r} must be a list"
+            )
+        for profile_name in extends:
+            profile = policy_profiles.get(str(profile_name))
+            if not isinstance(profile, dict):
+                raise ValueError(
+                    f"prompt bundle '{bundle_id}': unknown policy profile {profile_name!r}"
+                )
+            resolved = _deep_merge(resolved, profile)
+        resolved = _deep_merge(
+            resolved,
+            {key: value for key, value in raw_policy.items() if key != "extends"},
+        )
+        bundle.subagent_policies[str(sid)] = resolved
+
     return bundle
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge prompt-bundle policy mappings."""
+
+    out: Dict[str, Any] = dict(base)
+    for key, value in override.items():
+        current = out.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            out[key] = _deep_merge(current, value)
+        else:
+            out[key] = value
+    return out
 
 
 def _read_relative(root: Path, rel: str) -> str:
