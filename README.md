@@ -45,6 +45,19 @@ triggers, and strategy configs, so every strategy comes back sharper than the la
   and quant-strategy-loop skills add research lenses and repeatable strategy
   iteration without bloating the always-on agent prompt.
 
+### Current agent loop contract
+
+The main loop is skill-routed and bounded: ordinary chat can answer directly;
+research requests run `research_run`, delegate source work to
+`web_researcher`/`web_search_fetch`, and persist structured captures under
+`state/research_data` before the root turn writes its final answer. Large tool
+results are compressed into structured summaries while preserving the fields
+needed for the next step. Strategy work follows
+`strategy_draft → strategy_validate → strategy_submit_proposal → strategy_backtest`.
+Token, stock, market, and daily conversation routes share the same loop and
+error handling. Paper/live execution remains separate and fail-closed behind
+Risk Gate plus human Approval Gate.
+
 ---
 
 ## From request to evolving strategy
@@ -437,8 +450,8 @@ The launcher is idempotent. Re-run it whenever. API on `:18317`, dashboard on
 ```
 
 Code lives in the repo. Runtime state (strategies, journals, sessions, approvals,
-memory, vault, proposals) lives in your workspace directory. Tarball it, grep it,
-or `rm -rf` it.
+memory, vault, proposals) lives in your workspace directory. Back it up and audit
+it as ordinary files.
 
 ---
 
@@ -519,6 +532,9 @@ adapters, dev-mode journaling, and the service installer.
 The suite runs without network. LLM adapters use `FakeTransport`. Exchanges use
 `mock_exchange.py` and `mock_chain.py`. End-to-end LLM behavior is driven by
 deterministic `<<MOCK_DECISION:{…}>>` hooks.
+
+The current runtime smoke set covers daily chat, investment research, strategy
+validation/build, token analysis, stock analysis, and paper/mock order intent.
 
 ---
 

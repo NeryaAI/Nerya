@@ -39,6 +39,16 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 - **更深的金融工作流**：新增专家投资者、财经创作者和量化策略循环等内置技能，
   把研究视角和策略迭代流程按需加载，不膨胀常驻 Agent 提示词。
 
+### 当前 Agent loop 契约
+
+主循环由 skill 路由并且有预算边界：日常对话可以直接回答；投研请求进入
+`research_run`，再派发 `web_researcher` / `web_search_fetch`，把结构化 capture
+持久化到 `state/research_data` 后返回最终结论。大型工具结果会先压缩成结构化摘要，
+但保留下一步所需的关键字段。策略工作遵循
+`strategy_draft → strategy_validate → strategy_submit_proposal → strategy_backtest`。
+代币、股票、市场分析和日常对话共用同一套循环与错误处理。纸面与实盘严格分离，
+所有实盘意图都 fail-closed 地经过 Risk Gate 和人工 Approval Gate。
+
 ---
 
 ## 六大核心
@@ -385,7 +395,7 @@ pwsh -File .\scripts\windows\start-local.ps1 -OpenDashboard
 ```
 
 代码在仓库里。运行时的所有状态（策略、日志、会话、审批、记忆、Vault、提案）都落在你自己的
-工作空间。想备份 `tar`，想查 `cd`，想清空 `rm -rf` 完事。
+工作空间，可以按普通文件备份、审计和迁移。
 
 ---
 
@@ -459,6 +469,8 @@ CEX 实盘签名下单（Binance、Bybit、OKX、Hyperliquid）、DEX 实盘签�
 
 测试不联网。LLM 用 `FakeTransport`，交易所用 `mock_exchange.py` / `mock_chain.py`，
 端到端的 LLM 行为靠确定性的 `<<MOCK_DECISION:{…}>>` 钩子驱动。
+
+当前 runtime smoke 覆盖：日常对话、投研、策略验证/构建、代币分析、股票分析和纸面/模拟下单。
 
 ---
 
