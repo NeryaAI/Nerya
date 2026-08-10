@@ -47,7 +47,7 @@ from ...subagents.registry import (
     save_role,
 )
 from ...subagents.result_aggregator import aggregate
-from ...teams.models import TeamMember, TeamMemberSpec, TeamRun, TeamTask, TeamTaskSpec, TeamTemplate
+from ...teams.orchestrator import TeamOrchestrator, TeamRunRequest
 from ...teams.store import TeamStore
 from ...teams.templates import get_template
 from ..types import (
@@ -69,6 +69,61 @@ def _schema_error(call: ToolCall, message: str) -> ToolResult:
         name=call.name,
         error=ToolError(kind=ToolErrorKind.SCHEMA_VALIDATION, message=message),
     )
+
+
+def _nested_permission_pending(envelope: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first child-native ASK record in a subagent envelope."""
+
+    metrics = envelope.get("metrics") if isinstance(envelope, dict) else None
+    records = metrics.get("rejected_actions") if isinstance(metrics, dict) else None
+    if not isinstance(records, list):
+        return None
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("error_kind") or "").strip() != "permission_pending":
+            continue
+        entry = record.get("entry") if isinstance(record.get("entry"), dict) else {}
+        recovery = record.get("recovery_hint")
+        if not isinstance(recovery, dict):
+            recovery = {}
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            payload = recovery.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        tool_name = str(
+            record.get("tool_name")
+            or record.get("skill")
+            or recovery.get("tool_name")
+            or ""
+        ).strip()
+        nested_id = str(
+            record.get("tool_use_id")
+            or record.get("call_id")
+            or entry.get("tool_use_id")
+            or entry.get("call_id")
+            or recovery.get("nested_tool_use_id")
+            or recovery.get("tool_use_id")
+            or ""
+        ).strip()
+        caller = str(
+            record.get("caller")
+            or entry.get("caller")
+            or recovery.get("caller")
+            or ""
+        ).strip()
+        pending = {
+            "nested_permission_pending": True,
+            "nested_tool_use_id": nested_id,
+            "tool_name": tool_name,
+            "payload": redact_display_dict(dict(payload)),
+            "caller": caller,
+        }
+        if recovery:
+            pending["recovery_hint"] = redact_display_dict(dict(recovery))
+        return pending
+    return None
 
 
 def _build_inline_role_spec(
@@ -130,205 +185,6 @@ def _publish_team_event(kind: str, **payload: Any) -> None:
         get_default_bus().publish(kind, **payload)
     except Exception:
         pass
-
-
-def _persist_team_run_snapshot(
-    *,
-    config: Config,
-    common_event: dict[str, Any],
-    summary: dict[str, Any],
-) -> None:
-    """Mirror native ``team_run`` executions to the durable TeamStore API."""
-
-    paths = getattr(config, "paths", None)
-    if paths is None:
-        return
-    try:
-        store = TeamStore(paths)
-        run_id = str(summary.get("team_run_id") or common_event.get("team_run_id") or "").strip()
-        if not run_id:
-            return
-        team_template = str(
-            common_event.get("team_template")
-            or summary.get("team_template")
-            or "ad_hoc_parallel_team"
-        )
-        role_names = [str(r) for r in (summary.get("roles_requested") or common_event.get("roles") or [])]
-        if not role_names:
-            role_names = [
-                str(r.get("subagent") or "")
-                for r in (summary.get("results") or []) + (summary.get("failures") or [])
-                if isinstance(r, dict) and str(r.get("subagent") or "")
-            ]
-        members = [
-            TeamMember.from_spec(
-                TeamMemberSpec(
-                    name=role_name,
-                    role=role_name,
-                    subagent_name=role_name,
-                    required=True,
-                    tier="medium",
-                    description="Native team_run member.",
-                )
-            )
-            for role_name in role_names
-        ]
-        template = TeamTemplate(
-            id=team_template,
-            description="Native synchronous team_run mirror.",
-            lead=role_names[0] if role_names else "team",
-            members=[
-                TeamMemberSpec(
-                    name=role_name,
-                    role=role_name,
-                    subagent_name=role_name,
-                    required=True,
-                    tier="medium",
-                    description="Native team_run member.",
-                )
-                for role_name in role_names
-            ],
-            tasks=[
-                TeamTaskSpec(
-                    id=f"role-{role_name}",
-                    owner=role_name,
-                    subagent_name=role_name,
-                    subject=str(summary.get("task") or common_event.get("task") or ""),
-                    required=True,
-                    output_kinds=["decision_input"],
-                )
-                for role_name in role_names
-            ],
-            max_rounds=1,
-            max_parallel=int(common_event.get("max_parallel") or max(1, len(role_names) or 1)),
-            output_schema={"kind": "native_team_run_summary"},
-        )
-        existing = store.read_run(run_id)
-        if existing is None:
-            run = TeamRun(
-                id=run_id,
-                template_id=team_template,
-                goal=str(summary.get("task") or common_event.get("task") or ""),
-                status="running",
-                phase="research",
-                turn_id=common_event.get("turn_id"),
-                trigger_event_id=common_event.get("trigger_event_id"),
-                strategy_id=common_event.get("strategy_id"),
-                session_id=common_event.get("session_id"),
-                metrics={},
-            )
-            store.create_run(run, template, members)
-        succeeded = {str(x) for x in summary.get("roles_succeeded") or []}
-        failed = {str(x) for x in summary.get("roles_failed") or []}
-        result_by_role = {
-            str(row.get("subagent") or ""): row
-            for row in summary.get("results") or []
-            if isinstance(row, dict)
-        }
-        failure_by_role = {
-            str(row.get("subagent") or ""): row
-            for row in summary.get("failures") or []
-            if isinstance(row, dict)
-        }
-        for role_name in role_names:
-            result_row = result_by_role.get(role_name) or {}
-            failure_row = failure_by_role.get(role_name) or {}
-            result_output = result_row.get("output")
-            failure_output = failure_row.get("output")
-            output = (
-                result_output
-                if isinstance(result_output, dict)
-                else failure_output
-                if isinstance(failure_output, dict)
-                else {}
-            )
-            task = TeamTask(
-                id=f"role-{role_name}",
-                run_id=run_id,
-                owner=role_name,
-                subagent_name=role_name,
-                subject=str(summary.get("task") or common_event.get("task") or ""),
-                description="Native synchronous team_run member execution.",
-                required=True,
-                status="completed" if role_name in succeeded else "failed" if role_name in failed else "completed",
-                payload={
-                    "native_team_run": True,
-                    "output": output,
-                    "metrics": result_row.get("metrics") or failure_row.get("metrics") or {},
-                    "tokens": result_row.get("tokens", failure_row.get("tokens")),
-                    "usd": result_row.get("usd", failure_row.get("usd")),
-                },
-                result_summary=str(
-                    output.get("summary")
-                    or result_row.get("summary")
-                    or failure_row.get("error")
-                    or ""
-                )[:1000],
-                error=str(failure_row.get("error") or "") or None,
-            )
-            store.update_task(task)
-        run = store.read_run(run_id) or TeamRun(
-            id=run_id,
-            template_id=team_template,
-            goal=str(summary.get("task") or common_event.get("task") or ""),
-        )
-        run.status = str(summary.get("status") or "completed")
-        run.phase = "close"
-        run.final_context_ref = "synthesis/final_context.json"
-        run.final_report_ref = "synthesis/final_report.md"
-        run.metrics = {
-            "native_team_run": True,
-            "roles_total": len(role_names),
-            "roles_succeeded": len(succeeded),
-            "roles_failed": len(failed),
-            "max_parallel": summary.get("max_parallel") or common_event.get("max_parallel"),
-            "timeout_s": summary.get("timeout_s") or common_event.get("timeout_s"),
-            "timeout_uncapped_s": (
-                summary.get("timeout_uncapped_s")
-                or common_event.get("timeout_uncapped_s")
-            ),
-            "timeout_capped_by_parent": (
-                summary.get("timeout_capped_by_parent")
-                if "timeout_capped_by_parent" in summary
-                else common_event.get("timeout_capped_by_parent")
-            ),
-            "parent_remaining_wall_seconds": (
-                summary.get("parent_remaining_wall_seconds")
-                or common_event.get("parent_remaining_wall_seconds")
-            ),
-            "parent_final_reserve_seconds": (
-                summary.get("parent_final_reserve_seconds")
-                or common_event.get("parent_final_reserve_seconds")
-            ),
-            "tokens_total": summary.get("tokens_total"),
-            "usd_total": summary.get("usd_total"),
-            "output_language": summary.get("output_language"),
-            "analysis_language": summary.get("analysis_language"),
-        }
-        store.write_synthesis_json(run_id, "final_context", summary)
-        store.write_synthesis_text(
-            run_id,
-            "final_report.md",
-            _native_team_run_report(summary),
-        )
-        store.update_run(run)
-        try:
-            from ...core import jsonl
-
-            jsonl.append(config.paths.journal("agent"), {
-                "kind": "team.run",
-                "run_id": run_id,
-                "template_id": team_template,
-                "status": run.status,
-                "phase": run.phase,
-                "metrics": run.metrics,
-                "report_ref": run.final_report_ref,
-                "native_team_run": True,
-            })
-        except Exception:
-            pass
-    except Exception:
-        return
 
 
 def _native_team_run_report(summary: dict[str, Any]) -> str:
@@ -753,10 +609,21 @@ def _positive_float(value: Any) -> float | None:
     return parsed if parsed > 0 else None
 
 
+def _nonnegative_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _parent_remaining_wall_seconds(call: ToolCall) -> float | None:
     """Return the parent turn budget left at tool execution time."""
 
-    remaining = _positive_float(_call_meta(call, "remaining_wall_seconds"))
+    # Zero is meaningful here: the parent has already spent its budget and
+    # the child must fail closed instead of falling back to its own default.
+    remaining = _nonnegative_float(_call_meta(call, "remaining_wall_seconds"))
     deadline = _positive_float(_call_meta(call, "turn_deadline_epoch"))
     if deadline is not None:
         remaining_from_deadline = max(0.0, deadline - time.time())
@@ -769,10 +636,7 @@ def _parent_remaining_wall_seconds(call: ToolCall) -> float | None:
 def _parent_final_reserve_seconds(call: ToolCall | None) -> float:
     if call is None:
         return _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS
-    for key in (
-        "team_run_final_reserve_seconds",
-        "wall_time_final_synthesis_seconds",
-    ):
+    for key in ("wall_time_final_synthesis_seconds",):
         parsed = _positive_float(_call_meta(call, key))
         if parsed is not None:
             return max(_TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS, parsed)
@@ -1114,6 +978,8 @@ def _compact_member_entry(entry: dict[str, Any]) -> dict[str, Any]:
         out["error_kind"] = entry.get("error_kind")
     if entry.get("caveat"):
         out["caveat"] = entry.get("caveat")
+    if isinstance(entry.get("permission_pending"), dict):
+        out["permission_pending"] = dict(entry["permission_pending"])
     return out
 
 
@@ -1535,6 +1401,7 @@ def subagent_run_handler(
     config: Config,
     skills: SkillKernel,
     tool_registry: Any = None,
+    executor: Any = None,
 ) -> ToolResult:
     """Spawn one subagent and return its envelope."""
 
@@ -1550,6 +1417,10 @@ def subagent_run_handler(
         or _call_meta(call, "trigger_event_id")
         or None
     )
+    cancel_token = _call_meta(call, "cancel_token") or _call_meta(
+        call, "cancellation_token"
+    )
+    parent_remaining_wall_seconds = _parent_remaining_wall_seconds(call)
     inline_spec = _build_inline_role_spec(
         config,
         name=name,
@@ -1599,17 +1470,25 @@ def subagent_run_handler(
     dispatcher_kwargs = {"config": config, "skills": skills}
     if tool_registry is not None:
         dispatcher_kwargs["tool_registry"] = tool_registry
+    if executor is not None:
+        dispatcher_kwargs["executor"] = executor
     dispatcher = SubAgentDispatcher(**dispatcher_kwargs)
     try:
+        dispatch_kwargs: dict[str, Any] = {
+            "trigger_event_id": trigger_event_id,
+            "strategy_id": strategy_id,
+            "session_id": session_id,
+            "turn_id": call.turn_id,
+            "parent_call_id": call.id,
+            "inline_spec": inline_spec,
+            "cancel_token": cancel_token,
+        }
+        if parent_remaining_wall_seconds is not None:
+            dispatch_kwargs["max_wall_seconds"] = parent_remaining_wall_seconds
         envelope = dispatcher.dispatch(
             f"subagent:{name}",
             payload=payload or {},
-            trigger_event_id=trigger_event_id,
-            strategy_id=strategy_id,
-            session_id=session_id,
-            turn_id=call.turn_id,
-            parent_call_id=call.id,
-            inline_spec=inline_spec,
+            **dispatch_kwargs,
         )
     except Exception as exc:
         return ToolResult.from_error(
@@ -1621,7 +1500,45 @@ def subagent_run_handler(
             ),
         )
 
+    nested_pending = _nested_permission_pending(envelope)
+    if nested_pending is not None:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.PERMISSION_PENDING,
+                message=(
+                    "child subagent requested approval before executing "
+                    f"{nested_pending.get('tool_name') or 'a native tool'}"
+                ),
+                detail={"envelope": envelope},
+                retryable=True,
+                recovery_hint=nested_pending,
+            ),
+        )
+
     if not envelope.get("ok", True):
+        # Preserve cooperative cancellation at the native-tool boundary.
+        # A child runtime already records the canonical ``cancelled`` reason;
+        # collapsing it into ``execution_error`` makes the parent loop retry
+        # or display a generic failure instead of stopping the turn.
+        envelope_error_kind = str(envelope.get("error_kind") or "").strip().lower()
+        if envelope_error_kind == "cancelled":
+            reason = str(envelope.get("error") or "cancelled")
+            return ToolResult.from_error(
+                tool_use_id=call.id,
+                name=call.name,
+                error=ToolError(
+                    kind=ToolErrorKind.ABORTED,
+                    message=reason,
+                    detail={
+                        "envelope": envelope,
+                        "reason": reason,
+                    },
+                    retryable=False,
+                    recovery_hint={"action": "cancelled", "reason": reason},
+                ),
+            )
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
@@ -1771,6 +1688,7 @@ def research_run_handler(
     config: Config,
     skills: SkillKernel,
     tool_registry: Any = None,
+    executor: Any = None,
 ) -> ToolResult:
     """Delegate collection to the target declared on this tool descriptor."""
 
@@ -1853,22 +1771,34 @@ def research_run_handler(
         or _call_meta(call, "trigger_event_id")
         or None
     )
+    cancel_token = _call_meta(call, "cancel_token") or _call_meta(
+        call, "cancellation_token"
+    )
+    parent_remaining_wall_seconds = _parent_remaining_wall_seconds(call)
 
     dispatcher_kwargs = {"config": config, "skills": skills}
     if tool_registry is not None:
         dispatcher_kwargs["tool_registry"] = tool_registry
+    if executor is not None:
+        dispatcher_kwargs["executor"] = executor
     dispatcher = SubAgentDispatcher(**dispatcher_kwargs)
 
     try:
+        dispatch_kwargs: dict[str, Any] = {
+            "trigger_event_id": trigger_event_id,
+            "strategy_id": strategy_id,
+            "session_id": session_id,
+            "turn_id": call.turn_id,
+            "parent_call_id": call.id,
+            "delegation_depth": delegation_depth + 1,
+            "cancel_token": cancel_token,
+        }
+        if parent_remaining_wall_seconds is not None:
+            dispatch_kwargs["max_wall_seconds"] = parent_remaining_wall_seconds
         envelope = dispatcher.dispatch(
             f"subagent:{target_name}",
             payload=payload,
-            trigger_event_id=trigger_event_id,
-            strategy_id=strategy_id,
-            session_id=session_id,
-            turn_id=call.turn_id,
-            parent_call_id=call.id,
-            delegation_depth=delegation_depth + 1,
+            **dispatch_kwargs,
         )
     except Exception as exc:
         return ToolResult.from_error(
@@ -1881,6 +1811,20 @@ def research_run_handler(
         )
 
     if not envelope.get("ok", True):
+        envelope_error_kind = str(envelope.get("error_kind") or "").strip().lower()
+        if envelope_error_kind == "cancelled":
+            reason = str(envelope.get("error") or "cancelled")
+            return ToolResult.from_error(
+                tool_use_id=call.id,
+                name=call.name,
+                error=ToolError(
+                    kind=ToolErrorKind.ABORTED,
+                    message=reason,
+                    detail={"envelope": envelope, "reason": reason},
+                    retryable=False,
+                    recovery_hint={"action": "cancelled", "reason": reason},
+                ),
+            )
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
@@ -2161,6 +2105,7 @@ def team_run_handler(
     config: Config,
     skills: SkillKernel,
     tool_registry: Any = None,
+    executor: Any = None,
 ) -> ToolResult:
     """Run a multi-role Agent Team in parallel and return aggregated findings.
 
@@ -2304,17 +2249,10 @@ def team_run_handler(
     dispatcher_kwargs = {"config": config, "skills": skills}
     if tool_registry is not None:
         dispatcher_kwargs["tool_registry"] = tool_registry
+    if executor is not None:
+        dispatcher_kwargs["executor"] = executor
     dispatcher = SubAgentDispatcher(**dispatcher_kwargs)
 
-    # ``dispatch_many`` takes one shared payload — we approximate the
-    # per-role payload by issuing the run individually but with the
-    # bounded parallelism the dispatcher already implements. Keeping
-    # the loop in-process so a single failure doesn't abort the whole
-    # team.
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
-
-    results: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
     workers = _effective_team_workers(
         args=args,
         config=config,
@@ -2366,136 +2304,176 @@ def team_run_handler(
         ),
     }
     _publish_team_event("team.start", **common_event)
-    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="team")
-    nested_dispatch_kwargs = (
-        {"delegation_depth": delegation_depth} if delegation_depth else {}
+    for role_name in role_names:
+        _publish_team_event(
+            "team.member.start",
+            subagent=role_name,
+            role=role_name,
+            status="running",
+            team_task_id=f"role-{role_name}",
+            team_task_owner=role_name,
+            team_task_subject=task,
+            payload=redact_display_dict(role_payloads[role_name]),
+            assignment_prompt=role_assignment_prompts[role_name],
+            **common_event,
+        )
+
+    cancel_token = _call_meta(call, "cancel_token") or _call_meta(call, "cancellation_token")
+    request = TeamRunRequest(
+        task=task,
+        template=team_template,
+        roles=role_names,
+        role_payloads=role_payloads,
+        role_specs=inline_specs,
+        role_assignment_prompts=role_assignment_prompts,
+        shared_payload=shared_payload,
+        output_language=output_language,
+        analysis_language=analysis_language,
+        trigger={"trigger_event_id": trigger_event_id, "payload": shared_payload},
+        strategy_id=strategy_id,
+        session_id=session_id,
+        turn_id=call.turn_id,
+        parent_call_id=call.id,
+        delegation_depth=delegation_depth,
+        run_id=team_run_id,
+        max_parallel=workers,
+        timeout_s=team_timeout_s,
+        cancel_token=cancel_token,
+        executor=executor,
     )
-    futs = {
-        pool.submit(
-            dispatcher.dispatch,
-            f"subagent:{r}",
-            payload=role_payloads[r],
-            trigger_event_id=trigger_event_id,
-            strategy_id=strategy_id,
-            session_id=session_id,
-            turn_id=call.turn_id,
-            parent_call_id=call.id,
-            inline_spec=inline_specs.get(r),
-            **nested_dispatch_kwargs,
-        ): r
-        for r in role_names
-    }
     try:
-        for role_name in role_names:
-            _publish_team_event(
-                "team.member.start",
-                subagent=role_name,
-                role=role_name,
-                status="running",
-                team_task_id=f"role-{role_name}",
-                team_task_owner=role_name,
-                team_task_subject=task,
-                payload=redact_display_dict(role_payloads[role_name]),
-                assignment_prompt=role_assignment_prompts[role_name],
-                **common_event,
-            )
-        for fut in as_completed(futs, timeout=team_timeout_s):
-            role_name = futs[fut]
-            try:
-                envelope = fut.result()
-            except Exception as exc:
-                failure = {
-                    "subagent": role_name,
-                    "error_kind": "execution_error",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-                failures.append(failure)
-                _publish_team_event(
-                    "team.member.end",
-                    subagent=role_name,
-                    role=role_name,
-                    status="error",
-                    ok=False,
-                    error=failure["error"],
-                    error_kind=failure["error_kind"],
-                    **common_event,
-                )
-                continue
-            output = _apply_member_evidence_contract(envelope.get("output") or {})
-            failure_kind = _member_output_failure_kind(output)
-            ok = bool(envelope.get("ok", True)) and failure_kind is None
-            # A member that succeeded only because the evidence gate was
-            # softened (sourced findings but a flagged evidence gap) is marked
-            # as a *caveated* success so the UI and synthesis can show "done
-            # with caveats" instead of hiding the gap.
-            caveat_kind = _member_soft_quality_kind(output) if ok else None
-            usd = float(envelope.get("usd") or 0.0)
-            entry = {
+        result = TeamOrchestrator(
+            config=config,
+            skills=skills,
+            dispatcher=dispatcher,
+            tool_registry=tool_registry,
+            executor=executor,
+            cancel_token=cancel_token,
+        ).run_request(request)
+    except Exception as exc:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.EXECUTION_ERROR,
+                message=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+
+    results: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    seen_roles: set[str] = set()
+    pending_member: dict[str, Any] | None = None
+    for raw in result.member_results:
+        role_name = str(raw.get("subagent") or "team_member")
+        seen_roles.add(role_name)
+        output = _apply_member_evidence_contract(raw.get("output") or {})
+        nested_pending = _nested_permission_pending(raw)
+        if nested_pending is not None and pending_member is None:
+            pending_member = {**nested_pending, "subagent": role_name}
+        failure_kind = (
+            "permission_pending"
+            if nested_pending is not None
+            else _member_output_failure_kind(output)
+        )
+        ok = bool(raw.get("ok", True)) and failure_kind is None
+        caveat_kind = _member_soft_quality_kind(output) if ok else None
+        entry = {
+            "subagent": role_name,
+            "ok": ok,
+            "tier": raw.get("tier"),
+            "provider": raw.get("provider"),
+            "model": raw.get("model"),
+            "tokens": raw.get("tokens", 0),
+            "usd": float(raw.get("usd") or 0.0),
+            "wall_ms": raw.get("wall_ms", 0),
+            "output": output,
+            "metrics": raw.get("metrics") or {},
+            "steps": raw.get("steps") or [],
+            "error": raw.get("error") or (
+                "approval required"
+                if nested_pending is not None
+                else output.get("summary") if failure_kind else None
+            ),
+            "error_kind": (
+                "permission_pending"
+                if nested_pending is not None
+                else raw.get("error_kind") or failure_kind
+            ),
+            "caveat": caveat_kind,
+            "permission_pending": nested_pending,
+        }
+        (results if ok else failures).append(entry)
+        _publish_team_event(
+            "team.member.end",
+            subagent=role_name,
+            role=role_name,
+            status=(
+                "completed"
+                if ok
+                else "blocked" if nested_pending is not None else "error"
+            ),
+            ok=ok,
+            caveat=caveat_kind,
+            error=entry.get("error"),
+            error_kind=entry.get("error_kind"),
+            tokens=entry.get("tokens"),
+            usd=entry.get("usd"),
+            wall_ms=entry.get("wall_ms"),
+            provider=entry.get("provider"),
+            model=entry.get("model"),
+            team_task_id=f"role-{role_name}",
+            team_task_owner=role_name,
+            team_task_subject=task,
+            output=redact_display_dict(entry.get("output") or {}),
+            metrics=redact_display_dict(entry.get("metrics") or {}),
+            recovery=redact_display_dict(nested_pending) if nested_pending else None,
+            **common_event,
+        )
+    for task_row in result.tasks:
+        role_name = str(task_row.get("owner") or "")
+        if not role_name or role_name in seen_roles:
+            continue
+        if str(task_row.get("status") or "") in {"failed", "blocked", "cancelled"}:
+            failure = {
                 "subagent": role_name,
-                "ok": ok,
-                "tier": envelope.get("tier"),
-                "provider": envelope.get("provider"),
-                "model": envelope.get("model"),
-                "tokens": envelope.get("tokens", 0),
-                "usd": usd,
-                "wall_ms": envelope.get("wall_ms", 0),
-                "output": output,
-                "metrics": envelope.get("metrics") or {},
-                "steps": envelope.get("steps") or [],
-                "error": envelope.get("error")
-                or (output.get("summary") if failure_kind else None),
-                "error_kind": envelope.get("error_kind")
-                or failure_kind,
-                "caveat": caveat_kind,
+                "ok": False,
+                "error": task_row.get("error") or result.error or "team_member_not_completed",
+                "error_kind": "cancelled" if task_row.get("status") == "cancelled" else "execution_error",
+                "output": {},
             }
-            if ok:
-                results.append(entry)
-            else:
-                failures.append(entry)
+            failures.append(failure)
             _publish_team_event(
                 "team.member.end",
                 subagent=role_name,
                 role=role_name,
-                status="completed" if ok else "error",
-                ok=ok,
-                caveat=caveat_kind,
-                error=entry.get("error"),
-                error_kind=entry.get("error_kind"),
-                tokens=entry.get("tokens"),
-                usd=entry.get("usd"),
-                wall_ms=entry.get("wall_ms"),
-                provider=entry.get("provider"),
-                model=entry.get("model"),
-                team_task_id=f"role-{role_name}",
-                team_task_owner=role_name,
-                team_task_subject=task,
-                output=redact_display_dict(entry.get("output") or {}),
-                metrics=redact_display_dict(entry.get("metrics") or {}),
-                **common_event,
-            )
-    except TimeoutError:
-        for pending_fut, pending_name in list(futs.items()):
-            if pending_fut.done():
-                continue
-            pending_fut.cancel()
-            failure = {
-                "subagent": pending_name,
-                "error_kind": "timeout",
-                "error": f"team_run timeout after {team_timeout_s:.0f}s",
-            }
-            failures.append(failure)
-            _publish_team_event(
-                "team.member.timeout",
-                subagent=pending_name,
-                role=pending_name,
-                status="timeout",
+                status="error",
                 ok=False,
                 error=failure["error"],
                 error_kind=failure["error_kind"],
                 **common_event,
             )
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+
+    # The orchestrator records the raw dispatcher envelope. Apply the native
+    # evidence contract to the durable task row as well so dashboard/API
+    # consumers do not see a degraded member as successfully completed.
+    paths = getattr(config, "paths", None)
+    store = TeamStore(paths) if paths is not None else None
+    if store is not None and failures:
+        failed_by_role = {str(item.get("subagent")): item for item in failures}
+        for task_row in store.list_tasks(team_run_id):
+            failure = failed_by_role.get(task_row.owner)
+            if failure is None or task_row.status != "completed":
+                continue
+            task_row.status = "failed"
+            task_row.error = str(
+                failure.get("error") or failure.get("error_kind") or "member_failed"
+            )
+            task_row.payload = {
+                **(task_row.payload or {}),
+                "output": failure.get("output") or {},
+            }
+            store.update_task(task_row)
 
     compact_results = [_compact_member_entry(r) for r in results]
     compact_failures = [_compact_member_entry(f) for f in failures]
@@ -2503,7 +2481,12 @@ def team_run_handler(
         [{"subagent": r["subagent"], "output": r["output"]} for r in results]
     )
     compact_aggregated = _compact_json_value(aggregated, limit=16000)
-    status = "completed" if not failures else "completed_with_failures"
+    status = (
+        "blocked" if pending_member is not None
+        else "cancelled" if result.status == "cancelled"
+        else "completed" if not failures and result.status == "completed"
+        else "completed_with_failures"
+    )
     next_action = (
         "team_run is synchronous and already finished. Write the complete "
         "requested answer from results now. For research-report tasks, "
@@ -2555,6 +2538,7 @@ def team_run_handler(
         "failures": compact_failures,
         "aggregated": compact_aggregated,
         "next_action": next_action,
+        "orchestrator_status": result.status,
     }
     _publish_team_event(
         "team.end",
@@ -2569,11 +2553,88 @@ def team_run_handler(
         aggregated=redact_display_dict(compact_aggregated),
         **common_event,
     )
-    _persist_team_run_snapshot(
-        config=config,
-        common_event=common_event,
-        summary=summary,
-    )
+    # The orchestrator already owns durable persistence. The native adapter
+    # only updates the compatibility metrics/report shape consumed by older
+    # dashboard clients.
+    if store is not None:
+        try:
+            run_row = store.read_run(team_run_id)
+            if run_row is not None:
+                # Keep the durable lifecycle fail-closed when the native
+                # evidence adapter downgrades a member after orchestration.
+                # ``completed_with_failures`` remains the legacy tool summary
+                # status; TeamRun only admits terminal statuses from its
+                # durable state machine.
+                failed_roles = {
+                    str(item.get("subagent") or "")
+                    for item in failures
+                    if isinstance(item, dict)
+                }
+                required_failure = any(
+                    str(task_row.get("owner") or "") in failed_roles
+                    and bool(task_row.get("required", True))
+                    for task_row in result.tasks
+                    if isinstance(task_row, dict)
+                )
+                if failures and not result.tasks:
+                    # A failed/blocked orchestrator may return no task
+                    # envelope; treat native failures as required by default.
+                    required_failure = True
+                if result.status in {"failed", "blocked", "cancelled"}:
+                    run_row.status = result.status
+                elif result.status == "completed" and required_failure:
+                    run_row.status = "blocked"
+                if run_row.status in {"failed", "blocked", "cancelled"} and not run_row.error:
+                    reason = str(result.error or "").strip()
+                    if not reason:
+                        reason = next(
+                            (
+                                str(item.get("error_kind") or "").strip()
+                                for item in failures
+                                if isinstance(item, dict)
+                                and str(item.get("error_kind") or "").strip()
+                            ),
+                            "",
+                        )
+                    run_row.error = reason or f"team_run_{run_row.status}"
+                run_row.metrics.update({
+                    "roles_total": len(role_names),
+                    "roles_succeeded": len(results),
+                    "roles_failed": len(failures),
+                    "max_parallel": workers,
+                    "timeout_s": team_timeout_s,
+                    "timeout_uncapped_s": uncapped_team_timeout_s,
+                    "timeout_capped_by_parent": timeout_capped_by_parent,
+                    "parent_remaining_wall_seconds": parent_remaining_wall_seconds,
+                    "parent_final_reserve_seconds": parent_final_reserve_seconds,
+                    "tokens_total": summary["tokens_total"],
+                    "usd_total": summary["usd_total"],
+                    "output_language": output_language,
+                    "analysis_language": analysis_language,
+                })
+                store.write_synthesis_text(
+                    team_run_id,
+                    "final_report.md",
+                    _native_team_run_report(summary),
+                )
+                store.update_run(run_row)
+        except Exception:
+            pass
+    if pending_member is not None:
+        return ToolResult.from_error(
+            tool_use_id=call.id,
+            name=call.name,
+            error=ToolError(
+                kind=ToolErrorKind.PERMISSION_PENDING,
+                message=(
+                    "team member requested approval before executing "
+                    f"{pending_member.get('tool_name') or 'a native tool'}"
+                ),
+                detail={"team_run": summary},
+                retryable=True,
+                recovery_hint=pending_member,
+            ),
+        )
     if not allow_additional_team_run:
         _remember_team_run_summary(guard_key, summary)
     return ToolResult.from_json(

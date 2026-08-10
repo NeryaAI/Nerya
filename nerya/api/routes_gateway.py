@@ -2294,26 +2294,55 @@ def _handle_telegram_callback(client, cfg: dict[str, Any],
 
     rec = _ra._find_record(client, aid)
 
-    moved_state = {"state": None}
+    if rec is None:
+        try:
+            telegram.answer_callback_query(
+                channel_cfg=cfg,
+                callback_query_id=callback_query_id,
+                text="Approval expired or already resolved",
+                resolve_secret=_secret_resolver(client),
+            )
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "kind": "callback_query",
+            "callback_data": callback_data,
+            "approval_id": aid,
+            "action": action,
+            "state": "error",
+            "error": "approval not found or expired",
+            "actor_id": actor_id,
+        }
+
+    moved_state = {"state": None, "record": None}
 
     def _approve(target_id: str) -> None:
         moved = _ra._move_record(
             client, target_id, state="approved",
             note=f"approved via telegram by {actor_id}",
+            resolver_actor_id=actor_id,
         )
         moved_state["state"] = "approved" if moved else None
+        moved_state["record"] = moved
 
     def _reject(target_id: str, reason: str) -> None:
         moved = _ra._move_record(
             client, target_id, state="rejected", note=reason,
+            resolver_actor_id=actor_id,
         )
         moved_state["state"] = "rejected" if moved else None
+        moved_state["record"] = moved
 
-    record_actor = str((rec or {}).get("actor_id") or "")
+    record_actor = _ra._approval_owner_actor_id(rec or {})
 
     def actor_owns(req_actor: str, _approval_id: str) -> bool:
+        # Gateway callbacks have no HTTP operator scope; they must match the
+        # approval owner, and native prompts with no owner fail closed.
+        if _ra._is_native_tool_approval(rec or {}):
+            return bool(record_actor) and req_actor == record_actor
         if not record_actor:
-            return True
+            return bool(req_actor)
         return req_actor == record_actor
 
     resolution = resolve_callback(
@@ -2323,16 +2352,21 @@ def _handle_telegram_callback(client, cfg: dict[str, Any],
         reject=_reject,
         actor_owns=actor_owns,
     )
+    move_failed = (
+        resolution.state in {"approved", "rejected"}
+        and moved_state["state"] != resolution.state
+    )
+    effective_state = "error" if move_failed else resolution.state
 
     # Acknowledge the button press immediately.
-    if resolution.state == "approved":
+    if effective_state == "approved":
         ack_text = "✅ Approved"
-    elif resolution.state == "rejected":
+    elif effective_state == "rejected":
         ack_text = "❌ Rejected"
-    elif resolution.state == "details":
+    elif effective_state == "details":
         ack_text = "ℹ Details"
-    elif resolution.state == "error":
-        ack_text = f"⚠ {resolution.note or 'error'}"
+    elif effective_state == "error":
+        ack_text = f"⚠ {'approval expired or already resolved' if move_failed else (resolution.note or 'error')}"
     else:
         ack_text = "ignored"
     try:
@@ -2347,7 +2381,7 @@ def _handle_telegram_callback(client, cfg: dict[str, Any],
 
     # Strip the inline keyboard so the same approval cannot be
     # double-clicked from the same chat.
-    if message_id is not None and chat_id and resolution.state in {
+    if message_id is not None and chat_id and effective_state in {
         "approved", "rejected",
     }:
         try:
@@ -2367,10 +2401,9 @@ def _handle_telegram_callback(client, cfg: dict[str, Any],
             pass
         try:
             _ra._publish_approval_resolution(
-                client,
                 aid,
-                state=str(resolution.state),
-                record=rec,
+                state=str(effective_state),
+                record=moved_state["record"] or rec,
             )
         except Exception:
             pass
@@ -2388,7 +2421,7 @@ def _handle_telegram_callback(client, cfg: dict[str, Any],
                 "actor_id": actor_id,
                 "platform": "telegram",
                 "chat_id": chat_id,
-                "state": resolution.state,
+                "state": effective_state,
                 "ts": _now_iso(),
             },
         )
@@ -2396,12 +2429,13 @@ def _handle_telegram_callback(client, cfg: dict[str, Any],
         pass
 
     return {
-        "ok": resolution.state in {"approved", "rejected", "details"},
+        "ok": effective_state in {"approved", "rejected", "details"},
         "kind": "callback_query",
         "callback_data": callback_data,
         "approval_id": aid,
         "action": action,
-        "state": resolution.state,
+        "state": effective_state,
+        **({"error": "approval expired or already resolved"} if move_failed else {}),
         "actor_id": actor_id,
     }
 

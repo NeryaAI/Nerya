@@ -24,7 +24,13 @@ from ..llm.gateway import LLMGateway
 from ..skills.kernel import SkillKernel
 from ..strategy_history import store as history_store
 from .registry import SubAgentSpec
-from .runtime import DEFAULT_CONTEXT_SCOPE, SubAgentContextScope, SubAgentRuntime
+from .runtime import (
+    DEFAULT_CONTEXT_SCOPE,
+    SubAgentContextScope,
+    SubAgentRuntime,
+    _token_is_set,
+    _token_reason,
+)
 from .strategy_registry import StrategySubAgentRegistry
 
 
@@ -92,6 +98,13 @@ class SubAgentDispatcher:
     # native tool. Default ``None`` keeps every existing test / call
     # site (which only ever passes ``config + skills``) working.
     tool_registry: Any = None
+    # Parent-owned native executor. Child runtimes use this shared
+    # chokepoint for schema validation, permission, approval, and risk checks.
+    # Optional for legacy/ad-hoc callers that only expose the skill runtime.
+    executor: Any = None
+    # Explicit compatibility override for callers that outlive a parent turn
+    # (for example detached async workers). ``auto`` keeps role policy intact.
+    runtime_mode: str = "auto"
 
     def _registry_for(self, strategy_id: str | None) -> StrategySubAgentRegistry:
         """Build a fresh strategy-scoped registry for the active run.
@@ -120,9 +133,18 @@ class SubAgentDispatcher:
         inline_spec: SubAgentSpec | None = None,
         context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
         delegation_depth: int = 0,
+        cancel_token: Any = None,
+        max_wall_seconds: float | None = None,
     ) -> SubAgentResult:
         import time as _t
         t0 = _t.monotonic()
+        if _token_is_set(cancel_token):
+            return SubAgentResult(
+                ok=False,
+                subagent=name,
+                error=_token_reason(cancel_token),
+                error_kind="cancelled",
+            )
         try:
             # An inline spec lets the lead agent define a temporary role
             # on the fly (no registered role, no save_role round-trip).
@@ -130,22 +152,59 @@ class SubAgentDispatcher:
             # grant itself a live-trading / wallet surface.
             spec = inline_spec or self._resolve_spec(name, strategy_id=strategy_id)
             _assert_allowed_skills(spec)
+            required_native_tools = tuple(
+                getattr(spec.execution_policy, "required_native_tools", ()) or ()
+            )
+            if required_native_tools and (
+                self.tool_registry is None or self.executor is None
+            ):
+                return SubAgentResult(
+                    ok=False,
+                    subagent=name,
+                    error=(
+                        "native executor required for role contract: "
+                        + ", ".join(str(tool) for tool in required_native_tools)
+                    ),
+                    error_kind="policy",
+                    wall_ms=int((_t.monotonic() - t0) * 1000),
+                )
             runtime = SubAgentRuntime(
                 config=self.config, skills=self.skills,
                 llm=LLMGateway(self.config),
                 tool_registry=self.tool_registry,
+                tool_executor=self.executor,
+                require_tool_executor=self.tool_registry is not None,
             )
-            raw = runtime.run(
-                spec, trigger_event_id=trigger_event_id,
-                payload=payload, strategy_id=strategy_id,
-                session_id=session_id,
-                turn_id=turn_id,
-                parent_call_id=parent_call_id,
-                context_scope=context_scope,
-                delegation_depth=delegation_depth,
+            runtime_kwargs = {
+                "trigger_event_id": trigger_event_id,
+                "payload": payload,
+                "strategy_id": strategy_id,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "parent_call_id": parent_call_id,
+                "context_scope": context_scope,
+                "delegation_depth": delegation_depth,
+            }
+            if cancel_token is not None:
+                runtime_kwargs["cancel_token"] = cancel_token
+            if max_wall_seconds is not None:
+                runtime_kwargs["max_wall_seconds"] = max_wall_seconds
+            if self.runtime_mode != "auto":
+                runtime_kwargs["runtime_mode"] = self.runtime_mode
+            raw = runtime.run(spec, **runtime_kwargs)
+            cancelled = (
+                bool(raw.get("cancelled")) or _token_is_set(cancel_token)
+                if isinstance(raw, dict)
+                else _token_is_set(cancel_token)
             )
+            completion_status = (
+                str(raw.get("completion_status") or "").strip().lower()
+                if isinstance(raw, dict)
+                else ""
+            )
+            blocked = completion_status == "blocked"
             return SubAgentResult(
-                ok=True,
+                ok=not cancelled and not blocked,
                 subagent=name,
                 tier=str(raw.get("tier", spec.tier)),
                 provider=str(raw.get("provider") or ""),
@@ -157,6 +216,18 @@ class SubAgentDispatcher:
                 metrics=(raw.get("metrics") or {}),
                 steps=(raw.get("steps") or []),
                 audit=(raw.get("audit") or {}),
+                error=(
+                    _token_reason(cancel_token)
+                    if cancelled
+                    else "subagent completion gate blocked"
+                    if blocked
+                    else None
+                ),
+                error_kind=(
+                    "cancelled" if cancelled
+                    else "policy" if blocked
+                    else None
+                ),
             )
         except PermissionError as exc:
             return SubAgentResult(
@@ -213,6 +284,8 @@ class SubAgentDispatcher:
         inline_spec: SubAgentSpec | None = None,
         context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
         delegation_depth: int = 0,
+        cancel_token: Any = None,
+        max_wall_seconds: float | None = None,
     ) -> dict[str, Any]:
         if not target.startswith("subagent:"):
             return {"ok": False, "reason": "not_subagent_target"}
@@ -226,6 +299,8 @@ class SubAgentDispatcher:
             inline_spec=inline_spec,
             context_scope=context_scope,
             delegation_depth=delegation_depth,
+            cancel_token=cancel_token,
+            max_wall_seconds=max_wall_seconds,
         )
         self._journal(
             res,
@@ -260,6 +335,8 @@ class SubAgentDispatcher:
         session_id: str | None = None,
         max_parallel: int | None = None,
         context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
+        cancel_token: Any = None,
+        max_wall_seconds: float | None = None,
     ) -> list[SubAgentResult]:
         """Run multiple subagents concurrently.
 
@@ -285,6 +362,8 @@ class SubAgentDispatcher:
                     strategy_id=strategy_id,
                     session_id=session_id,
                     context_scope=context_scope,
+                    cancel_token=cancel_token,
+                    max_wall_seconds=max_wall_seconds,
                 ): name
                 for name in names_list
             }

@@ -40,6 +40,12 @@ from ..llm.gateway import LLMGateway
 from ..llm.route_candidates import configured_models, configured_routes
 from ..security.prompt_injection import wrap_untrusted
 from ..skills.kernel import SkillKernel
+from ..agent.runtime import (
+    AgentRuntime,
+    CompletionGateLike,
+    RuntimeRequest,
+    TurnSnapshot,
+)
 from .context_policy import build_context
 from .registry import SubAgentExecutionPolicy, SubAgentSpec
 
@@ -104,6 +110,20 @@ DEFAULT_CONTEXT_SCOPE: SubAgentContextScope = "subagent"
 EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE: SubAgentContextScope = "explicit_payload_only"
 
 
+def _token_is_set(token: Any) -> bool:
+    if token is None:
+        return False
+    state = getattr(token, "is_set", False)
+    try:
+        return bool(state() if callable(state) else state)
+    except Exception:
+        return True
+
+
+def _token_reason(token: Any) -> str:
+    return str(getattr(token, "reason", "") or "cancelled")
+
+
 def _spec_profile_name(spec: SubAgentSpec | None) -> str:
     if spec is None:
         return ""
@@ -157,6 +177,133 @@ def _split_task_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[s
         else:
             data_payload[normalized] = value
     return task_envelope, data_payload
+
+
+def _append_completion_feedback_payload(
+    payload: dict[str, Any],
+    feedback: str,
+) -> dict[str, Any]:
+    """Copy a child payload before adding caller-gate feedback."""
+
+    clean = str(feedback or "").strip()
+    if not clean:
+        return dict(payload or {})
+    updated = dict(payload or {})
+    updated["__completion_gate_feedback"] = clean
+    return updated
+
+
+def _native_tool_records(
+    blocks: list[Any],
+    *,
+    caller: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project canonical loop blocks onto the existing child metrics shape."""
+
+    payload_by_call_id: dict[str, Any] = {}
+    successful: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for envelope in blocks or []:
+        block = getattr(envelope, "block", None)
+        if not isinstance(block, dict) and isinstance(envelope, dict):
+            block = envelope.get("block", envelope)
+        if not isinstance(block, dict):
+            continue
+        call_id = str(block.get("call_id") or "")
+        if block.get("kind") == "tool_use":
+            if call_id:
+                payload_by_call_id[call_id] = block.get("payload") or {}
+            continue
+        if block.get("kind") != "tool_result":
+            continue
+        tool_name = str(block.get("action") or block.get("skill_id") or "")
+        result = _native_result_record(
+            block.get("result"),
+            tool_name=tool_name,
+            ok=bool(block.get("ok")),
+        )
+        record = {
+            "ok": bool(block.get("ok")),
+            "skill": tool_name,
+            "action": "(native)",
+            "tool_use_id": call_id,
+            "caller": caller,
+            "payload": redact_display_dict(payload_by_call_id.get(call_id, {})),
+            "result": result,
+        }
+        if record["ok"]:
+            successful.append(record)
+            continue
+        record.update({
+            "error": block.get("error") or "native tool failed",
+            "error_kind": block.get("error_kind"),
+            "recovery_hint": block.get("recovery") or {},
+        })
+        rejected.append(record)
+    return successful, rejected
+
+
+def _native_result_record(
+    value: Any,
+    *,
+    tool_name: str,
+    ok: bool,
+) -> dict[str, Any]:
+    """Restore the legacy structured result contract from loop blocks."""
+
+    base: dict[str, Any] = {"is_error": not ok, "name": tool_name}
+    if isinstance(value, dict):
+        if "data" in value or "is_error" in value:
+            return {**base, **value}
+        return {**base, "data": value}
+    if isinstance(value, list):
+        return {**base, "data": value}
+
+    text = str(value or "").strip()
+    candidates = [text]
+    marker = "[compacted_kept]"
+    if marker in text:
+        candidates.insert(0, text.split(marker, 1)[1].strip())
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, (dict, list)):
+            return {**base, "data": parsed}
+    if text:
+        base["text"] = text
+    return base
+
+
+def _native_final_output(final_text: str, *, stop_reason: str) -> dict[str, Any]:
+    """Preserve structured role output while accepting useful plain prose."""
+
+    from ..llm.structured_output import parse
+
+    text = str(final_text or "").strip()
+    try:
+        parsed = parse(text, strict=False)
+    except Exception:
+        parsed = {"raw": text}
+    if isinstance(parsed, dict) and set(parsed) != {"raw"}:
+        output = dict(parsed)
+    elif text:
+        output = {"summary": text, "raw": text}
+    else:
+        output = {
+            "summary": "subagent finished without visible final output",
+            "raw": "",
+            "degraded": True,
+            "error_kind": "empty_model_output",
+        }
+    output.setdefault("done", stop_reason == "end_turn")
+    if stop_reason != "end_turn":
+        output.setdefault("degraded", True)
+        output.setdefault("error_kind", stop_reason or "incomplete")
+    return output
 
 
 def _render_subagent_task_assignment(
@@ -290,6 +437,16 @@ class SubAgentRuntime:
     # simply has no native-tool fallthrough and the child is restricted to
     # the skill kernel.
     tool_registry: Any = None
+    # Parent-owned executor shared with the root turn. When present, every
+    # native child call goes through its schema/permission/approval/risk
+    # pipeline instead of invoking a descriptor handler directly.
+    tool_executor: Any = None
+    # Dispatcher-created runtimes fail closed when a native registry is
+    # present but the parent forgot to provide its executor. Directly-created
+    # legacy runtimes leave this false for backwards-compatible test/ad-hoc
+    # integrations; the production dispatcher always sets it from its
+    # registry wiring.
+    require_tool_executor: bool = False
 
     # ---------------------------------------------------------------- config
     def _max_iterations(self, spec: SubAgentSpec | None = None) -> int:
@@ -420,6 +577,15 @@ class SubAgentRuntime:
         return "\n\n".join(blocks)
 
     # ---------------------------------------------------------------- core
+    @staticmethod
+    def _resolve_runtime_mode(spec: SubAgentSpec, requested: str) -> str:
+        mode = str(requested or "auto").strip().lower()
+        if mode not in {"auto", "legacy", "native"}:
+            raise ValueError(f"unknown subagent runtime mode: {mode!r}")
+        if mode == "auto":
+            mode = str(spec.execution_policy.runtime or "legacy")
+        return mode
+
     def run(
         self,
         spec: SubAgentSpec,
@@ -432,6 +598,674 @@ class SubAgentRuntime:
         parent_call_id: str | None = None,
         context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
         delegation_depth: int = 0,
+        completion_gate: CompletionGateLike | None = None,
+        cancel_token: Any = None,
+        max_wall_seconds: float | None = None,
+        runtime_mode: str = "auto",
+    ) -> dict[str, Any]:
+        """Run one child through the selected engine and shared lifecycle."""
+
+        selected_runtime = self._resolve_runtime_mode(spec, runtime_mode)
+
+        def _run_once(next_payload: dict[str, Any], wall_seconds: float | None):
+            if selected_runtime == "native":
+                return self._run_native(
+                    spec,
+                    trigger_event_id=trigger_event_id,
+                    payload=next_payload,
+                    strategy_id=strategy_id,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    parent_call_id=parent_call_id,
+                    context_scope=context_scope,
+                    delegation_depth=delegation_depth,
+                    cancel_token=cancel_token,
+                    max_wall_seconds=wall_seconds,
+                )
+            return self._run_legacy(
+                spec,
+                trigger_event_id=trigger_event_id,
+                payload=next_payload,
+                strategy_id=strategy_id,
+                session_id=session_id,
+                turn_id=turn_id,
+                parent_call_id=parent_call_id,
+                context_scope=context_scope,
+                delegation_depth=delegation_depth,
+                cancel_token=cancel_token,
+                max_wall_seconds=wall_seconds,
+            )
+
+        continuation_started = time.monotonic()
+        continuation_wall_seconds: float | None = None
+        runtime_config = getattr(self, "config", None)
+        if completion_gate is not None and runtime_config is not None:
+            continuation_wall_seconds = self._max_wall_seconds(spec)
+            if max_wall_seconds is not None:
+                try:
+                    continuation_wall_seconds = min(
+                        continuation_wall_seconds,
+                        max(0.0, float(max_wall_seconds)),
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+        if completion_gate is None:
+            return _run_once(payload, max_wall_seconds)
+
+        def _execute(feedback: str) -> dict[str, Any]:
+            remaining = (
+                max(
+                    0.0,
+                    continuation_wall_seconds
+                    - (time.monotonic() - continuation_started),
+                )
+                if continuation_wall_seconds is not None
+                else None
+            )
+            return _run_once(
+                _append_completion_feedback_payload(payload, feedback),
+                remaining,
+            )
+
+        def _snapshot(output: dict[str, Any], round_index: int) -> TurnSnapshot:
+            metrics = output.get("metrics") if isinstance(output, dict) else {}
+            metrics = metrics if isinstance(metrics, dict) else {}
+            skill_calls = metrics.get("skill_calls") or []
+            rejected = metrics.get("rejected_actions") or []
+            return TurnSnapshot(
+                iteration=round_index,
+                transcript=tuple(
+                    (record.get("prompt") for record in (output.get("audit") or {}).get("prompt_records", []))
+                    if isinstance(output, dict)
+                    else ()
+                ),
+                tool_results=tuple(
+                    [*skill_calls, *rejected]
+                    if isinstance(skill_calls, list) and isinstance(rejected, list)
+                    else ()
+                ),
+                output=(output.get("output") if isinstance(output, dict) else output),
+                stop_reason=str(
+                    (output.get("close_reason") if isinstance(output, dict) else "")
+                    or ""
+                ),
+                usage={
+                    "tokens": int((output or {}).get("tokens", 0) or 0)
+                    if isinstance(output, dict) else 0,
+                    "usd": float((output or {}).get("usd", 0.0) or 0.0)
+                    if isinstance(output, dict) else 0.0,
+                },
+                metadata={
+                    "runtime": "subagent",
+                    "subagent": spec.name,
+                    "turn_id": turn_id or "",
+                    "strategy_id": strategy_id or "",
+                },
+            )
+
+        max_rounds = max(1, int(getattr(completion_gate, "max_rounds", 2) or 2))
+        if runtime_config is not None:
+            max_rounds = min(max_rounds, self._max_iterations(spec))
+            configured_wall = self._max_wall_seconds(spec)
+            if max_wall_seconds is not None:
+                try:
+                    configured_wall = min(
+                        configured_wall,
+                        max(0.0, float(max_wall_seconds)),
+                    )
+                except (TypeError, ValueError):
+                    configured_wall = self._max_wall_seconds(spec)
+            max_wall_seconds = configured_wall
+        else:
+            # Lightweight compatibility fixtures may construct the runtime
+            # with ``__new__`` and only replace the legacy runner.
+            max_wall_seconds = None
+        shared = AgentRuntime[dict[str, Any]]()
+        result = shared.run(
+            RuntimeRequest(
+                max_rounds=max_rounds,
+                max_wall_seconds=max_wall_seconds,
+                cancel=cancel_token,
+            ),
+            completion_gate,
+            execute=_execute,
+            snapshot=_snapshot,
+        )
+        output = result.value or {
+            "subagent": spec.name,
+            "output": {},
+            "metrics": {},
+            "steps": [],
+            "audit": {},
+        }
+        output["completion"] = result.decision.asdict()
+        output["completion_rounds"] = result.rounds
+        if result.decision.status == "blocked":
+            final_output = output.get("output")
+            if not isinstance(final_output, dict):
+                final_output = {}
+            final_output = dict(final_output)
+            if result.decision.reason == "cancelled":
+                output["cancelled"] = True
+                output["close_reason"] = "cancelled"
+                final_output.update({
+                    "done": True,
+                    "degraded": True,
+                    "cancelled": True,
+                    "error_kind": "cancelled",
+                    "summary": "subagent cancelled before the next round",
+                })
+            else:
+                final_output.update({
+                    "done": True,
+                    "degraded": True,
+                    "error_kind": "completion_gate_blocked",
+                    "summary": (
+                        "caller completion gate blocked this subagent result: "
+                        f"{result.decision.reason or 'blocked'}"
+                    ),
+                })
+            output["output"] = final_output
+            output["completion_status"] = "blocked"
+        else:
+            output["completion_status"] = result.decision.status
+        return output
+
+    def _run_native(
+        self,
+        spec: SubAgentSpec,
+        *,
+        trigger_event_id: str | None,
+        payload: dict[str, Any],
+        strategy_id: str | None = None,
+        session_id: str | None = None,
+        turn_id: str | None = None,
+        parent_call_id: str | None = None,
+        context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
+        delegation_depth: int = 0,
+        cancel_token: Any = None,
+        max_wall_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Run a child on the canonical messages -> tools loop."""
+
+        from ..agent.loop import LoopConfig, WorkspaceNativeAgentLoop
+        from ..tools.orchestrator import ToolOrchestrator
+
+        if context_scope not in {
+            DEFAULT_CONTEXT_SCOPE,
+            EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE,
+        }:
+            raise ValueError(f"unknown subagent context scope: {context_scope!r}")
+        if self.tool_registry is None or self.tool_executor is None:
+            raise RuntimeError(
+                "native subagent runtime requires the parent tool registry and executor"
+            )
+
+        t_start = time.monotonic()
+        explicit_payload_only = context_scope == EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE
+        task_envelope, data_payload = _split_task_payload(payload)
+        if explicit_payload_only:
+            allowed_native_tools: list[str] = []
+            preloaded: list[str] = []
+            base_context = ""
+        else:
+            allowed_native_tools = self._allowed_native_tool_names(
+                spec=spec,
+                delegation_depth=delegation_depth,
+            )
+            preloaded = [
+                skill
+                for skill in (*spec.allowed_skills, *CHILD_CORE_SELF_CONTROL_SKILLS)
+                if skill not in CHILD_SKILL_DENYLIST
+            ]
+            base_context = build_context(
+                self.config,
+                self.skills,
+                spec,
+                payload=payload,
+                strategy_id=strategy_id,
+            )
+            skill_context = self._preloaded_skill_context(spec)
+            if skill_context:
+                base_context = f"{base_context}\n\n{skill_context}"
+
+        max_calls = self._max_skill_calls(spec)
+        if max_calls <= 0:
+            allowed_native_tools = []
+        elif allowed_native_tools:
+            # Child roles already have a policy-bounded allowlist. Reveal only
+            # those surfaces so lazy disclosure cannot hide an allowed tool.
+            from ..tools.native.tool_surfaces import reveal_surfaces_for_tools
+
+            reveal_surfaces_for_tools(
+                self.tool_registry,
+                tuple(allowed_native_tools),
+            )
+        required_native_tools = [
+            name
+            for name in spec.execution_policy.required_native_tools
+            if name in allowed_native_tools
+        ]
+        safe_payload = redact_display_dict(data_payload)
+        safe_task_envelope = redact_display_dict(task_envelope)
+        prompt = self._render_prompt(
+            spec,
+            data_payload,
+            base_context,
+            [],
+            allowed=preloaded,
+            native_tools=allowed_native_tools,
+            task_envelope=task_envelope,
+            context_scope=context_scope,
+            native_protocol=True,
+        )
+        audit_prompt = self._render_prompt(
+            spec,
+            safe_payload,
+            base_context,
+            [],
+            allowed=preloaded,
+            native_tools=allowed_native_tools,
+            task_envelope=safe_task_envelope,
+            context_scope=context_scope,
+            native_protocol=True,
+        )
+
+        try:
+            from ..agent.streaming import get_default_bus
+
+            bus = get_default_bus()
+        except Exception:
+            bus = None
+        event_fields = {
+            "turn_id": turn_id,
+            "team_run_id": task_envelope.get("team_run_id"),
+            "team_template": task_envelope.get("team_template"),
+            "team_call_id": task_envelope.get("team_call_id") or parent_call_id,
+            "team_task_id": task_envelope.get("task_id"),
+            "team_task_owner": task_envelope.get("task_owner"),
+            "team_task_subject": task_envelope.get("task_subject")
+            or task_envelope.get("__team_task"),
+        }
+
+        def _publish(kind: str, **fields: Any) -> None:
+            if bus is None:
+                return
+            try:
+                bus.publish(
+                    kind,
+                    subagent=spec.name,
+                    tier=spec.tier,
+                    strategy_id=strategy_id,
+                    session_id=session_id,
+                    trigger_event_id=trigger_event_id,
+                    **{k: v for k, v in event_fields.items() if v is not None},
+                    **fields,
+                )
+            except Exception:
+                pass
+
+        audit_start = {
+            "subagent": spec.name,
+            "tier": spec.tier,
+            "prompt_path": str(spec.prompt_path) if spec.prompt_path else "",
+            "role_prompt": redact_text(spec.prompt or ""),
+            "payload": safe_payload,
+            "payload_keys": sorted(data_payload.keys()),
+            "task_envelope": safe_task_envelope,
+            "task_envelope_keys": sorted(task_envelope.keys()),
+            "allowed_skills": list(spec.allowed_skills or []),
+            "callable_skills": [],
+            "native_tools": list(allowed_native_tools),
+            "context_chars": len(base_context or ""),
+            "context_scope": context_scope,
+            "runtime": "native",
+            "redacted": True,
+        }
+        _publish(
+            "subagent.start",
+            payload_keys=audit_start["payload_keys"],
+            payload=audit_start["payload"],
+            task_envelope_keys=audit_start["task_envelope_keys"],
+            task_envelope=audit_start["task_envelope"],
+            role_prompt=audit_start["role_prompt"],
+            prompt_path=audit_start["prompt_path"],
+            allowed_skills=audit_start["allowed_skills"],
+            callable_skills=[],
+            native_tools=audit_start["native_tools"],
+            context_chars=audit_start["context_chars"],
+            runtime="native",
+        )
+        _publish(
+            "subagent.step",
+            step_kind="prompt",
+            iteration=0,
+            status="sent",
+            prompt=redact_text(audit_prompt),
+            prompt_chars=len(audit_prompt),
+            payload=safe_payload,
+            runtime="native",
+        )
+
+        tier_config = self.config.get(f"llm.tiers.{spec.tier}", {}) or {}
+        if not isinstance(tier_config, dict):
+            tier_config = {}
+        configured_wall = self._max_wall_seconds(spec)
+        if max_wall_seconds is not None:
+            try:
+                configured_wall = min(configured_wall, max(0.0, float(max_wall_seconds)))
+            except (TypeError, ValueError):
+                pass
+        model_provider, model_id = self._model_override(spec)
+        try:
+            max_tokens = int(
+                self.config.get(
+                    "agent.native.max_tokens",
+                    tier_config.get("max_tokens", 4096),
+                )
+                or 4096
+            )
+        except (TypeError, ValueError):
+            max_tokens = 4096
+        try:
+            temperature = float(
+                self.config.get(
+                    "agent.native.temperature",
+                    tier_config.get("temperature", 0.2),
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            temperature = 0.2
+        tool_metadata = {
+            "subagent": spec.name,
+            "parent_call_id": parent_call_id,
+            "delegation_depth": max(0, int(delegation_depth or 0)),
+            "context_scope": context_scope,
+            **event_fields,
+        }
+        loop_config = LoopConfig(
+            turn_id=turn_id,
+            max_iterations=self._max_iterations(spec),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tier=spec.tier,
+            task="subagent_analysis",
+            caller=f"subagent:{spec.name}",
+            reasoning_effort=str(tier_config.get("reasoning_effort") or "") or None,
+            reasoning_summary=str(tier_config.get("reasoning_summary") or "") or None,
+            model_provider=model_provider,
+            model_id=model_id,
+            session_id=session_id,
+            strategy_id=strategy_id,
+            trigger_event_id=trigger_event_id,
+            max_wall_seconds=configured_wall,
+            max_total_tool_calls=max_calls if max_calls > 0 else None,
+            wall_time_final_synthesis_seconds=min(
+                self._finalization_reserve_seconds(),
+                max(1.0, configured_wall / 2),
+            ),
+            llm_retry_attempts=self._llm_max_attempts(spec),
+            token_budget=(
+                int(self.config.get("agent.native.token_budget", 0) or 0) or None
+            ),
+            required_artifacts=tuple(
+                {"tool": name} for name in required_native_tools
+            ),
+            workspace_root=str(getattr(self.config.paths, "root", "") or ""),
+            tool_argument_defaults={
+                name: dict(spec.execution_policy.tool_argument_defaults.get(name) or {})
+                for name in allowed_native_tools
+                if name in spec.execution_policy.tool_argument_defaults
+            },
+            tool_call_metadata=tool_metadata,
+        )
+        allowed_set = frozenset(allowed_native_tools)
+
+        def _tool_filter(descriptor: Any) -> bool:
+            return str(getattr(descriptor, "name", "") or "") in allowed_set
+
+        def _event_sink(envelope: Any) -> None:
+            block = getattr(envelope, "block", None)
+            if not isinstance(block, dict):
+                return
+            kind = str(block.get("kind") or "")
+            iteration = int(block.get("index") or 0)
+            if kind == "tool_use":
+                _publish(
+                    "subagent.step",
+                    step_kind="act",
+                    iteration=iteration,
+                    status="started",
+                    skill=block.get("action") or block.get("skill_id"),
+                    action="(native)",
+                    runtime="native",
+                )
+            elif kind == "tool_result":
+                _publish(
+                    "subagent.step",
+                    step_kind="observe",
+                    iteration=iteration,
+                    status="ok" if block.get("ok") else "error",
+                    skill=block.get("action") or block.get("skill_id"),
+                    action="(native)",
+                    error=block.get("error"),
+                    runtime="native",
+                )
+
+        loop = WorkspaceNativeAgentLoop(
+            gateway=self.llm,
+            registry=self.tool_registry,
+            orchestrator=ToolOrchestrator(
+                registry=self.tool_registry,
+                executor=self.tool_executor,
+                max_parallel=int(self.config.get("agent.native.max_parallel", 4) or 4),
+            ),
+            config=loop_config,
+            event_sink=_event_sink,
+        )
+        outcome = loop.run(
+            system=(
+                "You are a delegated Nerya subagent. Follow the role, task, "
+                "and evidence contract in the user message. Use native tools "
+                "only when they are provided."
+            ),
+            user_message=prompt,
+            tool_filter=_tool_filter,
+            cancel_token=cancel_token,
+            turn_id=turn_id,
+        )
+
+        skill_calls, rejected_actions = _native_tool_records(
+            outcome.blocks,
+            caller=f"subagent:{spec.name}",
+        )
+        cancelled = _token_is_set(cancel_token) or (
+            outcome.stop_reason == "cancelled" and outcome.aborted
+        )
+        close_reason = (
+            _token_reason(cancel_token)
+            if cancelled and _token_is_set(cancel_token)
+            else str(outcome.stop_reason or outcome.transition_reason or "end_turn")
+        )
+        final_output = _native_final_output(
+            outcome.final_text,
+            stop_reason=outcome.stop_reason,
+        )
+        if cancelled:
+            final_output.update({
+                "done": True,
+                "cancelled": True,
+                "error_kind": "cancelled",
+                "summary": f"subagent cancelled: {close_reason}",
+            })
+        final_output = _attach_data_coverage(
+            final_output,
+            requested_role=spec.name,
+            role_profile=_spec_profile_name(spec),
+            skill_calls=skill_calls,
+            rejected_actions=rejected_actions,
+        )
+        signals_used: list[str] = []
+        for signal in _coerce_list(
+            final_output.get("signals") or final_output.get("signals_used")
+        ):
+            if str(signal) not in signals_used:
+                signals_used.append(str(signal))
+        evidence = [
+            item if isinstance(item, dict) else {"note": str(item)}
+            for item in _coerce_list(final_output.get("evidence"))
+        ]
+        try:
+            uncertainty = max(
+                0.0,
+                min(1.0, float(final_output.get("uncertainty") or 0.0)),
+            )
+        except (TypeError, ValueError):
+            uncertainty = 0.0
+        total_tokens = max(
+            0,
+            int(outcome.input_tokens_total or 0)
+            + int(outcome.output_tokens_total or 0),
+        )
+        model_calls = []
+        for call in outcome.model_calls:
+            row = dict(call)
+            row["tier"] = spec.tier
+            row["tokens"] = max(
+                0,
+                int(row.get("input_tokens") or 0)
+                + int(row.get("output_tokens") or 0),
+            )
+            row["usd"] = float(row.get("usd") or 0.0)
+            model_calls.append(row)
+        steps = [
+            _StepRecord(
+                kind="prompt",
+                iteration=0,
+                status="sent",
+                detail={"prompt_chars": len(audit_prompt)},
+            )
+        ]
+        for call in model_calls:
+            steps.append(_StepRecord(
+                kind="think",
+                iteration=int(call.get("iteration") or 0),
+                status="ok",
+                tokens=int(call.get("tokens") or 0),
+                usd=float(call.get("usd") or 0.0),
+                detail={
+                    "provider": call.get("provider"),
+                    "model": call.get("model"),
+                },
+            ))
+        for envelope in outcome.blocks:
+            block = getattr(envelope, "block", None)
+            if not isinstance(block, dict):
+                continue
+            kind = str(block.get("kind") or "")
+            if kind == "tool_use":
+                steps.append(_StepRecord(
+                    kind="act",
+                    iteration=int(block.get("index") or 0),
+                    status="ok",
+                    detail={"skill": block.get("action") or block.get("skill_id")},
+                ))
+            elif kind == "tool_result":
+                steps.append(_StepRecord(
+                    kind="observe",
+                    iteration=int(block.get("index") or 0),
+                    status="ok" if block.get("ok") else "error",
+                    detail={"skill": block.get("action") or block.get("skill_id")},
+                    error=str(block.get("error") or "") or None,
+                ))
+        steps.append(_StepRecord(
+            kind="close",
+            iteration=int(outcome.iterations or 0),
+            status="cancelled" if cancelled else "ok",
+            detail={"close_reason": close_reason},
+            tokens=total_tokens,
+            usd=float(outcome.usd_total or 0.0),
+            wall_ms=int((time.monotonic() - t_start) * 1000),
+            error=close_reason if cancelled else None,
+        ))
+        contribution_metrics = {
+            "signals_used": signals_used,
+            "skill_calls": skill_calls,
+            "rejected_actions": rejected_actions,
+            "uncertainty": uncertainty,
+            "evidence": evidence,
+        }
+        _publish(
+            "subagent.step",
+            step_kind="close",
+            iteration=int(outcome.iterations or 0),
+            wall_ms=int((time.monotonic() - t_start) * 1000),
+            iterations=int(outcome.iterations or 0),
+            skill_calls_n=len(skill_calls),
+            rejected_actions_n=len(rejected_actions),
+            tokens=total_tokens,
+            usd=float(outcome.usd_total or 0.0),
+            close_reason=close_reason,
+            runtime="native",
+        )
+        audit = {
+            **audit_start,
+            "prompt_records": [{
+                "iteration": 0,
+                "prompt": redact_text(audit_prompt),
+                "prompt_chars": len(audit_prompt),
+                "redacted": True,
+            }],
+            "provider": outcome.provider,
+            "model": outcome.model,
+            "model_calls": model_calls,
+            "redacted": True,
+        }
+        _publish(
+            "subagent.end",
+            iterations=int(outcome.iterations or 0),
+            skill_calls=len(skill_calls),
+            rejected=len(rejected_actions),
+            tokens=total_tokens,
+            usd=float(outcome.usd_total or 0.0),
+            wall_ms=int((time.monotonic() - t_start) * 1000),
+            output=redact_display_dict(final_output),
+            metrics=redact_display_dict(contribution_metrics),
+            close_reason=close_reason,
+            runtime="native",
+        )
+        return {
+            "subagent": spec.name,
+            "tier": spec.tier,
+            "provider": str(outcome.provider or ""),
+            "model": str(outcome.model or ""),
+            "model_calls": model_calls,
+            "output": final_output,
+            "cancelled": cancelled,
+            "close_reason": close_reason,
+            "tokens": total_tokens,
+            "usd": float(outcome.usd_total or 0.0),
+            "metrics": {**contribution_metrics, "iterations": int(outcome.iterations or 0)},
+            "steps": [step.asdict() for step in steps],
+            "audit": audit,
+        }
+
+    def _run_legacy(
+        self,
+        spec: SubAgentSpec,
+        *,
+        trigger_event_id: str | None,
+        payload: dict[str, Any],
+        strategy_id: str | None = None,
+        session_id: str | None = None,
+        turn_id: str | None = None,
+        parent_call_id: str | None = None,
+        context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
+        delegation_depth: int = 0,
+        cancel_token: Any = None,
+        max_wall_seconds: float | None = None,
     ) -> dict[str, Any]:
         t_start = time.monotonic()
         steps: list[_StepRecord] = []
@@ -537,8 +1371,18 @@ class SubAgentRuntime:
 
         max_iter = self._max_iterations(spec)
         max_calls = 0 if explicit_payload_only else self._max_skill_calls(spec)
-        max_wall_seconds = self._max_wall_seconds(spec)
+        configured_wall = self._max_wall_seconds(spec)
+        if max_wall_seconds is not None:
+            try:
+                configured_wall = min(configured_wall, max(0.0, float(max_wall_seconds)))
+            except (TypeError, ValueError):
+                pass
+        max_wall_seconds = configured_wall
+        # A reserve must not consume the whole child turn before a repair
+        # round starts. Preserve the configured value for normal budgets.
         finalization_reserve_seconds = self._finalization_reserve_seconds()
+        if finalization_reserve_seconds >= max_wall_seconds:
+            finalization_reserve_seconds = max(1.0, max_wall_seconds / 2)
         required_native_tools = [
             name for name in spec.execution_policy.required_native_tools
             if name in callable_native_tools
@@ -596,6 +1440,11 @@ class SubAgentRuntime:
             event_iteration: int,
             signature: str,
         ) -> dict[str, Any] | None:
+            dispatch_context_metadata = dict(team_event_fields)
+            dispatch_context_metadata["remaining_wall_seconds"] = max(
+                0.0,
+                max_wall_seconds - (time.monotonic() - t_start),
+            )
             record = self._dispatch_one(
                 entry,
                 spec_name=spec.name,
@@ -604,9 +1453,11 @@ class SubAgentRuntime:
                 strategy_id=strategy_id,
                 session_id=session_id,
                 trigger_event_id=trigger_event_id,
-                context_metadata=team_event_fields,
+                context_metadata=dispatch_context_metadata,
                 execution_policy=spec.execution_policy,
                 delegation_depth=delegation_depth,
+                iteration=event_iteration,
+                cancel_token=cancel_token,
             )
             if record is None:
                 return None
@@ -688,7 +1539,32 @@ class SubAgentRuntime:
             close_reason = "required_native_tool_missing"
             return "close"
 
+        def _mark_cancelled(iteration: int) -> bool:
+            """Record one cooperative cancellation boundary."""
+
+            nonlocal close_reason
+            if not _token_is_set(cancel_token):
+                return False
+            reason = _token_reason(cancel_token)
+            if (
+                close_reason == reason
+                and steps
+                and steps[-1].kind == "close"
+                and steps[-1].status == "cancelled"
+            ):
+                return True
+            close_reason = reason
+            steps.append(_StepRecord(
+                kind="close",
+                iteration=iteration,
+                status="cancelled",
+                error=reason,
+            ))
+            return True
+
         for i in range(max_iter):
+            if _mark_cancelled(i):
+                break
             if time.monotonic() - t_start >= max_wall_seconds:
                 close_reason = "subagent_wall_time_exceeded"
                 steps.append(_StepRecord(
@@ -868,6 +1744,12 @@ class SubAgentRuntime:
                 parsed_keys=sorted(parsed.keys())[:12],
             )
 
+            # A cancellation can arrive while the provider call is in
+            # flight. Preserve its usage telemetry, but do not execute the
+            # actions it returned or start a follow-up/finalization call.
+            if _mark_cancelled(i):
+                break
+
             # Pick up contribution metadata the subagent produced.
             for sig in _coerce_list(parsed.get("signals") or parsed.get("signals_used")):
                 if sig not in signals_used:
@@ -898,7 +1780,10 @@ class SubAgentRuntime:
             batch_obs: list[dict[str, Any]] = []
             batch_success = False
             duplicate_actions: list[dict[str, Any]] = []
+            rejected_before_actions = len(rejected_actions)
             for entry in actions:
+                if _mark_cancelled(i):
+                    break
                 if len(skill_calls) >= max_calls:
                     rejected_actions.append({
                         "entry": entry, "reason": "skill_call_budget_exhausted",
@@ -925,6 +1810,22 @@ class SubAgentRuntime:
                 if observation is not None:
                     batch_success = batch_success or observation["ok"] is True
                     batch_obs.append(observation)
+            if any(
+                str(record.get("error_kind") or "") == "permission_pending"
+                for record in rejected_actions[rejected_before_actions:]
+                if isinstance(record, dict)
+            ):
+                # Approval is an operator-owned pause, not an LLM-recoverable
+                # tool failure. Continuing would spend another model call and
+                # could produce a misleading done=true child output while the
+                # outer handler still waits for approval.
+                close_reason = "approval_pending"
+                break
+            if _token_is_set(cancel_token):
+                # The action that was already in flight may have completed;
+                # close before any settle/replan branch can request more work.
+                _mark_cancelled(i)
+                break
             if batch_obs:
                 steps.append(_StepRecord(
                     kind="act", iteration=i, status="ok",
@@ -934,6 +1835,13 @@ class SubAgentRuntime:
                     },
                 ))
                 accumulated_obs.extend(batch_obs)
+                if any(
+                    str(observation.get("error_kind") or "")
+                    == "permission_pending"
+                    for observation in batch_obs
+                ):
+                    close_reason = "approval_pending"
+                    break
             if actions and duplicate_actions and not batch_obs:
                 duplicates = []
                 for entry in duplicate_actions:
@@ -1193,9 +2101,11 @@ class SubAgentRuntime:
             )
             return output
 
+        cancelled = _token_is_set(cancel_token)
         final_output = _final_subagent_output(last_parsed, last_raw)
         if (
-            close_reason == "tool_calls_without_replan_settled"
+            not cancelled
+            and close_reason == "tool_calls_without_replan_settled"
             and skill_calls
             and not (last_parsed.get("done") is True or last_parsed.get("final") is True)
         ):
@@ -1207,7 +2117,7 @@ class SubAgentRuntime:
                 rejected_actions=rejected_actions,
                 close_reason=close_reason,
             )
-        elif final_output.get("degraded") and skill_calls:
+        elif not cancelled and final_output.get("degraded") and skill_calls:
             final_output = _try_final_observation_synthesis(
                 close_reason or str(final_output.get("error_kind") or "degraded_output")
             ) or _tool_observation_fallback_output(
@@ -1227,6 +2137,20 @@ class SubAgentRuntime:
             skill_calls=skill_calls,
             rejected_actions=rejected_actions,
         )
+        if close_reason == "approval_pending":
+            final_output.update({
+                "done": False,
+                "degraded": True,
+                "error_kind": "approval_pending",
+                "summary": "subagent is waiting for approval before continuing",
+            })
+        if cancelled:
+            final_output.update({
+                "done": True,
+                "cancelled": True,
+                "error_kind": "cancelled",
+                "summary": f"subagent cancelled: {close_reason}",
+            })
         if close_reason == "required_native_tool_missing":
             successful_tools = {
                 str(record.get("skill") or "")
@@ -1290,6 +2214,8 @@ class SubAgentRuntime:
             "model": last_model,
             "model_calls": model_calls,
             "output": final_output,
+            "cancelled": cancelled,
+            "close_reason": close_reason,
             "tokens": total_tokens,
             "usd": total_usd,
             "metrics": {**contribution_metrics, "iterations": iterations},
@@ -1317,6 +2243,7 @@ class SubAgentRuntime:
         task_envelope: dict[str, Any] | None = None,
         finalization_mode: bool = False,
         context_scope: SubAgentContextScope = DEFAULT_CONTEXT_SCOPE,
+        native_protocol: bool = False,
     ) -> str:
         task_envelope = task_envelope or {}
         obs_block = ""
@@ -1408,6 +2335,16 @@ class SubAgentRuntime:
                 "operator profile, or facts from another session. Produce the "
                 "final analysis from the frozen payload only and include "
                 '``"done": true``.'
+            )
+        elif native_protocol:
+            allow_note = (
+                "\nUse only the native tools provided by the caller through the "
+                "tool API. Treat tool results as evidence for this run; do not "
+                "print a skill_calls/tool_calls envelope in assistant text. "
+                "When the role is complete, return one JSON object with "
+                '``\"done\": true`` and a concise ``summary``. Preserve exact '
+                "source URLs, paths, identifiers, and numeric values from tool "
+                "results."
             )
         else:
             allow_note = (
@@ -1516,6 +2453,11 @@ class SubAgentRuntime:
         registry = self.tool_registry
         if registry is None:
             return []
+        if self.require_tool_executor and self.tool_executor is None:
+            # Do not advertise a native surface that cannot pass the parent
+            # policy chokepoint. _dispatch_native keeps a defense-in-depth
+            # guard for stale/model-emitted names.
+            return []
         policy = SubAgentExecutionPolicy.from_dict(
             getattr(spec, "execution_policy", None),
         )
@@ -1562,7 +2504,20 @@ class SubAgentRuntime:
         context_metadata: dict[str, Any] | None = None,
         execution_policy: SubAgentExecutionPolicy | None = None,
         delegation_depth: int = 0,
+        iteration: int = 0,
+        cancel_token: Any = None,
     ) -> dict[str, Any] | None:
+        if _token_is_set(cancel_token):
+            return {
+                "ok": False,
+                "skill": str(entry.get("skill") or entry.get("skill_id") or "")
+                if isinstance(entry, dict) else None,
+                "action": str(entry.get("action") or entry.get("name") or "")
+                if isinstance(entry, dict) else None,
+                "error": _token_reason(cancel_token),
+                "error_kind": "cancelled",
+                "entry": entry,
+            }
         if not isinstance(entry, dict):
             return {
                 "ok": False, "skill": None, "action": None,
@@ -1634,6 +2589,8 @@ class SubAgentRuntime:
                     context_metadata=context_metadata,
                     execution_policy=execution_policy,
                     delegation_depth=delegation_depth,
+                    iteration=iteration,
+                    cancel_token=cancel_token,
                 )
         # Descriptor-driven intent resolution avoids burning a retry when a
         # model expresses a native operation in ``{skill, action}`` form.
@@ -1669,6 +2626,8 @@ class SubAgentRuntime:
                     context_metadata=context_metadata,
                     execution_policy=execution_policy,
                     delegation_depth=delegation_depth,
+                    iteration=iteration,
+                    cancel_token=cancel_token,
                 )
         if skill in native_names:
             native_payload = dict(payload or {})
@@ -1682,6 +2641,8 @@ class SubAgentRuntime:
                 context_metadata=context_metadata,
                 execution_policy=execution_policy,
                 delegation_depth=delegation_depth,
+                iteration=iteration,
+                cancel_token=cancel_token,
             )
         if not action:
             return {
@@ -1707,14 +2668,31 @@ class SubAgentRuntime:
                 ),
                 "entry": entry,
             }
+        if _token_is_set(cancel_token):
+            return {
+                "ok": False,
+                "skill": skill,
+                "action": action,
+                "error": _token_reason(cancel_token),
+                "error_kind": "cancelled",
+                "entry": entry,
+            }
         try:
-            result = self.skills.runtime.call(
-                skill, action, payload=payload or {},
-                caller=f"subagent:{spec_name}",
-                strategy_id=strategy_id,
-                session_id=session_id,
-                trigger_event_id=trigger_event_id,
-            )
+            skill_kwargs: dict[str, Any] = {
+                "payload": payload or {},
+                "caller": f"subagent:{spec_name}",
+                "strategy_id": strategy_id,
+                "session_id": session_id,
+                "trigger_event_id": trigger_event_id,
+            }
+            if cancel_token is not None:
+                skill_kwargs["extras"] = {
+                    "cancel_token": cancel_token,
+                    "remaining_wall_seconds": (
+                        (context_metadata or {}).get("remaining_wall_seconds")
+                    ),
+                }
+            result = self.skills.runtime.call(skill, action, **skill_kwargs)
         except Exception as exc:
             failure: dict[str, Any] = {
                 "ok": False, "skill": skill, "action": action,
@@ -1749,14 +2727,16 @@ class SubAgentRuntime:
         context_metadata: dict[str, Any] | None = None,
         execution_policy: SubAgentExecutionPolicy | None = None,
         delegation_depth: int = 0,
+        iteration: int = 0,
+        cancel_token: Any = None,
     ) -> dict[str, Any]:
         """Invoke a parent native tool from inside a subagent.
 
-        We call the tool's handler directly (synchronously) with a
-        :class:`ToolCall` envelope. Any handler error is captured and
-        surfaced back through the same observation-record shape the
-        skill path uses, so the child's prompt-rendering code does not
-        need to special-case native results.
+        The normal parent path invokes the shared
+        :class:`NativeToolExecutor`, preserving schema validation,
+        permission/approval decisions, risk classification, and hooks. A
+        direct-handler fallback remains only for legacy callers that never
+        supplied an executor (older isolated tests / ad-hoc runtimes).
         """
 
         registry = self.tool_registry
@@ -1797,6 +2777,8 @@ class SubAgentRuntime:
             name=tool_name,
             arguments=dict(payload or {}),
             caller=f"subagent:{spec_name}",
+            turn_id=str((context_metadata or {}).get("turn_id") or ""),
+            iteration=max(0, int(iteration or 0)),
             metadata={
                 **(context_metadata or {}),
                 "subagent": spec_name,
@@ -1804,23 +2786,45 @@ class SubAgentRuntime:
                 "session_id": session_id,
                 "trigger_event_id": trigger_event_id,
                 "delegation_depth": max(0, int(delegation_depth or 0)),
+                "cancel_token": cancel_token,
             },
         )
         try:
-            raw = descriptor.handler(call)
-            if hasattr(raw, "__await__"):
-                # Async handlers exist (some shell tools). We don't
-                # have an event loop here, so we run them inline.
-                import asyncio
+            if self.tool_executor is not None:
+                raw = self.tool_executor.execute(call)
+            elif self.require_tool_executor:
+                return {
+                    "ok": False,
+                    "skill": tool_name,
+                    "action": "(native)",
+                    "tool_use_id": call.id,
+                    "caller": call.caller,
+                    "error": (
+                        "native executor is required when a child tool registry "
+                        "is inherited from the parent"
+                    ),
+                    "error_kind": "native_executor_required",
+                    "payload": safe_payload,
+                    "entry": entry,
+                }
+            else:
+                # Compatibility for callers that construct a child runtime
+                # directly without a parent kernel/executor.
+                raw = descriptor.handler(call)
+                if hasattr(raw, "__await__"):
+                    # Async handlers exist (some shell tools). We don't
+                    # have an event loop here, so we run them inline.
+                    import asyncio
 
-                loop = asyncio.new_event_loop()
-                try:
-                    raw = loop.run_until_complete(raw)  # type: ignore[arg-type]
-                finally:
-                    loop.close()
+                    loop = asyncio.new_event_loop()
+                    try:
+                        raw = loop.run_until_complete(raw)  # type: ignore[arg-type]
+                    finally:
+                        loop.close()
         except Exception as exc:
             return {
                 "ok": False, "skill": tool_name, "action": "(native)",
+                "tool_use_id": call.id, "caller": call.caller,
                 "error": f"{type(exc).__name__}: {exc}",
                 "payload": safe_payload,
                 "entry": entry,
@@ -1836,10 +2840,13 @@ class SubAgentRuntime:
             )
             return {
                 "ok": False, "skill": tool_name, "action": "(native)",
+                "tool_use_id": call.id,
+                "caller": call.caller,
                 "error": result_dict.get("error_message")
                 or "native tool returned is_error=true",
                 "error_kind": result_dict.get("error_kind"),
                 "error_detail": error_detail,
+                "recovery_hint": result_dict.get("recovery_hint") or {},
                 "retryable": result_dict.get("retryable"),
                 "result": result_dict,
                 "payload": safe_payload,
@@ -1889,6 +2896,7 @@ def _tool_result_to_dict(result: Any) -> dict[str, Any]:
     err = raw_dict.get("error")
     error_kind = ""
     error_detail: dict[str, Any] = {}
+    recovery_hint: dict[str, Any] = {}
     retryable: Any = None
     if isinstance(err, dict):
         error_message = str(err.get("message") or err.get("kind") or "")
@@ -1896,6 +2904,9 @@ def _tool_result_to_dict(result: Any) -> dict[str, Any]:
         detail = err.get("detail")
         if isinstance(detail, dict):
             error_detail = redact_display_dict(detail)
+        hint = err.get("recovery_hint")
+        if isinstance(hint, dict):
+            recovery_hint = redact_display_dict(hint)
         retryable = err.get("retryable")
     parts = raw_dict.get("content") or []
     payload: Any = None
@@ -1921,6 +2932,8 @@ def _tool_result_to_dict(result: Any) -> dict[str, Any]:
         out["error_kind"] = error_kind
     if error_detail:
         out["error_detail"] = error_detail
+    if recovery_hint:
+        out["recovery_hint"] = recovery_hint
     if retryable is not None:
         out["retryable"] = retryable
     return out

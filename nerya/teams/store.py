@@ -198,7 +198,14 @@ class TeamStore:
 
     # ------------------------------------------------------------ events
     def append_event(self, run_id: str, *, kind: str, **fields: Any) -> dict[str, Any]:
-        rec = {"kind": kind, "ts": now_iso(), **fields}
+        run_data = _read_json(self.run_dir(run_id) / "run.json") or {}
+        context = {
+            key: run_data[key]
+            for key in ("session_id", "turn_id", "strategy_id")
+            if run_data.get(key) is not None
+        }
+        event_fields = {**context, **fields}
+        rec = {"kind": kind, "ts": now_iso(), **event_fields}
         written = jsonl.append(self.events_path(run_id), rec, stamp=False)
         try:
             from ..agent.streaming import get_default_bus
@@ -208,7 +215,7 @@ class TeamStore:
                 team_run_id=run_id,
                 team_event_kind=kind,
                 team_event=written,
-                **fields,
+                **event_fields,
             )
         except Exception:
             pass

@@ -489,6 +489,25 @@ def normalise_trigger_payload(payload):
     return {}
 
 
+def _inject_trusted_actor(trigger: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    """Override model-controlled actor fields with the HTTP auth identity."""
+
+    actor_id = str(payload.get("_auth_actor_id") or "").strip()
+    if not actor_id:
+        return trigger
+    stamped = dict(trigger or {})
+    for key in ("_auth_actor_id", "_auth_scope", "_auth_scopes"):
+        stamped.pop(key, None)
+    trigger_payload = stamped.get("payload")
+    trigger_payload = dict(trigger_payload) if isinstance(trigger_payload, dict) else {}
+    for key in ("_auth_actor_id", "_auth_scope", "_auth_scopes"):
+        trigger_payload.pop(key, None)
+    trigger_payload["actor_id"] = actor_id
+    stamped["actor_id"] = actor_id
+    stamped["payload"] = trigger_payload
+    return stamped
+
+
 def agent_reply_text(result: AgentTurnResult) -> str:
     """Return the canonical workspace-native assistant response."""
 
@@ -578,7 +597,10 @@ def routes():
         model_provider = _normalise_model_provider(payload.get("model_provider"))
         model_id = _normalise_model_id(payload.get("model_id") or payload.get("model"))
         run_config = _with_turn_limit_overrides(client.config, payload)
-        trigger = normalise_trigger_payload(payload)
+        trigger = _inject_trusted_actor(
+            normalise_trigger_payload(payload),
+            payload,
+        )
         requested_session_id = payload.get("session_id")
         _user_text = _run_turn_user_text(payload)
 

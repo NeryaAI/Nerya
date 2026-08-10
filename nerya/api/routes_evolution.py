@@ -47,13 +47,19 @@ _MAX_PROPOSAL_FILES_TOTAL_BYTES = 1_000_000
 
 def _proposal_strategy_files(proposal_path: Path) -> dict[str, str]:
     strategies_root = proposal_path / "after" / "strategies"
-    if not strategies_root.exists():
+    if strategies_root.is_symlink() or not strategies_root.exists():
         return {}
-    strategy_dirs = [p for p in strategies_root.iterdir() if p.is_dir()]
+    strategy_dirs = [
+        p for p in strategies_root.iterdir()
+        if p.is_dir() and not p.is_symlink()
+    ]
     files: dict[str, str] = {}
     total = 0
     for strategy_dir in sorted(strategy_dirs):
-        for path in sorted(p for p in strategy_dir.rglob("*") if p.is_file()):
+        for path in sorted(
+            p for p in strategy_dir.rglob("*")
+            if p.is_file() and not p.is_symlink()
+        ):
             try:
                 size = path.stat().st_size
             except OSError:
@@ -83,6 +89,8 @@ def _proposal_workspace_root(proposal_path: Path) -> Path:
 
 
 def _read_text_preview(path: Path, *, max_bytes: int = _MAX_PROPOSAL_FILE_BYTES) -> tuple[str, bool, bool]:
+    if path.is_symlink():
+        return "", False, False
     try:
         size = path.stat().st_size
     except OSError:
@@ -104,11 +112,14 @@ def _read_text_preview(path: Path, *, max_bytes: int = _MAX_PROPOSAL_FILE_BYTES)
 
 def _proposal_file_changes(proposal_path: Path, workspace_root: Path) -> list[dict]:
     after_root = proposal_path / "after"
-    if not after_root.exists():
+    if after_root.is_symlink() or not after_root.exists():
         return []
     changes: list[dict] = []
     total = 0
-    for after_path in sorted(p for p in after_root.rglob("*") if p.is_file()):
+    for after_path in sorted(
+        p for p in after_root.rglob("*")
+        if p.is_file() and not p.is_symlink()
+    ):
         try:
             size = after_path.stat().st_size
         except OSError:
@@ -158,7 +169,12 @@ def _proposal_file_changes(proposal_path: Path, workspace_root: Path) -> list[di
 
 def _proposal_validation_plan(paths: WorkspacePaths, proposal_detail: dict) -> dict | None:
     plan_id = str(proposal_detail.get("validation_plan_id") or "").strip()
-    if not plan_id:
+    if (
+        not plan_id
+        or "/" in plan_id
+        or "\\" in plan_id
+        or Path(plan_id).name != plan_id
+    ):
         return None
     path = paths.evolution_validation_plans / f"{plan_id}.json"
     try:
@@ -186,7 +202,7 @@ def _proposal_detail_dict(proposal, *, workspace_root: Path | None = None) -> di
     }
     for name in ("rationale.md", "diff.patch", "test_plan.md", "rollback.md"):
         p = proposal.path / name
-        if p.exists():
+        if p.exists() and not p.is_symlink():
             detail[name.replace(".", "_")] = p.read_text(encoding="utf-8")
     files = _proposal_strategy_files(proposal.path)
     if files:
@@ -693,6 +709,33 @@ def routes():
             reason=str((payload or {}).get("reason") or "operator_dream_now"),
         )
 
+    def auto_apply_tick_route(client, _payload):
+        from ..evolution.auto_apply import auto_apply_tick
+
+        return auto_apply_tick(client.config.paths, client.config)
+
+    def auto_apply_status_route(client, _payload):
+        from ..evolution.auto_apply import (
+            AUTO_APPLY_KINDS,
+            AUTO_APPLY_PATH_ALLOWLIST,
+            auto_apply_enabled,
+            evaluate_auto_apply,
+        )
+        from ..evolution.patch_proposal import list_proposals as _list_proposals
+
+        pending = [
+            evaluate_auto_apply(client.config.paths, client.config, prop)
+            for prop in _list_proposals(client.config.paths)
+            if prop.state == "pending_review" and prop.kind in AUTO_APPLY_KINDS
+        ]
+        return {
+            "ok": True,
+            "enabled": auto_apply_enabled(client.config),
+            "eligible_kinds": sorted(AUTO_APPLY_KINDS),
+            "path_allowlist": list(AUTO_APPLY_PATH_ALLOWLIST),
+            "pending": pending,
+        }
+
     return [
         ("GET", "/evolution/proposals", list_proposals_route),
         ("POST", "/evolution/proposals", list_proposals_route),
@@ -726,4 +769,6 @@ def routes():
         ("POST", "/evolution/assets/promote", promote_asset),
         ("POST", "/evolution/assets/reject", reject_asset),
         ("POST", "/evolution/validation/run", validate),
+        ("GET", "/evolution/auto_apply/status", auto_apply_status_route),
+        ("POST", "/evolution/auto_apply/tick", auto_apply_tick_route),
     ]

@@ -149,7 +149,7 @@ def _render_route(route: CommandRoute) -> list[str]:
         f"      payload.command: {route.namespace_id}",
         '    target: main',
         "    enabled: true",
-        f"    cooldown_seconds: 0",
+        "    cooldown_seconds: 0",
         "    extra:",
         f"      finance_skill: {route.skill_target.namespace_id}",
         f"      argument_hint: \"{argument_hint}\"",

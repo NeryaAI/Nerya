@@ -82,6 +82,8 @@ _SENSITIVE_MUTATION_GLOBS = (
     "strategies/*/strategy.yaml",
     "strategies/*/limits.yml",
     "strategies/*/limits.yaml",
+    "skills/enabled.yml",
+    "skills/enabled.yaml",
     "providers/*",
     "providers/**/*",
 )
@@ -98,6 +100,10 @@ _PROPOSAL_ONLY_CONFIG_FILES = {
     "messages/channels.yaml",
     "policies/planner.yml",
     "policies/tier_policy.yml",
+    # Skill allow-list is a capability surface — route through
+    # evolve_core_config_patch like the other runtime config files.
+    "skills/enabled.yml",
+    "skills/enabled.yaml",
 }
 
 

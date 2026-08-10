@@ -27,7 +27,6 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..core import jsonl
 from ..core.time import now_iso
 from ..sdk.internal_client import InternalClient
 from .methods import (
@@ -95,46 +94,43 @@ class AcpServer:
         return self.events.publish(ev)
 
     def _move_approval(
-        self, approval_id: str, state: str, *, note: str,
+        self,
+        approval_id: str,
+        state: str,
+        *,
+        note: str,
+        resolver_actor_id: str = "",
     ) -> dict[str, Any]:
-        paths = self.client.config.paths
-        src = paths.approvals_pending
-        if not src.exists():
-            raise AcpError(-32004, "no pending approvals file")
-        kept: list[str] = []
-        moved: dict[str, Any] | None = None
-        for line in src.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                rec = json.loads(line)
-            except Exception:
-                kept.append(line)
-                continue
-            if rec.get("approval_id") == approval_id or rec.get("id") == approval_id:
-                rec["state"] = state
-                rec["state_ts"] = now_iso()
-                if note:
-                    rec["state_note"] = note
-                moved = rec
-                continue
-            kept.append(line)
+        # Keep ACP on the same locked, expiry-aware approval transition as
+        # HTTP and gateway callbacks.
+        from ..api import routes_approvals as _ra
+
+        moved = _ra._move_record(
+            self.client,
+            approval_id,
+            state=state,
+            note=note,
+            resolver_actor_id=resolver_actor_id,
+        )
         if moved is None:
-            raise AcpError(-32004, f"approval {approval_id} not found")
-        # Rewrite pending without the moved record.
-        src.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-        dst = (paths.approvals_approved if state == "approved"
-               else paths.approvals_rejected)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        with dst.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(moved) + "\n")
-        # fan-out as an event so subscribers see the change.
-        self.publish_event({
-            "kind": f"approval.{state}",
+            raise AcpError(
+                -32004,
+                f"approval {approval_id} not found, expired, or unauthorized",
+            )
+        event = {
+            "kind": "approval.resolved",
             "approval_id": approval_id,
             "state": state,
             "note": note,
-        })
+            "resolver_actor_id": resolver_actor_id,
+            "record": moved,
+        }
+        self.publish_event(event)
+        _ra._publish_approval_resolution(
+            approval_id,
+            state=state,
+            record=moved,
+        )
         return {"ok": True, "approval_id": approval_id, "state": state, "record": moved}
 
 
@@ -240,10 +236,11 @@ def register_default_methods(server: AcpServer) -> None:
         description="Move an approval from pending → approved.",
         params_schema={
             "type": "object",
-            "required": ["approval_id"],
+            "required": ["approval_id", "actor_id"],
             "properties": {
                 "approval_id": {"type": "string"},
                 "note": {"type": "string"},
+                "actor_id": {"type": "string"},
             },
         },
     )
@@ -254,10 +251,11 @@ def register_default_methods(server: AcpServer) -> None:
         description="Move an approval from pending → rejected.",
         params_schema={
             "type": "object",
-            "required": ["approval_id"],
+            "required": ["approval_id", "actor_id"],
             "properties": {
                 "approval_id": {"type": "string"},
                 "note": {"type": "string"},
+                "actor_id": {"type": "string"},
             },
         },
     )
@@ -333,6 +331,15 @@ def register_default_methods(server: AcpServer) -> None:
         category="tool",
         description="Approve a pending tool-call approval (alias of "
                     "``agent.approve`` with stable categorisation).",
+        params_schema={
+            "type": "object",
+            "required": ["approval_id", "actor_id"],
+            "properties": {
+                "approval_id": {"type": "string"},
+                "note": {"type": "string"},
+                "actor_id": {"type": "string"},
+            },
+        },
     )
 
     # ----- event bus ---------------------------------------
@@ -418,8 +425,9 @@ def _m_info(server: AcpServer, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _m_pending_approvals(server: AcpServer, params: dict[str, Any]) -> dict[str, Any]:
-    p = server.client.config.paths.approvals_pending
-    items = jsonl.read_all(p) if p.exists() else []
+    from ..api import routes_approvals as _ra
+
+    items = _ra._read_pending(server.client)
     limit = int(params.get("limit") or 100)
     return {"pending": items[-limit:]}
 
@@ -429,7 +437,15 @@ def _m_approve(server: AcpServer, params: dict[str, Any]) -> dict[str, Any]:
     if not approval_id:
         raise AcpError(-32602, "approval_id required")
     note = str(params.get("note") or "")
-    return server._move_approval(approval_id, "approved", note=note)
+    actor_id = str(params.get("actor_id") or params.get("actor") or "").strip()
+    if not actor_id:
+        raise AcpError(-32602, "actor_id required")
+    return server._move_approval(
+        approval_id,
+        "approved",
+        note=note,
+        resolver_actor_id=actor_id,
+    )
 
 
 def _m_reject(server: AcpServer, params: dict[str, Any]) -> dict[str, Any]:
@@ -437,7 +453,15 @@ def _m_reject(server: AcpServer, params: dict[str, Any]) -> dict[str, Any]:
     if not approval_id:
         raise AcpError(-32602, "approval_id required")
     note = str(params.get("note") or "")
-    return server._move_approval(approval_id, "rejected", note=note)
+    actor_id = str(params.get("actor_id") or params.get("actor") or "").strip()
+    if not actor_id:
+        raise AcpError(-32602, "actor_id required")
+    return server._move_approval(
+        approval_id,
+        "rejected",
+        note=note,
+        resolver_actor_id=actor_id,
+    )
 
 
 def _m_recent_turns(server: AcpServer, params: dict[str, Any]) -> dict[str, Any]:

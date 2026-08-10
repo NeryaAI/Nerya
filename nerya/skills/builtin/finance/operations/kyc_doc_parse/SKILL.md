@@ -5,13 +5,6 @@ description: "Use for: Parse an investor or client onboarding packet into struct
 version: 0.0.1
 license: Apache-2.0
 author: Anthropic
-risk_class: high
-adapted_from:
-  upstream: financial-services
-  upstream_path: plugins/vertical-plugins/operations/skills/kyc-doc-parse/SKILL.md
-  imported_at: 2026-05-09T18:16:49+00:00
-  imported_by: finance_skills_importer/0.0.1
-category: "finance"
 ---
 <!-- nerya-skill-frontmatter-end -->
 

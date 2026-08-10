@@ -175,33 +175,3 @@ DO_NOT_IMPORT: frozenset[tuple[str, str]] = frozenset(
 def is_blocked(upstream_vertical: str, upstream_skill: str) -> bool:
     """True when a skill is in the importer's never-import allow-list."""
     return (upstream_vertical, upstream_skill) in DO_NOT_IMPORT
-
-
-#: Default ``risk_class`` per vertical. The Nerya skill manifest does not
-#: enforce risk class semantically — it just persists the field — but the
-#: agent loop reads the frontmatter when deciding which approval gate to
-#: apply. The compact builtin importer preserves the same field on every
-#: promoted finance skill.
-#:
-#: Tier rationale:
-#: * ``low``    — analyst output only, no PII, no client data
-#:                (private-equity, equity-research, financial-analysis,
-#:                investment-banking).
-#: * ``medium`` — touches client PII / account data / tax events
-#:                (wealth-management, fund-admin).
-#: * ``high``   — KYC / onboarding / regulator-facing surface
-#:                (operations).
-DEFAULT_RISK_CLASS_BY_VERTICAL: dict[str, str] = {
-    "financial-analysis": "low",
-    "investment-banking": "low",
-    "equity-research": "low",
-    "private-equity": "low",
-    "wealth-management": "medium",
-    "fund-admin": "medium",
-    "operations": "high",
-}
-
-
-def default_risk_class(upstream_vertical: str) -> str:
-    """Return the default risk_class for an upstream vertical."""
-    return DEFAULT_RISK_CLASS_BY_VERTICAL.get(upstream_vertical, "low")

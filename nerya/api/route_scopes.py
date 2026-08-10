@@ -277,7 +277,24 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/evolution/timeline", "read:runtime", ""),
     RouteRule("GET", "/evolution/assets", "read:runtime", ""),
     RouteRule("POST", "/evolution/assets", "read:runtime", ""),
-    RouteRule("POST", "/evolution/validation/run", "read:runtime", ""),
+    RouteRule(
+        "POST",
+        "/evolution/validation/run",
+        "admin:ops",
+        "executes validation commands in a subprocess",
+    ),
+    RouteRule("GET", "/evolution/auto_apply/status", "read:runtime", ""),
+    RouteRule(
+        "POST",
+        "/evolution/auto_apply/tick",
+        "admin:ops",
+        "may apply and roll back proposals",
+    ),
+    # Proposal browsing is read-only, including concrete proposal ids.
+    RouteRule("GET", "/evolution/proposals", "read:runtime", ""),
+    RouteRule("POST", "/evolution/proposals", "read:runtime", ""),
+    RouteRule("GET", "/evolution/proposals/{proposal_id}", "read:runtime", ""),
+    RouteRule("POST", "/evolution/proposals/{proposal_id}", "read:runtime", ""),
     RouteRule("POST", "/evolution/proposals/{proposal_id}/approve", "write:skills", ""),
     RouteRule("POST", "/evolution/proposals/{proposal_id}/reject", "write:skills", ""),
     RouteRule("POST", "/evolution/post_apply_observation", "write:skills", ""),
@@ -396,7 +413,17 @@ def _matches(rule: RouteRule, method: str, path: str) -> bool:
         return False
     if rule.path.endswith("/"):
         return path.startswith(rule.path)
-    return path == rule.path
+    if "{" not in rule.path:
+        return path == rule.path
+    pattern = rule.path.strip("/").split("/")
+    actual = path.strip("/").split("/")
+    if len(pattern) != len(actual):
+        return False
+    return all(
+        (segment.startswith("{") and segment.endswith("}"))
+        or segment == value
+        for segment, value in zip(pattern, actual)
+    )
 
 
 def _best_match(method: str, path: str) -> Optional[RouteRule]:

@@ -304,7 +304,11 @@ class RawResultStore:
         return removed
 
 
-def open_store(client: Any = None) -> RawResultStore:
+def open_store(
+    client: Any = None,
+    *,
+    workspace_root: Any = None,
+) -> RawResultStore:
     """Open the store rooted at ``client.config.paths.root`` or the active workspace.
 
     When ``client`` is ``None`` (e.g. from the agent loop which has no
@@ -319,6 +323,11 @@ def open_store(client: Any = None) -> RawResultStore:
     if client is not None:
         try:
             root = client.config.paths.root  # type: ignore[union-attr]
+        except Exception:
+            root = None
+    if root is None and workspace_root is not None:
+        try:
+            root = Path(workspace_root)
         except Exception:
             root = None
     if root is None:
@@ -336,6 +345,7 @@ def write_default(
     tool_name: str,
     payload: Any,
     client: Any = None,
+    workspace_root: Any = None,
 ) -> str:
     """Convenience: persist ``payload`` using the default store.
 
@@ -344,7 +354,7 @@ def write_default(
     """
 
     try:
-        return open_store(client).write(
+        return open_store(client, workspace_root=workspace_root).write(
             tool_use_id=tool_use_id,
             tool_name=tool_name,
             payload=payload,

@@ -7,6 +7,13 @@ from .dispatcher import (
 )
 from .registry import SubAgentSpec, load_registry
 from .runtime import SubAgentRuntime
+from ..agent.runtime import (
+    AgentRuntime,
+    CompletionGate,
+    GateDecision,
+    GateStatus,
+    TurnSnapshot,
+)
 from .strategy_registry import StrategySubAgentRegistry, resolve_spec
 
 __all__ = [
@@ -14,4 +21,6 @@ __all__ = [
     "SubAgentRuntime", "SubAgentDispatcher",
     "SubAgentResult", "SUBAGENT_SKILL_DENYLIST",
     "StrategySubAgentRegistry", "resolve_spec",
+    "AgentRuntime", "CompletionGate", "GateDecision", "GateStatus",
+    "TurnSnapshot",
 ]

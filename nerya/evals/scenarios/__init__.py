@@ -36,6 +36,17 @@ from ..transcript_backend import (
     ToolUseBlock,
     TranscriptScript,
 )
+from ..fixtures import (
+    cleanup,
+    register_grep_compat,
+    register_mcp_fixture,
+    register_subagent_fixture,
+    seed_coding_workspace,
+    seed_compact_workspace,
+    seed_permission_workspace,
+    seed_schema_workspace,
+    seed_skill_workspace,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +93,8 @@ def _scn_read_grep_edit_shell_final() -> EvalScenario:
                             name="edit_file",
                             input={
                                 "path": "src/util.py",
-                                "patch": "diff_placeholder",
+                                "old_string": "return sum(values)",
+                                "new_string": "return sum(Decimal(value) for value in values)",
                             },
                         ),
                     ],
@@ -93,7 +105,7 @@ def _scn_read_grep_edit_shell_final() -> EvalScenario:
                     blocks=[
                         ToolUseBlock(
                             name="run_shell",
-                            input={"command": "pytest -k calculate_total"},
+                            input={"command": "echo calculate_total_verified"},
                         ),
                     ],
                     stop_reason="tool_use",
@@ -117,6 +129,8 @@ def _scn_read_grep_edit_shell_final() -> EvalScenario:
             ToolCallExpectation(name="run_shell"),
         ],
         expected_final_text_contains=["calculate_total", "Decimal"],
+        setup=lambda scratch: (seed_coding_workspace(scratch), register_grep_compat(scratch)),
+        teardown=cleanup,
         tags=("happy-path", "coding"),
     )
 
@@ -171,6 +185,8 @@ def _scn_tool_input_schema_correction() -> EvalScenario:
                 expected_status="ok",
             ),
         ],
+        setup=seed_schema_workspace,
+        teardown=cleanup,
         tags=("schema", "recovery"),
     )
 
@@ -178,10 +194,10 @@ def _scn_tool_input_schema_correction() -> EvalScenario:
 def _scn_permission_ask_approve() -> EvalScenario:
     return EvalScenario(
         id="permission_ask_approve",
-        title="Permission ask → approve → tool runs",
+        title="Permission ask → pending approval",
         summary=(
-            "Tool requires operator approval; harness fixture grants it; "
-            "tool runs to completion and result feeds the next turn."
+            "A destructive shell call must stop at the operator approval "
+            "boundary; the eval never auto-approves it."
         ),
         user_message="Delete tmp/ scratch files.",
         script=TranscriptScript(
@@ -196,20 +212,16 @@ def _scn_permission_ask_approve() -> EvalScenario:
                     stop_reason="tool_use",
                     label="ask",
                 ),
-                ScriptedTurn(
-                    blocks=[TextBlock("Cleanup completed.")],
-                    stop_reason="end_turn",
-                ),
             ]
         ),
         expected_tool_calls=[
             ToolCallExpectation(
                 name="run_shell",
                 input_subset={"command": "rm -rf tmp"},
-                expected_status="ok",
+                expected_status="error",
             )
         ],
-        expected_final_text_contains=["completed"],
+        expected_stop_reason="approval_pending",
         tags=("permissions",),
     )
 
@@ -260,6 +272,8 @@ def _scn_permission_deny_alternative() -> EvalScenario:
             ToolCallExpectation(name="read_file"),
         ],
         expected_final_text_contains=["runbook"],
+        setup=seed_permission_workspace,
+        teardown=cleanup,
         tags=("permissions", "recovery"),
     )
 
@@ -267,11 +281,10 @@ def _scn_permission_deny_alternative() -> EvalScenario:
 def _scn_shell_dangerous_blocked() -> EvalScenario:
     return EvalScenario(
         id="shell_dangerous_blocked",
-        title="Dangerous shell intercepted by risk filter",
+        title="Dangerous shell intercepted by approval gate",
         summary=(
-            "BashTool risk classifier rejects an obviously destructive "
-            "command. The model surfaces the rejection text instead of "
-            "retrying."
+            "The AUTO permission mode pauses an obviously destructive "
+            "command instead of executing it."
         ),
         user_message="Free up disk space.",
         script=TranscriptScript(
@@ -286,14 +299,6 @@ def _scn_shell_dangerous_blocked() -> EvalScenario:
                     stop_reason="tool_use",
                     label="dangerous",
                 ),
-                ScriptedTurn(
-                    blocks=[
-                        TextBlock(
-                            "Refusing dangerous command. Please specify a path."
-                        ),
-                    ],
-                    stop_reason="end_turn",
-                ),
             ]
         ),
         expected_tool_calls=[
@@ -303,7 +308,7 @@ def _scn_shell_dangerous_blocked() -> EvalScenario:
                 expected_status="error",
             )
         ],
-        expected_final_text_contains=["dangerous"],
+        expected_stop_reason="approval_pending",
         tags=("permissions", "shell-risk"),
     )
 
@@ -356,7 +361,8 @@ def _scn_compact_then_continue() -> EvalScenario:
                             name="edit_file",
                             input={
                                 "path": "src/auth/helpers.py",
-                                "patch": "remove_dead_code",
+                                "old_string": "def dead_helper():\n    return None\n",
+                                "new_string": "",
                             },
                         ),
                     ],
@@ -379,6 +385,11 @@ def _scn_compact_then_continue() -> EvalScenario:
             ToolCallExpectation(name="edit_file"),
         ],
         expected_final_text_contains=["src/auth/helpers.py"],
+        setup=lambda scratch: (
+            seed_compact_workspace(scratch),
+            register_grep_compat(scratch),
+        ),
+        teardown=cleanup,
         tags=("compact", "long-context"),
     )
 
@@ -413,7 +424,10 @@ def _scn_skill_index_view_run() -> EvalScenario:
                     blocks=[
                         ToolUseBlock(
                             name="script_inspect",
-                            input={"script_id": "workspace_janitor"},
+                            input={
+                                "skill_id": "workspace_janitor",
+                                "name": "janitor.py",
+                            },
                         ),
                     ],
                     stop_reason="tool_use",
@@ -422,7 +436,10 @@ def _scn_skill_index_view_run() -> EvalScenario:
                     blocks=[
                         ToolUseBlock(
                             name="script_run",
-                            input={"script_id": "workspace_janitor"},
+                            input={
+                                "skill_id": "workspace_janitor",
+                                "name": "janitor.py",
+                            },
                         ),
                     ],
                     stop_reason="tool_use",
@@ -441,6 +458,8 @@ def _scn_skill_index_view_run() -> EvalScenario:
             ToolCallExpectation(name="script_inspect"),
             ToolCallExpectation(name="script_run"),
         ],
+        setup=seed_skill_workspace,
+        teardown=cleanup,
         tags=("skills",),
     )
 
@@ -497,6 +516,8 @@ def _scn_mcp_session_expired_retry() -> EvalScenario:
             ToolCallExpectation(name="mcp_reconnect"),
             ToolCallExpectation(name="mcp_call", expected_status="ok"),
         ],
+        setup=register_mcp_fixture,
+        teardown=cleanup,
         tags=("mcp", "recovery"),
     )
 
@@ -541,11 +562,21 @@ def _scn_subagent_async_completion() -> EvalScenario:
             ToolCallExpectation(name="dispatch_subagent"),
         ],
         expected_final_text_contains=["BTC", "vol"],
+        setup=register_subagent_fixture,
+        teardown=cleanup,
         tags=("subagent",),
     )
 
 
 def _scn_interrupt_during_tool_use() -> EvalScenario:
+    def _assert_cancelled_then_resumed(result):  # noqa: ANN001
+        metadata = result.metadata
+        if metadata.get("initial_stop_reason") != "cancelled":
+            return "initial run did not stop at the cooperative cancel boundary"
+        if not metadata.get("resumed"):
+            return "cancelled transcript was not resumed"
+        return None
+
     return EvalScenario(
         id="interrupt_during_tool_use",
         title="Operator interrupt mid-turn → resume preserves transcript",
@@ -562,7 +593,7 @@ def _scn_interrupt_during_tool_use() -> EvalScenario:
                     blocks=[
                         ToolUseBlock(
                             name="run_shell",
-                            input={"command": "long_running_batch"},
+                            input={"command": "echo long_running_batch"},
                         ),
                     ],
                     stop_reason="tool_use",
@@ -576,9 +607,16 @@ def _scn_interrupt_during_tool_use() -> EvalScenario:
             ]
         ),
         expected_stop_reason="end_turn",
+        expected_final_text_contains=["Cancelled before final summary."],
         expected_tool_calls=[
-            ToolCallExpectation(name="run_shell"),
+            ToolCallExpectation(
+                name="run_shell",
+                input_subset={"command": "echo long_running_batch"},
+            ),
         ],
+        cancel_after_tool_batches=1,
+        resume_after_cancel=True,
+        custom_predicate=_assert_cancelled_then_resumed,
         tags=("interrupt", "resume"),
     )
 
@@ -602,6 +640,17 @@ SCENARIO_TEMPLATES: Mapping[str, Callable[[], EvalScenario]] = {
 }
 
 
+def build_scenarios() -> list[EvalScenario]:
+    """Build a fresh, deterministic snapshot of the trusted catalog.
+
+    The CLI consumes this function instead of importing scenario instances
+    from a caller-owned module.  Calling every registered builder on each
+    invocation keeps mutable setup/teardown state isolated between runs.
+    """
+
+    return [builder() for builder in SCENARIO_TEMPLATES.values()]
+
+
 def scenario_template(scenario_id: str) -> EvalScenario:
     """Return a fresh :class:`EvalScenario` from the catalog.
 
@@ -614,4 +663,4 @@ def scenario_template(scenario_id: str) -> EvalScenario:
     return builder()
 
 
-__all__ = ["SCENARIO_TEMPLATES", "scenario_template"]
+__all__ = ["SCENARIO_TEMPLATES", "build_scenarios", "scenario_template"]

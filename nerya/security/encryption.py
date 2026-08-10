@@ -14,6 +14,15 @@ except ImportError:  # pragma: no cover - optional during tests
     _HAS_CRYPTO = False
 
 
+def has_strong_crypto() -> bool:
+    """True when AES-GCM (cryptography) is available.
+
+    Real-money execution paths call this to refuse trading while the
+    XOR test fallback would be the only thing protecting the vault.
+    """
+    return _HAS_CRYPTO
+
+
 @dataclass
 class Envelope:
     ciphertext: bytes

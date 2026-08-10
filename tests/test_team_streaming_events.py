@@ -10,6 +10,7 @@ from nerya.llm.gateway import LLMCall
 from nerya.subagents.registry import SubAgentSpec
 from nerya.subagents.runtime import SubAgentLLMError, SubAgentRuntime
 from nerya.subagents.tasks import TaskStore
+from nerya.teams.models import TeamMember, TeamMemberSpec, TeamRun, TeamRunResult, TeamTemplate
 from nerya.teams.store import TeamStore
 from nerya.tools.executor import NativeToolExecutor
 from nerya.tools.native import agents
@@ -763,6 +764,9 @@ def test_native_team_run_store_preserves_degraded_member_output(monkeypatch, tmp
     assert task.status == "failed"
     assert task.payload["output"]["quality"] == "tool_observation_fallback"
     assert task.payload["output"]["observations"]
+    run = store.read_run(data["team_run_id"])
+    assert run is not None
+    assert run.status == "blocked"
 
 
 def test_team_run_treats_missing_research_evidence_contract_as_member_failure(
@@ -846,6 +850,101 @@ def test_team_run_treats_missing_research_evidence_contract_as_member_failure(
     task = store.list_tasks(data["team_run_id"])[0]
     assert task.status == "failed"
     assert task.payload["output"]["missing_evidence"] == ["financial_statement"]
+    run = store.read_run(data["team_run_id"])
+    assert run is not None
+    assert run.status == "blocked"
+
+
+@pytest.mark.parametrize(
+    ("orchestrator_status", "expected_durable_status"),
+    [("failed", "failed"), ("blocked", "blocked")],
+)
+def test_native_team_run_syncs_orchestrator_terminal_status(
+    monkeypatch,
+    tmp_path,
+    orchestrator_status,
+    expected_durable_status,
+) -> None:
+    run_id = f"team-terminal-{orchestrator_status}"
+    cfg = Config(paths=WorkspacePaths(root=tmp_path), data={})
+    template = TeamTemplate(
+        id="ad_hoc_parallel_team",
+        description="test native terminal status",
+        lead="analyst",
+        members=[
+            TeamMemberSpec(
+                name="analyst",
+                role="analyst",
+                subagent_name="analyst",
+            ),
+        ],
+        tasks=[],
+    )
+    TeamStore(cfg.paths).create_run(
+        TeamRun(
+            id=run_id,
+            template_id=template.id,
+            goal="terminal status sync",
+            status="completed",
+            phase="close",
+        ),
+        template,
+        [TeamMember.from_spec(template.members[0])],
+    )
+
+    class FakeDispatcher:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+    class FakeOrchestrator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run_request(self, request) -> TeamRunResult:  # noqa: ANN001
+            return TeamRunResult(
+                run_id=request.run_id or run_id,
+                template_id=template.id,
+                status=orchestrator_status,
+                phase="close",
+                final_context={"status": orchestrator_status},
+                error=f"{orchestrator_status}_reason",
+                member_results=[
+                    {
+                        "subagent": "analyst",
+                        "ok": False,
+                        "error": f"{orchestrator_status}_reason",
+                        "error_kind": "execution_error",
+                        "output": {},
+                    },
+                ],
+            )
+
+    monkeypatch.setattr(agents, "SubAgentDispatcher", FakeDispatcher)
+    monkeypatch.setattr(agents, "TeamOrchestrator", FakeOrchestrator)
+    result = agents.team_run_handler(
+        ToolCall(
+            name="team_run",
+            id=f"toolu-{orchestrator_status}",
+            turn_id=f"turn-{orchestrator_status}",
+            arguments={
+                "task": "terminal status sync",
+                "team_run_id": run_id,
+                "roles": [{"name": "analyst"}],
+            },
+        ),
+        config=cfg,
+        skills=object(),
+    )
+
+    assert not result.is_error
+    data = result.content[0].data
+    assert data["status"] == "completed_with_failures"
+    assert data["orchestrator_status"] == orchestrator_status
+    durable = TeamStore(cfg.paths).read_run(run_id)
+    assert durable is not None
+    assert durable.status == expected_durable_status
+    assert durable.status != "completed"
+    assert durable.error == f"{orchestrator_status}_reason"
 
 
 def test_team_run_respects_explicit_committee_template_without_prompt_keywords(

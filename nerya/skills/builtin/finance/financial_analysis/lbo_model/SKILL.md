@@ -5,13 +5,6 @@ description: "Use for: This skill should be used when completing LBO (Leveraged 
 version: 0.0.1
 license: Apache-2.0
 author: Anthropic
-risk_class: low
-adapted_from:
-  upstream: financial-services
-  upstream_path: plugins/vertical-plugins/financial-analysis/skills/lbo-model/SKILL.md
-  imported_at: 2026-05-09T18:16:49+00:00
-  imported_by: finance_skills_importer/0.0.1
-category: "finance"
 ---
 <!-- nerya-skill-frontmatter-end -->
 

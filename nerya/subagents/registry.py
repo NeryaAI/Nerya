@@ -56,6 +56,7 @@ class SubAgentExecutionPolicy:
     max_skill_calls: int | None = None
     max_wall_seconds: float | None = None
     llm_max_attempts: int | None = None
+    runtime: str = ""
 
     @classmethod
     def from_dict(cls, raw: Any) -> "SubAgentExecutionPolicy":
@@ -92,6 +93,9 @@ class SubAgentExecutionPolicy:
             max_wall_seconds = None
         if max_wall_seconds is not None and max_wall_seconds <= 0:
             max_wall_seconds = None
+        runtime = str(data.get("runtime") or "").strip().lower()
+        if runtime not in {"", "legacy", "native"}:
+            runtime = ""
         return cls(
             locked_tier=str(data.get("locked_tier") or "").strip(),
             allow_model_override=data.get("allow_model_override") is not False,
@@ -110,6 +114,7 @@ class SubAgentExecutionPolicy:
             max_skill_calls=_positive_int("max_skill_calls"),
             max_wall_seconds=max_wall_seconds,
             llm_max_attempts=_positive_int("llm_max_attempts"),
+            runtime=runtime,
         )
 
     def asdict(self) -> dict[str, Any]:
@@ -145,6 +150,8 @@ class SubAgentExecutionPolicy:
             value = getattr(self, key)
             if value is not None:
                 out[key] = value
+        if self.runtime:
+            out["runtime"] = self.runtime
         return out
 
     def merged(self, override: Any) -> "SubAgentExecutionPolicy":
@@ -195,6 +202,7 @@ class SubAgentExecutionPolicy:
             max_skill_calls=_bounded(self.max_skill_calls, other.max_skill_calls),
             max_wall_seconds=_bounded(self.max_wall_seconds, other.max_wall_seconds),
             llm_max_attempts=_bounded(self.llm_max_attempts, other.llm_max_attempts),
+            runtime=self.runtime or other.runtime,
         )
 
 

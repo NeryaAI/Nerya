@@ -40,6 +40,10 @@ _ALLOWED_TARGETS = frozenset({
     "triggers/routes.yml",   # non-protected sections only (handled by is_protected)
     "policies/planner.yml",
     "policies/tier_policy.yml",
+    # Skill allow-list: which builtin / installed skills the agent may
+    # load. Capability changes, so proposal-only (never a live edit).
+    "skills/enabled.yml",
+    "skills/enabled.yaml",
 })
 
 

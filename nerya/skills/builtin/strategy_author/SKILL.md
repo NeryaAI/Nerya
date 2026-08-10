@@ -5,14 +5,6 @@ description: "Use to author, validate, refactor, or backtest a Nerya strategy pa
 version: 0.2.0
 license: MIT
 author: Nerya
-tags:
-  - strategy
-  - trading
-  - backtest
-  - sdk
-  - onchain
-  - polymarket
-  - custom-data
 ---
 <!-- nerya-skill-frontmatter-end -->
 

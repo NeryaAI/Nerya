@@ -215,13 +215,18 @@ def _worker(
                 wall_ms=int((time.monotonic() - started) * 1000),
             )
             return
-        dispatcher = SubAgentDispatcher(config=config, skills=skills)
+        # Detached workers cannot retain a turn-scoped permission executor;
+        # keep this compatibility path on the legacy skill runtime.
+        dispatcher = SubAgentDispatcher(
+            config=config, skills=skills, runtime_mode="legacy"
+        )
         envelope = dispatcher.dispatch(
             f"subagent:{name}",
             payload=payload or {},
             trigger_event_id=trigger_event_id,
             strategy_id=strategy_id,
             session_id=session_id,
+            cancel_token=cancel_event,
         )
         wall_ms = int((time.monotonic() - started) * 1000)
         if cancel_event is not None and cancel_event.is_set():

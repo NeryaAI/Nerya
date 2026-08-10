@@ -88,6 +88,9 @@ class EvalScenario:
     timeout_seconds:
         Wall clock cap for the scenario. The runner sets
         :attr:`LoopConfig.max_wall_seconds` accordingly.
+    cancel_after_tool_batches, resume_after_cancel:
+        Optional harness controls for exercising cooperative cancellation.
+        They are applied by :class:`EvalRunner`, never by the production loop.
     setup, teardown:
         Optional callables run before/after the scenario. Receive a
         scratch dict so setup can pass state to teardown without
@@ -112,6 +115,11 @@ class EvalScenario:
     expected_final_text_contains: Sequence[str] = field(default_factory=list)
     timeout_seconds: float = 30.0
     allow_extra_calls: bool = True
+    cancel_after_tool_batches: int | None = None
+    """Cancel the first run after this many tool batches (harness only)."""
+    resume_after_cancel: bool = False
+    """Run one continuation with the cancelled transcript when requested."""
+    resume_message: str = "Resume the interrupted task and finish it."
     setup: Optional[Callable[[dict[str, Any]], None]] = None
     teardown: Optional[Callable[[dict[str, Any]], None]] = None
     custom_predicate: Optional[Callable[["EvalRunResult"], Optional[str]]] = None

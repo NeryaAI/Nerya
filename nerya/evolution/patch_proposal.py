@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import shutil
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..core import jsonl, yaml_io
@@ -13,6 +14,7 @@ from ..core.atomic_write import atomic_write_text
 from ..core.ids import proposal_id
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
+from .candidate_bundle import build_candidate_bundle
 
 
 PROTECTED_SCOPES = {
@@ -38,6 +40,11 @@ PROTECTED_SCOPES = {
     "approvals/policy.yml",
     "approvals/signer_policy.yml",
     "approvals/llm_high_tier_callers.yml",
+    # tiered-autonomy lane (see nerya.evolution.auto_apply) — the agent
+    # must never be able to propose widening its own auto-apply
+    # whitelist or flipping the opt-in flag.
+    "nerya.yml:evolution.auto_apply",
+    "nerya.yml:evolution.auto_apply.*",
     # trigger routes (rate limits / payload caps) live here too
     "triggers/routes.yml:*.max_payload_bytes",
     "triggers/routes.yml:*.max_per_minute",
@@ -117,6 +124,8 @@ def create_proposal(
         raise ProtectedScopeViolation(
             f"proposal target is in a protected scope: {target}"
         )
+    if validation_plan_id and not _safe_validation_id(validation_plan_id):
+        raise ValueError(f"invalid validation plan id: {validation_plan_id!r}")
     pid = proposal_id()
     pdir = paths.proposals / pid
     pdir.mkdir(parents=True, exist_ok=True)
@@ -141,8 +150,42 @@ def create_proposal(
         atomic_write_text(pdir / "diff.patch", diff)
     atomic_write_text(pdir / "test_plan.md", test_plan or "# Test plan\n\nTBD\n")
     atomic_write_text(pdir / "rollback.md", rollback or "# Rollback\n\nTBD\n")
-    for name, content in (extra_files or {}).items():
-        atomic_write_text(pdir / name, content)
+    staged_files = [
+        (_staging_path(pdir, name), content)
+        for name, content in (extra_files or {}).items()
+    ]
+    for path, content in staged_files:
+        atomic_write_text(path, content)
+    # Freeze the reviewed inputs after all staged files exist.  The bundle is
+    # content addressed; apply_proposal rechecks it before any workspace write.
+    candidate_context = {}
+    if isinstance(metadata, dict) and isinstance(metadata.get("candidate_context"), dict):
+        candidate_context = dict(metadata["candidate_context"])
+    if isinstance(metadata, dict):
+        for key in (
+            "base_revision", "model_schema", "model_schema_digest",
+            "tool_schema", "tool_schema_digest", "eval_suite",
+            "eval_suite_digest",
+        ):
+            if key in metadata and key not in candidate_context:
+                candidate_context[key] = metadata[key]
+    candidate_bundle = build_candidate_bundle(
+        paths.root,
+        pdir,
+        context=candidate_context,
+    )
+    meta["candidate_bundle"] = candidate_bundle
+    atomic_write_text(pdir / "proposal.yml", yaml_io.dumps(meta))
+    atomic_write_text(
+        pdir / "candidate_bundle.json",
+        json.dumps(candidate_bundle, indent=2, ensure_ascii=False) + "\n",
+    )
+    _bind_validation_plan(
+        paths,
+        validation_plan_id,
+        proposal_id=pid,
+        candidate_bundle_digest=str(candidate_bundle["digest"]),
+    )
     jsonl.append(paths.journal("evolution"), {
         "kind": "proposal.created", "proposal_id": pid,
         "proposal_kind": kind, "state": initial_state, "summary": summary,
@@ -161,7 +204,11 @@ def create_proposal(
             outcome="proposed" if initial_state != "draft" else "candidate",
             summary=summary,
             evidence_refs=list(evidence_refs or []),
-            metadata={"proposal_kind": kind, "validation_plan_id": validation_plan_id},
+            metadata={
+                "proposal_kind": kind,
+                "validation_plan_id": validation_plan_id,
+                "candidate_bundle_digest": candidate_bundle["digest"],
+            },
         )
     except Exception:
         pass
@@ -170,11 +217,169 @@ def create_proposal(
                     evidence_refs=list(evidence_refs or []),
                     source_event_id=source_event_id,
                     validation_plan_id=validation_plan_id,
-                    metadata=dict(metadata or {}))
+                    metadata={
+                        **dict(metadata or {}),
+                        "candidate_bundle": candidate_bundle,
+                    })
 
 
 def _meta_file(pdir: Path) -> Path:
     return pdir / "proposal.yml"
+
+
+def _staging_path(pdir: Path, name: str) -> Path:
+    """Keep generated proposal files inside their staging directory."""
+
+    text = str(name or "").strip().replace("\\", "/")
+    relative = PurePosixPath(text)
+    if (
+        not text
+        or relative.is_absolute()
+        or relative.as_posix() in {"", "."}
+        or any(part == ".." for part in relative.parts)
+    ):
+        raise ValueError(f"extra file path escapes proposal staging: {name!r}")
+    root = pdir.resolve()
+    target = (root / Path(*relative.parts)).resolve(strict=False)
+    if target != root and root not in target.parents:
+        raise ValueError(f"extra file path escapes proposal staging: {name!r}")
+    return target
+
+
+def _bind_validation_plan(
+    paths: WorkspacePaths,
+    plan_id: str | None,
+    *,
+    proposal_id: str,
+    candidate_bundle_digest: str,
+) -> bool:
+    """Bind a plan to the frozen candidate without rewriting a prior binding."""
+
+    if not plan_id:
+        return True
+    plan_text = str(plan_id).strip()
+    if not _safe_validation_id(plan_text):
+        return False
+    path = paths.evolution_validation_plans / f"{plan_text}.json"
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(plan, dict):
+        return False
+    bound_proposal = str(plan.get("proposal_id") or "").strip()
+    bound_digest = str(plan.get("candidate_bundle_digest") or "").strip()
+    # A plan can be attached once.  Reusing it for a different proposal or
+    # candidate must remain visible to the action gate instead of being silently
+    # resealed here.
+    if bound_proposal and bound_proposal != proposal_id:
+        return False
+    if bound_digest and bound_digest != candidate_bundle_digest:
+        return False
+    plan["proposal_id"] = proposal_id
+    plan["candidate_bundle_digest"] = candidate_bundle_digest
+    atomic_write_text(path, json.dumps(plan, indent=2, ensure_ascii=False) + "\n")
+    return True
+
+
+def _safe_validation_id(value: Any) -> bool:
+    text = str(value or "").strip()
+    return (
+        bool(text)
+        and "/" not in text
+        and "\\" not in text
+        and Path(text).name == text
+        and text not in {".", ".."}
+    )
+
+
+def reseal_candidate_bundle(
+    paths: WorkspacePaths,
+    pid: str,
+    *,
+    note: str = "",
+) -> dict[str, Any] | None:
+    """Refresh a candidate only while it is still in operator review.
+
+    Generators may attach a backtest/replay artifact after the initial draft
+    is written.  Re-sealing that pre-approval evidence keeps the apply-time
+    CAS strict without treating an approved proposal as mutable.
+    """
+
+    proposal = next((p for p in list_proposals(paths) if p.id == pid), None)
+    if proposal is None or proposal.state not in {"draft", "pending_review", "proposed"}:
+        return None
+    existing = yaml_io.load(_meta_file(proposal.path), default={}) or {}
+    old_bundle = existing.get("candidate_bundle")
+    context = old_bundle.get("context") if isinstance(old_bundle, dict) else None
+    bundle = build_candidate_bundle(
+        paths.root,
+        proposal.path,
+        context=context if isinstance(context, dict) else None,
+    )
+    if not _rebind_validation_plan_for_review(
+        paths,
+        proposal,
+        candidate_bundle_digest=str(bundle["digest"]),
+    ):
+        return None
+    existing["candidate_bundle"] = bundle
+    atomic_write_text(_meta_file(proposal.path), yaml_io.dumps(existing))
+    atomic_write_text(
+        proposal.path / "candidate_bundle.json",
+        json.dumps(bundle, indent=2, ensure_ascii=False) + "\n",
+    )
+    jsonl.append(paths.journal("evolution"), {
+        "kind": "proposal.bundle_resealed",
+        "proposal_id": pid,
+        "bundle_digest": bundle["digest"],
+        "note": note,
+    })
+    return bundle
+
+
+def _rebind_validation_plan_for_review(
+    paths: WorkspacePaths,
+    proposal: Proposal,
+    *,
+    candidate_bundle_digest: str,
+) -> bool:
+    """Move an attached plan to the new reviewed candidate and invalidate runs."""
+
+    plan_id = str(proposal.validation_plan_id or "").strip()
+    if not plan_id:
+        return True
+    if not _safe_validation_id(plan_id):
+        return False
+    path = paths.evolution_validation_plans / f"{plan_id}.json"
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(plan, dict):
+        return False
+    bound_proposal = str(plan.get("proposal_id") or "").strip()
+    if bound_proposal and bound_proposal != proposal.id:
+        return False
+    plan["proposal_id"] = proposal.id
+    plan["candidate_bundle_digest"] = candidate_bundle_digest
+    # Any previous run covered different bytes.  Preserve the step definitions
+    # but force a fresh execution before the proposal can be applied.
+    plan["status"] = "not_run"
+    plan.pop("last_run_id", None)
+    plan.pop("last_run_at", None)
+    for step in plan.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        step["status"] = "not_run"
+        step["evidence_ref"] = None
+        if step.get("notes"):
+            step["notes"] = "candidate bundle resealed; validation must be rerun"
+    try:
+        atomic_write_text(path, json.dumps(plan, indent=2, ensure_ascii=False) + "\n")
+    except OSError:
+        return False
+    return True
 
 
 # Proposal states that still sit in the operator's review queue. A recurring
@@ -222,15 +427,23 @@ def supersede_pending_siblings(
 
 def list_proposals(paths: WorkspacePaths) -> list[Proposal]:
     root = paths.proposals
-    if not root.exists():
+    if root.is_symlink() or not root.exists() or not root.is_dir():
         return []
     out: list[Proposal] = []
     for d in sorted(root.iterdir()):
-        if not d.is_dir():
+        if d.is_symlink() or not d.is_dir():
+            continue
+        try:
+            resolved = d.resolve()
+            resolved.relative_to(root.resolve())
+        except (OSError, ValueError):
             continue
         meta = yaml_io.load(_meta_file(d), default={}) or {}
         if not meta.get("id"):
             continue
+        proposal_metadata = dict(meta.get("metadata") or {})
+        if isinstance(meta.get("candidate_bundle"), dict):
+            proposal_metadata["candidate_bundle"] = dict(meta["candidate_bundle"])
         out.append(Proposal(
             id=meta["id"],
             kind=meta.get("kind", "unknown"),
@@ -242,15 +455,25 @@ def list_proposals(paths: WorkspacePaths) -> list[Proposal]:
             evidence_refs=list(meta.get("evidence_refs") or []),
             source_event_id=meta.get("source_event_id"),
             validation_plan_id=meta.get("validation_plan_id"),
-            metadata=dict(meta.get("metadata") or {}),
+            metadata=proposal_metadata,
         ))
     return out
 
 
 def set_state(paths: WorkspacePaths, pid: str, state: str,
               *, note: str = "") -> Proposal | None:
+    allowed_states = {
+        "draft", "pending_review", "proposed", "approved", "applied",
+        "rejected", "rolled_back", "superseded",
+    }
+    if state not in allowed_states:
+        raise ValueError(f"unknown proposal state: {state!r}")
     for p in list_proposals(paths):
         if p.id == pid:
+            if p.state in {"rejected", "rolled_back", "superseded"}:
+                # Terminal lifecycle records are immutable. Re-approving an
+                # applied proposal could replay the same workspace mutation.
+                return p if state == p.state else None
             meta = yaml_io.load(_meta_file(p.path), default={}) or {}
             meta["state"] = state
             meta["state_ts"] = now_iso()
@@ -280,20 +503,45 @@ def set_state(paths: WorkspacePaths, pid: str, state: str,
                     mutation_scope=[p.target] if p.target else [],
                     validation_status=meta.get("validation_status") or "not_run",
                     outcome=outcome,
-                    outcome_score=1.0 if state in {"approved", "applied"} else -0.5 if state in {"rejected", "rolled_back"} else 0.0,
+                    # Approval/application are lifecycle decisions; neither
+                    # is evidence that the change improved outcomes.
+                    outcome_score=(
+                        0.0 if state in {"approved", "applied"}
+                        else -0.5 if state in {"rejected", "rolled_back"}
+                        else 0.0
+                    ),
                     summary=f"Proposal {pid} state changed to {state}.",
                     evidence_refs=list(meta.get("evidence_refs") or []),
-                    metadata={"note": note, "proposal_kind": p.kind},
+                    metadata={
+                        "note": note,
+                        "proposal_kind": p.kind,
+                        **(
+                            {
+                                "approval_status": "approved",
+                                "reward_status": "unevaluated",
+                            }
+                            if state == "approved"
+                            else {
+                                "observation_status": "pending",
+                                "reward_status": "unevaluated",
+                            }
+                            if state == "applied"
+                            else {}
+                        ),
+                    },
                 )
             except Exception:
                 pass
+            updated_metadata = dict(meta.get("metadata") or {})
+            if isinstance(meta.get("candidate_bundle"), dict):
+                updated_metadata["candidate_bundle"] = dict(meta["candidate_bundle"])
             return Proposal(id=pid, kind=p.kind, state=state,
                             path=p.path, summary=p.summary,
                             ts=meta["state_ts"], target=p.target,
                             evidence_refs=list(meta.get("evidence_refs") or []),
                             source_event_id=meta.get("source_event_id"),
                             validation_plan_id=meta.get("validation_plan_id"),
-                            metadata=dict(meta.get("metadata") or {}))
+                            metadata=updated_metadata)
     return None
 
 

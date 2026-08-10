@@ -128,13 +128,17 @@ def create_server(
                 skills=tools.client.skills,
             )
             register_native_tools(native_registry, deps)
-            native_view, _native_executor = build_native_mcp_registry(
+            native_view, native_executor = build_native_mcp_registry(
                 registry=native_registry,
                 config=tools.client.config,
                 policy=native_policy or native_policy_from_config(
                     tools.client.config
                 ),
             )
+            # Native delegation handlers close over ``deps``. Keep the same
+            # executor that backs the MCP bridge on that bundle so any child
+            # native call re-enters the parent validation/permission pipeline.
+            deps.executor = native_executor
             for tool in native_view.tools:
                 _register_native_tool(mcp, tool)
             try:

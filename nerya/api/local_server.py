@@ -67,6 +67,16 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _stamp_trusted_auth(payload: dict[str, Any], auth: auth_mod.AuthResult) -> dict[str, Any]:
+    """Attach dispatcher-verified identity to sensitive route payloads."""
+
+    stamped = dict(payload or {})
+    stamped["_auth_actor_id"] = str(auth.actor or "").strip()
+    stamped["_auth_scope"] = str(auth.scope or "").strip()
+    stamped["_auth_scopes"] = sorted(str(scope) for scope in (auth.scopes or ()))
+    return stamped
+
+
 class StreamingResponse:
     """Marker that lets a route handler stream chunks instead of returning JSON.
 
@@ -569,6 +579,8 @@ def build_server(
                 payload = self._read_body()
                 if path_params:
                     payload = {**path_params, **payload}
+                if path_only in {"/agent/run_turn", "/approvals/callback"}:
+                    payload = _stamp_trusted_auth(payload, auth)
                 result = handler(
                     _client_for_current_thread(config),
                     payload,

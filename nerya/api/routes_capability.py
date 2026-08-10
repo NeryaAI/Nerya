@@ -31,7 +31,7 @@ from .gateway_commands import DEFAULT_REGISTRY
 def _skill_listing(client) -> list[dict[str, Any]]:
     """agent-skill style listing of installed skills.
 
-    Returns ``[{name, description, when_to_use?}, ...]``. The dashboard
+    Returns ``[{name, description}, ...]``. The dashboard
     renders this as a discovery list; tool-level capability lives on
     :class:`~nerya.tools.types.ToolDescriptor`, not on skills.
     """
@@ -46,8 +46,7 @@ def _skill_summaries(client) -> list[dict[str, Any]]:
     """Per-skill metadata for the dashboard ``Skills`` panel.
 
     Mirrors the official Agent Skills frontmatter contract: ``name``,
-    ``description``, ``when_to_use``, plus a few free-form metadata
-    fields (``version`` / ``license``). No action arrays — anything
+    ``description`` and ``version``. No action arrays — anything
     that can be invoked is a tool, surfaced separately by the
     ``ToolRegistry``-backed tools endpoint.
     """
@@ -65,23 +64,11 @@ def _skill_summaries(client) -> list[dict[str, Any]]:
         manifest = getattr(entry, "manifest", None)
         if manifest is None:
             continue
-        meta = getattr(manifest, "instructions_meta", {}) or {}
-        when_to_use = ""
-        if isinstance(meta, dict):
-            raw = meta.get("when_to_use") or meta.get("whenToUse") or ""
-            when_to_use = str(raw).strip()
         row: dict[str, Any] = {
             "name": getattr(manifest, "id", ""),
             "description": (getattr(manifest, "description", "") or "").strip(),
             "version": getattr(manifest, "version", "") or "",
         }
-        if when_to_use:
-            row["when_to_use"] = when_to_use
-        license_value = ""
-        if isinstance(meta, dict) and isinstance(meta.get("license"), str):
-            license_value = meta["license"].strip()
-        if license_value:
-            row["license"] = license_value
         out.append(row)
     out.sort(key=lambda r: r.get("name") or "")
     return out

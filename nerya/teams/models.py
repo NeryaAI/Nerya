@@ -191,7 +191,7 @@ class TeamRun:
     id: str
     template_id: str
     goal: str
-    status: str = "pending"  # pending|running|synthesizing|completed|failed|cancelled
+    status: str = "pending"  # pending|running|synthesizing|completed|blocked|failed|cancelled
     phase: str = "plan"      # plan|research|risk_review|synthesis|close
     turn_id: Optional[str] = None
     trigger_event_id: Optional[str] = None
@@ -222,6 +222,10 @@ class TeamRunResult:
     blackboard_size: int = 0
     metrics: dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+    # Per-member envelopes are kept in memory for callers (the native
+    # adapter turns them into its legacy summary). The durable store remains
+    # the source of truth for the redacted task/artifact records.
+    member_results: list[dict[str, Any]] = field(default_factory=list)
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)

@@ -8,7 +8,7 @@ import pytest
 from nerya.core.paths import WorkspacePaths
 from nerya.core.config import Config
 from nerya.core import yaml_io
-from nerya.skills.manifest import SkillManifest
+from nerya.skills.manifest import SkillManifest, _split_frontmatter
 from nerya.skills.registry import (
     SkillRegistry,
     _walk_skill_dirs,
@@ -22,6 +22,14 @@ pytestmark = pytest.mark.smoke
 
 BUILTIN_ROOT = Path(__file__).resolve().parents[1] / "nerya" / "skills" / "builtin"
 LEGACY_SKILL_FILES = {"actions.py", "skill.yml", "skill.yaml", "manifest.yml", "manifest.yaml"}
+SUPPORTED_FRONTMATTER_FIELDS = {
+    "name",
+    "description",
+    "version",
+    "license",
+    "author",
+    "requires_integration",
+}
 
 
 def _skill_dirs() -> list[Path]:
@@ -48,6 +56,16 @@ def test_builtin_skill_md_files_parse_and_stay_compact() -> None:
             f"{skill_dir.name} should keep the expanded playbook under "
             "references/ (own or hub)"
         )
+
+
+def test_builtin_skill_frontmatter_has_no_routing_extensions() -> None:
+    for skill_dir in _skill_dirs():
+        md = skill_dir / "SKILL.md"
+        doc, _body = _split_frontmatter(md.read_text(encoding="utf-8"), source=md)
+        extras = set(doc) - SUPPORTED_FRONTMATTER_FIELDS
+        if extras == {"permissions"} and skill_dir.name == "news_social":
+            continue
+        assert extras == set(), f"{md} has unsupported frontmatter: {sorted(extras)}"
 
 
 def test_builtin_skill_tree_has_no_legacy_definition_surfaces() -> None:

@@ -387,6 +387,26 @@ def validate_proposal_files(
         return result
 
 
+def static_scan_blockers(
+    package: StrategyPackage,
+) -> list[StrategyValidationIssue]:
+    """Return only the *blocker* issues from the static AST scan.
+
+    Load-time enforcement surface for :class:`~nerya.strategies.runner.
+    StrategyRunner`: the runner refuses to execute a live-mode package
+    whose code trips a blocker (forbidden import, dangerous builtin,
+    env access, …) even though the full promotion-time validation was
+    supposed to have caught it. Cheap — pure AST walk, no imports, no
+    fake-context smoke test.
+    """
+
+    return [
+        issue
+        for issue in _static_scan_package(package)
+        if issue.severity == "blocker"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Implementation
 # ---------------------------------------------------------------------------
@@ -1407,6 +1427,7 @@ __all__ = [
     "FORBIDDEN_TOP_LEVEL_MODULES",
     "StrategyValidation",
     "StrategyValidationIssue",
+    "static_scan_blockers",
     "validate_proposal_files",
     "validate_strategy_package",
 ]

@@ -44,6 +44,7 @@ from ...evolution.patch_proposal import (
     create_proposal,
     delete_proposal,
     list_proposals,
+    reseal_candidate_bundle,
     set_state,
 )
 from ...evolution.promotion import apply_proposal
@@ -2960,6 +2961,14 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
             },
         )
 
+    # Backtest/replay evidence can be attached after generation but before
+    # approval. Freeze that final review snapshot; once approved, apply CAS is
+    # intentionally immutable.
+    reseal_candidate_bundle(
+        paths,
+        pid,
+        note=f"strategy_promote:{accepted_kind or 'standard_backtest'}",
+    )
     set_state(paths, pid, "approved", note=note or "approved by agent native tool")
     try:
         outcome = apply_proposal(paths, pid)
@@ -3096,13 +3105,20 @@ def strategy_run_tick_handler(
     *,
     config: Config,
     skills: Any = None,
+    tool_registry: Any = None,
+    executor: Any = None,
 ) -> ToolResult:
     args = call.arguments or {}
     sid = (args.get("strategy_id") or "").strip()
     if not sid:
         return _usage_error(call, "strategy_id is required")
     from ...strategies.runner import StrategyRunner  # lazy: see top-of-file note
-    runner = StrategyRunner(config=config, skills=skills)
+    runner = StrategyRunner(
+        config=config,
+        skills=skills,
+        tool_registry=tool_registry,
+        executor=executor,
+    )
     try:
         record = runner.run_tick(
             sid,

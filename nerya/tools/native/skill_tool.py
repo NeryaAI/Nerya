@@ -56,7 +56,10 @@ from .skill import SkillIndex
 
 _LOG = logging.getLogger(__name__)
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
+_FRONTMATTER_RE = re.compile(
+    r"^\s*(?:<!--.*?-->\s*)*---\s*\n.*?\n---\s*\n",
+    re.DOTALL,
+)
 _SKILL_DIR_VAR_RE = re.compile(r"\$\{CLAUDE_SKILL_DIR\}")
 
 
@@ -64,20 +67,9 @@ SKILL_TOOL_NAME = "Skill"
 
 
 SKILL_TOOL_DESCRIPTION = (
-    "Execute a skill within the main conversation.\n\n"
-    "When users ask you to perform tasks, check if any of the available"
-    " skills match. Skills provide specialized capabilities and domain"
-    " knowledge.\n\n"
-    "How to invoke:\n"
-    "- Call this tool with the skill name (e.g. `skill: \"commit\"`).\n"
-    "- Available skills are listed in the system prompt under \"Skills"
-    " available\".\n\n"
-    "Important:\n"
-    "- When a skill matches the user's request, this is a BLOCKING"
-    " REQUIREMENT: invoke the relevant Skill tool BEFORE generating"
-    " any other response about the task.\n"
-    "- NEVER mention a skill without actually calling this tool.\n"
-    "- Do not invoke a skill that is already running."
+    "Load a matching SKILL.md playbook into the conversation. "
+    "Use the skill name from the available skills catalog; the playbook "
+    "contains the domain procedure and references to any required tools."
 )
 
 
@@ -105,8 +97,8 @@ SKILL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
 def _strip_frontmatter(text: str) -> str:
     """Drop a leading YAML frontmatter block, if present.
 
-    The listing already shows the description /
-    when_to_use; including the YAML in the body is just noise.
+    The listing already shows the description; including YAML in the body is
+    just noise.
     """
 
     return _FRONTMATTER_RE.sub("", text, count=1)

@@ -10,7 +10,8 @@ import threading
 
 import pytest
 
-from nerya.api import local_server
+from nerya.api import local_server, routes_agent
+from nerya.api.auth import AuthResult
 from nerya.cli.app import build_parser
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
@@ -55,6 +56,32 @@ def test_local_server_json_safe_replaces_non_finite_numbers():
         "nested": [{"value": None}, {"value": None}, {"value": 1.5}],
     }
     assert "Infinity" not in json.dumps(body, allow_nan=False)
+
+
+def test_sensitive_payloads_carry_only_dispatcher_auth_identity():
+    auth = AuthResult(
+        ok=True,
+        actor="token:operator",
+        scope="approve:tool",
+        scopes=frozenset({"approve:tool"}),
+    )
+    stamped = local_server._stamp_trusted_auth(
+        {"actor_id": "model-controlled", "value": 1},
+        auth,
+    )
+
+    assert stamped["actor_id"] == "model-controlled"
+    assert stamped["_auth_actor_id"] == "token:operator"
+    assert stamped["_auth_scopes"] == ["approve:tool"]
+
+    trigger = routes_agent._inject_trusted_actor(
+        {"kind": "agent.user_message", "payload": {"actor_id": "spoof"}},
+        stamped,
+    )
+    assert trigger["actor_id"] == "token:operator"
+    assert trigger["payload"]["actor_id"] == "token:operator"
+    assert "_auth_actor_id" not in trigger
+    assert "_auth_scopes" not in trigger["payload"]
 
 
 def test_local_server_request_clients_are_thread_local(tmp_path):

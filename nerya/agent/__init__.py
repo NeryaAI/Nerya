@@ -27,6 +27,14 @@ _EXPORTS = {
     "CompactionReport": ".transcript_compact",
     "compact_transcript": ".transcript_compact",
     "validate_transcript": ".transcript_compact",
+    "AgentRuntime": ".runtime",
+    "SharedAgentRuntime": ".runtime",
+    "CompletionGate": ".runtime",
+    "GateDecision": ".runtime",
+    "GateStatus": ".runtime",
+    "TurnSnapshot": ".runtime",
+    "RuntimeRequest": ".runtime",
+    "RuntimeResult": ".runtime",
 }
 
 __all__ = list(_EXPORTS)

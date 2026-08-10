@@ -4,8 +4,7 @@ A skill is a ``SKILL.md`` (YAML frontmatter + markdown body) — a
 *prompt template*, not a bundle of typed actions. The native agent
 loop discovers skills by reading SKILL.md frontmatter + body:
 
-* List skills as ``name: description - when_to_use`` lines, truncated
-  to a per-entry character cap and overall token budget.
+* List skills as ``name: description`` lines.
 * When the model invokes a skill, return the markdown body verbatim —
   the body teaches the model how to combine native tools.
 
@@ -23,43 +22,17 @@ all live on :class:`~nerya.tools.types.ToolDescriptor`, not on skills.
 
 from __future__ import annotations
 
-from typing import Any
-
 from .kernel import SkillKernel
 
 
-# Per-entry character cap for the listing. Wide descriptions waste
-# turn-1 cache-creation tokens without improving match rate.
-MAX_LISTING_DESC_CHARS = 250
-
-
-def _truncate(text: str, limit: int = MAX_LISTING_DESC_CHARS) -> str:
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 1)].rstrip() + "\u2026"
-
-
-def _frontmatter(manifest: Any) -> dict[str, Any]:
-    meta = getattr(manifest, "instructions_meta", None)
-    return dict(meta) if isinstance(meta, dict) else {}
-
-
-def _when_to_use(manifest: Any) -> str:
-    fm = _frontmatter(manifest)
-    raw = fm.get("when_to_use") or fm.get("whenToUse") or ""
-    return str(raw).strip()
-
-
-def build_skill_listing(skills: SkillKernel | None) -> list[dict[str, Any]]:
+def build_skill_listing(skills: SkillKernel | None) -> list[dict[str, str]]:
     """Return a compact listing of installed skills.
 
-    Each row carries only what the model needs to decide whether to
-    invoke a skill: ``name``, ``description`` (truncated), and
-    ``when_to_use`` (when the manifest declares one).
+    Each row carries only the standard activation contract: ``name`` and
+    ``description``. The model decides whether the description matches.
     """
 
-    out: list[dict[str, Any]] = []
+    out: list[dict[str, str]] = []
     if skills is None:
         return out
     try:
@@ -74,19 +47,15 @@ def build_skill_listing(skills: SkillKernel | None) -> list[dict[str, Any]]:
         name = getattr(manifest, "id", "") or ""
         if not name:
             continue
-        description = _truncate(getattr(manifest, "description", "") or "")
-        when_to_use = _truncate(_when_to_use(manifest))
-        row: dict[str, Any] = {"name": name, "description": description}
-        if when_to_use:
-            row["when_to_use"] = when_to_use
-        out.append(row)
+        description = (getattr(manifest, "description", "") or "").strip()
+        out.append({"name": name, "description": description})
 
     out.sort(key=lambda e: e.get("name") or "")
     return out
 
 
 def format_skill_listing(skills: SkillKernel | None) -> str:
-    """Format the listing as ``- name: description - when_to_use`` lines.
+    """Format the listing as ``- name: description`` lines.
 
     The caller owns the global token-budget pass because it knows the
     model's current context window.
@@ -98,17 +67,11 @@ def format_skill_listing(skills: SkillKernel | None) -> str:
     lines: list[str] = []
     for row in rows:
         desc = row.get("description") or ""
-        wtu = row.get("when_to_use") or ""
-        if desc and wtu:
-            payload = f"{desc} - {wtu}"
-        else:
-            payload = desc or wtu
-        lines.append(f"- {row['name']}: {payload}")
+        lines.append(f"- {row['name']}: {desc}")
     return "\n".join(lines)
 
 
 __all__ = [
-    "MAX_LISTING_DESC_CHARS",
     "build_skill_listing",
     "format_skill_listing",
 ]

@@ -33,12 +33,9 @@ from .diff_overlap import (
     render_overlap_report_md,
 )
 from .name_map import (
-    DEFAULT_RISK_CLASS_BY_VERTICAL,
-    DO_NOT_IMPORT,
     KNOWN_VERTICALS,
     NERYA_BUILTIN_OVERLAPS,
     UnknownVerticalError,
-    default_risk_class,
     is_blocked,
     overlap_target,
     resolve_target,
@@ -100,15 +97,11 @@ def cmd_import(args: argparse.Namespace) -> int:
         )
         return 2
 
-    risk_class = args.risk_class or default_risk_class(args.vertical)
-
     summary: dict[str, Any] = {
         "subcommand": "import",
         "vertical": args.vertical,
         "upstream_root": str(upstream_root),
         "workspace_root": str(workspace),
-        "risk_class": risk_class,
-        "risk_class_source": "explicit" if args.risk_class else "vertical_default",
         "dry_run": not args.apply,
         "imports": [],
         "skipped_overlaps": [],
@@ -149,9 +142,7 @@ def cmd_import(args: argparse.Namespace) -> int:
                 upstream_skill_dir=skill_dir,
                 target=target,
                 workspace_root=workspace,
-                upstream_repo_root=upstream_root,
                 dry_run=not args.apply,
-                risk_class=risk_class,
                 license_=args.license,
                 author=args.author,
             )
@@ -341,8 +332,6 @@ def cmd_promote(args: argparse.Namespace) -> int:
             )
             continue
 
-        risk_class = default_risk_class(vertical)
-
         imports: list[dict[str, Any]] = []
         overlap_skips: list[dict[str, Any]] = []
         blocked_skips: list[dict[str, Any]] = []
@@ -374,9 +363,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
                     upstream_skill_dir=skill_dir,
                     target=target,
                     workspace_root=workspace,
-                    upstream_repo_root=upstream_root,
                     dry_run=not args.apply,
-                    risk_class=risk_class,
                     license_=args.license,
                     author=args.author,
                 )
@@ -413,7 +400,6 @@ def cmd_promote(args: argparse.Namespace) -> int:
         summary["verticals"].append(
             {
                 "vertical": vertical,
-                "risk_class": risk_class,
                 "imports": len(imports),
                 "overlap_skips": len(overlap_skips),
                 "blocked_skips": len(blocked_skips),
@@ -580,13 +566,6 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Actually write to the workspace (default: dry-run).")
     p_import.add_argument("--include-overlaps", action="store_true",
                           help="Also import skills that overlap a Nerya builtin.")
-    p_import.add_argument(
-        "--risk-class", default=None, choices=["low", "medium", "high"],
-        help=(
-            "Override the per-vertical default risk_class. Defaults to "
-            f"{DEFAULT_RISK_CLASS_BY_VERTICAL!r}."
-        ),
-    )
     p_import.add_argument("--license", default="Apache-2.0")
     p_import.add_argument("--author", default="Anthropic")
     p_import.set_defaults(func=cmd_import)

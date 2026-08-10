@@ -64,9 +64,6 @@ def transform_skill_md(
     upstream_text: str,
     target: SkillTarget,
     *,
-    upstream_repo_path: str,
-    upstream_commit: str = "",
-    risk_class: str = "low",
     license_: str = "Apache-2.0",
     author: str = "Anthropic",
     requires_integration: str = "",
@@ -98,12 +95,9 @@ def transform_skill_md(
     meta = FrontmatterMeta(
         name=target.skill_id,
         description=nerya_description,
-        upstream_path=upstream_repo_path,
-        upstream_commit=upstream_commit,
         license=license_,
         author=author,
         version=version,
-        risk_class=risk_class,
         requires_integration=requires_integration,
     )
     fm = render_frontmatter_block(meta)
@@ -117,14 +111,11 @@ def apply_to_directory(
     upstream_skill_dir: Path,
     target: SkillTarget,
     workspace_root: Path,
-    upstream_commit: str = "",
-    risk_class: str = "low",
     license_: str = "Apache-2.0",
     author: str = "Anthropic",
     requires_integration: str = "",
     version: str = "0.0.1",
     dry_run: bool = True,
-    upstream_repo_root: Path | None = None,
 ) -> TransformResult:
     """Materialise one upstream skill directory into the workspace.
 
@@ -141,14 +132,9 @@ def apply_to_directory(
         raise FileNotFoundError(f"upstream SKILL.md missing: {upstream_md}")
 
     upstream_text = upstream_md.read_text(encoding="utf-8")
-    upstream_repo_path = _relative_repo_path(upstream_md, upstream_repo_root)
-
     nerya_text, upstream_desc, nerya_desc = transform_skill_md(
         upstream_text,
         target,
-        upstream_repo_path=upstream_repo_path,
-        upstream_commit=upstream_commit,
-        risk_class=risk_class,
         license_=license_,
         author=author,
         requires_integration=requires_integration,

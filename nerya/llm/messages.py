@@ -319,6 +319,7 @@ class MessagesResponse:
     model: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
     latency_ms: int = 0
+    usd_cost: float = 0.0
 
     def text(self) -> str:
         return "".join(b.get("text") or "" for b in self.content if b.get("type") == "text")

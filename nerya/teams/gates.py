@@ -58,7 +58,10 @@ def evaluate_gates(
             else:
                 out.append(GateOutcome(gate.id, True, reason="all required artifacts present"))
             continue
-        out.append(GateOutcome(gate.id, True, reason=f"unknown gate kind {gate.kind!r}"))
+        # ponytail: unknown policy is a blocker, not an implicit allow.
+        # A newly deployed template must declare an evaluator before it can
+        # produce an actionable/completed run.
+        out.append(GateOutcome(gate.id, False, reason=f"unknown gate kind {gate.kind!r}"))
     return out
 
 

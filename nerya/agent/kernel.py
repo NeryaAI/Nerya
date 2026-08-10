@@ -25,6 +25,7 @@ import logging
 import hashlib
 import json
 import re
+from contextlib import contextmanager
 import time
 from datetime import timezone
 from dataclasses import asdict as _dataclass_asdict, dataclass, field
@@ -55,12 +56,7 @@ from ..tools.native.bootstrap import (
 from ..tools.native.conversation_files import render_conversation_file_policy
 from .file_state import FileStateCache
 from .hooks import HookContext, HookRegistry, _bind_config, _unbind_config
-from .loop import (
-    _REQUIRED_ARTIFACT_TOOL_CONTRACT_KEYS,
-    LoopConfig,
-    LoopOutcome,
-    WorkspaceNativeAgentLoop,
-)
+from .loop import LoopConfig, LoopOutcome, WorkspaceNativeAgentLoop
 from .attachments import (
     prepare_user_message,
     public_attachment_blocks_from_envelopes,
@@ -92,6 +88,16 @@ from ..evolution.hooks import EvolutionHookBus
 
 
 _LOG = logging.getLogger(__name__)
+
+
+@contextmanager
+def _approval_file_lock(path: Path):
+    """Serialize approval JSONL read/modify/write across processes."""
+
+    lock_path = Path(path).with_name(f".{Path(path).name}.lock")
+    # jsonl already owns the portable POSIX/Windows file-lock details.
+    with jsonl._open_append(lock_path):  # noqa: SLF001
+        yield
 
 
 def _close_db_quietly(con: Any) -> None:
@@ -901,6 +907,19 @@ def _latest_prior_user_text(messages: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _user_text_from_trigger(trigger: dict[str, Any]) -> str:
+    payload = trigger.get("payload") if isinstance(trigger.get("payload"), dict) else {}
+    value = (
+        payload.get("text")
+        or payload.get("message")
+        or payload.get("prompt")
+        or trigger.get("raw")
+        or trigger.get("text")
+        or "(no user message provided)"
+    )
+    return value if isinstance(value, str) else str(value)
+
+
 def _render_turn_focus_block(
     *,
     attached_skills: Optional[list[str]] = None,
@@ -1051,17 +1070,21 @@ def _normalise_required_artifacts_contract(value: Any) -> tuple[dict[str, Any], 
         if not isinstance(raw, dict):
             continue
         item: dict[str, Any] = {}
-        for key in (
-            "kind",
-            "tool",
-            "source",
-            *_REQUIRED_ARTIFACT_TOOL_CONTRACT_KEYS,
-        ):
+        for key in ("kind", "tool", "source"):
             val = raw.get(key)
-            if isinstance(val, str):
-                clean = val.strip()
-                if clean:
-                    item[key] = clean[:96]
+            if isinstance(val, str) and val.strip():
+                item[key] = val.strip()[:96]
+        # Only an explicit ``arguments`` object is executable. Other fields
+        # remain metadata for the caller and cannot accidentally become tool
+        # arguments just because a domain adds a new contract key.
+        arguments = raw.get("arguments")
+        if isinstance(arguments, dict) and arguments:
+            item["arguments"] = dict(arguments)
+        for key, val in raw.items():
+            if key in {"kind", "tool", "source", "arguments", "defer_initial_tool_choice"}:
+                continue
+            if isinstance(val, (str, int, float, bool, list, dict)):
+                item[str(key)] = val
         if raw.get("defer_initial_tool_choice") is True:
             item["defer_initial_tool_choice"] = True
         if item.get("kind") or item.get("tool"):
@@ -1086,6 +1109,9 @@ def _loop_config_from_config(
 ) -> LoopConfig:
     """Build native loop limits from config, preserving legacy harness knobs."""
 
+    raw_action_reserve = config.get(
+        "agent.native.action_tool_wall_reserve_seconds"
+    )
     return LoopConfig(
         turn_id=turn_id,
         max_iterations=int(
@@ -1119,6 +1145,11 @@ def _loop_config_from_config(
         wall_time_final_synthesis_seconds=float(
             config.get("agent.native.wall_time_final_synthesis_seconds", 60.0)
         ),
+        action_tool_wall_reserve_seconds=(
+            float(raw_action_reserve)
+            if raw_action_reserve is not None
+            else None
+        ),
         llm_retry_attempts=int(config.get("agent.native.llm_retry_attempts", 10)),
         llm_retry_base_delay=float(config.get("agent.native.llm_retry_base_delay", 3.0)),
         llm_retry_max_delay=float(config.get("agent.native.llm_retry_max_delay", 60.0)),
@@ -1146,9 +1177,6 @@ def _loop_config_from_config(
         strategy_id=strategy_id,
         trigger_event_id=trigger_event_id,
         required_artifacts=required_artifacts,
-        workflow_forcing=bool(
-            config.get("agent.native.workflow_forcing", False)
-        ),
         compact_preservation_cb=compact_preservation_cb,
     )
 
@@ -1473,6 +1501,15 @@ class AgentKernel:
         deps.active_trigger_source = str((trigger or {}).get("source") or "")
         deps.strategy_order_auto_approve = strategy_order_auto_approve
         deps.permission_mode = self.permission_mode.value
+        user_payload = (
+            trigger.get("payload")
+            if isinstance(trigger.get("payload"), dict)
+            else {}
+        )
+        approval_continue = _is_approval_continue_trigger(trigger, user_payload)
+        continuation_approval_id = str(
+            user_payload.get("approval_id") or ""
+        ).strip()
         # In ``auto`` / ``yolo`` permission modes we run unattended, so any
         # plan the previous turn submitted via ``exit_plan_mode`` would
         # otherwise sit forever waiting for an operator that isn't there.
@@ -1506,11 +1543,42 @@ class AgentKernel:
         engine = PermissionEngine()
 
         def _approval_cb(call, _descriptor, _decision):
+            if not approval_continue or not continuation_approval_id:
+                return None
             return self._lookup_tool_permission_decision(
                 session_id=session_id,
+                strategy_id=strategy_id,
+                requester_actor_id=deps.active_actor_id,
+                approval_id=continuation_approval_id,
                 tool_name=str(getattr(call, "name", "") or ""),
                 payload=dict(getattr(call, "arguments", {}) or {}),
                 call_id=str(getattr(call, "id", "") or ""),
+            )
+
+        def _persist_child_permission_request(call, _descriptor, decision):
+            if not str(getattr(call, "caller", "") or "").startswith("subagent:"):
+                return
+            self._record_tool_permission_request(
+                turn_id=turn_id,
+                session_id=session_id,
+                strategy_id=strategy_id,
+                requester_actor_id=deps.active_actor_id,
+                block={
+                    "kind": "tool_result",
+                    "call_id": str(getattr(call, "id", "") or ""),
+                    "skill_id": "native",
+                    "action": str(getattr(call, "name", "") or ""),
+                    "payload": dict(getattr(call, "arguments", {}) or {}),
+                    "caller": str(getattr(call, "caller", "") or ""),
+                    "ok": False,
+                    "error": (
+                        decision.approval_reason
+                        or decision.reason
+                        or "approval required before this tool can run"
+                    ),
+                    "error_kind": "permission_pending",
+                },
+                broadcast=False,
             )
 
         executor = NativeToolExecutor(
@@ -1518,7 +1586,14 @@ class AgentKernel:
             permission_engine=engine,
             permission_context=permission_context,
             approval_cb=_approval_cb,
+            permission_pending_hooks=[_persist_child_permission_request],
         )
+        # Child runtimes spawned by native delegation must share this exact
+        # per-turn executor so schema, permission, approval, risk, and hooks
+        # remain one policy boundary. ``NativeToolDeps`` is mutable because
+        # the executor is intentionally rebuilt for each turn's permission
+        # context.
+        deps.executor = executor
         orchestrator = ToolOrchestrator(
             registry=self._registry,
             executor=executor,
@@ -1902,6 +1977,29 @@ class AgentKernel:
                         not bool(block.get("ok"))
                         and str(block.get("error_kind") or "") == "permission_pending"
                     ):
+                        approval_anchor_call_id = str(block.get("call_id") or "")
+                        recovery = (
+                            block.get("recovery")
+                            if isinstance(block.get("recovery"), dict)
+                            else {}
+                        )
+                        if recovery.get("nested_permission_pending") is True:
+                            block = {
+                                **block,
+                                "call_id": str(
+                                    recovery.get("nested_tool_use_id")
+                                    or block.get("call_id")
+                                    or ""
+                                ),
+                                "skill_id": "native",
+                                "action": str(
+                                    recovery.get("tool_name")
+                                    or block.get("action")
+                                    or ""
+                                ),
+                                "payload": dict(recovery.get("payload") or {}),
+                                "caller": str(recovery.get("caller") or ""),
+                            }
                         call_id = str(block.get("call_id") or "")
                         if call_id and not block.get("payload"):
                             block = {
@@ -1913,6 +2011,7 @@ class AgentKernel:
                             session_id=session_id,
                             strategy_id=strategy_id,
                             block=block,
+                            requester_actor_id=deps.active_actor_id,
                         )
                         bus.publish(
                             "approval.request",
@@ -1925,7 +2024,7 @@ class AgentKernel:
                             **common,
                         )
                         captured_approvals.append((
-                            call_id,
+                            approval_anchor_call_id or call_id,
                             {
                                 "kind": "approval_request",
                                 "approval_id": str(approval_payload.get("approval_id") or ""),
@@ -1960,18 +2059,7 @@ class AgentKernel:
             event_sink=_event_sink,
         )
 
-        user_payload = trigger.get("payload") or {}
-        user_text = (
-            user_payload.get("text")
-            or user_payload.get("message")
-            or user_payload.get("prompt")
-            or trigger.get("raw")
-            or trigger.get("text")
-            or "(no user message provided)"
-        )
-        if not isinstance(user_text, str):
-            user_text = str(user_text)
-        approval_continue = _is_approval_continue_trigger(trigger, user_payload)
+        user_text = _user_text_from_trigger(trigger)
         model_user_text = _model_user_text_for_trigger(user_text, trigger)
 
         # Replay prior user/assistant exchanges before rendering the
@@ -2589,6 +2677,51 @@ class AgentKernel:
                 rows.append(row)
         return rows
 
+    @staticmethod
+    def _approval_expired(row: dict[str, Any], *, now_ts: float | None = None) -> bool:
+        """Treat missing or malformed expiry as expired (fail closed)."""
+
+        raw = row.get("expires_at")
+        try:
+            return not raw or float(raw) <= float(now_ts or time.time())
+        except (TypeError, ValueError):
+            return True
+
+    @staticmethod
+    def _approval_scope_matches(
+        row: dict[str, Any],
+        parent: dict[str, Any] | None,
+        *,
+        session_id: str | None,
+        strategy_id: str | None,
+        requester_actor_id: str | None,
+    ) -> bool:
+        parent = parent or {}
+
+        def _value(name: str, legacy: str = "") -> str:
+            value = row.get(name) or row.get(legacy) or parent.get(name) or parent.get(legacy)
+            return str(value or "").strip()
+
+        # A tool approval is scoped to the exact requester session. A missing
+        # scope is not a wildcard: old/unscoped rows fail closed.
+        stored_session = _value("requester_session_id", "session_id")
+        requested_session = str(session_id or "").strip()
+        if not stored_session or not requested_session or stored_session != requested_session:
+            return False
+
+        stored_strategy = _value("requester_strategy_id", "strategy_id")
+        requested_strategy = str(strategy_id or "").strip()
+        if stored_strategy != requested_strategy:
+            return False
+
+        stored_actor = _value("requester_actor_id")
+        requested_actor = str(requester_actor_id or "").strip()
+        # Actor scope is mandatory for native approvals; an absent actor is
+        # never a wildcard that can be resumed by another requester.
+        if not stored_actor or not requested_actor or stored_actor != requested_actor:
+            return False
+        return True
+
     def _lookup_tool_permission_decision(
         self,
         *,
@@ -2596,6 +2729,9 @@ class AgentKernel:
         tool_name: str,
         payload: dict[str, Any],
         call_id: str,
+        strategy_id: str | None = None,
+        requester_actor_id: str | None = None,
+        approval_id: str | None = None,
     ) -> bool | None:
         """Return a persisted operator verdict for this exact tool call.
 
@@ -2606,66 +2742,134 @@ class AgentKernel:
         """
 
         fp = self._tool_permission_fingerprint(tool_name, payload)
+        requested_approval_id = str(approval_id or "").strip()
+        now_ts = time.time()
 
-        def _session_matches(row: dict[str, Any]) -> bool:
-            return not (
-                session_id
-                and row.get("session_id")
-                and row.get("session_id") != session_id
-            )
+        def _row_id(row: dict[str, Any]) -> str:
+            return str(row.get("approval_id") or row.get("id") or "").strip()
 
-        def _tool_payload(row: dict[str, Any]) -> dict[str, Any]:
-            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        def _tool_payload(row: dict[str, Any], parent: dict[str, Any] | None = None) -> dict[str, Any]:
+            parent = parent or {}
+            raw_payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
             tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
-            payload_tool = payload.get("tool") if isinstance(payload.get("tool"), dict) else {}
-            return {**payload_tool, **tool}
-
-        def _item_matches(row: dict[str, Any]) -> bool:
-            if not _session_matches(row):
-                return False
-            tool = _tool_payload(row)
-            row_call_id = str(
-                row.get("tool_use_id")
-                or row.get("call_id")
-                or tool.get("call_id")
-                or ""
+            payload_tool = (
+                raw_payload.get("tool")
+                if isinstance(raw_payload.get("tool"), dict)
+                else {}
             )
-            if call_id and row_call_id == call_id:
-                return True
-            if str(row.get("fingerprint") or "") == fp:
-                return True
-            return str(tool.get("fingerprint") or "") == fp
+            parent_tool = parent.get("tool") if isinstance(parent.get("tool"), dict) else {}
+            return {**parent_tool, **payload_tool, **tool}
 
-        def _matches(row: dict[str, Any]) -> bool:
-            kind = str(row.get("kind") or "")
-            if kind == "tool_permission":
-                return _item_matches(row)
-            if kind != "tool_permission_batch":
+        def _item_matches(
+            row: dict[str, Any],
+            parent: dict[str, Any] | None = None,
+        ) -> bool:
+            if parent is not None and self._approval_expired(parent, now_ts=now_ts):
                 return False
-            if not _session_matches(row):
+            expiry_row = row if row.get("expires_at") is not None else (parent or row)
+            if self._approval_expired(expiry_row, now_ts=now_ts):
                 return False
-            fingerprints = row.get("fingerprints")
-            if isinstance(fingerprints, list) and fp in {str(x) for x in fingerprints}:
-                return True
-            tool_use_ids = row.get("tool_use_ids")
-            if (
-                call_id
-                and isinstance(tool_use_ids, list)
-                and call_id in {str(x) for x in tool_use_ids}
+            if not self._approval_scope_matches(
+                row,
+                parent,
+                session_id=session_id,
+                strategy_id=strategy_id,
+                requester_actor_id=requester_actor_id,
             ):
-                return True
-            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-            items = row.get("items") or payload.get("items") or []
-            if not isinstance(items, list):
                 return False
-            return any(_item_matches(item) for item in items if isinstance(item, dict))
+            tool = _tool_payload(row, parent)
+            parent_action = parent.get("action") if isinstance(parent, dict) else ""
+            row_tool_name = str(
+                tool.get("name")
+                or row.get("action")
+                or parent_action
+            ).strip()
+            if row_tool_name != str(tool_name or "").strip():
+                return False
+            # Never authorize by call id alone. Providers can regenerate or
+            # accidentally reuse ids; the canonical argument fingerprint is
+            # the actual approval binding.
+            row_fp = str(row.get("fingerprint") or tool.get("fingerprint") or "").strip()
+            return bool(row_fp and row_fp == fp)
+
+        def _items(row: dict[str, Any]) -> list[dict[str, Any]]:
+            payload_obj = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            raw = row.get("items") or payload_obj.get("items") or []
+            return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+
+        def _match_index(row: dict[str, Any]) -> int | None:
+            kind = str(row.get("kind") or "")
+            if requested_approval_id and _row_id(row) != requested_approval_id:
+                return None
+            if kind == "tool_permission":
+                return 0 if _item_matches(row) else None
+            if kind != "tool_permission_batch":
+                return None
+            for index, item in enumerate(_items(row)):
+                if item.get("consumed_at"):
+                    continue
+                if _item_matches(item, row):
+                    return index
+            return None
 
         paths = self.config.paths
-        for row in self._iter_approval_rows(paths.approvals_rejected):
-            if _matches(row):
+        # A rejection is terminal for the exact scoped call, but an expired
+        # or unscoped historical row must never act as a wildcard.
+        rejected_path = paths.approvals_rejected
+        with _approval_file_lock(rejected_path):
+            rejected_rows = self._iter_approval_rows(rejected_path)
+            for row in reversed(rejected_rows):
+                index = _match_index(row)
+                if index is None:
+                    continue
+                items = _items(row)
+                target = (
+                    items[index]
+                    if str(row.get("kind") or "") == "tool_permission_batch"
+                    else row
+                )
+                if target.get("consumed_at"):
+                    continue
+                consumed_at = now_iso()
+                target["consumed_at"] = consumed_at
+                target["consumed_call_id"] = str(call_id or "")
+                if target is not row:
+                    row["items"] = items
+                    payload_obj = (
+                        row.get("payload")
+                        if isinstance(row.get("payload"), dict)
+                        else {}
+                    )
+                    row["payload"] = {**payload_obj, "items": items}
+                    if all(item.get("consumed_at") for item in items):
+                        row["consumed_at"] = consumed_at
+                        row["consumed_call_id"] = str(call_id or "")
+                jsonl.write_all(rejected_path, rejected_rows)
                 return False
-        for row in self._iter_approval_rows(paths.approvals_approved):
-            if _matches(row):
+
+        approved_path = paths.approvals_approved
+        with _approval_file_lock(approved_path):
+            approved_rows = self._iter_approval_rows(approved_path)
+            for row in reversed(approved_rows):
+                index = _match_index(row)
+                if index is None:
+                    continue
+                items = _items(row)
+                target = items[index] if str(row.get("kind") or "") == "tool_permission_batch" else row
+                consumed_at = target.get("consumed_at")
+                if consumed_at:
+                    continue
+                consumed_at = now_iso()
+                target["consumed_at"] = consumed_at
+                target["consumed_call_id"] = str(call_id or "")
+                if target is not row:
+                    row["items"] = items
+                    payload_obj = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                    row["payload"] = {**payload_obj, "items": items}
+                    if all(item.get("consumed_at") for item in items):
+                        row["consumed_at"] = consumed_at
+                        row["consumed_call_id"] = str(call_id or "")
+                jsonl.write_all(approved_path, approved_rows)
                 return True
         return None
 
@@ -2945,6 +3149,8 @@ class AgentKernel:
         session_id: str | None,
         strategy_id: str | None,
         block: dict[str, Any],
+        requester_actor_id: str | None = None,
+        broadcast: bool = True,
     ) -> dict[str, Any]:
         """Persist a tool permission prompt in the shared approval queue.
 
@@ -2958,8 +3164,35 @@ class AgentKernel:
         call_id = str(block.get("call_id") or block.get("tool_use_id") or "")
         safe_call_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", call_id)[:80]
         safe_turn_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", turn_id or "")[:80]
-        aid = f"tool_batch_{safe_turn_id or safe_call_id or 'pending'}"
         paths = self.config.paths
+        created_at = time.time()
+        try:
+            expires_s = max(
+                0.0,
+                float(self.config.get("approvals.expire_seconds", 600) or 600),
+            )
+        except (TypeError, ValueError):
+            expires_s = 600.0
+        expires_at = created_at + expires_s
+        requester_actor = str(
+            requester_actor_id or block.get("requester_actor_id") or ""
+        ).strip()
+        requester_session = str(
+            block.get("requester_session_id") or session_id or ""
+        ).strip()
+        requester_strategy = str(
+            block.get("requester_strategy_id") or strategy_id or ""
+        ).strip()
+        requester_caller = str(block.get("caller") or "").strip()
+        scope_hash = hashlib.sha256(
+            json.dumps(
+                [requester_session, requester_strategy, requester_actor],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        aid = (
+            f"tool_batch_{safe_turn_id or safe_call_id or 'pending'}_{scope_hash}"
+        )
 
         reason = str(block.get("error") or "approval required before this tool can run")
         action = str(block.get("action") or "")
@@ -2986,6 +3219,11 @@ class AgentKernel:
             "turn_id": turn_id,
             "session_id": session_id,
             "strategy_id": strategy_id,
+            "requester_actor_id": requester_actor,
+            "requester_session_id": requester_session,
+            "requester_strategy_id": requester_strategy,
+            "requester_caller": requester_caller,
+            "expires_at": expires_at,
             "tool_use_id": call_id,
             "tool": item_payload["tool"],
             "reason": reason,
@@ -2993,48 +3231,73 @@ class AgentKernel:
             "payload": item_payload,
         }
 
+        def _same_scope(row: dict[str, Any]) -> bool:
+            def _value(name: str, legacy: str = "") -> str:
+                return str(row.get(name) or row.get(legacy) or "").strip()
+
+            return (
+                _value("requester_session_id", "session_id") == requester_session
+                and _value("requester_strategy_id", "strategy_id")
+                == requester_strategy
+                and _value("requester_actor_id") == requester_actor
+            )
+
         def _item_matches(row: dict[str, Any]) -> bool:
+            if not _same_scope(row):
+                return False
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
             tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
             payload_tool = payload.get("tool") if isinstance(payload.get("tool"), dict) else {}
             merged_tool = {**payload_tool, **tool}
-            return bool(
-                (call_id and str(row.get("tool_use_id") or merged_tool.get("call_id") or "") == call_id)
-                or str(row.get("fingerprint") or merged_tool.get("fingerprint") or "") == fingerprint
+            row_call_id = str(
+                row.get("tool_use_id") or merged_tool.get("call_id") or ""
             )
+            if call_id and row_call_id:
+                return row_call_id == call_id
+            row_fingerprint = str(
+                row.get("fingerprint") or merged_tool.get("fingerprint") or ""
+            )
+            return bool(row_fingerprint and row_fingerprint == fingerprint)
 
         def _row_has_item(row: dict[str, Any]) -> bool:
             kind = str(row.get("kind") or "")
             if kind == "tool_permission":
                 return _item_matches(row)
-            if kind != "tool_permission_batch":
+            if kind != "tool_permission_batch" or not _same_scope(row):
                 return False
-            if call_id and call_id in {str(x) for x in row.get("tool_use_ids") or []}:
-                return True
-            if fingerprint in {str(x) for x in row.get("fingerprints") or []}:
-                return True
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
             items = row.get("items") or payload.get("items") or []
             return any(_item_matches(x) for x in items if isinstance(x, dict))
 
         def _existing_terminal(path) -> dict[str, Any] | None:
-            if not path.exists():
-                return None
-            try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
+            with _approval_file_lock(path):
+                rows = self._iter_approval_rows(path)
+            for rec in reversed(rows):
+                if self._approval_expired(rec):
+                    continue
+                if not _row_has_item(rec):
+                    continue
+                payload_obj = (
+                    rec.get("payload")
+                    if isinstance(rec.get("payload"), dict)
+                    else {}
+                )
+                raw_items = rec.get("items") or payload_obj.get("items") or []
+                matching = (
+                    [
+                        row
+                        for row in raw_items
+                        if isinstance(row, dict) and _item_matches(row)
+                    ]
+                    if isinstance(raw_items, list)
+                    else []
+                )
+                if matching:
+                    if all(row.get("consumed_at") for row in matching):
                         continue
-                    import json as _json
-
-                    rec = _json.loads(line)
-                    if (
-                        rec.get("approval_id") == aid
-                        or rec.get("id") == aid
-                        or _row_has_item(rec)
-                    ):
-                        return rec
-            except Exception:
-                return None
+                elif rec.get("consumed_at"):
+                    continue
+                return rec
             return None
 
         def _merge_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -3076,6 +3339,19 @@ class AgentKernel:
                 "turn_id": turn_id,
                 "session_id": session_id,
                 "strategy_id": strategy_id,
+                "requester_actor_id": (
+                    str(record.get("requester_actor_id") or requester_actor)
+                ),
+                "requester_session_id": (
+                    str(record.get("requester_session_id") or requester_session)
+                ),
+                "requester_strategy_id": (
+                    str(record.get("requester_strategy_id") or requester_strategy)
+                ),
+                "requester_caller": (
+                    str(record.get("requester_caller") or requester_caller)
+                ),
+                "expires_at": float(record.get("expires_at") or expires_at),
                 "tool_use_ids": tool_use_ids,
                 "fingerprints": fingerprints,
                 "tool": first_tool,
@@ -3091,7 +3367,7 @@ class AgentKernel:
                     "risk": {"reasons": reasons},
                 },
             }
-            record.setdefault("created_at", time.time())
+            record.setdefault("created_at", created_at)
             record.setdefault("created_at_iso", now_iso())
             return record
 
@@ -3102,57 +3378,50 @@ class AgentKernel:
         if terminal is not None:
             record = terminal
         else:
-            import json as _json
-
             record: dict[str, Any] | None = None
             pending = paths.approvals_pending
             pending.parent.mkdir(parents=True, exist_ok=True)
-            lines = pending.read_text(encoding="utf-8").splitlines() if pending.exists() else []
-            out_lines: list[str] = []
-            for line in lines:
-                if not line.strip():
-                    continue
+            with _approval_file_lock(pending):
+                pending_rows = self._iter_approval_rows(pending)
+                for index, rec in enumerate(pending_rows):
+                    if (
+                        record is None
+                        and (
+                            (
+                                (
+                                    rec.get("approval_id") == aid
+                                    or rec.get("id") == aid
+                                )
+                                and _same_scope(rec)
+                            )
+                            or _row_has_item(rec)
+                        )
+                    ):
+                        record = _merge_record(rec)
+                        pending_rows[index] = record
+                        break
+                if record is None:
+                    record = _merge_record({
+                        "approval_id": aid,
+                        "id": aid,
+                        "kind": "tool_permission_batch",
+                        "state": "pending",
+                        "created_at": created_at,
+                        "created_at_iso": now_iso(),
+                        "turn_id": turn_id,
+                        "session_id": session_id,
+                        "strategy_id": strategy_id,
+                        "items": [],
+                    })
+                    pending_rows.append(record)
+                jsonl.write_all(pending, pending_rows)
+            if broadcast:
                 try:
-                    rec = _json.loads(line)
-                except Exception:
-                    out_lines.append(line)
-                    continue
-                if (
-                    record is None
-                    and (
-                        rec.get("approval_id") == aid
-                        or rec.get("id") == aid
-                        or _row_has_item(rec)
-                    )
-                ):
-                    record = _merge_record(rec)
-                    out_lines.append(_json.dumps(record, ensure_ascii=False, default=str))
-                    continue
-                out_lines.append(line)
-            if record is None:
-                record = _merge_record({
-                    "approval_id": aid,
-                    "id": aid,
-                    "kind": "tool_permission_batch",
-                    "state": "pending",
-                    "created_at": time.time(),
-                    "created_at_iso": now_iso(),
-                    "turn_id": turn_id,
-                    "session_id": session_id,
-                    "strategy_id": strategy_id,
-                    "items": [],
-                })
-                out_lines.append(_json.dumps(record, ensure_ascii=False, default=str))
-            pending.write_text(
-                "\n".join(out_lines) + ("\n" if out_lines else ""),
-                encoding="utf-8",
-            )
-            try:
-                from ..trading.approval import _broadcast_approval
+                    from ..trading.approval import _broadcast_approval
 
-                _broadcast_approval(self.config, record)
-            except Exception:
-                pass
+                    _broadcast_approval(self.config, record)
+                except Exception:
+                    pass
         try:
             from ..messaging.approval_prompts import build_prompt
 

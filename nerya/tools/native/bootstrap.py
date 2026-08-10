@@ -277,6 +277,15 @@ class NativeToolDeps:
     tool_registry: Optional[ToolRegistry] = None
     """Native tool registry exposed to child subagent runtimes."""
 
+    executor: Optional[Any] = None
+    """Parent-owned :class:`NativeToolExecutor` for delegated calls.
+
+    The dependency bundle is created before the per-turn permission context,
+    so the kernel fills this slot once it has built that turn's executor.
+    Child runtimes must use this object instead of invoking descriptors
+    directly; keeping it optional preserves ad-hoc bootstrap compatibility.
+    """
+
     active_strategy_id: Optional[str] = None
     """Strategy scoped to the current Agent turn, if any."""
 
@@ -487,7 +496,6 @@ _PLAN_STATUS_SCHEMA = {
 _SKILL_INDEX_SCHEMA = {
     "type": "object",
     "properties": {
-        "tag": {"type": "string"},
         "refresh": {"type": "boolean", "default": False},
     },
 }
@@ -1061,6 +1069,7 @@ def _wrap_subagent_run(deps: NativeToolDeps):
             config=deps.config,
             skills=deps.skills,
             tool_registry=deps.tool_registry,
+            executor=deps.executor,
         )
 
     return handler
@@ -1073,6 +1082,7 @@ def _wrap_team_run(deps: NativeToolDeps):
             config=deps.config,
             skills=deps.skills,
             tool_registry=deps.tool_registry,
+            executor=deps.executor,
         )
 
     return handler
@@ -1085,6 +1095,7 @@ def _wrap_research_run(deps: NativeToolDeps):
             config=deps.config,
             skills=deps.skills,
             tool_registry=deps.tool_registry,
+            executor=deps.executor,
         )
 
     return handler
@@ -1536,7 +1547,11 @@ def _wrap_strategy_run_tick(deps: NativeToolDeps):
         if isinstance(guarded, ToolResult):
             return guarded
         return strategy_run_tick_handler(
-            guarded, config=deps.config, skills=deps.skills
+            guarded,
+            config=deps.config,
+            skills=deps.skills,
+            tool_registry=deps.tool_registry,
+            executor=deps.executor,
         )
 
     return handler
@@ -1971,8 +1986,8 @@ def register_native_tools(
         make_native_descriptor(
             name="skill_index",
             description=(
-                "List installed SKILL.md playbooks (id, title, description, "
-                "triggers, tags). Read the body via skill_view."
+                "List installed SKILL.md playbooks (id and description). "
+                "Read a playbook with skill_view or Skill."
             ),
             input_schema=_SKILL_INDEX_SCHEMA,
             handler=_wrap_skill_index(deps),
@@ -2036,7 +2051,7 @@ def register_native_tools(
             permission_scope=PermissionScope.NETWORK,
             read_only=True,
             is_concurrency_safe=True,
-            tags=("web", "research", "search"),
+            tags=("web", "research", "search", "external_content"),
             result_kind="json",
             auto_approve=True,
         ),
@@ -2057,7 +2072,7 @@ def register_native_tools(
             permission_scope=PermissionScope.NETWORK,
             read_only=True,
             is_concurrency_safe=True,
-            tags=("web", "research", "fetch"),
+            tags=("web", "research", "fetch", "external_content"),
             result_kind="json",
             auto_approve=True,
         ),
@@ -2076,7 +2091,7 @@ def register_native_tools(
             permission_scope=PermissionScope.NETWORK,
             read_only=True,
             is_concurrency_safe=False,
-            tags=("web", "research", "search", "fetch"),
+            tags=("web", "research", "search", "fetch", "external_content"),
             result_kind="json",
             auto_approve=True,
         ),
@@ -2664,9 +2679,12 @@ def register_native_tools(
                         "(per-role output + cross-role aggregate). Use this "
                         "when the operator explicitly asks for multiple "
                         "parallel roles or when the request is already split "
-                        "into independent analysis lanes. Pick roles from "
-                        "role_list/role_get evidence and the task itself; do "
-                        "not infer a hidden template from prompt keywords. "
+                        "into independent analysis lanes. For an explicit "
+                        "Agent Team request, call this tool directly with the "
+                        "task and clear role objects; use role_list or role_get "
+                        "only when a requested role is ambiguous. Build roles "
+                        "from the task itself; do not infer a hidden template "
+                        "from prompt keywords. "
                         "You are not limited to registered roles: when none "
                         "fits, give a role entry a fresh ``name`` plus an "
                         "inline ``prompt`` (and optional ``allowed_skills`` / "
@@ -2740,7 +2758,9 @@ def register_native_tools(
                         "defaults). Workspace roles override defaults "
                         "with the same name. This is a catalog, not a route "
                         "selector; inspect role_get when names overlap or "
-                        "scope is unclear."
+                        "scope is unclear. For an explicit Agent Team request, "
+                        "call team_run directly unless a requested role is "
+                        "ambiguous."
                     ),
                     input_schema=ROLE_LIST_SCHEMA,
                     handler=_wrap_role_list(deps),

@@ -50,12 +50,10 @@ from scripts.finance_skills_importer.frontmatter import (
     render_frontmatter_block,
 )
 from scripts.finance_skills_importer.name_map import (
-    DEFAULT_RISK_CLASS_BY_VERTICAL,
     DO_NOT_IMPORT,
     KNOWN_VERTICALS,
     NERYA_BUILTIN_OVERLAPS,
     UnknownVerticalError,
-    default_risk_class,
     is_blocked,
     overlap_target,
     resolve_target,
@@ -164,20 +162,6 @@ class TestNameMap:
         for vertical, _skill in DO_NOT_IMPORT:
             assert vertical in KNOWN_VERTICALS
 
-    def test_default_risk_class_by_vertical(self) -> None:
-        # Analyst-only verticals stay ``low``.
-        assert default_risk_class("private-equity") == "low"
-        assert default_risk_class("equity-research") == "low"
-        # Client-PII verticals bump to ``medium``.
-        assert default_risk_class("wealth-management") == "medium"
-        assert default_risk_class("fund-admin") == "medium"
-        # KYC / regulator-facing verticals bump to ``high``.
-        assert default_risk_class("operations") == "high"
-        # Every entry in DEFAULT_RISK_CLASS_BY_VERTICAL is also a known
-        # vertical (no map drift after we add a new entry).
-        assert set(DEFAULT_RISK_CLASS_BY_VERTICAL).issubset(KNOWN_VERTICALS)
-
-
 # ---------------------------------------------------------------------------
 # frontmatter
 # ---------------------------------------------------------------------------
@@ -217,14 +201,15 @@ class TestFrontmatter:
         meta = FrontmatterMeta(
             name="ic_memo",
             description='Use when "writing" IC memos. Triggers on "write IC memo".',
-            upstream_path="plugins/vertical-plugins/private-equity/skills/ic-memo/SKILL.md",
-            risk_class="low",
         )
         block = render_frontmatter_block(meta)
         assert block.startswith(FRONTMATTER_START_MARKER)
         assert block.rstrip().endswith(FRONTMATTER_END_MARKER)
         # The double-quoted YAML scalar must escape inner double quotes.
         assert '\\"writing\\"' in block
+        assert "risk_class:" not in block
+        assert "adapted_from:" not in block
+        assert "category:" not in block
 
         # Glue together a minimal SKILL.md and parse it with the real
         # Nerya manifest loader.
@@ -258,7 +243,6 @@ class TestTransformIcMemo:
         nerya_text, upstream_desc, nerya_desc = transform_skill_md(
             self.upstream_text,
             self.target,
-            upstream_repo_path="plugins/vertical-plugins/private-equity/skills/ic-memo/SKILL.md",
         )
         assert FRONTMATTER_START_MARKER in nerya_text
         assert FRONTMATTER_END_MARKER in nerya_text
@@ -300,7 +284,6 @@ class TestPrivateEquityVerticalSnapshot:
                 upstream_skill_dir=skill_dir,
                 target=target,
                 workspace_root=tmp_path,
-                upstream_repo_root=_UPSTREAM_ROOT,
                 dry_run=False,
             )
             assert result.target.skill_id == target.skill_id
@@ -320,16 +303,9 @@ class TestPrivateEquityVerticalSnapshot:
 
 @_skip_no_upstream
 class TestWealthManagementVerticalSnapshot:
-    """Phase C-2: wealth-management is the first PII-touching vertical.
+    """Phase C-2: wealth-management skills transform cleanly."""
 
-    All 6 upstream skills involve client account data (TLH events,
-    portfolio holdings, household members, AUM). The importer must
-    therefore stamp ``risk_class: medium`` so the agent runtime treats
-    these skills as PII-aware. ``DEFAULT_RISK_CLASS_BY_VERTICAL`` is the
-    source of truth for that mapping.
-    """
-
-    def test_resolves_six_skills_with_medium_risk_class(self, tmp_path: Path) -> None:
+    def test_resolves_six_skills(self, tmp_path: Path) -> None:
         assert _UPSTREAM_ROOT is not None
         wm_dir = (
             _UPSTREAM_ROOT / "plugins" / "vertical-plugins" / "wealth-management"
@@ -343,9 +319,6 @@ class TestWealthManagementVerticalSnapshot:
             f"{len(skill_dirs)}: {[d.name for d in skill_dirs]}"
         )
 
-        risk_class = default_risk_class("wealth-management")
-        assert risk_class == "medium"
-
         ids: set[str] = set()
         for skill_dir in skill_dirs:
             target = resolve_target("wealth-management", skill_dir.name)
@@ -356,18 +329,10 @@ class TestWealthManagementVerticalSnapshot:
                 upstream_skill_dir=skill_dir,
                 target=target,
                 workspace_root=tmp_path,
-                upstream_repo_root=_UPSTREAM_ROOT,
-                risk_class=risk_class,
                 dry_run=False,
             )
             assert result.target.skill_id == target.skill_id
 
-            md_text = result.target.absolute_skill_md(tmp_path).read_text(
-                encoding="utf-8"
-            )
-            # The frontmatter must persist the elevated risk_class so
-            # the agent loop can read it back.
-            assert "risk_class: medium" in md_text
             ids.add(target.skill_id)
 
         assert ids == {
@@ -404,7 +369,6 @@ class TestEquityResearchVerticalSnapshot:
                 upstream_skill_dir=skill_dir,
                 target=target,
                 workspace_root=tmp_path,
-                upstream_repo_root=_UPSTREAM_ROOT,
                 dry_run=False,
             )
             md = result.target.absolute_skill_md(tmp_path)
@@ -436,7 +400,6 @@ class TestBuiltinPromoter:
             target=target,
             builtin_root=tmp_path,
             upstream_repo_root=_UPSTREAM_ROOT,
-            risk_class=default_risk_class("private-equity"),
             apply=True,
         )
 

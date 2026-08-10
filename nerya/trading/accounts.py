@@ -108,6 +108,16 @@ class Account:
         # the AccountProfile directly to make finer-grained decisions.
         return self.mode == "live" and self.live_trading_enabled
 
+    @property
+    def is_real_money(self) -> bool:
+        """True if any path could result in real funds moving.
+
+        Mirrors :attr:`AccountProfile.is_real_money` so the legacy risk
+        path can make the same fail-closed decisions as the new control
+        plane.
+        """
+        return self.mode in ("canary", "live")
+
     def connector_cfg(self) -> dict[str, Any]:
         """Flattened config for ``build_connector``."""
         cfg = dict(self.raw or {})

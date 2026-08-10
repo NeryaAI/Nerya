@@ -17,10 +17,7 @@ through a full parser.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Mapping
+from dataclasses import dataclass
 
 from . import FRONTMATTER_END_MARKER, FRONTMATTER_START_MARKER
 
@@ -47,15 +44,10 @@ class FrontmatterMeta:
 
     name: str                   # snake_case skill id (frontmatter `name`)
     description: str            # composed Nerya-style description
-    upstream_path: str          # relative path inside upstream repo
-    upstream_repo: str = "financial-services"
-    upstream_commit: str = ""   # git sha, optional
     license: str = "Apache-2.0"
     author: str = "Anthropic"
     version: str = "0.0.1"
-    risk_class: str = "low"     # low | medium | high
     requires_integration: str = ""
-    extra: Mapping[str, str] = field(default_factory=dict)
 
 
 def extract_upstream_description(upstream_skill_md: str) -> str:
@@ -114,16 +106,6 @@ def render_frontmatter_block(meta: FrontmatterMeta) -> str:
     lines.append(f"author: {meta.author}")
     if meta.requires_integration:
         lines.append(f"requires_integration: {meta.requires_integration}")
-    lines.append(f"risk_class: {meta.risk_class}")
-    lines.append("adapted_from:")
-    lines.append(f"  upstream: {meta.upstream_repo}")
-    lines.append(f"  upstream_path: {meta.upstream_path}")
-    if meta.upstream_commit:
-        lines.append(f"  upstream_commit: {meta.upstream_commit}")
-    lines.append(f"  imported_at: {_now_iso()}")
-    lines.append("  imported_by: finance_skills_importer/0.0.1")
-    for key, value in sorted(meta.extra.items()):
-        lines.append(f"{key}: {_yaml_double_quote(str(value))}")
     lines.append("---")
     lines.append(FRONTMATTER_END_MARKER)
     return "\n".join(lines)
@@ -177,10 +159,6 @@ def _yaml_double_quote(text: str) -> str:
         .replace("\n", "\\n")
     )
     return f'"{escaped}"'
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 __all__ = [

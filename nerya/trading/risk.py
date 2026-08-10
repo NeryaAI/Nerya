@@ -9,6 +9,7 @@ exactly which decision allowed them.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -27,6 +28,8 @@ from .reconciliation import ReconciliationStore
 from .risk_hints import derive_fix_hints
 from .strategies import Strategy, load_strategy
 from .virtual_ledger import open_ledger
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -423,6 +426,14 @@ class RiskGate:
             daily_cap = strategy.limits.max_daily_notional_usd
             if daily_cap > 0:
                 spent_today = _strategy_daily_notional(paths, intent.strategy_id)
+                if spent_today is None:
+                    # Ledger unreadable. Fail closed for real-money
+                    # accounts — an unenforceable daily cap must not
+                    # silently become no cap. Paper stays permissive.
+                    if account.is_real_money:
+                        reasons.append("daily_notional_ledger_unreadable")
+                        decision = "reject"
+                    spent_today = 0.0
                 if spent_today + notional > daily_cap:
                     reasons.append(
                         f"max_daily_notional_exceeded:{spent_today:.2f}+{notional:.2f}>"
@@ -510,9 +521,24 @@ class RiskGate:
         try:
             self._persist(decision_obj, intent=intent)
         except Exception:
-            # Persistence is advisory — never let a bookkeeping
-            # hiccup block trading.
-            pass
+            # For paper accounts persistence stays advisory — a
+            # bookkeeping hiccup must not block simulated trading. For
+            # real-money accounts the audit row is part of the safety
+            # contract (reservations / executors pin themselves to the
+            # risk_evaluation_id), so fail closed instead of trading
+            # without a persisted decision.
+            log.exception(
+                "risk decision persistence failed for intent %s",
+                intent.intent_id,
+            )
+            if account.is_real_money and decision_obj.decision != "reject":
+                decision_obj.decision = "reject"
+                decision_obj.reasons = [
+                    r for r in decision_obj.reasons if r != "ok"
+                ] + ["risk_persistence_failed"]
+                decision_obj.fix_hints = derive_fix_hints(
+                    decision_obj.reasons, intent=intent,
+                )
         return decision_obj
 
     # --------------------------------------------------------------- persistence
@@ -547,13 +573,15 @@ class RiskGate:
         )
 
 
-def _strategy_daily_notional(paths, strategy_id: str) -> float:
+def _strategy_daily_notional(paths, strategy_id: str) -> float | None:
     """Sum the notional of every order the strategy placed today.
 
     Reads the strategy's ``orders.jsonl`` history and totals
     ``payload.notional_usd`` for entries whose session opened in the
-    last 24h. Best-effort: a read failure returns 0 so a missing or
-    corrupt log never blocks trading (the other gates still apply).
+    last 24h. A missing log legitimately means "nothing spent" and
+    returns ``0.0``; a *read failure* returns ``None`` so the caller
+    can fail closed on real-money accounts instead of treating a
+    corrupt ledger as an unlimited budget.
     """
     try:
         from ..strategy_history import store as history_store
@@ -584,4 +612,7 @@ def _strategy_daily_notional(paths, strategy_id: str) -> float:
             total += float(payload.get("notional_usd") or 0.0)
         return total
     except Exception:
-        return 0.0
+        log.exception(
+            "daily notional ledger read failed for strategy %s", strategy_id,
+        )
+        return None

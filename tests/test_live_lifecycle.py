@@ -45,6 +45,15 @@ from nerya.trading.submit import submit_trade_intent, submit_trade_plan
 pytestmark = pytest.mark.smoke
 
 
+@pytest.fixture(autouse=True)
+def _vault_passphrase(monkeypatch):
+    # Real-money execution now refuses to run without a vault passphrase
+    # (see ``_real_money_execution_blocker`` in nerya.trading.submit).
+    # Live-lifecycle tests exercise the executor path, so satisfy the
+    # crypto-readiness contract the same way an operator deployment does.
+    monkeypatch.setenv("NERYA_VAULT_PASSPHRASE", "test-live-lifecycle")
+
+
 class FakeLiveConnector(Connector):
     """A venue stand-in that records calls and returns filled acks."""
 

@@ -1147,7 +1147,7 @@ def test_news_social_skill_is_lazy_loaded_not_native_tool(tmp_path) -> None:
 
     assert record is not None
     assert "economy/finance/market news" in record.description
-    assert "热门经济新闻" in record.triggers
+    assert "热门经济新闻" in record.description
     assert record.permissions == ["network"]
     assert record.has_scripts is True
     assert "recent_news.py" in record.scripts

@@ -1,7 +1,7 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: team
-description: "Use for one bounded worker or coordinated multi-agent work when tasks are genuinely independent."
+description: "Use when the user explicitly asks to start or launch an Agent Team (启动智能体团队/组建专家委员会), or when coordinated multi-agent work has genuinely independent lanes."
 version: 0.1.0
 license: MIT
 author: Nerya
@@ -10,8 +10,10 @@ author: Nerya
 
 # Team
 
-Use only when a bounded subtask can run independently. Keep coupled or tiny
-work in the main agent.
+When the user explicitly asks to start, launch, or run an Agent Team, call
+`team_run`; role discovery or a single `subagent_run` is not a completed team
+run. Otherwise, use a team only when bounded lanes are genuinely independent.
+Keep coupled or tiny work in the main agent.
 
 ## Flow
 

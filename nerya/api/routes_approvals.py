@@ -9,15 +9,18 @@ payload for this approval". This route module exposes:
 - ``GET /approvals/prompt`` — fetch the prompt for a single approval id.
 - ``POST /approvals/callback`` — dispatch a platform callback (button
   press) into the approval gate. Honors actor ownership when the
-  approval record carries an ``actor_id``.
+  approval record carries an owner; native prompts fail closed when
+  requester scope is missing.
 
-The endpoints are read/append only on top of the existing JSONL
-journals already maintained by :class:`ApprovalGate`. We do not
-refactor the gate itself in this pass.
+The endpoints use the same locked, expiry-aware JSONL transition as
+the ACP and gateway surfaces. We do not refactor the gate itself in
+this pass.
 """
 
 from __future__ import annotations
 
+import time
+from contextlib import contextmanager
 from typing import Any
 
 from ..core import jsonl
@@ -30,14 +33,96 @@ from ..messaging.approval_prompts import (
 )
 
 
+@contextmanager
+def _approval_file_lock(path):
+    """Serialize approval queue moves across gateway/API workers."""
+
+    lock_path = path.with_name(f".{path.name}.lock")
+    # ponytail: one queue-wide lock is enough until approval throughput proves
+    # it needs per-record coordination.
+    with jsonl._open_append(lock_path):  # noqa: SLF001
+        yield
+
+
+def _is_native_tool_approval(rec: dict[str, Any]) -> bool:
+    return str(rec.get("kind") or "").strip() in {
+        "tool_permission",
+        "tool_permission_batch",
+    }
+
+
+def _approval_owner_actor_id(rec: dict[str, Any]) -> str:
+    """Return the actor bound to an approval, or empty when unbound."""
+
+    for key in ("approval_actor_id", "actor_id"):
+        actor_id = str(rec.get(key) or "").strip()
+        if actor_id:
+            return actor_id
+    if _is_native_tool_approval(rec):
+        return str(rec.get("requester_actor_id") or "").strip()
+    return ""
+
+
+def _can_resolve(
+    rec: dict[str, Any],
+    actor_id: str,
+    *,
+    operator_authorized: bool = False,
+) -> bool:
+    """Keep native approvals bound to an owner or trusted operator scope."""
+
+    actor_id = str(actor_id or "").strip()
+    if not actor_id:
+        return False
+    owner = _approval_owner_actor_id(rec)
+    if _is_native_tool_approval(rec):
+        # Native permission prompts must never be ownerless. HTTP operators
+        # with approve:tool/api:all are the explicit exception.
+        return bool(owner) and (operator_authorized or actor_id == owner)
+    return not owner or operator_authorized or actor_id == owner
+
+
+def _trusted_operator(payload: dict[str, Any], actor_id: str) -> bool:
+    """Recognize only the auth stamp added by the local HTTP dispatcher."""
+
+    stamped_actor = str(payload.get("_auth_actor_id") or "").strip()
+    if not stamped_actor or stamped_actor != str(actor_id or "").strip():
+        return False
+    raw_scopes = payload.get("_auth_scopes")
+    if isinstance(raw_scopes, str):
+        scopes = {
+            part.strip()
+            for part in raw_scopes.replace(",", " ").split()
+            if part.strip()
+        }
+    elif isinstance(raw_scopes, (list, tuple, set, frozenset)):
+        scopes = {str(part).strip() for part in raw_scopes if str(part).strip()}
+    else:
+        scopes = set()
+    return bool({"approve:tool", "api:all"} & scopes)
+
+
+def _expired(rec: dict[str, Any], *, now: float | None = None) -> bool:
+    """Return true only for an explicitly invalid/expired expiry value."""
+
+    if "expires_at" not in rec or rec.get("expires_at") in (None, ""):
+        return False  # legacy approval rows had no expiry field
+    try:
+        return float(rec["expires_at"]) <= float(now if now is not None else time.time())
+    except (TypeError, ValueError):
+        return True
+
+
 def _read_pending(client) -> list[dict[str, Any]]:
     p = client.config.paths.approvals_pending
     if not p.exists():
         return []
+    now = time.time()
     return [
         rec
         for rec in jsonl.read_all(p)
-        if not rec.get("state") or rec["state"] == "pending"
+        if (not rec.get("state") or rec["state"] == "pending")
+        and not (_is_native_tool_approval(rec) and _expired(rec, now=now))
     ]
 
 
@@ -50,7 +135,7 @@ def _find_record(client, approval_id: str) -> dict[str, Any] | None:
 
 
 def _row_to_prompt(rec: dict[str, Any]) -> ApprovalPrompt:
-    actor_id = str(rec.get("actor_id") or "")
+    actor_id = _approval_owner_actor_id(rec)
     return build_prompt(rec, actor_id=actor_id)
 
 
@@ -90,47 +175,59 @@ def _prompt(client, payload):
     }
 
 
-def _move_record(client, approval_id: str, *, state: str, note: str) -> dict[str, Any] | None:
+def _move_record(
+    client,
+    approval_id: str,
+    *,
+    state: str,
+    note: str,
+    resolver_actor_id: str = "",
+    operator_authorized: bool = False,
+) -> dict[str, Any] | None:
     """Move a pending approval to the approved/rejected JSONL.
 
-    Mirrors :meth:`AcpServer._move_approval` but local to this module so
-    the HTTP surface is independent of the ACP server bootstrapping.
+    This is the canonical transition shared by HTTP, ACP, and gateway
+    approval surfaces.
     """
-    import json as _json
-
     paths = client.config.paths
     src = paths.approvals_pending
     if not src.exists():
         return None
-    kept: list[str] = []
-    moved: dict[str, Any] | None = None
-    for line in src.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = _json.loads(line)
-        except Exception:
-            kept.append(line)
-            continue
-        if moved is None and (
-            rec.get("approval_id") == approval_id or rec.get("id") == approval_id
-        ):
-            rec["state"] = state
-            rec["state_ts"] = now_iso()
-            if note:
-                rec["state_note"] = note
-            moved = rec
-            continue
-        kept.append(line)
-    if moved is None:
-        return None
-    src.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-    dst = (
-        paths.approvals_approved if state == "approved" else paths.approvals_rejected
-    )
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with dst.open("a", encoding="utf-8") as f:
-        f.write(_json.dumps(moved) + "\n")
+    with _approval_file_lock(src):
+        rows = jsonl.read_all(src)
+        kept: list[dict[str, Any]] = []
+        moved: dict[str, Any] | None = None
+        for rec in rows:
+            if moved is None and (
+                rec.get("approval_id") == approval_id or rec.get("id") == approval_id
+            ):
+                if _is_native_tool_approval(rec) and _expired(rec):
+                    return None
+                if not _can_resolve(
+                    rec,
+                    resolver_actor_id,
+                    operator_authorized=operator_authorized,
+                ):
+                    return None
+                rec["state"] = state
+                rec["state_ts"] = now_iso()
+                if note:
+                    rec["state_note"] = note
+                if resolver_actor_id:
+                    rec["resolved_by_actor_id"] = str(resolver_actor_id)
+                moved = rec
+                continue
+            kept.append(rec)
+        if moved is None:
+            return None
+        jsonl.write_all(src, kept)
+        dst = (
+            paths.approvals_approved if state == "approved" else paths.approvals_rejected
+        )
+        # Coordinate with the kernel's one-shot consumer, which rewrites the
+        # terminal queue after marking a verdict consumed.
+        with _approval_file_lock(dst):
+            jsonl.append(dst, moved)
     try:
         from ..db.repositories import ApprovalRepository
         from ..db.sqlite import connect
@@ -229,6 +326,7 @@ def _publish_approval_resolution(
             "approval.resolved",
             approval_id=approval_id,
             state=state,
+            resolver_actor_id=rec.get("resolved_by_actor_id"),
             session_id=rec.get("session_id"),
             strategy_id=rec.get("strategy_id"),
             record=rec,
@@ -239,28 +337,36 @@ def _publish_approval_resolution(
 
 def _callback(client, payload):
     callback_data = str(payload.get("callback_data") or "").strip()
-    actor_id = str(payload.get("actor_id") or "").strip()
+    trusted_actor_id = str(payload.get("_auth_actor_id") or "").strip()
+    actor_id = trusted_actor_id or str(payload.get("actor_id") or "").strip()
+    operator_authorized = _trusted_operator(payload, actor_id)
     if not callback_data:
         return {"ok": False, "error": "callback_data required"}
+    if not actor_id:
+        return {"ok": False, "error": "trusted actor required"}
 
     action, aid = parse_callback_data(callback_data)
     if not action or not aid:
         return {"ok": False, "error": "ignored", "reason": "callback_data not recognized"}
 
     rec = _find_record(client, aid)
-    if rec is None and action != "details":
+    if rec is None:
         return {"ok": False, "error": "approval not found", "approval_id": aid}
 
-    record_actor = str((rec or {}).get("actor_id") or "")
-
     def actor_owns(req_actor: str, approval_id: str) -> bool:
-        if not record_actor:
-            # Single-tenant default: no actor pinned, accept the callback
-            # as long as ``actor_id`` was supplied.
-            return True
-        return req_actor == record_actor
+        return _can_resolve(
+            rec or {},
+            req_actor,
+            operator_authorized=operator_authorized,
+        )
 
     if action == "details":
+        if not actor_owns(actor_id, aid):
+            return {
+                "ok": False,
+                "error": "approval owner mismatch",
+                "approval_id": aid,
+            }
         prompt = _row_to_prompt(rec or {"approval_id": aid})
         return {
             "ok": True,
@@ -271,16 +377,24 @@ def _callback(client, payload):
             "telegram": _telegram_envelope(prompt),
         }
 
-    moved_state = {"state": None}
+    moved_state = {"state": None, "record": None}
 
     def _approve(target_id: str) -> None:
         moved = _move_record(client, target_id, state="approved",
-                             note=f"approved via callback by {actor_id or 'unknown'}")
+                             note=f"approved via callback by {actor_id or 'unknown'}",
+                             resolver_actor_id=actor_id,
+                             operator_authorized=operator_authorized)
         moved_state["state"] = "approved" if moved else None
+        moved_state["record"] = moved
 
     def _reject(target_id: str, reason: str) -> None:
-        moved = _move_record(client, target_id, state="rejected", note=reason)
+        moved = _move_record(
+            client, target_id, state="rejected", note=reason,
+            resolver_actor_id=actor_id,
+            operator_authorized=operator_authorized,
+        )
         moved_state["state"] = "rejected" if moved else None
+        moved_state["record"] = moved
 
     resolution = resolve_callback(
         callback_data,
@@ -289,6 +403,14 @@ def _callback(client, payload):
         reject=_reject,
         actor_owns=actor_owns,
     )
+    if resolution.state in {"approved", "rejected"} and moved_state["state"] != resolution.state:
+        return {
+            "ok": False,
+            "error": "approval already resolved or expired",
+            "approval_id": aid,
+            "action": action,
+            "state": resolution.state,
+        }
     if resolution.state == "error" and moved_state["state"] is None:
         return {
             "ok": False,
@@ -314,7 +436,7 @@ def _callback(client, payload):
         _publish_approval_resolution(
             aid,
             state=str(resolution.state),
-            record=rec,
+            record=moved_state["record"] or rec,
         )
     items = []
     if isinstance((rec or {}).get("items"), list):

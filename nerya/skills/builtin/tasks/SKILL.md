@@ -5,12 +5,6 @@ description: "Use to create, schedule, inspect, or manage operator tasks, recurr
 version: 0.1.0
 license: MIT
 author: Nerya
-permissions:
-  - workspace-write
-tags:
-  - tasks
-  - schedules
-  - automation
 ---
 <!-- nerya-skill-frontmatter-end -->
 

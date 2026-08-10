@@ -25,7 +25,6 @@ from .frontmatter import (
 from .name_map import (
     KNOWN_VERTICALS,
     SkillTarget,
-    default_risk_class,
     is_blocked,
     overlap_target,
     resolve_target,
@@ -149,7 +148,6 @@ def promote_finance_builtins(
                     target=target,
                     builtin_root=builtin_root,
                     upstream_repo_root=upstream_root,
-                    risk_class=default_risk_class(vertical),
                     license_=license_,
                     author=author,
                     version=version,
@@ -181,7 +179,6 @@ def apply_to_builtin_directory(
     target: SkillTarget,
     builtin_root: Path,
     upstream_repo_root: Path | None = None,
-    risk_class: str = "low",
     license_: str = "Apache-2.0",
     author: str = "Anthropic",
     version: str = "0.0.1",
@@ -200,8 +197,6 @@ def apply_to_builtin_directory(
     skill_text = render_compact_builtin_skill_md(
         upstream_text=upstream_text,
         target=target,
-        upstream_repo_path=upstream_repo_path,
-        risk_class=risk_class,
         license_=license_,
         author=author,
         version=version,
@@ -290,8 +285,6 @@ def render_compact_builtin_skill_md(
     *,
     upstream_text: str,
     target: SkillTarget,
-    upstream_repo_path: str,
-    risk_class: str,
     license_: str,
     author: str,
     version: str,
@@ -305,12 +298,9 @@ def render_compact_builtin_skill_md(
     meta = FrontmatterMeta(
         name=target.namespace_id,
         description=nerya_description,
-        upstream_path=upstream_repo_path,
         license=license_,
         author=author,
         version=version,
-        risk_class=risk_class,
-        extra={"category": "finance"},
     )
     fm = render_frontmatter_block(meta)
     title = _title_from_skill(target.nerya_skill)

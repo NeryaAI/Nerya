@@ -19,9 +19,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from nerya.agent.loop import LoopConfig, WorkspaceNativeAgentLoop
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
 from nerya.llm.gateway import LLMCall
+from nerya.llm.messages import MessagesResponse
 from nerya.llm.model_router import ModelRouter
 from nerya.llm.tier_policy import TierPolicy
 from nerya.subagents.registry import (
@@ -39,8 +41,13 @@ from nerya.subagents.registry import (
 )
 from nerya.subagents.runtime import SubAgentRuntime
 from nerya.subagents import runtime as subagent_runtime
+from nerya.tools.executor import NativeToolExecutor
 from nerya.tools.native import agents as native_agents
+from nerya.tools.native import web as native_web
+from nerya.tools.native.bootstrap import build_native_tool_deps, register_native_tools
 from nerya.tools.native.web import _save_raw_capture
+from nerya.tools.orchestrator import ToolOrchestrator
+from nerya.tools.permissions import PermissionContext, PermissionEngine, PermissionMode
 from nerya.tools.registry import ToolRegistry, make_native_descriptor
 from nerya.tools.types import PermissionScope, RiskLevel, ToolCall, ToolResult
 from nerya.workspace.prompt_bundles import load_bundle
@@ -177,6 +184,7 @@ def test_web_researcher_default_role_shape():
     assert policy.locked_tier == "light"
     assert policy.allow_model_override is True
     assert policy.model_override_scope == "tier_routes"
+    assert policy.runtime == "native"
     assert policy.tool_argument_defaults["web_fetch"]["save_raw"] is True
     assert "research_run" not in (
         DEFAULT_SUBAGENT_EXECUTION_POLICIES["buffett_lens"].required_native_tools
@@ -497,7 +505,7 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(
         id="t1",
         name="research_run",
         arguments={"query": "TSLA deliveries", "urls": ["https://ir.tesla.com"]},
-        metadata={"delegation_depth": 0},
+        metadata={"delegation_depth": 0, "remaining_wall_seconds": 42.0},
     )
     registry = _FakeRegistry([
         _FakeDescriptor(
@@ -515,6 +523,7 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(
     assert captured["target"] == "subagent:web_researcher"
     assert "__research_depth" not in captured["payload"]
     assert captured["dispatch_kwargs"]["delegation_depth"] == 1
+    assert 0.0 <= captured["dispatch_kwargs"]["max_wall_seconds"] <= 42.0
     assert captured["payload"]["query"] == "TSLA deliveries"
     assert captured["payload"]["urls"] == ["https://ir.tesla.com"]
     assert result.content[0].data["capture_paths"] == [
@@ -571,6 +580,167 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(
     assert string_queries_result.is_error is False
     assert "AI capex and GPU supply" in captured["payload"]["query"]
 
+
+def test_research_run_native_child_can_use_lazy_web_search_fetch(
+    monkeypatch,
+    tmp_path,
+):
+    class _EmptySkillRegistry:
+        def list(self):
+            return []
+
+        def get(self, name):
+            raise KeyError(name)
+
+    class _ScriptedGateway:
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.tools_per_call = []
+            self.messages_per_call = []
+
+        def call_messages(self, **kwargs):
+            self.tools_per_call.append({
+                str(tool.get("name") or "")
+                for tool in (kwargs.get("tools") or [])
+            })
+            self.messages_per_call.append(kwargs.get("messages") or [])
+            return self.responses.pop(0)
+
+    fake_capture = {
+        "ok": True,
+        "query": "Nerya agent loop",
+        "count": 1,
+        "attempted": 1,
+        "search": {
+            "ok": True,
+            "engine": "fixture",
+            "count": 1,
+            "results": [{
+                "title": "Nerya",
+                "url": "https://example.com/nerya",
+                "snippet": "Agent-loop evidence.",
+            }],
+        },
+        "documents": [{
+            "rank": 1,
+            "title": "Nerya",
+            "url": "https://example.com/nerya",
+            "ok": True,
+            "status": 200,
+            "fetch_method": "fixture",
+            "markdown": "# Nerya\n\nAgent-loop evidence.",
+        }],
+    }
+    monkeypatch.setattr(native_web.search_fetch, "run", lambda **_kwargs: fake_capture)
+
+    child_gateway = _ScriptedGateway([
+        MessagesResponse(
+            content=[{
+                "type": "tool_use",
+                "id": "toolu_child_search",
+                "name": "web_search_fetch",
+                "input": {"query": "Nerya agent loop"},
+            }],
+            stop_reason="tool_use",
+        ),
+        MessagesResponse(
+            content=[{
+                "type": "text",
+                "text": '{"summary":"capture saved","done":true}',
+            }],
+            stop_reason="end_turn",
+        ),
+    ])
+    monkeypatch.setattr(
+        "nerya.subagents.dispatcher.LLMGateway",
+        lambda _config: child_gateway,
+    )
+
+    root_gateway = _ScriptedGateway([
+        MessagesResponse(
+            content=[{
+                "type": "tool_use",
+                "id": "toolu_root_research",
+                "name": "research_run",
+                "input": {"query": "Nerya agent loop"},
+            }],
+            stop_reason="tool_use",
+        ),
+        MessagesResponse(
+            content=[{"type": "text", "text": "research complete"}],
+            stop_reason="end_turn",
+        ),
+    ])
+    paths = WorkspacePaths(tmp_path)
+    config = Config(paths=paths, data={})
+    skills = SimpleNamespace(registry=_EmptySkillRegistry())
+    registry = ToolRegistry()
+    deps = build_native_tool_deps(
+        workspace_root=tmp_path,
+        skill_roots=[],
+        paths=paths,
+        config=config,
+        skills=skills,
+    )
+    register_native_tools(registry, deps)
+    executor = NativeToolExecutor(
+        registry=registry,
+        permission_engine=PermissionEngine(),
+        permission_context=PermissionContext(mode=PermissionMode.YOLO),
+    )
+    deps.executor = executor
+    loop = WorkspaceNativeAgentLoop(
+        gateway=root_gateway,
+        registry=registry,
+        orchestrator=ToolOrchestrator(registry=registry, executor=executor),
+        config=LoopConfig(max_iterations=3, caller="test:research"),
+    )
+
+    outcome = loop.run(system="system", user_message="research Nerya")
+
+    assert "research_run" in root_gateway.tools_per_call[0]
+    assert "web_search_fetch" in child_gateway.tools_per_call[0]
+    assert outcome.error_count == 0
+    assert outcome.final_text == "research complete"
+    assert "capture_paths" in str(root_gateway.messages_per_call[1])
+    saved_paths = list((tmp_path / "state" / "research_data").rglob("*.json"))
+    assert len(saved_paths) == 1
+    assert "Agent-loop evidence" in saved_paths[0].read_text(encoding="utf-8")
+
+
+def test_subagent_run_handler_forwards_parent_wall_budget(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class _FakeDispatcher:
+        def __init__(self, **kwargs):  # noqa: ARG002
+            pass
+
+        def dispatch(self, target, *, payload, **kwargs):
+            captured["target"] = target
+            captured["payload"] = payload
+            captured["dispatch_kwargs"] = kwargs
+            return {
+                "ok": True,
+                "subagent": "analyst",
+                "output": {"done": True},
+                "metrics": {},
+            }
+
+    monkeypatch.setattr(native_agents, "SubAgentDispatcher", _FakeDispatcher)
+    result = native_agents.subagent_run_handler(
+        ToolCall(
+            id="subagent-parent-budget",
+            name="subagent_run",
+            arguments={"name": "analyst", "payload": {"task": "inspect"}},
+            metadata={"remaining_wall_seconds": 42.0},
+        ),
+        config=SimpleNamespace(paths=WorkspacePaths(tmp_path)),
+        skills=SimpleNamespace(),
+    )
+
+    assert result.is_error is False
+    assert captured["target"] == "subagent:analyst"
+    assert 0.0 <= captured["dispatch_kwargs"]["max_wall_seconds"] <= 42.0
 
 def test_research_run_handler_rejects_success_without_persisted_capture(
     monkeypatch,

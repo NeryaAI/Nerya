@@ -55,6 +55,20 @@ from .types import (
 _LOG = logging.getLogger(__name__)
 
 
+def _cancel_requested(token: Any) -> bool:
+    if token is None:
+        return False
+    try:
+        value = getattr(token, "is_set", False)
+        return bool(value() if callable(value) else value)
+    except Exception:
+        return True
+
+
+def _cancel_reason(token: Any) -> str:
+    return str(getattr(token, "reason", "") or "cancelled")
+
+
 PreHook = Callable[[ToolCall, ToolDescriptor, PermissionDecision], None]
 PostHook = Callable[[ToolCall, ToolResult], None]
 """Post-tool hook. Mutate ``result`` in place to attach context /
@@ -72,6 +86,11 @@ PermissionDeniedHook = Callable[
 this for analytics, transcript breadcrumbs, or to surface a
 dashboard banner — the call already has its denied tool_result by
 the time this runs."""
+
+PermissionPendingHook = Callable[
+    [ToolCall, ToolDescriptor, PermissionDecision], None
+]
+"""Fired when an ASK decision has no resolved operator verdict."""
 
 ApprovalCallback = Callable[
     [ToolCall, ToolDescriptor, PermissionDecision],
@@ -701,19 +720,6 @@ def _repair_arguments_before_validation(
 
 
 # ---------------------------------------------------------------------------
-# Approval state (executor-side bookkeeping for ASK decisions)
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _PendingApproval:
-    tool_use_id: str
-    tool_name: str
-    decision: PermissionDecision
-    expires_at: float
-
-
-# ---------------------------------------------------------------------------
 # Executor
 # ---------------------------------------------------------------------------
 
@@ -726,8 +732,8 @@ class ExecutorOptions:
       short-circuit before permission evaluation. Set to false for
       lenient mode (still passes broken payload to handler so it can
       respond with a structured error).
-    * ``approval_timeout_sec`` — how long an ASK decision sits as
-      ``permission_pending`` before the executor surfaces a timeout.
+    * ``approval_timeout_sec`` — retained for compatibility. Approval
+      expiry is owned by the durable approval queue.
     """
 
     fail_fast_on_validation: bool = True
@@ -747,6 +753,7 @@ class NativeToolExecutor:
         pre_hooks: Optional[list[PreHook]] = None,
         post_hooks: Optional[list[PostHook]] = None,
         permission_denied_hooks: Optional[list[PermissionDeniedHook]] = None,
+        permission_pending_hooks: Optional[list[PermissionPendingHook]] = None,
         options: Optional[ExecutorOptions] = None,
     ) -> None:
         self.registry = registry
@@ -758,8 +765,10 @@ class NativeToolExecutor:
         self.permission_denied_hooks: list[PermissionDeniedHook] = list(
             permission_denied_hooks or []
         )
+        self.permission_pending_hooks: list[PermissionPendingHook] = list(
+            permission_pending_hooks or []
+        )
         self.options = options or ExecutorOptions()
-        self._pending: dict[str, _PendingApproval] = {}
 
     # ------------------------------------------------------------------ hooks
 
@@ -779,6 +788,11 @@ class NativeToolExecutor:
 
         self.permission_denied_hooks.append(hook)
 
+    def add_permission_pending_hook(self, hook: PermissionPendingHook) -> None:
+        """Register an observer that persists an unresolved ASK decision."""
+
+        self.permission_pending_hooks.append(hook)
+
     # ------------------------------------------------------------------ exec
 
     def execute(self, call: ToolCall) -> ToolResult:
@@ -787,6 +801,19 @@ class NativeToolExecutor:
         loop). For async-native callers see :meth:`execute_async`."""
 
         started = time.monotonic()
+        cancel_token = (call.metadata or {}).get("cancel_token")
+        if _cancel_requested(cancel_token):
+            return ToolResult.from_error(
+                tool_use_id=call.id,
+                name=call.name,
+                error=ToolError(
+                    kind=ToolErrorKind.ABORTED,
+                    message="tool call cancelled before execution",
+                    detail={"reason": _cancel_reason(cancel_token)},
+                    retryable=False,
+                    recovery_hint={"action": "cancelled"},
+                ),
+            )
         try:
             descriptor = self.registry.get(call.name)
         except ToolNotFoundError:
@@ -874,12 +901,13 @@ class NativeToolExecutor:
                     ),
                 )
             if approved is None:
-                self._pending[call.id] = _PendingApproval(
-                    tool_use_id=call.id,
-                    tool_name=call.name,
-                    decision=decision,
-                    expires_at=time.time() + self.options.approval_timeout_sec,
-                )
+                for hook in self.permission_pending_hooks:
+                    try:
+                        hook(call, descriptor, decision)
+                    except Exception:
+                        _LOG.exception(
+                            "permission-pending hook failed for %s", call.name,
+                        )
                 return ToolResult.from_error(
                     tool_use_id=call.id,
                     name=call.name,
@@ -928,6 +956,7 @@ class NativeToolExecutor:
             "result_kind": descriptor.result_kind,
             "risk": descriptor.per_call_risk(call.arguments or {}).value,
             "scope": descriptor.permission_scope.value,
+            "tags": tuple(descriptor.tags),
         })
 
         for hook in self.post_hooks:
@@ -967,8 +996,14 @@ class NativeToolExecutor:
         decision: PermissionDecision,
     ) -> Optional[bool]:
         if call.id in self.permission_context.approved_calls:
+            # Compatibility escape hatch for callers that pre-populate the
+            # context. It is deliberately one-shot; durable approvals are
+            # resolved by ``approval_cb`` and must not become an in-memory
+            # reusable grant.
+            self.permission_context.approved_calls.discard(call.id)
             return True
         if call.id in self.permission_context.rejected_calls:
+            self.permission_context.rejected_calls.discard(call.id)
             return False
         if self.approval_cb is None:
             return None
@@ -985,10 +1020,8 @@ class NativeToolExecutor:
             except RuntimeError:
                 return None
         if verdict is True:
-            self.permission_context.approved_calls.add(call.id)
             return True
         if verdict is False:
-            self.permission_context.rejected_calls.add(call.id)
             return False
         return None
 
@@ -997,6 +1030,7 @@ __all__ = [
     "ApprovalCallback",
     "ExecutorOptions",
     "NativeToolExecutor",
+    "PermissionPendingHook",
     "PermissionDeniedHook",
     "PostHook",
     "PreHook",

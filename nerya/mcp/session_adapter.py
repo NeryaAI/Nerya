@@ -335,7 +335,7 @@ def _make_descriptor(
         is_concurrency_safe=(risk == RiskLevel.READ),
         requires_fresh_read=False,
         mutates_paths=False,
-        tags=("mcp", adapter.server_id),
+        tags=("mcp", adapter.server_id, "external_content"),
         result_kind="json",
         namespace="mcp",
         auto_approve=(risk == RiskLevel.READ),

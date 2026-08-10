@@ -1,19 +1,10 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: news_social
-description: "Use first for latest/current economy/finance/market news or crypto headlines; RSS first pass before broad web search."
+description: "Use first for latest/current economy/finance/market news or crypto headlines, including 热门经济新闻 and 当前财经新闻; RSS first pass before broad web search."
 version: 0.1.0
 license: MIT
 author: Nerya
-tags:
-  - news
-  - rss
-  - research
-triggers:
-  - 热门经济新闻
-  - 当前财经新闻
-  - market news
-  - latest finance headlines
 permissions:
   - network
 ---

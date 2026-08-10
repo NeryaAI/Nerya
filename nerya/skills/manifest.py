@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import re as _re
 
 from ..core import yaml_io
 from ..core.errors import SkillManifestError
@@ -142,7 +143,6 @@ class SkillManifest:
     status: str = "ready"
     tags: list[str] = field(default_factory=list)
     instructions: str = ""
-    instructions_meta: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     requires_integration: str = ""
 
@@ -236,7 +236,6 @@ class SkillManifest:
             status="ready",
             tags=[],
             instructions=body,
-            instructions_meta={},
             metadata={},
             requires_integration=requires_integration,
         )
@@ -245,8 +244,6 @@ class SkillManifest:
 # --------------------------------------------------------------------------
 # Frontmatter parsing helpers
 # --------------------------------------------------------------------------
-
-import re as _re
 
 
 _FRONTMATTER_RE = _re.compile(

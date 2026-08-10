@@ -136,8 +136,8 @@ EVOLVE_CORE_CONFIG_PATCH_SCHEMA: dict[str, Any] = {
                 "Workspace config file to propose, for example nerya.yml, "
                 "agents.yml, workspace.yml, news_feeds.yml, "
                 "messages/channels.yml, triggers/routes.yml, "
-                "policies/planner.yml, or "
-                "policies/tier_policy.yml."
+                "policies/planner.yml, policies/tier_policy.yml, or "
+                "skills/enabled.yml."
             ),
         },
         "summary": {

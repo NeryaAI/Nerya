@@ -818,13 +818,34 @@ class StrategySubAgents:
     skills: Any  # SkillKernel — type-hinted as Any to avoid import cycle
     strategy_id: str
     session_id: Optional[str] = None
+    tool_registry: Any = None
+    executor: Any = None
+    runtime_mode: str = "auto"
     _dispatcher: Any = field(default=None, init=False, repr=False)
 
     def _disp(self) -> Any:
         if self._dispatcher is None:
             from ..subagents.dispatcher import SubAgentDispatcher
 
-            self._dispatcher = SubAgentDispatcher(config=self.config, skills=self.skills)
+            kwargs: dict[str, Any] = {
+                "config": self.config,
+                "skills": self.skills,
+            }
+            if self.tool_registry is not None:
+                kwargs["tool_registry"] = self.tool_registry
+            if self.executor is not None:
+                kwargs["executor"] = self.executor
+            mode = self.runtime_mode
+            if mode == "auto" and (
+                self.tool_registry is None or self.executor is None
+            ):
+                # SDK/scheduler callers have no turn-owned policy chokepoint;
+                # preserve their pre-native legacy behavior instead of
+                # fabricating one or advertising an unusable native surface.
+                mode = "legacy"
+            if mode != "auto":
+                kwargs["runtime_mode"] = mode
+            self._dispatcher = SubAgentDispatcher(**kwargs)
         return self._dispatcher
 
     def run(
@@ -1985,6 +2006,8 @@ def build_strategy_context(
     news_fetchers: Optional[dict[str, NewsFetcher]] = None,
     clock: Optional[StrategyClock] = None,
     connector_registry: Any = None,  # nerya.connectors.registry.ConnectorRegistry
+    tool_registry: Any = None,
+    executor: Any = None,
     trigger_event: Any = None,
     trigger_payload: Optional[dict[str, Any]] = None,
     trigger_event_id: Optional[str] = None,
@@ -2120,6 +2143,8 @@ def build_strategy_context(
         skills=skills,
         strategy_id=manifest.strategy_id,
         session_id=sid,
+        tool_registry=tool_registry,
+        executor=executor,
     )
 
     trading = StrategyTrading(

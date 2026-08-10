@@ -438,7 +438,8 @@ def record_capsule_from_proposal(
     paths: WorkspacePaths,
     proposal_id: str,
     *,
-    outcome_score: float = 1.0,
+    outcome_score: float = 0.0,
+    outcome_status: str | None = None,
 ) -> dict[str, Any] | None:
     pdir = paths.proposals / proposal_id
     meta_path = pdir / "proposal.yml"
@@ -447,6 +448,12 @@ def record_capsule_from_proposal(
     meta = yaml_io.load(meta_path, default={}) or {}
     proposal_metadata = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
     capsule_metadata = _capsule_metadata_from_proposal(meta, proposal_metadata, proposal_id)
+    if outcome_status:
+        capsule_metadata["outcome_status"] = str(outcome_status)
+    capsule_metadata.setdefault(
+        "reward_status",
+        "pending" if float(outcome_score) == 0.0 else "evaluated",
+    )
     selected_gene_ids = _str_list(capsule_metadata.get("selected_gene_ids"))
     capsule = EvolutionCapsule(
         id=new_id("cap"),

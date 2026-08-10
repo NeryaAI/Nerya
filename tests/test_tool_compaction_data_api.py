@@ -253,6 +253,9 @@ def test_market_data_candle_compaction_keeps_non_empty_coverage() -> None:
         "interval": "5m",
         "count": len(rows),
         "candles": rows,
+        "coverage": {"bars": len(rows), "complete": True},
+        "features": {"rsi_14": 61.2, "macd": {"hist": 0.04}},
+        "context": "Momentum is positive while volatility remains bounded.",
     }
 
     result = tc.compact_tool_result("market_data", output, size_threshold=0)
@@ -267,7 +270,24 @@ def test_market_data_candle_compaction_keeps_non_empty_coverage() -> None:
     assert result.kept["last_timestamp"] == "2026-05-18T07:00:00Z"
     assert result.kept["first_timestamp_iso"] == "2026-05-18T00:00:00Z"
     assert result.kept["last_timestamp_iso"] == "2026-05-18T07:00:00Z"
+    assert result.kept["coverage"] == {"bars": 8, "complete": True}
+    assert result.kept["features"]["rsi_14"] == 61.2
+    assert result.kept["features"]["macd"]["hist"] == 0.04
+    assert result.kept["context"].startswith("Momentum is positive")
     assert "rows=8" in result.summary
+
+
+def test_compaction_keeps_persisted_capture_paths() -> None:
+    output = {
+        "ok": True,
+        "query": "market structure",
+        "results": [{"title": "Source", "url": "https://example.com"}],
+        "saved_path": "state/research_data/2026-08-10/capture.json",
+    }
+
+    result = tc.compact_tool_result("web_search", output, size_threshold=0)
+
+    assert result.kept["saved_path"] == output["saved_path"]
 
 
 def test_market_data_candle_compaction_converts_unix_seconds_to_iso() -> None:
@@ -330,6 +350,70 @@ def test_backtest_compaction_keeps_dashboard_artifact_locator() -> None:
     assert result.kept["backtest_ts"] == "freeform_20260521_050643"
     assert result.kept["raw_metrics_file"].endswith("metrics.json")
     assert result.kept["chart_path"].endswith("chart.json")
+
+
+def test_backtest_compaction_keeps_top_level_outcome_contract() -> None:
+    output = {
+        "ok": False,
+        "verdict": "FAIL",
+        "coverage_ok": False,
+        "coverage": {"bars": 3, "required_bars": 100, "complete": False},
+        "coverage_message": "historical candles are incomplete",
+        "operator_summary": {
+            "headline": "Insufficient coverage",
+            "unit_warning": "percent values are display strings",
+        },
+        "padding": "x" * 10_000,
+    }
+
+    result = tc.compact_tool_result("strategy_backtest", output, size_threshold=0)
+
+    assert result.kept["ok"] is False
+    assert result.kept["verdict"] == "FAIL"
+    assert result.kept["coverage_ok"] is False
+    assert result.kept["coverage"]["bars"] == 3
+    assert result.kept["operator_summary"]["headline"] == "Insufficient coverage"
+    assert "padding" not in result.kept
+
+
+def test_generic_validation_compaction_keeps_bounded_blockers_and_warnings() -> None:
+    output = {
+        "ok": False,
+        "strategy_id": "alpha",
+        "blockers": [
+            {"code": f"blocker_{i}", "message": "fix this"}
+            for i in range(12)
+        ],
+        "warnings": [
+            {"code": f"warning_{i}", "message": "review this"}
+            for i in range(12)
+        ],
+        "padding": "x" * 10_000,
+    }
+
+    result = tc.compact_tool_result("strategy_validate", output, size_threshold=0)
+
+    assert result.kept["ok"] is False
+    assert result.kept["blockers"][0]["code"] == "blocker_0"
+    assert result.kept["warnings"][0]["code"] == "warning_0"
+    assert result.kept["blockers"][-1]["_truncated_items"] == 4
+    assert result.kept["warnings"][-1]["_truncated_items"] == 4
+    assert "padding" not in result.kept
+
+
+def test_generic_draft_compaction_keeps_state_and_next_steps() -> None:
+    output = {
+        "state": "draft",
+        "next_steps": ["edit", "validate", "submit", "promote"] * 4,
+        "summary": "draft is awaiting validation",
+        "padding": "x" * 10_000,
+    }
+
+    result = tc.compact_tool_result("strategy_generate_proposal", output, size_threshold=0)
+
+    assert result.kept["state"] == "draft"
+    assert result.kept["next_steps"][:3] == ["edit", "validate", "submit"]
+    assert result.kept["next_steps"][-1]["_truncated_items"] == 8
 
 
 def test_generic_json_compaction_keeps_proposal_locator_fields() -> None:

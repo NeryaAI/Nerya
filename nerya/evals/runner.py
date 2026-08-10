@@ -21,9 +21,9 @@ useful in three flavours of consumer:
 
 from __future__ import annotations
 
+import inspect
 import logging
 import time
-import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
@@ -90,6 +90,8 @@ class EvalRunner:
     orchestrator: ToolOrchestrator
     loop_factory: LoopFactory = field(default=_default_loop_factory)
     tier: str = "mock-script"
+    context: dict[str, Any] = field(default_factory=dict)
+    """Trusted harness objects exposed to scenario setup callbacks."""
     """Tier name we override on the gateway. Any tier works — the
     runner monkey-patches :meth:`LLMGateway._resolve_messages_backend`
     to return our scripted backend regardless of the value the loop
@@ -99,7 +101,23 @@ class EvalRunner:
     # ------------------------------------------------------------------ run
 
     def run_scenario(self, scenario: EvalScenario) -> EvalRunResult:
-        scratch: dict[str, Any] = {"scenario_id": scenario.id}
+        from ..harness.cancellation import CancelToken
+
+        executor = getattr(self.orchestrator, "executor", None)
+        cancel_token = CancelToken()
+        scratch: dict[str, Any] = {
+            **dict(self.context),
+            "scenario_id": scenario.id,
+            "workspace_root": getattr(
+                getattr(getattr(self.gateway, "config", None), "paths", None),
+                "root",
+                None,
+            ),
+            "registry": self.registry,
+            "orchestrator": self.orchestrator,
+            "executor": executor,
+            "cancel_token": cancel_token,
+        }
         backend = TranscriptMockBackend(script=scenario.script)
 
         if scenario.setup is not None:
@@ -107,9 +125,16 @@ class EvalRunner:
 
         recorded_calls: list[dict[str, Any]] = []
         original_run_batch = self.orchestrator.run_batch
+        tool_batches = 0
+        cancel_fired = False
+        cancel_after = scenario.cancel_after_tool_batches
+        if cancel_after is not None:
+            cancel_after = max(1, int(cancel_after))
 
         def record_run_batch(calls):  # type: ignore[no-untyped-def]
+            nonlocal tool_batches, cancel_fired
             batch = original_run_batch(calls)
+            tool_batches += 1
             try:
                 for call, result in zip(calls, batch.results):
                     recorded_calls.append(
@@ -124,24 +149,68 @@ class EvalRunner:
                     )
             except Exception:
                 _LOG.exception("eval runner: failed to record batch results")
+            if cancel_after is not None and not cancel_fired and tool_batches >= cancel_after:
+                cancel_fired = True
+                cancel_token.cancel("eval_interrupt")
             return batch
 
         self.orchestrator.run_batch = record_run_batch  # type: ignore[assignment]
         loop = None
         try:
             loop = self._build_loop(scenario)
+
+            def invoke_loop(**kwargs: Any):  # noqa: ANN202
+                """Keep legacy test loop factories compatible with cancel injection."""
+
+                try:
+                    parameters = inspect.signature(loop.run).parameters
+                except (TypeError, ValueError):
+                    parameters = {}
+                accepts_kwargs = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+                if "cancel_token" not in parameters and not accepts_kwargs:
+                    kwargs.pop("cancel_token", None)
+                return loop.run(**kwargs)
+
             with self._patched_backend(backend):
                 started = time.time()
                 started_iso = _iso_now()
-                outcome = loop.run(
+                initial_outcome = invoke_loop(
                     system=scenario.system,
                     user_message=scenario.user_message
                     if scenario.user_message
                     else "begin scenario",
+                    cancel_token=cancel_token,
                 )
+                outcome = initial_outcome
+                resume_failure = ""
+                resumed = False
+                if scenario.resume_after_cancel:
+                    if initial_outcome.stop_reason != "cancelled":
+                        resume_failure = (
+                            "resume requested but initial run did not cancel "
+                            f"(got {initial_outcome.stop_reason!r})"
+                        )
+                    else:
+                        outcome = invoke_loop(
+                            system=scenario.system,
+                            user_message=scenario.resume_message,
+                            prior_messages=initial_outcome.transcript,
+                            cancel_token=CancelToken(),
+                        )
+                        resumed = True
                 duration_ms = int((time.time() - started) * 1000)
 
                 verdict = self._evaluate(scenario, outcome, recorded_calls)
+                if scenario.cancel_after_tool_batches is not None and not cancel_fired:
+                    verdict.failures.append(
+                        "cancel fixture did not reach the configured tool-batch boundary"
+                    )
+                if resume_failure:
+                    verdict.failures.append(resume_failure)
+                verdict.passed = not verdict.failures
                 result = EvalRunResult(
                     scenario_id=scenario.id,
                     started_at=started_iso,
@@ -159,6 +228,11 @@ class EvalRunner:
                         "script_cursor": backend.cursor,
                         "script_history": list(backend.history),
                         "abort_reason": outcome.abort_reason,
+                        "initial_stop_reason": initial_outcome.stop_reason,
+                        "initial_iterations": initial_outcome.iterations,
+                        "cancel_fired": cancel_fired,
+                        "tool_batches": tool_batches,
+                        "resumed": resumed,
                     },
                 )
                 if scenario.custom_predicate is not None:
@@ -211,12 +285,29 @@ class EvalRunner:
     def _build_loop(self, scenario: EvalScenario):  # type: ignore[no-untyped-def]
         from ..agent.loop import LoopConfig
 
+        workspace_root = self.context.get("workspace_root") or getattr(
+            getattr(getattr(self.gateway, "config", None), "paths", None),
+            "root",
+            None,
+        )
         loop_config = LoopConfig(
             max_iterations=max(8, len(scenario.script.turns) + 4),
             max_wall_seconds=scenario.timeout_seconds,
+            # Scripted evals are short and deterministic; reserving the
+            # production 60s synthesis window would preempt every multi-step
+            # scenario whose wall budget is 30s.
+            wall_time_final_synthesis_seconds=0.0,
+            # The production action reserve is likewise intentionally
+            # disabled for this bounded offline transcript harness.
+            action_tool_wall_reserve_seconds=0.0,
             tier=self.tier,
-            task="evals.scenario",
+            # The eval harness replaces the provider backend with a scripted
+            # transcript, but it still exercises the production agent-loop
+            # policy.  Reuse the advertised production task so a dedicated
+            # production tier does not need an eval-only allowlist entry.
+            task="normal_agent_loop",
             caller=f"evals:{scenario.id}",
+            workspace_root=str(workspace_root) if workspace_root is not None else None,
         )
         return self.loop_factory(
             gateway=self.gateway,
@@ -238,7 +329,7 @@ class EvalRunner:
 
         original = self.gateway._resolve_messages_backend  # type: ignore[attr-defined]
 
-        def _patched(_tier_or_request: Any) -> TranscriptMockBackend:  # noqa: ANN001
+        def _patched(*_args: Any, **_kwargs: Any) -> TranscriptMockBackend:
             return backend
 
         self.gateway._resolve_messages_backend = _patched  # type: ignore[assignment]

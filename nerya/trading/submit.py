@@ -29,6 +29,7 @@ in their preferred shape (ToolResult / SDK return / context shim).
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import replace
 from typing import Any, Optional
@@ -100,6 +101,17 @@ def _maybe_auto_approve_strategy_order(
         "live",
     }:
         return None
+    # Real-money accounts never auto-approve, regardless of the strategy's
+    # promotion state. ``promotion_state`` guards the *strategy* lifecycle;
+    # this guards the *account* — a paper-status strategy pointed at a
+    # canary/live account must still page an operator. Fail closed when
+    # the profile cannot be resolved.
+    try:
+        profile = get_account_profile(config.paths, intent.account_id)
+    except Exception:
+        return None
+    if bool(getattr(profile, "is_real_money", False)):
+        return None
     if not _is_strategy_originated_order(intent):
         return None
     if not _auto_approvable_strategy_escalation(risk):
@@ -130,6 +142,15 @@ def _real_money_execution_blocker(config: Config, profile) -> str | None:
         return "live_trading_disabled_runtime"
     if not bool(getattr(profile, "can_place_order", False)):
         return "account_cannot_place_order"
+    # Crypto readiness: real-money execution refuses to run while the
+    # vault would fall back to the XOR test cipher or the hardcoded
+    # default passphrase. Both are fine for paper workspaces but mean
+    # exchange credentials are effectively plaintext-at-rest.
+    from ..security import encryption as _encryption
+    if not _encryption.has_strong_crypto():
+        return "vault_crypto_unavailable"
+    if not (os.environ.get("NERYA_VAULT_PASSPHRASE") or "").strip():
+        return "vault_passphrase_not_set"
     return None
 
 

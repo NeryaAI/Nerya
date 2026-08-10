@@ -950,6 +950,7 @@ class LLMGateway:
             provider_override=response.provider or active_route_cfg.get("provider"),
             model_override=response.model or active_route_cfg.get("model"),
         )
+        response.usd_cost = usd_cost
 
         if session is not None:
             session.check_quota_after(tokens=tokens, cost=usd_cost)

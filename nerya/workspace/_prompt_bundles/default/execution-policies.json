@@ -84,6 +84,9 @@
       "extends": ["bounded_research", "expert_web_delegate"],
       "preload_skills": ["research", "finance-creators.kobeissi"]
     },
-    "web_researcher": {"extends": "web_collector"}
+    "web_researcher": {
+      "extends": "web_collector",
+      "runtime": "native"
+    }
   }
 }

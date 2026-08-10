@@ -5,13 +5,6 @@ description: "Use whenever the operator asks to build or update a comprehensive 
 version: 0.0.1
 license: Apache-2.0
 author: Anthropic
-risk_class: medium
-adapted_from:
-  upstream: financial-services
-  upstream_path: plugins/vertical-plugins/wealth-management/skills/financial-plan/SKILL.md
-  imported_at: 2026-05-09T18:16:49+00:00
-  imported_by: finance_skills_importer/0.0.1
-category: "finance"
 ---
 <!-- nerya-skill-frontmatter-end -->
 

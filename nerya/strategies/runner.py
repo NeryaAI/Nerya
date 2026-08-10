@@ -74,6 +74,10 @@ _LOG = logging.getLogger(__name__)
 _VALID_MODES: frozenset[str] = frozenset({"paper", "shadow", "live"})
 _RETURN_STATUS_VALUES: frozenset[str] = frozenset(s.value for s in StrategyResultStatus)
 
+# Static-scan verdict cache keyed by package content hash. A package is
+# immutable per hash, so one AST scan per (process, version) is enough.
+_STATIC_SCAN_CACHE: dict[str, list[dict[str, Any]]] = {}
+
 
 def _normalise_return_status(raw: dict[str, Any]) -> str:
     value = raw.get("status")
@@ -231,6 +235,8 @@ class StrategyRunner:
     skills: Any = None
     news_fetchers: dict[str, NewsFetcher] = field(default_factory=dict)
     connector_registry: Any = None
+    tool_registry: Any = None
+    executor: Any = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -293,6 +299,58 @@ class StrategyRunner:
                 subagent_calls=0,
             )
 
+        # Load-time static gate. The promotion pipeline already runs the
+        # full validator, but the runner is the last line of defence: a
+        # package whose code trips a static *blocker* (forbidden import,
+        # dangerous builtin, env access) shares this interpreter with the
+        # vault and the connector registry, so live mode refuses to
+        # execute it at all. Paper/shadow log a warning so operators can
+        # fix the package before promotion.
+        static_blockers = self._static_scan_blockers(package)
+        if static_blockers:
+            enforce = mode == "live" or bool(
+                self.config.get("trading.strategy_static_check.enforce_all_modes", False)
+            )
+            if enforce:
+                summary = "; ".join(
+                    f"{b.get('code')}@{b.get('where')}" for b in static_blockers[:5]
+                )
+                return self._finalize_record(
+                    package=package,
+                    run_id=rid,
+                    session_id=sid,
+                    started_at=started_at,
+                    t0=t0,
+                    inputs=StrategyRunInputs(
+                        mode=mode,
+                        package_hash=package.content_hash,
+                        trigger_event_id=trigger_event_id,
+                        trigger_payload=dict(trigger_payload or {}),
+                        operator=operator,
+                        note=note,
+                    ),
+                    result=StrategyResult.error(
+                        message=f"static check blockers: {summary}",
+                        kind="strategy_static_check_failed",
+                        metadata={"static_blockers": static_blockers},
+                    ),
+                    audit_events=[],
+                    error={
+                        "kind": "strategy_static_check_failed",
+                        "message": summary,
+                        "blockers": static_blockers,
+                    },
+                    llm_calls=0,
+                    subagent_calls=0,
+                )
+            _LOG.warning(
+                "strategy %s has %d static blocker(s) (mode=%s, not enforced): %s",
+                strategy_id,
+                len(static_blockers),
+                mode,
+                "; ".join(str(b.get("code")) for b in static_blockers[:5]),
+            )
+
         ctx = build_strategy_context(
             config=self.config,
             package=package,
@@ -302,6 +360,8 @@ class StrategyRunner:
             news_fetchers=self.news_fetchers,
             clock=clock,
             connector_registry=self.connector_registry,
+            tool_registry=self.tool_registry,
+            executor=self.executor,
             trigger_payload=trigger_payload,
             trigger_event_id=trigger_event_id,
         )
@@ -374,6 +434,32 @@ class StrategyRunner:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _static_scan_blockers(package: StrategyPackage) -> list[dict[str, Any]]:
+        """Run (or reuse) the static AST scan for ``package``.
+
+        Fail closed: a scanner crash counts as a blocker — live mode
+        must not execute code the scanner could not vet.
+        """
+
+        cached = _STATIC_SCAN_CACHE.get(package.content_hash)
+        if cached is not None:
+            return cached
+        try:
+            from .validator import static_scan_blockers
+
+            blockers = [issue.asdict() for issue in static_scan_blockers(package)]
+        except Exception as exc:  # pragma: no cover - defensive
+            _LOG.exception("static scan failed for %s", package.strategy_id)
+            blockers = [{
+                "severity": "blocker",
+                "code": "static_scan_error",
+                "message": f"static scanner crashed: {exc}",
+                "where": "",
+            }]
+        _STATIC_SCAN_CACHE[package.content_hash] = blockers
+        return blockers
 
     def _resolve_mode(self, manifest_mode: str, override: Optional[str]) -> str:
         """Pick the run mode, refusing live overrides without runtime flag."""

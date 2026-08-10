@@ -7,7 +7,13 @@ from nerya.api.routes_evolution import _proposal_detail_dict, routes
 from nerya.core import yaml_io
 from nerya.core.paths import WorkspacePaths
 from nerya.evolution.patch_proposal import create_proposal
-from nerya.evolution.validation_plan import build_validation_plan, write_validation_plan
+from nerya.evolution.promotion import apply_proposal, proposal_action_gates
+from nerya.evolution.validation_plan import (
+    build_validation_plan,
+    load_validation_plan,
+    run_validation_plan,
+    write_validation_plan,
+)
 from nerya.strategies.package import load_package
 
 pytestmark = pytest.mark.smoke
@@ -272,6 +278,47 @@ def test_validation_run_route_refreshes_action_gates(tmp_path):
     assert after["action_gates"]["can_apply"] is True
     assert after["action_gates"]["validation"]["status"] == "passed"
     assert after["action_gates"]["evidence"]["count"] >= 1
+
+
+def test_validation_evidence_is_bound_to_candidate_bundle_bytes(tmp_path):
+    paths = WorkspacePaths(root=tmp_path)
+    sample = tmp_path / "test_candidate_binding.py"
+    sample.write_text("def test_candidate_binding():\n    assert True\n", encoding="utf-8")
+    plan = build_validation_plan(
+        [{"type": "unit_test", "command": "python -m pytest test_candidate_binding.py -q"}],
+        source="test",
+    )
+    plan_id = write_validation_plan(paths, plan)
+    proposal = create_proposal(
+        paths,
+        kind="strategy_package_proposal",
+        summary="Candidate binding",
+        initial_state="approved",
+        evidence_refs=["turn:candidate-binding"],
+        validation_plan_id=plan_id,
+        extra_files={"after/candidate.txt": "reviewed\n"},
+    )
+
+    run = run_validation_plan(paths, proposal_id=proposal.id, dry_run=False)
+
+    assert run["ok"] is True
+    assert run["candidate_bundle_digest"]
+    persisted = load_validation_plan(paths, plan_id)
+    assert persisted["proposal_id"] == proposal.id
+    assert persisted["candidate_bundle_digest"] == run["candidate_bundle_digest"]
+
+    (proposal.path / "after" / "candidate.txt").write_text(
+        "tampered after validation\n", encoding="utf-8"
+    )
+
+    gates = proposal_action_gates(paths, proposal.id)
+    applied = apply_proposal(paths, proposal.id)
+
+    assert gates["can_apply"] is False
+    assert "validation_candidate_bundle_mismatch" in gates["blockers"]
+    assert applied["ok"] is False
+    assert applied["reason"] == "validation_candidate_bundle_mismatch"
+    assert not (tmp_path / "candidate.txt").exists()
 
 
 def test_approve_proposal_route_updates_state_and_action_gates(tmp_path):

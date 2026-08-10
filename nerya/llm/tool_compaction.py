@@ -32,7 +32,8 @@ from typing import Any, Callable, Optional
 AUDIT_FIELDS: tuple[str, ...] = (
     "order_id", "client_order_id", "account_id", "strategy_id",
     "proposal_id", "task_id", "run_id", "session_id", "approval_id",
-    "next_required_action", "proposal_paths", "risk_reason",
+    "next_required_action", "proposal_paths", "saved_path", "capture_paths",
+    "risk_reason",
     "rejection_reason", "error", "error_code", "exchange_error_code", "ts",
     "timestamp", "symbol", "side", "qty", "price", "status",
 )
@@ -59,6 +60,16 @@ _SENSITIVE_JSON_KEY_RE = re.compile(
     r"(api[_-]?key|authorization|bearer|cookie|credential|password|secret|token)",
     re.I,
 )
+_COMPACTION_INTERNAL_KEYS = frozenset({
+    "raw",
+    "traceback",
+    "stack_trace",
+    "debug",
+    "padding",
+})
+_TOP_LEVEL_FIELD_LIMIT = 48
+_TOP_LEVEL_LIST_LIMIT = 8
+_TOP_LEVEL_STRING_LIMIT = 800
 
 
 @dataclass
@@ -328,6 +339,56 @@ def _extract_structured_audit(output: Any) -> dict[str, Any]:
     normalization = _compact_normalization(output.get("normalization"))
     if normalization:
         kept["normalization"] = normalization
+    return kept
+
+
+def _compact_top_level_value(value: Any) -> Any:
+    """Keep a bounded, redacted preview without knowing the producer schema."""
+
+    if isinstance(value, str):
+        return _truncate(value, _TOP_LEVEL_STRING_LIMIT)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return compact_json_evidence_preview(value)
+    if isinstance(value, (list, tuple)):
+        items = [
+            compact_json_evidence_preview(item)
+            for item in value[:_TOP_LEVEL_LIST_LIMIT]
+        ]
+        if len(value) > _TOP_LEVEL_LIST_LIMIT:
+            items.append({"_truncated_items": len(value) - _TOP_LEVEL_LIST_LIMIT})
+        return items
+    return _truncate(str(value), _TOP_LEVEL_STRING_LIMIT)
+
+
+def _compact_top_level_fields(output: Any) -> dict[str, Any]:
+    """Preserve useful top-level state while bounding arbitrary JSON output."""
+
+    if not isinstance(output, dict):
+        return {}
+    entries: list[tuple[str, Any]] = []
+    for raw_key, value in output.items():
+        key = str(raw_key)
+        normalized = key.lower().replace("-", "_")
+        if (
+            normalized in _COMPACTION_INTERNAL_KEYS
+            or _SENSITIVE_JSON_KEY_RE.search(key)
+            or value in (None, "", [], {})
+        ):
+            continue
+        entries.append((key, value))
+
+    # Scalars carry status and identifiers most often; keep them before bulky
+    # collections so a producer cannot hide its outcome behind a large list.
+    entries.sort(
+        key=lambda item: not isinstance(item[1], (str, int, float, bool))
+    )
+    kept: dict[str, Any] = {}
+    for key, value in entries[:_TOP_LEVEL_FIELD_LIMIT]:
+        kept[key] = _compact_top_level_value(value)
+    if len(entries) > _TOP_LEVEL_FIELD_LIMIT:
+        kept["_truncated_fields"] = len(entries) - _TOP_LEVEL_FIELD_LIMIT
     return kept
 
 
@@ -681,6 +742,14 @@ def _reduce_candles(name: str, output: Any) -> Optional[CompactedResult]:
         "first_timestamp_iso": first_iso,
         "last_timestamp_iso": last_iso,
     }
+    if isinstance(output, dict):
+        if isinstance(output.get("coverage"), dict):
+            kept["coverage"] = output["coverage"]
+        if isinstance(output.get("features"), dict):
+            kept["features"] = output["features"]
+        context = str(output.get("context") or "").strip()
+        if context:
+            kept["context"] = _truncate(context, 1_200)
     return CompactedResult(
         rule_id="trading.candles",
         summary=summary,
@@ -735,18 +804,21 @@ def _reduce_backtest(name: str, output: Any) -> Optional[CompactedResult]:
     symbols = output.get("symbols") or []
     errors = output.get("errors") or []
     artifact_refs = output.get("artifact_refs") or []
-    summary = f"backtest: metrics={list(metrics.keys())}, errors={len(errors)}"
-    kept = {
-        "strategy_id": output.get("strategy_id"),
-        "proposal_id": output.get("proposal_id"),
-        "kind": output.get("kind"),
-        "backtest_ts": output.get("backtest_ts"),
-        "metrics": metrics,
-        "window": window,
-        "symbols": list(symbols)[:10],
-        "errors": list(errors)[:5],
-        "artifact_refs": list(artifact_refs)[:5],
-    }
+    metric_keys = list(metrics.keys()) if isinstance(metrics, dict) else []
+    error_count = len(errors) if isinstance(errors, (dict, list, tuple)) else int(bool(errors))
+    summary = f"backtest: metrics={metric_keys}, errors={error_count}"
+    kept = _compact_top_level_fields(output)
+    # Keep the report's common collections bounded even when a producer adds
+    # thousands of metrics, errors, or symbols.
+    for key, value in (
+        ("metrics", metrics),
+        ("window", window),
+        ("symbols", symbols),
+        ("errors", errors),
+        ("artifact_refs", artifact_refs),
+    ):
+        if value not in (None, "", [], {}):
+            kept[key] = _compact_top_level_value(value)
     for key in (
         "out_dir",
         "backtest_dir",
@@ -1526,7 +1598,12 @@ def _reduce_generic_json(name: str, output: Any) -> Optional[CompactedResult]:
         structured = _extract_structured_audit(output)
         top_keys = list(output.keys())[:25]
         summary = f"json dict: top_keys={top_keys}"
-        kept = {"top_keys": top_keys, **audit, **structured}
+        kept = {
+            "top_keys": top_keys,
+            **_compact_top_level_fields(output),
+            **audit,
+            **structured,
+        }
     else:
         summary = f"json list: count={len(output)}"
         kept = {"count": len(output), "first": output[:3], **audit}

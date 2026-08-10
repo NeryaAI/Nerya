@@ -3,8 +3,8 @@
 In the new architecture (per
 are no longer schema containers — they are *playbooks*:
 
-* ``SKILL.md`` is markdown. Its frontmatter carries an
-  ``id`` / ``description`` / ``triggers`` / ``tags`` block.
+* ``SKILL.md`` is markdown. Its standard ``name`` and ``description``
+  frontmatter fields identify the skill and explain when to use it.
 * The body is free-form prose: how to think, what to do, common
   pitfalls, scripts available.
 * Optional ``scripts/`` subfolder holds executables / helpers the
@@ -17,8 +17,8 @@ short.
 
 Tools provided here:
 
-* ``skill_index``    — list available skills (id, title, description,
-                       triggers, tags). Read-only, concurrency-safe.
+* ``skill_index``    — list available skills (id, description). Read-only,
+                       concurrency-safe.
 * ``skill_view``     — fetch the body of one skill's playbook.
                        Read-only, concurrency-safe.
 * ``script_inspect`` — read script metadata / first lines (for
@@ -67,10 +67,8 @@ class SkillRecord:
     """Indexed view of a skill on disk."""
 
     skill_id: str
-    title: str
     description: str
-    triggers: list[str] = field(default_factory=list)
-    tags: list[str] = field(default_factory=list)
+    # Kept for the script approval gate; never used for skill activation.
     permissions: list[str] = field(default_factory=list)
     path: str = ""
     body_chars: int = 0
@@ -80,11 +78,7 @@ class SkillRecord:
     def asdict(self) -> dict[str, Any]:
         return {
             "skill_id": self.skill_id,
-            "title": self.title,
             "description": self.description,
-            "triggers": list(self.triggers),
-            "tags": list(self.tags),
-            "permissions": list(self.permissions),
             "path": self.path,
             "body_chars": self.body_chars,
             "has_scripts": self.has_scripts,
@@ -155,7 +149,7 @@ def index_skills(
         except OSError:
             continue
         fm, body = _parse_frontmatter(text)
-        sid = str(fm.get("id") or fm.get("name") or child.name).strip()
+        sid = str(fm.get("name") or child.name).strip()
         if not sid or sid in seen_ids:
             continue
         seen_ids.add(sid)
@@ -163,10 +157,7 @@ def index_skills(
         found.append(
             SkillRecord(
                 skill_id=sid,
-                title=str(fm.get("title") or fm.get("name") or sid),
                 description=str(fm.get("description") or "").strip(),
-                triggers=list(fm.get("triggers") or fm.get("when_to_use") or []),
-                tags=list(fm.get("tags") or []),
                 permissions=list(fm.get("permissions") or []),
                 path=str(md),
                 body_chars=len(body),
@@ -220,20 +211,19 @@ class SkillIndex:
             self.reload()
         return self._by_id.get(skill_id)
 
-    def render_for_prompt(self, *, max_chars: int = 4000) -> str:
+    def render_for_prompt(self, *, max_chars: int | None = None) -> str:
         out: list[str] = [
             "## Skills available",
-            "Call skill_view(<id>) to load a skill's playbook; this also "
-            "unlocks that skill's specialized tools for the rest of the "
-            "session (only a small core toolset is shown up front).",
+            "Each entry is a SKILL.md playbook. Load a matching playbook "
+            "with Skill or skill_view before using its specialized tools.",
         ]
         used = sum(len(s) + 1 for s in out)
         for r in self.records():
-            head = f"- **{r.skill_id}** — {r.title}"
+            head = f"- **{r.skill_id}**"
             if r.description:
-                desc = r.description.replace("\n", " ").strip()[:240]
+                desc = r.description.replace("\n", " ").strip()
                 head += f": {desc}"
-            if used + len(head) + 1 > max_chars:
+            if max_chars is not None and used + len(head) + 1 > max_chars:
                 break
             out.append(head)
             used += len(head) + 1
@@ -248,14 +238,10 @@ class SkillIndex:
 def skill_index_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult:
     args = call.arguments or {}
     refresh = bool(args.get("refresh") or False)
-    tag_filter = args.get("tag")
     rows = skill_index.records(refresh=refresh)
-    if isinstance(tag_filter, str) and tag_filter.strip():
-        wanted = tag_filter.strip().lower()
-        rows = [r for r in rows if wanted in (t.lower() for t in r.tags)]
     text_lines = [f"Discovered {len(rows)} skill(s)."]
     for r in rows:
-        line = f"- {r.skill_id}: {r.title}"
+        line = f"- {r.skill_id}"
         if r.description:
             line += f" — {r.description[:160]}"
         text_lines.append(line)

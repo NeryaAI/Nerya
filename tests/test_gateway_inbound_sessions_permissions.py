@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from nerya.api import routes_gateway
+from nerya.api import routes_approvals, routes_gateway
 from nerya.core import jsonl, yaml_io
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
@@ -176,9 +177,10 @@ def test_gateway_inbound_routes_approval_callback_without_agent(tmp_path, monkey
         json.dumps(
             {
                 "approval_id": "approval-1",
-                "actor_id": "u1",
+                "approval_actor_id": "u1",
                 "state": "pending",
                 "kind": "tool_permission",
+                "expires_at": time.time() + 60,
                 "payload": {"tool": {"name": "run_shell"}},
             }
         )
@@ -235,14 +237,26 @@ def test_gateway_inbound_uses_nested_telegram_callback_identity(tmp_path, monkey
                 "actor_id": "u1",
                 "state": "pending",
                 "kind": "tool_permission",
+                "expires_at": time.time() + 60,
                 "payload": {"tool": {"name": "run_shell"}},
             }
         )
         + "\n",
         encoding="utf-8",
     )
+    cleared: list[dict] = []
+    published: list[tuple[str, dict]] = []
     monkeypatch.setattr(routes_gateway.telegram, "answer_callback_query", lambda **_kwargs: None)
-    monkeypatch.setattr(routes_gateway.telegram, "clear_reply_markup", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        routes_gateway.telegram,
+        "clear_reply_markup",
+        lambda **kwargs: cleared.append(kwargs),
+    )
+    monkeypatch.setattr(
+        routes_approvals,
+        "_publish_approval_resolution",
+        lambda approval_id, **kwargs: published.append((approval_id, kwargs)),
+    )
     routes = _route_map()
 
     result = routes[("POST", "/gateway/inbound")](
@@ -266,6 +280,33 @@ def test_gateway_inbound_uses_nested_telegram_callback_identity(tmp_path, monkey
     assert result["state"] == "approved"
     approved = jsonl.read_all(client.config.paths.approvals_approved)
     assert approved[0]["approval_id"] == "approval-telegram"
+    assert approved[0]["resolved_by_actor_id"] == "u1"
+    assert len(published) == 1
+    assert published[0][0] == "approval-telegram"
+    assert published[0][1]["state"] == "approved"
+    assert len(cleared) == 1
+
+    repeated = routes[("POST", "/gateway/inbound")](
+        client,
+        {
+            "platform": "telegram",
+            "channel": "telegram",
+            "callback_query": {
+                "id": "cb-2",
+                "data": "approve:approval-telegram",
+                "from": {"id": "u1", "username": "u1"},
+                "message": {
+                    "message_id": 42,
+                    "chat": {"id": "chat-1", "type": "group"},
+                },
+            },
+        },
+    )
+
+    assert repeated["ok"] is False
+    assert repeated["state"] == "error"
+    assert len(published) == 1
+    assert len(cleared) == 1
 
 
 def test_gateway_inbound_auto_replies_through_configured_channel(tmp_path, monkeypatch):
