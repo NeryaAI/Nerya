@@ -295,28 +295,16 @@ def _approval_message(block: dict[str, Any]) -> str:
 def _tool_result_status(block: dict[str, Any]) -> str:
     if block.get("ok") is True:
         return "completed"
-    if _is_tool_redirect(block):
-        return "redirected"
     if block.get("ok") is False or block.get("error") or block.get("error_kind"):
         return "failed"
     return "observed"
 
 
 def _tool_message(tool: str, status: str, block: dict[str, Any]) -> str:
-    if status == "redirected":
-        return _short_text(f"{tool} redirected to a native tool lane")
     if status == "failed":
         err = block.get("error") or block.get("error_kind") or ""
         return _short_text(f"{tool} failed {err}".strip())
     return _short_text(f"{tool} {status}")
-
-
-def _is_tool_redirect(block: dict[str, Any]) -> bool:
-    recovery = block.get("recovery")
-    if not isinstance(recovery, dict):
-        return False
-    return str(recovery.get("reason") or "").strip().lower() == "tool_redirect"
-
 
 def _activity_surface(kind: str) -> str:
     lowered = kind.lower()

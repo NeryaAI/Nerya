@@ -130,13 +130,10 @@ def _write_trade_fixture(paths: WorkspacePaths) -> None:
 def test_shell_research_commands_are_read_risk():
     assert classify_shell_risk({"command": "rg -n approval nerya"}) is RiskLevel.READ
     assert classify_shell_risk({"command": "find . -name '*.py'"}) is RiskLevel.READ
-    assert (
-        classify_shell_risk({
-            "command": "python -c \"from nerya.data import data_api; data_api()\"",
-            "description": "Check wallet capability catalog structure",
-        })
-        is RiskLevel.READ
-    )
+    assert classify_shell_risk({
+        "command": "python -c \"from nerya.data import data_api; data_api()\"",
+        "description": "Check wallet capability catalog structure",
+    }) is RiskLevel.WRITE
     assert (
         classify_shell_risk({"command": "git diff -- nerya/tools/permissions.py"})
         is RiskLevel.READ
@@ -320,7 +317,7 @@ def test_registered_script_run_auto_approves_browser_skill_scripts(tmp_path):
     assert decision.reason == "auto_approve predicate"
 
 
-def test_registered_script_run_auto_approves_low_risk_builtin_skill_scripts(tmp_path):
+def test_registered_script_run_keeps_non_browser_scripts_behind_exec_approval(tmp_path):
     builtin_root = Path(__file__).resolve().parents[1] / "nerya" / "skills" / "builtin"
     registry = ToolRegistry()
     deps = build_native_tool_deps(workspace_root=tmp_path, skill_roots=[builtin_root])
@@ -337,9 +334,8 @@ def test_registered_script_run_auto_approves_low_risk_builtin_skill_scripts(tmp_
         PermissionMode.DEFAULT,
     )
 
-    assert decision.is_allow()
-    assert decision.requires_approval is False
-    assert decision.reason == "auto_approve predicate"
+    assert decision.is_ask()
+    assert decision.requires_approval is True
 
 
 def test_registered_script_run_still_asks_for_unmarked_builtin_scripts(tmp_path):

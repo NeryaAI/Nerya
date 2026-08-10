@@ -1,11 +1,10 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: dcf_valuation
-description: "Use for intrinsic value, DCF, fair value, valuation sensitivity, and price-target analysis."
+description: "Use for intrinsic value, DCF, fair value, valuation sensitivity, and price-target analysis; source data needs Financial Datasets credentials or explicit inputs."
 version: 0.1.0
 license: MIT
 author: Nerya
-requires_integration: financial_datasets
 ---
 <!-- nerya-skill-frontmatter-end -->
 

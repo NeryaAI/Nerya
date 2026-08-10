@@ -5,7 +5,6 @@ description: "Use for end-to-end deep research on a US-listed stock. Pulls incom
 version: 0.1.0
 license: MIT
 author: Nerya
-requires_integration: financial_datasets
 ---
 <!-- nerya-skill-frontmatter-end -->
 

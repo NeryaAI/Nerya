@@ -1,26 +1,22 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: news_social
-description: "Use first for latest/current economy/finance/market news or crypto headlines, including 热门经济新闻 and 当前财经新闻; RSS first pass before broad web search."
+description: "Use for RSS-specific current news or social evidence, source-by-source headline review, and custom feed registration; general market research should use its own bounded research flow."
 version: 0.1.0
 license: MIT
 author: Nerya
-permissions:
-  - network
 ---
 <!-- nerya-skill-frontmatter-end -->
 
 # News Social
 
-Use when the task needs current headlines, RSS-backed news context, or
-lightweight news/social evidence. Prefer this before broad web search
-when built-in feeds cover the topic.
+Use when the task specifically needs RSS-backed headlines, source-by-source
+news context, or custom feed handling.
 
 ## Flow
 
-CALL native `script_run` for the fast RSS pass:
-`skill_id="news_social"`, `name="recent_news.py"`, `args=["--json", "..."]`.
-Do not invoke this script through `run_shell`.
+CALL `research_run` once with the full topic, requested sources, and freshness
+window. Consume its capture and finish instead of repeating raw searches.
 
 IF the user gives a freshness window, pass it as `lookback_hours` when
 possible. If the script returns `time_filter`, only summarize returned
@@ -31,13 +27,7 @@ explicit tickers.
 
 USE CoinDesk, Cointelegraph, and BitcoinMagazine RSS for crypto topics.
 
-FOR broad hot/popular economy or finance roundups:
-RUN `web_search_fetch` after the RSS pass with a current-date query for
-source diversity and accessible article content.
-
-THEN use `research` / `web_search_fetch` only when RSS coverage is too
-narrow, the user needs full article content, or source diversity is
-required.
+Use `web_fetch` only for an exact article URL missing from the returned capture.
 
 ## Custom Feed Registration
 
@@ -46,24 +36,7 @@ USE `evolve_core_config_patch` with target `news_feeds.yml`.
 Do not inspect runtime source files, and do not mutate `news_feeds.yml`
 with `write_file`, `edit_file`, or `run_shell`.
 
-## Script
-
-`scripts/recent_news.py` accepts JSON through `--json`, `--payload-file`,
-or stdin. Prefer `script_run` with `--json`. Example payloads:
-
-```json
-{"topic":"热门财经新闻","limit":20}
-```
-
-```json
-{"topic":"加密新闻","lookback_hours":3,"limit":20}
-```
-
-```json
-{"sources":["yahoo_finance_rss"],"tickers":["AAPL","NVDA"],"limit":10}
-```
-
 ## Lazy References
 
-- `references/full-playbook.md` for custom feed proposal details and the
-  full output contract.
+- `references/full-playbook.md` for explicit RSS script use, custom feed
+  proposal details, and the full output contract.

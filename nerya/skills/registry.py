@@ -24,40 +24,6 @@ from ..core.errors import SkillNotFoundError
 from .manifest import ActionSpec, SkillManifest
 
 
-_LEGACY_ENABLED_ALIASES: dict[str, tuple[str, ...]] = {
-    "market_data": ("markets", "market_data_routing"),
-    "portfolio": ("trading",),
-    "risk": ("trading",),
-    "trigger": ("triggers",),
-    "script": ("coding",),
-    "message": ("notify",),
-    "strategy_review": ("strategy_author",),
-    "evolution": ("evolve",),
-    "onchain": ("markets",),
-    "subagent": ("team",),
-    "exchange": ("markets",),
-    "sdk_writer": ("strategy_author", "coding"),
-    "strategy": ("strategy_author",),
-    "wallet": ("markets",),
-    "exchange_author": ("coding",),
-    "capability_developer": ("coding", "evolve"),
-    "trace": ("analysis",),
-    "operator": ("coding",),
-    "strategy_validation": ("backtest", "quant_research"),
-    "workspace": ("analysis",),
-    "data_science": ("analysis", "quant_research"),
-    "devops": ("coding",),
-}
-
-
-def _expand_legacy_enabled_ids(enabled: set[str]) -> set[str]:
-    expanded = set(enabled)
-    for legacy_id, playbook_ids in _LEGACY_ENABLED_ALIASES.items():
-        if legacy_id in enabled:
-            expanded.update(playbook_ids)
-    return expanded
-
-
 def _enabled_ok(skill_id: str, enabled: set[str] | None) -> bool:
     """True when ``skill_id`` passes the operator allow-list.
 
@@ -142,14 +108,10 @@ class SkillRegistry:
         such skill; only procedural single-file skills register a
         ``run`` handler.
 
-        A skill whose frontmatter declares ``requires_integration:
-        <name>`` is skipped entirely unless
-        ``config.integration_enabled(<name>)`` is true. This keeps
-        optional third-party surfaces
-        invisible to the agent when the operator has not opted in.
-        When ``config`` is ``None`` the guard defaults to "no
-        integration enabled" — safe for any caller that boots the
-        registry before config has been loaded.
+        Skill selection is based on the standard ``name`` and
+        ``description`` metadata. Integration availability is reported by
+        the selected skill or tool when it runs; it does not hide the skill
+        from discovery.
         """
 
         reg = cls()
@@ -159,18 +121,11 @@ class SkillRegistry:
         if workspace_paths is not None:
             doc = yaml_io.load(workspace_paths.skills_enabled, default={}) or {}
             if doc.get("enabled"):
-                enabled = _expand_legacy_enabled_ids(set(doc["enabled"]))
-
-        def _integration_ok(manifest: SkillManifest) -> bool:
-            req = (getattr(manifest, "requires_integration", "") or "").strip()
-            if not req:
-                return True
-            if config is None:
-                return False
-            try:
-                return bool(config.integration_enabled(req))
-            except Exception:
-                return False
+                enabled = {
+                    str(item).strip()
+                    for item in doc["enabled"]
+                    if str(item).strip()
+                }
 
         # 1. Shipped Anthropic-spec builtins.
         if builtin_root.exists():
@@ -181,8 +136,6 @@ class SkillRegistry:
                     continue
                 manifest.source = "builtin"
                 if not _enabled_ok(manifest.id, enabled):
-                    continue
-                if not _integration_ok(manifest):
                     continue
                 reg.register(SkillEntry(
                     manifest=manifest, module=None, actions={},
@@ -208,11 +161,10 @@ class SkillRegistry:
                     if manifest is not None:
                         manifest.source = "workspace_installed"
                         if _enabled_ok(manifest.id, enabled):
-                            if _integration_ok(manifest):
-                                reg.register(SkillEntry(
-                                    manifest=manifest, module=None, actions={},
-                                ))
-                                continue
+                            reg.register(SkillEntry(
+                                manifest=manifest, module=None, actions={},
+                            ))
+                            continue
                     _register_procedural(reg, md, enabled=enabled, source="workspace_installed")
 
         # 3 + 4. Additional user roots (workspace/skills/ + ~/.nerya/skills/).
@@ -252,11 +204,10 @@ class SkillRegistry:
                     ):
                         continue
                     if _enabled_ok(manifest.id, enabled):
-                        if _integration_ok(manifest):
-                            reg.register(SkillEntry(
-                                manifest=manifest, module=None, actions={},
-                            ))
-                            continue
+                        reg.register(SkillEntry(
+                            manifest=manifest, module=None, actions={},
+                        ))
+                        continue
                 _register_procedural(
                     reg,
                     md,

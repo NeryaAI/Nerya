@@ -113,13 +113,6 @@ def _is_destructive_command(command: str) -> bool:
     return any(p.search(command or "") for p in _DESTRUCTIVE_PATTERNS)
 
 
-def _is_tool_redirect_result(result: dict[str, Any]) -> bool:
-    recovery = result.get("recovery")
-    if not isinstance(recovery, dict):
-        return False
-    return str(recovery.get("reason") or "").strip().lower() == "tool_redirect"
-
-
 def _recovery_key(action: str, payload: dict[str, Any]) -> tuple[str, str] | None:
     """Return a stable target key for retry recovery accounting."""
 
@@ -249,19 +242,18 @@ def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
                     created_set.add(p)
         elif action == "run_shell":
             command = str(payload.get("command") or "")
-            if not _is_tool_redirect_result(result):
-                shell_data = result.get("output") or {}
-                exit_code = shell_data.get("exit_code") if isinstance(shell_data, dict) else None
-                entry = {
-                    "command": command,
-                    "exit_code": exit_code,
-                    "ok": ok,
-                }
-                index.commands.append(entry)
-                if is_validation_command(command):
-                    index.tests_run.append(entry)
-                if _is_destructive_command(command):
-                    destructive_commands_without_followup.append(entry)
+            shell_data = result.get("output") or {}
+            exit_code = shell_data.get("exit_code") if isinstance(shell_data, dict) else None
+            entry = {
+                "command": command,
+                "exit_code": exit_code,
+                "ok": ok,
+            }
+            index.commands.append(entry)
+            if is_validation_command(command):
+                index.tests_run.append(entry)
+            if _is_destructive_command(command):
+                destructive_commands_without_followup.append(entry)
         elif action in {"script_run"}:
             entry = {
                 "script": payload.get("name"),
@@ -269,7 +261,7 @@ def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
             }
             index.commands.append(entry)
         # error tracking
-        if not ok and not _is_tool_redirect_result(result):
+        if not ok:
             entry = _tool_error_entry(action, result)
             recovered = key is not None and any(
                 success_pos > pos for success_pos in successful_positions.get(key, [])

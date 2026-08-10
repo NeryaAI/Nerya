@@ -1797,8 +1797,12 @@ def test_subagent_legacy_market_data_skill_call_falls_through_to_native_tool(tmp
     result = runtime._dispatch_one(
         {
             "skill": "market_data",
-            "action": "calculate_features",
-            "payload": {"market": "mock:BTC/USDT", "interval": "1m", "count": 40},
+            "payload": {
+                "action": "calculate_features",
+                "market": "mock:BTC/USDT",
+                "interval": "1m",
+                "count": 40,
+            },
         },
         spec_name="technical_analyst",
         allowed=[],

@@ -20,7 +20,6 @@ only place a live-trading surface can be reached.
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -46,7 +45,6 @@ from ..agent.runtime import (
     RuntimeRequest,
     TurnSnapshot,
 )
-from .context_policy import build_context
 from .registry import SubAgentExecutionPolicy, SubAgentSpec
 
 
@@ -151,15 +149,6 @@ _TASK_CONTROL_PAYLOAD_KEYS: frozenset[str] = frozenset({
     "team_template",
     "working_language",
 })
-
-LEGACY_TOOL_ALIASES: dict[str, tuple[str, ...]] = {
-    "websearch": ("web_search", "web_search_fetch"),
-    "news_social": ("web_search_fetch",),
-    "portfolio": ("portfolio_summary",),
-    "risk": ("risk_check",),
-    "trading_read": ("portfolio_summary",),
-}
-
 
 class SubAgentLLMError(RuntimeError):
     """Raised when a child runtime cannot produce any model output."""
@@ -819,29 +808,11 @@ class SubAgentRuntime:
                 for skill in (*spec.allowed_skills, *CHILD_CORE_SELF_CONTROL_SKILLS)
                 if skill not in CHILD_SKILL_DENYLIST
             ]
-            base_context = build_context(
-                self.config,
-                self.skills,
-                spec,
-                payload=payload,
-                strategy_id=strategy_id,
-            )
-            skill_context = self._preloaded_skill_context(spec)
-            if skill_context:
-                base_context = f"{base_context}\n\n{skill_context}"
+            base_context = self._preloaded_skill_context(spec)
 
         max_calls = self._max_skill_calls(spec)
         if max_calls <= 0:
             allowed_native_tools = []
-        elif allowed_native_tools:
-            # Child roles already have a policy-bounded allowlist. Reveal only
-            # those surfaces so lazy disclosure cannot hide an allowed tool.
-            from ..tools.native.tool_surfaces import reveal_surfaces_for_tools
-
-            reveal_surfaces_for_tools(
-                self.tool_registry,
-                tuple(allowed_native_tools),
-            )
         required_native_tools = [
             name
             for name in spec.execution_policy.required_native_tools
@@ -1359,15 +1330,9 @@ class SubAgentRuntime:
             except Exception:
                 pass
 
-        base_context = ""
-        if not explicit_payload_only:
-            base_context = build_context(
-                self.config, self.skills, spec,
-                payload=payload, strategy_id=strategy_id,
-            )
-            skill_context = self._preloaded_skill_context(spec)
-            if skill_context:
-                base_context = f"{base_context}\n\n{skill_context}"
+        base_context = (
+            "" if explicit_payload_only else self._preloaded_skill_context(spec)
+        )
 
         max_iter = self._max_iterations(spec)
         max_calls = 0 if explicit_payload_only else self._max_skill_calls(spec)
@@ -1701,18 +1666,6 @@ class SubAgentRuntime:
                 "usd": call_usd,
             })
             parsed = result.parsed if isinstance(result.parsed, dict) else {}
-            if _should_use_legacy_tool_calls(parsed):
-                recovered_tool_calls = (
-                    _extract_legacy_tool_calls(result.raw)
-                    or _extract_raw_json_tool_calls(result.raw)
-                )
-            else:
-                recovered_tool_calls = []
-            if recovered_tool_calls:
-                parsed = {
-                    "skill_calls": recovered_tool_calls,
-                    "replan": True,
-                }
             last_parsed = parsed
             last_raw = result.raw
             think_wall = int((time.monotonic() - t0) * 1000)
@@ -1769,7 +1722,7 @@ class SubAgentRuntime:
             # Dispatch any requested skill calls. Only allowed skills that are
             # not denylisted will run. Every attempt is recorded either as a
             # skill_call entry or as a rejected_actions entry.
-            actions = _coerce_list(parsed.get("skill_calls") or parsed.get("tool_calls"))
+            actions = _coerce_list(parsed.get("skill_calls"))
             settle_after_actions = (
                 bool(actions)
                 and parsed.get("replan") is False
@@ -2057,10 +2010,8 @@ class SubAgentRuntime:
                 )
                 return None
             parsed = result.parsed if isinstance(result.parsed, dict) else {}
-            has_tool_requests = bool(parsed.get("skill_calls") or parsed.get("tool_calls"))
+            has_tool_requests = bool(parsed.get("skill_calls"))
             raw_text = str(result.raw or "")
-            if "<tool_call" in raw_text or '"skill_calls"' in raw_text or '"tool_calls"' in raw_text:
-                has_tool_requests = True
             total_tokens_local = int(result.tokens or 0)
             total_usd_local = float(result.usd or 0.0)
             total_tokens += total_tokens_local
@@ -2267,15 +2218,10 @@ class SubAgentRuntime:
             nt_block = (
                 "\nNative tools (parent kernel inheritance — call them "
                 "via the same ``skill_calls`` envelope using the tool "
-                f"name as the ``skill`` field): {preview}{tail}.\n"
-                "Particularly useful: ``connector_list`` and "
-                "``connector_view`` to discover already-integrated "
-                "exchanges / data sources before claiming something is "
-                "missing."
+                f"name as the ``skill`` field): {preview}{tail}. Put all "
+                "arguments in the ``payload`` object exactly as documented "
+                "by the tool schema."
             )
-            hints = _native_tool_usage_hints(native_tools)
-            if hints:
-                nt_block += "\n" + hints
         output_language = str(
             payload.get("output_language")
             or task_envelope.get("output_language")
@@ -2325,8 +2271,8 @@ class SubAgentRuntime:
                 "prior observations only. Return strict JSON with "
                 '``"done": true`` and a concise ``summary``; include '
                 "``evidence`` / ``risk_flags`` / ``uncertainty`` or explicit "
-                "data gaps when useful. ``skill_calls`` and ``tool_calls`` "
-                "are forbidden in this mode."
+                "data gaps when useful. ``skill_calls`` are forbidden in "
+                "this mode."
             )
         elif context_scope == EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE:
             allow_note = (
@@ -2340,7 +2286,7 @@ class SubAgentRuntime:
             allow_note = (
                 "\nUse only the native tools provided by the caller through the "
                 "tool API. Treat tool results as evidence for this run; do not "
-                "print a skill_calls/tool_calls envelope in assistant text. "
+                "print a skill_calls envelope in assistant text. "
                 "When the role is complete, return one JSON object with "
                 '``\"done\": true`` and a concise ``summary``. Preserve exact '
                 "source URLs, paths, identifiers, and numeric values from tool "
@@ -2352,11 +2298,9 @@ class SubAgentRuntime:
                 '``{"skill_calls": [{"skill": <id>, "action": <name>, '
                 '"payload": {...}}]}``. '
                 f"Preferred callable tools for this role: {allowed or 'none'}. "
-                "Use exact tool names and fields; do not invent legacy names "
-                "such as ``websearch`` / ``news_social`` or guessed actions "
-                "such as ``market_data.get_quote``. If a workspace skill only "
-                "describes a playbook, use it as context and call the native "
-                "tools below rather than guessing action names. "
+                "Use exact tool names and fields from the callable catalog. "
+                "A workspace skill describes a playbook; load it when needed "
+                "and use the tool schemas for the actual call. "
                 f"{nt_block}"
                 '\nIf you are done, include ``"done": true``; to re-plan after '
                 'these calls, include ``"replan": true``.'
@@ -2510,9 +2454,9 @@ class SubAgentRuntime:
         if _token_is_set(cancel_token):
             return {
                 "ok": False,
-                "skill": str(entry.get("skill") or entry.get("skill_id") or "")
+                "skill": str(entry.get("skill") or "")
                 if isinstance(entry, dict) else None,
-                "action": str(entry.get("action") or entry.get("name") or "")
+                "action": str(entry.get("action") or "")
                 if isinstance(entry, dict) else None,
                 "error": _token_reason(cancel_token),
                 "error_kind": "cancelled",
@@ -2524,8 +2468,8 @@ class SubAgentRuntime:
                 "error": "skill_call entry is not a dict",
                 "entry": entry,
             }
-        skill = str(entry.get("skill") or entry.get("skill_id") or "").strip()
-        action = str(entry.get("action") or entry.get("name") or "").strip()
+        skill = str(entry.get("skill") or "").strip()
+        action = str(entry.get("action") or "").strip()
         payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
         if not skill:
             return {
@@ -2538,103 +2482,13 @@ class SubAgentRuntime:
                 "ok": False, "skill": skill, "action": action,
                 "error": "skill is in child denylist", "entry": entry,
             }
-        # Native-tool fallthrough: subagents inherit the parent's
-        # native-tool surface, so ``market_analyst`` can call
-        # ``connector_list`` mid-run. Resolve against the tool registry
-        # first and fall back to the skill kernel only when the name is
-        # unknown to the native registry.
+        # Native tools and playbook skills share one exact-name dispatch
+        # surface. The payload is passed through unchanged and validated by
+        # the native executor or skill action schema.
         native_names = allowed_native_tools or []
-        # A playbook may describe an operation using skill-call language even
-        # when the executable surface is a native tool. Resolve those shapes
-        # from descriptor metadata, including the common nested
-        # ``payload={action, inputs}`` wrapper emitted by some providers. The
-        # runtime remains agnostic to concrete skills, actions, and roles.
-        if skill not in native_names and self.tool_registry is not None:
-            nested_action = str(payload.get("action") or "").strip()
-            action_candidates = list(dict.fromkeys([
-                candidate for candidate in (action, nested_action) if candidate
-            ]))
-            intent_keys = (
-                [f"{skill}.{candidate}" for candidate in action_candidates]
-                if action_candidates
-                else [skill]
-            )
-            for native_name in native_names:
-                try:
-                    descriptor = self.tool_registry.get(native_name)
-                except Exception:
-                    continue
-                aliases = {
-                    str(value).strip()
-                    for value in (
-                        getattr(descriptor, "invocation_aliases", ()) or ()
-                    )
-                    if str(value).strip()
-                }
-                if not aliases.intersection(intent_keys):
-                    continue
-                native_payload = dict(payload or {})
-                wrapped_inputs = native_payload.pop("inputs", None)
-                native_payload.pop("action", None)
-                if isinstance(wrapped_inputs, dict):
-                    native_payload.update(wrapped_inputs)
-                return self._dispatch_native(
-                    native_name,
-                    payload=native_payload,
-                    entry=entry,
-                    spec_name=spec_name,
-                    strategy_id=strategy_id,
-                    session_id=session_id,
-                    trigger_event_id=trigger_event_id,
-                    context_metadata=context_metadata,
-                    execution_policy=execution_policy,
-                    delegation_depth=delegation_depth,
-                    iteration=iteration,
-                    cancel_token=cancel_token,
-                )
-        # Descriptor-driven intent resolution avoids burning a retry when a
-        # model expresses a native operation in ``{skill, action}`` form.
-        # The descriptor declares both accepted action aliases and the
-        # argument that receives the subject; no action names live here.
-        if action and skill not in native_names and self.tool_registry is not None:
-            for native_name in native_names:
-                try:
-                    descriptor = self.tool_registry.get(native_name)
-                except Exception:
-                    continue
-                aliases = tuple(
-                    str(value)
-                    for value in (
-                        getattr(descriptor, "subject_action_aliases", ()) or ()
-                    )
-                )
-                subject_argument = str(
-                    getattr(descriptor, "subject_argument", "") or ""
-                )
-                if action not in aliases or not subject_argument:
-                    continue
-                native_payload = dict(payload or {})
-                native_payload.setdefault(subject_argument, skill)
-                return self._dispatch_native(
-                    native_name,
-                    payload=native_payload,
-                    entry=entry,
-                    spec_name=spec_name,
-                    strategy_id=strategy_id,
-                    session_id=session_id,
-                    trigger_event_id=trigger_event_id,
-                    context_metadata=context_metadata,
-                    execution_policy=execution_policy,
-                    delegation_depth=delegation_depth,
-                    iteration=iteration,
-                    cancel_token=cancel_token,
-                )
         if skill in native_names:
-            native_payload = dict(payload or {})
-            if action and "action" not in native_payload:
-                native_payload["action"] = action
             return self._dispatch_native(
-                skill, payload=native_payload, entry=entry,
+                skill, payload=dict(payload or {}), entry=entry,
                 spec_name=spec_name,
                 strategy_id=strategy_id, session_id=session_id,
                 trigger_event_id=trigger_event_id,
@@ -2759,19 +2613,6 @@ class SubAgentRuntime:
         policy = SubAgentExecutionPolicy.from_dict(execution_policy)
         defaults = policy.tool_argument_defaults.get(tool_name) or {}
         payload = {**dict(defaults), **dict(payload or {})}
-        for alias, canonical in (
-            getattr(descriptor, "argument_aliases", ()) or ()
-        ):
-            alias_name = str(alias or "").strip()
-            canonical_name = str(canonical or "").strip()
-            if (
-                alias_name
-                and canonical_name
-                and canonical_name not in payload
-                and alias_name in payload
-            ):
-                payload[canonical_name] = payload.pop(alias_name)
-        payload = _normalise_native_payload(tool_name, payload)
         safe_payload = redact_display_dict(dict(payload or {}))
         call = ToolCall(
             name=tool_name,
@@ -2945,15 +2786,7 @@ def _normalise_preloaded_tools(
     callable_skills: list[str],
     native_tools: list[str],
 ) -> list[str]:
-    """Keep role hints on the real callable surface.
-
-    Several older default role specs still say ``websearch`` /
-    ``news_social`` / ``portfolio`` even though the current native tool
-    surface exposes ``web_search`` / ``web_search_fetch`` /
-    ``portfolio_summary``. Showing stale names in the child prompt trains the
-    model to call tools that cannot exist, so normalize aliases and drop
-    non-callable leftovers before rendering the prompt.
-    """
+    """Keep explicit role hints on the real callable surface."""
 
     callable_set = set(callable_skills) | set(native_tools)
     out: list[str] = []
@@ -2961,169 +2794,8 @@ def _normalise_preloaded_tools(
         name = str(raw or "").strip()
         if not name:
             continue
-        candidates = LEGACY_TOOL_ALIASES.get(name, (name,))
-        for candidate in candidates:
-            if candidate not in callable_set:
-                continue
-            if candidate not in out:
-                out.append(candidate)
-    return out
-
-
-def _native_tool_usage_hints(native_tools: list[str]) -> str:
-    available = set(native_tools or [])
-    lines: list[str] = [
-        "Common native-tool examples for research roles:",
-    ]
-    if "market_data" in available:
-        lines.append(
-            "- market_data: "
-            '{"skill":"market_data","payload":{"action":"get_candles",'
-            '"venue":"<venue>","market":"<venue>:<symbol>","interval":"1d","count":90}}; '
-            "actions are get_ticker, get_mark_price, get_candles, "
-            "calculate_features, summarize_market, compress_context."
-        )
-    if "data_api" in available:
-        lines.append(
-            "- data_api: for non-OHLC provider-specific data. For "
-            "US public-company fundamentals and SEC filings, inspect or call "
-            "provider='financial_datasets' (aliases: equities, financials, "
-            "sec_filings) for statements, metrics, estimates, prices, news, "
-            "company facts, and filings. For "
-            "on-chain/DEX/wallet-signal sources first inspect "
-            '{"skill":"data_api","payload":{"op":"list","provider":"wallet"}} '
-            "and "
-            '{"skill":"data_api","payload":{"op":"list","provider":"onchainos"}}; '
-            "aliases include byreal, byreal_onchain, okx_os, okx_onchain. "
-            "For wallet-backed strategies, first call the relevant wallet "
-            "capability catalog or strategy guide so you use the selected route for the "
-            "installed/logged-in wallet; when none is ready, follow the "
-            "GOAT/self_custody fallback and wallet install recommendations."
-        )
-    if "web_search_fetch" in available:
-        lines.append(
-            "- web_search_fetch: "
-            '{"skill":"web_search_fetch","payload":{"query":"<subject> latest '
-            'filings/news/data","max_results":5,'
-            '"fetch_top_n":3}}.'
-        )
-    elif "web_search" in available:
-        lines.append(
-            "- web_search: "
-            '{"skill":"web_search","payload":{"query":"<subject> latest '
-            'filings/news/data","max_results":5}}.'
-        )
-    if "mcp__yahoo__get_stock_info" in available:
-        lines.append(
-            "- Yahoo MCP direct tools use ticker, not symbol: "
-            '{"skill":"mcp__yahoo__get_stock_info","payload":{"ticker":"<ticker>"}}.'
-        )
-    if "mcp__yahoo__get_financial_statement" in available:
-        lines.append(
-            "- Yahoo statements: "
-            '{"skill":"mcp__yahoo__get_financial_statement","payload":'
-            '{"ticker":"<ticker>","financial_type":"income_stmt"}}; also use '
-            "balance_sheet or cashflow."
-        )
-    if any(t.startswith("mcp__edgar__") for t in available):
-        lines.append(
-            "- Edgar MCP direct tools use identifier, not ticker/cik: "
-            '{"skill":"mcp__edgar__get_company_info","payload":{"identifier":"<company-or-cik>"}}.'
-        )
-    if len(lines) == 1:
-        return ""
-    return "\n".join(lines)
-
-
-def _normalise_native_payload(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Repair common LLM-emitted aliases before native schema validation."""
-
-    out = dict(payload or {})
-    name = str(tool_name or "")
-
-    if name == "market_data":
-        action = str(out.get("action") or "").strip()
-        action_aliases = {
-            "get_quote": "get_ticker",
-            "get_price": "get_ticker",
-            "quote": "get_ticker",
-            "price": "get_ticker",
-            "get_history": "get_candles",
-            "get_historical_data": "get_candles",
-            "historical_data": "get_candles",
-            "get_klines": "get_candles",
-            "klines": "get_candles",
-            "history": "get_candles",
-            "get_features": "calculate_features",
-            "technical_indicators": "calculate_features",
-        }
-        if action in action_aliases:
-            out["action"] = action_aliases[action]
-        elif not action:
-            out["action"] = (
-                "get_candles"
-                if any(k in out for k in ("interval", "count", "limit", "period", "range"))
-                else "get_ticker"
-            )
-        if "market" not in out:
-            if out.get("symbol"):
-                out["market"] = out.get("symbol")
-            elif out.get("ticker"):
-                out["market"] = out.get("ticker")
-        period = str(out.get("period") or out.get("range") or "").lower()
-        if period and "count" not in out and "limit" not in out:
-            if "6mo" in period or "6m" in period:
-                out["count"] = 180
-            elif "3mo" in period or "3m" in period:
-                out["count"] = 90
-            elif "1y" in period or "12mo" in period:
-                out["count"] = 252
-        return out
-
-    if name.startswith("mcp__"):
-        out.pop("action", None)
-
-    if name.startswith("mcp__yahoo__"):
-        if "ticker" not in out and out.get("symbol"):
-            out["ticker"] = out.get("symbol")
-        if name.endswith("__get_financial_statement"):
-            raw = (
-                str(
-                out.get("financial_type")
-                or out.get("statement_type")
-                or out.get("statement")
-                or ""
-            ).strip().lower()
-            )
-            statement_aliases = {
-                "income": "income_stmt",
-                "income_statement": "income_stmt",
-                "income statement": "income_stmt",
-                "balance": "balance_sheet",
-                "balance_sheet": "balance_sheet",
-                "balance sheet": "balance_sheet",
-                "cashflow": "cashflow",
-                "cash_flow": "cashflow",
-                "cash flow": "cashflow",
-                "cashflow_statement": "cashflow",
-                "cashflow_stmt": "cashflow",
-            }
-            if raw:
-                out["financial_type"] = statement_aliases.get(raw, raw)
-        if name.endswith("__get_holder_info") and not out.get("holder_type"):
-            out["holder_type"] = "institutional_holders"
-        if name.endswith("__get_recommendations") and not out.get("recommendation_type"):
-            out["recommendation_type"] = "recommendations"
-
-    if name.startswith("mcp__edgar__"):
-        if "identifier" not in out:
-            if out.get("ticker"):
-                out["identifier"] = out.get("ticker")
-            elif out.get("symbol"):
-                out["identifier"] = out.get("symbol")
-            elif out.get("cik"):
-                out["identifier"] = out.get("cik")
-
+        if name in callable_set and name not in out:
+            out.append(name)
     return out
 
 
@@ -3131,22 +2803,7 @@ def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
     if isinstance(parsed, dict) and parsed:
         if _has_substantive_subagent_output(parsed):
             return parsed
-        raw_text = " ".join(
-            str(parsed.get(key) or "")
-            for key in ("raw", "text", "message", "content")
-        )
-        if (
-            parsed.get("skill_calls") or parsed.get("tool_calls")
-            or "<tool_call" in raw_text
-            or '"skill_calls"' in raw_text
-            or '"tool_calls"' in raw_text
-        ):
-            if _raw_has_substantive_subagent_output(raw):
-                return {
-                    "raw": str(raw or ""),
-                    "done": True,
-                    "quality": "raw_substantive_with_tool_request",
-                }
+        if parsed.get("skill_calls"):
             return {
                 "raw": str(raw or ""),
                 "degraded": True,
@@ -3154,7 +2811,7 @@ def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
                 "summary": (
                     "subagent requested tool calls but did not produce a final analysis"
                 ),
-                "requested_tools": parsed.get("skill_calls") or parsed.get("tool_calls"),
+                "requested_tools": parsed.get("skill_calls"),
             }
         if set(parsed).issubset({"raw", "text", "message", "content"}):
             return {
@@ -3189,26 +2846,16 @@ def _final_subagent_output(parsed: dict[str, Any], raw: str) -> dict[str, Any]:
 def _is_unstructured_protocol_miss(parsed: dict[str, Any], raw: str) -> bool:
     """Return true for child responses that did not produce a usable envelope.
 
-    A JSON-looking ``skill_calls`` marker inside a raw/text wrapper is still a
-    protocol miss when no parsed calls exist. Treating it as finished forces the
-    parent to rerun the entire child; the runtime can repair it once in-place
-    using its existing bounded protocol retry instead.
+    Raw/text wrappers are protocol misses when no parsed calls exist. The
+    runtime can repair them once in-place using its bounded protocol retry.
     """
 
     if not isinstance(parsed, dict) or not parsed:
         return bool(str(raw or "").strip())
-    if parsed.get("skill_calls") or parsed.get("tool_calls"):
+    if parsed.get("skill_calls"):
         return False
     if parsed.get("done") is True or parsed.get("final") is True:
         return False
-    raw_text = " ".join(
-        str(parsed.get(key) or "")
-        for key in ("raw", "text", "message", "content")
-    ) or str(raw or "")
-    if (
-        "<tool_call" in raw_text or '"skill_calls"' in raw_text or '"tool_calls"' in raw_text
-    ):
-        return True
     return set(parsed).issubset({"raw", "text", "message", "content"})
 
 
@@ -3234,7 +2881,7 @@ def _has_substantive_subagent_output(parsed: dict[str, Any]) -> bool:
     if set(parsed) & analytical_keys:
         return True
     protocol_keys = {
-        "skill_calls", "tool_calls", "continue", "replan", "raw", "text",
+        "skill_calls", "continue", "replan", "raw", "text",
         "message", "content",
     }
     substantive_keys = [
@@ -3242,23 +2889,6 @@ def _has_substantive_subagent_output(parsed: dict[str, Any]) -> bool:
         if key not in protocol_keys and value not in (None, "", [], {})
     ]
     return len(substantive_keys) >= 2
-
-
-def _raw_has_substantive_subagent_output(raw: str) -> bool:
-    text = str(raw or "")
-    if not text.strip():
-        return False
-    if re.search(r'"(?:done|final)"\s*:\s*true\b', text, re.I):
-        return True
-    if re.search(
-        r'"(?:status|summary|recommendation|analysis|findings|conclusion|'
-        r"report|data_inventory|risk_policy|parameter_table|fundamentals|"
-        r'valuation)"\s*:',
-        text,
-        re.I,
-    ):
-        return True
-    return False
 
 
 def _tool_observation_fallback_output(
@@ -3459,11 +3089,8 @@ def _coerce_list(v: Any) -> list[Any]:
 def _skill_call_name_action(entry: Any) -> tuple[str, str]:
     if not isinstance(entry, dict):
         return "", ""
-    skill = str(entry.get("skill") or entry.get("skill_id") or "").strip()
-    action = str(entry.get("action") or entry.get("name") or "").strip()
-    payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
-    if not action and isinstance(payload, dict):
-        action = str(payload.get("action") or "").strip()
+    skill = str(entry.get("skill") or "").strip()
+    action = str(entry.get("action") or "").strip()
     return skill, action
 
 
@@ -3474,141 +3101,15 @@ def _skill_call_signature(entry: Any) -> str:
     if not skill:
         return ""
     payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
-    native_payload = dict(payload or {})
-    if action and "action" not in native_payload:
-        native_payload["action"] = action
     try:
         return json.dumps(
-            {"skill": skill, "payload": native_payload},
+            {"skill": skill, "action": action, "payload": payload},
             sort_keys=True,
             ensure_ascii=False,
             default=str,
         )
     except Exception:
-        return f"{skill}\0{action}\0{native_payload!r}"
-
-
-def _extract_raw_json_tool_calls(raw: str) -> list[dict[str, Any]]:
-    """Recover the final JSON tool-call object from mixed assistant text."""
-
-    text = str(raw or "")
-    if '"skill_calls"' not in text and '"tool_calls"' not in text:
-        return []
-    decoder = json.JSONDecoder()
-    candidates: list[list[dict[str, Any]]] = []
-    for match in re.finditer(r"\{", text):
-        try:
-            obj, _end = decoder.raw_decode(text[match.start():])
-        except Exception:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        calls = _coerce_list(obj.get("skill_calls") or obj.get("tool_calls"))
-        if calls:
-            candidates.append([entry for entry in calls if isinstance(entry, dict)])
-    if not candidates:
-        return []
-    return candidates[-1]
-
-
-_LEGACY_TOOL_CALL_RE = re.compile(
-    r"<tool_call>\s*<function=([A-Za-z0-9_.:-]+)>(.*?)</function>\s*</tool_call>",
-    re.DOTALL,
-)
-_LEGACY_SKILL_CALLS_RE = re.compile(
-    r"<skill_calls>\s*(.*?)\s*</skill_calls>",
-    re.DOTALL,
-)
-_LEGACY_TOOL_PARAM_RE = re.compile(
-    r"<parameter=([A-Za-z0-9_.:-]+)>(.*?)</parameter>",
-    re.DOTALL,
-)
-
-
-def _extract_legacy_tool_calls(raw: str) -> list[dict[str, Any]]:
-    """Translate XML-ish model tool-call text into the child JSON envelope.
-
-    Some providers occasionally emit a Claude/OpenAI-looking textual block
-    instead of the subagent runtime's documented ``skill_calls`` JSON. Treating
-    that raw text as final output makes Agent Team roles look successful even
-    though they only asked to use a tool. This compatibility shim keeps the
-    execution loop moving through the normal dispatcher and observation path.
-    """
-
-    text = str(raw or "")
-    if "<tool_call>" not in text and "<skill_calls>" not in text:
-        return []
-    out: list[dict[str, Any]] = []
-    for block in _LEGACY_SKILL_CALLS_RE.finditer(text):
-        parsed = _parse_legacy_skill_calls_block(block.group(1))
-        for entry in parsed:
-            if isinstance(entry, dict):
-                out.append(entry)
-    for match in _LEGACY_TOOL_CALL_RE.finditer(text):
-        skill = match.group(1).strip()
-        body = match.group(2)
-        if not skill:
-            continue
-        payload: dict[str, Any] = {}
-        action = ""
-        for param in _LEGACY_TOOL_PARAM_RE.finditer(body):
-            key = param.group(1).strip()
-            if not key:
-                continue
-            value = _parse_legacy_tool_param(param.group(2))
-            if key == "action":
-                action = str(value or "").strip()
-            else:
-                payload[key] = value
-        call: dict[str, Any] = {"skill": skill, "payload": payload}
-        if action:
-            call["action"] = action
-        out.append(call)
-    return out
-
-
-def _parse_legacy_skill_calls_block(raw: str) -> list[Any]:
-    text = str(raw or "").strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return []
-    if isinstance(parsed, dict):
-        return _coerce_list(parsed.get("skill_calls") or parsed.get("tool_calls"))
-    if isinstance(parsed, list):
-        return parsed
-    return []
-
-
-def _should_use_legacy_tool_calls(parsed: dict[str, Any]) -> bool:
-    """Return true when parsed content is only a raw-text wrapper.
-
-    Some provider adapters preserve non-JSON assistant text as
-    ``{"raw": "..."}`` instead of leaving ``parsed`` empty. If that raw
-    text contains XML-ish tool calls, treating it as final output makes a
-    role look complete even though it only asked to use tools.
-    """
-
-    if not parsed:
-        return True
-    if parsed.get("skill_calls") or parsed.get("tool_calls"):
-        return False
-    if parsed.get("done") is True or parsed.get("final") is True:
-        return False
-    raw_only_keys = {"raw", "text", "message", "content"}
-    return set(parsed).issubset(raw_only_keys)
-
-
-def _parse_legacy_tool_param(raw: str) -> Any:
-    value = str(raw or "").strip()
-    if not value:
-        return ""
-    try:
-        return json.loads(value)
-    except Exception:
-        return value
+        return f"{skill}\0{action}\0{payload!r}"
 
 
 def _summarise(result: Any, *, limit: int = 4000) -> str:

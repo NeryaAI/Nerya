@@ -85,53 +85,6 @@ def test_run_shell_loads_vault_runtime_env(tmp_path):
     assert _shell_stdout(result).strip() == "shell-loaded"
 
 
-def test_run_shell_redirects_native_strategy_data_discovery(tmp_path):
-    command = (
-        "python -c \"from nerya.data import data_api; "
-        "data_api(op='call', provider='wallet', action='capability_catalog')\""
-    )
-
-    result = run_shell_handler(
-        ToolCall(
-            name="run_shell",
-            arguments={
-                "command": command,
-                "description": "Check wallet capability catalog structure",
-            },
-        ),
-        root=tmp_path,
-    )
-
-    assert result.is_error is True
-    assert result.error is not None
-    assert result.error.kind is ToolErrorKind.PERMISSION_DENIED
-    assert "strategy_author" in result.text()
-    assert "strategy_draft_proposal" in result.text()
-
-
-def test_run_shell_redirects_workspace_file_enumeration(tmp_path):
-    result = run_shell_handler(
-        ToolCall(
-            name="run_shell",
-            arguments={
-                "command": 'dir "C:\\Users\\Ricky\\.nerya" /s /b',
-                "description": "List workspace files",
-            },
-        ),
-        root=tmp_path,
-    )
-
-    assert result.is_error is True
-    assert result.error is not None
-    assert result.error.kind is ToolErrorKind.PERMISSION_DENIED
-    assert result.error.retryable is False
-    assert result.error.recovery_hint["reason"] == "tool_redirect"
-    assert result.error.recovery_hint["preferred_tools"] == ["glob", "list_dir", "read_file"]
-    assert result.error.detail["reason"] == "tool_redirect"
-    assert "glob" in result.text()
-    assert "list_dir" in result.text()
-
-
 def test_run_shell_refuses_absolute_read_path_outside_workspace(tmp_path):
     result = run_shell_handler(
         ToolCall(

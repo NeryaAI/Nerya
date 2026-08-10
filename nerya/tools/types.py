@@ -178,28 +178,6 @@ class ToolDescriptor:
     delegates_to: str = ""
     """Optional declarative subagent target used by delegation handlers."""
 
-    invocation_aliases: tuple[str, ...] = field(default_factory=tuple)
-    """Skill-call intents that route to this native tool.
-
-    Entries use ``skill`` or ``skill.action`` notation. This lets a native
-    tool declare compatibility with playbook-shaped calls without adding
-    skill names, action names, or role branches to the agent runtime.
-    """
-
-    subject_action_aliases: tuple[str, ...] = field(default_factory=tuple)
-    """Action intents that route a ``{skill, action}`` shape to this tool."""
-
-    subject_argument: str = ""
-    """Argument that receives the original ``skill`` subject for aliases."""
-
-    argument_aliases: tuple[tuple[str, str], ...] = field(default_factory=tuple)
-    """Declarative ``(accepted_name, canonical_name)`` input aliases.
-
-    Subagent/native dispatch applies these before invoking the handler. This
-    absorbs provider vocabulary differences without adding tool-name branches
-    or natural-language routing heuristics to the agent loop.
-    """
-
     # ----- helpers ---------------------------------------------------
 
     def to_provider_tool(self) -> dict[str, Any]:

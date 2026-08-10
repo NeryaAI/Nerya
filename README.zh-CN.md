@@ -11,7 +11,8 @@
 Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负责调度全局，市场、链上、新闻、
 技术面分析师分头收集证据，风控批评家给每一个论点做压力测试，组合经理核对敞口。团队起草
 策略，让它们过一遍 Risk Gate 和 Approval Gate，再把每个会话沉淀下来的证据，变成需要操作员
-签字的补丁：提示词、技能、脚本、触发器、策略配置——所以每一版策略都比上一版更强。
+签字的提案：提示词、技能、脚本、触发器、策略配置。可执行改动不会静默生效，必须经过验证、
+审阅、应用后观察和回滚。
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -31,7 +32,8 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 - **Git / WebDAV 工作区同步**：可以从 Dashboard 或工作区 API 推送、拉取 Nerya
   工作区，运行时状态仍然保留在本地，并由操作员明确控制。
 - **统一的持久记忆运行时**：会话记忆、反思写入、上下文压缩、原生工具和 Memory API
-  现在共用同一套带作用域的存储与投影模型，不再各走一套召回逻辑。
+  现在共用同一套带作用域的存储与投影模型，不再各走一套召回逻辑。SQLite 是唯一真源，
+  Markdown 和 JSONL 只是可重建的审计投影。
 - **隔离的策略调优审阅**：调优只读取被选中策略包及其证据范围，避免其他策略或运行时
   上下文串进审阅结果。
 - **实盘交易链路加固**：CCXT 衍生品订单现在完整传递交易所精度、合约单位、
@@ -64,8 +66,8 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 |   | 市面上的 Agent 框架 | Nerya |
 |---|---|---|
 | **交易能力** | 套个壳直接调交易所 SDK | 原生 Risk Gate、Approval Gate、纸面/实盘分离、虚拟账本、对账 |
-| **记忆** | 随手糊一个向量库 | 5 份带语义的 markdown 记忆面：全局、错题本、行情画像、技能心得、策略复盘 |
-| **自我进化** | 你给它写 prompt | 反思自动出提案，操作员签字，运行时上线还留快照 |
+| **记忆** | 随手糊一个向量库 | 带证据、生命周期和脱敏的 SQLite 分域记录，外加可重建的 Markdown / JSONL 投影 |
+| **自我进化** | 你给它写 prompt | 反思先写证据，再生成候选提案；验证、操作员签字、观察和回滚后才可应用 |
 | **多 Agent** | 几个 function call 串一下 | 持久化的投研团队：策略队长、市场/链上/新闻/技术面分析师、风控批评家、组合经理、共享黑板、任务板、邮箱、审批门 |
 | **连接器** | 一家一套 SDK | Binance、Bybit、OKX、Hyperliquid、PancakeSwap、Jupiter、通用 EVM，再加 CCXT 桥的 100+ 家。**还没？让 Agent 自己写一个**。 |
 | **安全** | 「别把 key 打进日志」 | 密钥只进 Vault；prompt 里只看 `vault://` 引用；提示词防火墙、签名策略、脚本沙箱 |
@@ -145,12 +147,12 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 
 ### 自我进化
 
-Nerya 的策略不是一成不变的。每个收尾的会话都会变成证据，Agent 用它把下一版策略打磨得更锋利，
-并适应当前的行情。每个会话收尾，`nerya/agent/reflection.py` 把心得写进记忆。`nerya/evolution/`
-再把这些记忆变成结构化的进化提案：
+Nerya 的策略不是一成不变的。每个收尾的会话都会变成脱敏且带证据的发现，Agent 可以用它把下一版
+策略打磨得更锋利，并适应当前的行情。每个会话收尾，反思通过 `MemoryRuntime` 写入分域记忆。
+`nerya/evolution/` 再把这些发现排序为结构化的候选提案：
 
 ```
-learning_update        记忆 markdown 补丁
+learning_update        证据快照，不直接修改运行状态
 prompt_patch           agent / subagent 提示词 unified diff
 script_proposal        新脚本 + manifest，落到 workspace/scripts/pending/
 skill_proposal         新技能目录，落到 workspace/skills/pending/
@@ -160,21 +162,22 @@ risk_limit_suggestion  只建议，永远不会自己覆盖 limits.yml
 ```
 
 代码硬性兜底：agent 起草的补丁永远碰不到 `accounts.yml`、`limits.yml`、vault、签名策略、
-`live_trading_enabled`——`promotion.py` 拦在那里直接拒。每个被采纳的提案都自带快照，
-想回滚一句话的事。
+`live_trading_enabled`——`promotion.py` 拦在那里直接拒。可执行提案必须先验证、再由操作员签字，
+应用后持续观察。每个被采纳的提案都自带快照，想回滚一句话的事。
 
 ### 记忆
 
 ```
 workspace/memory/
-├── global.md                       全局笔记
-├── mistakes.md                     错题本（反思写，agent 读）
-├── market_regimes.md               行情画像（每周复盘 + 新闻技能写）
-├── skill_learnings.md              每个技能的心得
-└── strategy_learnings/<id>.md      每个策略的复盘
+├── memory.db                       SQLite 真源，保存分域记录
+├── global.md                       可重建的全局投影
+├── index.jsonl                     可重建的活动投影
+├── mistakes.md                     脱敏复盘投影
+└── strategy_learnings/<id>.md      策略投影
 ```
 
-纯 markdown。人能读、能 diff、能 git。塞进 prompt 之前一律过提示词防火墙。
+SQLite 记录的作用域来自可信运行时上下文，而不是模型输入。Markdown 和 JSONL 供审计、版本化和人工
+阅读；任何内容进入 prompt 之前，都要经过内容扫描、证据引用、生命周期和有界召回。
 
 ### 技能（Skill）
 

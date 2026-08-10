@@ -16,12 +16,16 @@ before trading decisions.
 ## Flow
 
 NORMALIZE market as `VENUE:SYMBOL` when possible.
-READ quote/book/candles/symbols/wallet state through a script.
+READ quotes, candles, and computed features through native `market_data`.
 FOR provider-specific tables or analytics beyond quote/OHLCV, use native
 `data_api`: list, inspect schema, then call with bounded `limit`/`columns`.
 FOR charts, prefer `get_candles` so raw series stay out of context.
 CHECK timestamp, venue, and fallback method.
 PASS fresh results to `trading`, `backtest`, or `market_research`.
+
+Use a bundled script only for a capability the native tools do not expose and
+only when the operator explicitly requests it; `script_run` may require
+approval.
 
 ## Wallet balance reads
 

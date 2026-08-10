@@ -33,8 +33,9 @@ triggers, and strategy configs, so every strategy comes back sharper than the la
 - **Git and WebDAV workspace sync** — push or pull a Nerya workspace from the
   dashboard or workspace API while keeping runtime state local and explicit.
 - **Unified durable memory** — session memory, reflection writes, compaction,
-  native tools, and the memory API now share one scoped runtime and projection
-  model instead of maintaining separate recall paths.
+  native tools, and the memory API now share one scoped `MemoryRuntime` and
+  projection model instead of maintaining separate recall paths. SQLite is
+  canonical; Markdown and JSONL are rebuildable projections.
 - **Isolated strategy tuning reviews** — tuning evaluates the selected strategy
   package and its evidence scope without leaking unrelated runtime context into
   the review.
@@ -73,9 +74,10 @@ The `strategy_author` skill writes the first package: trigger route, sub-agent
 prompts, candle source, account binding, risk limits, and session ledger. Nerya runs
 it on paper until you enable live trading and approve the intent.
 
-After the session closes, Nerya journals decisions, reviews fills, writes mistakes
-into typed memory, and drafts evolution proposals. You sign or reject each diff.
-Applied proposals carry rollback snapshots.
+After the session closes, Nerya journals decisions, reviews fills, and writes
+redacted, evidence-linked findings through `MemoryRuntime`. The evolution layer
+may turn those findings into candidate proposals. You sign or reject executable
+changes; applied proposals carry rollback snapshots and post-apply observation.
 
 ---
 
@@ -87,8 +89,8 @@ Applied proposals carry rollback snapshots.
 4. The execution planner produces a strategy package with triggers, prompts, data
    sources, limits, and history.
 5. The trading kernel submits intents through Risk Gate and Approval Gate.
-6. Reflection writes memory. Evolution drafts patches. The operator signs the next
-   version.
+6. Reflection writes scoped memory. Evolution stages candidate bundles. The operator
+   signs executable changes before promotion.
 
 ---
 
@@ -108,7 +110,7 @@ Applied proposals carry rollback snapshots.
 | **Strategy creation** | Manual prompt-to-code handoff | `strategy_author` builds triggers, prompts, data sources, account binding, limits, and ledgers |
 | **Strategy evolution** | Operator rewrites prompts after failures | Reflection drafts typed proposals. Operator signs. Runtime applies them with rollback snapshots. |
 | **Trading execution** | Tool calls against exchange SDKs | Risk Gate, Approval Gate, paper/live separation, virtual ledger, reconciliation |
-| **Memory** | Vector snippets with weak meaning | 5 typed markdown surfaces: global, mistakes, market regimes, skill learnings, per-strategy |
+| **Memory** | Vector snippets with weak meaning | Scoped SQLite records with evidence, lifecycle, redaction, and rebuildable Markdown / JSONL projections |
 | **Connectors** | One SDK per venue | Binance, Bybit, OKX, Hyperliquid, PancakeSwap, Jupiter, generic EVM, plus 100+ via CCXT. Missing one? Ask the agent to author it. |
 | **Security** | Key handling left to each integration | Vault-only secrets, `vault://` refs in context, prompt firewall, signer policy, script sandbox |
 
@@ -199,11 +201,11 @@ Three templates ship today: `market_analysis_team`, `strategy_design_team`,
 Nerya's strategies are not static. Every closed session becomes evidence the agent uses
 to sharpen the next version and adapt to the current regime. Nerya keeps strategy code,
 prompts, triggers, limits, sessions, and reviews under one workspace. After a strategy
-run closes, `nerya/agent/reflection.py` writes memory entries. `nerya/evolution/` reads
-those entries and opens typed proposals:
+run closes, reflection writes scoped, redacted, evidence-linked findings through
+`MemoryRuntime`. `nerya/evolution/` can rank those findings and open typed proposals:
 
 ```
-learning_update        markdown patch to memory
+learning_update        evidence snapshot; does not mutate runtime state
 prompt_patch           unified diff of an agent / subagent prompt
 script_proposal        new script + manifest in workspace/scripts/pending/
 skill_proposal         new skill directory in workspace/skills/pending/
@@ -220,15 +222,17 @@ signer policy, or `live_trading_enabled`. Each applied proposal carries a
 
 ```
 workspace/memory/
-├── global.md                       runtime-wide
-├── mistakes.md                     reflection writes, agent reads
-├── market_regimes.md               weekly review + news skill
-├── skill_learnings.md              per-skill insights
-└── strategy_learnings/<id>.md      per-strategy
+├── memory.db                       canonical scoped records
+├── global.md                       rebuildable global projection
+├── index.jsonl                     rebuildable activity projection
+├── mistakes.md                     redacted review projection
+└── strategy_learnings/<id>.md      strategy projection
 ```
 
-Plain markdown. You can read it, diff it, version-control it. Nothing reaches a prompt
-without passing the firewall first.
+SQLite records are canonical and scoped by trusted runtime context, not model input.
+Markdown and JSONL are rebuildable views for audit and versioning. Content scanning,
+stable keys, evidence references, lifecycle, and bounded recall apply before anything
+reaches a prompt.
 
 ### Skills
 

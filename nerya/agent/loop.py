@@ -3155,211 +3155,6 @@ def _messages_response_text(response: MessagesResponse) -> str:
     return "\n\n".join(parts).strip()
 
 
-_LEGACY_TOOL_CALL_RE = re.compile(
-    r"<tool_call>\s*<function=([A-Za-z0-9_.:-]+)>(.*?)</function>\s*</tool_call>",
-    re.DOTALL,
-)
-_LEGACY_TOOL_ANY_RE = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
-_LEGACY_TOOL_PARAM_RE = re.compile(
-    r"<parameter=([A-Za-z0-9_.:-]+)>(.*?)</parameter>",
-    re.DOTALL,
-)
-# Truncated / dangling markup: a provider response cut off mid tool call
-# leaves an *unclosed* ``<tool_call>`` / ``<function=...>`` / ``<parameter=...>``
-# block. The complete-block regexes above never match these, so the raw
-# markup used to leak into the operator-visible transcript. These patterns
-# remove everything from the dangling open tag to the end of the text.
-_LEGACY_TOOL_TRUNCATED_RE = re.compile(r"<tool_call\b.*\Z", re.IGNORECASE | re.DOTALL)
-_LEGACY_FUNCTION_BLOCK_RE = re.compile(
-    r"<function=[A-Za-z0-9_.:-]+>.*?</function>",
-    re.DOTALL,
-)
-_LEGACY_FUNCTION_TRUNCATED_RE = re.compile(
-    r"<function=[A-Za-z0-9_.:-]+\b.*\Z",
-    re.IGNORECASE | re.DOTALL,
-)
-_LEGACY_PARAM_BLOCK_RE = re.compile(
-    r"<parameter=[A-Za-z0-9_.:-]+>.*?</parameter>",
-    re.DOTALL,
-)
-_LEGACY_PARAM_TRUNCATED_RE = re.compile(
-    r"<parameter=[A-Za-z0-9_.:-]+\b.*\Z",
-    re.IGNORECASE | re.DOTALL,
-)
-_LEGACY_TOOL_MARKUP_DETECT_RE = re.compile(
-    r"<tool_call\b|<function=[A-Za-z0-9_.:-]+|<parameter=[A-Za-z0-9_.:-]+",
-    re.IGNORECASE,
-)
-_PLAIN_TEXT_TOOL_CALL_RE = re.compile(
-    r"(?:^|[\s`])call\s+`?([A-Za-z0-9_.:-]+)`?",
-    re.IGNORECASE,
-)
-
-
-def _legacy_tool_text(blocks: list[dict[str, Any]]) -> str:
-    parts: list[str] = []
-    for block in blocks:
-        if not isinstance(block, dict) or block.get("type") != "text":
-            continue
-        text = str(block.get("text") or "")
-        if text:
-            parts.append(text)
-    return "\n\n".join(parts)
-
-
-def _parse_legacy_tool_param(raw: str) -> Any:
-    value = str(raw or "").strip()
-    if not value:
-        return ""
-    try:
-        return json.loads(value)
-    except Exception:
-        return value
-
-
-def _extract_legacy_tool_use_blocks(
-    text: str,
-    *,
-    allowed_tool_names: set[str],
-) -> list[dict[str, Any]]:
-    """Recover XML-ish textual tool calls emitted by OpenAI-compat models.
-
-    Some providers occasionally write Claude-style ``<tool_call>`` text into
-    the assistant message instead of returning structured ``tool_calls``. Only
-    registered tools are recovered; everything else stays ordinary text.
-    """
-
-    text = _normalise_provider_legacy_markup(text)
-    out: list[dict[str, Any]] = []
-    if "<tool_call>" in text:
-        for match in _LEGACY_TOOL_CALL_RE.finditer(text):
-            name = match.group(1).strip()
-            if not name or name not in allowed_tool_names:
-                continue
-            payload: dict[str, Any] = {}
-            for param in _LEGACY_TOOL_PARAM_RE.finditer(match.group(2)):
-                key = param.group(1).strip()
-                if key:
-                    payload[key] = _parse_legacy_tool_param(param.group(2))
-            out.append({
-                "type": "tool_use",
-                "id": f"toolu_{uuid.uuid4().hex[:24]}",
-                "name": name,
-                "input": payload,
-                "legacy_text_recovered": True,
-            })
-    out.extend(
-        _extract_plain_text_legacy_tool_use_blocks(
-            text,
-            allowed_tool_names=allowed_tool_names,
-        )
-    )
-    return out
-
-
-def _extract_plain_text_legacy_tool_use_blocks(
-    text: str,
-    *,
-    allowed_tool_names: set[str],
-) -> list[dict[str, Any]]:
-    """Recover complete ``call tool_name {json}`` provider fallback text."""
-
-    out: list[dict[str, Any]] = []
-    decoder = json.JSONDecoder()
-    for match in _PLAIN_TEXT_TOOL_CALL_RE.finditer(text):
-        name = match.group(1).strip()
-        if not name or name not in allowed_tool_names:
-            continue
-        tail = text[match.end():]
-        brace_index = tail.find("{")
-        if brace_index < 0 or brace_index > 120:
-            continue
-        try:
-            parsed, _end = decoder.raw_decode(tail[brace_index:])
-        except Exception:
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        out.append({
-            "type": "tool_use",
-            "id": f"toolu_{uuid.uuid4().hex[:24]}",
-            "name": name,
-            "input": parsed,
-            "legacy_text_recovered": True,
-        })
-    return out
-
-
-def _strip_legacy_tool_call_text(text: str) -> str:
-    normalised = _normalise_provider_legacy_markup(text)
-    # Remove well-formed blocks first so any real prose that follows a
-    # complete tool call is preserved.
-    normalised = _LEGACY_TOOL_CALL_RE.sub("", normalised)
-    normalised = _LEGACY_TOOL_ANY_RE.sub("", normalised)
-    normalised = _LEGACY_FUNCTION_BLOCK_RE.sub("", normalised)
-    normalised = _LEGACY_PARAM_BLOCK_RE.sub("", normalised)
-    # Remove dangling/truncated markup (response cut off mid tool call). Only
-    # a still-open tag can remain at this point, so these strip from the
-    # leftover open tag to the end of the text without eating earlier prose.
-    normalised = _LEGACY_TOOL_TRUNCATED_RE.sub("", normalised)
-    normalised = _LEGACY_FUNCTION_TRUNCATED_RE.sub("", normalised)
-    normalised = _LEGACY_PARAM_TRUNCATED_RE.sub("", normalised)
-    return normalised.strip()
-
-
-def _contains_legacy_tool_call_markup(text: str) -> bool:
-    """True when ``text`` carries textual tool-call markup, complete or not."""
-
-    normalised = _normalise_provider_legacy_markup(str(text or ""))
-    return bool(_LEGACY_TOOL_MARKUP_DETECT_RE.search(normalised))
-
-
-def _sanitize_assistant_text_blocks(
-    blocks: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Strip leaked textual tool-call markup from assistant text blocks.
-
-    Applied right before assistant content is persisted/emitted so that
-    truncated or otherwise unrecovered ``<tool_call>`` / ``<function=...>``
-    markup never reaches the operator-visible transcript. Non-text blocks
-    pass through untouched; text blocks that become empty are dropped.
-    """
-
-    sanitized: list[dict[str, Any]] = []
-    for block in blocks:
-        if not isinstance(block, dict) or block.get("type") != "text":
-            sanitized.append(block)
-            continue
-        cleaned = _strip_legacy_tool_call_text(str(block.get("text") or ""))
-        if not cleaned:
-            continue
-        next_block = dict(block)
-        next_block["text"] = cleaned
-        sanitized.append(next_block)
-    return sanitized
-
-
-_PROVIDER_LEGACY_MARKUP_RE = re.compile(r"\]<\][A-Za-z0-9_.-]+\[>\[")
-
-
-def _normalise_provider_legacy_markup(text: str) -> str:
-    """Remove provider-specific token wrappers around XML-ish tool text."""
-
-    return _PROVIDER_LEGACY_MARKUP_RE.sub("", str(text or ""))
-
-
-def _legacy_tool_retry_message(stop_reason: str) -> str:
-    return (
-        "You emitted a textual <tool_call> instead of a native "
-        "provider tool call"
-        + (f" and the response stopped with {stop_reason!r}" if stop_reason else "")
-        + ". Retry now using the provided native tools/tool_calls API only. "
-        "Do not print XML, markdown, or JSON examples of the tool call in the "
-        "assistant text. If the payload is large, keep it concise and let the "
-        "tool generate the detailed files."
-    )
-
-
 # ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
@@ -3722,36 +3517,13 @@ class WorkspaceNativeAgentLoop:
         else:
             transcript.append({"role": "user", "content": list(user_message)})
 
-        if self.config.required_artifacts:
-            # A caller contract may name tools that live on lazily gated
-            # native surfaces (e.g. team_run on the "team" surface).
-            # Reveal those surfaces before the first render so every
-            # contract tool is advertised from iteration 1 and the
-            # contract's declared order can be enforced from the start.
-            try:
-                from ..tools.native.tool_surfaces import (
-                    reveal_surfaces_for_tools,
-                )
-
-                reveal_surfaces_for_tools(
-                    self.registry,
-                    tuple(
-                        str(artifact.get("tool") or "")
-                        for artifact in self.config.required_artifacts
-                        if isinstance(artifact, dict)
-                    ),
-                )
-            except Exception:  # noqa: BLE001 - reveal is best-effort
-                pass
         provider_tools = self._render_tools(tool_filter)
         provider_tool_names = {
             str(t.get("name") or "")
             for t in provider_tools
             if isinstance(t, dict) and t.get("name")
         }
-        # Track the lazy reveal set so the loop can re-render the
-        # advertised tools when a mid-turn skill_view / mcp_describe
-        # unlocks a new surface (see the refresh inside the loop below).
+        # Re-render after mcp_describe promotes a lazy MCP namespace.
         last_render_lazy_sig = self._lazy_described_signature()
 
         iterations = 0
@@ -3817,13 +3589,10 @@ class WorkspaceNativeAgentLoop:
                 stop_reason = "cancelled"
                 transition_reason = "cancelled"
                 break
-            # Re-render the advertised tool list when a prior iteration
-            # promoted a new lazy surface/namespace (skill_view unlocking
-            # native strategy/team tools, or mcp_describe promoting an
-            # MCP namespace). provider_tools is rendered once before the
-            # loop, so without this refresh a tool unlocked mid-turn
-            # would not be advertised until the *next* turn — leaving the
-            # model unable to call a tool it was just told is available.
+            # Re-render after mcp_describe promotes a lazy MCP namespace.
+            # provider_tools is rendered once before the loop, so without
+            # this refresh newly described MCP tools would not appear until
+            # the next turn.
             current_lazy_sig = self._lazy_described_signature()
             if current_lazy_sig != last_render_lazy_sig:
                 provider_tools = self._render_tools(tool_filter)
@@ -4902,27 +4671,6 @@ class WorkspaceNativeAgentLoop:
                 if name
             }
 
-            if not tool_uses:
-                legacy_text = _legacy_tool_text(assistant_blocks)
-                legacy_tool_uses = _extract_legacy_tool_use_blocks(
-                    legacy_text,
-                    allowed_tool_names=allowed_iteration_tool_names,
-                )
-                if legacy_tool_uses and stop_reason != "content_filter":
-                    cleaned_blocks: list[dict[str, Any]] = []
-                    for block in assistant_blocks:
-                        if not isinstance(block, dict) or block.get("type") != "text":
-                            cleaned_blocks.append(block)
-                            continue
-                        cleaned = _strip_legacy_tool_call_text(str(block.get("text") or ""))
-                        if cleaned:
-                            cleaned_block = dict(block)
-                            cleaned_block["text"] = cleaned
-                            cleaned_blocks.append(cleaned_block)
-                    assistant_blocks = cleaned_blocks + legacy_tool_uses
-                    tool_uses = legacy_tool_uses
-                    stop_reason = "tool_use"
-
             if tool_uses:
                 offered_tool_uses: list[dict[str, Any]] = []
                 rejected_tool_uses: list[dict[str, Any]] = []
@@ -5366,18 +5114,6 @@ class WorkspaceNativeAgentLoop:
                     )
                     break
 
-            # Containment for textual tool-call leaks: when the model emits
-            # ``<tool_call>`` / ``<function=...>`` markup as plain text (often a
-            # truncated response that the structured recovery above cannot
-            # parse), scrub it from the assistant text *before* it is persisted
-            # or streamed so the raw markup never reaches the operator. The flag
-            # is remembered so the legacy retry path below still fires.
-            leaked_legacy_markup = not tool_uses and _contains_legacy_tool_call_markup(
-                _legacy_tool_text(assistant_blocks)
-            )
-            if leaked_legacy_markup:
-                assistant_blocks = _sanitize_assistant_text_blocks(assistant_blocks)
-
             assistant_text = _assistant_text_from_blocks(assistant_blocks)
             if tool_uses:
                 candidate = _substantive_pre_tool_answer_candidate(
@@ -5461,43 +5197,6 @@ class WorkspaceNativeAgentLoop:
             if not tool_uses:
                 if aborted_reason:
                     break
-                if leaked_legacy_markup:
-                    # ``assistant_blocks`` was already scrubbed above, so the
-                    # surviving text is the clean prose (if any) the model wrote
-                    # alongside the leaked tool call.
-                    cleaned_text = _assistant_text_from_blocks(assistant_blocks)
-                    if text_only_final_attempt:
-                        summary = _build_deterministic_final_summary(
-                            iterations=iterations,
-                            tool_calls=total_tool_calls,
-                            error_count=error_count,
-                            had_model_text=bool(cleaned_text),
-                            evidence_snippets=_collect_abort_evidence_snippets(
-                                transcript,
-                                limit=6,
-                            ),
-                        )
-                        final_text = (
-                            f"{cleaned_text}\n\n{summary}"
-                            if cleaned_text
-                            else summary
-                        )
-                        transcript.append({
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": summary}],
-                        })
-                        emit("assistant", TextBlock(text=summary).as_dict())
-                        transition_reason = (
-                            "legacy_tool_call_final_synthesis_fallback"
-                        )
-                        break
-                    transcript.append({
-                        "role": "user",
-                        "content": _legacy_tool_retry_message(stop_reason),
-                    })
-                    transition_reason = "legacy_text_tool_call_retry"
-                    final_text = ""
-                    continue
                 if text_only_final_attempt and final_text:
                     if transition_reason not in {
                         "llm_safety_rejection_finalized",

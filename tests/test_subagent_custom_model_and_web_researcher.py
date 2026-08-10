@@ -393,10 +393,6 @@ class _FakeDescriptor:
     risk: SimpleNamespace = None  # type: ignore[assignment]
     child_max_depth: int | None = None
     delegates_to: str = ""
-    invocation_aliases: tuple[str, ...] = ()
-    subject_action_aliases: tuple[str, ...] = ()
-    subject_argument: str = ""
-    argument_aliases: tuple[tuple[str, str], ...] = ()
 
 
 class _FakeRegistry:
@@ -878,10 +874,6 @@ class _RecordingHandlerRegistry:
         configured = self._descriptors.get(name)
 
         class _Desc:
-            invocation_aliases = getattr(configured, "invocation_aliases", ())
-            subject_action_aliases = getattr(configured, "subject_action_aliases", ())
-            subject_argument = getattr(configured, "subject_argument", "")
-            argument_aliases = getattr(configured, "argument_aliases", ())
             child_max_depth = getattr(configured, "child_max_depth", None)
 
             def handler(self, call):
@@ -894,99 +886,6 @@ class _RecordingHandlerRegistry:
         if name not in self._names:
             raise KeyError(name)
         return _Desc()
-
-
-def test_view_action_rewritten_onto_skill_view_native():
-    """`{skill: <id>, action: view}` should hit skill_view, not error."""
-
-    reg = _RecordingHandlerRegistry(
-        ["skill_view", "web_fetch"],
-        descriptors={
-            "skill_view": _FakeDescriptor(
-                "skill_view",
-                subject_action_aliases=("view", "skill_view"),
-                subject_argument="skill_id",
-            ),
-        },
-    )
-    runtime = SubAgentRuntime(
-        config=SimpleNamespace(), skills=SimpleNamespace(),
-        llm=SimpleNamespace(), tool_registry=reg,
-    )
-
-    out = runtime._dispatch_one(
-        {"skill": "expert_investors.buffett", "action": "view"},
-        spec_name="buffett_lens",
-        allowed=["expert_investors.buffett"],
-        allowed_native_tools=["skill_view", "web_fetch"],
-        trigger_event_id=None, strategy_id=None, session_id=None,
-    )
-
-    assert out["ok"] is True
-    assert len(reg.calls) == 1
-    assert reg.calls[0].name == "skill_view"
-    assert reg.calls[0].arguments["skill_id"] == "expert_investors.buffett"
-
-
-@pytest.mark.parametrize(
-    "entry",
-    [
-        {
-            "skill": "research",
-            "action": "research_run",
-            "payload": {"query": "AI capex"},
-        },
-        {
-            "skill": "research",
-            "action": "web_search",
-            "payload": {"query": "AI capex"},
-        },
-        {
-            "skill": "research",
-            "action": "run",
-            "payload": {"query": "AI capex"},
-        },
-        {
-            "skill": "research",
-            "payload": {
-                "action": "research_run",
-                "inputs": {"query": "AI capex"},
-            },
-        },
-    ],
-)
-def test_descriptor_invocation_alias_routes_skill_intent_onto_native(entry):
-    reg = _RecordingHandlerRegistry(
-        ["research_run"],
-        descriptors={
-            "research_run": _FakeDescriptor(
-                "research_run",
-                invocation_aliases=(
-                    "research",
-                    "research.run",
-                    "research.research_run",
-                    "research.web_search",
-                ),
-            ),
-        },
-    )
-    runtime = SubAgentRuntime(
-        config=SimpleNamespace(), skills=SimpleNamespace(),
-        llm=SimpleNamespace(), tool_registry=reg,
-    )
-
-    out = runtime._dispatch_one(
-        entry,
-        spec_name="buffett_lens",
-        allowed=["research"],
-        allowed_native_tools=["research_run"],
-        trigger_event_id=None, strategy_id=None, session_id=None,
-    )
-
-    assert out["ok"] is True
-    assert len(reg.calls) == 1
-    assert reg.calls[0].name == "research_run"
-    assert reg.calls[0].arguments == {"query": "AI capex"}
 
 
 def test_required_native_tool_policy_requests_one_corrective_turn(tmp_path):
@@ -1192,59 +1091,6 @@ def test_declarative_tool_defaults_respect_explicit_arguments():
         ),
     )
     assert reg.calls[-1].arguments["save_raw"] is False
-
-
-def test_descriptor_argument_alias_avoids_schema_retry():
-    descriptor = _FakeDescriptor(
-        name="collector",
-        argument_aliases=(
-            ("request", "query"),
-            ("task", "query"),
-            ("fetch_urls", "urls"),
-        ),
-    )
-    reg = _RecordingHandlerRegistry(
-        ["collector"],
-        descriptors={"collector": descriptor},
-    )
-    runtime = SubAgentRuntime(
-        config=SimpleNamespace(),
-        skills=SimpleNamespace(),
-        llm=SimpleNamespace(),
-        tool_registry=reg,
-    )
-
-    record = runtime._dispatch_native(
-        "collector",
-        payload={
-            "request": "AI capex",
-            "fetch_urls": ["https://example.com"],
-        },
-        entry={},
-        spec_name="expert",
-        strategy_id=None,
-        session_id=None,
-        trigger_event_id=None,
-    )
-
-    assert record["ok"] is True
-    assert reg.calls[-1].arguments == {
-        "query": "AI capex",
-        "urls": ["https://example.com"],
-    }
-
-    second = runtime._dispatch_native(
-        "collector",
-        payload={"task": "Fetch the supplied sources"},
-        entry={},
-        spec_name="expert",
-        strategy_id=None,
-        session_id=None,
-        trigger_event_id=None,
-    )
-
-    assert second["ok"] is True
-    assert reg.calls[-1].arguments == {"query": "Fetch the supplied sources"}
 
 
 @pytest.mark.parametrize(

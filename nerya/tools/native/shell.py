@@ -120,25 +120,6 @@ _NETWORK_SECRET_SEND_RE = re.compile(
     r"(?i)\b(authorization|cookie|x-api-key|api[_-]?key|bearer|secret|token)\b"
 )
 
-_NATIVE_STRATEGY_DISCOVERY_TERMS = (
-    "capability_catalog",
-    "meme_strategy_guide",
-    "data_api",
-    "connector_list",
-    "connector_view",
-    "market_data",
-    "onchainos",
-    "okx_onchain",
-    "byreal",
-    "wallet provider",
-    "wallet capability",
-    "token_hot_tokens",
-    "memepump",
-)
-_SHELL_TEST_OR_BUILD_RE = re.compile(
-    r"\b(pytest|ruff|mypy|pyright|npm\s+test|pnpm\s+test|yarn\s+test)\b",
-    re.IGNORECASE,
-)
 _SHELL_PROJECT_COMMAND_RE = re.compile(
     r"\b("
     r"pytest|mypy|pyright|"
@@ -149,11 +130,6 @@ _SHELL_PROJECT_COMMAND_RE = re.compile(
     re.IGNORECASE,
 )
 _PARENT_PATH_RE = re.compile(r"(^|[\s\"'=:(])\.\.(?:[/\\]|$)")
-_WORKSPACE_ENUM_RE = re.compile(
-    r"(?i)(list\s+workspace|workspace\s+files|workspace\s+root|os\.walk|"
-    r"get-childitem|dir\s+.*[/\\]s|ls\s+-la|find\s+.+-name)"
-)
-
 _SHELL_SEGMENT_RE = re.compile(r"(?:^|[;&|]\s*)([A-Za-z0-9_.\\/-]+)")
 _DELETE_HEADS = {
     "rm", "del", "erase", "rmdir", "rd", "remove-item", "ri",
@@ -391,46 +367,6 @@ def _looks_like_read_only_network_fetch(cmd: str, heads: list[str]) -> bool:
     return True
 
 
-def _looks_like_native_strategy_discovery(cmd: str, description: str) -> bool:
-    haystack = f"{description}\n{cmd}".lower()
-    heads = _command_heads(cmd)
-    if any(head in _DELETE_HEADS for head in heads):
-        return False
-    if re.search(r"\bfind\b.*\s-delete\b", cmd, re.IGNORECASE):
-        return False
-    if _WORKSPACE_ENUM_RE.search(haystack) and any(
-        head in _READ_HEADS or head in {"python", "python3", "py"} for head in heads
-    ):
-        return True
-    if not any(term in haystack for term in _NATIVE_STRATEGY_DISCOVERY_TERMS):
-        return False
-    if _SHELL_TEST_OR_BUILD_RE.search(cmd):
-        return False
-
-    uses_python_probe = any(head in {"python", "python3", "py"} for head in heads) and (
-        re.search(r"\s-c\b", cmd)
-        or "from nerya.data" in haystack
-        or "data_api(" in haystack
-    )
-    if uses_python_probe:
-        return True
-
-    searches_workspace_for_native_sources = any(
-        head in _READ_HEADS for head in heads
-    ) and any(
-        term in haystack
-        for term in (
-            "connector",
-            "data source",
-            "wallet provider",
-            "onchainos",
-            "meme_strategy_guide",
-            "capability_catalog",
-        )
-    )
-    return searches_workspace_for_native_sources
-
-
 def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     """Map ``run_shell`` arguments -> :class:`RiskLevel`.
 
@@ -445,11 +381,6 @@ def classify_shell_risk(arguments: dict[str, Any]) -> RiskLevel:
     if not cmd:
         return RiskLevel.READ
     cmd = cmd.strip()
-    if _looks_like_native_strategy_discovery(
-        cmd,
-        str(arguments.get("description") or ""),
-    ):
-        return RiskLevel.READ
     heads = _command_heads(cmd)
     if any(head in _DELETE_HEADS for head in heads):
         return RiskLevel.DANGEROUS
@@ -605,45 +536,6 @@ def run_shell_handler(
                         "tool": proposal_tool,
                         "reason": "proposal_only_shell_mutation",
                     }
-                },
-            ),
-        )
-    if _looks_like_native_strategy_discovery(cmd, str(description)):
-        preferred_tools = ["glob", "list_dir", "read_file"]
-        if any(
-            term in f"{description}\n{cmd}".lower()
-            for term in _NATIVE_STRATEGY_DISCOVERY_TERMS
-        ):
-            preferred_tools.extend(["role_list", "subagent_list", "strategy_backtest"])
-        return ToolResult.from_error(
-            tool_use_id=call.id,
-            name=call.name,
-            error=ToolError(
-                kind=ToolErrorKind.PERMISSION_DENIED,
-                message=(
-                    "run_shell was not executed: this command is trying to "
-                    "rediscover strategy, connector, wallet, or on-chain data "
-                    "that native tools already expose. Read "
-                    "strategy_author with skill_view, use connector_list / "
-                    "connector_view / data_api / market_data for bounded "
-                    "evidence, then call strategy_draft_proposal and edit_file "
-                    "/ write_file on the staged proposal files with Nerya SDK "
-                    "code when custom strategy logic is needed. For workspace "
-                    "file listing use glob, list_dir, or read_file; to "
-                    "enumerate roles or subagents use role_list / "
-                    "subagent_list; to run a backtest use strategy_backtest. "
-                    "Reserve run_shell for explicit "
-                    "operator commands, tests, builds, or cases with no "
-                    "native tool."
-                ),
-                retryable=False,
-                detail={
-                    "reason": "tool_redirect",
-                    "preferred_tools": preferred_tools,
-                },
-                recovery_hint={
-                    "reason": "tool_redirect",
-                    "preferred_tools": preferred_tools,
                 },
             ),
         )

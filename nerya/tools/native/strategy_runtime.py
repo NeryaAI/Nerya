@@ -100,16 +100,13 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
         "description": {"type": "string"},
         "strategy_class": {
             "type": "string",
-            "enum": ["scalping", "trend", "news", "agent", "agent_task", "agent_team"],
+            "enum": ["scalping", "trend", "news", "agent", "agent_team"],
             "default": "scalping",
-            "description": (
-                "Strategy family. `agent_task` is accepted as an alias for "
-                "`strategy_class=agent` plus `execution_mode=agent_task`."
-            ),
+            "description": "Canonical strategy family.",
         },
         "execution_mode": {
             "type": "string",
-            "enum": ["script", "agent", "agent_task", "agent_team", "team"],
+            "enum": ["script", "agent", "agent_team"],
             "description": (
                 "Explicit runtime mode. `script` runs main.py directly; "
                 "`agent` lets main.py build a StrategyAgentTask prompt; "
@@ -131,22 +128,6 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
             ),
         },
         "accounts": {"type": "array", "items": {"type": "string"}},
-        "files.main.py": {
-            "type": "string",
-            "description": (
-                "Compact top-level alias for files['main.py']. Prefer this "
-                "over a large nested files object when authoring custom SDK "
-                "strategies through OpenAI-compatible providers."
-            ),
-        },
-        "files.strategy.md": {
-            "type": "string",
-            "description": (
-                "Compact top-level alias for files['strategy.md']. Keep it "
-                "concise; detailed tuning notes can be added after the "
-                "proposal exists."
-            ),
-        },
         "prompt": {
             "type": "string",
             "description": (
@@ -276,17 +257,13 @@ STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
         },
         "strategy_class": {
             "type": "string",
-            "enum": ["scalping", "trend", "news", "agent", "agent_task", "agent_team"],
+            "enum": ["scalping", "trend", "news", "agent", "agent_team"],
             "default": "scalping",
-            "description": (
-                "Strategy family used to pick the scaffold template. "
-                "`agent_task` is an alias for `strategy_class=agent` plus "
-                "`execution_mode=agent_task`."
-            ),
+            "description": "Canonical strategy family used to pick the scaffold template.",
         },
         "execution_mode": {
             "type": "string",
-            "enum": ["script", "agent", "agent_task", "agent_team", "team"],
+            "enum": ["script", "agent", "agent_team"],
             "description": (
                 "Explicit runtime mode for the scaffold. `script` runs main.py "
                 "directly; `agent` lets main.py build a StrategyAgentTask; "
@@ -696,20 +673,8 @@ def _missing_account_error(
 
 
 def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
-    args = _normalise_raw_strategy_args(args)
-    args = _normalise_strategy_market_venues(args)
     strategy_class = str(args.get("strategy_class") or "scalping").strip().lower()
     execution_mode = str(args.get("execution_mode") or "").strip().lower()
-    if strategy_class == "agent_task":
-        strategy_class = "agent"
-        execution_mode = execution_mode or "agent_task"
-    elif strategy_class == "custom":
-        execution_key = execution_mode.replace("-", "_")
-        strategy_class = (
-            "agent"
-            if execution_key in {"agent", "agent_task", "agent_team", "team"}
-            else "trend"
-        )
     return StrategyGenerationRequest(
         strategy_id=str(args.get("strategy_id") or "").strip(),
         title=str(args.get("title") or ""),
@@ -745,402 +710,6 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
     )
 
 
-def _normalise_strategy_market_venues(args: dict[str, Any]) -> dict[str, Any]:
-    markets = args.get("markets")
-    if not isinstance(markets, list):
-        return args
-    text = " ".join(
-        str(args.get(key) or "")
-        for key in ("title", "description", "prompt", "strategy_id")
-    ).lower()
-    wants_bybit_perp = (
-        "bybit" in text
-        and any(token in text for token in ("perp", "perpetual", "linear", "swap", "futures", "contract"))
-    )
-    changed = False
-    fixed: list[str] = []
-    for market in markets:
-        value = str(market)
-        if wants_bybit_perp and value.upper().startswith("BYBIT:"):
-            fixed.append("BYBIT_PERPETUAL:" + value.split(":", 1)[1])
-            changed = True
-        elif value.upper().startswith("BYREAL:"):
-            fixed_value = _normalise_byreal_market(value)
-            fixed.append(fixed_value)
-            changed = changed or fixed_value != value
-        else:
-            fixed.append(value)
-    if not changed:
-        return args
-    out = dict(args)
-    out["markets"] = fixed
-    return out
-
-
-_BYREAL_GENERIC_MARKET_TAILS = {
-    "",
-    "sol",
-    "solana",
-    "meme",
-    "memes",
-    "meme_pool",
-    "meme_pools",
-    "sol_meme_pool",
-    "sol_memepool",
-    "new_pool",
-    "new_pools",
-    "new-pool",
-    "new-pools",
-    "pool",
-    "pools",
-    "scan",
-    "scanner",
-    "universe",
-}
-
-
-def _normalise_byreal_market(value: str) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return raw
-    upper = raw.upper()
-    if upper.startswith("BYREAL_ONCHAIN:"):
-        return "BYREAL_ONCHAIN:" + raw.split(":", 1)[1]
-    if not upper.startswith("BYREAL:"):
-        return raw
-    tail = raw.split(":", 1)[1].strip() if ":" in raw else ""
-    tail_key = tail.strip().lower().replace("-", "_")
-    if (
-        tail_key in _BYREAL_GENERIC_MARKET_TAILS
-        or "meme_pool" in tail_key
-        or "new_pool" in tail_key
-    ):
-        return "BYREAL_ONCHAIN:solana"
-    if tail.lower().startswith("solana:"):
-        return "BYREAL_ONCHAIN:" + tail
-    return "BYREAL_ONCHAIN:solana:" + tail
-
-
-def _normalise_raw_strategy_args(args: dict[str, Any]) -> dict[str, Any]:
-    raw = args.get("_raw") if isinstance(args, dict) else None
-    if not isinstance(raw, str):
-        return args
-    raw = raw.strip()
-    if not raw.startswith("{"):
-        return args
-    parsed = _parse_raw_strategy_args(raw)
-    truncated_fields: list[str] = []
-    if parsed is None:
-        recovered = _recover_truncated_raw_strategy_args(raw)
-        if recovered is not None:
-            parsed = recovered
-            truncated_fields = [
-                key
-                for key in ("files", "files.main.py", "files.strategy.md")
-                if f'"{key}"' in raw and key not in recovered
-            ]
-    if parsed is None:
-        return args
-    merged = dict(args)
-    merged.pop("_raw", None)
-    merged.update(parsed)
-    if truncated_fields:
-        merged["_provider_raw_truncated"] = True
-        merged["_provider_raw_truncated_fields"] = truncated_fields
-    return merged
-
-
-def _parse_raw_strategy_args(raw: str) -> dict[str, Any] | None:
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _recover_truncated_raw_strategy_args(raw: str) -> dict[str, Any] | None:
-    """Recover provider-truncated JSON tool args without inventing fields."""
-
-    cut = raw.rfind(",")
-    attempts = 0
-    while cut > 0 and attempts < 20:
-        attempts += 1
-        candidate = raw[:cut].rstrip() + "}"
-        parsed = _parse_raw_strategy_args(candidate)
-        if isinstance(parsed, dict) and all(
-            parsed.get(key) for key in ("strategy_id", "markets", "accounts")
-        ):
-            return parsed
-        cut = raw.rfind(",", 0, cut)
-    return None
-
-
-def _request_mentions_markers(
-    request: StrategyGenerationRequest,
-    markers: tuple[str, ...],
-) -> bool:
-    body = "\n".join(
-        [
-            request.strategy_id,
-            request.title,
-            request.description,
-            request.prompt,
-            request.strategy_class,
-            request.execution_mode,
-            *request.markets,
-        ]
-    ).lower()
-    return _text_contains_marker(body, markers)
-
-
-def _text_mentions_markers(text: str, markers: tuple[str, ...]) -> bool:
-    return _text_contains_marker(str(text or "").lower(), markers)
-
-
-def _text_contains_marker(lowered: str, markers: tuple[str, ...]) -> bool:
-    tokens: set[str] | None = None
-    for marker in markers:
-        if marker in _TOKEN_MATCH_ONLY_MARKERS:
-            if tokens is None:
-                tokens = _lower_tokens(lowered)
-            if marker in tokens:
-                return True
-            continue
-        if marker in lowered:
-            return True
-    return False
-
-
-def _lower_tokens(lowered: str) -> set[str]:
-    token_chars: list[str] = []
-    tokens: set[str] = set()
-    for char in lowered:
-        if char.isalnum() or char == "_":
-            token_chars.append(char)
-            continue
-        if token_chars:
-            tokens.add("".join(token_chars))
-            token_chars.clear()
-    if token_chars:
-        tokens.add("".join(token_chars))
-    return tokens
-
-
-def _request_mentions_hard_to_replay(request: StrategyGenerationRequest) -> bool:
-    return _request_mentions_markers(request, _HARD_TO_REPLAY_MARKERS)
-
-
-def _request_mentions_custom_signal_logic(request: StrategyGenerationRequest) -> bool:
-    return _request_mentions_markers(request, _CUSTOM_SIGNAL_MARKERS)
-
-
-def _request_mentions_agent_decision(request: StrategyGenerationRequest) -> bool:
-    body = "\n".join(
-        [
-            request.strategy_id,
-            request.title,
-            request.description,
-            request.prompt,
-            *request.markets,
-        ]
-    ).lower()
-    return _text_contains_marker(body, _AGENT_DECISION_MARKERS)
-
-
-def _has_package_file(request: StrategyGenerationRequest, rel_path: str) -> bool:
-    wanted = rel_path.replace("\\", "/")
-    return any(str(path).replace("\\", "/") == wanted for path in request.files)
-
-
-def _requires_explicit_sdk_files(request: StrategyGenerationRequest) -> bool:
-    """Return true when template fallback would erase the requested thesis.
-
-    The generic generator is useful for simple CEX trend/scalping examples,
-    but wallet/on-chain/custom-data strategies need the agent to author the
-    SDK package logic itself. Otherwise the tool can silently turn a smart
-    money prompt into the default trend template.
-    """
-
-    if not _request_mentions_hard_to_replay(request):
-        return False
-    has_main = _has_package_file(request, "main.py")
-    has_strategy_doc = _has_package_file(
-        request,
-        "strategy.md",
-    ) or _has_package_file(request, "README.md")
-    return not (has_main and has_strategy_doc)
-
-
-def _raw_payload_truncated_before_sdk_files(args: dict[str, Any]) -> bool:
-    if not args.get("_provider_raw_truncated"):
-        return False
-    fields = args.get("_provider_raw_truncated_fields")
-    if isinstance(fields, list):
-        return any(str(field) in {"files", "files.main.py", "files.strategy.md"} for field in fields)
-    return False
-
-
-def _truncated_sdk_files_payload_error() -> str:
-    return (
-        "strategy_generate_proposal tool arguments were truncated before the "
-        "SDK files arrived. Re-call the tool with a compact payload: include "
-        "only strategy_id, title, strategy_class, execution_mode, mode, "
-        "markets, accounts, plus top-level `files.main.py` and "
-        "`files.strategy.md` string arguments. Omit long prompt, tuning_prompt, "
-        "policy_overrides, and llm_policy_overrides until after the proposal "
-        "exists."
-    )
-
-
-def _requires_custom_signal_main_py(
-    request: StrategyGenerationRequest,
-    *,
-    operator_prompt: str = "",
-) -> bool:
-    if not _request_mentions_custom_signal_logic(request):
-        return False
-    if operator_prompt and not _text_mentions_markers(
-        operator_prompt,
-        _CUSTOM_SIGNAL_MARKERS,
-    ):
-        return False
-    if _has_package_file(request, "main.py"):
-        return False
-    raw = request.execution_mode.strip().lower().replace("-", "_")
-    if raw == "agent_task":
-        raw = "agent"
-    elif raw == "team":
-        raw = "agent_team"
-    if raw in {"script", "agent", "agent_team"}:
-        return True
-    return request.strategy_class in {"scalping", "trend", "news", "agent", "agent_team"}
-
-
-def _custom_signal_main_py_coverage_error(
-    request: StrategyGenerationRequest,
-    *,
-    operator_prompt: str = "",
-) -> str:
-    main_py = request.files.get("main.py", "")
-    if not main_py:
-        return ""
-    requested = _requested_custom_signal_requirements(
-        request,
-        operator_prompt=operator_prompt,
-    )
-    if not requested:
-        return ""
-    main_l = main_py.lower()
-    missing = [
-        label
-        for label, code_markers in requested
-        if not _text_contains_marker(main_l, code_markers)
-    ]
-    if not missing:
-        return ""
-    return (
-        "`files.main.py` is missing requested custom signal logic: "
-        + ", ".join(missing)
-        + ". Put the indicator/data-source reads, trigger preconditions, or "
-        "StrategyAgentTask prompt inputs in main.py; strategy.md alone is not "
-        "a runnable strategy contract."
-    )
-
-
-def _requested_custom_signal_requirements(
-    request: StrategyGenerationRequest,
-    *,
-    operator_prompt: str = "",
-) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    source = operator_prompt.strip()
-    if not source:
-        source = "\n".join(
-            [
-                request.strategy_id,
-                request.title,
-                request.description,
-                request.prompt,
-                request.strategy_class,
-                request.execution_mode,
-                *request.markets,
-            ]
-        )
-    source_l = source.lower()
-    requested: list[tuple[str, tuple[str, ...]]] = []
-    for label, request_markers, code_markers in _CUSTOM_SIGNAL_TERM_REQUIREMENTS:
-        if _text_contains_marker(source_l, request_markers):
-            requested.append((label, code_markers))
-    return tuple(requested)
-
-
-def _normalise_model_invented_strategy_scope(
-    request: StrategyGenerationRequest,
-    *,
-    operator_prompt: str = "",
-) -> StrategyGenerationRequest:
-    """Undo model-invented agent mode when the operator asked for a plain strategy."""
-
-    if not operator_prompt:
-        return request
-    if _text_mentions_markers(operator_prompt, _AGENT_DECISION_MARKERS):
-        return request
-    strategy_class = request.strategy_class.strip().lower().replace("-", "_")
-    execution_mode = request.execution_mode.strip().lower().replace("-", "_")
-    if strategy_class not in {"agent", "agent_task", "agent_team"} and execution_mode not in {
-        "agent",
-        "agent_task",
-        "agent_team",
-        "team",
-    }:
-        return request
-    if request.files:
-        return request
-    return replace(request, strategy_class="trend", execution_mode="script")
-
-
-def _agent_decision_contract_error(
-    request: StrategyGenerationRequest,
-    *,
-    operator_prompt: str = "",
-) -> str:
-    if not _request_mentions_agent_decision(request):
-        return ""
-    if operator_prompt and not _text_mentions_markers(
-        operator_prompt,
-        _AGENT_DECISION_MARKERS,
-    ):
-        return ""
-    raw = request.execution_mode.strip().lower().replace("-", "_")
-    if raw == "agent_task":
-        raw = "agent"
-    elif raw == "team":
-        raw = "agent_team"
-    strategy_class = request.strategy_class.strip().lower().replace("-", "_")
-    main_py = request.files.get("main.py", "")
-    uses_agent_task = "StrategyAgentTask" in main_py
-    if raw in {"", "agent"} and strategy_class in {"agent", "agent_task"}:
-        if not main_py or uses_agent_task:
-            return ""
-    if raw == "agent" and uses_agent_task:
-        return ""
-    if raw == "agent_team" and strategy_class in {"agent", "agent_team"}:
-        if not main_py or uses_agent_task:
-            return ""
-    return (
-        "strategy requests that ask an Agent to decide, judge, arbitrate, "
-        "check news, size risk, or choose skip/error paths must be packaged "
-        "as an Agent-task strategy: set `strategy_class` to `agent` with "
-        "`execution_mode=agent` for a single-agent decision workflow, or use "
-        "`execution_mode=agent_team` when the request requires a coordinated "
-        "Agent Team. `files.main.py` must return "
-        "`StrategyAgentTask.dispatch(...)` when the Agent should decide, "
-        "`StrategyAgentTask.skip(...)` when preconditions are not met, or "
-        "`StrategyAgentTask.error(...)` for unrecoverable data errors. Do "
-        "not submit script-mode `ctx.result.*` logic for an Agent-decision "
-        "request."
-    )
-
-
 _PLACEHOLDER_BACKTEST_MARKERS = (
     "示例输出",
     "示例框架",
@@ -1156,8 +725,6 @@ _PLACEHOLDER_BACKTEST_MARKERS = (
 
 
 def _sdk_files_placeholder_error(request: StrategyGenerationRequest) -> str:
-    if not _request_mentions_hard_to_replay(request):
-        return ""
     for path, content in request.files.items():
         rel = str(path).replace("\\", "/").lower()
         if not rel.startswith("backtests/"):
@@ -1188,76 +755,6 @@ def _read_proposal_files(
     """
 
     return read_proposal_strategy_files(paths, proposal_id)
-
-
-def _normalise_bybit_perpetual_manifest_files(
-    paths,
-    *,
-    proposal_id: str,
-    strategy_id: str,
-    files: dict[str, str],
-) -> dict[str, str]:
-    manifest_text = files.get("strategy.yml")
-    if not manifest_text:
-        return files
-    try:
-        manifest = yaml_io.loads(manifest_text, default={}) or {}
-    except Exception:
-        return files
-    if not isinstance(manifest, dict):
-        return files
-    text = " ".join(
-        str(manifest.get(key) or "")
-        for key in ("strategy_id", "title", "description", "strategy_class", "execution_mode")
-    )
-    strategy_md = files.get("strategy.md")
-    if strategy_md:
-        text += " " + strategy_md
-    lowered = text.lower()
-    wants_bybit_perp = (
-        "bybit" in lowered
-        and any(token in lowered for token in ("perp", "perpetual", "linear", "swap", "futures", "contract"))
-    )
-    markets = manifest.get("markets")
-    if isinstance(markets, str):
-        values = [markets]
-    elif isinstance(markets, list):
-        values = [str(item) for item in markets]
-    else:
-        values = []
-    changed = False
-    fixed: list[str] = []
-    for market in values:
-        if wants_bybit_perp and market.upper().startswith("BYBIT:"):
-            fixed.append("BYBIT_PERPETUAL:" + market.split(":", 1)[1])
-            changed = True
-        elif market.upper().startswith("BYREAL:"):
-            fixed_value = _normalise_byreal_market(market)
-            fixed.append(fixed_value)
-            changed = changed or fixed_value != market
-        else:
-            fixed.append(market)
-    if not changed:
-        return files
-    manifest["markets"] = fixed
-    updated = yaml_io.dumps(manifest)
-    out = dict(files)
-    out["strategy.yml"] = updated
-    manifest_path = (
-        paths.evolution
-        / "proposals"
-        / proposal_id
-        / "after"
-        / "strategies"
-        / strategy_id
-        / "strategy.yml"
-    )
-    try:
-        if manifest_path.exists():
-            manifest_path.write_text(updated, encoding="utf-8")
-    except Exception:
-        _LOG.debug("failed to persist normalized strategy market", exc_info=True)
-    return out
 
 
 _FREEFORM_BACKTEST_KINDS = {
@@ -1303,233 +800,23 @@ def _proposal_backtest_artifacts(paths, proposal_id: str, strategy_id: str | Non
     return out
 
 
-_MEME_OR_ONCHAIN_MARKERS = (
-    "meme",
-    "memecoin",
-    "pump.fun",
-    "pumpfun",
-    "smart money",
-    "smart_money",
-    "top_trader",
-    "token_top_trader",
-    "onchain",
-    "on-chain",
-    "onchainos",
-    "okx_onchain",
-    "byreal",
-    "byreal_onchain",
-    "goat",
-    "dex",
-    "dexscreener",
-    "decentralized exchange",
-    "decentralised exchange",
-    "swap history",
-    "swap_history",
-    "token swap",
-    "wallet swap",
-    "solana:",
-    "base:",
-    "ethereum:",
-)
-
-_TOKEN_MATCH_ONLY_MARKERS = frozenset({"dex"})
-
-_PREDICTION_MARKET_MARKERS = (
-    "polymarket",
-    "prediction market",
-    "prediction_market",
-    "clob",
-)
-
-_HARD_TO_REPLAY_MARKERS = (
-    *_MEME_OR_ONCHAIN_MARKERS,
-    *_PREDICTION_MARKET_MARKERS,
-)
-
-_CUSTOM_SIGNAL_MARKERS = (
-    "macd",
-    "rsi",
-    "bollinger",
-    "布林",
-    "donchian",
-    "atr",
-    "kdj",
-    "fibonacci",
-    "支撑",
-    "阻力",
-    "support",
-    "resistance",
-    "funding",
-    "资金费率",
-    "cvd",
-    "order flow",
-    "订单流",
-)
-
-_CUSTOM_SIGNAL_TERM_REQUIREMENTS = (
-    (
-        "rsi",
-        ("rsi", "relative strength index", "相对强弱"),
-        ("rsi", "relative strength index", "相对强弱"),
-    ),
-    (
-        "macd",
-        ("macd",),
-        ("macd",),
-    ),
-    (
-        "bollinger",
-        ("bollinger", "布林"),
-        ("bollinger", "bbands", "布林"),
-    ),
-    (
-        "donchian",
-        ("donchian",),
-        ("donchian",),
-    ),
-    (
-        "atr",
-        ("atr", "average true range"),
-        ("atr", "average true range"),
-    ),
-    (
-        "kdj",
-        ("kdj",),
-        ("kdj",),
-    ),
-    (
-        "fibonacci",
-        ("fibonacci", "fib"),
-        ("fibonacci", "fib"),
-    ),
-    (
-        "support_resistance",
-        ("support", "resistance", "支撑", "阻力"),
-        ("support", "resistance", "支撑", "阻力"),
-    ),
-    (
-        "funding_rate",
-        ("funding", "funding rate", "资金费率"),
-        ("funding", "funding_rate", "funding rate", "资金费率"),
-    ),
-    (
-        "order_flow",
-        ("cvd", "order flow", "订单流", "大单流向", "大单", "whale flow"),
-        (
-            "cvd",
-            "order_flow",
-            "order flow",
-            "订单流",
-            "大单流向",
-            "large_trade",
-            "large trade",
-            "whale",
-            "taker",
-        ),
-    ),
-)
-
-_AGENT_DECISION_MARKERS = (
-    "agent",
-    "agentic",
-    "仲裁",
-    "决策",
-    "判断",
-    "决定",
-    "新闻",
-    "news",
-    "news_social",
-    "portfolio",
-    "仓位",
-    "风险预算",
-    "skip",
-    "error",
-)
-_NEWS_CONTEXT_MARKERS = (
-    "news",
-    "headline",
-    "headlines",
-    "catalyst",
-    "catalysts",
-    "social",
-    "sentiment",
-    "macro event",
-    "market event",
-    "新闻",
-    "消息",
-    "事件",
-    "大宗事件",
-    "舆情",
-    "情绪",
-)
-_CRYPTO_CONTEXT_MARKERS = (
-    "btc",
-    "eth",
-    "sol",
-    "bnb",
-    "usdt",
-    "crypto",
-    "defi",
-    "dex",
-    "链上",
-    "加密",
-)
-_SOCIAL_CONTEXT_MARKERS = (
-    "social",
-    "sentiment",
-    "x/twitter",
-    "twitter",
-    "reddit",
-    "舆情",
-    "社媒",
-    "情绪",
-)
-
-
-def _with_inferred_news_sources(
-    request: StrategyGenerationRequest,
-    *,
-    operator_prompt: str,
-) -> StrategyGenerationRequest:
-    if request.news_sources:
-        return request
-    text = " ".join(
-        str(part or "")
-        for part in (
-            operator_prompt,
-            request.prompt,
-            request.title,
-            request.description,
-            " ".join(request.markets),
-        )
-    ).lower()
-    if not any(marker in text for marker in _NEWS_CONTEXT_MARKERS):
-        return request
-    sources: list[str] = []
-    if any(marker in text for marker in _CRYPTO_CONTEXT_MARKERS):
-        sources.append("crypto")
-    else:
-        sources.append("news")
-    if any(marker in text for marker in _SOCIAL_CONTEXT_MARKERS):
-        sources.append("social")
-    return replace(request, news_sources=tuple(dict.fromkeys(sources)))
-
-
-def _proposal_is_meme_or_onchain(
+def _proposal_uses_event_replay(
     strategy_id: str | None,
     files: dict[str, str],
 ) -> bool:
-    body = "\n".join(
-        str(part)
-        for part in (
-            strategy_id or "",
-            files.get("strategy.yml", ""),
-            files.get("strategy.md", ""),
-            files.get("config.yml", ""),
-            files.get("main.py", ""),
-        )
-    ).lower()
-    return _text_contains_marker(body, _MEME_OR_ONCHAIN_MARKERS)
+    """Use the replay policy declared by canonical market identifiers."""
+    del strategy_id
+    try:
+        manifest = yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}
+    except Exception:
+        manifest = {}
+    markets = manifest.get("markets") if isinstance(manifest, dict) else None
+    values = [markets] if isinstance(markets, str) else markets if isinstance(markets, list) else []
+    for market in values:
+        venue = str(market or "").split(":", 1)[0].strip().upper()
+        if venue.endswith("_ONCHAIN") or venue in {"ONCHAIN", "POLYMARKET"}:
+            return True
+    return False
 
 
 def _proposal_generic_onchain_markets(files: dict[str, str]) -> list[str]:
@@ -1958,7 +1245,7 @@ def _proposal_requires_standard_backtest(
         market_values = []
     if not market_values:
         return False
-    if _proposal_is_meme_or_onchain(strategy_id, files):
+    if _proposal_uses_event_replay(strategy_id, files):
         return False
     return True
 
@@ -1983,65 +1270,11 @@ def _proposal_nonstandard_replay_next_action() -> dict[str, Any]:
 def strategy_generate_proposal_handler(
     call: ToolCall, *, config: Config
 ) -> ToolResult:
-    args = _normalise_raw_strategy_args(call.arguments or {})
+    args = call.arguments or {}
     try:
         request = _request_from_args(args)
     except Exception as exc:  # type errors etc.
         return _usage_error(call, f"invalid request: {type(exc).__name__}: {exc}")
-    metadata = call.metadata if isinstance(call.metadata, dict) else {}
-    operator_prompt = str(metadata.get("original_user_prompt") or "")
-    request = _normalise_model_invented_strategy_scope(
-        request,
-        operator_prompt=operator_prompt,
-    )
-    request = _with_inferred_news_sources(
-        request,
-        operator_prompt=operator_prompt,
-    )
-    if _requires_explicit_sdk_files(request):
-        if _raw_payload_truncated_before_sdk_files(args):
-            return _usage_error(call, _truncated_sdk_files_payload_error())
-        return _usage_error(
-            call,
-            (
-                "wallet/on-chain/custom-data or prediction-market strategy "
-                "proposals must include "
-                "`files.main.py` and `files.strategy.md` authored with the "
-                "Nerya Strategy SDK. The proposal tool only packages and "
-                "validates that code; it must not fall back to the default "
-                "trend/scalping generator for this scope."
-            ),
-        )
-    if _requires_custom_signal_main_py(request, operator_prompt=operator_prompt):
-        return _usage_error(
-            call,
-            (
-                "strategy requests with named custom signal logic must include "
-                "`files.main.py` authored with the Nerya Strategy SDK. Draft "
-                "the indicator/trigger logic directly in "
-                "strategy_generate_proposal.files instead of generating a stock "
-                "template and editing proposal files afterwards."
-            ),
-            recovery_hint={
-                "action": "retry_with_required_arguments",
-                "tool_name": "strategy_generate_proposal",
-                "required_arguments": ["files.main.py"],
-                "avoid_arguments": ["files"],
-                "reason": "custom_signal_logic_requires_sdk_file",
-            },
-        )
-    agent_contract_error = _agent_decision_contract_error(
-        request,
-        operator_prompt=operator_prompt,
-    )
-    if agent_contract_error:
-        return _usage_error(call, agent_contract_error)
-    signal_coverage_error = _custom_signal_main_py_coverage_error(
-        request,
-        operator_prompt=operator_prompt,
-    )
-    if signal_coverage_error:
-        return _usage_error(call, signal_coverage_error)
     placeholder_error = _sdk_files_placeholder_error(request)
     if placeholder_error:
         return _usage_error(call, placeholder_error)
@@ -2273,7 +1506,7 @@ def _draft_from_promoted(
 def strategy_draft_proposal_handler(
     call: ToolCall, *, config: Config
 ) -> ToolResult:
-    args = _normalise_raw_strategy_args(call.arguments or {})
+    args = call.arguments or {}
     strategy_id = str(args.get("strategy_id") or "").strip()
     from_strategy_id = str(args.get("from_strategy_id") or "").strip()
     if not strategy_id:
@@ -2438,13 +1671,6 @@ def strategy_submit_proposal_handler(
             ),
         )
     strategy_id = sid or "unknown"
-    files = _normalise_bybit_perpetual_manifest_files(
-        paths,
-        proposal_id=proposal_id,
-        strategy_id=strategy_id,
-        files=files,
-    )
-
     try:
         validation = validate_proposal_files(strategy_id=strategy_id, files=files)
     except Exception as exc:
@@ -2516,12 +1742,6 @@ def strategy_validate_handler(call: ToolCall, *, config: Config) -> ToolResult:
                     call, f"proposal {proposal_id!r} has no after/strategies/* tree"
                 )
             target_sid = strategy_id or sid or "unknown"
-            files = _normalise_bybit_perpetual_manifest_files(
-                config.paths,
-                proposal_id=proposal_id,
-                strategy_id=target_sid,
-                files=files,
-            )
             validation = validate_proposal_files(
                 strategy_id=target_sid, files=files
             )
@@ -2548,18 +1768,6 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
     # rather than failing run_strategy_backtest's "exactly one" guard.
     if strategy_id and proposal_id:
         strategy_id = None
-    if proposal_id:
-        try:
-            sid, files = _read_proposal_files(config.paths, proposal_id)
-            if files:
-                _normalise_bybit_perpetual_manifest_files(
-                    config.paths,
-                    proposal_id=proposal_id,
-                    strategy_id=sid or strategy_id or "unknown",
-                    files=files,
-                )
-        except Exception:
-            _LOG.debug("pre-backtest proposal normalization failed", exc_info=True)
     if strategy_id and not proposal_id:
         matching_proposals = _matching_proposal_strategy_candidates(config.paths, strategy_id)
         if matching_proposals and _promoted_strategy_has_placeholder_market(
@@ -2649,7 +1857,7 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
                             "market_data result, e.g. BYREAL_ONCHAIN:solana:<pool_address>."
                         ),
                     }
-                elif _proposal_is_meme_or_onchain(sid or strategy_id, files):
+                elif _proposal_uses_event_replay(sid or strategy_id, files):
                     next_required_action = {
                         "type": "custom_replay_or_operator_approval",
                         "message": (
@@ -2711,7 +1919,7 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
             target_sid,
         )
         model_result["nonstandard_backtests"] = nonstandard_backtests
-        is_meme_or_onchain = _proposal_is_meme_or_onchain(target_sid, files)
+        is_meme_or_onchain = _proposal_uses_event_replay(target_sid, files)
         if is_meme_or_onchain:
             paper_review_allowed = bool(nonstandard_backtests) or bool(result.get("ok"))
             result_kind = str(result.get("kind") or "")
@@ -2842,7 +2050,7 @@ def strategy_promote_handler(call: ToolCall, *, config: Config) -> ToolResult:
         return _usage_error(call, f"invalid backtest_policy: {requested_policy!r}")
     approval_note = str(args.get("approval_note") or note or "").strip()
     operator_approved = bool(args.get("operator_approved", False))
-    is_meme_or_onchain = _proposal_is_meme_or_onchain(sid, files)
+    is_meme_or_onchain = _proposal_uses_event_replay(sid, files)
     backtest_status = _proposal_backtest_status(
         policy=requested_policy,
         is_meme_or_onchain=is_meme_or_onchain,

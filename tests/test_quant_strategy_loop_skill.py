@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from nerya.skills.manifest import SkillManifest
-from nerya.tools.native.tool_surfaces import surfaces_for_skill
 from nerya.workspace.manager import _DEFAULT_ENABLED_SKILLS
 
 
@@ -22,7 +21,6 @@ def test_quant_strategy_loop_is_safe_and_available() -> None:
 
     assert manifest.id == "quant-strategy-loop"
     assert manifest.id in _DEFAULT_ENABLED_SKILLS
-    assert surfaces_for_skill(manifest.id) == ("strategy", "trading", "markets")
     assert "GOAL GATE" in manifest.instructions
     assert "allow_mock=false" in manifest.instructions
     assert "available_at <= decision_at" in playbook

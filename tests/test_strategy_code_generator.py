@@ -20,7 +20,6 @@ from nerya.strategies.agent_task import StrategyAgentTask
 from nerya.tools.native.strategy_runtime import (
     STRATEGY_GENERATE_PROPOSAL_SCHEMA,
     _request_from_args,
-    _with_inferred_news_sources,
     strategy_promote_handler,
 )
 from nerya.tools.types import ToolCall
@@ -101,7 +100,7 @@ def test_strategy_generator_normalizes_agent_authored_overrides(tmp_path):
     req = StrategyGenerationRequest(
         strategy_id="solana_smartmoney_meme",
         strategy_class="agent",
-        execution_mode="agent_task",
+        execution_mode="agent",
         markets=("SOLANA",),
         accounts=("paper",),
         files={
@@ -161,7 +160,7 @@ def test_strategy_generator_normalizes_common_agent_task_sdk_mistakes(tmp_path):
     req = StrategyGenerationRequest(
         strategy_id="solana_smartmoney_meme",
         strategy_class="agent",
-        execution_mode="agent_task",
+        execution_mode="agent",
         markets=("BYREAL_ONCHAIN:solana",),
         accounts=("paper",),
         files={
@@ -238,7 +237,7 @@ def test_strategy_generator_normalizes_agent_task_constructor_kwargs(tmp_path):
     req = StrategyGenerationRequest(
         strategy_id="btc_bb_squeeze_agent",
         strategy_class="agent",
-        execution_mode="agent_task",
+        execution_mode="agent",
         markets=("BINANCE:BTCUSDT",),
         accounts=("paper_main",),
         files={
@@ -590,7 +589,7 @@ def test_strategy_generator_normalizes_legacy_execution_schedule(tmp_path):
     req = StrategyGenerationRequest(
         strategy_id="solana_smartmoney_meme",
         strategy_class="agent",
-        execution_mode="agent_task",
+        execution_mode="agent",
         markets=("BYREAL_ONCHAIN:solana:token",),
         accounts=("paper_main",),
         files={
@@ -604,7 +603,7 @@ accounts:
   - paper_main
 mode: paper
 execution:
-  execution_mode: agent_task
+  execution_mode: agent
   schedule:
     cron: "*/30 * * * *"
 """,
@@ -628,18 +627,19 @@ execution:
     }
 
 
-def test_strategy_generate_request_accepts_agent_task_class_alias() -> None:
+def test_strategy_generate_request_uses_canonical_agent_class_and_mode() -> None:
     req = _request_from_args({
         "strategy_id": "solana_smartmoney_meme",
-        "strategy_class": "agent_task",
+        "strategy_class": "agent",
+        "execution_mode": "agent",
         "markets": ["BYREAL_ONCHAIN:solana:token"],
         "accounts": ["paper_main"],
     })
 
     enum = STRATEGY_GENERATE_PROPOSAL_SCHEMA["properties"]["strategy_class"]["enum"]
-    assert "agent_task" in enum
+    assert "agent_task" not in enum
     assert req.strategy_class == "agent"
-    assert req.execution_mode == "agent_task"
+    assert req.execution_mode == "agent"
 
 
 def test_strategy_generate_request_maps_bybit_perpetual_market_alias() -> None:
@@ -651,7 +651,7 @@ def test_strategy_generate_request_maps_bybit_perpetual_market_alias() -> None:
         "accounts": ["bybit_paper"],
     })
 
-    assert req.markets == ("BYBIT_PERPETUAL:SOLUSDT",)
+    assert req.markets == ("BYBIT:SOLUSDT",)
 
 
 def test_strategy_generator_agent_team_uses_agent_task_runtime(tmp_path):
@@ -761,7 +761,7 @@ def test_strategy_generator_agent_mode_preserves_news_social_context(tmp_path):
     assert "ctx.news.fetch(sources=_NEWS_SOCIAL_SOURCES" in main_py
 
 
-def test_strategy_request_infers_news_social_context_from_operator_prompt(tmp_path):
+def test_strategy_request_does_not_infer_news_sources_from_operator_prompt(tmp_path):
     req = _request_from_args({
         "strategy_id": "eth_macd_news_agent",
         "title": "ETH MACD Agent",
@@ -771,20 +771,15 @@ def test_strategy_request_infers_news_social_context_from_operator_prompt(tmp_pa
         "accounts": ["paper_main"],
     })
 
-    inferred = _with_inferred_news_sources(
-        req,
-        operator_prompt="ETH 1h MACD 金叉触发时先查最近 6 小时新闻和大宗事件再决策",
-    )
     out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
-        inferred,
+        req,
         validate=False,
         create_proposal_record=False,
     )
 
     manifest = yaml_io.loads(out.files["strategy.yml"])
-    assert inferred.news_sources == ("crypto",)
-    assert "news_social" in manifest["agent_profile"]["attached_skills"]
-    assert "news_social" in out.files["main.py"]
+    assert req.news_sources == ()
+    assert "news_social" not in manifest["agent_profile"]["attached_skills"]
 
 
 def test_strategy_generator_news_sources_add_hook_to_inline_main_override(tmp_path):

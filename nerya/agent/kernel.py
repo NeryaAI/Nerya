@@ -818,12 +818,8 @@ def _render_temporal_context_block() -> str:
         f"Temporal context: Today's date is {local_date} (local time). "
         f"Current UTC time is {utc_iso}.\n"
         "Current and recent fact rule: for facts that could have changed "
-        "recently, including markets, news, regulations, model/provider "
-        "availability, public/company figures, prices, schedules, and anything "
-        "the user calls current/latest/recent/today/this year, use live tools "
-        "such as web_search_fetch, web_fetch, connector_list/connector_view, "
-        "portfolio/strategy tools, journals, or relevant skills loaded on "
-        "demand before answering. Report the "
+        "recently, use the available live tools and relevant skills before "
+        "answering. Report the "
         "evidence date/source you used. If current tools fail or are "
         "unavailable, say the current status is unverified instead of "
         "presenting model-memory facts as current. Do not describe 2024-2025 "
@@ -844,8 +840,6 @@ def _render_output_language_block() -> str:
         "that explicit final-output language overrides the prompt's surrounding language. "
         "For split-language requests, keep working analysis in the requested analysis language "
         "and write the final user-facing answer/report in the requested final-output language.\n"
-        "- When calling `team_run`, pass the requested final-output language through `output_language` "
-        "and pass any requested internal analysis/discussion language through `analysis_language`.\n"
         "- Translate or synthesize tool/sub-agent outputs into that same "
         "user-facing language; do not leave a mixed-language report just "
         "because evidence, tool fields, or team member outputs used another "
@@ -4303,23 +4297,12 @@ class AgentKernel:
         rolling_sections: list[str] = []
         sections = cached_sections
         sections.append(
-            "You are Nerya, an autonomous coding + trading agent. You have"
-            " native tools for filesystem, search, shell, planning,"
-            " memory, sub-agents, self-evolution, skill discovery,"
-            " connector / venue discovery (connector_list,"
-            " connector_view), trading (portfolio_summary, risk_check,"
-            " kill_switch_set, trade_intent_submit, strategy_list /"
-            " strategy_view / strategy_history), strategy package"
-            " lifecycle (strategy_draft_proposal then edit the staged files"
-            " / strategy_validate / strategy_submit_proposal /"
-            " strategy_backtest / strategy_promote / strategy_run_tick),"
-            " and LLM delegation"
-            " (llm_complete / llm_classify / llm_extract_json /"
-            " llm_compress for cheap classification + schema-bound"
-            " extraction). Prefer the smallest tool that gets the job"
-            " done; read files before editing them; run short commands"
-            " before long ones; dry-run trade intents through risk_check"
-            " before trade_intent_submit."
+            "You are Nerya, an autonomous coding and trading agent. Select "
+            "skills from their descriptions, load the matching playbook on "
+            "demand, and select tools from their names, descriptions, and "
+            "input schemas. Prefer the smallest sufficient action and ground "
+            "claims in observed results. Agent-authored changes remain "
+            "proposals; trading remains subject to risk and approval gates."
         )
 
         sections.append(f"Workspace root: {deps.workspace_root}")
@@ -4337,11 +4320,6 @@ class AgentKernel:
             rolling_sections.append(conversation_file_policy)
         rolling_sections.append(_render_output_language_block())
         rolling_sections.append(_render_permission_mode_block(self.permission_mode))
-        if attached_skills:
-            rolling_sections.append(
-                "Attached skills (preferred for this turn): "
-                + ", ".join(attached_skills)
-            )
         if stable_memory_block:
             cached_sections.append(stable_memory_block)
         if dynamic_memory_block:

@@ -38,6 +38,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from xml.sax.saxutils import escape as xml_escape
 
 from ...core.sandbox import sandbox_exec
 from ...security.runtime_env import build_process_env
@@ -68,8 +69,6 @@ class SkillRecord:
 
     skill_id: str
     description: str
-    # Kept for the script approval gate; never used for skill activation.
-    permissions: list[str] = field(default_factory=list)
     path: str = ""
     body_chars: int = 0
     has_scripts: bool = False
@@ -158,7 +157,6 @@ def index_skills(
             SkillRecord(
                 skill_id=sid,
                 description=str(fm.get("description") or "").strip(),
-                permissions=list(fm.get("permissions") or []),
                 path=str(md),
                 body_chars=len(body),
                 has_scripts=bool(scripts),
@@ -212,22 +210,26 @@ class SkillIndex:
         return self._by_id.get(skill_id)
 
     def render_for_prompt(self, *, max_chars: int | None = None) -> str:
-        out: list[str] = [
-            "## Skills available",
-            "Each entry is a SKILL.md playbook. Load a matching playbook "
-            "with Skill or skill_view before using its specialized tools.",
-        ]
-        used = sum(len(s) + 1 for s in out)
+        """Render the standard progressive-disclosure skill catalog.
+
+        Only metadata is injected. The markdown body is loaded through the
+        Skill/skill_view tool when the model selects a skill.
+        """
+        entries: list[str] = []
+        used = len("<available_skills>\n</available_skills>")
         for r in self.records():
-            head = f"- **{r.skill_id}**"
-            if r.description:
-                desc = r.description.replace("\n", " ").strip()
-                head += f": {desc}"
-            if max_chars is not None and used + len(head) + 1 > max_chars:
+            entry = (
+                "  <skill>\n"
+                f"    <name>{xml_escape(r.skill_id)}</name>\n"
+                f"    <description>{xml_escape(r.description)}</description>\n"
+                f"    <location>{xml_escape(r.path)}</location>\n"
+                "  </skill>"
+            )
+            if max_chars is not None and used + len(entry) + 1 > max_chars:
                 break
-            out.append(head)
-            used += len(head) + 1
-        return "\n".join(out)
+            entries.append(entry)
+            used += len(entry) + 1
+        return "<available_skills>\n" + "\n".join(entries) + "\n</available_skills>"
 
 
 # ---------------------------------------------------------------------------
@@ -355,44 +357,6 @@ def is_browser_skill_script_run(payload: dict[str, Any]) -> bool:
     sid = str(payload.get("skill_id") or payload.get("id") or "").strip().lower()
     name = str(payload.get("name") or payload.get("script") or "").strip()
     return sid == "browser" and bool(name)
-
-
-_SAFE_SCRIPT_PERMISSIONS = frozenset({"read", "network", "rss", "web", "http"})
-
-
-def is_low_risk_builtin_skill_script_run(
-    payload: dict[str, Any],
-    *,
-    skill_index: SkillIndex,
-    trusted_roots: Iterable[Path],
-) -> bool:
-    """Return true for explicitly low-risk scripts from trusted built-in skills."""
-
-    sid = str(payload.get("skill_id") or payload.get("id") or "").strip()
-    name = str(payload.get("name") or payload.get("script") or "").strip()
-    if not sid or not name:
-        return False
-    rec = skill_index.get(sid)
-    if rec is None or name not in set(rec.scripts):
-        return False
-    permissions = {
-        str(item).strip().lower()
-        for item in rec.permissions
-        if str(item).strip()
-    }
-    if not permissions or not permissions <= _SAFE_SCRIPT_PERMISSIONS:
-        return False
-    script_path = _script_path(skill_index, sid, name)
-    if script_path is None:
-        return False
-    resolved_script = script_path.resolve()
-    for root in trusted_roots:
-        try:
-            resolved_script.relative_to(Path(root).resolve())
-            return True
-        except ValueError:
-            continue
-    return False
 
 
 def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult:
@@ -555,7 +519,6 @@ __all__ = [
     "SkillRecord",
     "index_skills",
     "is_browser_skill_script_run",
-    "is_low_risk_builtin_skill_script_run",
     "script_inspect_handler",
     "script_run_handler",
     "skill_index_handler",

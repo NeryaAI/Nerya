@@ -420,7 +420,7 @@ def test_generic_json_compaction_keeps_proposal_locator_fields() -> None:
     output = {
         "strategy_id": "bsc_whale_copycat",
         "strategy_class": "agent",
-        "execution_mode": "agent_task",
+        "execution_mode": "agent",
         "proposal_id": "prp_625b2c8ffd0d",
         "validation": {"ok": True},
         "proposal_paths": {

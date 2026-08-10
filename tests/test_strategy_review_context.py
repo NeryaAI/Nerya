@@ -410,17 +410,8 @@ def test_sdk_and_native_tuning_run_forward_explicit_evidence_scope(
 
 def test_explicit_payload_only_context_cannot_read_session_memory(
     tmp_path,
-    monkeypatch,
 ):
     sentinel = "ordinary-session-memory-must-not-appear"
-
-    def fail_if_context_is_loaded(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        raise AssertionError(sentinel)
-
-    monkeypatch.setattr(
-        "nerya.subagents.runtime.build_context",
-        fail_if_context_is_loaded,
-    )
 
     class FakeSkillRegistry:
         def list(self):  # noqa: ANN201

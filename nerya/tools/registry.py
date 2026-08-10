@@ -123,23 +123,10 @@ class ToolRegistry:
     # ------------------------------------------------------------ lookup
 
     def get(self, name: str) -> ToolDescriptor:
-        """Return the descriptor or raise :class:`ToolNotFoundError`.
-
-        Exact-match first. On miss, falls back to a case-insensitive
-        scan so a model emitting ``"skill"`` instead of ``"Skill"`` (or
-        ``"read_File"`` etc.) still routes to the right tool instead
-        of taking the ``unknown tool`` branch. Enabled-status is still
-        enforced on the matched entry.
-        """
+        """Return the exact descriptor or raise :class:`ToolNotFoundError`."""
 
         with self._lock:
             entry = self._entries.get(name)
-            if entry is None:
-                lowered = name.lower() if isinstance(name, str) else name
-                for key, candidate in self._entries.items():
-                    if key.lower() == lowered:
-                        entry = candidate
-                        break
         if entry is None or not entry.enabled:
             raise ToolNotFoundError(name)
         return entry.descriptor
@@ -244,10 +231,6 @@ def make_native_descriptor(
     permission_scope: Any = None,
     child_max_depth: int | None = None,
     delegates_to: str = "",
-    invocation_aliases: Iterable[str] = (),
-    subject_action_aliases: Iterable[str] = (),
-    subject_argument: str = "",
-    argument_aliases: Iterable[tuple[str, str]] = (),
 ) -> ToolDescriptor:
     """Build a :class:`ToolDescriptor` for a native tool.
 
@@ -284,13 +267,6 @@ def make_native_descriptor(
         auto_approve_when=auto_approve_when,
         child_max_depth=child_max_depth,
         delegates_to=str(delegates_to or ""),
-        invocation_aliases=tuple(invocation_aliases),
-        subject_action_aliases=tuple(subject_action_aliases),
-        subject_argument=str(subject_argument or ""),
-        argument_aliases=tuple(
-            (str(alias), str(canonical))
-            for alias, canonical in argument_aliases
-        ),
     )
 
 

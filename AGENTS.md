@@ -76,7 +76,7 @@ Nerya/
 │   ├── connectors/        # ccxt_adapter, polymarket, evm/solana/bsc native, registry, provider_spec
 │   ├── core/              # config, paths, errors, yaml_io, devmode
 │   ├── data/              # news / social / tvl / funding / whale-event feeds (real APIs)
-│   ├── evolution/         # reflection_engine, strategy_mutation, learning_writer, patch proposals
+│   ├── evolution/         # reflection, strategy mutation, patch proposals, promotion, rollback
 │   ├── install/           # service / host-process helpers
 │   ├── llm/               # ModelRouter, adapters/, credential_pool, compression, session, budget
 │   ├── mcp/               # FastMCP server exposing skills as MCP tools

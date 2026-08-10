@@ -5,7 +5,6 @@ description: "Use to perform a discounted cash flow (DCF) valuation analysis and
 version: 0.1.0
 license: MIT
 author: Nerya
-requires_integration: financial_datasets
 ---
 <!-- nerya-skill-frontmatter-end -->
 

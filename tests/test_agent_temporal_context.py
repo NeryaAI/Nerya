@@ -142,8 +142,8 @@ def test_system_prompt_includes_current_date_and_freshness_rules(tmp_path) -> No
 
     assert "Today's date is 2026-05-02" in prompt
     assert "Current UTC time is 2026-05-02T15:58:10Z" in prompt
-    assert "web_search_fetch" in prompt
-    assert "current/latest/recent/today/this year" in prompt
+    assert "available live tools and relevant skills" in prompt
+    assert "web_search_fetch" not in prompt
     assert "Do not describe 2024-2025 as the current environment" in prompt
 
 
@@ -385,7 +385,7 @@ def test_news_turn_focus_requires_source_evidence_or_blocker(tmp_path) -> None:
     )
 
     assert "Current and recent fact rule" in prompt
-    assert "use live tools" in prompt
+    assert "use the available live tools" in prompt
     assert "current status is unverified" in prompt
     assert "For web/news/social research" not in prompt
 
@@ -440,7 +440,8 @@ def test_system_prompt_prioritizes_explicit_final_output_language(tmp_path) -> N
 
     assert "If the latest request explicitly names a final answer, report, or deliverable language" in prompt
     assert "that explicit final-output language overrides the prompt's surrounding language" in prompt
-    assert "When calling `team_run`, pass the requested final-output language through `output_language`" in prompt
+    assert "team_run" not in prompt
+    assert "Translate or synthesize tool/sub-agent outputs" in prompt
 
 
 def test_prior_chat_history_skips_failed_max_iteration_turns(tmp_path) -> None:

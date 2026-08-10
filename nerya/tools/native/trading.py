@@ -199,11 +199,11 @@ _TRADE_INTENT_SCHEMA_PROPERTIES: dict[str, Any] = {
     },
     "symbol": {
         "type": "string",
-        "description": "Adapter alias for the symbol/pair when market is separate.",
+        "description": "Symbol or pair when passed with an explicit venue.",
     },
     "venue": {
         "type": "string",
-        "description": "Adapter alias used with symbol or a market missing venue.",
+        "description": "Venue paired with symbol when market is not already qualified.",
     },
     "side": {"type": "string", "enum": ["buy", "sell"]},
     "size": {
@@ -253,10 +253,7 @@ _TRADE_INTENT_SCHEMA_PROPERTIES: dict[str, Any] = {
     },
     "confidence": {"type": "number"},
     "reasoning": {"type": "string"},
-    "rationale": {
-        "type": "string",
-        "description": "Adapter alias for reasoning.",
-    },
+
     "source": {"type": "string"},
     "trigger_event_id": {"type": "string"},
     "meta": {"type": "object"},
@@ -444,26 +441,11 @@ def _coerce_pct_fraction(raw: Any) -> float | None:
     return None
 
 
-def _venue_from_account(config: Config, account_id: str) -> str:
-    if not account_id:
-        return ""
-    try:
-        account = load_accounts(config.paths).get(account_id)
-    except Exception:
-        account = None
-    if account is None:
-        return ""
-    return str(account.venue or account.exchange or "").strip()
-
-
-def _normalize_market_fields(spec: dict[str, Any], *, config: Config) -> dict[str, Any]:
+def _normalize_market_fields(spec: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(spec)
     market = str(normalized.get("market") or "").strip()
     symbol = str(normalized.get("symbol") or "").strip()
     venue = str(normalized.get("venue") or "").strip()
-    if not venue:
-        venue = _venue_from_account(config, str(normalized.get("account_id") or ""))
-
     if not market and symbol:
         market = f"{venue}:{symbol}" if venue else symbol
     elif market and ":" not in market and venue:
@@ -593,12 +575,8 @@ def _normalize_trade_intent_for_domain(
     default_source: str,
     market_snapshot: dict[str, Any] | None = None,
 ) -> _NormalizedIntent:
-    spec = _normalize_market_fields(_normalize_trade_intent_spec(raw), config=config)
+    spec = _normalize_market_fields(_normalize_trade_intent_spec(raw))
     normalization: dict[str, Any] = {}
-
-    rationale = spec.pop("rationale", None)
-    if rationale and not spec.get("reasoning"):
-        spec["reasoning"] = str(rationale)
 
     size_pct_nav = _coerce_pct_fraction(spec.pop("size_pct_nav", None))
     max_size_pct_nav = _coerce_pct_fraction(spec.pop("max_size_pct_nav", None))

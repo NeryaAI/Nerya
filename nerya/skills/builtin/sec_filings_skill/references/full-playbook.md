@@ -5,7 +5,6 @@ description: "Use to list, fetch, and read sections of SEC filings (10-K, 10-Q, 
 version: 0.1.0
 license: MIT
 author: Nerya
-requires_integration: financial_datasets
 ---
 <!-- nerya-skill-frontmatter-end -->
 

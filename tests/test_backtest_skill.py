@@ -1119,7 +1119,7 @@ def test_strategy_generate_proposal_handler_accepts_agent_team_decision_strategy
     assert data["proposal_id"]
 
 
-def test_strategy_generate_proposal_handler_recovers_truncated_raw_payload(
+def test_strategy_generate_proposal_handler_rejects_truncated_raw_payload(
     tmp_path: Path,
 ) -> None:
     from nerya.tools.native.strategy_runtime import strategy_generate_proposal_handler
@@ -1133,7 +1133,7 @@ def test_strategy_generate_proposal_handler_recovers_truncated_raw_payload(
         'and Aster perpetual basis/funding.",'
         '"prompt":"Use Binance spot and Aster perpetual markets for a '
         'cash-and-carry basis strategy; report data gaps honestly.",'
-        '"strategy_class":"custom",'
+        '"strategy_class":"trend",'
         '"execution_mode":"script",'
         '"mode":"paper",'
         '"markets":["binance:BTCUSDT","aster:BTCUSDT-PERP"],'
@@ -1154,27 +1154,12 @@ def test_strategy_generate_proposal_handler_recovers_truncated_raw_payload(
         config=cfg,
     )
 
-    assert generated.is_error is False, generated.text()
-    data = generated.content[0].data
-    assert data["strategy_id"] == "binance_aster_cash_carry"
-    assert data["proposal_id"]
-    proposal_root = (
-        tmp_path / "evolution" / "proposals" / data["proposal_id"]
-    )
-    proposal_text = (proposal_root / "proposal.yml").read_text(encoding="utf-8")
-    strategy_text = (
-        proposal_root
-        / "after"
-        / "strategies"
-        / "binance_aster_cash_carry"
-        / "strategy.yml"
-    ).read_text(encoding="utf-8")
-    combined = f"{proposal_text}\n{strategy_text}".lower()
-    for needle in ("cash", "carry", "aster", "binance"):
-        assert needle in combined
+    assert generated.is_error is True
+    assert "strategy_id" in generated.text()
+    assert not list(tmp_path.glob("evolution/proposals/prp_*"))
 
 
-def test_strategy_generate_proposal_handler_reports_truncated_custom_files_payload(
+def test_strategy_generate_proposal_handler_does_not_infer_truncated_files(
     tmp_path: Path,
 ) -> None:
     from nerya.tools.native.strategy_runtime import strategy_generate_proposal_handler
@@ -1187,7 +1172,7 @@ def test_strategy_generate_proposal_handler_reports_truncated_custom_files_paylo
         '"description":"Use BSC wallet/on-chain whale inflow evidence.",'
         '"prompt":"When whale net inflow rises in a 5m window, dispatch an Agent.",'
         '"strategy_class":"agent",'
-        '"execution_mode":"agent_task",'
+        '"execution_mode":"agent",'
         '"mode":"paper",'
         '"markets":["ONCHAIN:bsc:0x<meme_token_contract>"],'
         '"accounts":["paper_main"],'
@@ -1209,11 +1194,7 @@ def test_strategy_generate_proposal_handler_reports_truncated_custom_files_paylo
     )
 
     assert generated.is_error is True
-    text = generated.text()
-    assert "truncated" in text
-    assert "files.main.py" in text
-    assert "files.strategy.md" in text
-    assert "compact" in text
+    assert "strategy_id" in generated.text()
     assert not list(tmp_path.glob("evolution/proposals/prp_*"))
 
 
@@ -1301,7 +1282,7 @@ def test_polymarket_strategy_prompt_path_generates_and_backtests_freeform(
 
     assert generated.is_error is False
     proposal_id = generated.content[0].data["proposal_id"]
-    assert generated.content[0].data["backtest_required"] is True
+    assert generated.content[0].data["backtest_required"] is False
 
     backtest = strategy_backtest_handler(
         ToolCall(

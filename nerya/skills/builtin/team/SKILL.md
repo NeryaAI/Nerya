@@ -10,10 +10,18 @@ author: Nerya
 
 # Team
 
-When the user explicitly asks to start, launch, or run an Agent Team, call
-`team_run`; role discovery or a single `subagent_run` is not a completed team
-run. Otherwise, use a team only when bounded lanes are genuinely independent.
-Keep coupled or tiny work in the main agent.
+## Explicit team requests
+
+When the user explicitly asks to start, launch, or run an Agent Team, the
+**first tool action after loading this skill must be `team_run`**. Do not spend
+the tool budget on `role_list`, `role_get`, `research_run`, `web_search`,
+`market_data`, or `subagent_run` first. Build the smallest useful inline role
+array from the request; role discovery is only for an ambiguous requested role.
+`team_run` is synchronous, so synthesize its returned findings in the same
+turn. A role lookup or a single subagent is not a completed team run.
+
+Without an explicit team request, use a team only when bounded lanes are
+genuinely independent. Keep coupled or tiny work in the main agent.
 
 ## Flow
 

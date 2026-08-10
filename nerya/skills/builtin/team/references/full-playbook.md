@@ -47,9 +47,10 @@ You have two pools:
   `role_save` and stored under
   `<workspace>/subagents/<name>.agent.md`.
 
-Call `role_list` first to see both pools. Pick the smallest set that
-covers the perspectives the mission actually needs — typical teams
-are 2–4 roles.
+For an explicit Agent Team request, call `team_run` directly with the smallest
+useful inline role array. Use `role_list` or `role_get` only when a requested
+role is ambiguous; discovery must not delay the team launch. Typical teams are
+2–4 roles.
 
 ## Running a team
 
@@ -98,7 +99,7 @@ Operators and the model can both author durable roles. Use
 {
   "name": "ashare_quant_lead",
   "prompt": "# A-Share Quant Lead\nYou lead a research squad covering CN A-shares. Output JSON: {decision: ENTRY|HOLD|EXIT, drivers: string[], confidence: 0..1}.",
-  "allowed_skills": ["market_data", "news_social", "websearch", "operator", "script", "llm"],
+  "allowed_skills": ["market_data", "news_social", "web_search_fetch", "coding", "llm"],
   "tier": "medium"
 }
 ```

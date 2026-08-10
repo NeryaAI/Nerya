@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from ..registry import ToolRegistry, make_native_descriptor
 from ..tool_errors import schema_validation_result
@@ -69,7 +69,9 @@ SKILL_TOOL_NAME = "Skill"
 SKILL_TOOL_DESCRIPTION = (
     "Load a matching SKILL.md playbook into the conversation. "
     "Use the skill name from the available skills catalog; the playbook "
-    "contains the domain procedure and references to any required tools."
+    "contains the domain procedure and references to any required tools. "
+    "Catalog skill names are not callable tools: always load them through "
+    "this exact Skill tool instead of calling the skill name directly."
 )
 
 
@@ -79,7 +81,7 @@ SKILL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
         "skill": {
             "type": "string",
             "description": (
-                'The skill name. E.g., "commit", "review-pr", or "pdf".'
+                "Exact <name> value from the available skills catalog."
             ),
         },
         "args": {
@@ -115,13 +117,6 @@ def _normalise_dir(path: Path) -> str:
     return str(path).replace("\\", "/")
 
 
-def _normalise_name(raw: Any) -> str:
-    name = str(raw or "").strip()
-    if name.startswith("/"):
-        name = name[1:]
-    return name
-
-
 def _substitute_args(body: str, args: str) -> str:
     """Replace ``$ARGUMENTS`` markers with the caller-supplied string.
 
@@ -140,7 +135,8 @@ def skill_tool_handler(
     skill_index: SkillIndex,
 ) -> ToolResult:
     args = call.arguments or {}
-    skill_name = _normalise_name(args.get("skill") or args.get("name"))
+    raw_skill_name = args.get("skill")
+    skill_name = raw_skill_name.strip() if isinstance(raw_skill_name, str) else ""
     if not skill_name:
         return schema_validation_result(
             call, 'Skill tool requires a non-empty "skill" argument.',
@@ -197,10 +193,6 @@ def skill_tool_handler(
                     "skill_id": record.skill_id,
                     "path": str(skill_md_path),
                     "base_dir": base_dir,
-                    "scripts": list(record.scripts),
-                    "has_scripts": bool(record.has_scripts),
-                    "args": extra_args,
-                    "status": "inline",
                 }
             ),
         ],
@@ -212,9 +204,6 @@ def register_skill_tool(
     *,
     skill_index: SkillIndex,
     replace: bool = False,
-    handler_wrapper: Optional[
-        Callable[[Callable[[ToolCall], ToolResult]], Callable[[ToolCall], ToolResult]]
-    ] = None,
 ) -> None:
     """Register the ``Skill`` tool on ``registry``.
 
@@ -222,24 +211,17 @@ def register_skill_tool(
     register a slim subset of native tools (for tests or specialised
     runtimes) can opt in or out without touching the bootstrap.
 
-    ``handler_wrapper`` lets the bootstrap layer decorate the base
-    handler — e.g. to fire native-tool-surface progressive disclosure
-    after a successful skill load — without coupling this leaf module to
-    the tool-surfaces machinery. Both the ``Skill`` descriptor and its
-    lowercase ``skill`` alias share the wrapped handler so whichever
-    casing the model emits unlocks the same surfaces.
+    The advertised name is exact: ``Skill``.
     """
 
     def _base_handler(call: ToolCall) -> ToolResult:
         return skill_tool_handler(call, skill_index=skill_index)
 
-    _handler = handler_wrapper(_base_handler) if handler_wrapper else _base_handler
-
     descriptor = make_native_descriptor(
         name=SKILL_TOOL_NAME,
         description=SKILL_TOOL_DESCRIPTION,
         input_schema=SKILL_TOOL_INPUT_SCHEMA,
-        handler=_handler,
+        handler=_base_handler,
         risk=RiskLevel.READ,
         permission_scope=PermissionScope.NONE,
         read_only=True,
@@ -249,28 +231,6 @@ def register_skill_tool(
         auto_approve=True,
     )
     registry.register(descriptor, replace=replace)
-
-    # Lowercase alias. Some models emit ``"skill"`` instead of
-    # ``"Skill"``. The
-    # registry lookup is case-sensitive, so without this alias those
-    # calls hit the ``unknown tool: 'skill'`` branch in the executor and
-    # the agent loop records a hard error — the turn often recovers by
-    # restarting from scratch and loses the model's plan. Register an
-    # alias descriptor that shares the same handler / schema.
-    alias_descriptor = make_native_descriptor(
-        name=SKILL_TOOL_NAME.lower(),
-        description=SKILL_TOOL_DESCRIPTION,
-        input_schema=SKILL_TOOL_INPUT_SCHEMA,
-        handler=_handler,
-        risk=RiskLevel.READ,
-        permission_scope=PermissionScope.NONE,
-        read_only=True,
-        is_concurrency_safe=True,
-        tags=("skill", "playbook", "alias"),
-        result_kind="text",
-        auto_approve=True,
-    )
-    registry.register(alias_descriptor, replace=replace)
 
 
 __all__ = [

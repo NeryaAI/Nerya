@@ -30,7 +30,6 @@ from ..types import (
     ToolError,
     ToolErrorKind,
     ToolResult,
-    ToolResultPart,
 )
 from .accounts import (
     ACCOUNT_LIST_SCHEMA,
@@ -146,18 +145,12 @@ from .shell import classify_shell_risk, run_shell_handler
 from .skill import (
     SkillIndex,
     is_browser_skill_script_run,
-    is_low_risk_builtin_skill_script_run,
     script_inspect_handler,
     script_run_handler,
     skill_index_handler,
     skill_view_handler,
 )
 from .skill_tool import register_skill_tool
-from .tool_surfaces import (
-    apply_native_lazy_surfaces,
-    reveal_surfaces_for_skill,
-    revealed_tool_names,
-)
 from .task import (
     TaskState,
     enter_plan_mode_handler,
@@ -640,93 +633,11 @@ def _wrap_skill_index(deps: NativeToolDeps):
     return handler
 
 
-def _reveal_skill_surfaces(result, *, registry, sid: str) -> None:
-    """Reveal a skill's native tool surfaces + append an unlock note.
-
-    Shared by ``skill_view`` and the canonical ``Skill``/``skill``
-    invoke tool so that *whichever* skill-loading tool the model uses
-    unlocks the same progressive-disclosure surfaces. Best-effort and
-    silent: never regress skill loading if gating is off or the registry
-    has no lazy state.
-    """
-
-    try:
-        if registry is None or getattr(result, "is_error", False):
-            return
-        sid = (sid or "").strip()
-        if not sid:
-            return
-        newly = reveal_surfaces_for_skill(registry, sid)
-        if not newly:
-            return
-        names = revealed_tool_names(registry, newly)
-        if names:
-            note = (
-                "\n\n[tools unlocked] Viewing this skill revealed "
-                f"{len(names)} specialized tool(s) for the rest of "
-                "this session — call them directly now: "
-                + ", ".join(names)
-            )
-            result.content.append(ToolResultPart.text_part(note))
-    except Exception:
-        pass
-
-
-def _skill_id_from_result_or_args(result, call: ToolCall) -> str:
-    """Resolve the skill id a skill-loading tool just loaded.
-
-    Prefers the authoritative ``skill_id`` the handler resolved (carried
-    on the result's JSON part), then falls back to the caller-supplied
-    argument under any of the accepted key names. Different models emit
-    ``skill_id`` (skill_view), ``skill`` (the Skill tool), or ``name``.
-    """
-
-    for part in getattr(result, "content", None) or []:
-        data = getattr(part, "data", None)
-        if isinstance(data, dict):
-            sid = str(data.get("skill_id") or "").strip()
-            if sid:
-                return sid
-    args = call.arguments or {}
-    return str(
-        args.get("skill_id")
-        or args.get("skill")
-        or args.get("name")
-        or args.get("id")
-        or ""
-    ).strip()
-
-
 def _wrap_skill_view(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        result = skill_view_handler(call, skill_index=deps.skill_index)
-        args = call.arguments or {}
-        sid = str(args.get("skill_id") or args.get("id") or "").strip()
-        _reveal_skill_surfaces(result, registry=deps.tool_registry, sid=sid)
-        return result
+        return skill_view_handler(call, skill_index=deps.skill_index)
 
     return handler
-
-
-def _wrap_skill_invoke_reveal(deps: NativeToolDeps):
-    """Decorate the ``Skill``/``skill`` handler with surface reveal.
-
-    The canonical playbook-invocation tool (``Skill``) is what the
-    system prompt instructs the model to call as a blocking requirement,
-    so the progressive-disclosure reveal must fire here too — not only on
-    the discovery-only ``skill_view`` tool.
-    """
-
-    def wrapper(base_handler):
-        def handler(call: ToolCall):
-            result = base_handler(call)
-            sid = _skill_id_from_result_or_args(result, call)
-            _reveal_skill_surfaces(result, registry=deps.tool_registry, sid=sid)
-            return result
-
-        return handler
-
-    return wrapper
 
 
 def _wrap_market_data(deps: NativeToolDeps):
@@ -899,32 +810,10 @@ def _wrap_script_run(deps: NativeToolDeps):
     return handler
 
 
-def _trusted_builtin_skill_roots(deps: NativeToolDeps) -> list[Path]:
-    try:
-        from ... import skills as _skills_pkg
-
-        builtin = (Path(_skills_pkg.__file__).parent / "builtin").resolve()
-    except Exception:
-        return []
-    roots: list[Path] = []
-    for root in deps.skill_roots:
-        try:
-            resolved = Path(root).resolve()
-        except Exception:
-            continue
-        if resolved == builtin:
-            roots.append(resolved)
-    return roots
-
-
 def _auto_approve_skill_script_run(deps: NativeToolDeps, payload: dict[str, Any]) -> bool:
-    if is_browser_skill_script_run(payload):
-        return True
-    return is_low_risk_builtin_skill_script_run(
-        payload,
-        skill_index=deps.skill_index,
-        trusted_roots=_trusted_builtin_skill_roots(deps),
-    )
+    # Browser automation is the only built-in script lane with a dedicated
+    # low-risk policy. All other scripts use the normal EXEC approval gate.
+    return is_browser_skill_script_run(payload)
 
 
 def _wrap_memory_recall(deps: NativeToolDeps):
@@ -2005,8 +1894,6 @@ def register_native_tools(
             permission_scope=PermissionScope.NONE,
             tags=("skill", "discovery"),
             auto_approve=True,
-            subject_action_aliases=("view", "skill_view"),
-            subject_argument="skill_id",
             result_kind="text",
         ),
         make_native_descriptor(
@@ -2153,9 +2040,9 @@ def register_native_tools(
             name="market_data",
             description=(
                 "Read current ticker, OHLCV candles, and computed technical "
-                "features/indicators for a market. Backward-compatible with "
-                "legacy skill_calls shaped like "
-                "{skill:'market_data', action:'get_candles', payload:{...}}. "
+                "features/indicators for a market. Call this exact tool name "
+                "through the skill_calls envelope and put its schema fields "
+                "in payload. "
                 "Actions: get_ticker, get_mark_price, get_candles, "
                 "calculate_features, summarize_market, compress_context. "
                 "Always pass market or symbol; this tool never infers a "
@@ -2682,7 +2569,10 @@ def register_native_tools(
                         "into independent analysis lanes. For an explicit "
                         "Agent Team request, call this tool directly with the "
                         "task and clear role objects; use role_list or role_get "
-                        "only when a requested role is ambiguous. Build roles "
+                        "only when a requested role is ambiguous. Do not "
+                        "prefetch market or research data before this call; "
+                        "put those requirements in the team task or role "
+                        "prompts so members gather the evidence. Build roles "
                         "from the task itself; do not infer a hidden template "
                         "from prompt keywords. "
                         "You are not limited to registered roles: when none "
@@ -2726,7 +2616,9 @@ def register_native_tools(
                         "team members, so an expert lane can pull fresh web "
                         "data mid-run; the researcher itself cannot nest "
                         "further. Provide ``query`` and/or explicit "
-                        "``urls``."
+                        "``urls``. For a normal one-turn brief, consume one "
+                        "successful result instead of repeating equivalent "
+                        "raw web searches."
                     ),
                     input_schema=RESEARCH_RUN_SCHEMA,
                     handler=_wrap_research_run(deps),
@@ -2739,17 +2631,6 @@ def register_native_tools(
                     auto_approve=True,
                     child_max_depth=1,
                     delegates_to="web_researcher",
-                    invocation_aliases=(
-                        "research",
-                        "research.run",
-                        "research.research_run",
-                        "research.web_search",
-                    ),
-                    argument_aliases=(
-                        ("request", "query"),
-                        ("task", "query"),
-                        ("fetch_urls", "urls"),
-                    ),
                 ),
                 make_native_descriptor(
                     name="role_list",
@@ -3224,12 +3105,16 @@ def register_native_tools(
                     "proposal_id plus `proposal_paths` (the "
                     "after/strategies/<id>/ files: strategy.yml, strategy.md, "
                     "main.py, tests/...) and `next_steps`. This does NOT enter "
-                    "the pending-review queue and writes NO inline code — you "
-                    "then author the logic by editing the staged files with "
-                    "read_file + edit_file / write_file (they live under "
-                    "evolution/proposals/<id>/ which the workspace mutation "
-                    "guard allows), run strategy_validate, and finish with "
-                    "strategy_submit_proposal. Read the strategy_author skill "
+                        "the pending-review queue and writes NO inline code — you "
+                        "then author the logic by editing the staged files with "
+                        "read_file + edit_file / write_file (they live under "
+                        "evolution/proposals/<id>/ which the workspace mutation "
+                        "guard allows), run strategy_validate, and finish with "
+                        "strategy_submit_proposal. If the operator explicitly "
+                        "asks for a draft/proposal scaffold only or says not to "
+                        "edit, submit, promote, run, or trade, return this "
+                        "scaffold result and stop; do not follow these next "
+                        "steps in the same turn. Read the strategy_author skill "
                     "(skill_view) for the exact per-file format. Only for "
                     "requests that actually ask for a strategy: never reroute "
                     "'enable live trading' or an immediate buy/sell order into "
@@ -3551,20 +3436,7 @@ def register_native_tools(
         registry,
         skill_index=deps.skill_index,
         replace=replace,
-        handler_wrapper=_wrap_skill_invoke_reveal(deps),
     )
-    # Progressive native tool disclosure: keep a small always-on core and
-    # gate specialized families behind skill_view (see tool_surfaces).
-    # Opt out with runtime.native_tool_gating=false
-    # (env NERYA_FF_RUNTIME_NATIVE_TOOL_GATING=0). Wrapped so gating setup
-    # can never break tool registration.
-    try:
-        from ...runtime import feature_flags as _ff
-
-        if _ff.is_enabled(deps.config, "runtime.native_tool_gating"):
-            apply_native_lazy_surfaces(registry)
-    except Exception:
-        pass
     deps.skill_index.reload()
     return deps
 

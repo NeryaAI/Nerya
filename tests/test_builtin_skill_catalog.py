@@ -28,7 +28,6 @@ SUPPORTED_FRONTMATTER_FIELDS = {
     "version",
     "license",
     "author",
-    "requires_integration",
 }
 
 
@@ -63,8 +62,6 @@ def test_builtin_skill_frontmatter_has_no_routing_extensions() -> None:
         md = skill_dir / "SKILL.md"
         doc, _body = _split_frontmatter(md.read_text(encoding="utf-8"), source=md)
         extras = set(doc) - SUPPORTED_FRONTMATTER_FIELDS
-        if extras == {"permissions"} and skill_dir.name == "news_social":
-            continue
         assert extras == set(), f"{md} has unsupported frontmatter: {sorted(extras)}"
 
 
@@ -115,25 +112,19 @@ def test_default_enabled_ids_are_real_bundled_playbooks() -> None:
     assert "market_data" not in _DEFAULT_ENABLED_SKILLS
 
 
-def test_legacy_enabled_action_ids_map_to_current_playbooks(tmp_path: Path) -> None:
+def test_enabled_ids_are_loaded_as_exact_playbook_names(tmp_path: Path) -> None:
     paths = WorkspacePaths(root=tmp_path)
     yaml_io.dump(
         paths.skills_enabled,
         {
             "version": 1,
-            "enabled": ["market_data", "operator", "strategy_validation"],
+            "enabled": ["markets", "coding", "backtest", "quant_research"],
         },
     )
 
     ids = set(SkillRegistry.load_builtin(paths, config=Config(paths=paths)).by_id)
 
-    assert {
-        "markets",
-        "market_data_routing",
-        "coding",
-        "backtest",
-        "quant_research",
-    } <= ids
+    assert {"markets", "coding", "backtest", "quant_research"} <= ids
 
 
 def test_builtin_registry_loads_finance_namespace_skills() -> None:
@@ -141,6 +132,7 @@ def test_builtin_registry_loads_finance_namespace_skills() -> None:
     ids = set(registry.by_id)
 
     assert "finance.private_equity.ic_memo" in ids
+    assert {"dcf_valuation", "equity_research", "sec_filings"} <= ids
     assert "finance.financial_analysis.dcf_model" not in ids
     assert registry.get("finance.private_equity.ic_memo").manifest.source == "builtin"
 

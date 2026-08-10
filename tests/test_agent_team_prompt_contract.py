@@ -10,7 +10,7 @@ from nerya.core.paths import WorkspacePaths
 from nerya.skills.kernel import SkillKernel
 from nerya.skills.registry import SkillRegistry
 from nerya.tools.native.skill import SkillIndex, index_skills
-from nerya.tools.native.skill_tool import skill_tool_handler
+from nerya.tools.native.skill_tool import SKILL_TOOL_DESCRIPTION, skill_tool_handler
 from nerya.tools.types import ToolCall
 
 
@@ -33,6 +33,20 @@ def test_team_skill_uses_standard_description_for_activation(tmp_path) -> None:
     assert record.description in deps.skill_index.render_for_prompt()
 
 
+def test_team_skill_puts_explicit_launch_before_discovery_or_research(tmp_path) -> None:
+    cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    kernel = AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]
+    entry = SkillRegistry.load_builtin().get("team")
+    body = entry.manifest.instructions
+    playbook = (entry.manifest.path / "references" / "full-playbook.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "first tool action after loading this skill must be `team_run`" in body
+    assert "Do not spend" in body and "the tool budget on `role_list`" in body
+    assert "call `team_run` directly" in playbook
+
+
 def test_market_research_description_covers_stock_and_token_analysis(tmp_path) -> None:
     cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
     kernel = AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]
@@ -44,24 +58,29 @@ def test_market_research_description_covers_stock_and_token_analysis(tmp_path) -
     assert "on-chain" in description
 
 
-def test_viewing_team_skill_reveals_team_run(tmp_path) -> None:
+def test_research_skills_do_not_force_approval_gated_scripts() -> None:
+    registry = SkillRegistry.load_builtin()
+    market_research = registry.get("market_research").manifest.instructions
+    news_social = registry.get("news_social").manifest.instructions
+    markets = registry.get("markets").manifest.instructions
+
+    assert "CALL `research_run` once" in market_research
+    assert "CALL `research_run` once" in news_social
+    assert "script_run" not in news_social
+    assert "READ quotes, candles, and computed features through native `market_data`" in markets
+
+
+def test_native_tools_are_visible_without_loading_a_skill(tmp_path) -> None:
     cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
     kernel = AgentKernel(config=cfg, skills=SkillKernel.boot(cfg))
     deps = kernel._ensure_registry()
     registry = kernel._registry
-    state = registry.lazy_mcp_state
-
-    assert registry.find("team_run") is not None
-    before = {tool.name for tool in registry.list_tools() if state.is_visible(tool)}
-    result = registry.get("skill_view").handler(
-        ToolCall(name="skill_view", arguments={"skill_id": "team"})
-    )
-    after = {tool.name for tool in registry.list_tools() if state.is_visible(tool)}
-
     assert deps.skill_index.get("team") is not None
-    assert not result.is_error
-    assert "team_run" not in before
-    assert "team_run" in after
+    team_run = registry.find("team_run")
+    assert team_run is not None
+    assert "Do not prefetch market or research data" in team_run.description
+    assert registry.find("research_run") is not None
+    assert registry.find("strategy_draft_proposal") is not None
 
 
 def test_skill_tool_strips_marked_frontmatter(tmp_path) -> None:
@@ -76,6 +95,11 @@ def test_skill_tool_strips_marked_frontmatter(tmp_path) -> None:
     assert not result.is_error
     assert "nerya-skill-frontmatter-start" not in result.text()
     assert "# Team" in result.text()
+    assert registry.find("skill") is None
+
+
+def test_skill_tool_description_forbids_calling_catalog_names_as_tools() -> None:
+    assert "Catalog skill names are not callable tools" in SKILL_TOOL_DESCRIPTION
 
 
 def test_skill_index_ignores_nonstandard_id_field(tmp_path) -> None:
@@ -114,6 +138,9 @@ def test_minimal_standard_skill_loads_exactly_without_routing_fields(tmp_path) -
     assert not result.is_error
     assert "# Stock Analysis" in result.text()
     assert "description:" not in result.text()
+    payload = next(part.data for part in result.content if part.type == "json")
+    assert "scripts" not in payload
+    assert "has_scripts" not in payload
     assert near_miss.is_error
 
 

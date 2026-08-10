@@ -732,6 +732,8 @@
     "canvasKindCharts": "Charts",
     "canvasKindDiff": "Diff",
     "canvasKindPdf": "PDF",
+    "canvasSearchResultCount": "{count, plural, one {# result} other {# results}}",
+    "canvasSearchOpen": "Open result",
     "canvasFileLoading": "Loading file preview...",
     "canvasFileBinary": "Binary file preview is available as a raw file.",
     "canvasFileReadFailed": "Could not load file preview",

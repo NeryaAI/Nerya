@@ -732,6 +732,8 @@
     "canvasKindCharts": "图表",
     "canvasKindDiff": "差异",
     "canvasKindPdf": "PDF",
+    "canvasSearchResultCount": "{count} 条结果",
+    "canvasSearchOpen": "打开结果",
     "canvasFileLoading": "正在加载文件预览…",
     "canvasFileBinary": "二进制文件可作为原始文件预览。",
     "canvasFileReadFailed": "无法加载文件预览",

@@ -11,10 +11,12 @@ author: Nerya
 # Strategy Author
 Use when the user wants a trading strategy created, changed, validated, or reviewed.
 
-Viewing this skill unlocks its specialized tools for the rest of the session (`strategy_draft_proposal`, `strategy_validate`, `strategy_submit_proposal`, `strategy_backtest`, plus portfolio/risk and connector reads). Until a skill is viewed only a small core toolset (file read/edit/write, shell, search, skill discovery) is advertised, so author strategies by editing the staged proposal files rather than reaching for a one-shot generator.
-
 ## Flow
 DEFINE markets, accounts, timeframe, trigger, risk limits, and goal. When a create/backtest request leaves details open, choose conservative paper/proposal defaults unless the missing choice would make the action live, destructive, irreversible, or honestly impossible.
+IF the operator asks for a draft/proposal scaffold only, or explicitly says not
+to edit, submit, promote, run, or trade, call `strategy_draft_proposal` once,
+report its returned proposal paths and validation result, and stop. Do not
+follow its implementation `next_steps` in that turn.
 KEEP every operator-named venue, market, and strategy concept verbatim in the package metadata: the strategy id/title and `markets` list must mention each requested venue (for example a Binance+Aster cash-and-carry request keeps both `binance` and `aster` plus the cash-and-carry/basis wording). If a requested venue has no usable provider yet, keep it in metadata, mark that leg `not ready`, and say so — do not silently swap in a different venue.
 SELECT an archetype only when it fits: scalping, trend, news, sentiment, on-chain, rotation, mean reversion, prediction-market, or custom.
 SCAFFOLD the package as a draft proposal with `strategy_draft_proposal` (new strategy) — or `strategy_draft_proposal` with `from_strategy_id` to iterate an existing promoted strategy. This stages template/seed files under the proposal's `after/strategies/<id>/` tree and returns `proposal_id` + `proposal_paths`; it does NOT enter the pending-review queue and writes no inline code.
@@ -56,7 +58,7 @@ SDK notes: Use exactly `from nerya.strategies import StrategyContext, StrategyRe
 For on-chain meme, news, social, or wallet strategies, do not request shell just to inspect providers; stop discovery and write the SDK proposal. Do not call shell, glob, or raw file reads once the efficient evidence boundary is met; author the SDK strategy package immediately by editing the staged files.
 Continue until a `strategy_submit_proposal` call for a validated SDK package exists for custom hard-to-replay scopes; preserve preferred_provider and mark not ready instead of silently substituting another provider.
 Wallet Meme Quick Path: when selection.mode` is `wallet_binding` and `market_data` already returned the exact chain:token, do not install a fallback; rely on the runtime scanner.
-Use execution_mode: "agent_task" when the strategy needs Agent decisions.
+Use execution_mode: "agent" when the strategy needs Agent decisions.
 On-chain means on-chain: do not satisfy
 that request with CEX proxies; generic chain markets are not a valid on-chain
 backtest.

@@ -28,10 +28,17 @@ import {
   GlobeIcon,
   ImageIcon,
   MessagesIcon,
+  SearchIcon,
 } from "../icons";
+import { JsonView as StructuredJsonView } from "../JsonView";
 import { AgentChartPanel, hasAgentVisuals } from "./AgentChartPanel";
 import { Markdown } from "./Markdown";
 import { CopyButton } from "./tool-cards/atoms";
+import {
+  parseWebToolResult,
+  webSearchResultsFromResult,
+  type WebSearchResult,
+} from "./tool-cards/WebCard";
 
 type CanvasKind =
   | "browser"
@@ -58,6 +65,7 @@ type CanvasItem = {
   sessionId?: string;
   mimeType?: string;
   language?: string;
+  data?: unknown;
   thread?: ChatThread | null;
   workspaceLoaded?: boolean;
   seenAt: number;
@@ -614,6 +622,32 @@ function itemFromToolLike(
 
   if (failed && !html && !imageSrc && !diff) {
     return null;
+  }
+
+  if (action === "web_search" || action === "web_search_fetch") {
+    const results = webSearchResultsFromResult(value.result);
+    if (results.length > 0) {
+      const webResult = parseWebToolResult(value.result);
+      const nestedSearch = recordOf(webResult.search);
+      const query = String(payload.query || webResult.query || nestedSearch.query || "");
+      const engine = String(
+        webResult.engine ||
+          webResult.provider ||
+          nestedSearch.engine ||
+          nestedSearch.provider ||
+          "",
+      );
+      return {
+        id: `${idPrefix}:web-search`,
+        kind: "web",
+        title: query || title || "Web search",
+        subtitle: engine || results[0]?.url || undefined,
+        body,
+        url: results[0]?.url,
+        data: { query, engine, results },
+        seenAt,
+      };
+    }
   }
 
   if (imageSrc.startsWith("data:image/")) {
@@ -1673,16 +1707,27 @@ function CsvTable({
   );
 }
 
-function JsonView({ item }: { item: CanvasItem }) {
-  const pretty = useMemo(() => {
+function JsonCanvasView({ item }: { item: CanvasItem }) {
+  const parsed = useMemo(() => {
     const raw = item.body || "";
     try {
-      return JSON.stringify(JSON.parse(raw), null, 2);
+      return JSON.parse(raw) as unknown;
     } catch {
-      return raw;
+      return undefined;
     }
   }, [item.body]);
-  return <CodeView item={{ ...item, body: pretty, language: "json" }} />;
+  if (parsed === undefined) return <CodeView item={{ ...item, language: "json" }} />;
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-ink-950">
+      <CanvasToolbar label="json" copyText={item.body || ""} />
+      <div className="min-h-0 flex-1 overflow-auto p-3">
+        <StructuredJsonView
+          value={parsed}
+          className="border-brand-500/15 bg-ink-900/30"
+        />
+      </div>
+    </div>
+  );
 }
 
 function MediaView({ item }: { item: CanvasItem }) {
@@ -1753,7 +1798,7 @@ function FileView({ item }: { item: CanvasItem }) {
     return <CsvTable text={body} delimiter={useTab ? "\t" : ","} item={item} />;
   }
   if (lang === "json" || mime.includes("json") || /\.json$/.test(name)) {
-    return <JsonView item={item} />;
+    return <JsonCanvasView item={item} />;
   }
   return <CodeView item={item} />;
 }
@@ -1798,6 +1843,104 @@ function TextView({ item }: { item: CanvasItem }) {
   );
 }
 
+function resultDomain(result: WebSearchResult): string {
+  if (result.url) {
+    try {
+      return new URL(result.url).hostname.replace(/^www\./, "");
+    } catch {
+      // Fall back to the provider supplied source below.
+    }
+  }
+  return result.source || "";
+}
+
+function WebSearchCanvasView({ item }: { item: CanvasItem }) {
+  const t = useTranslations("chat");
+  const data = recordOf(item.data);
+  const rows = Array.isArray(data.results)
+    ? (data.results as WebSearchResult[]).filter(
+        (row) => row && (row.title || row.url || row.snippet),
+      )
+    : [];
+  const query = String(data.query || item.title || "");
+  const engine = String(data.engine || "");
+  if (!rows.length) return <TextView item={item} />;
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-ink-950">
+      <div className="border-b border-brand-500/15 bg-ink-900/45 px-4 py-3">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-brand-500/20 bg-brand-500/[0.08] text-brand-200">
+            <SearchIcon size={15} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="break-words text-sm font-semibold leading-snug text-ink-100">
+              {query}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-500">
+              <span>{t("canvasSearchResultCount", { count: rows.length })}</span>
+              {engine ? <span className="font-mono text-ink-400">{engine}</span> : null}
+            </div>
+          </div>
+        </div>
+      </div>
+      <ol className="min-h-0 flex-1 space-y-2 overflow-auto p-3">
+        {rows.map((row, index) => {
+          const domain = resultDomain(row);
+          return (
+            <li
+              key={`${row.url || row.title}:${index}`}
+              className="grid grid-cols-[28px_minmax(0,1fr)_32px] gap-2 rounded-md border border-brand-500/10 bg-ink-900/35 px-3 py-3"
+            >
+              <span className="pt-0.5 font-mono text-[11px] text-ink-500">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <div className="min-w-0">
+                {row.url ? (
+                  <a
+                    href={row.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="break-words text-[13px] font-semibold leading-snug text-brand-200 underline-offset-2 hover:text-brand-100 hover:underline"
+                  >
+                    {row.title || row.url}
+                  </a>
+                ) : (
+                  <div className="break-words text-[13px] font-semibold leading-snug text-ink-100">
+                    {row.title}
+                  </div>
+                )}
+                {domain ? (
+                  <div className="mt-1 truncate font-mono text-[10px] text-ink-500">
+                    {domain}
+                  </div>
+                ) : null}
+                {row.snippet ? (
+                  <p className="mt-1.5 break-words text-[12px] leading-relaxed text-ink-300">
+                    {row.snippet}
+                  </p>
+                ) : null}
+              </div>
+              {row.url ? (
+                <a
+                  href={row.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={t("canvasSearchOpen")}
+                  title={t("canvasSearchOpen")}
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-brand-500/15 text-ink-400 transition-colors hover:border-brand-500/35 hover:bg-brand-500/[0.08] hover:text-brand-200"
+                >
+                  <GlobeIcon size={14} />
+                </a>
+              ) : null}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function BrowserSessionFrame({ item }: { item: CanvasItem }) {
   if (!item.sessionId) return null;
   const params = new URLSearchParams({ session_id: item.sessionId });
@@ -1832,7 +1975,9 @@ function CanvasBody({ item }: { item: CanvasItem }) {
   if (item.kind === "pdf") return <PdfView item={item} />;
   if (item.kind === "diff") return <DiffView item={item} />;
   if (item.kind === "web") {
-    return item.html ? <HtmlFrame item={item} title={item.title} /> : <TextView item={item} />;
+    if (item.html) return <HtmlFrame item={item} title={item.title} />;
+    if (item.data) return <WebSearchCanvasView item={item} />;
+    return <TextView item={item} />;
   }
   if (item.kind === "text") return <TextView item={item} />;
   return <FileView item={item} />;

@@ -7,8 +7,8 @@ Covers:
 * :mod:`nerya.tools.executor` — end-to-end: a malformed
   ``strategy_generate_proposal`` payload produces a friendly
   ``SCHEMA_VALIDATION`` result that the loop can surface verbatim.
-* The ``strategy_generate_proposal`` repair hook that backfills
-  ``strategy_id`` from ``title`` when the model drops the field.
+* Schema-driven provider transport decoding without tool-specific field
+  inference.
 """
 
 from __future__ import annotations
@@ -220,124 +220,6 @@ def test_legacy_validator_reports_first_missing_field():
 
 
 # ---------------------------------------------------------------------------
-# Repair hook: strategy_generate_proposal backfills strategy_id from title
-# ---------------------------------------------------------------------------
-
-
-def test_repair_derives_strategy_id_from_title():
-    call = ToolCall(
-        name="strategy_generate_proposal",
-        arguments={"title": "BTCUSDT Intraday Scalper", "markets": ["binance:BTC/USDT"]},
-    )
-    _repair_arguments_before_validation(call)
-    assert call.arguments["strategy_id"] == "btcusdt_intraday_scalper"
-
-
-def test_repair_preserves_existing_strategy_id():
-    call = ToolCall(
-        name="strategy_generate_proposal",
-        arguments={
-            "strategy_id": "already_set",
-            "title": "Some Other Title",
-        },
-    )
-    _repair_arguments_before_validation(call)
-    assert call.arguments["strategy_id"] == "already_set"
-
-
-def test_repair_parses_strategy_files_json_string():
-    call = ToolCall(
-        name="strategy_generate_proposal",
-        arguments={
-            "strategy_id": "macd_agent",
-            "markets": ["BINANCE:BTCUSDT"],
-            "accounts": ["paper"],
-            "files": '{"main.py":"def run(ctx):\\n    return ctx.result()"}',
-        },
-    )
-    _repair_arguments_before_validation(call)
-    assert call.arguments["files"] == {
-        "main.py": "def run(ctx):\n    return ctx.result()"
-    }
-
-
-def test_repair_collects_dotted_strategy_file_arguments():
-    call = ToolCall(
-        name="strategy_generate_proposal",
-        arguments={
-            "strategy_id": "bsc_smart_money_meme",
-            "markets": ["OKX_ONCHAIN:bsc:meme"],
-            "accounts": ["paper"],
-            "files.main.py": "def run(ctx):\n    return ctx.result.skip('wait')",
-            "files.strategy.md": "# BSC smart money meme",
-        },
-    )
-    _repair_arguments_before_validation(call)
-    assert call.arguments["files"]["main.py"].startswith("def run")
-    assert "BSC smart money" in call.arguments["files"]["strategy.md"]
-
-
-def test_repair_backfills_strategy_fields_from_inline_manifest():
-    call = ToolCall(
-        name="strategy_generate_proposal",
-        arguments={
-            "files": {
-                "strategy.yml": """
-strategy_id: bsc_smart_money_meme
-title: BSC Smart Money Meme
-markets:
-  - OKX_ONCHAIN:bsc:meme
-accounts:
-  - paper
-mode: paper
-execution:
-  execution_mode: agent
-""",
-                "main.py": "def run(ctx):\n    return ctx.result.skip('wait')",
-                "strategy.md": "# BSC Smart Money Meme",
-            },
-        },
-    )
-    _repair_arguments_before_validation(call)
-    assert call.arguments["strategy_id"] == "bsc_smart_money_meme"
-    assert call.arguments["markets"] == ["OKX_ONCHAIN:bsc:meme"]
-    assert call.arguments["accounts"] == ["paper"]
-    assert call.arguments["execution_mode"] == "agent"
-    assert call.arguments["strategy_class"] == "agent"
-
-
-def test_repair_leaves_non_object_strategy_files_string_for_schema_validation():
-    call = ToolCall(
-        name="strategy_generate_proposal",
-        arguments={
-            "strategy_id": "bad_files",
-            "markets": ["BINANCE:BTCUSDT"],
-            "accounts": ["paper"],
-            "files": "main.py: pass",
-        },
-    )
-    _repair_arguments_before_validation(call)
-    assert call.arguments["files"] == "main.py: pass"
-
-
-def test_repair_leaves_unrelated_tools_alone():
-    call = ToolCall(name="other_tool", arguments={"title": "Foo"})
-    _repair_arguments_before_validation(call)
-    assert "strategy_id" not in call.arguments
-
-
-def test_repair_skips_titles_that_slug_to_invalid_id():
-    """strategy_id must start with a letter. Numeric-leading or empty
-    slugs must be left for schema validation to reject."""
-    call = ToolCall(
-        name="strategy_generate_proposal",
-        arguments={"title": "123 bot"},
-    )
-    _repair_arguments_before_validation(call)
-    assert "strategy_id" not in call.arguments
-
-
-# ---------------------------------------------------------------------------
 # Executor end-to-end: malformed payload -> friendly SCHEMA_VALIDATION result
 # ---------------------------------------------------------------------------
 
@@ -515,7 +397,7 @@ def test_executor_coerces_schema_number_strings_before_validation():
     assert captured[0]["confidence"] == 0.75
 
 
-def test_repair_normalizes_strategy_market_account_item_objects():
+def test_schema_transport_unwrap_does_not_infer_strategy_item_fields():
     call = ToolCall(
         name="strategy_generate_proposal",
         arguments={
@@ -539,11 +421,19 @@ def test_repair_normalizes_strategy_market_account_item_objects():
 
     _repair_arguments_before_validation(call, _proposal_descriptor().input_schema)
 
-    assert call.arguments["markets"] == ["BINANCE:BTCUSDT"]
-    assert call.arguments["accounts"] == ["binance_paper_001"]
+    assert call.arguments["markets"] == [{
+        "venue": "binance",
+        "market": "BINANCE:BTCUSDT",
+        "instrument": "perp",
+    }]
+    assert call.arguments["accounts"] == [{
+        "venue": "binance",
+        "account_id": "binance_paper_001",
+        "mode": "paper",
+    }]
 
 
-def test_repair_uses_account_label_and_venue_for_strategy_arrays():
+def test_schema_transport_does_not_add_market_venue_or_extract_account_label():
     call = ToolCall(
         name="strategy_generate_proposal",
         arguments={
@@ -562,8 +452,13 @@ def test_repair_uses_account_label_and_venue_for_strategy_arrays():
 
     _repair_arguments_before_validation(call, _proposal_descriptor().input_schema)
 
-    assert call.arguments["markets"] == ["binance_perpetual:BTC/USDT:USDT"]
-    assert call.arguments["accounts"] == ["binance_perp_paper"]
+    assert call.arguments["markets"] == ["BTC/USDT:USDT"]
+    assert call.arguments["accounts"] == [{
+        "venue": "binance_perpetual",
+        "label": "binance_perp_paper",
+        "mode": "paper",
+        "credentials": "missing",
+    }]
 
 
 def test_executor_decodes_raw_json_object_arguments_before_validation():
@@ -602,7 +497,7 @@ def test_executor_decodes_raw_json_object_arguments_before_validation():
     assert captured[0]["files"]["main.py"].startswith("def run")
 
 
-def test_executor_recovers_truncated_raw_json_before_validation():
+def test_executor_rejects_truncated_raw_json_instead_of_dropping_fields():
     captured: list[dict] = []
     descriptor = _proposal_descriptor()
     descriptor = replace(
@@ -619,7 +514,7 @@ def test_executor_recovers_truncated_raw_json_before_validation():
         '"description":"Whale flow strategy.",'
         '"prompt":"Use BSC whale flow evidence.",'
         '"strategy_class":"agent",'
-        '"execution_mode":"agent_task",'
+        '"execution_mode":"agent",'
         '"mode":"paper",'
         '"markets":["bsc:0xMEME"],'
         '"accounts":["binance_paper"],'
@@ -632,15 +527,13 @@ def test_executor_recovers_truncated_raw_json_before_validation():
 
     result = executor.execute(call)
 
-    assert not result.is_error
-    assert captured[0]["strategy_id"] == "bsc_whale_copytrade"
-    assert captured[0]["markets"] == ["bsc:0xMEME"]
-    assert captured[0]["accounts"] == ["binance_paper"]
-    assert captured[0]["execution_mode"] == "agent_task"
-    assert "_raw" not in captured[0]
+    assert result.is_error
+    assert result.error is not None
+    assert result.error.kind is ToolErrorKind.SCHEMA_VALIDATION
+    assert captured == []
 
 
-def test_executor_unwraps_strategy_proposal_object_argument_before_validation():
+def test_executor_rejects_tool_specific_wrapper_instead_of_guessing_payload_shape():
     captured: list[dict] = []
     descriptor = _proposal_descriptor()
     descriptor = replace(
@@ -666,7 +559,7 @@ def test_executor_unwraps_strategy_proposal_object_argument_before_validation():
 
     result = executor.execute(call)
 
-    assert not result.is_error
-    assert captured[0]["strategy_id"] == "eth_rsi_agent_breakout"
-    assert captured[0]["markets"] == ["BINANCE:ETHUSDT"]
-    assert captured[0]["accounts"] == ["binance_paper"]
+    assert result.is_error
+    assert result.error is not None
+    assert result.error.kind is ToolErrorKind.SCHEMA_VALIDATION
+    assert captured == []

@@ -1,11 +1,10 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: equity_research
-description: "Use for deep research on a US-listed stock: financials, filings, estimates, news, valuation, and memo output."
+description: "Use for deep research on a US-listed stock: financials, filings, estimates, news, valuation, and memo output; includes Financial Datasets setup and fallback guidance."
 version: 0.1.0
 license: MIT
 author: Nerya
-requires_integration: financial_datasets
 ---
 <!-- nerya-skill-frontmatter-end -->
 

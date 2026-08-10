@@ -122,11 +122,6 @@ class SkillManifest:
     * ``description`` (required) — one-paragraph trigger blurb.
     * ``version`` — semver (defaults to ``0.1.0``).
     * ``license`` / ``author`` — provenance.
-    * ``requires_integration`` — optional. Name of an entry under
-      ``integrations.<name>`` whose ``enabled`` flag must be true for
-      the skill to be registered. Nerya-specific extension; strict
-      Anthropic-spec loaders can ignore it without harm.
-
     Anything else in the frontmatter is ignored. Actions, when
     present, come from procedural single-file SKILL.md loading and
     not from auto-importing scripts.
@@ -144,7 +139,6 @@ class SkillManifest:
     tags: list[str] = field(default_factory=list)
     instructions: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
-    requires_integration: str = ""
 
     def is_proposal_only(self) -> bool:
         """True when the manifest is a proposal-only scaffold."""
@@ -214,8 +208,6 @@ class SkillManifest:
 
         description = str(doc.get("description") or "").strip()
         version = str(doc.get("version") or "0.1.0").strip()
-        requires_integration = str(doc.get("requires_integration") or "").strip()
-
         skill_permissions: list[str] = []
         seen: set[str] = set()
         for a in actions.values():
@@ -237,7 +229,6 @@ class SkillManifest:
             tags=[],
             instructions=body,
             metadata={},
-            requires_integration=requires_integration,
         )
 
 

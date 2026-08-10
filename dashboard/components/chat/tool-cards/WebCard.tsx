@@ -34,7 +34,7 @@ function parseFetchSummary(text: string): Record<string, unknown> {
   return out;
 }
 
-function parseJsonRecord(value: unknown): Record<string, unknown> {
+export function parseWebToolResult(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const rec = value as Record<string, unknown>;
     const data = rec.data;
@@ -51,13 +51,13 @@ function parseJsonRecord(value: unknown): Record<string, unknown> {
         }
         const text = typeof row.text === "string" ? row.text.trim() : "";
         if (text.startsWith("{") || text.startsWith("[")) {
-          const parsed = parseJsonRecord(text);
+          const parsed = parseWebToolResult(text);
           if (Object.keys(parsed).length) return { ...rec, ...parsed };
         }
       }
     }
     if (typeof content === "string") {
-      const parsed = parseJsonRecord(content);
+      const parsed = parseWebToolResult(content);
       if (Object.keys(parsed).length) return { ...rec, ...parsed };
     }
     return rec;
@@ -113,13 +113,15 @@ function previewText(value: unknown, max = 320): string {
   return squashed.length > max ? `${squashed.slice(0, max)}...` : squashed;
 }
 
-function webSearchResults(block: NativeBlock): Array<{
+export type WebSearchResult = {
   title: string;
   url: string;
   snippet: string;
   source?: string;
-}> {
-  const result = parseJsonRecord(block.result);
+};
+
+export function webSearchResultsFromResult(value: unknown): WebSearchResult[] {
+  const result = parseWebToolResult(value);
   const nestedSearch = recordOf(result.search);
   const candidates: unknown[] = [
     result.results,
@@ -130,23 +132,30 @@ function webSearchResults(block: NativeBlock): Array<{
   ];
   for (const c of candidates) {
     if (Array.isArray(c) && c.length) {
-      return c.slice(0, 30).map((row) => {
-        const r = recordOf(row);
-        return {
-          title: String(r.title || r.name || r.url || ""),
-          url: String(r.url || r.link || r.href || ""),
-          snippet: firstText(
-            r.snippet,
-            r.body,
-            r.description,
-            previewText(r.markdown || r.text),
-          ),
-          source: typeof r.source === "string" ? r.source : undefined,
-        };
-      });
+      return c
+        .slice(0, 30)
+        .map((row) => {
+          const r = recordOf(row);
+          return {
+            title: String(r.title || r.name || r.url || ""),
+            url: String(r.url || r.link || r.href || ""),
+            snippet: firstText(
+              r.snippet,
+              r.body,
+              r.description,
+              previewText(r.markdown || r.text),
+            ),
+            source: typeof r.source === "string" ? r.source : undefined,
+          };
+        })
+        .filter((row) => row.title || row.url || row.snippet);
     }
   }
   return [];
+}
+
+function webSearchResults(block: NativeBlock): WebSearchResult[] {
+  return webSearchResultsFromResult(block.result);
 }
 
 function resultCount(result: Record<string, unknown>, rows: unknown[], content: string): number {
@@ -171,7 +180,7 @@ export function WebCard({
   const t = useTranslations("webToolCard");
   const action = String(block.action || "").toLowerCase();
   const payload = recordOf(block.payload);
-  const result = parseJsonRecord(block.result);
+  const result = parseWebToolResult(block.result);
   const nestedSearch = recordOf(result.search);
   const isResult = variant === "result";
   const ok = block.ok !== false && !block.error && result.ok !== false;

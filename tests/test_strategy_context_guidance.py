@@ -10,6 +10,7 @@ import pytest
 from nerya.agent.kernel import AgentKernel, AgentTurnResult
 from nerya.agent.session import SessionStore
 from nerya.api import routes_agent
+from nerya.core import yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.tools.permissions import PermissionMode
@@ -52,8 +53,8 @@ def test_system_prompt_surfaces_session_market_context_as_advisory(tmp_path) -> 
     assert "generic follow-up strategy requests should inherit this context" in prompt
     assert "do not substitute unrelated example markets" in prompt
     assert "not a keyword router or hard tool gate" in prompt
-    assert "strategy_draft_proposal then edit the staged files" in prompt
-    assert "strategy_validate / strategy_submit_proposal /" in prompt
+    assert "strategy_draft_proposal" not in prompt
+    assert "strategy_submit_proposal" not in prompt
     assert "Turn execution policy:" in prompt
     assert "Choose tools from their schemas" in prompt
     assert "hardcoded workflows" in prompt
@@ -95,7 +96,7 @@ def test_system_prompt_does_not_hard_route_chat_orders(tmp_path) -> None:
         user_text="place the order if risk allows",
     )
 
-    assert "trade_intent_submit" in prompt  # tool list only
+    assert "trade_intent_submit" not in prompt
     assert "call trade_intent_submit" not in prompt
     assert "confirmation window" not in prompt
     assert "do not ask for chat confirmation first" not in prompt
@@ -159,6 +160,7 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "Market scope assumption" in text
     # New draft -> edit -> validate -> submit lane.
     assert "SCAFFOLD the package as a draft proposal with `strategy_draft_proposal`" in text
+    assert "asks for a draft/proposal scaffold only" in text
     assert "AUTHOR the strategy by editing the staged files" in text
     assert "SUBMIT with `strategy_submit_proposal(" in text
     assert "strategy_draft_proposal" in text
@@ -224,7 +226,7 @@ def test_strategy_author_skill_contains_soft_context_rules() -> None:
     assert "exact chain:token" in text
     assert "do not install a fallback" in text
     assert "runtime scanner" in text
-    assert "execution_mode: \"agent_task\"" in text
+    assert "execution_mode: \"agent\"" in text
     assert "do not satisfy\nthat request with CEX proxies" in text
     assert "not a valid on-chain\nbacktest" in text
     assert "Do not copy those low-level action names into" in text
@@ -253,6 +255,7 @@ def test_strategy_draft_and_submit_descriptions_describe_the_lane(tmp_path) -> N
     assert "from_strategy_id to iterate on it" in draft_desc
     assert "proposal_paths" in draft_desc
     assert "next_steps" in draft_desc
+    assert "return this scaffold result and stop" in draft_desc
     assert "does NOT enter the pending-review queue and writes NO inline code" in draft_desc
     assert "editing the staged files with read_file + edit_file / write_file" in draft_desc
     assert "run strategy_validate" in draft_desc
@@ -287,7 +290,7 @@ def test_strategy_draft_and_submit_descriptions_describe_the_lane(tmp_path) -> N
     assert "explicitly asks to promote" in promote_desc
 
 
-def test_strategy_generate_proposal_requires_sdk_files_for_onchain_wallet_scope(tmp_path) -> None:
+def test_strategy_generate_proposal_keeps_explicit_onchain_scope(tmp_path) -> None:
     cfg = _config(tmp_path)
 
     result = strategy_generate_proposal_handler(
@@ -306,9 +309,21 @@ def test_strategy_generate_proposal_requires_sdk_files_for_onchain_wallet_scope(
         config=cfg,
     )
 
-    assert result.is_error is True
-    assert "must include `files.main.py`" in result.text()
-    assert not list(cfg.paths.evolution.glob("proposals/prp_*"))
+    assert result.is_error is False, result.text()
+    data = result.content[0].data
+    strategy_doc = yaml_io.load(
+        cfg.paths.evolution
+        / "proposals"
+        / data["proposal_id"]
+        / "after"
+        / "strategies"
+        / "solana_meme_smart_money"
+        / "strategy.yml",
+        default={},
+    )
+    assert strategy_doc["markets"] == [
+        "BYREAL_ONCHAIN:solana:4pMsh7JF5wXjkx8sK6gJgv14xkBy1kUoMv4ixN8npump"
+    ]
 
 
 def test_strategy_generate_proposal_allows_cex_cash_carry_perp_swap_without_inline_files(
@@ -364,7 +379,7 @@ def test_strategy_generate_proposal_allows_cex_cash_carry_perp_swap_without_inli
         assert needle in combined
 
 
-def test_strategy_generate_proposal_requires_main_for_named_custom_signals(tmp_path) -> None:
+def test_strategy_generate_proposal_does_not_infer_file_requirements_from_description(tmp_path) -> None:
     cfg = _config(tmp_path)
 
     result = strategy_generate_proposal_handler(
@@ -383,13 +398,14 @@ def test_strategy_generate_proposal_requires_main_for_named_custom_signals(tmp_p
         config=cfg,
     )
 
-    assert result.is_error is True
-    assert "named custom signal logic" in result.text()
-    assert "`files.main.py`" in result.text()
-    assert not list(cfg.paths.evolution.glob("proposals/prp_*"))
+    assert result.is_error is False, result.text()
+    data = result.content[0].data
+    assert data["strategy_class"] == "agent"
+    assert data["execution_mode"] == "agent"
+    assert data["proposal_id"]
 
 
-def test_strategy_generate_proposal_rejects_main_py_missing_requested_signal_terms(
+def test_strategy_generate_proposal_does_not_match_prompt_terms_against_main_py(
     tmp_path,
 ) -> None:
     cfg = _config(tmp_path)
@@ -430,11 +446,8 @@ def test_strategy_generate_proposal_rejects_main_py_missing_requested_signal_ter
         config=cfg,
     )
 
-    assert result.is_error is True
-    text = result.text().lower()
-    assert "files.main.py" in text
-    assert "rsi" in text
-    assert not list(cfg.paths.evolution.glob("proposals/prp_*"))
+    assert result.is_error is False, result.text()
+    assert result.content[0].data["proposal_id"]
 
 
 def test_strategy_generate_proposal_ignores_model_invented_agent_custom_scope(
@@ -469,7 +482,7 @@ def test_strategy_generate_proposal_ignores_model_invented_agent_custom_scope(
     assert data["validation"]["ok"] is True
 
 
-def test_strategy_generate_proposal_rejects_script_mode_for_agent_decision(tmp_path) -> None:
+def test_strategy_generate_proposal_keeps_explicit_script_mode(tmp_path) -> None:
     cfg = _config(tmp_path)
 
     result = strategy_generate_proposal_handler(
@@ -499,10 +512,8 @@ def test_strategy_generate_proposal_rejects_script_mode_for_agent_decision(tmp_p
         config=cfg,
     )
 
-    assert result.is_error is True
-    assert "Agent-task strategy" in result.text()
-    assert "StrategyAgentTask.skip" in result.text()
-    assert not list(cfg.paths.evolution.glob("proposals/prp_*"))
+    assert result.is_error is False, result.text()
+    assert result.content[0].data["execution_mode"] == "script"
 
 
 def test_agent_task_validator_rejects_structural_no_dispatch_branch(tmp_path) -> None:
@@ -554,7 +565,7 @@ def test_agent_task_validator_rejects_structural_no_dispatch_branch(tmp_path) ->
     assert not list(cfg.paths.evolution.glob("proposals/prp_*"))
 
 
-def test_strategy_generate_proposal_requires_sdk_files_for_polymarket_scope(tmp_path) -> None:
+def test_strategy_generate_proposal_keeps_explicit_polymarket_scope(tmp_path) -> None:
     cfg = _config(tmp_path)
 
     result = strategy_generate_proposal_handler(
@@ -572,10 +583,19 @@ def test_strategy_generate_proposal_requires_sdk_files_for_polymarket_scope(tmp_
         config=cfg,
     )
 
-    assert result.is_error is True
-    assert "prediction-market strategy proposals must include" in result.text()
-    assert "must include `files.main.py`" in result.text()
-    assert not list(cfg.paths.evolution.glob("proposals/prp_*"))
+    assert result.is_error is False, result.text()
+    data = result.content[0].data
+    strategy_doc = yaml_io.load(
+        cfg.paths.evolution
+        / "proposals"
+        / data["proposal_id"]
+        / "after"
+        / "strategies"
+        / "polymarket_headline_edge"
+        / "strategy.yml",
+        default={},
+    )
+    assert strategy_doc["markets"] == ["POLYMARKET:event-slug"]
 
 
 def test_strategy_generate_proposal_rejects_placeholder_onchain_backtest(tmp_path) -> None:

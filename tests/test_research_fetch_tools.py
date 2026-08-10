@@ -1133,8 +1133,7 @@ def test_native_registry_exposes_web_research_tools(tmp_path) -> None:
     web_fetch = registry.get("web_fetch")
     assert web_fetch.permission_scope.value == "network"
     assert web_fetch.auto_approve is True
-    research_run = registry.get("research_run")
-    assert "research.run" in research_run.invocation_aliases
+    assert registry.get("research_run").name == "research_run"
 
 
 def test_news_social_skill_is_lazy_loaded_not_native_tool(tmp_path) -> None:
@@ -1146,9 +1145,8 @@ def test_news_social_skill_is_lazy_loaded_not_native_tool(tmp_path) -> None:
     record = deps.skill_index.get("news_social", refresh=True)
 
     assert record is not None
-    assert "economy/finance/market news" in record.description
-    assert "热门经济新闻" in record.description
-    assert record.permissions == ["network"]
+    assert "RSS-specific current news" in record.description
+    assert not hasattr(record, "permissions")
     assert record.has_scripts is True
     assert "recent_news.py" in record.scripts
 

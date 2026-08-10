@@ -28,6 +28,10 @@ _VOLATILE_ROOTS = frozenset({
     ".git", ".pytest_cache", ".ruff_cache", "__pycache__",
     "backtests", "evolution", "history", "inbox", "journals", "memory",
     "outbox", "runs", "sessions", "state", "vault", "versions", "reviews",
+    # Runtime evidence, task/team transcripts, and local recovery copies are
+    # outputs of the agent, not operator-authored proposal inputs.
+    "agent_tasks", "artifacts", "dev_logs", "evidence", "logs", "reports",
+    "teams", ".cleanup-backups",
 })
 _RUNTIME_FINGERPRINTS = {
     "model_schema": ("llm/model_registry.py",),
@@ -337,32 +341,35 @@ def _tree_digest(root: Path, *, exclude_roots: frozenset[str]) -> str:
     h = hashlib.sha256()
     if root.is_symlink() or not root.exists() or not root.is_dir():
         return h.hexdigest()
-    resolved = root.resolve()
     files: list[tuple[str, Path]] = []
     links: list[tuple[str, str]] = []
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            try:
-                relative = path.relative_to(root)
-                if any(part in exclude_roots for part in relative.parts):
+    # ``Path.rglob`` cannot prune a volatile subtree, so a workspace with a
+    # large evidence history pays the cost of walking and hashing everything.
+    # A small scandir walker keeps the same symlink and containment rules while
+    # skipping those directories before descending into them.
+    def visit(directory: Path, parts: tuple[str, ...]) -> None:
+        try:
+            entries = os.scandir(directory)
+        except OSError:
+            return
+        with entries:
+            for entry in entries:
+                name = entry.name
+                if name in exclude_roots:
                     continue
-                links.append((relative.as_posix(), os.readlink(path)))
-            except (OSError, ValueError):
-                continue
-            continue
-        elif not path.is_file():
-            continue
-        try:
-            relative = path.relative_to(root)
-        except ValueError:
-            continue
-        if any(part in exclude_roots for part in relative.parts):
-            continue
-        try:
-            path.resolve().relative_to(resolved)
-        except (OSError, ValueError):
-            continue
-        files.append((relative.as_posix(), path))
+                relative = PurePosixPath(*(parts + (name,)))
+                path = Path(entry.path)
+                try:
+                    if entry.is_symlink():
+                        links.append((relative.as_posix(), os.readlink(entry.path)))
+                    elif entry.is_dir(follow_symlinks=False):
+                        visit(path, parts + (name,))
+                    elif entry.is_file(follow_symlinks=False):
+                        files.append((relative.as_posix(), path))
+                except (OSError, ValueError):
+                    continue
+
+    visit(root, ())
     for relative, target in sorted(links):
         h.update(b"symlink\0")
         h.update(relative.encode("utf-8"))

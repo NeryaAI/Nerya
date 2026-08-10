@@ -12,7 +12,6 @@ from nerya.agent.loop import (
     LoopConfig,
     WorkspaceNativeAgentLoop,
     _build_team_run_bounded_fallback,
-    _contains_legacy_tool_call_markup,
     _format_timeout_evidence_snippet,
     _next_required_artifact_tool_names,
     _success_tool_result_markers,
@@ -393,12 +392,6 @@ def test_team_coverage_only_accepts_explicit_data_coverage() -> None:
     assert _team_final_data_coverage(
         {"data_coverage": {"has_data": True, "has_gap": False, "count": 3}}
     ) == {"has_data": True, "has_gap": False}
-
-
-def test_legacy_tool_markup_is_detected_and_never_treated_as_plain_text() -> None:
-    assert _contains_legacy_tool_call_markup("<tool_call><name>alpha</name>")
-    assert _contains_legacy_tool_call_markup("<function=alpha>")
-    assert not _contains_legacy_tool_call_markup("ordinary prose")
 
 
 def test_tool_trace_projection_keeps_payload_and_result() -> None:

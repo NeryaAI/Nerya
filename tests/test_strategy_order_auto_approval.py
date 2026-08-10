@@ -360,7 +360,7 @@ def test_risk_check_normalizes_alias_fields_and_pct_nav_cap(tmp_path):
                 "max_size_pct_nav": "0.10",
                 "order_type": "market",
                 "confidence": "1.0",
-                "rationale": "all-in request with a 10% NAV cap",
+            "reasoning": "all-in request with a 10% NAV cap",
             },
             "market_snapshot": {"price": "50000", "age_s": "0", "source": "test"},
         },

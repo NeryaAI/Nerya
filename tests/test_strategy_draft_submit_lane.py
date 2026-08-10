@@ -152,7 +152,7 @@ def test_validate_normalizes_bybit_perpetual_manifest_market(tmp_path):
 
     assert validation.is_error is False
     repaired = yaml_io.load(manifest, default={})
-    assert repaired["markets"] == ["BYBIT_PERPETUAL:SOLUSDT"]
+    assert repaired["markets"] == ["BYBIT:SOLUSDT"]
 
 
 def test_validate_normalizes_byreal_generic_pool_market(tmp_path):
@@ -185,7 +185,7 @@ def test_validate_normalizes_byreal_generic_pool_market(tmp_path):
 
     assert validation.is_error is False
     repaired = yaml_io.load(manifest, default={})
-    assert repaired["markets"] == ["BYREAL_ONCHAIN:solana"]
+    assert repaired["markets"] == ["byreal:SOL_MEME_POOL"]
 
 
 def test_submit_onchain_meme_strategy_uses_paper_replay_next_action(tmp_path):

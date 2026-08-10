@@ -2427,7 +2427,7 @@ def test_subagent_runtime_retries_transient_llm_error_once(tmp_path) -> None:
     assert result["metrics"]["iterations"] == 1
 
 
-def test_subagent_runtime_recovers_last_raw_json_tool_request(tmp_path) -> None:
+def test_subagent_runtime_does_not_execute_raw_json_tool_request(tmp_path) -> None:
     class FakeRegistry:
         def list(self):  # noqa: ANN201
             return []
@@ -2518,7 +2518,7 @@ def test_subagent_runtime_recovers_last_raw_json_tool_request(tmp_path) -> None:
     )
 
     assert llm.calls == 2
-    assert native_calls == [{"action": "get_ticker", "market": "YAHOO:NVDA"}]
+    assert native_calls == []
     assert result["output"]["summary"] == "quote observed"
 
 
@@ -2789,7 +2789,7 @@ def test_subagent_runtime_uses_finalization_reserve_before_next_normal_llm(
     assert close_steps[-1]["detail"]["close_reason"] == "subagent_finalization_reserve"
 
 
-def test_subagent_runtime_executes_legacy_xml_tool_call(tmp_path) -> None:
+def test_subagent_runtime_ignores_legacy_xml_tool_call(tmp_path) -> None:
     class FakeRegistry:
         def list(self):  # noqa: ANN201
             return []
@@ -2883,15 +2883,12 @@ def test_subagent_runtime_executes_legacy_xml_tool_call(tmp_path) -> None:
     )
 
     assert fake_llm.calls == 2
-    assert native_calls == [
-        {"venue": "yahoo", "market": "AAPL", "action": "get_ticker"}
-    ]
-    assert "prior observations" in fake_llm.prompts[1]
+    assert native_calls == []
     assert result["output"]["summary"] == "AAPL ticker observed"
-    assert result["metrics"]["skill_calls"][0]["skill"] == "market_data"
+    assert result["metrics"]["skill_calls"] == []
 
 
-def test_subagent_runtime_executes_legacy_xml_tool_call_inside_raw_wrapper(tmp_path) -> None:
+def test_subagent_runtime_ignores_legacy_xml_tool_call_inside_raw_wrapper(tmp_path) -> None:
     class FakeRegistry:
         def list(self):  # noqa: ANN201
             return []
@@ -2985,12 +2982,12 @@ def test_subagent_runtime_executes_legacy_xml_tool_call_inside_raw_wrapper(tmp_p
     )
 
     assert fake_llm.calls == 2
-    assert native_calls == [{"ticker": "NVDA", "limit": 10, "identifier": "NVDA"}]
+    assert native_calls == []
     assert result["output"]["summary"] == "NVDA filings observed"
-    assert result["metrics"]["skill_calls"][0]["skill"] == "mcp__edgar__get_recent_filings"
+    assert result["metrics"]["skill_calls"] == []
 
 
-def test_subagent_runtime_executes_legacy_skill_calls_block_and_normalises_payloads(
+def test_subagent_runtime_ignores_legacy_skill_calls_in_text(
     tmp_path,
 ) -> None:
     class FakeRegistry:
@@ -3078,7 +3075,7 @@ def test_subagent_runtime_executes_legacy_skill_calls_block_and_normalises_paylo
         name="technical_analyst",
         prompt_path=tmp_path / "technical_analyst.agent.md",
         prompt="Analyze the market.",
-        allowed_skills=["websearch", "news_social", "market_data"],
+        allowed_skills=["web_search_fetch", "news_social", "market_data"],
         tier="medium",
     )
 
@@ -3089,10 +3086,7 @@ def test_subagent_runtime_executes_legacy_skill_calls_block_and_normalises_paylo
         payload={"ticker": "NVDA"},
     )
 
-    assert calls == [
-        ("market_data", {"symbol": "NVDA", "venue": "yahoo", "action": "get_ticker", "market": "NVDA"}),
-        ("mcp__yahoo__get_stock_info", {"symbol": "NVDA", "ticker": "NVDA"}),
-    ]
+    assert calls == []
     assert result["output"]["summary"] == "NVDA data observed"
 
 
@@ -3595,7 +3589,7 @@ def test_subagent_runtime_marks_unfinished_tool_request_degraded(tmp_path) -> No
     assert result["output"]["error_kind"] == "unfinished_tool_request"
 
 
-def test_final_subagent_output_keeps_substantive_raw_with_tool_calls() -> None:
+def test_final_subagent_output_does_not_promote_raw_tool_text() -> None:
     from nerya.subagents import runtime as subagent_runtime
 
     raw = (
@@ -3615,9 +3609,8 @@ def test_final_subagent_output_keeps_substantive_raw_with_tool_calls() -> None:
         raw,
     )
 
-    assert output["done"] is True
-    assert output["quality"] == "raw_substantive_with_tool_request"
-    assert "degraded" not in output
+    assert output["degraded"] is True
+    assert output["error_kind"] == "unfinished_tool_request"
 
 
 def test_subagent_runtime_recovers_from_repeated_successful_tool_request(tmp_path) -> None:

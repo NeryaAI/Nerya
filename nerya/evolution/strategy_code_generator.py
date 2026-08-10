@@ -76,9 +76,7 @@ _VALID_EXECUTION_MODES: frozenset[str] = frozenset({
     "",
     "script",
     "agent",
-    "agent_task",
     "agent_team",
-    "team",
 })
 _STRATEGY_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,62}$")
 _VALID_TUNING_OBJECTIVES: frozenset[str] = frozenset({
@@ -145,7 +143,7 @@ class StrategyGenerationRequest:
     description: str = ""
     prompt: str = ""
     strategy_class: str = "scalping"  # scalping | trend | news | agent | agent_team
-    execution_mode: str = ""  # script | agent | agent_team; defaults from class/prompt
+    execution_mode: str = ""  # script | agent | agent_team; defaults from class
     mode: str = "paper"
     markets: tuple[str, ...] = ()
     accounts: tuple[str, ...] = ()
@@ -1509,10 +1507,6 @@ def _default_cron(strategy_class: str) -> str:
 
 def _execution_mode(req: StrategyGenerationRequest) -> str:
     raw = (req.execution_mode or "").strip().lower().replace("-", "_")
-    if raw == "agent_task":
-        return "agent"
-    if raw == "team":
-        return "agent_team"
     if raw in {"script", "agent", "agent_team"}:
         return raw
     if req.strategy_class == "agent":

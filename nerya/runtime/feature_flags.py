@@ -95,16 +95,6 @@ DEFAULTS: tuple[FlagSpec, ...] = (
         phase="phase5",
         summary="E2E verification artifact capture (`/ops/e2e/*`).",
     ),
-    FlagSpec(
-        key="runtime.native_tool_gating",
-        default=True,
-        phase="phase6",
-        summary=(
-            "Progressive native tool disclosure: keep a small always-on core "
-            "and reveal specialized tool families when the matching skill is "
-            "viewed (skill_view). Shrinks per-turn tool payload."
-        ),
-    ),
 )
 
 
