@@ -378,12 +378,12 @@ _TEAM_RUN_TURN_CACHE_LOCK = Lock()
 _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS = 120.0
 _TEAM_RUN_PARENT_MIN_FINAL_RESERVE_SECONDS = 30.0
 _TEAM_RUN_PARENT_RESERVE_SLACK_SECONDS = 15.0
-# Even a shallow single-wave team needs enough wall time for one round of
-# (web) research plus a synthesis round per member. Observed research members
-# run ~90s, so a model-authored ``timeout_s`` smaller than this silently kills
-# members mid-research and returns an empty "timeout" team. We lift such a
-# too-small timeout to this floor (unless the operator carried a hard deadline).
-_TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS = 180.0
+# Even a shallow single-wave team needs enough wall time for multiple rounds
+# of public-data research plus a synthesis round per member. Three equity
+# roles can each spend several provider calls before they have a conclusion;
+# a smaller model-authored timeout silently cancels the whole team. Lift such
+# a timeout to this floor unless the operator carried a hard deadline.
+_TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS = 300.0
 _OUTPUT_LANGUAGE_KEYS = (
     "output_language",
     "target_language",

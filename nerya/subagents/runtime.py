@@ -1250,9 +1250,10 @@ class SubAgentRuntime:
         callable_skills: list[str] = []
         callable_native_tools: list[str] = []
         if not explicit_payload_only:
-            # Normal subagents treat allowed_skills as preferences and inherit
-            # the callable catalog. Isolated reviews never touch either
-            # registry, so global tool state cannot affect the review.
+            # Keep the callable playbook surface declarative. A role's
+            # ``allowed_skills`` is the boundary; the registry is only used
+            # to discard stale ids. Native tools remain governed separately
+            # by the parent tool policy below.
             preloaded = [
                 skill
                 for skill in (*spec.allowed_skills, *CHILD_CORE_SELF_CONTROL_SKILLS)
@@ -1269,9 +1270,10 @@ class SubAgentRuntime:
                 ]
             except Exception:
                 registry_ids = []
+            declared_skills = set(preloaded)
             callable_skills = sorted({
                 sid for sid in registry_ids
-                if sid and sid not in CHILD_SKILL_DENYLIST
+                if sid in declared_skills and sid not in CHILD_SKILL_DENYLIST
             })
             callable_native_tools = self._allowed_native_tool_names(
                 spec=spec,
@@ -2222,6 +2224,29 @@ class SubAgentRuntime:
                 "arguments in the ``payload`` object exactly as documented "
                 "by the tool schema."
             )
+            preferred_contracts: list[dict[str, Any]] = []
+            preferred_native = set(allowed) & set(native_tools)
+            for tool_name in allowed:
+                if tool_name not in preferred_native or self.tool_registry is None:
+                    continue
+                descriptor = self.tool_registry.find(tool_name)
+                if descriptor is None:
+                    continue
+                preferred_contracts.append({
+                    "tool": tool_name,
+                    "description": descriptor.description,
+                    "payload_schema": descriptor.input_schema,
+                })
+            if preferred_contracts:
+                nt_block += (
+                    "\nPreferred native tool contracts for this role. The "
+                    "payload must match these schemas exactly:\n"
+                    + json.dumps(
+                        preferred_contracts,
+                        ensure_ascii=False,
+                        default=str,
+                    )
+                )
         output_language = str(
             payload.get("output_language")
             or task_envelope.get("output_language")
@@ -2298,7 +2323,8 @@ class SubAgentRuntime:
                 '``{"skill_calls": [{"skill": <id>, "action": <name>, '
                 '"payload": {...}}]}``. '
                 f"Preferred callable tools for this role: {allowed or 'none'}. "
-                "Use exact tool names and fields from the callable catalog. "
+                "Use only these declared ids and exact fields from the callable "
+                "catalog; do not invent dotted actions or route names. "
                 "A workspace skill describes a playbook; load it when needed "
                 "and use the tool schemas for the actual call. "
                 f"{nt_block}"
@@ -2487,8 +2513,26 @@ class SubAgentRuntime:
         # the native executor or skill action schema.
         native_names = allowed_native_tools or []
         if skill in native_names:
+            native_payload = dict(payload or {})
+            descriptor = (
+                self.tool_registry.find(skill)
+                if self.tool_registry is not None
+                else None
+            )
+            schema_properties = (
+                descriptor.input_schema.get("properties", {})
+                if descriptor is not None
+                and isinstance(descriptor.input_schema, dict)
+                else {}
+            )
+            if (
+                action
+                and "action" in schema_properties
+                and "action" not in native_payload
+            ):
+                native_payload["action"] = action
             return self._dispatch_native(
-                skill, payload=dict(payload or {}), entry=entry,
+                skill, payload=native_payload, entry=entry,
                 spec_name=spec_name,
                 strategy_id=strategy_id, session_id=session_id,
                 trigger_event_id=trigger_event_id,
@@ -2507,11 +2551,9 @@ class SubAgentRuntime:
                 ),
                 "entry": entry,
             }
-        # ``allowed`` here is the full set of skills the runtime is
-        # willing to dispatch (registry minus denylist). It is *not*
-        # the operator's per-spec preload list — that's a hint surfaced
-        # in the prompt, not a hard wall. So we only fail closed when
-        # the requested id is genuinely unknown to the registry.
+        # ``allowed`` is the role's declared playbook surface. Unknown or
+        # undeclared ids fail closed; native tools have already been handled
+        # above against their registered schema.
         if skill not in allowed:
             return {
                 "ok": False, "skill": skill, "action": action,

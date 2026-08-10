@@ -214,6 +214,27 @@ def test_shallow_team_operator_deadline_keeps_small_timeout(tmp_path) -> None:
     assert timeout == 60.0
 
 
+def test_shallow_equity_team_timeout_allows_research_rounds(tmp_path) -> None:
+    args = {
+        "team_template": "ad_hoc_parallel_team",
+        "max_parallel": 3,
+        "timeout_s": 180,
+        "roles": [
+            {"name": "equity_fundamental_analyst"},
+            {"name": "valuation_analyst"},
+            {"name": "technical_sentiment_analyst"},
+        ],
+    }
+
+    timeout = agents._effective_team_timeout_seconds(
+        args=args,
+        shared_payload={"context": "NVDA public-equity research"},
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+    )
+
+    assert timeout >= 300.0
+
+
 def test_shallow_team_large_model_timeout_is_unchanged(tmp_path) -> None:
     # A generous model timeout above the floor is left untouched.
     args = {
@@ -2189,6 +2210,56 @@ def test_subagent_runtime_publishes_prompt_payload_and_output(tmp_path) -> None:
     assert end["output"]["summary"] == "done"
 
 
+def test_subagent_runtime_only_exposes_declared_playbooks(tmp_path) -> None:
+    class Entry:
+        def __init__(self, skill_id: str) -> None:
+            self.manifest = type("Manifest", (), {"id": skill_id})()
+
+    class FakeRegistry:
+        def list(self):  # noqa: ANN201
+            return [Entry("declared_skill"), Entry("unlisted_skill")]
+
+    class FakeSkills:
+        registry = FakeRegistry()
+
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def call(self, **kwargs):  # noqa: ANN201
+            self.prompts.append(str(kwargs.get("prompt") or ""))
+            return LLMCall(
+                tier="medium",
+                task=kwargs["task"],
+                caller=kwargs["caller"],
+                tokens=1,
+                usd=0.001,
+                raw='{"summary":"done","done":true}',
+                parsed={"summary": "done", "done": True},
+                provider="fake",
+                model="fake-model",
+            )
+
+    llm = FakeLLM()
+    runtime = SubAgentRuntime(
+        config=Config(paths=WorkspacePaths(root=tmp_path), data={}),
+        skills=FakeSkills(),
+        llm=llm,
+    )
+    spec = SubAgentSpec(
+        name="researcher",
+        prompt_path=tmp_path / "researcher.agent.md",
+        prompt="Return the evidence.",
+        allowed_skills=["declared_skill"],
+        tier="medium",
+    )
+
+    runtime.run(spec, trigger_event_id=None, payload={})
+
+    assert "declared_skill" in llm.prompts[0]
+    assert "unlisted_skill" not in llm.prompts[0]
+
+
 def test_subagent_prompt_keeps_team_control_fields_out_of_untrusted_payload(
     tmp_path,
 ) -> None:
@@ -3122,7 +3193,10 @@ def test_subagent_runtime_falls_back_to_tool_observations_after_tool_only_budget
                 model="fake-model",
             )
 
+    native_payloads: list[dict] = []
+
     def fake_market_data(call):  # noqa: ANN001, ANN202
+        native_payloads.append(dict(call.arguments or {}))
         return ToolResult.from_json(
             tool_use_id=call.id,
             name=call.name,
@@ -3134,7 +3208,11 @@ def test_subagent_runtime_falls_back_to_tool_observations_after_tool_only_budget
         make_native_descriptor(
             name="market_data",
             description="test market data",
-            input_schema={},
+            input_schema={
+                "type": "object",
+                "properties": {"action": {"type": "string"}},
+                "required": ["action"],
+            },
             handler=fake_market_data,
             risk=RiskLevel.READ,
             permission_scope=PermissionScope.NETWORK,
@@ -3170,6 +3248,7 @@ def test_subagent_runtime_falls_back_to_tool_observations_after_tool_only_budget
     assert result["output"]["partial"] is True
     assert result["output"]["quality"] == "tool_observation_fallback"
     assert result["metrics"]["skill_calls"][0]["skill"] == "market_data"
+    assert native_payloads == [{"market": "NVDA", "action": "get_ticker"}]
 
 
 def test_subagent_runtime_falls_back_after_raw_tool_request_followup(
@@ -3323,7 +3402,19 @@ def test_subagent_runtime_does_not_prefetch_from_role_name(tmp_path) -> None:
             make_native_descriptor(
                 name=name,
                 description=f"test {name}",
-                input_schema={},
+                input_schema=(
+                    {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["get_ticker"],
+                            }
+                        },
+                    }
+                    if name == "market_data"
+                    else {}
+                ),
                 handler=fake_tool,
                 risk=RiskLevel.READ,
                 permission_scope=PermissionScope.NETWORK,
@@ -3355,6 +3446,9 @@ def test_subagent_runtime_does_not_prefetch_from_role_name(tmp_path) -> None:
 
     assert native_calls == []
     assert "prior observations" not in llm.prompts[0]
+    assert "Preferred native tool contracts for this role" in llm.prompts[0]
+    assert '"tool": "market_data"' in llm.prompts[0]
+    assert '"get_ticker"' in llm.prompts[0]
     assert result["metrics"]["skill_calls"] == []
     assert result["output"]["data_coverage"]["has_market_data"] is False
     assert result["output"]["data_coverage"]["has_financial_statement"] is False

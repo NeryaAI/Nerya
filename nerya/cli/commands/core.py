@@ -7,6 +7,8 @@ keep them self-contained and side-effect-free at import time.
 
 from __future__ import annotations
 
+import os
+import signal
 import sys
 
 from .._common import _add_ws, _client, _print
@@ -109,23 +111,41 @@ def cmd_run(args) -> int:
             api_port=args.port,
         )
 
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _handle_termination)
     try:
         serve(client.config, host=args.host, port=args.port)
     finally:
         if dashboard_proc is not None:
-            try:
-                dashboard_proc.terminate()
-                dashboard_proc.wait(timeout=5)
-            except Exception:
-                try:
-                    dashboard_proc.kill()
-                except Exception:
-                    pass
+            _stop_dashboard(dashboard_proc)
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return 0
 
 
+def _handle_termination(signum, _frame) -> None:
+    raise SystemExit(128 + int(signum))
+
+
+def _stop_dashboard(process) -> None:
+    """Stop the dashboard and every child it spawned."""
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        else:
+            process.terminate()
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            if os.name == "posix":
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            else:
+                process.kill()
+        except Exception:
+            pass
+
+
 def _spawn_dashboard(port: int, *, api_host: str = "127.0.0.1", api_port: int = 18317):
-    """Spawn ``npm run dev`` for the bundled Next.js dashboard.
+    """Spawn the bundled Next.js dashboard.
 
     Returns the ``subprocess.Popen`` (or ``None`` if the dashboard
     folder / npm is not available — the API stays up regardless).
@@ -144,14 +164,15 @@ def _spawn_dashboard(port: int, *, api_host: str = "127.0.0.1", api_port: int = 
     import subprocess
     from pathlib import Path
 
-    npm = shutil.which("npm") or shutil.which("npm.cmd")
-    if npm is None:
-        print("[nerya] dashboard skipped: npm not on PATH", file=sys.stderr)
+    node = shutil.which("node") or shutil.which("node.exe")
+    if node is None:
+        print("[nerya] dashboard skipped: node not on PATH", file=sys.stderr)
         return None
 
     here = Path(__file__).resolve().parents[3]
     dashboard_dir = here / "dashboard"
-    if not (dashboard_dir / "package.json").exists():
+    next_cli = here / "node_modules" / "next" / "dist" / "bin" / "next"
+    if not (dashboard_dir / "package.json").exists() or not next_cli.exists():
         print(f"[nerya] dashboard skipped: {dashboard_dir} not found", file=sys.stderr)
         return None
 
@@ -173,10 +194,10 @@ def _spawn_dashboard(port: int, *, api_host: str = "127.0.0.1", api_port: int = 
     elif os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
-    print(f"[nerya] launching dashboard: npm run dev (port={port}) at {dashboard_dir}")
+    print(f"[nerya] launching dashboard: next dev (port={port}) at {dashboard_dir}")
     try:
         return subprocess.Popen(
-            [npm, "run", "dev"],
+            [node, str(next_cli), "dev"],
             cwd=str(dashboard_dir),
             env=env,
             stdout=None, stderr=None,
