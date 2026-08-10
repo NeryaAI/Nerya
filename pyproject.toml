@@ -44,7 +44,9 @@ dev = [
     "ruff>=0.4",
 ]
 trading = [
-    "ccxt>=4.4",
+    # Keep the credential schema stable until the BitMart uid contract is
+    # explicitly reviewed against the upstream CCXT release.
+    "ccxt>=4.4,<4.5.65",
     "eth-account>=0.13",
     "eth-abi>=5.0",
     "msgpack>=1.0",

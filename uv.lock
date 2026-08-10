@@ -1772,7 +1772,7 @@ trading = [
 requires-dist = [
     { name = "base58", marker = "extra == 'trading'", specifier = ">=2.1" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
-    { name = "ccxt", marker = "extra == 'trading'", specifier = ">=4.4" },
+    { name = "ccxt", marker = "extra == 'trading'", specifier = ">=4.4,<4.5.65" },
     { name = "cryptography", specifier = ">=41.0" },
     { name = "eth-abi", marker = "extra == 'trading'", specifier = ">=5.0" },
     { name = "eth-account", marker = "extra == 'trading'", specifier = ">=0.13" },
