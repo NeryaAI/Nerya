@@ -54,7 +54,19 @@ def test_cmd_run_terminates_dashboard_process_group(monkeypatch):
     assert ("killpg", 123) in events
 
 
-def test_spawn_dashboard_uses_direct_next_cli(monkeypatch):
+def test_spawn_dashboard_uses_direct_next_cli(monkeypatch, tmp_path):
+    fake_repo = tmp_path / "repo"
+    dashboard = fake_repo / "dashboard"
+    next_cli = fake_repo / "node_modules" / "next" / "dist" / "bin" / "next"
+    dashboard.mkdir(parents=True)
+    next_cli.parent.mkdir(parents=True)
+    (dashboard / "package.json").write_text("{}", encoding="utf-8")
+    next_cli.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        core,
+        "__file__",
+        str(fake_repo / "nerya" / "cli" / "commands" / "core.py"),
+    )
     captured = {}
     monkeypatch.setattr(
         shutil,
