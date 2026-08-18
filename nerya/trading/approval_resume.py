@@ -192,6 +192,14 @@ def register_approval_resume_subscriber(config: Config) -> Any:
                 return
             if str(event.get("state") or "").lower() != "approved":
                 return
+            record = event.get("record")
+            record_kind = str(
+                (record or {}).get("kind")
+                if isinstance(record, dict)
+                else event.get("approval_kind") or ""
+            ).strip()
+            if record_kind and record_kind != "trade_intent":
+                return
             approval_id = str(event.get("approval_id") or "")
             if not approval_id:
                 return
@@ -363,6 +371,7 @@ def _rebuild_plan(record: dict[str, Any]) -> TradePlan | None:
         entry = TradeEntry(
             order_type=str(entry_raw.get("order_type") or "market"),
             limit_price=entry_raw.get("limit_price"),
+            stop_price=entry_raw.get("stop_price"),
             max_slippage_bps=int(entry_raw.get("max_slippage_bps") or 25),
             time_in_force=str(entry_raw.get("time_in_force") or "gtc"),
         )

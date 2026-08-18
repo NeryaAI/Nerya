@@ -268,6 +268,7 @@ class OrderCandidate:
     size_base: float | None = None
     notional_usd: float = 0.0
     price: float | None = None
+    stop_price: float | None = None
     leverage: float = 1.0
     reduce_only: bool = False
     time_in_force: Literal["gtc", "ioc", "fok", "post_only"] = "gtc"
@@ -297,6 +298,10 @@ class OrderCandidate:
             raise IntentValidationError(
                 f"{self.order_type} candidate requires a price"
             )
+        if self.order_type in ("stop", "stop_limit") and self.stop_price is None:
+            raise IntentValidationError(
+                f"{self.order_type} candidate requires a stop_price"
+            )
         if self.leverage <= 0:
             raise IntentValidationError("leverage must be > 0")
 
@@ -321,10 +326,23 @@ PlanAction = Literal[
 
 @dataclass
 class TradeEntry:
-    order_type: Literal["market", "limit"] = "market"
+    order_type: Literal["market", "limit", "stop", "stop_limit"] = "market"
     limit_price: float | None = None
+    stop_price: float | None = None
     max_slippage_bps: int = 25
     time_in_force: Literal["gtc", "ioc", "fok", "post_only"] = "gtc"
+
+    def __post_init__(self) -> None:
+        if self.order_type in ("limit", "stop_limit") and self.limit_price is None:
+            raise IntentValidationError(f"{self.order_type} requires limit_price")
+        if self.order_type in ("stop", "stop_limit") and self.stop_price is None:
+            raise IntentValidationError(f"{self.order_type} requires stop_price")
+        if self.limit_price is not None and float(self.limit_price) <= 0:
+            raise IntentValidationError("limit_price must be positive")
+        if self.stop_price is not None and float(self.stop_price) <= 0:
+            raise IntentValidationError("stop_price must be positive")
+        if int(self.max_slippage_bps) < 0:
+            raise IntentValidationError("max_slippage_bps must be >= 0")
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)

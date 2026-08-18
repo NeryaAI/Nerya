@@ -14,6 +14,16 @@ class WorkspacePaths:
     @property
     def config(self) -> Path: return self.root / "nerya.yml"
 
+    # Declarative dashboard UI.  ``ui/workspace.yml`` is the canonical
+    # operator-authored manifest; ``workspace/ui.yml`` is retained as a
+    # migration alias by :mod:`nerya.workspace.ui`.
+    @property
+    def ui_dir(self) -> Path: return self.root / "ui"
+    @property
+    def ui_workspace(self) -> Path: return self.ui_dir / "workspace.yml"
+    @property
+    def workspace_ui(self) -> Path: return self.root / "workspace" / "ui.yml"
+
     # state
     @property
     def state(self) -> Path: return self.root / "state"

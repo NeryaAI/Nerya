@@ -1,20 +1,19 @@
-"""Execution engine — decides paper vs live, routes to connector, writes fills.
+"""Legacy execution compatibility for deterministic paper orders.
 
-Live path:
-    - account.is_live  (= account.mode == 'live' AND account.live_trading_enabled)
-    - runtime.live_trading_enabled in nerya.yml must also be true
-    - runtime.kill_switch must be false
-    - market_snapshot must be fresh enough (`execution.max_snapshot_age_s`)
+Real-money execution is intentionally disabled on the public ``execute``
+method. All canary/live orders must enter through ``submit_trade_intent`` or
+``submit_trade_plan`` so they cannot bypass RiskGate, ApprovalGate, capital
+reservations, durable executors, final live-state checks, and audit journals.
 
-When any of these are false we fall back to the deterministic paper
-executor so bots never accidentally send a real order.
+The private ``_execute_live`` implementation remains temporarily for focused
+order-tracker migration tests. It is not exported from :mod:`nerya.trading`
+and must not be used by application code.
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ..connectors import ConnectorRegistry
@@ -23,7 +22,7 @@ from ..core.config import Config
 from ..core.errors import TradingError
 from ..core.ids import fill_id as _new_fill_id, order_id as _new_order_id
 from ..core.time import now_iso
-from .accounts import Account, get_account
+from .accounts import Account, get_account, get_account_profile
 from .intents import TradeIntent
 from .order_tracker import OrderTracker
 from .orders import OrderRequest, OrderResult, Fill
@@ -50,6 +49,12 @@ class ExecutionEngine:
         market_snapshot: dict[str, Any] | None = None,
     ) -> OrderResult:
         paths = self.config.paths
+        profile = get_account_profile(paths, intent.account_id)
+        if profile.is_real_money:
+            raise TradingError(
+                "legacy ExecutionEngine cannot execute canary/live accounts; "
+                "use submit_trade_intent or submit_trade_plan"
+            )
         account = get_account(paths, intent.account_id)
         request = OrderRequest(
             intent_id=intent.intent_id,
@@ -67,9 +72,6 @@ class ExecutionEngine:
         mark = (market_snapshot or {}).get("price") or intent.limit_price
         if mark is None:
             raise TradingError("execution requires a mark price or limit price")
-
-        if self._should_execute_live(account):
-            return self._execute_live(account, intent, request, float(mark))
 
         ledger = open_ledger(paths, account.id, account.initial_balance_usd)
         return paper.execute(
@@ -97,6 +99,8 @@ class ExecutionEngine:
         request: OrderRequest,
         mark_price: float,
     ) -> OrderResult:
+        """Historical unchecked live helper retained only for migration tests."""
+
         conn = self._get_registry().get(account.id, account.connector_cfg())
 
         # convert usd size to base size if necessary

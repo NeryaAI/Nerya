@@ -48,7 +48,7 @@ ALL_SCOPES: frozenset[str] = frozenset({
     "write:skills",      # install / promote / lock-sign skills, evolution
     "write:config",      # workspace config / models / wallet / schedules
     "write:secrets",     # secrets vault, provider auth credentials
-    "trade:paper",       # submit/cancel paper trades, swaps, wallets
+    "trade:paper",       # submit/cancel paper or shadow account trades
     "trade:live",        # live exchange trade submit/cancel
     "approve:trade",     # respond to trade approvals
     "approve:tool",      # respond to tool approvals
@@ -84,7 +84,10 @@ class RouteRule:
     scope:
         The minimum scope required. ``None`` means "no scope check
         beyond authentication" (used for endpoints we explicitly
-        publish to every authenticated caller).
+        publish to every authenticated caller). A pipe-separated value
+        (for example ``"approve:trade|approve:tool"``) means any one of
+        those canonical scopes is sufficient at the route boundary; the
+        handler must still enforce record-specific authorization.
     note:
         Optional human-readable rationale, surfaced via
         :func:`describe_matrix` for the capability matrix endpoint.
@@ -119,6 +122,9 @@ _RULES: tuple[RouteRule, ...] = (
     # workspace
     RouteRule(None, "/workspace", "read:runtime", ""),
     RouteRule(None, "/workspace/", "read:runtime", "writes still pass through specific routes"),
+    RouteRule("GET", "/workspace/ui", "read:runtime", "validated declarative dashboard manifest"),
+    RouteRule("POST", "/workspace/ui/propose", "write:config", "stage a reviewable dashboard UI proposal"),
+    RouteRule("POST", "/workspace/ui/apply", "write:config", "apply an approved dashboard UI proposal"),
     RouteRule("POST", "/workspace/sync/config", "write:config", "configure Git/WebDAV workspace sync"),
     RouteRule("POST", "/workspace/sync/run", "admin:ops", "operator-only workspace snapshot restore/publish"),
     RouteRule("POST", "/workspace/file/save", "write:config", "dashboard files drawer save"),
@@ -200,12 +206,26 @@ _RULES: tuple[RouteRule, ...] = (
     # approvals
     RouteRule(None, "/approvals/pending", "read:sessions", ""),
     RouteRule(None, "/approvals/prompt", "read:sessions", ""),
-    RouteRule("POST", "/approvals/callback", "approve:tool", ""),
+    RouteRule(
+        "POST",
+        "/approvals/callback",
+        "approve:trade|approve:tool",
+        "handler partitions trade and tool approval scopes by record kind",
+    ),
 
     # trading / portfolio / strategy
-    RouteRule("POST", "/trading/submit", "trade:paper",
-              "live submit still requires risk_gate + approval_gate"),
-    RouteRule("POST", "/trading/cancel", "trade:paper", ""),
+    RouteRule(
+        "POST",
+        "/trading/submit",
+        "trade:paper|trade:live",
+        "handler resolves the target account mode before submission",
+    ),
+    RouteRule(
+        "POST",
+        "/trading/cancel",
+        "trade:paper|trade:live",
+        "SDK resolves the order account before venue cancellation",
+    ),
     RouteRule("POST", "/trading/history", "read:runtime", ""),
     RouteRule("POST", "/trading/recent_trades", "read:runtime", ""),
     RouteRule("POST", "/accounts/test_balance", "read:runtime", ""),
@@ -214,8 +234,12 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/strategy/get", "read:runtime", ""),
     RouteRule("POST", "/strategy/create", "write:config", ""),
     RouteRule("POST", "/strategy/update", "write:config", ""),
-    RouteRule("POST", "/strategy/close_positions", "trade:paper",
-              "live close still requires risk_gate + approval_gate"),
+    RouteRule(
+        "POST",
+        "/strategy/close_positions",
+        "trade:paper|trade:live",
+        "handler validates every position account before any close submit",
+    ),
     RouteRule("POST", "/strategy/delete", "write:config", ""),
     RouteRule("POST", "/strategy/set_status", "write:config", ""),
     RouteRule("POST", "/strategy/bind_wallet", "write:config", ""),
@@ -397,8 +421,12 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/wallet/quote", "read:runtime", ""),
     RouteRule("POST", "/wallet/balance", "read:runtime", ""),
     RouteRule("POST", "/wallet/klines", "read:runtime", ""),
-    RouteRule("POST", "/wallet/swap", "trade:paper",
-              "wallet swap is a side-effect; live exchanges still gate at risk layer"),
+    RouteRule(
+        "POST",
+        "/wallet/swap",
+        "trade:live",
+        "wallet swap always requests a live provider side effect",
+    ),
 
     # exchanges
     RouteRule(None, "/exchanges/providers", "read:runtime", ""),
@@ -486,7 +514,10 @@ def authorize(scopes: Iterable[str], method: str, path: str) -> tuple[bool, Opti
     """Check whether the granted scope set satisfies the route.
 
     Returns ``(ok, reason)`` where ``reason`` is ``None`` on success or
-    a short explanation suitable for the security-events journal.
+    a short explanation suitable for the security-events journal. Route
+    rules may declare pipe-separated alternatives; matching any one is
+    enough to enter the handler, which remains responsible for binding
+    the granted scope to the concrete resource being mutated.
     """
     granted = frozenset(scopes)
     if WILDCARD_SCOPE in granted:
@@ -494,9 +525,16 @@ def authorize(scopes: Iterable[str], method: str, path: str) -> tuple[bool, Opti
     needed = required_scope(method, path)
     if needed is None:
         return True, None
-    if needed in granted:
+    accepted = frozenset(
+        part.strip()
+        for part in str(needed).split("|")
+        if part.strip()
+    )
+    if granted & accepted:
         return True, None
-    return False, f"insufficient_scope:needed={needed}"
+    if len(accepted) <= 1:
+        return False, f"insufficient_scope:needed={needed}"
+    return False, f"insufficient_scope:needed_any={needed}"
 
 
 def describe_matrix() -> list[dict[str, object]]:

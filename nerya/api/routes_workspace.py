@@ -37,6 +37,32 @@ def _is_sensitive(rel: str) -> bool:
     return is_sensitive_mutation_path(rel)
 
 
+def _is_ui_manifest(rel: str) -> bool:
+    """Return true for declarative dashboard manifests.
+
+    The files drawer is deliberately a general workspace editor, but the UI
+    manifest is a capability surface: writing it directly would bypass the
+    agent proposal/diff/approval pipeline.  Keep this guard here as well as in
+    the native file tools because the dashboard can call these routes directly.
+    """
+
+    normalised = str(rel or "").strip().replace("\\", "/").lstrip("./").lower()
+    return normalised in {"ui/workspace.yml", "workspace/ui.yml"}
+
+
+def _proposal_only_error(rel: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": "proposal_only",
+        "detail": (
+            f"refusing to mutate {rel} directly; use the agent's "
+            "evolve_core_config_patch proposal and approve it in Action Inbox"
+        ),
+        "path": rel,
+        "next_action": "evolve_core_config_patch",
+    }
+
+
 def _rel(client, path: Path) -> str:
     from ..tools.native.paths import to_workspace_relative
 
@@ -326,6 +352,8 @@ def routes():
             return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
 
         rel = _rel(client, target)
+        if _is_ui_manifest(rel):
+            return _proposal_only_error(rel)
         if _is_sensitive(rel):
             return {
                 "ok": False,
@@ -379,6 +407,8 @@ def routes():
         rel = _rel(client, target)
         if rel in ("", "."):
             return {"ok": False, "error": "refuse_root"}
+        if _is_ui_manifest(rel):
+            return _proposal_only_error(rel)
         if _is_sensitive(rel):
             return {"ok": False, "error": "sensitive_path", "detail": rel}
 
@@ -414,6 +444,8 @@ def routes():
             return {"ok": False, "error": type(exc).__name__, "detail": str(exc)}
 
         rel = _rel(client, target)
+        if _is_ui_manifest(rel):
+            return _proposal_only_error(rel)
         if _is_sensitive(rel):
             return {"ok": False, "error": "sensitive_path", "detail": rel}
 
@@ -450,6 +482,8 @@ def routes():
 
         rel_from = _rel(client, src)
         rel_to = _rel(client, dst)
+        if _is_ui_manifest(rel_from) or _is_ui_manifest(rel_to):
+            return _proposal_only_error(rel_to if _is_ui_manifest(rel_to) else rel_from)
         if _is_sensitive(rel_from) or _is_sensitive(rel_to):
             return {"ok": False, "error": "sensitive_path", "detail": rel_to}
         if dst.exists():

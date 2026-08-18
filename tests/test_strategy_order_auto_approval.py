@@ -193,7 +193,16 @@ def test_trade_plan_live_account_without_order_permission_never_creates_executor
     out = submit_trade_plan(
         cfg,
         plan,
-        market_snapshot={"price": 50_000, "age_s": 0, "source": "test"},
+        market_snapshot={
+            "price": 50_000,
+            "age_s": 0,
+            "source": "test",
+            "_envelope": {
+                "mode": "live",
+                "source": "test_live_feed",
+                "venue": "mock",
+            },
+        },
     )
 
     assert out["status"] == "rejected"
@@ -243,6 +252,29 @@ def test_manual_agent_order_still_waits_for_approval(tmp_path):
     assert jsonl.read_all(cfg.paths.approvals_approved) == []
     pending = jsonl.read_all(cfg.paths.approvals_pending)
     assert pending[-1]["intent"]["source"] == "agent:native"
+
+
+def test_manual_agent_close_still_waits_for_approval(tmp_path):
+    cfg = _config(tmp_path)
+    spec = _intent_spec("agent:native")
+    spec.update({
+        "side": "sell",
+        "size": 1,
+        "size_unit": "base",
+        "meta": {"plan_action": "close_position"},
+    })
+
+    out = submit_trade_intent(
+        cfg,
+        spec=spec,
+        market_snapshot={"price": 50_000, "age_s": 0, "source": "test"},
+    )
+
+    assert out["status"] == "pending_approval"
+    assert out["approval_id"]
+    assert out["risk_decision"]["reasons"] == [
+        "operator_agent_trade_approval_required",
+    ]
 
 
 def test_risk_check_accepts_provider_numeric_strings(tmp_path):

@@ -35,6 +35,7 @@ delegates to the same skill kernel route it always has.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -102,8 +103,14 @@ class TradingAPI:
                 "detail": str(exc),
             }
 
-    def cancel_order(self, *, strategy_id: str, order_id: str,
-                     caller: str = "sdk") -> dict[str, Any]:
+    def cancel_order(
+        self,
+        *,
+        strategy_id: str,
+        order_id: str,
+        caller: str = "sdk",
+        auth_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Cancel a resting order recorded in the strategy's order ledger.
 
         Paper-mode market orders fill synchronously, so there is usually
@@ -148,12 +155,46 @@ class TradingAPI:
                 "order_id": order_id,
             }
         from ..connectors.registry import ConnectorRegistry
-        from ..trading.accounts import get_account
+        from ..trading.access_control import guard_http_trade_scope
+        from ..trading.accounts import get_account_profile
+
+        denial = guard_http_trade_scope(
+            self.config,
+            auth_context,
+            account_id=account_id,
+            action="cancel_order",
+        )
+        if denial is not None:
+            return {
+                **denial,
+                "strategy_id": strategy_id,
+                "order_id": order_id,
+            }
 
         try:
-            account = get_account(self.config.paths, account_id)
-            registry = ConnectorRegistry(workspace=self.config.paths.root)
-            connector = registry.get(account.id, account.connector_cfg())
+            profile = get_account_profile(self.config.paths, account_id)
+            if not profile.permissions.cancel_order:
+                return {
+                    "ok": False,
+                    "error": "cancel_order_disabled",
+                    "detail": f"account {account_id!r} does not permit cancellation",
+                    "strategy_id": strategy_id,
+                    "order_id": order_id,
+                    "account_id": account_id,
+                }
+            registry = ConnectorRegistry(
+                workspace=self.config.paths.root,
+                vault_passphrase=(
+                    os.environ.get("NERYA_VAULT_PASSPHRASE") or None
+                ),
+            )
+            connector_account = profile.to_connector_account(
+                live=profile.is_real_money
+            )
+            connector = registry.get(
+                profile.id,
+                connector_account.connector_cfg(),
+            )
             ack = connector.cancel_order(market=market, order_id=order_id)
         except Exception as exc:  # noqa: BLE001 — venue errors become envelopes
             return {

@@ -73,6 +73,12 @@ import type {
   EvolutionSignalsEnvelope,
   EvolutionTimelineEnvelope,
 } from "./evolutionTypes";
+import type {
+  WorkspaceUiApplyResponse,
+  WorkspaceUiEnvelope,
+  WorkspaceUiProposalRequest,
+  WorkspaceUiProposalResponse,
+} from "./workspaceUiTypes";
 import { authHeaders, handleAuthFailure } from "./auth";
 
 const BASE = "/api/proxy";
@@ -3987,6 +3993,15 @@ export const clientApi = {
   operatorNav: () => get<OperatorNavEnvelope>("/operator/nav"),
   operatorOverview: () => get<OperatorOverviewEnvelope>("/operator/overview"),
   setupReadiness: () => get<SetupReadinessEnvelope>("/setup/readiness"),
+  /**
+   * Declarative workspace UI.  The server validates `ui/workspace.yml` and
+   * returns only the safe manifest/catalog vocabulary the renderer knows.
+   */
+  workspaceUi: () => get<WorkspaceUiEnvelope>("/workspace/ui"),
+  workspaceUiPropose: (body: WorkspaceUiProposalRequest) =>
+    post<WorkspaceUiProposalResponse>("/workspace/ui/propose", body),
+  workspaceUiApply: (body: { proposal_id: string; actor_id?: string }) =>
+    post<WorkspaceUiApplyResponse>("/workspace/ui/apply", body),
 
   inboxItems: (opts?: {
     type?: string | string[];
@@ -4337,6 +4352,7 @@ export const clientApi = {
       approval_ids?: string[];
       action?: string;
       state?: string;
+      approval_kind?: string;
       batch?: boolean;
       item_count?: number;
       error?: string;

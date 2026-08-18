@@ -1335,6 +1335,39 @@ def _wrap_trade_intent_submit(deps: NativeToolDeps):
         guarded = _strategy_agent_trade_call(deps, call)
         if isinstance(guarded, ToolResult):
             return guarded
+        if not (deps.strategy_order_auto_approve and deps.active_strategy_id):
+            # Provenance is runtime-owned. A model/user must not be able to
+            # submit ``source=strategy_runtime`` from an interactive chat and
+            # inherit the unattended strategy approval lane.
+            args = dict(guarded.arguments or {})
+            requested_source = str(args.get("source") or "").strip()
+            args["source"] = "agent:native"
+            meta = dict(args.get("meta") or {})
+            meta["order_origin"] = "operator_agent"
+            if requested_source and requested_source != "agent:native":
+                meta["requested_source"] = requested_source
+            if deps.active_session_id:
+                meta["agent_session_id"] = deps.active_session_id
+            if deps.active_conversation_id:
+                meta["conversation_id"] = deps.active_conversation_id
+            if deps.active_actor_id:
+                meta["actor_id"] = deps.active_actor_id
+            if call.turn_id:
+                meta["turn_id"] = call.turn_id
+            if call.id:
+                meta["tool_call_id"] = call.id
+            args["meta"] = meta
+            guarded = ToolCall(
+                name=guarded.name,
+                arguments=args,
+                id=guarded.id,
+                turn_id=guarded.turn_id,
+                iteration=guarded.iteration,
+                caller=guarded.caller,
+                started_at=guarded.started_at,
+                parent_call_id=guarded.parent_call_id,
+                metadata=dict(guarded.metadata or {}),
+            )
         return trade_intent_submit_handler(
             guarded,
             config=deps.config,
@@ -2431,6 +2464,7 @@ def register_native_tools(
                 description=(
                     "Propose a non-protected runtime config change to "
                     "nerya.yml / agents.yml / workspace.yml / "
+                    "ui/workspace.yml / "
                     "news_feeds.yml / messages/channels.yml / policy files. "
                     "This never mutates the live config; it writes a "
                     "core_config_patch proposal under evolution/proposals/ "
@@ -2445,7 +2479,13 @@ def register_native_tools(
                     "silent: []}; do not invent targets like "
                     "notifications.routing. For Telegram channels, use "
                     "bot_token_ref plus numeric chat_id or vault-backed "
-                    "chat_id_ref. Do not use this "
+                    "chat_id_ref. For dashboard UI requests, target "
+                    "`ui/workspace.yml` and provide a full version-1 "
+                    "manifest using only read-only catalog kinds (kpi, "
+                    "metric, chart, market_ticker, portfolio, strategy_table, table, "
+                    "attention, markdown, link, skill_panel, agent_panel). "
+                    "Never include HTML, JavaScript, iframe, remote URL, or "
+                    "executable component fields. Do not use this "
                     "for protected "
                     "risk exposure, signer, secret, approval, or live-trading "
                     "limits; those direct changes must be refused with "

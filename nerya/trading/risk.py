@@ -20,7 +20,7 @@ from ..core.time import now_iso
 from ..db import DedupeRepository
 from ..db.sqlite import connect
 from .account_snapshots import fresh_snapshot
-from .accounts import Account, load_accounts
+from .accounts import Account, get_account_profile, load_accounts
 from .capital import CapitalReservationStore
 from .intents import TradeIntent
 from .position_book import PositionBook
@@ -118,6 +118,17 @@ class RiskGate:
                 fix_hints=derive_fix_hints(reasons, intent=intent),
             )
         account: Account = accounts[intent.account_id]
+        try:
+            account_profile = get_account_profile(paths, intent.account_id)
+        except Exception as exc:
+            reasons.append(f"account_profile_unavailable:{exc}")
+            return RiskDecision(
+                intent.intent_id,
+                "reject",
+                reasons,
+                estimated_notional_usd=intent.notional_usd_estimate,
+                fix_hints=derive_fix_hints(reasons, intent=intent),
+            )
 
         # 1b. Strategy ↔ account binding integrity.
         #
@@ -142,12 +153,30 @@ class RiskGate:
                 fix_hints=derive_fix_hints(reasons, intent=intent),
             )
 
-        # 2. Live flag
-        if account.mode == "live" and not self.config.live_trading_enabled():
+        # 2. Execution-mode gates. Use AccountProfile rather than the
+        # compatibility Account view: load_accounts intentionally collapses
+        # canary to paper, which previously made canary orders pass paper-cash
+        # checks and skip real-money fail-closed branches.
+        if account_profile.is_real_money and not self.config.live_trading_enabled():
             reasons.append("live_trading_disabled_runtime")
             decision = "reject"
-        if account.mode == "live" and not account.live_trading_enabled:
+        if account_profile.is_real_money and not account_profile.live_trading_enabled:
             reasons.append("live_trading_disabled_account")
+            decision = "reject"
+        if account_profile.mode == "paper" and not self.config.paper_trading_enabled():
+            reasons.append("paper_trading_disabled_runtime")
+            decision = "reject"
+        # A paper-lifecycle strategy must never reach a real-money account even
+        # if a caller supplies that account id and all global live flags are on.
+        if account_profile.is_real_money and strategy.status not in {
+            "shadow", "canary", "live",
+        }:
+            reasons.append(
+                f"strategy_status_{strategy.status}_cannot_use_real_money_account"
+            )
+            decision = "reject"
+        if strategy.limits.kill_switch:
+            reasons.append("strategy_kill_switch_enabled")
             decision = "reject"
 
         plan_action = str((intent.meta or {}).get("plan_action") or "").strip()
@@ -193,6 +222,18 @@ class RiskGate:
 
         # notional
         mark = (market_snapshot or {}).get("price") or intent.limit_price or 0.0
+        market_envelope = (
+            (market_snapshot or {}).get("_envelope")
+            if isinstance((market_snapshot or {}).get("_envelope"), dict)
+            else {}
+        )
+        if (
+            account_profile.is_real_money
+            and not risk_reducing
+            and str((market_envelope or {}).get("mode") or "").lower() != "live"
+        ):
+            reasons.append("real_money_requires_live_market_snapshot")
+            decision = "reject"
         if intent.size_unit == "usd":
             notional = float(intent.size)
         elif intent.size_unit == "base":
@@ -303,10 +344,11 @@ class RiskGate:
                 )
                 decision = "reject"
 
-        # 8. Virtual ledger balance (paper mode only)
+        # 8. Virtual ledger balance (paper mode only). Canary is real money
+        # even though the legacy Account compatibility view calls it paper.
         if (
             not risk_reducing
-            and account.mode == "paper"
+            and account_profile.mode == "paper"
             and intent.side == "buy"
             and ledger_snapshot["cash_usd"] < notional
         ):
@@ -355,7 +397,7 @@ class RiskGate:
                 reservation_blocked_usd = 0.0
             # On real-money modes, blocked reservations must not exceed
             # the snapshot's free balance + the new notional.
-            if not risk_reducing and account.is_live and intent.side == "buy":
+            if not risk_reducing and account_profile.is_real_money and intent.side == "buy":
                 free_usd = snap.free_usd
                 if reservation_blocked_usd + notional > free_usd:
                     reasons.append(
@@ -430,7 +472,7 @@ class RiskGate:
                     # Ledger unreadable. Fail closed for real-money
                     # accounts — an unenforceable daily cap must not
                     # silently become no cap. Paper stays permissive.
-                    if account.is_real_money:
+                    if account_profile.is_real_money:
                         reasons.append("daily_notional_ledger_unreadable")
                         decision = "reject"
                     spent_today = 0.0
@@ -495,6 +537,23 @@ class RiskGate:
                 reasons.append("canary_per_trade_approval_required")
                 decision = "escalate"
 
+        # Human/operator-driven Agent turns always stop at Approval Gate,
+        # independent of notional and account mode. Strategy automation uses
+        # the dedicated strategy_* sources and may proceed unattended subject
+        # to its own lifecycle/risk policy. This source is trusted only after
+        # the native-tool wrapper overwrites model-supplied provenance.
+        operator_agent_sources = {"agent", "agent:native", "subagent", "operator"}
+        source_key = str(intent.source or "").strip().lower()
+        # A dashboard operator's emergency flatten path is intentionally
+        # allowed to reduce risk without another card. Conversational Agent
+        # proposals—including closes/reductions—still require Approval Gate.
+        if source_key in operator_agent_sources and not (
+            source_key == "operator" and risk_reducing
+        ):
+            if decision != "reject":
+                reasons.append("operator_agent_trade_approval_required")
+                decision = "escalate"
+
         if not reasons:
             reasons = ["ok"]
 
@@ -531,7 +590,7 @@ class RiskGate:
                 "risk decision persistence failed for intent %s",
                 intent.intent_id,
             )
-            if account.is_real_money and decision_obj.decision != "reject":
+            if account_profile.is_real_money and decision_obj.decision != "reject":
                 decision_obj.decision = "reject"
                 decision_obj.reasons = [
                     r for r in decision_obj.reasons if r != "ok"

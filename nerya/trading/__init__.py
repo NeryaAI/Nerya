@@ -3,7 +3,7 @@ capital, position book, paper execution, ledger.
 
 04-29 introduces a richer control plane on top of the
 existing safety scaffolding (kill switch + live flag + RiskGate +
-ApprovalGate + ExecutionEngine). New code should import from the
+ApprovalGate + durable executors). New code should import from the
 explicit submodules; the names re-exported here are the stable ones
 every dashboard / CLI / SDK call site already depends on.
 """
@@ -34,7 +34,6 @@ from .capital import (
     CapitalReservation,
     CapitalReservationStore,
 )
-from .execution import ExecutionEngine
 from .executors import (
     Executor,
     ExecutorOrchestrator,
@@ -106,7 +105,6 @@ __all__ = [
     "OrderRequest", "OrderResult", "Fill",
     "RiskDecision", "RiskGate",
     "ApprovalGate", "ApprovalRecord",
-    "ExecutionEngine",
     "VirtualLedger",
     "STATES", "TRADABLE_STATES", "LIVE_STATES",
     "EXECUTING_STATES", "ACCOUNT_BINDABLE_STATES",

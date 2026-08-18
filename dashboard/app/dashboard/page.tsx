@@ -34,6 +34,8 @@ import { useUiSettings } from "../../lib/settings";
 import { useCurrentAccountId, formatBalance } from "../../lib/currentAccount";
 import { formatTime } from "../../lib/format";
 import { authHeaders } from "../../lib/auth";
+import { WorkspaceCustomizeButton } from "../../components/workspace/WorkspaceCustomizeButton";
+import { WorkspaceUiHome } from "../../components/workspace/WorkspaceUiHome";
 
 type Message = { id?: string; ts?: string; channel?: string; text?: string; severity?: string };
 type Proposal = { id?: string; kind?: string; summary?: string; status?: string };
@@ -284,6 +286,7 @@ export default function DashboardOverview() {
               {t(greetingKey)}, {operatorName}.
             </h1>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[color:var(--text-muted)]">
+              <WorkspaceCustomizeButton context="home" compact />
               <StatusDot
                 tone={apiOnline ? "ok" : "danger"}
                 label={apiOnline ? t("statusOnline") : t("statusOffline")}
@@ -368,6 +371,9 @@ export default function DashboardOverview() {
 
         {/* Setup checklist — auto-hides when everything is ok. */}
         <SetupReadinessCard collapsed />
+
+        {/* Agent-authored, read-only widgets from ui/workspace.yml. */}
+        <WorkspaceUiHome />
 
         {/* Section 2 — Strategies (cockpit focus: status + P&L + win-rate
             for every registered strategy, at a glance). */}

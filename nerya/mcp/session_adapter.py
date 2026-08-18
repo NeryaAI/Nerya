@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, TYPE_CHECKING
 
 from ..tools.registry import ToolRegistry
-from ..tools.resources import ResourceEntry, ResourceIndex
+from ..tools.resources import ResourceEntry, ResourceFetcher, ResourceIndex
 if TYPE_CHECKING:
     from ..tools.executor import NativeToolExecutor  # noqa: F401
 from ..tools.types import (

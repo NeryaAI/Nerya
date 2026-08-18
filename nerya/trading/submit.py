@@ -274,8 +274,9 @@ def _intent_to_plan(intent: TradeIntent) -> TradePlan:
         sizing = SizingPolicy(method="fixed_base", fixed_base=float(intent.size))
 
     entry = TradeEntry(
-        order_type=intent.order_type if intent.order_type in ("market", "limit") else "market",
+        order_type=intent.order_type,
         limit_price=intent.limit_price,
+        stop_price=intent.stop_price,
         time_in_force=intent.time_in_force,
     )
 
@@ -425,8 +426,12 @@ def _resolve_market_snapshot(
     if isinstance(supplied, dict) and supplied:
         snap = dict(supplied)
         if "_envelope" not in snap:
-            snap["_envelope"] = live_envelope(
-                source=str(snap.get("source", venue_hint or "caller")),
+            # Untagged caller/model data has no trustworthy provenance. Paper
+            # simulation may still use the numeric mark, but real-money Risk
+            # Gate requires a live envelope and will fail closed.
+            snap["_envelope"] = degraded_envelope(
+                "caller_market_snapshot",
+                error="missing_provenance_envelope",
                 venue=venue_hint,
             ).as_dict()
         return snap
@@ -570,6 +575,40 @@ def submit_trade_plan(
             "intent": redact_dict(intent.asdict()),
             "risk_decision": risk.asdict(),
         }
+
+    # A real-money account that cannot place orders must be rejected before
+    # Approval Gate.  Otherwise a human could approve a trade that the
+    # executor is guaranteed to refuse, leaving a misleading approval card
+    # and no executable path.  This is deliberately after Risk Gate so the
+    # caller still gets the normal risk reasons when the intent itself is
+    # invalid, but before any approval is created.
+    try:
+        profile = get_account_profile(paths, plan.account_id)
+    except Exception as exc:
+        profile = None
+        execution_blocker = f"account_profile_unavailable:{exc}"
+    else:
+        execution_blocker = _real_money_execution_blocker(config, profile)
+    if execution_blocker:
+        jsonl.append(paths.journal("trading"), {
+            "kind": "trade_plan.execution_blocked",
+            "ts": now_iso(),
+            "strategy_id": plan.strategy_id,
+            "session_id": session_id,
+            "plan_id": plan.plan_id,
+            "intent_id": intent.intent_id,
+            "account_id": plan.account_id,
+            "reason": execution_blocker,
+        })
+        return {
+            "status": "rejected",
+            "session_id": session_id,
+            "plan_id": plan.plan_id,
+            "intent": redact_dict(intent.asdict()),
+            "risk_decision": risk.asdict(),
+            "execution_blocker": execution_blocker,
+        }
+
     approval_record = None
     if risk.decision == "escalate":
         approval_record = _maybe_auto_approve_strategy_order(config, intent, risk)
@@ -621,9 +660,18 @@ def submit_trade_plan(
         }
 
     # Budget check + reservation.
-    profile = get_account_profile(paths, plan.account_id)
-    blocker = _real_money_execution_blocker(config, profile)
-    if blocker:
+    # Re-read the account after Approval Gate. An operator may change the
+    # account mode, permissions, or live switch while a card is pending; the
+    # approval must never turn that stale pre-approval view into a connector
+    # call.
+    try:
+        profile = get_account_profile(paths, plan.account_id)
+    except Exception as exc:
+        profile = None
+        execution_blocker = f"account_profile_unavailable:{exc}"
+    else:
+        execution_blocker = _real_money_execution_blocker(config, profile)
+    if execution_blocker:
         jsonl.append(paths.journal("trading"), {
             "kind": "trade_plan.execution_blocked",
             "ts": now_iso(),
@@ -632,7 +680,7 @@ def submit_trade_plan(
             "plan_id": plan.plan_id,
             "intent_id": intent.intent_id,
             "account_id": plan.account_id,
-            "reason": blocker,
+            "reason": execution_blocker,
         })
         return {
             "status": "rejected",
@@ -640,7 +688,7 @@ def submit_trade_plan(
             "plan_id": plan.plan_id,
             "intent": redact_dict(intent.asdict()),
             "risk_decision": risk.asdict(),
-            "execution_blocker": blocker,
+            "execution_blocker": execution_blocker,
         }
     snap = fresh_snapshot(config, plan.account_id, profile=profile)
     store = CapitalReservationStore(paths)
@@ -654,6 +702,8 @@ def submit_trade_plan(
         side=side,
         sizing=plan.sizing,
         mark_price=float(mark_price) if mark_price else None,
+        order_price=plan.entry.limit_price,
+        stop_price=plan.entry.stop_price,
         order_type=plan.entry.order_type,
         reduce_only=risk_reducing,
         time_in_force=plan.entry.time_in_force,
@@ -850,6 +900,7 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
         "size_unit": intent_unit,
         "order_type": plan.entry.order_type,
         "limit_price": plan.entry.limit_price,
+        "stop_price": plan.entry.stop_price,
         "time_in_force": plan.entry.time_in_force,
         "confidence": plan.confidence,
         "reasoning": plan.reasoning_ref,
@@ -862,6 +913,7 @@ def _plan_to_intent(plan: TradePlan) -> TradeIntent:
                 "subagent",
                 "script",
                 "cron",
+                "operator",
                 "strategy_runtime",
                 "strategy_agent",
                 "strategy_triggered_agent",

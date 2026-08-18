@@ -28,7 +28,7 @@ Operators choose how strict the result is:
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -115,39 +115,56 @@ def _env_ref_resolved(ref: str | None) -> bool:
 
 
 def _check_llm_keys(cfg: Config, mode: Mode) -> list[Check]:
-    tiers = cfg.get("llm.tiers") or {}
+    """Validate route-aware provider credentials for every configured tier."""
+
+    from ..llm.ops import effective_tiers, provider_readiness
+    from ..llm.route_candidates import configured_routes
+
+    tiers = effective_tiers(cfg)
+    readiness = {
+        str(row.get("provider") or "").strip().lower(): row
+        for row in provider_readiness(cfg).get("providers", [])
+    }
     out: list[Check] = []
-    for name, tier in (tiers or {}).items():
-        provider = (tier or {}).get("provider") or "mock"
-        if provider == "mock":
+    for name, tier in tiers.items():
+        routes = configured_routes(tier)
+        if not routes:
             out.append(Check(
                 name=f"llm.tier.{name}",
-                status="pass" if mode == "local_dev" else "fail",
-                detail=f"tier {name} uses provider=mock",
+                status="warn" if mode == "local_dev" else "fail",
+                detail=f"tier {name} has no provider/model routes",
                 required_for=("prod_paper", "canary_live", "full_live"),
             ))
             continue
-        key_ref = (
-            (tier or {}).get("api_key_ref")
-            or (tier or {}).get("api_key")
-        )
-        if _env_ref_resolved(key_ref):
-            out.append(Check(
-                name=f"llm.tier.{name}",
-                status="pass",
-                detail=f"tier {name} provider={provider} has key",
-            ))
-        else:
-            out.append(Check(
-                name=f"llm.tier.{name}",
-                status="fail" if mode != "local_dev" else "warn",
-                detail=(
-                    f"tier {name} provider={provider} missing api_key_ref"
-                    if not key_ref
-                    else f"tier {name} env var {key_ref} is empty"
-                ),
-                required_for=("prod_paper", "canary_live", "full_live"),
-            ))
+
+        route_states: list[str] = []
+        ready_count = 0
+        for route in routes:
+            provider = str(route.get("provider") or "mock").strip().lower()
+            provider_row = readiness.get(provider) or {}
+            env_name = str(route.get("provider_key_env") or "").strip()
+            env_ready = bool(env_name and os.environ.get(env_name))
+            route_ready = (
+                provider != "mock"
+                and (
+                    bool(provider_row.get("ready"))
+                    or bool(route.get("provider_key_ref"))
+                    or env_ready
+                )
+            )
+            ready_count += int(route_ready)
+            route_states.append(f"{provider}:{'ready' if route_ready else 'missing_key'}")
+
+        status = "pass" if ready_count else ("warn" if mode == "local_dev" else "fail")
+        out.append(Check(
+            name=f"llm.tier.{name}",
+            status=status,
+            detail=(
+                f"tier {name} ready_routes={ready_count}/{len(routes)} "
+                + ", ".join(route_states)
+            ),
+            required_for=("prod_paper", "canary_live", "full_live") if not ready_count else (),
+        ))
     return out
 
 
@@ -170,6 +187,76 @@ def _check_live_mock_conflict(cfg: Config, mode: Mode) -> Check:
         name="runtime.live_vs_mock",
         status="pass",
         detail=f"live={live_on} mock={mock_on}",
+    )
+
+
+def _check_live_enabled(cfg: Config, mode: Mode) -> Check:
+    live_on = cfg.live_trading_enabled()
+    strict = mode in ("canary_live", "full_live")
+    return Check(
+        name="runtime.live_enabled",
+        status="pass" if live_on or not strict else "fail",
+        detail=f"live_trading_enabled={live_on}",
+        required_for=("canary_live", "full_live") if strict else (),
+    )
+
+
+def _check_live_accounts(cfg: Config, mode: Mode) -> Check:
+    """Require at least one real-money account that can actually trade."""
+
+    if mode not in ("canary_live", "full_live"):
+        return Check(
+            name="accounts.live_ready",
+            status="skip",
+            detail=f"not required in mode={mode}",
+        )
+    from ..trading.accounts import load_account_profiles
+
+    try:
+        profiles = load_account_profiles(cfg.paths)
+    except Exception as exc:
+        return Check(
+            name="accounts.live_ready",
+            status="fail",
+            detail=f"cannot load account profiles: {type(exc).__name__}:{exc}",
+            required_for=("canary_live", "full_live"),
+        )
+
+    real_accounts = [profile for profile in profiles.values() if profile.is_real_money]
+    if not real_accounts:
+        return Check(
+            name="accounts.live_ready",
+            status="fail",
+            detail="no canary/live account configured",
+            required_for=("canary_live", "full_live"),
+        )
+
+    ready: list[str] = []
+    blocked: list[str] = []
+    for profile in real_accounts:
+        reasons: list[str] = []
+        if profile.status != "active":
+            reasons.append(f"status={profile.status}")
+        if not profile.live_trading_enabled:
+            reasons.append("live_disabled")
+        if not profile.permissions.read_balances:
+            reasons.append("read_balances=false")
+        if not profile.permissions.place_order:
+            reasons.append("place_order=false")
+        if profile.kind == "cex" and not profile.permissions.cancel_order:
+            reasons.append("cancel_order=false")
+        if reasons:
+            blocked.append(f"{profile.id}({','.join(reasons)})")
+        else:
+            ready.append(profile.id)
+
+    return Check(
+        name="accounts.live_ready",
+        status="pass" if ready else "fail",
+        detail=(
+            f"ready={ready or []}; blocked={blocked or []}"
+        ),
+        required_for=("canary_live", "full_live"),
     )
 
 
@@ -254,24 +341,15 @@ def _check_capability_gaps(cfg: Config, mode: Mode) -> Check:
 
 # ---------------------------------------------------------------- connector reachability
 def _check_connector_reachability(cfg: Config, mode: Mode) -> list[Check]:
-    """Positive proof every configured venue can be reached.
+    """Probe each account using the transport appropriate to its account kind."""
 
-    For every registered account we try the cheapest public read the
-    venue exposes (``get_ticker`` on a conservative default market for
-    CEX, ``eth_blockNumber`` for chains). The probe runs *without*
-    credentials — it only proves network reachability + provider
-    liveness. Credential smoke is a separate check.
-
-    Skipped in ``local_dev`` because operators routinely boot Nerya
-    offline. For ``prod_paper`` and stricter we insist on at least one
-    reachable CEX venue so the rest of the preflight is meaningful.
-    """
     if mode == "local_dev":
         return []
-    from ..skills._connector_helpers import venue_of  # local — avoids cycle
-    from ..trading.accounts import load_accounts
+    from ..connectors.registry import build_connector
+    from ..trading.accounts import load_account_profiles
+
     try:
-        accounts = load_accounts(cfg.paths)
+        profiles = load_account_profiles(cfg.paths)
     except Exception as exc:
         return [Check(
             name="connectors.registry",
@@ -279,51 +357,84 @@ def _check_connector_reachability(cfg: Config, mode: Mode) -> list[Check]:
             detail=f"cannot load accounts: {exc}",
             required_for=("prod_paper", "canary_live", "full_live"),
         )]
-    if not accounts:
+    if not profiles:
         return [Check(
             name="connectors.registry",
             status="warn" if mode == "prod_paper" else "fail",
             detail="no accounts configured",
             required_for=("canary_live", "full_live"),
         )]
+
     out: list[Check] = []
-    from ..connectors.registry import build_connector
-    for acc in accounts.values():
-        if (acc.venue or acc.exchange or "").lower() in ("", "mock", "paper"):
+    for profile in profiles.values():
+        venue = (profile.venue or profile.provider_spec or "").lower()
+        if venue in ("", "mock", "paper", "mock_chain"):
             out.append(Check(
-                name=f"connectors.reachability.{acc.id}",
+                name=f"connectors.reachability.{profile.id}",
                 status="skip",
-                detail=f"account {acc.id!r} uses mock/paper venue",
+                detail=f"account {profile.id!r} uses mock/paper venue",
             ))
             continue
-        probe_cfg = dict(acc.connector_cfg())
-        probe_cfg["live"] = False  # always public-path for reachability
-        try:
-            conn = build_connector(probe_cfg, workspace=cfg.paths.root)
-        except Exception as exc:
-            out.append(Check(
-                name=f"connectors.reachability.{acc.id}",
-                status="fail" if mode != "prod_paper" else "warn",
-                detail=f"build_connector failed: {type(exc).__name__}:{exc}",
-                required_for=("canary_live", "full_live"),
-            ))
-            continue
-        probed, detail = _probe_connector_public(conn, acc)
-        status = "pass" if probed else ("warn" if mode == "prod_paper" else "fail")
+
+        strict_account = (
+            mode in ("canary_live", "full_live")
+            and profile.is_real_money
+        )
+        wallet_bound = bool(
+            profile.wallet_id and profile.kind in ("chain", "dex")
+        )
+        if wallet_bound:
+            probed, detail = _probe_wallet_account(cfg, profile)
+        else:
+            probe_cfg = profile.to_connector_account(live=False).connector_cfg()
+            probe_cfg["live"] = False
+            try:
+                conn = build_connector(probe_cfg, workspace=cfg.paths.root)
+            except Exception as exc:
+                probed = False
+                detail = f"build_connector failed: {type(exc).__name__}:{exc}"
+            else:
+                probed, detail = _probe_connector_public(conn, profile)
+
+        status = "pass" if probed else ("fail" if strict_account else "warn")
         out.append(Check(
-            name=f"connectors.reachability.{acc.id}",
+            name=f"connectors.reachability.{profile.id}",
             status=status,
             detail=detail,
-            required_for=("canary_live", "full_live") if not probed else (),
+            required_for=("canary_live", "full_live") if strict_account and not probed else (),
         ))
     return out
 
 
+def _probe_wallet_account(cfg: Config, profile: Any) -> tuple[bool, str]:
+    """Read a non-persisted wallet snapshot; never signs or broadcasts."""
+
+    try:
+        from ..trading.account_snapshots import capture_snapshot
+
+        snapshot = capture_snapshot(
+            cfg,
+            profile.id,
+            profile=profile,
+            persist=False,
+        )
+    except Exception as exc:
+        return False, f"wallet snapshot failed: {type(exc).__name__}:{exc}"
+    health = str(getattr(snapshot, "health", "") or "")
+    source = str(getattr(snapshot, "source", "") or "")
+    if health != "ok":
+        meta = dict(getattr(snapshot, "meta", {}) or {})
+        reason = meta.get("error") or meta.get("reason") or "unhealthy snapshot"
+        return False, f"wallet snapshot health={health} source={source}: {reason}"
+    return True, (
+        f"wallet snapshot ok source={source} "
+        f"nav_usd={float(getattr(snapshot, 'nav_usd', 0.0) or 0.0):.2f}"
+    )
+
+
 def _probe_connector_public(conn: Any, acc: Any) -> tuple[bool, str]:
     """Cheapest public read a connector can do — returns (ok, detail)."""
-    # CEX: use the ccxt client directly if available to call fetch_time /
-    # load_markets without placing a market-data order. Fall back to
-    # connector-level get_ticker on a conservative market.
+
     client = getattr(conn, "client", None)
     if client is not None and hasattr(client, "fetch_time"):
         try:
@@ -331,13 +442,34 @@ def _probe_connector_public(conn: Any, acc: Any) -> tuple[bool, str]:
             return True, f"fetch_time ok (server_ts={ts})"
         except Exception as exc:
             return False, f"fetch_time failed: {type(exc).__name__}:{exc}"
+
+    # Chain-native connectors often inherit a generic get_ticker that raises.
+    # Prefer their actual RPC liveness method before trying market symbols.
+    for meth_name in (
+        "get_slot",
+        "get_block_number",
+        "block_number",
+        "get_latest_block",
+        "getblockcount",
+    ):
+        meth = getattr(conn, meth_name, None)
+        if callable(meth):
+            try:
+                height = meth()
+                return True, f"{meth_name}() ok (height={height})"
+            except Exception as exc:
+                return False, f"{meth_name}() failed: {type(exc).__name__}:{exc}"
+
     if hasattr(conn, "get_ticker"):
-        # Pick a market: prefer a conservative default so we don't
-        # accidentally hit a paused / delisted market on exotic venues.
-        probe_market = (acc.raw.get("probe_market")
-                        if getattr(acc, "raw", None) else None)
+        raw = getattr(acc, "raw", None) or {}
+        probe_market = raw.get("probe_market")
         if not probe_market:
-            probe_market = "BTC/USDT"
+            venue = str(
+                getattr(acc, "venue", None)
+                or getattr(acc, "provider_spec", None)
+                or ""
+            ).lower()
+            probe_market = "BTC-USD" if venue == "yahoo" else "BTC/USDT"
         try:
             tick = conn.get_ticker(probe_market)
             return True, f"get_ticker {probe_market} ok (last={getattr(tick, 'last', '?')})"
@@ -346,36 +478,20 @@ def _probe_connector_public(conn: Any, acc: Any) -> tuple[bool, str]:
                 f"get_ticker {probe_market} failed: "
                 f"{type(exc).__name__}:{exc}"
             )
-    # Chain connectors: try block_number / get_block_number.
-    for meth_name in ("get_block_number", "block_number", "get_latest_block"):
-        meth = getattr(conn, meth_name, None)
-        if callable(meth):
-            try:
-                bn = meth()
-                return True, f"{meth_name}() ok (block={bn})"
-            except Exception as exc:
-                return False, (
-                    f"{meth_name}() failed: {type(exc).__name__}:{exc}"
-                )
     return False, f"connector {type(conn).__name__} exposes no probe method"
 
 
 # ------------------------------------------------------------ account credentials
 def _check_account_credentials(cfg: Config, mode: Mode) -> list[Check]:
-    """Verify every live account has resolvable credentials.
+    """Construct every real-money private client or wallet read path."""
 
-    For ``canary_live``/``full_live`` we insist each account advertised
-    as ``live=true`` can actually load its API key / secret from the
-    vault or env. We do NOT perform a full authenticated call — that
-    would cost money on some venues. The point is to fail fast on
-    vault-misconfiguration drift.
-    """
     if mode == "local_dev":
         return []
-    from ..trading.accounts import load_accounts
-    from ..connectors.registry import _resolve_ref
+    from ..connectors.registry import build_connector
+    from ..trading.accounts import load_account_profiles
+
     try:
-        accounts = load_accounts(cfg.paths)
+        profiles = load_account_profiles(cfg.paths)
     except Exception as exc:
         return [Check(
             name="accounts.credentials",
@@ -383,78 +499,91 @@ def _check_account_credentials(cfg: Config, mode: Mode) -> list[Check]:
             detail=f"cannot load accounts: {exc}",
             required_for=("canary_live", "full_live"),
         )]
-    if not accounts:
-        return []
+
     out: list[Check] = []
-    vault_passphrase = getattr(cfg, "vault_passphrase", None)
-    for acc in accounts.values():
-        if (acc.venue or "").lower() in ("mock", "paper", ""):
+    vault_passphrase = (
+        os.environ.get("NERYA_VAULT_PASSPHRASE")
+        or getattr(cfg, "vault_passphrase", None)
+    )
+    for profile in profiles.values():
+        if not profile.is_real_money:
             continue
-        if not acc.is_live and mode == "prod_paper":
+        wallet_bound = bool(
+            profile.wallet_id and profile.kind in ("chain", "dex")
+        )
+        if wallet_bound:
+            ready, detail = _probe_wallet_account(cfg, profile)
             out.append(Check(
-                name=f"accounts.credentials.{acc.id}",
-                status="skip",
-                detail=f"{acc.id} runs in paper mode",
+                name=f"accounts.credentials.{profile.id}",
+                status="pass" if ready else "fail",
+                detail=detail,
+                required_for=("canary_live", "full_live") if not ready else (),
             ))
             continue
-        key_ref = acc.raw.get("api_key_ref")
-        sec_ref = acc.raw.get("api_secret_ref")
-        if not (key_ref or sec_ref):
-            out.append(Check(
-                name=f"accounts.credentials.{acc.id}",
-                status="fail" if acc.is_live else "warn",
-                detail=f"{acc.id} has no api_key_ref/api_secret_ref",
-                required_for=("canary_live", "full_live"),
-            ))
-            continue
-        def _resolve_any(ref: str | None) -> str | None:
-            if not ref:
-                return None
-            if isinstance(ref, str) and ref.startswith("env:"):
-                return os.environ.get(ref[len("env:"):].strip()) or None
-            # vault://... path
-            return _resolve_ref(ref, cfg.paths.root, vault_passphrase,
-                                scope="exchange")
+
+        private_cfg = profile.to_connector_account(live=True).connector_cfg()
         try:
-            key = _resolve_any(key_ref)
-            sec = _resolve_any(sec_ref)
+            build_connector(
+                private_cfg,
+                workspace=cfg.paths.root,
+                vault_passphrase=vault_passphrase,
+            )
         except Exception as exc:
             out.append(Check(
-                name=f"accounts.credentials.{acc.id}",
-                status="fail" if acc.is_live else "warn",
-                detail=f"credential resolve failed: {type(exc).__name__}:{exc}",
-                required_for=("canary_live", "full_live"),
-            ))
-            continue
-        if not key or not sec:
-            out.append(Check(
-                name=f"accounts.credentials.{acc.id}",
-                status="fail" if acc.is_live else "warn",
-                detail=(
-                    f"{acc.id}: key_present={bool(key)} secret_present={bool(sec)}"
-                ),
+                name=f"accounts.credentials.{profile.id}",
+                status="fail",
+                detail=f"private connector build failed: {type(exc).__name__}:{exc}",
                 required_for=("canary_live", "full_live"),
             ))
             continue
         out.append(Check(
-            name=f"accounts.credentials.{acc.id}",
+            name=f"accounts.credentials.{profile.id}",
             status="pass",
-            detail=f"{acc.id} credentials resolved (live={acc.is_live})",
+            detail=f"{profile.id} private connector credentials resolved",
         ))
     return out
 
 
 # -------------------------------------------------------------- llm provider smoke
+_SMOKE_TASK_BY_CLASS = {
+    "classification": "classify",
+    "structured_extraction": "extract_json",
+    "subagent_reasoning": "subagent_analysis",
+    "strategy_review": "strategy_review",
+    "proposal_generation": "script_generation",
+    "complex_reasoning": "complex_signal_analysis",
+    "content_compression": "compress",
+    "agent_loop": "normal_agent_loop",
+}
+
+
+def _smoke_task_for_tier(tier: dict[str, Any]) -> str | None:
+    tasks = [str(task) for task in (tier.get("allowed_tasks") or []) if str(task)]
+    preferred = (
+        "classify",
+        "extract_json",
+        "compress",
+        "subagent_analysis",
+        "strategy_review",
+        "normal_agent_loop",
+        "complex_signal_analysis",
+        "script_generation",
+    )
+    for task in preferred:
+        if task in tasks:
+            return task
+    if tasks:
+        return tasks[0]
+    for class_name in tier.get("allowed_classes") or []:
+        task = _SMOKE_TASK_BY_CLASS.get(str(class_name))
+        if task:
+            return task
+    return None
+
+
 def _check_llm_provider_smoke(cfg: Config, mode: Mode) -> list[Check]:
-    """Tiny ping per configured tier — proves the key is live.
+    """Tiny policy-valid ping per tier — proves a route and key are live."""
 
-    Runs only for ``canary_live`` / ``full_live`` by default because a
-    real provider call costs a few fractions of a cent. Operators can
-    opt in earlier by setting ``runtime.preflight.smoke_llm=true``.
-
-    The smoke prompt is deliberately tiny ("ping") and caps tokens; we
-    just want proof the key is alive + the model route is working.
-    """
     opt_in = bool(cfg.get("runtime.preflight.smoke_llm", False))
     if mode not in ("canary_live", "full_live") and not opt_in:
         return [Check(
@@ -465,7 +594,11 @@ def _check_llm_provider_smoke(cfg: Config, mode: Mode) -> list[Check]:
                 "(set runtime.preflight.smoke_llm=true to force)"
             ),
         )]
-    tiers = cfg.get("llm.tiers") or {}
+    from ..llm.gateway import LLMGateway
+    from ..llm.ops import effective_tiers
+    from ..llm.route_candidates import configured_routes
+
+    tiers = effective_tiers(cfg)
     if not tiers:
         return [Check(
             name="llm.provider_smoke",
@@ -473,33 +606,34 @@ def _check_llm_provider_smoke(cfg: Config, mode: Mode) -> list[Check]:
             detail="no llm.tiers configured",
         )]
     out: list[Check] = []
-    from ..llm.gateway import LLMGateway
-    gw = LLMGateway(config=cfg)
-    for tier_name in tiers.keys():
-        provider = (tiers.get(tier_name) or {}).get("provider") or "mock"
-        if provider == "mock" and mode != "local_dev":
+    gateway = LLMGateway(config=cfg)
+    for tier_name, tier in tiers.items():
+        routes = configured_routes(tier)
+        providers = [str(route.get("provider") or "mock") for route in routes]
+        task = _smoke_task_for_tier(tier)
+        if not task:
             out.append(Check(
                 name=f"llm.provider_smoke.{tier_name}",
                 status="fail",
-                detail=f"tier {tier_name} still on provider=mock",
-                required_for=("prod_paper", "canary_live", "full_live"),
+                detail=f"tier={tier_name} advertises no smokeable task/class",
+                required_for=("canary_live", "full_live"),
             ))
             continue
         try:
-            call = gw.call(
-                task="preflight",
-                prompt="SYSTEM: You are a health probe.\n\nreply OK",
+            call = gateway.call(
+                task=task,
+                prompt="Health probe: reply with a minimal successful response.",
                 caller="preflight",
                 tier=tier_name,
                 caller_allowed_tiers=[tier_name],
             )
-            ok = bool(getattr(call, "text", "") or "")
+            ok = bool(getattr(call, "raw", "")) or getattr(call, "parsed", None) is not None
             out.append(Check(
                 name=f"llm.provider_smoke.{tier_name}",
                 status="pass" if ok else "warn",
                 detail=(
-                    f"tier={tier_name} provider={provider} "
-                    f"latency_ms={getattr(call, 'latency_ms', '?')}"
+                    f"tier={tier_name} task={task} providers={providers} "
+                    f"selected={getattr(call, 'provider', '?')}"
                 ),
             ))
         except Exception as exc:
@@ -507,7 +641,7 @@ def _check_llm_provider_smoke(cfg: Config, mode: Mode) -> list[Check]:
                 name=f"llm.provider_smoke.{tier_name}",
                 status="fail",
                 detail=(
-                    f"tier={tier_name} provider={provider} "
+                    f"tier={tier_name} task={task} providers={providers} "
                     f"probe error: {type(exc).__name__}:{exc}"
                 ),
                 required_for=("canary_live", "full_live"),
@@ -551,6 +685,8 @@ DEFAULT_CHECKERS: tuple[Checker, ...] = (
     _check_talib,
     _check_llm_keys,
     _check_live_mock_conflict,
+    _check_live_enabled,
+    _check_live_accounts,
     _check_kill_switch,
     _check_capability_gaps,
     _check_connector_reachability,

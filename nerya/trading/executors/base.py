@@ -65,6 +65,7 @@ CloseType = Literal[
     "insufficient_balance",
     "lost_order_recovered",
     "external_position_change",
+    "order_canceled",
     "filled",
     "failed",
     "",  # not yet terminal

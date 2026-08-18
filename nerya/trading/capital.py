@@ -376,6 +376,8 @@ class BudgetChecker:
         side: Literal["buy", "sell"],
         sizing: SizingPolicy,
         mark_price: float | None,
+        order_price: float | None = None,
+        stop_price: float | None = None,
         order_type: Literal["market", "limit", "stop", "stop_limit"] = "market",
         leverage: float = 1.0,
         reduce_only: bool = False,
@@ -409,6 +411,7 @@ class BudgetChecker:
                 market=market, side=side, plan_strategy_id=plan_strategy_id,
                 order_type=order_type, leverage=leverage, reduce_only=reduce_only,
                 time_in_force=time_in_force, mark_price=mark_price,
+                order_price=order_price, stop_price=stop_price,
                 notional=0.0, reasons=reasons, intent_id=intent_id,
                 plan_id=plan_id, risk_evaluation_id=risk_evaluation_id,
             )
@@ -493,7 +496,8 @@ class BudgetChecker:
             order_type=order_type,
             size_base=size_base,
             notional_usd=notional,
-            price=(mark_price if order_type in ("limit", "stop_limit") else None),
+            price=(order_price if order_type in ("limit", "stop_limit") else None),
+            stop_price=(stop_price if order_type in ("stop", "stop_limit") else None),
             leverage=leverage,
             reduce_only=reduce_only,
             time_in_force=time_in_force,
@@ -516,7 +520,8 @@ class BudgetChecker:
 
     def _reject(
         self, *, market, side, plan_strategy_id, order_type, leverage,
-        reduce_only, time_in_force, mark_price, notional, reasons,
+        reduce_only, time_in_force, mark_price, order_price, stop_price,
+        notional, reasons,
         intent_id, plan_id, risk_evaluation_id,
     ) -> BudgetDecision:
         candidate = OrderCandidate(
@@ -527,7 +532,8 @@ class BudgetChecker:
             order_type=order_type,
             size_base=None,
             notional_usd=float(notional),
-            price=(mark_price if order_type in ("limit", "stop_limit") else None),
+            price=(order_price if order_type in ("limit", "stop_limit") else None),
+            stop_price=(stop_price if order_type in ("stop", "stop_limit") else None),
             leverage=leverage,
             reduce_only=reduce_only,
             time_in_force=time_in_force,

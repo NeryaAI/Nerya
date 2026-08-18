@@ -44,6 +44,7 @@ import { useOperatorNav } from "../../lib/useOperatorNav";
 import { NeryaLogo } from "../NeryaLogo";
 import { useCommandPalette } from "./CommandPalette";
 import { SidebarStrategies } from "./SidebarStrategies";
+import { WorkspaceCustomizeButton } from "../workspace/WorkspaceCustomizeButton";
 import {
   AgentsIcon,
   ChevronDownIcon,
@@ -338,6 +339,9 @@ export function CodexSidebar() {
           <SideRow icon={OverviewIcon} label={t("overview")} href="/dashboard" collapsed={railCollapsed} active={isActive(pathname, "/dashboard")} />
           <SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed={railCollapsed} active={isActive(pathname, "/chat")} />
           <SideRow icon={SearchIcon} label={t("search")} collapsed={railCollapsed} shortcut="⌘K" onClick={() => palette.setOpen(true)} />
+          {!railCollapsed ? (
+            <WorkspaceCustomizeButton context="home" compact className="w-full" />
+          ) : null}
           <SideRow icon={AgentsIcon} label={t("agents")} href="/agents" collapsed={railCollapsed} active={isActive(pathname, "/agents", ["/skills", "/tasks"])} />
           <SideRow icon={StrategiesIcon} label={t("strategies")} href="/strategies" collapsed={railCollapsed} active={isActive(pathname, "/strategies")} />
 

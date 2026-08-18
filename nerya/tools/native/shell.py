@@ -163,6 +163,8 @@ _CONFIG_PATH_RE = re.compile(
     r"nerya\.ya?ml|"
     r"news_feeds\.ya?ml|"
     r"messages[/\\]channels\.ya?ml|"
+    r"ui[/\\]workspace\.yml|"
+    r"workspace[/\\]ui\.yml|"
     r"accounts[/\\][^\s\"']+|"
     r"exchanges\.ya?ml|"
     r"triggers[/\\]schedules\.yml|"
@@ -176,6 +178,8 @@ _PROPOSAL_ONLY_CONFIG_PATH_RE = re.compile(
     r"(nerya\.ya?ml|agents\.ya?ml|workspace\.ya?ml|"
     r"news_feeds\.ya?ml|"
     r"messages[/\\]channels\.ya?ml|"
+    r"ui[/\\]workspace\.yml|"
+    r"workspace[/\\]ui\.yml|"
     r"policies[/\\](planner|tier_policy)\.ya?ml)"
 )
 _LIVE_STRATEGY_PATH_RE = re.compile(

@@ -385,6 +385,22 @@ def _capability_flags(client) -> dict[str, bool]:
     }
 
 
+def _workspace_nav_entries(client) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return safe custom page entries from the declarative UI manifest.
+
+    The shell still owns all compiled routes.  A manifest page is merely a
+    JSON/YAML-driven renderer route under ``/workspace/pages/<id>``; arbitrary
+    hrefs and duplicate built-in ids are never accepted here.
+    """
+
+    try:
+        from ..workspace.ui import nav_pages, read
+
+        return nav_pages(read(client.config.paths))
+    except Exception as exc:  # pragma: no cover - defensive nav fallback
+        return [], [f"workspace UI unavailable: {type(exc).__name__}"]
+
+
 def _nav_handler(client, _query):
     flags = _capability_flags(client)
     primary: list[dict[str, Any]] = []
@@ -397,6 +413,15 @@ def _nav_handler(client, _query):
             hidden.append(
                 {
                     **entry,
+                    # ``reason``/``fix_action`` are the current frontend
+                    # contract. Keep the old aliases for older dashboard
+                    # builds still deployed against this backend.
+                    "reason": f"Capability '{cap}' not configured.",
+                    "fix_action": action(
+                        id=f"setup_{cap}",
+                        label="Run setup",
+                        href="/settings",
+                    ),
                     "hidden_reason": f"Capability '{cap}' not configured.",
                     "fix": action(
                         id=f"setup_{cap}",
@@ -406,6 +431,19 @@ def _nav_handler(client, _query):
                 }
             )
     advanced = [dict(e) for e in _ADVANCED_NAV]
+    custom_pages, ui_warnings = _workspace_nav_entries(client)
+    reserved = {str(entry.get("id") or "") for entry in (*primary, *advanced)}
+    for entry in custom_pages:
+        entry_id = str(entry.get("id") or "")
+        if entry_id in reserved:
+            ui_warnings.append(f"workspace page id collides with built-in nav: {entry_id}")
+            continue
+        section = entry.pop("_section", "advanced")
+        if section == "primary":
+            primary.append(entry)
+        else:
+            advanced.append(entry)
+        reserved.add(entry_id)
     env = ok(
         f"{len(primary)} primary entries, {len(advanced)} advanced",
         data={
@@ -413,6 +451,7 @@ def _nav_handler(client, _query):
             "advanced": advanced,
             "hidden": hidden,
             "capabilities": flags,
+            "workspace_ui_warnings": ui_warnings,
         },
         debug_refs=[debug_ref("module", "routes_operator.nav")],
     )

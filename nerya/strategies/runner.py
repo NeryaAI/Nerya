@@ -364,6 +364,7 @@ class StrategyRunner:
             executor=self.executor,
             trigger_payload=trigger_payload,
             trigger_event_id=trigger_event_id,
+            execution_mode=mode,
         )
 
         ctx.audit.log(

@@ -18,10 +18,11 @@ finalises since paper fills are synchronous.
 from __future__ import annotations
 
 import logging
+import os
+import inspect
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..account_snapshots import latest_snapshot
 from ..accounts import get_account_profile
 from ..capital import CapitalReservationStore
 from ..order_intents import OrderCandidate
@@ -78,6 +79,7 @@ class MarketOrderExecutor(Executor):
                 size_base=candidate.size_base,
                 notional_usd=candidate.notional_usd,
                 price=candidate.price,
+                stop_price=candidate.stop_price,
                 leverage=candidate.leverage,
                 reduce_only=candidate.reduce_only,
                 time_in_force=candidate.time_in_force,
@@ -135,11 +137,24 @@ class MarketOrderExecutor(Executor):
         # ``submitted`` / ``open`` / ``partially_filled``: in paper / shadow
         # we resolve synchronously; in live mode we rely on the connector.
         if venue_mode in ("paper", "shadow"):
-            self._paper_resolve(order_id=order_id, candidate=candidate)
-            return self._finalize(filled=True)
+            paper_state = self._paper_resolve(order_id=order_id, candidate=candidate)
+            if paper_state == "filled":
+                return self._finalize(filled=True)
+            if paper_state in ("rejected", "canceled", "expired", "failed"):
+                return self._finalize(filled=False, reason=paper_state)
+            if self.run.state != "submitted":
+                self.transition("submitted")
+            return False
 
         # canary / live path
         if order.state == "created":
+            blocker = self._live_execution_blocker(profile)
+            if blocker:
+                tracker.mark_rejected(order_id, reason=blocker)
+                self.store_result({"reason": blocker})
+                self.transition("failed", close_type="risk_kill_switch")
+                self._release_reservations()
+                return True
             self._submit_live(order_id=order_id, candidate=candidate, profile=profile)
             return False
         # Already submitted; poll once.
@@ -219,31 +234,120 @@ class MarketOrderExecutor(Executor):
     def _tracker(self) -> OrderTracker:
         return OrderTracker(self.paths)
 
-    def _paper_resolve(self, *, order_id: str, candidate: OrderCandidate) -> None:
-        """Apply a synchronous deterministic fill for paper/shadow."""
+    def _live_execution_blocker(self, profile: Any) -> str | None:
+        """Re-check irreversible live gates immediately before place_order.
+
+        submit.py checks these before reserving capital, but an executor can be
+        resumed after a crash or sit queued while the operator engages the kill
+        switch. The connector boundary must therefore fail closed a second time.
+        """
+
+        try:
+            from ...core.config import load_config
+
+            config = load_config(self.paths.root)
+        except Exception:
+            return "runtime_config_unavailable"
+        if config.kill_switch():
+            return "kill_switch_enabled"
+        if not config.live_trading_enabled():
+            return "live_trading_disabled_runtime"
+        if not bool(getattr(profile, "live_trading_enabled", False)):
+            return "live_trading_disabled_account"
+        if not bool(getattr(profile, "can_place_order", False)):
+            return "account_cannot_place_order"
+        try:
+            from ...security import encryption as _encryption
+
+            if not _encryption.has_strong_crypto():
+                return "vault_crypto_unavailable"
+        except Exception:
+            return "vault_crypto_unavailable"
+        if not (os.environ.get("NERYA_VAULT_PASSPHRASE") or "").strip():
+            return "vault_passphrase_not_set"
+        return None
+
+    def _paper_resolve(self, *, order_id: str, candidate: OrderCandidate) -> str:
+        """Advance a paper order using exchange-like trigger semantics.
+
+        Market orders fill immediately. Limit/stop orders remain durable and
+        are revisited by the orchestrator until the current mark crosses the
+        requested price. The old implementation used the limit itself as the
+        mark and therefore filled every paper limit order instantly.
+        """
         tracker = self._tracker()
-        snap = latest_snapshot(self.paths, self.run.account_id)
-        # Decide reference price: candidate.price (limit) > meta.mark_price (market) > tracked order.price.
         order = tracker.get(order_id)
-        meta_mark = float(candidate.meta.get("mark_price") or 0.0)
-        ref_price = candidate.price or meta_mark or (order.price if order else None)
-        if ref_price is None or float(ref_price or 0.0) <= 0:
-            ref_price = float(order.avg_price) if (order and order.avg_price) else 0.0
-        ref_price = float(ref_price or 0.0)
-        if ref_price <= 0:
+        mark_price = self._paper_mark_price(
+            candidate,
+            prefer_frozen=bool(order is None or order.state == "created"),
+        )
+        if mark_price <= 0:
             tracker.mark_rejected(order_id, reason="no_mark_price")
             self.store_result({"reason": "no_mark_price"})
-            return
+            return "rejected"
 
-        slip = ref_price * (_PAPER_SLIPPAGE_BPS / 10_000.0)
-        fill_price = ref_price + slip if candidate.side == "buy" else ref_price - slip
+        order_type = str(candidate.order_type or "market").lower()
+        limit_price = float(candidate.price or 0.0)
+        stop_price = float(candidate.stop_price or 0.0)
+        stop_triggered = bool((candidate.meta or {}).get("paper_stop_triggered"))
+
+        if order_type in ("stop", "stop_limit") and not stop_triggered:
+            stop_triggered = (
+                mark_price >= stop_price
+                if candidate.side == "buy"
+                else mark_price <= stop_price
+            )
+            if stop_triggered:
+                candidate.meta["paper_stop_triggered"] = True
+                self.run.config_json["candidate"] = candidate.asdict()
+            else:
+                tracker.update_state(order_id, "open", payload={
+                    "reason": "awaiting_stop_trigger",
+                    "mark_price": mark_price,
+                    "stop_price": stop_price,
+                })
+                return "open"
+
+        limit_like = order_type in ("limit", "stop_limit")
+        if limit_like:
+            marketable = (
+                mark_price <= limit_price
+                if candidate.side == "buy"
+                else mark_price >= limit_price
+            )
+            if candidate.time_in_force == "post_only" and marketable:
+                tracker.confirm_cancel(order_id)
+                self.store_result({"reason": "paper_post_only_would_take"})
+                return "canceled"
+            if not marketable:
+                if candidate.time_in_force in ("ioc", "fok"):
+                    tracker.confirm_cancel(order_id)
+                    self.store_result({"reason": "paper_limit_not_marketable"})
+                    return "canceled"
+                tracker.update_state(order_id, "open", payload={
+                    "reason": "awaiting_limit_cross",
+                    "mark_price": mark_price,
+                    "limit_price": limit_price,
+                })
+                return "open"
+
+        slip = mark_price * (_PAPER_SLIPPAGE_BPS / 10_000.0)
+        fill_price = mark_price + slip if candidate.side == "buy" else mark_price - slip
+        if limit_like:
+            # A limit fill may improve on the requested price, but never cross
+            # through it after simulated slippage.
+            fill_price = (
+                min(fill_price, limit_price)
+                if candidate.side == "buy"
+                else max(fill_price, limit_price)
+            )
         size_base = candidate.size_base or (
             candidate.notional_usd / fill_price if fill_price else 0.0
         )
         if size_base <= 0:
             tracker.mark_rejected(order_id, reason="zero_size")
             self.store_result({"reason": "zero_size"})
-            return
+            return "rejected"
 
         notional = float(size_base) * float(fill_price)
         fee_usd = notional * (_PAPER_FEE_BPS / 10_000.0)
@@ -254,7 +358,7 @@ class MarketOrderExecutor(Executor):
             price=fill_price,
             size_base=size_base,
             fee_usd=fee_usd,
-            source="paper" if (snap is None or snap.source != "shadow") else "shadow",
+                    source="paper",
         )
 
         # Update the position book.
@@ -269,7 +373,7 @@ class MarketOrderExecutor(Executor):
             fee_usd=fee_usd,
             venue=_infer_venue(candidate.market),
             leverage=candidate.leverage,
-            source="paper" if (snap is None or snap.source != "shadow") else "shadow",
+            source="paper",
             executor_id=self.run.executor_id,
             order_id=order_id,
             fill_id=fill.fill_id,
@@ -296,6 +400,35 @@ class MarketOrderExecutor(Executor):
             "fee_usd": fee_usd,
             "notional_usd": notional,
         })
+        return "filled"
+
+    def _paper_mark_price(
+        self,
+        candidate: OrderCandidate,
+        *,
+        prefer_frozen: bool = False,
+    ) -> float:
+        """Resolve the latest public mark, falling back to the frozen mark."""
+
+        frozen = float((candidate.meta or {}).get("mark_price") or 0.0)
+        if prefer_frozen and frozen > 0:
+            return frozen
+        try:
+            from ...core.config import load_config
+            from ...data.candles import fetch_public_ticker
+
+            config = load_config(self.paths.root)
+            ticker = fetch_public_ticker(
+                candidate.market,
+                allow_mock=None,
+                config_like=config,
+            )
+            price = float((ticker or {}).get("price") or 0.0)
+            if price > 0:
+                return price
+        except Exception:
+            pass
+        return frozen
 
     def _submit_live(
         self,
@@ -328,7 +461,8 @@ class MarketOrderExecutor(Executor):
         sl_price, tp_price = self._native_bracket_levels(candidate)
 
         try:
-            ack = conn.place_order(
+            ack = self._place_live_order(
+                conn,
                 market=candidate.market,
                 side=candidate.side,
                 order_type=candidate.order_type,
@@ -340,6 +474,7 @@ class MarketOrderExecutor(Executor):
                 leverage=candidate.leverage if candidate.leverage and candidate.leverage != 1.0 else None,
                 stop_loss=sl_price,
                 take_profit=tp_price,
+                trigger_price=candidate.stop_price,
                 extra_params=self._connector_extra_params(),
             )
         except NotImplementedError as exc:
@@ -381,6 +516,51 @@ class MarketOrderExecutor(Executor):
             tracker.update_state(order_id, "filled")
 
         self.transition("submitted")
+
+    @staticmethod
+    def _place_live_order(conn: Any, **kwargs: Any) -> Any:
+        """Call connectors without violating their declared capabilities.
+
+        Several broker connectors still implement the legacy six-argument
+        signature. Passing harmless ``reduce_only=False`` used to make their
+        live path fail with ``unexpected keyword``. We omit unused optional
+        fields, while failing closed when an unsupported field changes order
+        semantics (reduce-only, leverage, trigger price, connector params).
+        """
+
+        signature = inspect.signature(conn.place_order)
+        parameters = signature.parameters
+        accepts_kwargs = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD
+            for p in parameters.values()
+        )
+        if accepts_kwargs:
+            return conn.place_order(**kwargs)
+
+        required_semantics = {
+            "reduce_only": bool(kwargs.get("reduce_only")),
+            "leverage": kwargs.get("leverage") not in (None, 1, 1.0),
+            "trigger_price": kwargs.get("trigger_price") is not None,
+            "stop_loss": kwargs.get("stop_loss") is not None,
+            "take_profit": kwargs.get("take_profit") is not None,
+            "extra_params": bool(kwargs.get("extra_params")),
+        }
+        unsupported = [
+            name
+            for name, required in required_semantics.items()
+            if required and name not in parameters
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "connector does not support required order fields: "
+                + ", ".join(sorted(unsupported))
+            )
+        filtered = {
+            key: value
+            for key, value in kwargs.items()
+            if key in parameters
+        }
+        return conn.place_order(**filtered)
 
     def _poll_live(self, *, order_id: str, profile) -> str | None:
         from ...connectors import ConnectorRegistry
@@ -517,6 +697,16 @@ class MarketOrderExecutor(Executor):
                 store.consume(rid)
             self._maybe_attach_protection()
             self.transition("done", close_type="filled")
+        elif reason == "canceled":
+            # IOC/FOK and post-only paper orders are valid terminal
+            # cancellations, not execution failures. Keep the executor
+            # state aligned with the order tracker so API callers can
+            # distinguish "not filled because canceled" from a risk or
+            # connector failure, while still releasing any reservation.
+            for rid in self.run.reservation_ids:
+                store.release(rid)
+            self.store_result({"reason": "canceled"})
+            self.transition("canceled", close_type="order_canceled")
         else:
             for rid in self.run.reservation_ids:
                 store.release(rid)
@@ -621,6 +811,11 @@ def _candidate_from_payload(payload: dict[str, Any]) -> OrderCandidate:
         size_base=(float(payload["size_base"]) if payload.get("size_base") is not None else None),
         notional_usd=float(payload.get("notional_usd") or 0.0),
         price=(float(payload["price"]) if payload.get("price") is not None else None),
+        stop_price=(
+            float(payload["stop_price"])
+            if payload.get("stop_price") is not None
+            else None
+        ),
         leverage=float(payload.get("leverage") or 1.0),
         reduce_only=bool(payload.get("reduce_only") or False),
         time_in_force=str(payload.get("time_in_force") or "gtc"),  # type: ignore[arg-type]

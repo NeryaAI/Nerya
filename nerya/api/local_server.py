@@ -27,6 +27,7 @@ from . import routes_skills, routes_strategies_runtime, routes_strategy
 from . import routes_strategy_history, routes_trading
 from . import routes_teams
 from . import routes_triggers, routes_wallet, routes_workspace
+from . import routes_workspace_ui
 from . import routes_gateway
 from . import routes_operator, routes_inbox, routes_agent_tasks, routes_accounts
 from . import routes_account_intake
@@ -65,6 +66,16 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+_TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
+    "/agent/run_turn",
+    "/approvals/callback",
+    "/strategy/close_positions",
+    "/trading/cancel",
+    "/trading/submit",
+    "/wallet/swap",
+})
 
 
 def _stamp_trusted_auth(payload: dict[str, Any], auth: auth_mod.AuthResult) -> dict[str, Any]:
@@ -185,7 +196,7 @@ def _register(method: str, path: str, handler):
 def _collect_routes() -> None:
     if _ROUTES:
         return
-    base_modules = (routes_health, routes_auth, routes_workspace, routes_agent,
+    base_modules = (routes_health, routes_auth, routes_workspace, routes_workspace_ui, routes_agent,
                 routes_skills, routes_triggers, routes_trading,
                 routes_llm, routes_memory, routes_strategy_history, routes_scripts,
                 routes_search, routes_browsers, routes_browsers_session, routes_data_sources,
@@ -579,7 +590,7 @@ def build_server(
                 payload = self._read_body()
                 if path_params:
                     payload = {**path_params, **payload}
-                if path_only in {"/agent/run_turn", "/approvals/callback"}:
+                if path_only in _TRUSTED_AUTH_PAYLOAD_PATHS:
                     payload = _stamp_trusted_auth(payload, auth)
                 result = handler(
                     _client_for_current_thread(config),

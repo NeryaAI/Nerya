@@ -136,6 +136,7 @@ EVOLVE_CORE_CONFIG_PATCH_SCHEMA: dict[str, Any] = {
                 "Workspace config file to propose, for example nerya.yml, "
                 "agents.yml, workspace.yml, news_feeds.yml, "
                 "messages/channels.yml, triggers/routes.yml, "
+                "ui/workspace.yml (or legacy workspace/ui.yml), "
                 "policies/planner.yml, policies/tier_policy.yml, or "
                 "skills/enabled.yml."
             ),
@@ -156,7 +157,14 @@ EVOLVE_CORE_CONFIG_PATCH_SCHEMA: dict[str, Any] = {
                 "For Telegram, store bot tokens as `bot_token_ref`; if the "
                 "operator provides a vault-backed chat id, use `chat_id_ref`, "
                 "otherwise use plaintext numeric `chat_id`. "
-                "Do not use ad-hoc targets such as notifications.routing."
+                "Do not use ad-hoc targets such as notifications.routing. For "
+                "ui/workspace.yml, send a full declarative manifest with "
+                "version: 1, home.widgets, and pages; widgets must use only "
+                "the read-only catalog kinds returned by GET /workspace/ui "
+                "(kpi, metric, chart, market_ticker, portfolio, "
+                "strategy_table, table, attention, markdown, link, skill_panel, "
+                "or agent_panel). Never include HTML, JavaScript, iframe, "
+                "remote URLs, or executable component fields."
             ),
         },
         "rationale": {

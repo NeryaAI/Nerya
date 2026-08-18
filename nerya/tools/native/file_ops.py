@@ -84,6 +84,8 @@ _SENSITIVE_MUTATION_GLOBS = (
     "strategies/*/limits.yaml",
     "skills/enabled.yml",
     "skills/enabled.yaml",
+    "ui/workspace.yml",
+    "workspace/ui.yml",
     "providers/*",
     "providers/**/*",
 )
@@ -104,6 +106,8 @@ _PROPOSAL_ONLY_CONFIG_FILES = {
     # evolve_core_config_patch like the other runtime config files.
     "skills/enabled.yml",
     "skills/enabled.yaml",
+    "ui/workspace.yml",
+    "workspace/ui.yml",
 }
 
 

@@ -29,9 +29,12 @@ import pytest
 from nerya.connectors.base import Connector, OrderAck, Ticker
 from nerya.core import yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
+from nerya.core.errors import TradingError
 from nerya.core.paths import WorkspacePaths
+from nerya.trading.accounts import get_account
 from nerya.trading.execution import ExecutionEngine
 from nerya.trading.intents import TradeIntent
+from nerya.trading.orders import OrderRequest
 from nerya.trading.order_polling import poll_active_live_orders
 from nerya.trading.order_tracker import OrderTracker
 from nerya.trading.position_book import PositionBook
@@ -167,6 +170,47 @@ def _intent(*, side="buy", size_usd=10_000.0) -> TradeIntent:
     )
 
 
+def _execute_unchecked_legacy_live_for_tracker_test(
+    engine: ExecutionEngine,
+    intent: TradeIntent,
+    *,
+    mark_price: float = 50_000.0,
+):
+    """Exercise the historical tracker adapter without exposing it publicly."""
+
+    account = get_account(engine.config.paths, intent.account_id)
+    request = OrderRequest(
+        intent_id=intent.intent_id,
+        strategy_id=intent.strategy_id,
+        account_id=intent.account_id,
+        market=intent.market,
+        side=intent.side,
+        size=intent.size,
+        size_unit=intent.size_unit,
+        order_type=intent.order_type,
+        limit_price=intent.limit_price,
+        stop_price=intent.stop_price,
+        time_in_force=intent.time_in_force,
+    )
+    return engine._execute_live(account, intent, request, mark_price)
+
+
+def test_public_legacy_execution_refuses_real_money_accounts(tmp_path):
+    cfg, stub = _live_config(tmp_path)
+    engine = _build_engine(cfg, stub)
+
+    with pytest.raises(TradingError, match="cannot execute canary/live"):
+        engine.execute(_intent(), market_snapshot={"price": 50_000})
+
+    assert stub.calls == []
+
+
+def test_legacy_execution_engine_is_not_exported_from_trading_package():
+    import nerya.trading as trading
+
+    assert not hasattr(trading, "ExecutionEngine")
+
+
 def test_execute_live_registers_order_with_tracker_even_on_zero_fill_ack(tmp_path):
     """Live ``place_order`` ack with ``filled=0`` must still produce a
     tracker row in ``submitted`` state so the poller can pick it up.
@@ -179,7 +223,7 @@ def test_execute_live_registers_order_with_tracker_even_on_zero_fill_ack(tmp_pat
         size=0.2, filled=0.0,
     ))
 
-    result = engine.execute(_intent(), market_snapshot={"price": 50_000})
+    result = _execute_unchecked_legacy_live_for_tracker_test(engine, _intent())
     assert result.filled_size == 0.0
     assert result.order_id == "venue-zerofill"
     assert result.fills == []
@@ -210,7 +254,7 @@ def test_execute_live_records_immediate_fill_on_tracker_and_position_book(tmp_pa
         size=0.2, filled=0.2, avg_price=50_000.0, fee_usd=2.5,
     ))
 
-    result = engine.execute(_intent(), market_snapshot={"price": 50_000})
+    result = _execute_unchecked_legacy_live_for_tracker_test(engine, _intent())
     assert result.filled_size == pytest.approx(0.2)
     assert result.fee_usd == pytest.approx(2.5)
     assert len(result.fills) == 1
@@ -236,7 +280,7 @@ def test_execute_live_marks_rejected_when_place_order_raises(tmp_path):
     stub.raise_on_place(RuntimeError("boom"))
 
     with pytest.raises(RuntimeError):
-        engine.execute(_intent(), market_snapshot={"price": 50_000})
+        _execute_unchecked_legacy_live_for_tracker_test(engine, _intent())
 
     tracker = OrderTracker(cfg.paths)
     # Rejected is terminal so it's in cached, not active.
@@ -259,7 +303,7 @@ def test_poller_applies_late_fills_to_position_book(tmp_path):
         status="new", market="mock:BTC/USDT", side="buy",
         size=0.2, filled=0.0,
     ))
-    engine.execute(_intent(), market_snapshot={"price": 50_000})
+    _execute_unchecked_legacy_live_for_tracker_test(engine, _intent())
 
     # The order is open, PositionBook still empty.
     book = PositionBook(cfg.paths)
@@ -331,7 +375,7 @@ def test_poller_handles_get_order_errors_via_not_found_streak(tmp_path):
         status="new", market="mock:BTC/USDT", side="buy",
         size=0.2, filled=0.0,
     ))
-    engine.execute(_intent(), market_snapshot={"price": 50_000})
+    _execute_unchecked_legacy_live_for_tracker_test(engine, _intent())
 
     # Sanity check: order was registered as active.
     tracker_before = OrderTracker(cfg.paths)
@@ -372,7 +416,7 @@ def test_poller_is_restart_safe(tmp_path):
         status="new", market="mock:BTC/USDT", side="buy",
         size=0.2, filled=0.0,
     ))
-    engine.execute(_intent(), market_snapshot={"price": 50_000})
+    _execute_unchecked_legacy_live_for_tracker_test(engine, _intent())
 
     # The "new process" starts here. PositionBook + OrderTracker are
     # rebuilt from disk; the active order survives.

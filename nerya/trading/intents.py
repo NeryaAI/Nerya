@@ -50,6 +50,12 @@ class TradeIntent:
             raise IntentValidationError("size must be positive")
         if self.order_type in ("limit", "stop_limit") and self.limit_price is None:
             raise IntentValidationError(f"{self.order_type} requires limit_price")
+        if self.order_type in ("stop", "stop_limit") and self.stop_price is None:
+            raise IntentValidationError(f"{self.order_type} requires stop_price")
+        if self.limit_price is not None and float(self.limit_price) <= 0:
+            raise IntentValidationError("limit_price must be positive")
+        if self.stop_price is not None and float(self.stop_price) <= 0:
+            raise IntentValidationError("stop_price must be positive")
         if not 0 <= self.confidence <= 1:
             raise IntentValidationError("confidence must be in [0,1]")
         if ":" not in self.market:

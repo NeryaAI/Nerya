@@ -85,8 +85,9 @@ def _resolve_market_snapshot(
     if isinstance(supplied, dict) and supplied:
         snap = dict(supplied)
         if "_envelope" not in snap:
-            snap["_envelope"] = live_envelope(
-                source=str(snap.get("source", venue_hint or "caller")),
+            snap["_envelope"] = degraded_envelope(
+                "caller_market_snapshot",
+                error="missing_provenance_envelope",
                 venue=venue_hint,
             ).as_dict()
         return snap

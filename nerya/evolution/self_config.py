@@ -33,6 +33,11 @@ _ALLOWED_TARGETS = frozenset({
     "nerya.yml",
     "agents.yml",
     "workspace.yml",
+    # Declarative dashboard UI.  Keep the canonical path explicit and retain
+    # the prototype alias so old workspaces can be migrated through the same
+    # proposal-only lane without opening a direct file-write escape hatch.
+    "ui/workspace.yml",
+    "workspace/ui.yml",
     "news_feeds.yml",
     "news_feeds.yaml",
     "messages/channels.yml",
@@ -434,6 +439,18 @@ def _normalise_message_channels_config(config_after: dict[str, Any]) -> dict[str
 def _normalise_core_config_after(target: str, config_after: dict[str, Any]) -> dict[str, Any]:
     if target in {"messages/channels.yml", "messages/channels.yaml"}:
         return _normalise_message_channels_config(config_after)
+    if target in {"ui/workspace.yml", "workspace/ui.yml"}:
+        # Import lazily so the general self-config module remains usable in
+        # minimal CLI contexts that do not load dashboard support.
+        from ..workspace.ui import validate_manifest, WorkspaceUiError
+
+        checked = validate_manifest(config_after)
+        if not checked.ok:
+            raise WorkspaceUiError(
+                "dashboard UI manifest validation failed: "
+                + "; ".join(checked.errors)
+            )
+        return checked.manifest
     return config_after
 
 

@@ -23,6 +23,7 @@ from ..core import jsonl
 from ..core.errors import NeryaError, TradingError
 from ..core.time import now_iso
 from ..skills.builtin.backtest.scripts.render_chart import render_chart
+from ..trading.access_control import guard_http_trade_scope, trusted_http_actor
 from ..trading.executors.orchestrator import ExecutorOrchestrator
 from ..trading.order_intents import SizingPolicy, TradeEntry, TradePlan
 from ..trading.order_tracker import OrderTracker
@@ -110,7 +111,9 @@ def _close_strategy_positions(client, payload: dict[str, Any]) -> dict[str, Any]
     if not sid:
         return _error("strategy_id required")
     dry_run = bool(body.get("dry_run", False))
-    operator = str(body.get("operator") or "dashboard")
+    requested_operator = str(body.get("operator") or "dashboard").strip() or "dashboard"
+    authenticated_operator = trusted_http_actor(body)
+    operator = authenticated_operator or requested_operator
     book = PositionBook(client.config.paths)
     positions = book.open_positions(strategy_id=sid)
     # Build rows from each strategy's own share so close-quantities
@@ -135,6 +138,24 @@ def _close_strategy_positions(client, payload: dict[str, Any]) -> dict[str, Any]
             "positions": rows,
         }
 
+    # Resolve every account before the first side effect. This avoids a
+    # partially flattened strategy when a batch spans paper and live accounts
+    # but the caller only holds the paper grant.
+    for account_id in sorted({str(pos.account_id) for pos in positions}):
+        denial = guard_http_trade_scope(
+            client.config,
+            body,
+            account_id=account_id,
+            action="close_strategy_positions",
+        )
+        if denial is not None:
+            return {
+                **denial,
+                "strategy_id": sid,
+                "dry_run": False,
+                "positions": rows,
+            }
+
     submitted: list[dict[str, Any]] = []
     for pos, row in zip(positions, rows):
         if row["size_base"] <= 0 or row["mark_price"] <= 0:
@@ -147,6 +168,17 @@ def _close_strategy_positions(client, payload: dict[str, Any]) -> dict[str, Any]
         # Use the share-derived side/size so we close exactly what
         # this strategy owns, even when the merged position holds the
         # opposite net direction via another strategy.
+        meta = {
+            "operator": operator,
+            "actor_id": operator,
+            "order_origin": (
+                "operator_http" if authenticated_operator else "operator_internal"
+            ),
+            "reason": str(body.get("reason") or "strategy_delete_prepare"),
+            "position_id": pos.position_id,
+        }
+        if authenticated_operator and requested_operator != authenticated_operator:
+            meta["requested_operator"] = requested_operator
         plan = TradePlan(
             action="close_position",
             strategy_id=sid,
@@ -158,11 +190,7 @@ def _close_strategy_positions(client, payload: dict[str, Any]) -> dict[str, Any]
             confidence=1.0,
             reasoning_ref=f"operator {operator} requested close before strategy delete",
             source="operator",
-            meta={
-                "operator": operator,
-                "reason": str(body.get("reason") or "strategy_delete_prepare"),
-                "position_id": pos.position_id,
-            },
+            meta=meta,
         )
         result = submit_trade_plan(
             client.config,

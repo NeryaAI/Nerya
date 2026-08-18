@@ -1142,6 +1142,13 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     const approvalId = approvalIdFromCallback(callbackData);
     const action = approvalActionFromCallback(callbackData);
     if (!approvalId) return;
+    const approvalKind = String(
+      pendingApprovals.get(approvalId)?.record?.kind || "",
+    ).toLowerCase();
+    const isAutoResumedFinancialApproval = [
+      "trade_intent",
+      "wallet_swap",
+    ].includes(approvalKind);
     setResolvingApprovalIds((prev) => new Set(prev).add(approvalId));
     try {
       const res = await clientApi.approvalCallback({
@@ -1149,6 +1156,12 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         actor_id: "dashboard",
       });
       const state = String(res?.state || "").toLowerCase();
+      const resolvedApprovalKind = String(
+        res?.approval_kind || approvalKind,
+      ).toLowerCase();
+      const resolvedAutoResumedFinancialApproval =
+        isAutoResumedFinancialApproval ||
+        ["trade_intent", "wallet_swap"].includes(resolvedApprovalKind);
       if (state === "approved" || state === "rejected") {
         const resolvedIds =
           Array.isArray(res?.approval_ids) && res.approval_ids.length
@@ -1165,7 +1178,9 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       await refreshApprovals();
       if (res?.ok && action === "approve" && state === "approved") {
         await runAgentTurn(
-          "The requested permission was approved. Continue from the pending tool call, retry the approved action, and proceed with the original task.",
+          resolvedAutoResumedFinancialApproval
+            ? `Financial approval ${approvalId} was approved. The frozen financial action is resumed automatically by the approval handler. Do not submit or retry the order, trade intent, or wallet transaction. Query the existing approval, order, or transaction status, report the resulting state, and continue the original task from that result.`
+            : "The requested permission was approved. Continue from the pending tool call, retry the approved action, and proceed with the original task.",
           {
             visibleUser: false,
             source: "approval_continue",

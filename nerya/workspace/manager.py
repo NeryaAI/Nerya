@@ -55,6 +55,13 @@ class WorkspaceManager:
         _seed_yaml(paths.messages_channels, {"version": 1, "channels": {
             "dashboard": {"kind": "dashboard"},
         }})
+        # Declarative dashboard UI starts as an empty, versioned manifest.
+        # Agent-authored changes still go through the proposal/approval
+        # pipeline; seeding here only makes the active source explicit for
+        # operators and for the files browser.
+        if not paths.ui_workspace.exists():
+            from .ui import DEFAULT_MANIFEST
+            yaml_io.dump(paths.ui_workspace, DEFAULT_MANIFEST)
         # seed memory
         _seed_text(paths.memory / "global.md",
                    "# Global memory\n\nAgent-wide notes go here.\n")

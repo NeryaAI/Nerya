@@ -20,21 +20,13 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from typing import Any
 
 from ...core.config import Config
 from ...core.paths import WorkspacePaths
 from ...db.sqlite import connect
 from ..order_intents import OrderCandidate, ProtectionRule
-from .base import (
-    Executor,
-    ExecutorConfig,
-    ExecutorKind,
-    ExecutorRun,
-    ExecutorState,
-    TERMINAL_EXECUTOR_STATES,
-)
+from .base import Executor, ExecutorKind, ExecutorRun
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +140,7 @@ class ExecutorOrchestrator:
         intent_id: str | None = None,
         plan_id: str | None = None,
         protection: ProtectionRule | None = None,
+        position_id: str | None = None,
     ) -> Executor:
         from .market_order import MarketOrderConfig, MarketOrderExecutor
 
@@ -170,6 +163,7 @@ class ExecutorOrchestrator:
             plan=plan,
             intent_id=intent_id,
             plan_id=plan_id,
+            position_id=position_id,
             paths=self.paths,
         )
         self._persist(executor.run)

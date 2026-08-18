@@ -49,19 +49,57 @@ class ApprovalGate:
         *,
         market_snapshot: dict[str, Any] | None = None,
         plan: Any = None,
+        created_at: float | None = None,
+        expires_at: float | None = None,
     ) -> dict[str, Any]:
+        meta = dict(intent.meta or {})
+        try:
+            from .accounts import get_account_profile
+
+            profile = get_account_profile(self.config.paths, intent.account_id)
+            execution_mode = str(profile.mode)
+        except Exception:
+            execution_mode = "unknown"
         record = {
             "approval_id": aid,
             "kind": "trade_intent",
+            "state": "pending",
+            "created_at": created_at if created_at is not None else time.time(),
+            "expires_at": expires_at,
             "intent_id": intent.intent_id,
             "strategy_id": intent.strategy_id,
+            "account_id": intent.account_id,
             "market": intent.market,
             "side": intent.side,
+            "order_type": intent.order_type,
+            "size": intent.size,
+            "size_unit": intent.size_unit,
+            "limit_price": intent.limit_price,
+            "stop_price": intent.stop_price,
+            "source": intent.source,
+            "execution_mode": execution_mode,
             "risk_reasons": decision.reasons,
             "notional_usd": decision.estimated_notional_usd,
             "intent": intent.asdict(),
             "risk": decision.asdict(),
         }
+        session_id = str(
+            meta.get("agent_session_id")
+            or meta.get("conversation_id")
+            or ""
+        ).strip()
+        actor_id = str(meta.get("actor_id") or "").strip()
+        turn_id = str(meta.get("turn_id") or "").strip()
+        tool_call_id = str(meta.get("tool_call_id") or "").strip()
+        if session_id:
+            record["session_id"] = session_id
+        if actor_id:
+            record["actor_id"] = actor_id
+            record["approval_actor_id"] = actor_id
+        if turn_id:
+            record["turn_id"] = turn_id
+        if tool_call_id:
+            record["tool_call_id"] = tool_call_id
         # Freeze the market snapshot and plan at escalation time so the
         # resume path can replay against the exact market state the risk
         # decision was made on (no drift between escalation and approval).
@@ -84,19 +122,23 @@ class ApprovalGate:
     ) -> ApprovalRecord:
         expires_s = float(self.config.get("approvals.expire_seconds", 600))
         aid = approval_id()
+        created_at = time.time()
+        expires_at = created_at + expires_s
         repo = ApprovalRepository(self._con_lazy())
-        payload = {"intent": intent.asdict(), "risk": decision.asdict()}
-        if market_snapshot is not None:
-            payload["frozen_market_snapshot"] = dict(market_snapshot)
-        if plan is not None:
-            try:
-                payload["frozen_plan"] = plan.asdict()
-            except Exception:
-                pass
-        repo.insert(id=aid, kind="trade_intent", expires_s=expires_s, payload=payload)
         record = self._record_payload(
-            aid, intent, decision, market_snapshot=market_snapshot, plan=plan,
+            aid,
+            intent,
+            decision,
+            market_snapshot=market_snapshot,
+            plan=plan,
+            created_at=created_at,
+            expires_at=expires_at,
         )
+        # Store the rich, redaction-safe approval record in SQLite too. The
+        # JSONL queue drives the UI; the DB is the crash-recovery source used
+        # by approval_resume when processes restart.
+        payload = dict(record)
+        repo.insert(id=aid, kind="trade_intent", expires_s=expires_s, payload=payload)
         jsonl.append(self.config.paths.approvals_pending, record)
         # Fan the new approval out to every configured messaging channel
         # that opted into the approvals topic so operators can resolve it

@@ -117,12 +117,48 @@ class ApprovalRepository:
     def set_state(self, id: str, state: str) -> None:
         self.con.execute("UPDATE approvals SET state=? WHERE id=?", (state, id))
 
-    def claim_resume(self, id: str) -> bool:
-        """Atomically claim one approved record for execution."""
-        cursor = self.con.execute(
-            "UPDATE approvals SET state='resuming' WHERE id=? AND state='approved'",
-            (id,),
+    def claim_resume(self, id: str, *, lease_s: float = 300.0) -> bool:
+        """Atomically claim one approved record for execution.
+
+        A process can die after changing the row to ``resuming``.  Treat a
+        claim without a recent lease as recoverable, while retaining the
+        compare-and-swap on the exact payload so two workers cannot reclaim
+        the same stale row concurrently.
+        """
+
+        now = time.time()
+        row = self.con.execute(
+            "SELECT state, payload FROM approvals WHERE id=?", (id,),
+        ).fetchone()
+        if row is None:
+            return False
+        state = str(row["state"] or "")
+        raw_payload = row["payload"]
+        try:
+            payload = json.loads(raw_payload) if isinstance(raw_payload, str) else dict(raw_payload or {})
+        except (TypeError, ValueError):
+            payload = {}
+        claimed_at = float(payload.get("resume_claimed_at") or 0.0)
+        stale = state == "resuming" and (
+            claimed_at <= 0 or now - claimed_at >= max(1.0, float(lease_s))
         )
+        if state != "approved" and not stale:
+            return False
+        payload["resume_claimed_at"] = now
+        payload["resume_attempts"] = int(payload.get("resume_attempts") or 0) + 1
+        encoded = json.dumps(payload, default=str)
+        if state == "approved":
+            cursor = self.con.execute(
+                "UPDATE approvals SET state='resuming', payload=? "
+                "WHERE id=? AND state='approved'",
+                (encoded, id),
+            )
+        else:
+            cursor = self.con.execute(
+                "UPDATE approvals SET payload=? "
+                "WHERE id=? AND state='resuming' AND payload=?",
+                (encoded, id, raw_payload),
+            )
         return cursor.rowcount == 1
 
     def finish_resume(

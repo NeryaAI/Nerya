@@ -19,7 +19,7 @@ import time
 from typing import Any
 
 from .. import wallet as wallet_mod
-from ..core import jsonl, yaml_io
+from ..core import yaml_io
 from ..core.errors import TradingError
 from ..data.onchain_klines import fetch_token_klines
 from ..security.runtime_env import build_process_env
@@ -32,6 +32,8 @@ from ..install.dep_installer import (
     uninstall_node_skill as remove_node_skill,
 )
 from ..trading import accounts as accounts_mod
+from ..trading.access_control import trusted_http_actor
+from ..wallet.swap_approval import prepare_swap, request_approval as request_swap_approval
 from ..wallet.errors import (
     WalletDependencyError,
     WalletPolicyDenied,
@@ -1399,46 +1401,29 @@ def routes():
             return {"ok": False, "error": "provider_error", "reason": str(exc)}
 
     def swap(client, payload):
-        name = (payload.get("provider") or "").strip().lower() \
-            or (client.config.data.get("wallet") or {}).get("provider")
-        if not name:
-            return {"ok": False, "error": "no_provider_selected"}
         if not client.config.live_trading_enabled():
             return {"ok": False, "error": "live_trading_disabled",
                     "reason": "enable runtime.live_trading_enabled to run swaps"}
         if client.config.kill_switch():
             return {"ok": False, "error": "kill_switch_enabled"}
-        audit = {
-            "kind": "wallet.swap.requested",
-            "ts": time.time(),
-            "provider": name,
-            "chain": str(payload.get("chain") or "ethereum"),
-            "token_in": str(payload.get("token_in") or ""),
-            "token_out": str(payload.get("token_out") or ""),
-            "amount_in": float(payload.get("amount_in") or 0.0),
-            "slippage_bps": int(payload.get("slippage_bps") or 50),
-        }
-        jsonl.append(client.config.paths.journal("wallet"), audit)
         try:
-            p = wallet_mod.build_provider(
-                name, _wallet_cfg(client, name), workspace=_workspace(client),
+            request, quote_snapshot = prepare_swap(client.config, payload)
+            actor_id = trusted_http_actor(payload) or "operator:http"
+            return request_swap_approval(
+                client.config,
+                request=request,
+                quote=quote_snapshot,
+                actor_id=actor_id,
+                session_id=str(payload.get("session_id") or "").strip(),
+                turn_id=str(payload.get("turn_id") or "").strip(),
+                tool_call_id=str(
+                    payload.get("tool_call_id")
+                    or payload.get("tool_use_id")
+                    or ""
+                ).strip(),
             )
-            result = p.swap(
-                chain=str(payload.get("chain") or "ethereum"),
-                token_in=str(payload.get("token_in") or ""),
-                token_out=str(payload.get("token_out") or ""),
-                amount_in=float(payload.get("amount_in") or 0.0),
-                slippage_bps=int(payload.get("slippage_bps") or 50),
-                receiver=payload.get("receiver") or None,
-                live=True,
-            )
-            jsonl.append(client.config.paths.journal("wallet"), {
-                **audit,
-                "kind": "wallet.swap.result",
-                "ok": result.ok,
-                "tx_hash": getattr(result, "tx_hash", "") or "",
-            })
-            return {"ok": result.ok, "result": result.to_dict()}
+        except ValueError as exc:
+            return {"ok": False, "error": "invalid_request", "reason": str(exc)}
         except WalletDependencyError as exc:
             return {"ok": False, "error": "dependency_missing",
                     "provider": exc.provider, "missing": exc.missing,

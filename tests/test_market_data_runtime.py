@@ -1689,8 +1689,8 @@ def test_wallet_configure_binding_vaultifies_plaintext(tmp_path) -> None:
 
 
 def test_wallet_swap_obeys_runtime_kill_switch(tmp_path, monkeypatch) -> None:
-    from nerya.api import routes_wallet
     from nerya.api.routes_wallet import routes as wallet_routes
+    from nerya.wallet import swap_approval
 
     cfg = _config(tmp_path)
     cfg.data["runtime"]["live_trading_enabled"] = True
@@ -1703,7 +1703,7 @@ def test_wallet_swap_obeys_runtime_kill_switch(tmp_path, monkeypatch) -> None:
     def fail_build_provider(*_args, **_kwargs):  # noqa: ANN001
         raise AssertionError("provider should not be built while kill switch is on")
 
-    monkeypatch.setattr(routes_wallet.wallet_mod, "build_provider", fail_build_provider)
+    monkeypatch.setattr(swap_approval, "build_provider", fail_build_provider)
 
     res = handler(
         client,
@@ -1719,10 +1719,14 @@ def test_wallet_swap_obeys_runtime_kill_switch(tmp_path, monkeypatch) -> None:
     assert res == {"ok": False, "error": "kill_switch_enabled"}
 
 
-def test_wallet_swap_journals_request_and_result(tmp_path, monkeypatch) -> None:
-    from nerya.api import routes_wallet
+def test_wallet_swap_journals_approval_request_and_one_shot_result(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from nerya.api import routes_approvals
     from nerya.api.routes_wallet import routes as wallet_routes
-    from nerya.wallet.protocol import WalletSwapResult
+    from nerya.wallet import swap_approval
+    from nerya.wallet.protocol import WalletQuote, WalletSwapResult
 
     cfg = _config(tmp_path)
     cfg.data["runtime"]["live_trading_enabled"] = True
@@ -1730,10 +1734,25 @@ def test_wallet_swap_journals_request_and_result(tmp_path, monkeypatch) -> None:
         ("POST", "/wallet/swap")
     ]
     client = SimpleNamespace(config=cfg)
+    swap_calls: list[dict] = []
 
     class FakeProvider:
+        def quote(self, **kwargs):  # noqa: ANN001
+            return WalletQuote(
+                provider="byreal",
+                chain=kwargs["chain"],
+                token_in=kwargs["token_in"],
+                token_out=kwargs["token_out"],
+                amount_in=kwargs["amount_in"],
+                expected_out=100,
+                min_out=99,
+                slippage_bps=kwargs["slippage_bps"],
+            )
+
         def swap(self, **kwargs):  # noqa: ANN001
+            swap_calls.append(dict(kwargs))
             assert kwargs["live"] is True
+            assert kwargs["min_out"] == 99
             return WalletSwapResult(
                 provider="byreal",
                 chain=kwargs["chain"],
@@ -1743,10 +1762,11 @@ def test_wallet_swap_journals_request_and_result(tmp_path, monkeypatch) -> None:
                 amount_out=99,
             )
 
+    provider = FakeProvider()
     monkeypatch.setattr(
-        routes_wallet.wallet_mod,
+        swap_approval,
         "build_provider",
-        lambda *_args, **_kwargs: FakeProvider(),
+        lambda *_args, **_kwargs: provider,
     )
 
     res = handler(
@@ -1762,12 +1782,31 @@ def test_wallet_swap_journals_request_and_result(tmp_path, monkeypatch) -> None:
     )
 
     assert res["ok"] is True
+    assert res["status"] == "pending_approval"
+    assert swap_calls == []
+
+    approved = routes_approvals._callback(
+        client,
+        {
+            "callback_data": f"approve:{res['approval_id']}",
+            "_auth_actor_id": "operator",
+            "_auth_scopes": ["approve:trade"],
+        },
+    )
+    assert approved["ok"] is True
+    assert approved["state"] == "approved"
+    assert approved["approval_kind"] == "wallet_swap"
+    assert approved["resume"]["ok"] is True
+    assert len(swap_calls) == 1
+
     rows = jsonl.read_all(cfg.paths.journal("wallet"))
-    assert [row["kind"] for row in rows[-2:]] == [
+    assert [row["kind"] for row in rows[-4:]] == [
+        "wallet.swap.approval_requested",
         "wallet.swap.requested",
         "wallet.swap.result",
+        "wallet.swap.approval_resumed",
     ]
-    assert rows[-1]["tx_hash"] == "tx-123"
+    assert rows[-2]["tx_hash"] == "tx-123"
     assert "private" not in str(rows).lower()
 
 

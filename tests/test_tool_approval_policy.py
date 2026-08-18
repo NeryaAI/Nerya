@@ -414,6 +414,9 @@ def test_chat_trade_submit_executor_returns_domain_pending_approval(tmp_path):
         paths=paths,
         config=cfg,
     )
+    deps.active_session_id = "ses_chat_trade"
+    deps.active_conversation_id = "conversation_chat_trade"
+    deps.active_actor_id = "operator_chat_trade"
     register_native_tools(registry, deps)
     executor = NativeToolExecutor(
         registry=registry,
@@ -425,15 +428,21 @@ def test_chat_trade_submit_executor_returns_domain_pending_approval(tmp_path):
         ToolCall(
             name="trade_intent_submit",
             id="toolu_trade_chat",
+            turn_id="turn_chat_trade",
             arguments={
                 "strategy_id": "s1",
                 "account_id": "paper_main",
                 "market": "mock:BTC/USDT",
                 "side": "buy",
-                "size": 100,
+                # Deliberately below the strategy's USD approval threshold:
+                # human/Agent chat trades always require Approval Gate.
+                "size": 0.5,
                 "size_unit": "usd",
                 "order_type": "market",
                 "confidence": 1,
+                # Interactive callers cannot self-declare the trusted
+                # unattended strategy lane.
+                "source": "strategy_runtime",
                 "market_snapshot": {"price": 50_000, "age_s": 0, "source": "test"},
             },
         )
@@ -444,7 +453,16 @@ def test_chat_trade_submit_executor_returns_domain_pending_approval(tmp_path):
     assert out["status"] == "pending_approval"
     assert out["approval_id"]
     assert out["intent"]["source"] == "agent:native"
-    assert jsonl.read_all(paths.approvals_pending)[-1]["approval_id"] == out["approval_id"]
+    assert out["intent"]["meta"]["requested_source"] == "strategy_runtime"
+    pending = jsonl.read_all(paths.approvals_pending)[-1]
+    assert pending["approval_id"] == out["approval_id"]
+    assert pending["execution_mode"] == "paper"
+    assert pending["session_id"] == "ses_chat_trade"
+    assert pending["actor_id"] == "operator_chat_trade"
+    assert pending["turn_id"] == "turn_chat_trade"
+    assert pending["tool_call_id"] == "toolu_trade_chat"
+    assert pending["market"] == "mock:BTC/USDT"
+    assert pending["size"] == pytest.approx(0.5)
 
 
 def test_registered_risk_check_accepts_top_level_trade_fields(tmp_path):

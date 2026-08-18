@@ -119,6 +119,10 @@ def _live_config(tmp_path) -> tuple[Config, FakeLiveConnector]:
     data["runtime"]["mock_mode"] = False
     data["runtime"]["live_trading_enabled"] = True
     cfg = Config(paths=WorkspacePaths(root=tmp_path), data=data)
+    # The executor re-loads runtime safety flags immediately before the
+    # irreversible connector call, so persist the same configuration a real
+    # deployment would read after a restart.
+    yaml_io.dump(tmp_path / "nerya.yml", data)
     yaml_io.dump(
         cfg.paths.accounts_file,
         {
@@ -195,7 +199,16 @@ def _strategy(cfg: Config, sid: str, account_id: str, status: str = "paper", mar
 
 
 def _snapshot() -> dict[str, Any]:
-    return {"price": 150.0, "age_s": 0, "source": "test"}
+    return {
+        "price": 150.0,
+        "age_s": 0,
+        "source": "test",
+        "_envelope": {
+            "mode": "live",
+            "source": "test_live_feed",
+            "venue": "fake",
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +294,93 @@ def test_place_order_false_blocks_intent_path(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Strategy automation vs interactive Agent approval contract
+# ---------------------------------------------------------------------------
+
+
+def test_live_strategy_risk_allow_places_order_without_human_approval(
+    tmp_path,
+    monkeypatch,
+):
+    """A promoted live strategy executes directly when every risk gate allows."""
+
+    cfg = _live_config(tmp_path)
+    _strategy(cfg, "s_live", "live_acct", status="live", market="FAKE:SOL/USDT")
+    fake = FakeLiveConnector()
+    monkeypatch.setattr(ConnectorRegistry, "get", lambda self, aid, acfg: fake)
+
+    out = submit_trade_plan(
+        cfg,
+        TradePlan(
+            action="open_position",
+            strategy_id="s_live",
+            account_id="live_acct",
+            market="FAKE:SOL/USDT",
+            side="long",
+            sizing=SizingPolicy(method="fixed_usd", fixed_usd=100),
+            entry=TradeEntry(order_type="market"),
+            confidence=1.0,
+            source="strategy_runtime",
+        ),
+        market_snapshot=_snapshot(),
+    )
+
+    assert out["status"] == "filled", out
+    assert out["risk_decision"]["decision"] == "allow"
+    assert len(fake.place_calls) == 1
+    assert jsonl.read_all(cfg.paths.approvals_pending) == []
+    assert jsonl.read_all(cfg.paths.approvals_approved) == []
+
+
+def test_interactive_agent_live_order_waits_for_full_operator_approval(
+    tmp_path,
+    monkeypatch,
+):
+    """The same live order proposed in a human conversation never auto-executes."""
+
+    cfg = _live_config(tmp_path)
+    _strategy(cfg, "s_chat", "live_acct", status="live", market="FAKE:SOL/USDT")
+    fake = FakeLiveConnector()
+    monkeypatch.setattr(ConnectorRegistry, "get", lambda self, aid, acfg: fake)
+
+    out = submit_trade_plan(
+        cfg,
+        TradePlan(
+            action="open_position",
+            strategy_id="s_chat",
+            account_id="live_acct",
+            market="FAKE:SOL/USDT",
+            side="long",
+            sizing=SizingPolicy(method="fixed_usd", fixed_usd=100),
+            entry=TradeEntry(order_type="market"),
+            confidence=1.0,
+            source="agent:native",
+            meta={
+                "actor_id": "operator:chat",
+                "order_origin": "operator_agent",
+                "reasoning": "human requested research and proposed entry",
+            },
+        ),
+        market_snapshot=_snapshot(),
+    )
+
+    assert out["status"] == "pending_approval", out
+    assert "operator_agent_trade_approval_required" in out["risk_decision"]["reasons"]
+    assert fake.place_calls == []
+    pending = jsonl.read_all(cfg.paths.approvals_pending)
+    assert len(pending) == 1
+    record = pending[0]
+    assert record["execution_mode"] == "live"
+    assert record["account_id"] == "live_acct"
+    assert record["strategy_id"] == "s_chat"
+    assert record["market"] == "FAKE:SOL/USDT"
+    assert record["side"] == "buy"
+    assert record["size"] == pytest.approx(100.0)
+    assert record["intent"]["source"] == "agent:native"
+    assert record["intent"]["meta"]["actor_id"] == "operator:chat"
+
+
+# ---------------------------------------------------------------------------
 # Scenario 2: immediate live fill → PositionBook + protection (P0.3)
 # ---------------------------------------------------------------------------
 
@@ -314,7 +414,7 @@ def test_live_immediate_fill_updates_position_book_and_protection(tmp_path, monk
         entry=TradeEntry(order_type="market"),
         protection=protection,
         confidence=1.0,
-        source="agent",
+        source="strategy_runtime",
     )
     out = submit_trade_plan(cfg, plan, market_snapshot=_snapshot())
     assert out["status"] == "filled", out
@@ -377,7 +477,7 @@ def test_live_cancel_calls_connector_cancel_order(tmp_path, monkeypatch):
         sizing=SizingPolicy(method="fixed_base", fixed_base=1.0),
         entry=TradeEntry(order_type="market"),
         confidence=1.0,
-        source="agent",
+        source="strategy_runtime",
     )
     out = submit_trade_plan(cfg, plan, market_snapshot=_snapshot())
     executor_id = out.get("executor_id")

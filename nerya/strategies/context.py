@@ -954,6 +954,7 @@ class StrategyTrading:
     strategy_id: str
     policy: StrategyPolicyView
     accounts: tuple[str, ...]
+    execution_mode: str = "paper"
     session_id: Optional[str] = None
 
     def _resolve_account(self, account: Optional[str]) -> str:
@@ -966,6 +967,68 @@ class StrategyTrading:
             )
         return self.accounts[0]
 
+    def _resolve_execution_account(self, account: Optional[str]) -> str:
+        """Resolve the account and enforce this run's money boundary.
+
+        The manifest mode is not authoritative for an individual run because
+        operators may use ``mode_override``.  Fail closed when the resolved
+        run mode and account class disagree so a paper override can never
+        reach real funds and a live run cannot silently fall back to paper.
+        """
+
+        account_id = self._resolve_account(account)
+        mode = str(self.execution_mode or "paper").strip().lower()
+        if mode not in {"paper", "shadow", "live"}:
+            raise StrategyRuntimeError(
+                f"strategy {self.strategy_id!r}: unsupported execution mode {mode!r}"
+            )
+        try:
+            from ..trading.accounts import get_account_profile
+
+            profile = get_account_profile(self.config.paths, account_id)
+        except Exception as exc:
+            raise StrategyRuntimeError(
+                f"strategy {self.strategy_id!r}: cannot resolve account "
+                f"{account_id!r}: {exc}"
+            ) from exc
+
+        if mode == "paper" and str(profile.mode) != "paper":
+            raise StrategyRuntimeError(
+                f"strategy {self.strategy_id!r}: paper run cannot submit to "
+                f"{profile.mode} account {account_id!r}"
+            )
+        if mode == "live" and not profile.is_real_money:
+            raise StrategyRuntimeError(
+                f"strategy {self.strategy_id!r}: live run requires a canary/live "
+                f"account, got {profile.mode} account {account_id!r}"
+            )
+        return account_id
+
+    def _shadow_envelope(
+        self,
+        *,
+        operation: str,
+        intent: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """Return a non-executing envelope for shadow strategy runs."""
+
+        return {
+            "status": "submitted",
+            "order_id": None,
+            "session_id": self.session_id,
+            "intent": dict(intent or {}),
+            "order": {},
+            "risk_decision": {
+                "decision": "shadow",
+                "reasons": ["shadow_mode_no_execution"],
+            },
+            "metadata": {
+                "shadow": True,
+                "operation": operation,
+                "execution_mode": "shadow",
+            },
+        }
+
     def submit_intent(
         self,
         *,
@@ -975,6 +1038,8 @@ class StrategyTrading:
         size_unit: str = "usd",
         order_type: str = "market",
         limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
+        time_in_force: str = "gtc",
         confidence: Optional[float] = None,
         reasoning: Optional[str] = None,
         account: Optional[str] = None,
@@ -1011,7 +1076,7 @@ class StrategyTrading:
                 f"strategy {self.strategy_id!r}: allow_direct_order=False; "
                 f"submit_intent calls are disabled by policy"
             )
-        account_id = self._resolve_account(account)
+        account_id = self._resolve_execution_account(account)
         notional_usd = float(size) if size_unit == "usd" else 0.0
         if (
             self.policy.max_single_order_usd > 0
@@ -1053,11 +1118,14 @@ class StrategyTrading:
             "size": float(size),
             "size_unit": size_unit,
             "order_type": order_type,
+            "time_in_force": time_in_force,
             "strategy_id": self.strategy_id,
             "source": "strategy_runtime",
         }
         if limit_price is not None:
             spec["limit_price"] = float(limit_price)
+        if stop_price is not None:
+            spec["stop_price"] = float(stop_price)
         if confidence is not None:
             spec["confidence"] = float(confidence)
         if reasoning is not None:
@@ -1066,6 +1134,9 @@ class StrategyTrading:
             spec["trigger_event_id"] = str(trigger_event_id)
         if meta_payload:
             spec["meta"] = meta_payload
+
+        if self.execution_mode == "shadow":
+            return self._shadow_envelope(operation="submit_intent", intent=spec)
 
         from ..trading.submit import submit_trade_intent as _submit
 
@@ -1115,10 +1186,22 @@ class StrategyTrading:
         # Lazy SkillKernel import to avoid a circular import.
         from ..skills.kernel import SkillKernel
 
+        account_id = self._resolve_execution_account(account)
+        if self.execution_mode == "shadow":
+            return self._shadow_envelope(
+                operation="open_position",
+                intent={
+                    "strategy_id": self.strategy_id,
+                    "account_id": account_id,
+                    "market": market,
+                    "side": side,
+                    "source": "strategy_runtime",
+                },
+            )
         api = TradingAPI(config=self.config, skills=SkillKernel.boot(self.config))
         return api.open_position(
             strategy_id=self.strategy_id,
-            account_id=self._resolve_account(account),
+            account_id=account_id,
             market=market,
             side=side,  # type: ignore[arg-type]
             sizing=sizing,
@@ -1150,10 +1233,22 @@ class StrategyTrading:
         from ..sdk.trading_api import TradingAPI
         from ..skills.kernel import SkillKernel
 
+        account_id = self._resolve_execution_account(account)
+        if self.execution_mode == "shadow":
+            return self._shadow_envelope(
+                operation="close_position",
+                intent={
+                    "strategy_id": self.strategy_id,
+                    "account_id": account_id,
+                    "market": market,
+                    "side": side,
+                    "source": "strategy_runtime",
+                },
+            )
         api = TradingAPI(config=self.config, skills=SkillKernel.boot(self.config))
         return api.close_position(
             strategy_id=self.strategy_id,
-            account_id=self._resolve_account(account),
+            account_id=account_id,
             market=market,
             side=side,  # type: ignore[arg-type]
             entry=entry,
@@ -1184,10 +1279,22 @@ class StrategyTrading:
         from ..sdk.trading_api import TradingAPI
         from ..skills.kernel import SkillKernel
 
+        account_id = self._resolve_execution_account(account)
+        if self.execution_mode == "shadow":
+            return self._shadow_envelope(
+                operation="reduce_position",
+                intent={
+                    "strategy_id": self.strategy_id,
+                    "account_id": account_id,
+                    "market": market,
+                    "side": side,
+                    "source": "strategy_runtime",
+                },
+            )
         api = TradingAPI(config=self.config, skills=SkillKernel.boot(self.config))
         return api.reduce_position(
             strategy_id=self.strategy_id,
-            account_id=self._resolve_account(account),
+            account_id=account_id,
             market=market,
             side=side,  # type: ignore[arg-type]
             reduce_pct=reduce_pct,
@@ -1216,10 +1323,23 @@ class StrategyTrading:
         from ..sdk.trading_api import TradingAPI
         from ..skills.kernel import SkillKernel
 
+        account_id = self._resolve_execution_account(account)
+        if self.execution_mode == "shadow":
+            return self._shadow_envelope(
+                operation="attach_protection",
+                intent={
+                    "strategy_id": self.strategy_id,
+                    "account_id": account_id,
+                    "position_id": position_id,
+                    "market": market,
+                    "side": side,
+                    "source": "strategy_runtime",
+                },
+            )
         api = TradingAPI(config=self.config, skills=SkillKernel.boot(self.config))
         return api.attach_protection(
             strategy_id=self.strategy_id,
-            account_id=self._resolve_account(account),
+            account_id=account_id,
             position_id=position_id,
             market=market,
             side=side,  # type: ignore[arg-type]
@@ -1232,6 +1352,11 @@ class StrategyTrading:
         )
 
     def cancel_executor(self, *, executor_id: str) -> dict[str, Any]:
+        if self.execution_mode == "shadow":
+            return self._shadow_envelope(
+                operation="cancel_executor",
+                intent={"executor_id": executor_id, "strategy_id": self.strategy_id},
+            )
         from ..sdk.trading_api import TradingAPI
         from ..skills.kernel import SkillKernel
 
@@ -2011,6 +2136,7 @@ def build_strategy_context(
     trigger_event: Any = None,
     trigger_payload: Optional[dict[str, Any]] = None,
     trigger_event_id: Optional[str] = None,
+    execution_mode: Optional[str] = None,
 ) -> StrategyContext:
     """Construct a :class:`StrategyContext` for one strategy run.
 
@@ -2056,10 +2182,17 @@ def build_strategy_context(
         strategy_id=manifest.strategy_id,
     )
 
+    resolved_mode = str(execution_mode or manifest.mode or "paper").strip().lower()
+    if resolved_mode not in {"paper", "shadow", "live"}:
+        raise StrategyRuntimeError(
+            f"strategy {manifest.strategy_id!r}: unsupported execution mode "
+            f"{resolved_mode!r}"
+        )
+
     cfg_view = StrategyConfig(
         strategy_id=manifest.strategy_id,
         title=manifest.title,
-        mode=manifest.mode,
+        mode=resolved_mode,
         markets=manifest.markets,
         accounts=manifest.accounts,
         news_sources=manifest.news_sources,
@@ -2152,6 +2285,7 @@ def build_strategy_context(
         strategy_id=manifest.strategy_id,
         policy=policy_view,
         accounts=manifest.accounts,
+        execution_mode=resolved_mode,
         session_id=sid,
     )
     portfolio = StrategyPortfolio(paths=paths, strategy_id=manifest.strategy_id)

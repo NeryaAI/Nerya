@@ -78,11 +78,12 @@ def _format_intent(intent: dict[str, Any]) -> str:
     market = intent.get("market") or intent.get("symbol") or ""
     side = intent.get("side") or ""
     size = intent.get("size") or intent.get("notional_usd") or ""
+    size_unit = intent.get("size_unit") or ""
     order_type = intent.get("order_type") or "market"
     if market or side:
         parts.append(f"{side.upper()} {market}".strip())
     if size:
-        parts.append(f"{size}")
+        parts.append(f"{size} {size_unit}".strip())
     if order_type:
         parts.append(f"{order_type}")
     return " · ".join(p for p in parts if p)
@@ -152,6 +153,8 @@ def build_prompt(
     kind = str(record.get("kind") or payload.get("kind") or "approval")
     intent = payload.get("intent") or record.get("intent") or {}
     risk = payload.get("risk") or record.get("risk") or {}
+    wallet_swap = payload.get("wallet_swap") or record.get("wallet_swap") or {}
+    quote = payload.get("quote") or record.get("quote") or {}
 
     # Compose the human-readable summary.
     lines: list[str] = []
@@ -186,10 +189,52 @@ def build_prompt(
         reason = record.get("reason") or payload.get("reason") or ""
         if reason:
             lines.append(f"Reason: {reason}")
+    elif kind == "wallet_swap":
+        lines.append(f"Wallet swap approval requested · {aid}")
+        lines.append(
+            "Swap: "
+            f"{wallet_swap.get('amount_in')} {wallet_swap.get('token_in')}"
+            f" → {wallet_swap.get('token_out')}"
+        )
+        lines.append(
+            f"Provider: {wallet_swap.get('provider')} · "
+            f"Chain: {wallet_swap.get('chain')}"
+        )
+        if quote.get("expected_out") not in (None, ""):
+            lines.append(
+                f"Expected output: {quote.get('expected_out')} "
+                f"{wallet_swap.get('token_out')}"
+            )
+        if quote.get("min_out") not in (None, ""):
+            lines.append(f"Approved minimum output: {quote.get('min_out')}")
+        lines.append(
+            f"Slippage limit: {wallet_swap.get('slippage_bps', 0)} bps"
+        )
+        if wallet_swap.get("receiver"):
+            lines.append(f"Receiver: {wallet_swap.get('receiver')}")
     else:
         intent_summary = _format_intent(intent) or record.get("kind", "approval")
-        lines.append(f"Approval requested · {aid}")
-        lines.append(f"Intent: {intent_summary}")
+        lines.append(f"Trade approval requested · {aid}")
+        lines.append(f"Order: {intent_summary}")
+        account_id = record.get("account_id") or intent.get("account_id")
+        execution_mode = record.get("execution_mode") or ""
+        if account_id:
+            lines.append(
+                f"Account: {account_id}"
+                + (f" ({str(execution_mode).upper()})" if execution_mode else "")
+            )
+        notional = record.get("notional_usd")
+        if notional not in (None, ""):
+            try:
+                lines.append(f"Estimated notional: ${float(notional):,.2f}")
+            except (TypeError, ValueError):
+                lines.append(f"Estimated notional: {notional}")
+        if intent.get("limit_price") is not None:
+            lines.append(f"Limit price: {intent.get('limit_price')}")
+        if intent.get("stop_price") is not None:
+            lines.append(f"Stop price: {intent.get('stop_price')}")
+        if intent.get("reasoning"):
+            lines.append(f"Reason: {str(intent.get('reasoning'))[:240]}")
     risk_summary = _format_risk(risk)
     if risk_summary:
         lines.append(f"Risk: {risk_summary}")
@@ -229,6 +274,8 @@ def build_prompt(
             "kind": kind or "trade_intent",
             "intent": intent,
             "risk": risk,
+            "wallet_swap": wallet_swap,
+            "quote": quote,
             "tool": payload.get("tool") or record.get("tool") or {},
             "items": batch_items,
             "tool_batch": kind == "tool_permission_batch",
@@ -238,7 +285,10 @@ def build_prompt(
                 else 1 if kind == "tool_permission" else 0
             ),
             "strategy_id": record.get("strategy_id") or intent.get("strategy_id"),
+            "account_id": record.get("account_id") or intent.get("account_id"),
             "market": record.get("market") or intent.get("market"),
+            "execution_mode": record.get("execution_mode"),
+            "notional_usd": record.get("notional_usd") or risk.get("estimated_notional_usd"),
         },
     )
 

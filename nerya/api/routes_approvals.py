@@ -51,6 +51,17 @@ def _is_native_tool_approval(rec: dict[str, Any]) -> bool:
     }
 
 
+_FINANCIAL_APPROVAL_KINDS = frozenset({"trade_intent", "wallet_swap"})
+
+
+def _required_approval_scope(rec: dict[str, Any]) -> str:
+    """Return the least-privilege HTTP scope for this approval record."""
+
+    if str(rec.get("kind") or "").strip() in _FINANCIAL_APPROVAL_KINDS:
+        return "approve:trade"
+    return "approve:tool"
+
+
 def _approval_owner_actor_id(rec: dict[str, Any]) -> str:
     """Return the actor bound to an approval, or empty when unbound."""
 
@@ -82,8 +93,12 @@ def _can_resolve(
     return not owner or operator_authorized or actor_id == owner
 
 
-def _trusted_operator(payload: dict[str, Any], actor_id: str) -> bool:
-    """Recognize only the auth stamp added by the local HTTP dispatcher."""
+def _trusted_operator(
+    payload: dict[str, Any],
+    actor_id: str,
+    rec: dict[str, Any],
+) -> bool:
+    """Validate dispatcher auth and bind its scope to the record kind."""
 
     stamped_actor = str(payload.get("_auth_actor_id") or "").strip()
     if not stamped_actor or stamped_actor != str(actor_id or "").strip():
@@ -99,7 +114,7 @@ def _trusted_operator(payload: dict[str, Any], actor_id: str) -> bool:
         scopes = {str(part).strip() for part in raw_scopes if str(part).strip()}
     else:
         scopes = set()
-    return bool({"approve:tool", "api:all"} & scopes)
+    return "api:all" in scopes or _required_approval_scope(rec) in scopes
 
 
 def _expired(rec: dict[str, Any], *, now: float | None = None) -> bool:
@@ -122,7 +137,7 @@ def _read_pending(client) -> list[dict[str, Any]]:
         rec
         for rec in jsonl.read_all(p)
         if (not rec.get("state") or rec["state"] == "pending")
-        and not (_is_native_tool_approval(rec) and _expired(rec, now=now))
+        and not _expired(rec, now=now)
     ]
 
 
@@ -201,7 +216,7 @@ def _move_record(
             if moved is None and (
                 rec.get("approval_id") == approval_id or rec.get("id") == approval_id
             ):
-                if _is_native_tool_approval(rec) and _expired(rec):
+                if _expired(rec):
                     return None
                 if not _can_resolve(
                     rec,
@@ -317,7 +332,9 @@ def _publish_approval_resolution(
     *,
     state: str,
     record: dict[str, Any] | None = None,
-) -> None:
+    config: Any = None,
+) -> dict[str, Any] | None:
+    resume_result: dict[str, Any] | None = None
     try:
         from ..agent.streaming import get_default_bus
 
@@ -327,19 +344,47 @@ def _publish_approval_resolution(
             approval_id=approval_id,
             state=state,
             resolver_actor_id=rec.get("resolved_by_actor_id"),
+            approval_kind=rec.get("kind"),
             session_id=rec.get("session_id"),
             strategy_id=rec.get("strategy_id"),
             record=rec,
         )
     except Exception:
         pass
+    # The API server and AgentKernel commonly run as separate processes. In
+    # that deployment the kernel's event-bus subscriber is not present in the
+    # API process, so an approved trade would otherwise only move JSONL rows
+    # and never reach the executor. Resume directly when no subscriber is
+    # registered; the durable claim keeps this safe if both paths race.
+    kind = str((record or {}).get("kind") or "").strip()
+    if str(state or "").lower() == "approved" and config is not None:
+        try:
+            if kind == "trade_intent":
+                from ..trading import approval_resume
+
+                if not getattr(
+                    approval_resume, "_resume_subscriber_registered", False
+                ):
+                    resume_result = approval_resume.resume_approved(
+                        config, approval_id
+                    )
+            elif kind == "wallet_swap":
+                from ..wallet import swap_approval
+
+                resume_result = swap_approval.resume_approved(config, approval_id)
+        except Exception as exc:  # pragma: no cover - callback must still resolve
+            resume_result = {
+                "ok": False,
+                "approval_id": approval_id,
+                "error": f"approval_resume_dispatch_failed:{exc}",
+            }
+    return resume_result
 
 
 def _callback(client, payload):
     callback_data = str(payload.get("callback_data") or "").strip()
     trusted_actor_id = str(payload.get("_auth_actor_id") or "").strip()
     actor_id = trusted_actor_id or str(payload.get("actor_id") or "").strip()
-    operator_authorized = _trusted_operator(payload, actor_id)
     if not callback_data:
         return {"ok": False, "error": "callback_data required"}
     if not actor_id:
@@ -352,6 +397,19 @@ def _callback(client, payload):
     rec = _find_record(client, aid)
     if rec is None:
         return {"ok": False, "error": "approval not found", "approval_id": aid}
+
+    operator_authorized = _trusted_operator(payload, actor_id, rec)
+    # HTTP callbacks always carry a dispatcher stamp. Even when the token
+    # actor happens to own the approval, a trade-only token must not resolve
+    # tool permissions (or vice versa). Gateway/ACP callbacks have no stamp
+    # and continue to rely on exact owner binding below.
+    if trusted_actor_id and not operator_authorized:
+        return {
+            "ok": False,
+            "error": "insufficient approval scope",
+            "approval_id": aid,
+            "required_scope": _required_approval_scope(rec),
+        }
 
     def actor_owns(req_actor: str, approval_id: str) -> bool:
         return _can_resolve(
@@ -433,11 +491,14 @@ def _callback(client, payload):
             _retract_approval_cards(client, aid, state=resolution.state)
         except Exception:
             pass
-        _publish_approval_resolution(
+        resume_result = _publish_approval_resolution(
             aid,
             state=str(resolution.state),
             record=moved_state["record"] or rec,
+            config=client.config,
         )
+    else:
+        resume_result = None
     items = []
     if isinstance((rec or {}).get("items"), list):
         items = [x for x in (rec or {}).get("items") if isinstance(x, dict)]
@@ -446,9 +507,12 @@ def _callback(client, payload):
             "approval_ids": [aid],
             "action": action,
             "state": resolution.state,
+            "approval_kind": str((rec or {}).get("kind") or ""),
             "batch": str((rec or {}).get("kind") or "") == "tool_permission_batch",
             "item_count": len(items),
-            "note": resolution.note}
+            "note": resolution.note,
+            **({"resume": resume_result} if resume_result is not None else {}),
+    }
 
 
 def routes():
