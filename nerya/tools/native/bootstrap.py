@@ -84,6 +84,12 @@ from .evolve import (
     evolve_reflect_handler,
     evolve_skill_proposal_handler,
 )
+from .workspace_ui import (
+    WORKSPACE_UI_INSPECT_SCHEMA,
+    WORKSPACE_UI_PROPOSE_SCHEMA,
+    workspace_ui_inspect_handler,
+    workspace_ui_propose_handler,
+)
 from .file_ops import (
     classify_file_mutation_risk,
     edit_file_handler,
@@ -1035,6 +1041,20 @@ def _wrap_role_save(deps: NativeToolDeps):
 def _wrap_role_delete(deps: NativeToolDeps):
     def handler(call: ToolCall):
         return role_delete_handler(call, config=deps.config)
+
+    return handler
+
+
+def _wrap_workspace_ui_inspect(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return workspace_ui_inspect_handler(call, config=deps.config)
+
+    return handler
+
+
+def _wrap_workspace_ui_propose(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return workspace_ui_propose_handler(call, config=deps.config)
 
     return handler
 
@@ -2390,6 +2410,50 @@ def register_native_tools(
                 ),
             ])
     if deps.config is not None:
+        # ----- conversational workspace customization -----
+        descriptors.extend([
+            make_native_descriptor(
+                name="workspace_ui_inspect",
+                description=(
+                    "Read the current declarative dashboard layout, revision, "
+                    "page/widget inventory, and finite allow-listed widget catalog. "
+                    "Use this before changing the home dashboard, adding a widget, "
+                    "creating a menu page, or editing page navigation. This tool is "
+                    "read-only and is the authoritative alternative to reading or "
+                    "reconstructing ui/workspace.yml manually."
+                ),
+                input_schema=WORKSPACE_UI_INSPECT_SCHEMA,
+                handler=_wrap_workspace_ui_inspect(deps),
+                risk=RiskLevel.READ,
+                permission_scope=PermissionScope.WORKSPACE,
+                tags=("workspace", "dashboard", "ui", "customization", "read"),
+                result_kind="json",
+                auto_approve=True,
+            ),
+            make_native_descriptor(
+                name="workspace_ui_propose",
+                description=(
+                    "Create a reviewable dashboard/page/menu proposal from small "
+                    "structured operations. First call workspace_ui_inspect, then "
+                    "use upsert_widget or upsert_page with stable ids whenever "
+                    "possible. The tool validates the read-only widget catalog, "
+                    "captures revision/digest guards, and writes only a pending "
+                    "core_config_patch proposal; it never changes the live dashboard. "
+                    "Do not edit React/TSX or rewrite the full YAML for normal UI "
+                    "customization requests."
+                ),
+                input_schema=WORKSPACE_UI_PROPOSE_SCHEMA,
+                handler=_wrap_workspace_ui_propose(deps),
+                risk=RiskLevel.WRITE,
+                permission_scope=PermissionScope.WORKSPACE,
+                read_only=False,
+                is_concurrency_safe=False,
+                mutates_paths=True,
+                tags=("workspace", "dashboard", "ui", "customization", "proposal"),
+                result_kind="json",
+                max_result_tokens=6_000,
+            ),
+        ])
         # ----- self-evolution -----
         descriptors.extend([
             make_native_descriptor(
@@ -2423,7 +2487,8 @@ def register_native_tools(
                     "or workspace directory searches. This tool is read-only "
                     "and cannot create or apply a proposal; do not use it as "
                     "a substitute for evolve_reflect, evolve_skill_proposal, "
-                    "evolve_core_config_patch, strategy_draft_proposal, or "
+                    "workspace_ui_propose, evolve_core_config_patch, "
+                    "strategy_draft_proposal, or "
                     "strategy_tuning_generate when the task asks for new "
                     "reflection, learning, skill, config, or strategy changes."
                 ),
@@ -2473,20 +2538,18 @@ def register_native_tools(
                     "routing, reasoning_effort, max_parallel, custom RSS "
                     "feeds, outbound channel/webhook config, severity-based "
                     "notification routing, trade notification fan-out, or "
-                    "other agent/runtime defaults. For messages/channels.yml "
+                    "other agent/runtime defaults. Dashboard, page, widget, and "
+                    "menu requests must use workspace_ui_inspect followed by "
+                    "workspace_ui_propose instead of this full-document tool. "
+                    "For messages/channels.yml "
                     "severity routing, propose top-level severity_routes such "
                     "as {info: [telegram], critical: [telegram, discord], "
                     "silent: []}; do not invent targets like "
                     "notifications.routing. For Telegram channels, use "
                     "bot_token_ref plus numeric chat_id or vault-backed "
-                    "chat_id_ref. For dashboard UI requests, target "
-                    "`ui/workspace.yml` and provide a full version-1 "
-                    "manifest using only read-only catalog kinds (kpi, "
-                    "metric, chart, market_ticker, portfolio, strategy_table, table, "
-                    "attention, markdown, link, skill_panel, agent_panel). "
-                    "Never include HTML, JavaScript, iframe, remote URL, or "
-                    "executable component fields. Do not use this "
-                    "for protected "
+                    "chat_id_ref. Never include HTML, JavaScript, iframe, remote "
+                    "URL, or executable component fields in any declarative config. "
+                    "Do not use this for protected "
                     "risk exposure, signer, secret, approval, or live-trading "
                     "limits; those direct changes must be refused with "
                     "`advisory reject`. When you report such a reject to the "

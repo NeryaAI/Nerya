@@ -691,6 +691,31 @@ def _target_container(manifest: dict[str, Any], target: Any) -> list[dict[str, A
     raise WorkspaceUiError(f"unknown dashboard page {target!r}")
 
 
+def _merge_nested_mappings(
+    existing: dict[str, Any],
+    incoming: Mapping[str, Any],
+    *,
+    fields: tuple[str, ...],
+) -> None:
+    """Apply an upsert while preserving unspecified nested mapping fields.
+
+    Conversational edits commonly change one widget config value or one page
+    navigation property. Treating the supplied mapping as a full replacement
+    would silently discard the rest of the validated declaration. Explicit
+    ``None`` still replaces the field and can be used to clear it.
+    """
+
+    merged = _clone(dict(incoming))
+    for field in fields:
+        current_value = existing.get(field)
+        incoming_value = incoming.get(field)
+        if isinstance(current_value, Mapping) and isinstance(incoming_value, Mapping):
+            nested = _clone(dict(current_value))
+            nested.update(_clone(dict(incoming_value)))
+            merged[field] = nested
+    existing.update(merged)
+
+
 def _apply_operations(base: Mapping[str, Any], operations: Any) -> dict[str, Any]:
     if isinstance(operations, Mapping):
         operations = operations.get("operations") or operations.get("changes") or [operations]
@@ -702,12 +727,37 @@ def _apply_operations(base: Mapping[str, Any], operations: Any) -> dict[str, Any
         if not isinstance(operation, Mapping):
             raise WorkspaceUiError(f"patch.operations[{index}] must be a mapping")
         op = str(operation.get("op") or operation.get("action") or "").strip().lower()
-        if op in {"add_widget", "widget.add"}:
+        if op in {"update_home", "home.update"}:
+            changes = operation.get("changes") or operation.get("patch") or operation.get("value")
+            if not isinstance(changes, Mapping):
+                raise WorkspaceUiError(f"patch.operations[{index}].changes must be a mapping")
+            candidate["home"].update(_clone(dict(changes)))
+        elif op in {"add_widget", "widget.add"}:
             target = _target_container(candidate, operation.get("page") or operation.get("target"))
             widget = operation.get("widget") or operation.get("value")
             if not isinstance(widget, Mapping):
                 raise WorkspaceUiError(f"patch.operations[{index}].widget must be a mapping")
             target.append(_clone(dict(widget)))
+        elif op in {"upsert_widget", "widget.upsert"}:
+            target = _target_container(candidate, operation.get("page") or operation.get("target"))
+            widget = operation.get("widget") or operation.get("value")
+            if not isinstance(widget, Mapping):
+                raise WorkspaceUiError(f"patch.operations[{index}].widget must be a mapping")
+            widget_id = str(widget.get("id") or operation.get("id") or operation.get("widget_id") or "").strip()
+            if not widget_id:
+                raise WorkspaceUiError(f"patch.operations[{index}].widget.id is required")
+            incoming = _clone(dict(widget))
+            incoming["id"] = widget_id
+            for existing in target:
+                if existing.get("id") == widget_id:
+                    _merge_nested_mappings(
+                        existing,
+                        incoming,
+                        fields=("config", "source"),
+                    )
+                    break
+            else:
+                target.append(incoming)
         elif op in {"update_widget", "widget.update"}:
             target = _target_container(candidate, operation.get("page") or operation.get("target"))
             widget_id = str(operation.get("id") or operation.get("widget_id") or "")
@@ -725,13 +775,28 @@ def _apply_operations(base: Mapping[str, Any], operations: Any) -> dict[str, Any
             widget_id = str(operation.get("id") or operation.get("widget_id") or "")
             before = len(target)
             target[:] = [widget for widget in target if widget.get("id") != widget_id]
-            if len(target) == before:
+            if len(target) == before and operation.get("ignore_missing") is not True:
                 raise WorkspaceUiError(f"widget {widget_id!r} not found")
         elif op in {"add_page", "page.add"}:
             page = operation.get("page") or operation.get("value")
             if not isinstance(page, Mapping):
                 raise WorkspaceUiError(f"patch.operations[{index}].page must be a mapping")
             candidate["pages"].append(_clone(dict(page)))
+        elif op in {"upsert_page", "page.upsert"}:
+            page = operation.get("page") or operation.get("value")
+            if not isinstance(page, Mapping):
+                raise WorkspaceUiError(f"patch.operations[{index}].page must be a mapping")
+            page_id = str(page.get("id") or operation.get("id") or operation.get("page_id") or "").strip()
+            if not page_id:
+                raise WorkspaceUiError(f"patch.operations[{index}].page.id is required")
+            incoming = _clone(dict(page))
+            incoming["id"] = page_id
+            for existing in candidate["pages"]:
+                if existing.get("id") == page_id:
+                    _merge_nested_mappings(existing, incoming, fields=("nav",))
+                    break
+            else:
+                candidate["pages"].append(incoming)
         elif op in {"update_page", "page.update"}:
             page_id = str(operation.get("id") or operation.get("page_id") or "")
             changes = operation.get("changes") or operation.get("patch")
@@ -747,7 +812,7 @@ def _apply_operations(base: Mapping[str, Any], operations: Any) -> dict[str, Any
             page_id = str(operation.get("id") or operation.get("page_id") or "")
             before = len(candidate["pages"])
             candidate["pages"] = [page for page in candidate["pages"] if page.get("id") != page_id]
-            if len(candidate["pages"]) == before:
+            if len(candidate["pages"]) == before and operation.get("ignore_missing") is not True:
                 raise WorkspaceUiError(f"page {page_id!r} not found")
         elif op in {"set_nav", "page.nav"}:
             page_id = str(operation.get("id") or operation.get("page_id") or "")
@@ -855,8 +920,12 @@ def propose(
     actor_id = str(body.get("actor_id") or "").strip()[:128]
     metadata = {
         "workspace_ui": True,
-        "base_revision": int(current_response.get("revision") or 0),
-        "base_digest": str(current_response.get("digest") or ""),
+        # ``base_revision`` is reserved by the generic Candidate Bundle for a
+        # content-addressed workspace snapshot.  The UI manifest has its own
+        # small integer revision, so keep it under a namespaced key to avoid
+        # turning a valid second UI proposal into a CAS conflict.
+        "workspace_ui_base_revision": int(current_response.get("revision") or 0),
+        "workspace_ui_base_digest": str(current_response.get("digest") or ""),
         "manifest_digest": manifest_digest(candidate),
     }
     if actor_id:

@@ -77,9 +77,21 @@ export type WorkspaceUiEnvelope = {
   [key: string]: unknown;
 };
 
+export type WorkspaceUiOperation = {
+  op: string;
+  [key: string]: unknown;
+};
+
 export type WorkspaceUiProposalRequest = {
-  /** Full post-change manifest; the server validates and stores a proposal. */
-  manifest: WorkspaceUiManifest;
+  /** Full post-change manifest for advanced callers. */
+  manifest?: WorkspaceUiManifest;
+  /** Preferred conversational surface: small validated incremental changes. */
+  patch?: { operations: WorkspaceUiOperation[] };
+  /** Shorthand accepted by the runtime alongside `patch.operations`. */
+  operations?: WorkspaceUiOperation[];
+  /** Optimistic concurrency guard for the declarative UI manifest. */
+  base_revision?: number;
+  base_digest?: string;
   summary?: string;
   rationale?: string;
   actor_id?: string;

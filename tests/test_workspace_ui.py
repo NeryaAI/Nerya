@@ -159,6 +159,126 @@ def test_structured_patch_adds_widget_and_page_and_nav(tmp_path):
     assert entries[0]["_section"] == "primary"
 
 
+def test_structured_patch_upserts_home_widget_page_and_metadata(tmp_path):
+    paths = WorkspacePaths(tmp_path)
+    first = ui.propose(
+        paths,
+        {
+            "operations": [
+                {
+                    "op": "upsert_widget",
+                    "page": "home",
+                    "widget": {
+                        "id": "btc-ticker",
+                        "kind": "market_ticker",
+                        "title": "BTC",
+                        "config": {
+                            "symbol": "BTCUSDT",
+                            "venue": "bybit",
+                            "refresh_seconds": 10,
+                        },
+                    },
+                },
+                {
+                    "op": "upsert_page",
+                    "page": {
+                        "id": "market-watch",
+                        "title": "Market Watch",
+                        "widgets": [],
+                        "nav": {
+                            "label": "Markets",
+                            "section": "primary",
+                            "order": 2,
+                            "hidden": False,
+                        },
+                    },
+                },
+            ]
+        },
+    )
+    assert first["ok"] is True
+    _approve_and_apply(paths, first["proposal_id"])
+
+    second = ui.propose(
+        paths,
+        {
+            "operations": [
+                {
+                    "op": "update_home",
+                    "changes": {"title": "Operator Console", "description": "Live overview"},
+                },
+                {
+                    "op": "upsert_widget",
+                    "page": "home",
+                    "widget": {
+                        "id": "btc-ticker",
+                        "title": "BTC / USDT",
+                        "span": "half",
+                        "config": {"refresh_seconds": 30},
+                    },
+                },
+                {
+                    "op": "upsert_page",
+                    "page": {
+                        "id": "market-watch",
+                        "description": "Read-only market monitoring",
+                        "nav": {"order": 4},
+                    },
+                },
+                {
+                    "op": "upsert_widget",
+                    "page": "market-watch",
+                    "widget": {
+                        "id": "market-note",
+                        "kind": "markdown",
+                        "text": "Read-only market view",
+                    },
+                },
+            ]
+        },
+    )
+    assert second["ok"] is True
+    applied = _approve_and_apply(paths, second["proposal_id"])
+
+    assert applied["manifest"]["home"]["title"] == "Operator Console"
+    assert len(applied["manifest"]["home"]["widgets"]) == 1
+    home_widget = applied["manifest"]["home"]["widgets"][0]
+    assert home_widget["kind"] == "market_ticker"
+    assert home_widget["title"] == "BTC / USDT"
+    assert home_widget["config"] == {
+        "symbol": "BTCUSDT",
+        "venue": "bybit",
+        "refresh_seconds": 30,
+    }
+    assert home_widget["span"] == "half"
+    page = applied["manifest"]["pages"][0]
+    assert page["title"] == "Market Watch"
+    assert page["description"] == "Read-only market monitoring"
+    assert page["nav"] == {
+        "label": "Markets",
+        "section": "primary",
+        "order": 4,
+        "hidden": False,
+    }
+    assert page["widgets"][0]["id"] == "market-note"
+
+
+def test_structured_patch_remove_can_be_idempotent(tmp_path):
+    paths = WorkspacePaths(tmp_path)
+    result = ui.propose(
+        paths,
+        {
+            "operations": [
+                {"op": "remove_widget", "page": "home", "id": "missing", "ignore_missing": True},
+                {"op": "update_home", "changes": {"title": "Still valid"}},
+            ]
+        },
+    )
+    assert result["ok"] is True
+    applied = _approve_and_apply(paths, result["proposal_id"])
+    assert applied["manifest"]["home"]["title"] == "Still valid"
+
+
 def test_routes_and_scopes_are_registered(tmp_path):
     route_map = {(method, path): handler for method, path, handler in routes_workspace_ui.routes()}
     client = _client(tmp_path)

@@ -35,6 +35,11 @@ import {
 } from "../strategies/StrategyProposalApprovalCard";
 import { ChartBlock as NativeChartBlock } from "./ChartBlock";
 import {
+  CustomizationProposalCard,
+  customizationFromToolResult,
+  isCustomizationTool,
+} from "./CustomizationProposalCard";
+import {
   CopyButton,
   FileOpCard,
   ShellCard,
@@ -315,6 +320,12 @@ function ActionBlock({
   suppressProposalIds?: Set<string>;
 }) {
   const ok = !action.error;
+  const customization = ok
+    ? customizationFromToolResult(action.result, action.action)
+    : null;
+  if (customization) {
+    return <CustomizationProposalCard view={customization} compact />;
+  }
   const rawProposal = strategyProposalFromToolResult(
     action.result,
     action.action,
@@ -447,6 +458,12 @@ function ToolBlock({
     return <AgentToolResultCard block={block} />;
   }
   const ok = t.ok !== false && !t.error;
+  const customization = ok
+    ? customizationFromToolResult(t.result, String(t.action || ""))
+    : null;
+  if (customization) {
+    return <CustomizationProposalCard view={customization} compact />;
+  }
   const rawProposal = strategyProposalFromToolResult(
     t.result,
     String(t.action || ""),
@@ -2415,6 +2432,12 @@ function NativeToolResultBlock({
   }
   const ok = block.ok !== false && !block.error;
   const action = (block.action as string | undefined) || "tool";
+  const customization = ok
+    ? customizationFromToolResult(block.result ?? block, action)
+    : null;
+  if (customization) {
+    return <CustomizationProposalCard view={customization} compact />;
+  }
   const skill = (block.skill_id as string | undefined) || "native";
   const rawProposal = strategyProposalFromToolResult(block.result ?? block, action);
   const strategyProposal =
@@ -3874,7 +3897,8 @@ export function NativeBlocksTrack({
           isFileOp(block) ||
           isShellTool(block) ||
           isWebTool(block) ||
-          isAgentTool(block))
+          isAgentTool(block) ||
+          isCustomizationTool(block))
       ) {
         return null;
       }
@@ -3956,13 +3980,13 @@ export function NativeBlocksTrack({
     const kind = (block.kind || env.kind || "").toString();
     if (kind === "thinking") return true;
     if (kind === "tool_use") {
-      if (isAgentTool(block) || isFriendlyToolCard(block)) return false;
+      if (isAgentTool(block) || isFriendlyToolCard(block) || isCustomizationTool(block)) return false;
       const callId = toolCallId(block);
       if (callId && errorCallIds.has(callId)) return false;
       return true;
     }
     if (kind === "tool_result") {
-      if (isAgentTool(block) || isFriendlyToolCard(block)) return false;
+      if (isAgentTool(block) || isFriendlyToolCard(block) || isCustomizationTool(block)) return false;
       if (block.ok === false || block.error) return false;
       return true;
     }
