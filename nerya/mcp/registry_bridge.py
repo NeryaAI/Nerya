@@ -19,19 +19,16 @@ Two consumers:
 * :func:`mcp_dispatch` — single chokepoint used by the FastMCP wrapper
   to invoke a tool by name (used by the bridge above).
 
-The bridge respects the same operator preset / mode that the agent
-loop uses. When :class:`PermissionContext.mode` is ``BYPASS`` every
-mutating tool is allowed; when it is ``RESTRICTED`` only auto-approve
-read-only tools surface; the default mode keeps the executor's
-ASK/ALLOW/DENY semantics.
+The bridge uses the same permission engine as the agent loop. Remote
+exposure is constrained independently through ``allow_mutating``,
+``allow_exec`` and allow/deny tool lists; the executor mode remains one of
+``default``, ``auto`` or ``yolo``.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
@@ -46,7 +43,6 @@ from ..tools import (
     ToolRegistry,
 )
 from ..tools.types import (
-    PermissionScope,
     RiskLevel,
     ToolCall,
     ToolDescriptor,
@@ -152,9 +148,9 @@ class NativeMCPRegistry:
 class NativeMCPPolicy:
     """Filter / preset settings for the native MCP layer.
 
-    * ``mode`` — :class:`PermissionMode` to seed the executor's
-      :class:`PermissionContext` with. ``RESTRICTED`` is recommended for
-      remote MCP clients; ``DEFAULT`` for local CLI access.
+    * ``mode`` — :class:`PermissionMode` used by the executor. Remote
+      restriction is expressed by the exposure flags below, not a second
+      permission-mode enum.
     * ``allow_mutating`` — when ``False`` (default) only ``read_only``
       tools are exposed; mutating tools are dropped from the surface
       regardless of the runtime mode.
@@ -165,7 +161,7 @@ class NativeMCPPolicy:
     * ``allow_tools`` — when present, only these names are exposed.
     """
 
-    mode: PermissionMode = PermissionMode.RESTRICTED
+    mode: PermissionMode = PermissionMode.DEFAULT
     allow_mutating: bool = False
     allow_exec: bool = False
     deny_tools: tuple[str, ...] = ()
@@ -180,11 +176,11 @@ def policy_from_config(config: Any) -> NativeMCPPolicy:
     native_cfg = (mcp_cfg.get("native_tools") or {}) if isinstance(mcp_cfg, dict) else {}
     runtime_cfg = (data.get("runtime") or {}) if isinstance(data, dict) else {}
 
-    mode_str = str(native_cfg.get("mode") or "restricted").lower()
+    mode_str = str(native_cfg.get("mode") or "default").lower()
     try:
         mode = PermissionMode(mode_str)
     except ValueError:
-        mode = PermissionMode.RESTRICTED
+        mode = PermissionMode.DEFAULT
 
     return NativeMCPPolicy(
         mode=mode,

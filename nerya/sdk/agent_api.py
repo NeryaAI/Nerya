@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..agent.kernel import AgentKernel
+from ..agent.loop_state import validate_turn_checkpoint_resume_request
 from ..core import jsonl
 from ..core.config import Config
 from ..skills.kernel import SkillKernel
@@ -40,6 +41,9 @@ class AgentAPI:
         strategy_id: str | None = None,
         session_id: str | None = None,
         attached_skills: list[str] | None = None,
+        turn_id: str | None = None,
+        resume_turn_id: str | None = None,
+        continuation_feedback: str = "",
     ) -> dict[str, Any]:
         """Run a single agent turn and return a dashboard-shaped dict.
 
@@ -52,13 +56,32 @@ class AgentAPI:
         learn one schema.
         """
 
-        if trigger is None and text is None:
+        trigger_payload = (
+            trigger.get("payload")
+            if isinstance(trigger, dict)
+            and isinstance(trigger.get("payload"), dict)
+            else {}
+        )
+        resume_id, resume_feedback = validate_turn_checkpoint_resume_request(
+            resume_turn_id=resume_turn_id,
+            continuation_feedback=continuation_feedback,
+            session_id=session_id,
+            turn_id=turn_id,
+            has_attachments=bool(trigger_payload.get("attachments")),
+        )
+        if trigger is None and text is None and not resume_id:
             raise ValueError("AgentAPI.run_turn requires either trigger= or text=")
         if trigger is None:
             trigger = {
                 "source": "sdk",
-                "kind": "agent.user_message",
-                "payload": {"text": text},
+                "kind": (
+                    "agent.checkpoint_continue"
+                    if resume_id
+                    else "agent.user_message"
+                ),
+                "payload": (
+                    {} if resume_id else {"text": text}
+                ),
             }
 
         kernel = AgentKernel(config=self.config, skills=self.skills)
@@ -68,6 +91,9 @@ class AgentAPI:
                 strategy_id=strategy_id,
                 session_id=session_id,
                 attached_skills=attached_skills,
+                turn_id=turn_id,
+                resume_turn_id=resume_id or None,
+                continuation_feedback=resume_feedback,
             )
         except Exception as exc:
             jsonl.append(self.config.paths.journal("errors"), {

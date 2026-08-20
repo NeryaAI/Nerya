@@ -4,7 +4,6 @@ import pytest
 
 from nerya.agent.artifact_index import build_artifact_index, render_final_report
 from nerya.agent.execution_state import build_execution_state
-from nerya.agent.kernel import _captured_domain_approval_from_tool_result_block
 
 
 pytestmark = pytest.mark.smoke
@@ -74,31 +73,6 @@ def test_execution_state_routes_blocks_and_activity_by_surface() -> None:
     task = state["surfaces"]["task_progress"][0]
     assert task["status"] == "completed"
     assert task["parent_id"] == "team_1"
-
-
-def test_trade_pending_approval_result_becomes_approval_request_block() -> None:
-    captured = _captured_domain_approval_from_tool_result_block(
-        {
-            "kind": "tool_result",
-            "call_id": "call_trade",
-            "skill_id": "native",
-            "action": "trade_intent_submit",
-            "ok": True,
-            "result": {
-                "status": "pending_approval",
-                "approval_id": "approval_trade_1",
-                "risk_decision": {"decision": "escalate"},
-            },
-        }
-    )
-
-    assert captured is not None
-    call_id, block = captured
-    assert call_id == "call_trade"
-    assert block["kind"] == "approval_request"
-    assert block["approval_id"] == "approval_trade_1"
-    assert block["action"] == "trade_intent_submit"
-    assert block["record"]["status"] == "pending"
 
 
 def test_artifact_index_keeps_real_permission_denied_errors() -> None:

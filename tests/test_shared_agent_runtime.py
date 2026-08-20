@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nerya.agent.loop import LoopConfig, LoopOutcome, WorkspaceNativeAgentLoop
+from nerya.agent.loop_state import TurnCheckpoint
 from nerya.agent.runtime import (
     AgentRuntime,
     GateDecision,
@@ -240,6 +241,104 @@ def test_shared_runtime_always_requires_stateful_continuation_state() -> None:
     assert calls == [""]
     assert result.rounds == 1
     assert result.decision.reason == "stateful_continuation_required"
+
+
+def test_shared_runtime_uses_explicit_stateful_continuation() -> None:
+    calls: list[tuple[str, str]] = []
+    gate_calls = 0
+
+    def gate(_snapshot):  # noqa: ANN001
+        nonlocal gate_calls
+        gate_calls += 1
+        if gate_calls == 1:
+            return GateDecision.continue_("include cited evidence")
+        return GateDecision.complete(reason="evidence_present")
+
+    result = AgentRuntime[str]().run(
+        RuntimeRequest(max_rounds=2),
+        gate,
+        execute=lambda feedback: calls.append(("initial", feedback)) or "draft",
+        continue_from=lambda previous, feedback: (
+            calls.append((previous, feedback)) or "evidence-backed"
+        ),
+    )
+
+    assert calls == [
+        ("initial", ""),
+        ("draft", "include cited evidence"),
+    ]
+    assert result.value == "evidence-backed"
+    assert result.rounds == 2
+    assert result.decision.status == "complete"
+    assert result.decision.reason == "evidence_present"
+
+
+def test_root_wrapper_resumes_from_returned_checkpoint(monkeypatch) -> None:
+    root = WorkspaceNativeAgentLoop.__new__(WorkspaceNativeAgentLoop)
+    root.config = LoopConfig(max_iterations=3)
+    calls: list[dict] = []
+
+    def legacy(**kwargs):  # noqa: ANN003
+        calls.append(dict(kwargs))
+        prior = kwargs.get("checkpoint")
+        if prior is None:
+            checkpoint = TurnCheckpoint(
+                turn_id="turn-checkpoint",
+                message_id="message-checkpoint",
+                transcript=({"role": "assistant", "content": "draft"},),
+                iterations=1,
+                resumable=True,
+            )
+            final_text = "draft"
+            iterations = 1
+        else:
+            assert prior.turn_id == "turn-checkpoint"
+            assert kwargs["continuation_feedback"] == "include evidence"
+            checkpoint = TurnCheckpoint(
+                turn_id=prior.turn_id,
+                message_id=prior.message_id,
+                transcript=tuple(prior.transcript),
+                iterations=2,
+                resumable=True,
+            )
+            final_text = "evidence-backed"
+            iterations = 2
+        return LoopOutcome(
+            transcript=list(checkpoint.transcript),
+            iterations=iterations,
+            stop_reason="end_turn",
+            final_text=final_text,
+            tool_calls=0,
+            error_count=0,
+            checkpoint=checkpoint,
+        )
+
+    class _Gate:
+        max_rounds = 2
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def evaluate(self, _snapshot):  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 1:
+                return GateDecision.continue_("include evidence")
+            return GateDecision.complete(reason="done")
+
+    monkeypatch.setattr(root, "_run_legacy", legacy)
+    outcome = root.run(
+        system="system",
+        user_message="task",
+        turn_id="turn-checkpoint",
+        completion_gate=_Gate(),
+    )
+
+    assert len(calls) == 2
+    assert calls[0].get("checkpoint") is None
+    assert calls[1]["checkpoint"].turn_id == "turn-checkpoint"
+    assert outcome.final_text == "evidence-backed"
+    assert outcome.completion_rounds == 2
+    assert outcome.completion_status == "complete"
 
 
 def test_runtime_cancellation_after_execute_beats_completion_gate():

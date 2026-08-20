@@ -126,6 +126,15 @@ class CompletionGate(Protocol):
 CompletionGateLike = CompletionGate | Callable[[TurnSnapshot], Any]
 
 
+class ContinuationUnavailable(RuntimeError):
+    """A caller-owned checkpoint cannot safely continue this runtime value."""
+
+    def __init__(self, reason: str, *, feedback: str = "") -> None:
+        self.reason = str(reason or "stateful_continuation_required")[:1_000]
+        self.feedback = str(feedback or "")[:MAX_GATE_FEEDBACK_CHARS]
+        super().__init__(self.reason)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeRequest:
     """Budget and cancellation knobs for the shared adapter."""
@@ -233,10 +242,10 @@ def _cancelled(cancel: Any) -> bool:
 class AgentRuntime(Generic[T]):
     """Shared round adapter used by root and child compatibility wrappers.
 
-    ``execute`` owns provider/tool mechanics and receives only the gate's
-    feedback for the next round.  The adapter owns bounded continuation,
-    cancellation, and normalization of gate decisions.  This is deliberately
-    small so the existing domain finalizers can migrate incrementally.
+    ``execute`` owns the first provider/tool round. A caller may additionally
+    provide ``continue_from`` to resume from its own checkpointed value; without
+    that explicit capability a CONTINUE decision remains fail-closed. The
+    adapter owns bounded continuation, cancellation, and decision normalization.
     """
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
@@ -249,6 +258,7 @@ class AgentRuntime(Generic[T]):
         *,
         execute: Callable[[str], T],
         snapshot: Callable[[T, int], TurnSnapshot] | None = None,
+        continue_from: Callable[[T, str], T] | None = None,
     ) -> RuntimeResult[T]:
         request = request or RuntimeRequest()
         started = self._clock()
@@ -273,7 +283,41 @@ class AgentRuntime(Generic[T]):
                     rounds=round_index,
                     snapshots=tuple(snapshots),
                 )
-            value = execute(feedback)
+            if round_index == 0:
+                value = execute(feedback)
+            else:
+                if value is None or continue_from is None:
+                    return RuntimeResult(
+                        value=value,
+                        decision=GateDecision.blocked(
+                            "stateful_continuation_required",
+                            feedback=feedback,
+                        ),
+                        rounds=round_index,
+                        snapshots=tuple(snapshots),
+                    )
+                try:
+                    value = continue_from(value, feedback)
+                except ContinuationUnavailable as exc:
+                    return RuntimeResult(
+                        value=value,
+                        decision=GateDecision.blocked(
+                            exc.reason,
+                            feedback=exc.feedback or feedback,
+                        ),
+                        rounds=round_index,
+                        snapshots=tuple(snapshots),
+                    )
+                except Exception as exc:
+                    return RuntimeResult(
+                        value=value,
+                        decision=GateDecision.blocked(
+                            "continuation_error",
+                            feedback=f"{type(exc).__name__}: {exc}",
+                        ),
+                        rounds=round_index,
+                        snapshots=tuple(snapshots),
+                    )
             try:
                 current = (
                     snapshot(value, round_index)
@@ -337,17 +381,20 @@ class AgentRuntime(Generic[T]):
                     rounds=round_index + 1,
                     snapshots=tuple(snapshots),
                 )
-            # The adapter has no continuation state or side-effect journal.
-            # Never restart a legacy engine from the original input.
-            return RuntimeResult(
-                value=value,
-                decision=GateDecision.blocked(
-                    "stateful_continuation_required",
-                    feedback=decision.feedback,
-                ),
-                rounds=round_index + 1,
-                snapshots=tuple(snapshots),
-            )
+            if continue_from is None:
+                # Never restart a legacy engine from its original input. A
+                # continuation callback is the explicit proof that the caller
+                # owns a checkpoint and side-effect journal.
+                return RuntimeResult(
+                    value=value,
+                    decision=GateDecision.blocked(
+                        "stateful_continuation_required",
+                        feedback=decision.feedback,
+                    ),
+                    rounds=round_index + 1,
+                    snapshots=tuple(snapshots),
+                )
+            feedback = decision.feedback
         return RuntimeResult(
             value=value,
             decision=GateDecision.blocked("completion_gate_round_budget_exhausted"),
@@ -370,6 +417,7 @@ __all__ = [
     "SharedAgentRuntime",
     "CompletionGate",
     "CompletionGateLike",
+    "ContinuationUnavailable",
     "GateDecision",
     "GateStatus",
     "TurnSnapshot",

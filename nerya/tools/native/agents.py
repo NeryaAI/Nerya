@@ -50,6 +50,9 @@ from ...subagents.result_aggregator import aggregate
 from ...teams.orchestrator import TeamOrchestrator, TeamRunRequest
 from ...teams.store import TeamStore
 from ...teams.templates import get_template
+from ..approval_contracts import PERMISSION_PENDING_ERROR_KIND
+from ..approval_runtime import nested_approval_pause_from_envelope
+from ..result_contracts import TEAM_REPORT_RESULT_PROTOCOL
 from ..types import (
     ToolCall,
     ToolError,
@@ -72,58 +75,22 @@ def _schema_error(call: ToolCall, message: str) -> ToolResult:
 
 
 def _nested_permission_pending(envelope: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the first child-native ASK record in a subagent envelope."""
+    """Render the shared child-native pause in the established recovery shape."""
 
-    metrics = envelope.get("metrics") if isinstance(envelope, dict) else None
-    records = metrics.get("rejected_actions") if isinstance(metrics, dict) else None
-    if not isinstance(records, list):
+    pause = nested_approval_pause_from_envelope(envelope)
+    if pause is None:
         return None
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        if str(record.get("error_kind") or "").strip() != "permission_pending":
-            continue
-        entry = record.get("entry") if isinstance(record.get("entry"), dict) else {}
-        recovery = record.get("recovery_hint")
-        if not isinstance(recovery, dict):
-            recovery = {}
-        payload = record.get("payload")
-        if not isinstance(payload, dict):
-            payload = recovery.get("payload")
-        if not isinstance(payload, dict):
-            payload = {}
-        tool_name = str(
-            record.get("tool_name")
-            or record.get("skill")
-            or recovery.get("tool_name")
-            or ""
-        ).strip()
-        nested_id = str(
-            record.get("tool_use_id")
-            or record.get("call_id")
-            or entry.get("tool_use_id")
-            or entry.get("call_id")
-            or recovery.get("nested_tool_use_id")
-            or recovery.get("tool_use_id")
-            or ""
-        ).strip()
-        caller = str(
-            record.get("caller")
-            or entry.get("caller")
-            or recovery.get("caller")
-            or ""
-        ).strip()
-        pending = {
-            "nested_permission_pending": True,
-            "nested_tool_use_id": nested_id,
-            "tool_name": tool_name,
-            "payload": redact_display_dict(dict(payload)),
-            "caller": caller,
-        }
-        if recovery:
-            pending["recovery_hint"] = redact_display_dict(dict(recovery))
-        return pending
-    return None
+    pending = pause.as_nested_dict()
+    pending["payload"] = redact_display_dict(dict(pause.payload))
+    if pause.recovery_hint:
+        pending["recovery_hint"] = redact_display_dict(
+            dict(pause.recovery_hint)
+        )
+    if pause.approval_request:
+        pending["approval_request"] = redact_display_dict(
+            dict(pause.approval_request)
+        )
+    return pending
 
 
 def _build_inline_role_spec(
@@ -1502,7 +1469,13 @@ def subagent_run_handler(
 
     nested_pending = _nested_permission_pending(envelope)
     if nested_pending is not None:
-        return ToolResult.from_error(
+        approval_request = nested_pending.get("approval_request")
+        recovery_hint = {
+            key: value
+            for key, value in nested_pending.items()
+            if key != "approval_request"
+        }
+        pending_result = ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
             error=ToolError(
@@ -1513,9 +1486,14 @@ def subagent_run_handler(
                 ),
                 detail={"envelope": envelope},
                 retryable=True,
-                recovery_hint=nested_pending,
+                recovery_hint=recovery_hint,
             ),
         )
+        if isinstance(approval_request, dict):
+            pending_result.metadata["approval_request"] = dict(
+                approval_request
+            )
+        return pending_result
 
     if not envelope.get("ok", True):
         # Preserve cooperative cancellation at the native-tool boundary.
@@ -2364,15 +2342,26 @@ def team_run_handler(
     failures: list[dict[str, Any]] = []
     seen_roles: set[str] = set()
     pending_member: dict[str, Any] | None = None
+    pending_approval_request: dict[str, Any] | None = None
     for raw in result.member_results:
         role_name = str(raw.get("subagent") or "team_member")
         seen_roles.add(role_name)
         output = _apply_member_evidence_contract(raw.get("output") or {})
         nested_pending = _nested_permission_pending(raw)
         if nested_pending is not None and pending_member is None:
-            pending_member = {**nested_pending, "subagent": role_name}
+            pending_approval = nested_pending.get("approval_request")
+            if isinstance(pending_approval, dict):
+                pending_approval_request = dict(pending_approval)
+            pending_member = {
+                **{
+                    key: value
+                    for key, value in nested_pending.items()
+                    if key != "approval_request"
+                },
+                "subagent": role_name,
+            }
         failure_kind = (
-            "permission_pending"
+            PERMISSION_PENDING_ERROR_KIND
             if nested_pending is not None
             else _member_output_failure_kind(output)
         )
@@ -2396,7 +2385,7 @@ def team_run_handler(
                 else output.get("summary") if failure_kind else None
             ),
             "error_kind": (
-                "permission_pending"
+                PERMISSION_PENDING_ERROR_KIND
                 if nested_pending is not None
                 else raw.get("error_kind") or failure_kind
             ),
@@ -2621,7 +2610,7 @@ def team_run_handler(
         except Exception:
             pass
     if pending_member is not None:
-        return ToolResult.from_error(
+        pending_result = ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
             error=ToolError(
@@ -2635,12 +2624,19 @@ def team_run_handler(
                 recovery_hint=pending_member,
             ),
         )
+        if pending_approval_request is not None:
+            pending_result.metadata["approval_request"] = dict(
+                pending_approval_request
+            )
+        return pending_result
     if not allow_additional_team_run:
         _remember_team_run_summary(guard_key, summary)
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
         data=summary,
+        semantic_success=bool(summary.get("ok")),
+        result_protocol=TEAM_REPORT_RESULT_PROTOCOL,
     )
 
 

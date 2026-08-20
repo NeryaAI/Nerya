@@ -17,7 +17,6 @@ from nerya.agent.loop import (
     _success_tool_result_markers,
     _team_result_data,
     _team_final_data_coverage,
-    _tool_result_counts_as_success,
     _wrap_external_content,
 )
 from nerya.llm.messages import MessagesResponse
@@ -25,6 +24,10 @@ from nerya.tools.executor import NativeToolExecutor
 from nerya.tools.orchestrator import ToolOrchestrator
 from nerya.tools.permissions import PermissionContext, PermissionEngine, PermissionMode
 from nerya.tools.registry import ToolRegistry
+from nerya.tools.result_contracts import (
+    TEAM_REPORT_RESULT_PROTOCOL,
+    result_counts_as_success,
+)
 from nerya.tools.types import (
     PermissionScope,
     RiskLevel,
@@ -120,7 +123,27 @@ def test_result_contract_is_domain_agnostic() -> None:
             name=f"arbitrary_{index}",
             data=payload,
         )
-        assert _tool_result_counts_as_success(result) is expected
+        assert result_counts_as_success(result) is expected
+
+
+def test_explicit_semantic_success_overrides_legacy_payload_inference() -> None:
+    forced_failure = ToolResult.from_json(
+        tool_use_id="toolu_false",
+        name="producer_owned",
+        data={"ok": True, "status": "completed"},
+        semantic_success=False,
+    )
+    forced_success = ToolResult.from_json(
+        tool_use_id="toolu_true",
+        name="producer_owned",
+        data={"success": False, "status": "failed"},
+        semantic_success=True,
+    )
+
+    assert result_counts_as_success(forced_failure) is False
+    assert result_counts_as_success(forced_success) is True
+    assert forced_failure.asdict()["semantic_success"] is False
+    assert forced_success.asdict()["semantic_success"] is True
 
 
 def test_required_contract_keeps_opaque_fields_and_order() -> None:
@@ -196,12 +219,36 @@ def test_team_result_requires_real_team_run_payload() -> None:
         data={"roles": [{"name": "market_analyst"}]},
     )
     discovery_result.metadata["descriptor"] = {"tags": ("team",)}
+    protocol_result = ToolResult.from_json(
+        tool_use_id="toolu_protocol",
+        name="parallel_committee_plugin",
+        data={
+            "team_run_id": "team-protocol",
+            "results": [{"summary": "plugin evidence"}],
+        },
+        result_protocol=TEAM_REPORT_RESULT_PROTOCOL,
+    )
+    wrong_protocol_result = ToolResult.from_json(
+        tool_use_id="toolu_wrong_protocol",
+        name="team_run",
+        data={
+            "team_run_id": "team-wrong",
+            "results": [{"summary": "must not be reclassified"}],
+        },
+        result_protocol="plugin.other.v1",
+    )
 
     assert _team_result_data(team_result) == {
         "team_run_id": "team-123",
         "results": [{"summary": "evidence"}],
     }
+    assert _team_result_data(protocol_result) == {
+        "team_run_id": "team-protocol",
+        "results": [{"summary": "plugin evidence"}],
+    }
+    assert protocol_result.asdict()["result_protocol"] == TEAM_REPORT_RESULT_PROTOCOL
     assert _team_result_data(discovery_result) is None
+    assert _team_result_data(wrong_protocol_result) is None
     assert _team_result_data(ToolResult.from_json(
         tool_use_id="toolu_invalid",
         name="team_run",
@@ -358,6 +405,180 @@ def test_loop_blocks_contract_failure_even_for_arbitrary_tool_name() -> None:
     outcome = loop.run(system="system", user_message="run alpha")
     assert "alpha" in outcome.final_text
     assert outcome.transition_reason == "required_artifact_missing_finalized"
+
+
+def test_unoffered_only_tool_call_retries_without_execution() -> None:
+    executed: list[str] = []
+    gateway = _Gateway(
+        _response(_tool_use("hidden_tool"), stop_reason="tool_use"),
+        _response({"type": "text", "text": "Recovered with visible context."}),
+    )
+    loop = _loop(
+        gateway,
+        [
+            _descriptor(
+                "visible_tool",
+                lambda call: executed.append(call.name) or _json_result(
+                    call,
+                    {"ok": True},
+                ),
+            )
+        ],
+        max_iterations=2,
+    )
+
+    outcome = loop.run(system="system", user_message="use a tool")
+
+    assert outcome.final_text == "Recovered with visible context."
+    assert executed == []
+    assert outcome.tool_calls == 1
+    assert outcome.error_count == 1
+    assert len(gateway.calls) == 2
+    retry_messages = gateway.calls[1]["messages"]
+    assert any(
+        "not exposed in this iteration" in str(message.get("content") or "")
+        for message in retry_messages
+        if isinstance(message, dict)
+    )
+    assert any(
+        isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and "hidden_tool" in str(message.get("content") or "")
+        for message in retry_messages
+    )
+    assert any(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and "toolu_1" in str(message.get("content") or "")
+        and "permission_denied" in str(message.get("content") or "")
+        for message in retry_messages
+    )
+
+
+def test_unoffered_only_tool_call_blocks_at_iteration_limit() -> None:
+    gateway = _Gateway(
+        _response(_tool_use("hidden_tool"), stop_reason="tool_use"),
+    )
+    loop = _loop(
+        gateway,
+        [_descriptor("visible_tool", lambda call: _json_result(call, {"ok": True}))],
+        max_iterations=1,
+    )
+
+    outcome = loop.run(system="system", user_message="use a tool")
+
+    assert outcome.transition_reason == "provider_unoffered_tool_blocked"
+    assert "hidden_tool" in outcome.final_text
+    assert "not exposed" in outcome.final_text
+    assert outcome.tool_calls == 1
+    assert outcome.error_count == 1
+    assert any(
+        isinstance(message, dict)
+        and message.get("role") == "user"
+        and "permission_denied" in str(message.get("content") or "")
+        for message in outcome.transcript
+    )
+
+
+def test_mixed_offered_and_unoffered_calls_preserve_result_pairing() -> None:
+    executed: list[str] = []
+
+    def handler(call: ToolCall) -> ToolResult:
+        executed.append(call.name)
+        return _json_result(call, {"ok": True, "value": 7})
+
+    gateway = _Gateway(
+        _response(
+            _tool_use("alpha", call_id="toolu_allowed"),
+            _tool_use("hidden_tool", call_id="toolu_hidden"),
+            stop_reason="tool_use",
+        ),
+        _response({"type": "text", "text": "Used the allowed evidence."}),
+    )
+    loop = _loop(gateway, [_descriptor("alpha", handler)], max_iterations=2)
+
+    outcome = loop.run(system="system", user_message="collect evidence")
+
+    assert outcome.final_text == "Used the allowed evidence."
+    assert executed == ["alpha"]
+    assert outcome.tool_calls == 2
+    assert outcome.error_count == 1
+    result_messages = [
+        message
+        for message in outcome.transcript
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and isinstance(message.get("content"), list)
+        and any(
+            isinstance(block, dict) and block.get("type") == "tool_result"
+            for block in message["content"]
+        )
+    ]
+    assert result_messages
+    result_blocks = result_messages[0]["content"]
+    assert [block["tool_use_id"] for block in result_blocks] == [
+        "toolu_allowed",
+        "toolu_hidden",
+    ]
+    hidden_result = result_blocks[1]
+    assert hidden_result["is_error"] is True
+    assert "permission_denied" in str(hidden_result["content"])
+
+
+def test_team_final_synthesis_is_included_in_usage_telemetry() -> None:
+    final_report = "Verified team evidence supports a bounded conclusion."
+    gateway = _Gateway(
+        MessagesResponse(
+            content=[_tool_use("team_run", call_id="toolu_team")],
+            stop_reason="tool_use",
+            usage={"input_tokens": 10, "output_tokens": 2},
+            provider="fake",
+            model="fake-main",
+            usd_cost=0.01,
+        ),
+        MessagesResponse(
+            content=[{"type": "text", "text": final_report}],
+            stop_reason="end_turn",
+            usage={"input_tokens": 30, "output_tokens": 8},
+            provider="fake",
+            model="fake-summary",
+            usd_cost=0.02,
+        ),
+    )
+
+    def team_handler(call: ToolCall) -> ToolResult:
+        return ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "ok": True,
+                "status": "completed",
+                "team_run_id": "team-1",
+                "roles_succeeded": ["analyst"],
+                "results": [
+                    {
+                        "subagent": "analyst",
+                        "output": {"summary": "verified evidence"},
+                    }
+                ],
+            },
+            semantic_success=True,
+        )
+
+    loop = _loop(gateway, [_descriptor("team_run", team_handler)], max_iterations=2)
+    outcome = loop.run(system="system", user_message="run the team")
+
+    assert outcome.final_text == final_report
+    assert outcome.llm_calls == 2
+    assert outcome.input_tokens_total == 40
+    assert outcome.output_tokens_total == 10
+    assert outcome.usd_total == pytest.approx(0.03)
+    assert outcome.provider == "fake"
+    assert outcome.model == "fake-summary"
+    assert [call["context_scope"] for call in outcome.model_calls] == [
+        "agent_loop",
+        "team_final_synthesis",
+    ]
 
 
 def test_team_fallback_keeps_business_fields_and_drops_internal_fields() -> None:

@@ -333,6 +333,224 @@ class AgentSessionRepository:
         )
         return bool(cur.rowcount or 0)
 
+    def save_turn_checkpoint(
+        self,
+        session_id: str,
+        *,
+        turn_id: str,
+        checkpoint: dict[str, Any],
+        expected_claim_id: str | None = None,
+        max_bytes: int = 2 * 1024 * 1024,
+        ts: float | None = None,
+    ) -> bool:
+        """Persist one private continuation checkpoint for ``session_id``.
+
+        Fresh turns may replace only an unclaimed row. A resumed turn must
+        provide the exact claim id obtained from :meth:`claim_turn_checkpoint`;
+        this prevents a stale worker from overwriting a newer checkpoint.
+        """
+
+        sid = str(session_id or "").strip()
+        tid = str(turn_id or "").strip()
+        if not sid or not tid:
+            raise ValueError("session_id and turn_id are required")
+        payload = json.dumps(
+            checkpoint or {},
+            default=str,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        payload_bytes = len(payload.encode("utf-8"))
+        byte_limit = max(1, int(max_bytes or 0))
+        if payload_bytes > byte_limit:
+            raise ValueError(
+                "turn checkpoint exceeds size limit: "
+                f"{payload_bytes} > {byte_limit} bytes"
+            )
+        saved_at = float(ts or time.time())
+        claim_id = str(expected_claim_id or "").strip()
+        if claim_id:
+            cur = self.con.execute(
+                """
+                UPDATE agent_turn_checkpoints
+                SET checkpoint_json=?, checkpoint_bytes=?, saved_at=?,
+                    claim_id=NULL, claimed_at=NULL
+                WHERE session_id=? AND turn_id=? AND claim_id=?
+                """,
+                (payload, payload_bytes, saved_at, sid, tid, claim_id),
+            )
+            return bool(cur.rowcount or 0)
+
+        cur = self.con.execute(
+            """
+            INSERT INTO agent_turn_checkpoints(
+                session_id, turn_id, checkpoint_json, checkpoint_bytes,
+                saved_at, claim_id, claimed_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, NULL)
+            ON CONFLICT(session_id) DO UPDATE SET
+                turn_id=excluded.turn_id,
+                checkpoint_json=excluded.checkpoint_json,
+                checkpoint_bytes=excluded.checkpoint_bytes,
+                saved_at=excluded.saved_at,
+                claim_id=NULL,
+                claimed_at=NULL
+            WHERE agent_turn_checkpoints.claim_id IS NULL
+            """,
+            (sid, tid, payload, payload_bytes, saved_at),
+        )
+        return bool(cur.rowcount or 0)
+
+    def peek_turn_checkpoint(
+        self,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        """Read the private checkpoint row without claiming it."""
+
+        row = self.con.execute(
+            """
+            SELECT session_id, turn_id, checkpoint_json, checkpoint_bytes,
+                   saved_at, claim_id, claimed_at
+            FROM agent_turn_checkpoints
+            WHERE session_id=?
+            """,
+            (str(session_id or "").strip(),),
+        ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        try:
+            checkpoint = json.loads(str(out.pop("checkpoint_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            checkpoint = None
+        out["checkpoint"] = checkpoint if isinstance(checkpoint, dict) else None
+        return out
+
+    def claim_turn_checkpoint(
+        self,
+        session_id: str,
+        *,
+        turn_id: str,
+        claim_id: str,
+        ts: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically make one checkpoint unavailable to other resumptions."""
+
+        sid = str(session_id or "").strip()
+        tid = str(turn_id or "").strip()
+        claim = str(claim_id or "").strip()
+        if not sid or not tid or not claim:
+            raise ValueError("session_id, turn_id and claim_id are required")
+        cur = self.con.execute(
+            """
+            UPDATE agent_turn_checkpoints
+            SET claim_id=?, claimed_at=?
+            WHERE session_id=? AND turn_id=? AND claim_id IS NULL
+            """,
+            (claim, float(ts or time.time()), sid, tid),
+        )
+        if not (cur.rowcount or 0):
+            return None
+        return self.peek_turn_checkpoint(sid)
+
+    def begin_turn_checkpoint_lease(
+        self,
+        session_id: str,
+        *,
+        turn_id: str,
+        claim_id: str,
+        checkpoint: dict[str, Any],
+        stale_before: float | None = None,
+        max_bytes: int = 64 * 1024,
+        ts: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically create/replace a session checkpoint with a live lease.
+
+        The row exists for the entire turn, closing the cross-process gap
+        between abandoning an old checkpoint and saving the new one. A live
+        claim wins; only an unclaimed or explicitly stale row may be replaced.
+        """
+
+        sid = str(session_id or "").strip()
+        tid = str(turn_id or "").strip()
+        claim = str(claim_id or "").strip()
+        if not sid or not tid or not claim:
+            raise ValueError("session_id, turn_id and claim_id are required")
+        payload = json.dumps(
+            checkpoint or {},
+            default=str,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        payload_bytes = len(payload.encode("utf-8"))
+        byte_limit = max(1, int(max_bytes or 0))
+        if payload_bytes > byte_limit:
+            raise ValueError(
+                "turn lease checkpoint exceeds size limit: "
+                f"{payload_bytes} > {byte_limit} bytes"
+            )
+        started_at = float(ts or time.time())
+        availability = "agent_turn_checkpoints.claim_id IS NULL"
+        params: list[Any] = [
+            sid,
+            tid,
+            payload,
+            payload_bytes,
+            started_at,
+            claim,
+            started_at,
+        ]
+        if stale_before is not None:
+            availability = (
+                "(agent_turn_checkpoints.claim_id IS NULL OR "
+                "(agent_turn_checkpoints.claimed_at IS NOT NULL AND "
+                "agent_turn_checkpoints.claimed_at <= ?))"
+            )
+            params.append(float(stale_before))
+        cur = self.con.execute(
+            """
+            INSERT INTO agent_turn_checkpoints(
+                session_id, turn_id, checkpoint_json, checkpoint_bytes,
+                saved_at, claim_id, claimed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                turn_id=excluded.turn_id,
+                checkpoint_json=excluded.checkpoint_json,
+                checkpoint_bytes=excluded.checkpoint_bytes,
+                saved_at=excluded.saved_at,
+                claim_id=excluded.claim_id,
+                claimed_at=excluded.claimed_at
+            WHERE """ + availability,
+            tuple(params),
+        )
+        if not (cur.rowcount or 0):
+            return None
+        return self.peek_turn_checkpoint(sid)
+
+    def clear_turn_checkpoint(
+        self,
+        session_id: str,
+        *,
+        turn_id: str | None = None,
+        claim_id: str | None = None,
+    ) -> bool:
+        """Delete one checkpoint, optionally guarded by turn/claim identity."""
+
+        clauses = ["session_id=?"]
+        params: list[Any] = [str(session_id or "").strip()]
+        tid = str(turn_id or "").strip()
+        claim = str(claim_id or "").strip()
+        if tid:
+            clauses.append("turn_id=?")
+            params.append(tid)
+        if claim:
+            clauses.append("claim_id=?")
+            params.append(claim)
+        cur = self.con.execute(
+            "DELETE FROM agent_turn_checkpoints WHERE " + " AND ".join(clauses),
+            tuple(params),
+        )
+        return bool(cur.rowcount or 0)
+
     def update_context_checkpoint(
         self,
         session_id: str,

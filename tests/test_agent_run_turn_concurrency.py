@@ -8,6 +8,7 @@ import time
 import pytest
 
 from nerya.agent.kernel import AgentKernel, AgentTurnResult
+from nerya.agent.loop_state import TurnCheckpointResumeError
 from nerya.api import routes_agent
 from nerya.core import jsonl
 from nerya.core.config import Config, DEFAULT_CONFIG
@@ -36,6 +37,170 @@ def _interrupt_route():
     )
 
 
+def _completed_turn(
+    kwargs: dict[str, object],
+    *,
+    event_id: str = "evt_1",
+    default_turn_id: str = "turn_1",
+    text: str = "done",
+) -> AgentTurnResult:
+    return AgentTurnResult(
+        trigger_event_id=event_id,
+        strategy_id=kwargs.get("strategy_id"),
+        session_id=kwargs.get("session_id"),
+        turn_id=str(kwargs.get("turn_id") or default_turn_id),
+        decision={"action": "send_message", "text": text},
+        actions=[{"action": "send_message", "ok": True, "text": text}],
+        tool_trace=[],
+        stopped_reason="end_turn",
+        final_text=text,
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "status", "error"),
+    [
+        (
+            {
+                "session_id": "session-1",
+                "resume_turn_id": "turn-1",
+            },
+            400,
+            "turn_checkpoint_resume_fields_required",
+        ),
+        (
+            {
+                "resume_turn_id": "turn-1",
+                "continuation_feedback": "continue",
+            },
+            400,
+            "turn_checkpoint_session_required",
+        ),
+        (
+            {
+                "session_id": "session-1",
+                "turn_id": "turn-other",
+                "resume_turn_id": "turn-1",
+                "continuation_feedback": "continue",
+            },
+            409,
+            "turn_checkpoint_turn_mismatch",
+        ),
+        (
+            {
+                "session_id": "session-1",
+                "resume_turn_id": "turn-1",
+                "continuation_feedback": "continue",
+                "attachments": [{"name": "new.txt"}],
+            },
+            400,
+            "turn_checkpoint_attachments_not_supported",
+        ),
+    ],
+)
+def test_run_turn_validates_durable_resume_before_kernel(
+    tmp_path,
+    monkeypatch,
+    payload,
+    status,
+    error,
+):
+    cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    client = SimpleNamespace(config=cfg, skills=None)
+
+    class UnexpectedKernel:
+        def __init__(self, **_kwargs):
+            raise AssertionError("invalid resume request reached AgentKernel")
+
+    monkeypatch.setattr(routes_agent, "AgentKernel", UnexpectedKernel)
+
+    result = _run_turn_route()(client, payload)
+
+    assert result["_status"] == status
+    assert result["ok"] is False
+    assert result["error"] == error
+
+
+def test_run_turn_durable_resume_bypasses_commands_and_passes_fields(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    client = SimpleNamespace(config=cfg, skills=None)
+    captured: dict[str, object] = {}
+
+    def unexpected_command(*_args, **_kwargs):
+        raise AssertionError("checkpoint feedback was dispatched as a slash command")
+
+    class CapturingKernel:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_turn(self, **kwargs):
+            captured.update(kwargs)
+            return _completed_turn(
+                kwargs,
+                event_id="evt_resume",
+                default_turn_id="turn-resume",
+            )
+
+    monkeypatch.setattr(
+        routes_agent,
+        "_run_turn_command_response",
+        unexpected_command,
+    )
+    monkeypatch.setattr(routes_agent, "AgentKernel", CapturingKernel)
+
+    result = _run_turn_route()(
+        client,
+        {
+            "session_id": "session-resume",
+            "resume_turn_id": "turn-resume",
+            "continuation_feedback": "/include verified evidence",
+        },
+    )
+
+    assert result["turn_id"] == "turn-resume"
+    assert captured["session_id"] == "session-resume"
+    assert captured["resume_turn_id"] == "turn-resume"
+    assert captured["continuation_feedback"] == "/include verified evidence"
+    assert captured["trigger"] == {}
+
+
+def test_run_turn_surfaces_typed_checkpoint_kernel_error(tmp_path, monkeypatch):
+    cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    client = SimpleNamespace(config=cfg, skills=None)
+
+    class MissingCheckpointKernel:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_turn(self, **_kwargs):
+            raise TurnCheckpointResumeError(
+                "turn_checkpoint_not_found",
+                "No durable checkpoint exists.",
+                status=404,
+            )
+
+    monkeypatch.setattr(routes_agent, "AgentKernel", MissingCheckpointKernel)
+
+    result = _run_turn_route()(
+        client,
+        {
+            "session_id": "session-resume",
+            "resume_turn_id": "turn-resume",
+            "continuation_feedback": "continue",
+        },
+    )
+
+    assert result == {
+        "_status": 404,
+        "ok": False,
+        "error": "turn_checkpoint_not_found",
+        "message": "No durable checkpoint exists.",
+    }
+
+
 def test_run_turn_rejects_concurrent_turn_for_same_session(tmp_path, monkeypatch):
     cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
     client = SimpleNamespace(config=cfg, skills=None)
@@ -49,17 +214,7 @@ def test_run_turn_rejects_concurrent_turn_for_same_session(tmp_path, monkeypatch
         def run_turn(self, **kwargs):
             started.set()
             assert release.wait(timeout=5), "test timed out waiting to release slow turn"
-            return AgentTurnResult(
-                trigger_event_id="evt_1",
-                strategy_id=kwargs.get("strategy_id"),
-                session_id=kwargs.get("session_id"),
-                turn_id=kwargs.get("turn_id") or "turn_1",
-                decision={"action": "send_message", "text": "done"},
-                actions=[{"action": "send_message", "ok": True, "text": "done"}],
-                tool_trace=[],
-                stopped_reason="end_turn",
-                final_text="done",
-            )
+            return _completed_turn(kwargs)
 
     monkeypatch.setattr(routes_agent, "AgentKernel", SlowKernel)
     run_turn = _run_turn_route()
@@ -177,17 +332,7 @@ def test_run_turn_does_not_route_prompt_text_to_light_tier(tmp_path, monkeypatch
             captured.update(kwargs)
 
         def run_turn(self, **kwargs):
-            return AgentTurnResult(
-                trigger_event_id="evt_1",
-                strategy_id=kwargs.get("strategy_id"),
-                session_id=kwargs.get("session_id"),
-                turn_id=kwargs.get("turn_id") or "turn_1",
-                decision={"action": "send_message", "text": "done"},
-                actions=[{"action": "send_message", "ok": True, "text": "done"}],
-                tool_trace=[],
-                stopped_reason="end_turn",
-                final_text="done",
-            )
+            return _completed_turn(kwargs)
 
     monkeypatch.setattr(routes_agent, "AgentKernel", CapturingKernel)
 
@@ -224,17 +369,7 @@ def test_run_turn_respects_explicit_model_tier_and_env_permission_mode(
             captured.update(kwargs)
 
         def run_turn(self, **kwargs):
-            return AgentTurnResult(
-                trigger_event_id="evt_1",
-                strategy_id=kwargs.get("strategy_id"),
-                session_id=kwargs.get("session_id"),
-                turn_id=kwargs.get("turn_id") or "turn_1",
-                decision={"action": "send_message", "text": "done"},
-                actions=[{"action": "send_message", "ok": True, "text": "done"}],
-                tool_trace=[],
-                stopped_reason="end_turn",
-                final_text="done",
-            )
+            return _completed_turn(kwargs)
 
     monkeypatch.setenv("NERYA_PERMISSION_MODE", "yolo")
     monkeypatch.setattr(routes_agent, "AgentKernel", CapturingKernel)
@@ -271,17 +406,7 @@ def test_run_turn_uses_config_permission_mode_when_env_absent(
             captured.update(kwargs)
 
         def run_turn(self, **kwargs):
-            return AgentTurnResult(
-                trigger_event_id="evt_1",
-                strategy_id=kwargs.get("strategy_id"),
-                session_id=kwargs.get("session_id"),
-                turn_id=kwargs.get("turn_id") or "turn_1",
-                decision={"action": "send_message", "text": "done"},
-                actions=[{"action": "send_message", "ok": True, "text": "done"}],
-                tool_trace=[],
-                stopped_reason="end_turn",
-                final_text="done",
-            )
+            return _completed_turn(kwargs)
 
     monkeypatch.delenv("NERYA_PERMISSION_MODE", raising=False)
     monkeypatch.setattr(routes_agent, "AgentKernel", CapturingKernel)
@@ -346,16 +471,10 @@ def test_run_turn_passes_evidence_contract_to_kernel(tmp_path, monkeypatch):
 
         def run_turn(self, **kwargs):
             captured.update(kwargs)
-            return AgentTurnResult(
-                trigger_event_id="evt_contract",
-                strategy_id=kwargs.get("strategy_id"),
-                session_id=kwargs.get("session_id"),
-                turn_id=kwargs.get("turn_id") or "turn_contract",
-                decision={"action": "send_message", "text": "done"},
-                actions=[{"action": "send_message", "ok": True, "text": "done"}],
-                tool_trace=[],
-                stopped_reason="end_turn",
-                final_text="done",
+            return _completed_turn(
+                kwargs,
+                event_id="evt_contract",
+                default_turn_id="turn_contract",
             )
 
     monkeypatch.setattr(routes_agent, "AgentKernel", CapturingKernel)

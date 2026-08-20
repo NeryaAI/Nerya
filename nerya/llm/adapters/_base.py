@@ -24,6 +24,7 @@ from typing import Any, Callable, Protocol
 
 from ...core import devmode
 from ...core.errors import LLMError
+from ..attempt_budget import claim_current_extra_attempt
 from ..rate_limits import global_store, parse_rate_limit_headers
 from ..retry import is_retryable_status, jittered_backoff
 
@@ -378,6 +379,8 @@ def _post_with_retry(
             })
             if attempt >= max_attempts:
                 raise
+            if not claim_current_extra_attempt("transport_retry"):
+                raise
             _sleep_with_deadline(
                 jittered_backoff(
                     attempt,
@@ -416,6 +419,8 @@ def _post_with_retry(
         ):
             break
 
+        if not claim_current_extra_attempt("transport_retry"):
+            break
         delay = jittered_backoff(attempt, base_delay=base_delay,
                                    max_delay=_DEFAULT_MAX_DELAY)
         retry_after = resp_headers.get("retry-after") if resp_headers else None

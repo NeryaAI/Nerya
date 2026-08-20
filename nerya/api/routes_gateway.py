@@ -2404,6 +2404,7 @@ def _handle_telegram_callback(client, cfg: dict[str, Any],
                 aid,
                 state=str(effective_state),
                 record=moved_state["record"] or rec,
+                config=client.config,
             )
         except Exception:
             pass

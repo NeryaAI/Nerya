@@ -37,9 +37,7 @@ class PermissionMode(str, enum.Enum):
     """Top-level operator policy.
 
     * ``DEFAULT``    — risk-based: READ/WRITE auto-allowed, EXEC asks,
-      DANGEROUS blocks unless explicitly approved.
-    * ``PLAN``       — approval-planning mode. Mutating tools are blocked,
-      but auto-approved research/delegation helpers may still run.
+      DANGEROUS asks unless a producer-owned domain gate handles it.
     * ``AUTO``       — unattended for low/medium-risk work (used by eval /
       cron); DANGEROUS operations still ask and the engine still enforces
       deny rules and sandboxed scopes.
@@ -50,7 +48,6 @@ class PermissionMode(str, enum.Enum):
     """
 
     DEFAULT = "default"
-    PLAN = "plan"
     AUTO = "auto"
     YOLO = "yolo"
 
@@ -191,11 +188,6 @@ class PermissionContext:
     permanent_rules: list[PermissionRule] = field(default_factory=list)
     session_rules: list[PermissionRule] = field(default_factory=list)
     deny_rules: list[PermissionRule] = field(default_factory=list)
-    approved_calls: set[str] = field(default_factory=set)
-    """``{tool_use_id}`` set of pre-approved calls (UI confirmed)."""
-
-    rejected_calls: set[str] = field(default_factory=set)
-    """``{tool_use_id}`` set of explicitly rejected calls."""
 
 
 class PermissionEngine:
@@ -240,22 +232,6 @@ class PermissionEngine:
                     kind=PermissionDecisionKind.DENY,
                     reason=rule.reason or "denied by deny rule",
                     rule=rule,
-                    risk=risk,
-                    scope=scope,
-                )
-
-        if context.mode is PermissionMode.PLAN:
-            if (
-                risk is RiskLevel.DANGEROUS
-                or (
-                    (risk is RiskLevel.WRITE or descriptor.mutates_paths)
-                    and not auto_approve
-                )
-                or (risk is RiskLevel.EXEC and not auto_approve)
-            ):
-                return PermissionDecision(
-                    kind=PermissionDecisionKind.DENY,
-                    reason="plan mode forbids mutating tools",
                     risk=risk,
                     scope=scope,
                 )

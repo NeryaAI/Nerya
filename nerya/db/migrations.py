@@ -718,9 +718,6 @@ def _v6_position_shares(con: sqlite3.Connection) -> None:
         max_leverage = 0.0
         first_opened = rows[0][16]
         last_updated = rows[0][17]
-        venue_value = rows[0][2] or ""
-        mark_value = rows[0][6]
-        source_value = rows[0][13] or "paper"
 
         for r in rows:
             sz = float(r[4] or 0)
@@ -987,6 +984,40 @@ def _v9_memory_legacy_import_ownership(con: sqlite3.Connection) -> None:
     )
 
 
+def _v10_agent_turn_checkpoints(con: sqlite3.Connection) -> None:
+    """Persist one private, claimable continuation checkpoint per session."""
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_turn_checkpoints (
+            session_id       TEXT PRIMARY KEY,
+            turn_id          TEXT NOT NULL,
+            checkpoint_json  TEXT NOT NULL,
+            checkpoint_bytes INTEGER NOT NULL,
+            saved_at         REAL NOT NULL,
+            claim_id         TEXT,
+            claimed_at       REAL,
+            FOREIGN KEY (session_id)
+                REFERENCES agent_sessions(session_id)
+                ON DELETE CASCADE
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_turn_checkpoints_turn
+        ON agent_turn_checkpoints(turn_id)
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_agent_turn_checkpoints_claim
+        ON agent_turn_checkpoints(claim_id)
+        WHERE claim_id IS NOT NULL
+        """
+    )
+
+
 # Append new migrations to the end of this list. Never renumber; new
 # work always becomes a *new* version. The registry validator above
 # enforces a contiguous 1..N sequence at startup.
@@ -1007,6 +1038,11 @@ MIGRATIONS: list[Migration] = [
         version=9,
         name="memory_legacy_import_ownership",
         up=_v9_memory_legacy_import_ownership,
+    ),
+    Migration(
+        version=10,
+        name="agent_turn_checkpoints",
+        up=_v10_agent_turn_checkpoints,
     ),
 ]
 

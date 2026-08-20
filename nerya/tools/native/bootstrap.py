@@ -157,13 +157,7 @@ from .skill import (
     skill_view_handler,
 )
 from .skill_tool import register_skill_tool
-from .task import (
-    TaskState,
-    enter_plan_mode_handler,
-    exit_plan_mode_handler,
-    plan_status_handler,
-    todo_write_handler,
-)
+from .task import TaskState, todo_write_handler
 from .trading import (
     KILL_SWITCH_SET_SCHEMA,
     PORTFOLIO_PNL_SCHEMA,
@@ -309,7 +303,7 @@ class NativeToolDeps:
     permission card. Domain gates still enforce trading invariants."""
 
     permission_mode: str = "default"
-    """Current agent turn permission mode, threaded to plan tools."""
+    """Current agent turn permission mode for handler-owned execution policy."""
 
 
 # ---------------------------------------------------------------------------
@@ -466,32 +460,6 @@ _TODO_WRITE_SCHEMA = {
     "required": ["todos"],
 }
 
-_ENTER_PLAN_MODE_SCHEMA = {
-    "type": "object",
-    "properties": {},
-}
-
-_EXIT_PLAN_MODE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "plan": {"type": "string", "description": "Markdown plan body."},
-    },
-    "required": ["plan"],
-}
-
-_PLAN_STATUS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "plan_id": {
-            "type": "string",
-            "description": (
-                "Optional plan id to inspect (returned by exit_plan_mode). "
-                "Omit to inspect the most recent submission."
-            ),
-        },
-    },
-}
-
 _SKILL_INDEX_SCHEMA = {
     "type": "object",
     "properties": {
@@ -603,31 +571,6 @@ def _wrap_run_shell(deps: NativeToolDeps):
 def _wrap_todo_write(deps: NativeToolDeps):
     def handler(call: ToolCall):
         return todo_write_handler(call, task_state=deps.task_state)
-
-    return handler
-
-
-def _wrap_enter_plan(deps: NativeToolDeps):
-    def handler(call: ToolCall):
-        return enter_plan_mode_handler(call, task_state=deps.task_state)
-
-    return handler
-
-
-def _wrap_exit_plan(deps: NativeToolDeps):
-    def handler(call: ToolCall):
-        return exit_plan_mode_handler(
-            call,
-            task_state=deps.task_state,
-            permission_mode=deps.permission_mode,
-        )
-
-    return handler
-
-
-def _wrap_plan_status(deps: NativeToolDeps):
-    def handler(call: ToolCall):
-        return plan_status_handler(call, task_state=deps.task_state)
 
     return handler
 
@@ -1864,7 +1807,7 @@ def register_native_tools(
             result_kind="shell",
             risk_classifier=classify_shell_risk,
         ),
-        # ----- task / plan -----
+        # ----- task tracking -----
         make_native_descriptor(
             name="todo_write",
             description=(
@@ -1877,49 +1820,6 @@ def register_native_tools(
             permission_scope=PermissionScope.NONE,
             read_only=True,
             is_concurrency_safe=False,
-            tags=("planning",),
-            result_kind="json",
-            auto_approve=True,
-        ),
-        make_native_descriptor(
-            name="enter_plan_mode",
-            description=(
-                "Enter plan mode. Mutating tools are blocked until exit_plan_mode "
-                "submits a plan and the user approves it."
-            ),
-            input_schema=_ENTER_PLAN_MODE_SCHEMA,
-            handler=_wrap_enter_plan(deps),
-            risk=RiskLevel.READ,
-            permission_scope=PermissionScope.NONE,
-            tags=("planning",),
-            result_kind="json",
-            auto_approve=True,
-        ),
-        make_native_descriptor(
-            name="exit_plan_mode",
-            description=(
-                "Submit a markdown plan body for user approval and exit plan mode "
-                "on accept."
-            ),
-            input_schema=_EXIT_PLAN_MODE_SCHEMA,
-            handler=_wrap_exit_plan(deps),
-            risk=RiskLevel.READ,
-            permission_scope=PermissionScope.NONE,
-            tags=("planning",),
-            result_kind="json",
-            auto_approve=True,
-        ),
-        make_native_descriptor(
-            name="plan_status",
-            description=(
-                "Poll the resolution of a plan submitted via exit_plan_mode. "
-                "Returns approved / rejected / pending_approval / stale / "
-                "no_pending_plan, plus a hint for what the model should do next."
-            ),
-            input_schema=_PLAN_STATUS_SCHEMA,
-            handler=_wrap_plan_status(deps),
-            risk=RiskLevel.READ,
-            permission_scope=PermissionScope.NONE,
             tags=("planning",),
             result_kind="json",
             auto_approve=True,

@@ -43,6 +43,16 @@ _FALLBACK_MULTIMODAL_PROVIDERS = {
 }
 _FALLBACK_PDF_PROVIDERS = {"anthropic", "claude", "gemini", "google", "bedrock"}
 
+ATTACHMENT_BLOCK_TYPES = frozenset({
+    "attachment",
+    "image",
+    "document",
+    "file",
+    "video",
+    "audio",
+})
+"""Provider/result block kinds projected as dashboard attachments."""
+
 
 @dataclass
 class PreparedAttachments:
@@ -239,14 +249,7 @@ def assistant_attachment_block(block: dict[str, Any]) -> dict[str, Any]:
     if data and mime and not data_url:
         data_url = f"data:{mime};base64,{data}"
     attachment_kind = str(block.get("attachment_kind") or block.get("kind") or "")
-    if not attachment_kind or attachment_kind in {
-        "attachment",
-        "image",
-        "document",
-        "file",
-        "video",
-        "audio",
-    }:
+    if not attachment_kind or attachment_kind in ATTACHMENT_BLOCK_TYPES:
         attachment_kind = _kind_for_mime(mime)
     return {
         "kind": "attachment",
@@ -494,14 +497,7 @@ def _attachments_from_value(value: Any) -> list[dict[str, Any]]:
         raw = value.get("attachments")
         if isinstance(raw, list):
             return [_public_meta(v) for v in raw if isinstance(v, dict)]
-        if value.get("kind") in {
-            "attachment",
-            "image",
-            "document",
-            "file",
-            "video",
-            "audio",
-        }:
+        if value.get("kind") in ATTACHMENT_BLOCK_TYPES:
             return [_public_meta(value)]
     return []
 

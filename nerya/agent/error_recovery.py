@@ -38,6 +38,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..tools.approval_contracts import (
+    APPROVAL_PENDING_REASON,
+    PERMISSION_PENDING_ERROR_KIND,
+)
 from .file_state import StaleFileReadError
 
 
@@ -66,7 +70,7 @@ RECOVERY_HINTS: dict[str, str] = {
         "re-anchor your edit on a string that still exists; do not "
         "guess the new contents."
     ),
-    "approval_pending": (
+    APPROVAL_PENDING_REASON: (
         "This action requires operator approval. Either wait for the "
         "approval to land in your observation feed, restate the request "
         "as a read-only/dry-run action, or send a message to the user "
@@ -233,8 +237,8 @@ def classify_for_recovery(
         "validation": "ambiguous_input",
         "schema_validation": "ambiguous_input",
         # approval / permissions
-        "approval_pending": "approval_pending",
-        "permission_pending": "approval_pending",
+        APPROVAL_PENDING_REASON: APPROVAL_PENDING_REASON,
+        PERMISSION_PENDING_ERROR_KIND: APPROVAL_PENDING_REASON,
         "approval_denied": "unrecoverable",
         "permission_denied": "permission_denied",
         # discovery
@@ -384,7 +388,7 @@ RETRY_POLICY: dict[str, RetryPolicy] = {
         max_retries=0,
         notes="schema validation failed — model must fix the payload",
     ),
-    "approval_pending": RetryPolicy(
+    APPROVAL_PENDING_REASON: RetryPolicy(
         action=RecoveryAction.STOP_LOOP,
         max_retries=0,
         notes=(

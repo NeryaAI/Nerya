@@ -42,36 +42,78 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from ..core.redaction import redact_text
-from ..core.errors import (
-    LLMApprovalRequired,
-    LLMError,
-    LLMScriptQuotaExceeded,
-    LLMStructuredOutputError,
-    LLMTaskNotAllowed,
-    LLMTierDenied,
-)
+from ..core.errors import LLMError
 from ..harness.cancellation import CancelToken, SteerInbox
+from ..llm.attempt_budget import (
+    AttemptBudget,
+    DEFAULT_EXTRA_ATTEMPT_LIMIT,
+    attempt_budget_scope,
+)
 from ..llm.gateway import LLMGateway
 from ..llm.messages import MessagesResponse
-from ..llm.model_registry import lookup as _model_registry_lookup
 from ..llm import tool_compaction as _tool_compaction
-from ..tools.orchestrator import BatchResult, ToolOrchestrator
+from ..tools.approval_contracts import (
+    APPROVAL_PENDING_REASON,
+    PERMISSION_PENDING_ERROR_KIND,
+)
+from ..tools.approval_runtime import first_approval_pause
+from ..tools.orchestrator import ToolOrchestrator
 from ..tools.registry import ToolRegistry
-from ..tools.types import RiskLevel, ToolCall, ToolError, ToolErrorKind, ToolResult
+from ..tools.result_contracts import (
+    NON_SUCCESS_RESULT_STATUSES as _NON_SUCCESS_RESULT_STATUSES,
+    compacted_kept_data as _tool_compacted_kept_data,
+    parse_compacted_kept_jsonish as _parse_compacted_kept_jsonish,
+    parse_json_text as _parse_json_text,
+    team_report_data as _team_result_data,
+    team_report_has_usable_output as _team_result_has_usable_output,
+    team_report_should_finalize as _team_result_should_finalize,
+    tool_json_data as _tool_json_data,
+)
+from ..tools.types import RiskLevel, ToolResult
 from .artifact_index import summarize_batch
-from .attachments import assistant_attachment_block
+from .attachments import ATTACHMENT_BLOCK_TYPES, assistant_attachment_block
 from .transcript_blocks import (
     BlockEnvelope,
     TextBlock,
     ThinkingBlock,
-    ToolResultBlock,
     ToolUseBlock,
+)
+from .loop_state import (
+    LoopRunState,
+    LoopUsage,
+    ProviderToolSelection,
+    TurnCheckpoint,
+    filter_provider_tools_by_names as _filter_provider_tools_by_names,
+    provider_tool_name as _provider_tool_name,
+)
+from .tool_phase import (
+    ToolBatchPhase,
+    ToolBatchState,
+    ToolCallBuildContext,
+    build_tool_calls,
+    truncate_tool_loop_text as _truncate_for_tool_loop,
+)
+from .tool_projection import project_tool_results
+from .provider_errors import (
+    is_context_overflow_error as _is_context_overflow_llm_error,
+    is_safety_rejection as _is_llm_safety_rejection,
+    is_transient_error as _is_transient_llm_error,
+    transcript_char_size as _transcript_char_size,
+)
+from .tool_continuation import (
+    decide_unoffered_tool_calls,
+    required_action_read_only_blocked_final_text as _required_action_read_only_blocked_final_text,
+    required_action_read_only_retry_prompt as _required_action_read_only_retry_prompt,
+    required_action_wrong_tool_blocked_final_text as _required_action_wrong_tool_blocked_final_text,
+    required_action_wrong_tool_retry_prompt as _required_action_wrong_tool_retry_prompt,
+    wall_time_late_tool_abort_text as _wall_time_late_tool_abort_text,
 )
 from .microcompact import microcompact
 from .transcript_compact import compact_transcript
 from .runtime import (
     AgentRuntime,
     CompletionGateLike,
+    ContinuationUnavailable,
     RuntimeRequest,
     TurnSnapshot,
 )
@@ -102,152 +144,7 @@ _LOG = logging.getLogger(__name__)
 EventSink = Callable[[BlockEnvelope], None]
 
 
-def _parse_json_text(
-    text: Any,
-    *,
-    allow_suffix: bool = False,
-    allow_trailing_lines: bool = False,
-) -> Any:
-    stripped = str(text or "").strip()
-    if not stripped:
-        return None
-    candidates = [stripped]
-    if allow_trailing_lines and "\n" in stripped:
-        candidates.extend(
-            line.strip()
-            for line in reversed(stripped.splitlines())
-            if line.strip().startswith(("{", "["))
-        )
-    for candidate in candidates:
-        try:
-            if allow_suffix:
-                parsed, _end = json.JSONDecoder().raw_decode(candidate)
-            else:
-                parsed = json.loads(candidate)
-            return parsed
-        except Exception:
-            continue
-    return None
-
-
-def _tool_json_data(result: ToolResult) -> dict[str, Any] | None:
-    for part in result.content:
-        if part.type == "json" and isinstance(part.data, dict):
-            return part.data
-    parsed = _parse_json_text(result.text())
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _team_result_data(result: ToolResult) -> dict[str, Any] | None:
-    if result.name != "team_run" or result.is_error:
-        return None
-    data = _tool_json_data(result)
-    if not isinstance(data, dict) or not str(data.get("team_run_id") or "").strip():
-        return None
-    return data
-
-
-def _team_result_should_finalize(data: dict[str, Any]) -> bool:
-    status = str(data.get("status") or "").strip().lower()
-    return (
-        bool(data.get("failures"))
-        or status in {"completed_with_failures", "failed", "timeout"}
-        or data.get("ok") is False
-    )
-
-
-def _team_result_has_usable_output(data: dict[str, Any]) -> bool:
-    roles_succeeded = data.get("roles_succeeded")
-    if isinstance(roles_succeeded, list) and roles_succeeded:
-        return True
-    results = data.get("results")
-    if isinstance(results, list) and results:
-        return True
-    aggregated = data.get("aggregated")
-    if isinstance(aggregated, dict) and aggregated:
-        return True
-    return False
-
-
-_NON_SUCCESS_RESULT_STATUSES = frozenset({
-    "blocked",
-    "cancelled",
-    "canceled",
-    "error",
-    "failed",
-    "missing",
-    "not_configured",
-    "not_found",
-    "pending",
-    "rejected",
-    "timeout",
-    "unavailable",
-    "validation_blocked",
-})
 _NO_SUBSTANTIVE_EVIDENCE_FINAL_SYNTHESIS_SECONDS = 15.0
-
-
-def _tool_result_counts_as_success(result: ToolResult) -> bool:
-    """Use the result contract, never the tool name, to track progress."""
-
-    if result.is_error:
-        return False
-    data = _tool_json_data(result) or _tool_compacted_kept_data(result)
-    if not isinstance(data, dict):
-        return True
-    if data.get("ok") is False or data.get("success") is False:
-        return False
-    if data.get("terminal") is False or data.get("complete") is False:
-        return False
-    status = str(data.get("status") or data.get("state") or "").strip().lower()
-    if status in _NON_SUCCESS_RESULT_STATUSES:
-        return False
-    error = data.get("error")
-    if error not in (None, "", [], {}):
-        return False
-    return True
-
-
-def _provider_tool_name(tool: Any) -> str:
-    if not isinstance(tool, dict):
-        return ""
-    name = tool.get("name")
-    if name:
-        return str(name)
-    function = tool.get("function")
-    if isinstance(function, dict) and function.get("name"):
-        return str(function.get("name"))
-    return ""
-
-
-def _filter_provider_tools_by_names(
-    provider_tools: list[dict[str, Any]],
-    tool_names: set[str] | tuple[str, ...],
-) -> list[dict[str, Any]]:
-    names = {str(name) for name in tool_names if str(name)}
-    if not names:
-        return []
-    return [
-        tool
-        for tool in provider_tools
-        if _provider_tool_name(tool) in names
-    ]
-
-
-def _tool_compacted_kept_data(result: ToolResult) -> dict[str, Any] | None:
-    return _parse_compacted_kept_jsonish(result.text())
-
-
-def _parse_compacted_kept_jsonish(text: str) -> dict[str, Any] | None:
-    marker = "[compacted_kept]"
-    marker_index = text.find(marker)
-    if marker_index < 0:
-        return None
-    tail = text[marker_index + len(marker):].strip()
-    if not tail:
-        return None
-    parsed = _parse_json_text(tail, allow_suffix=True)
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _pending_required_tool_names(
@@ -401,37 +298,6 @@ def _required_next_action_retry_prompt(pending_tool_names: tuple[str, ...]) -> s
     )
 
 
-def _provider_unoffered_tool_retry_prompt(
-    *,
-    allowed_tool_names: set[str],
-    rejected_tool_names: list[str],
-) -> str:
-    allowed = ", ".join(sorted(allowed_tool_names)) or "none"
-    rejected = ", ".join(name for name in rejected_tool_names if name) or "unknown"
-    return (
-        "Required action tool boundary: the provider returned "
-        "tool call(s) that were not exposed in this iteration: "
-        f"{rejected}. Available tools for this iteration: {allowed}. "
-        "Ignore the unexposed call(s), do not continue read-only discovery "
-        "with hidden tools, and call only an available tool; answer in text "
-        "if no tools are available."
-    )
-
-
-def _provider_unoffered_tool_blocked_final_text(
-    *,
-    allowed_tool_names: set[str],
-    rejected_tool_names: list[str],
-) -> str:
-    allowed = ", ".join(sorted(allowed_tool_names)) or "none"
-    rejected = ", ".join(name for name in rejected_tool_names if name) or "unknown"
-    return (
-        "The provider returned only tool call(s) that were not exposed in this "
-        f"iteration: {rejected}. Available tools were: {allowed}. I did not "
-        "execute the unexposed tool call(s); retry the turn or continue from "
-        "the existing tool evidence."
-    )
-
 
 def _protected_scope_rejection_data(result: ToolResult) -> dict[str, str] | None:
     if not result.is_error or result.error is None:
@@ -479,244 +345,8 @@ def _build_protected_scope_rejection_final_text(items: list[dict[str, str]]) -> 
     return "\n".join(lines)
 
 
-def _required_action_read_only_retry_prompt(
-    pending_tool_names: tuple[str, ...],
-    skipped_tool_names: list[str],
-) -> str:
-    pending = ", ".join(pending_tool_names) or "the required action tool"
-    skipped = ", ".join(name for name in skipped_tool_names if name) or "read-only tools"
-    return (
-        "Required action tool(s) are still pending: "
-        f"{pending}. Your previous response attempted only read-only "
-        f"discovery tool(s): {skipped}. Stop open-ended read-only exploration "
-        f"now. Call {pending} with a concise evidence-grounded payload, or "
-        "provide a bounded final status that names the pending action as not "
-        "completed if you cannot safely call it."
-    )
-
-
-def _required_action_read_only_blocked_final_text(
-    pending_tool_names: tuple[str, ...],
-    skipped_tool_names: list[str],
-) -> str:
-    pending = ", ".join(pending_tool_names) or "the required action tool"
-    skipped = ", ".join(name for name in skipped_tool_names if name) or "read-only tools"
-    return (
-        "Stopped before more open-ended read-only discovery because "
-        f"required action tool(s) remain pending: {pending}.\n\n"
-        f"Skipped read-only tool(s): {skipped}.\n"
-        "No additional action was completed in this turn."
-    )
-
-
-def _required_action_wrong_tool_retry_prompt(
-    pending_tool_names: tuple[str, ...],
-    skipped_tool_names: list[str],
-) -> str:
-    pending = ", ".join(pending_tool_names) or "the required action tool"
-    skipped = ", ".join(name for name in skipped_tool_names if name) or "other tools"
-    return (
-        "Required action tool(s) are still pending: "
-        f"{pending}. Your previous response attempted different tool(s): "
-        f"{skipped}. Do not execute unrelated read-only discovery or other "
-        f"tools before the required action. Call {pending} with a concise "
-        "evidence-grounded payload, or provide a bounded final status that "
-        "names the pending action as not completed if you cannot safely call "
-        "it."
-    )
-
-
-def _required_action_wrong_tool_blocked_final_text(
-    pending_tool_names: tuple[str, ...],
-    skipped_tool_names: list[str],
-) -> str:
-    pending = ", ".join(pending_tool_names) or "the required action tool"
-    skipped = ", ".join(name for name in skipped_tool_names if name) or "other tools"
-    return (
-        "Stopped before unrelated tools because required action "
-        f"tool(s) remain pending: {pending}.\n\n"
-        f"Skipped tool(s): {skipped}.\n"
-        "No additional action was completed in this turn."
-    )
-
 
 _SKIP_REPORT_KEYS = {"done", "ok", "truncated"}
-
-
-def _json_fingerprint(value: Any) -> str:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-    except Exception:
-        return repr(value)
-
-
-def _tool_call_fingerprint(call: ToolCall) -> str:
-    return f"{call.name}:{_json_fingerprint(call.arguments or {})}"
-
-
-def _explicit_next_required_tools(
-    value: Any,
-    *,
-    provider_tool_names: set[str],
-    depth: int = 0,
-    active: bool = False,
-) -> set[str]:
-    if depth >= 8:
-        return set()
-    if isinstance(value, str):
-        candidate = value.strip()
-        return {candidate} if active and candidate in provider_tool_names else set()
-    if isinstance(value, dict):
-        out: set[str] = set()
-        for k, v in value.items():
-            key = str(k).lower()
-            if (
-                active
-                and key in {"tool", "tool_name"}
-                and isinstance(v, str)
-                and v.strip() in provider_tool_names
-            ):
-                out.add(v.strip())
-                continue
-            next_active = active or key == "next_required_action"
-            if isinstance(v, (dict, list, str)):
-                out.update(
-                    _explicit_next_required_tools(
-                        v,
-                        provider_tool_names=provider_tool_names,
-                        depth=depth + 1,
-                        active=next_active,
-                    )
-                )
-        return out
-    if isinstance(value, list):
-        out: set[str] = set()
-        for item in value:
-            out.update(
-                _explicit_next_required_tools(
-                    item,
-                    provider_tool_names=provider_tool_names,
-                    depth=depth + 1,
-                    active=active,
-                )
-            )
-        return out
-    return set()
-
-
-def _text_next_required_tools(
-    text: str,
-    *,
-    provider_tool_names: set[str],
-) -> set[str]:
-    """Read explicit next-action tools from a JSON text payload.
-
-    Free-form docs and SKILL.md bodies often mention the literal field name
-    ``next_required_action``. Text is accepted only when the whole payload is
-    JSON and names an advertised tool exactly.
-    """
-
-    stripped = str(text or "").strip()
-    if "next_required_action" not in stripped:
-        return set()
-    if not stripped.startswith(("{", "[")):
-        return set()
-    parsed = _parse_json_text(stripped)
-    if parsed is None:
-        return set()
-    return _explicit_next_required_tools(
-        parsed,
-        provider_tool_names=provider_tool_names,
-    )
-
-
-def _extract_next_required_tools(
-    results: list[ToolResult],
-    *,
-    provider_tool_names: set[str],
-) -> set[str]:
-    """Find native tools explicitly named by structured next-action hints."""
-
-    if not provider_tool_names:
-        return set()
-    required: set[str] = set()
-    for result in results:
-        if result.is_error:
-            if result.error is not None and result.error.recovery_hint:
-                required.update(
-                    _explicit_next_required_tools(
-                        result.error.recovery_hint,
-                        provider_tool_names=provider_tool_names,
-                    )
-                )
-            continue
-        for part in result.content:
-            if part.type == "json" and part.data is not None:
-                required.update(
-                    _explicit_next_required_tools(
-                        part.data,
-                        provider_tool_names=provider_tool_names,
-                    )
-                )
-            elif part.type == "text" and part.text:
-                required.update(
-                    _text_next_required_tools(
-                        part.text,
-                        provider_tool_names=provider_tool_names,
-                    )
-                )
-    return required
-
-
-def _truncate_for_tool_loop(text: str, *, limit: int = 1200) -> str:
-    text = str(text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "\n...[truncated prior result]"
-
-
-def _deduped_tool_loop_result(
-    call: ToolCall,
-    prior: ToolResult,
-    *,
-    repeat_count: int,
-) -> ToolResult:
-    prior_text = prior.text()
-    if prior.is_error and prior.error is not None:
-        prior_text = prior.error.message or prior_text
-    message = (
-        "Repeated tool call suppressed: this exact tool and payload already "
-        f"ran {repeat_count - 1} time(s) in the current turn. Use the prior "
-        "result below, change the arguments, choose a different tool, or "
-        "write the final answer. Do not call the same tool with the same "
-        "payload again.\n\n"
-        f"Prior result:\n{_truncate_for_tool_loop(prior_text)}"
-    )
-    return ToolResult.from_error(
-        tool_use_id=call.id,
-        name=call.name,
-        error=ToolError(
-            kind=ToolErrorKind.DEDUPED,
-            message=message,
-            detail={
-                "repeat_count": repeat_count,
-                "prior_tool_use_id": prior.tool_use_id,
-                "tool": call.name,
-                "arguments": dict(call.arguments or {}),
-            },
-            retryable=False,
-            recovery_hint={
-                "action": "use_prior_result_or_change_args",
-                "prior_tool_use_id": prior.tool_use_id,
-            },
-        ),
-    )
 
 
 def _required_action_repeated_error_blocked_final_text(
@@ -994,19 +624,19 @@ class LoopConfig:
     a model from burning the whole max-iteration budget on one stale
     action."""
 
-    llm_retry_attempts: int = 10
-    """How many times to retry ``gateway.call_messages`` for one
-    iteration when the provider returns a transient error (502 / 503
-    / 504 / 500 / 429 / 529 / network timeout). The provider adapter
-    *already* retries 5 times per HTTP call (see
-    ``llm/adapters/_base._post_with_retry``); this layer is a second,
-    longer fence that survives provider outages lasting tens of
-    seconds — without it, a single bad iteration would drop a whole
-    multi-minute turn whose tool history (reads/writes/etc.) is
-    already on disk. Set to ``1`` to disable the loop-level retry.
+    max_extra_llm_attempts_per_turn: int = DEFAULT_EXTRA_ATTEMPT_LIMIT
+    """Shared budget for attempts beyond the first provider call of each
+    semantic iteration. Adapter wire retries, context recovery, safety retry,
+    and compact final-synthesis retries all consume this same turn-scoped
+    ledger. Checkpoint continuation preserves the remaining allowance."""
 
-    The default is high enough to ride out sustained provider 5xx bursts
-    without silently dropping a long-running turn."""
+    llm_retry_attempts: int = 10
+    """Per-iteration compatibility ceiling for transient logical retries.
+
+    ``max_extra_llm_attempts_per_turn`` is the authoritative cross-layer cap,
+    so this value no longer multiplies with adapter wire retries or recovery
+    paths. Set to ``1`` to disable generic loop-level retry.
+    """
 
     llm_retry_base_delay: float = 3.0
     """Base seconds for exponential backoff between iteration-level
@@ -1154,190 +784,17 @@ class LoopOutcome:
     model: str = ""
     model_calls: list[dict[str, Any]] = field(default_factory=list)
     usd_total: float = 0.0
+    extra_llm_attempts: int = 0
+    """Extra logical/wire attempts consumed after normal first calls."""
+    extra_llm_attempt_limit: int = 0
+    extra_llm_attempts_by_reason: dict[str, int] = field(default_factory=dict)
+    checkpoint: TurnCheckpoint | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    """Internal state required for safe caller-owned continuation."""
 
-
-# ---------------------------------------------------------------------------
-# Transient-error detection (loop-level retry on top of provider retries)
-# ---------------------------------------------------------------------------
-
-
-# These ``LLMError`` subclasses are *permanent* — retrying them buys
-# nothing and just burns latency. Auth, tier policy, quota, schema, and
-# explicit approval-required errors all fall in this bucket.
-_NON_RETRYABLE_LLM_ERRORS: tuple[type[Exception], ...] = (
-    LLMTierDenied,
-    LLMTaskNotAllowed,
-    LLMScriptQuotaExceeded,
-    LLMStructuredOutputError,
-    LLMApprovalRequired,
-)
-
-
-# Substrings that mark a generic ``LLMError`` as transient — the
-# provider had a momentary blip we should sleep through. We match on
-# the *message* (rather than just status codes) because the upstream
-# adapter formats errors as ``"openai messages api error (502): http_502"``
-# / ``"network timeout"`` / etc.
-_TRANSIENT_LLM_HINTS: tuple[str, ...] = (
-    "(429)",
-    "(500)",
-    "(502)",
-    "(503)",
-    "(504)",
-    "(522)",
-    "(524)",
-    "(529)",
-    # GMI Cloud surfaces upstream flaps as a generic 400 with this exact
-    # message; the same payload succeeds on replay (real validation
-    # errors name the offending field instead).
-    "backend request failed",
-    "rate_limit",
-    "rate-limit",
-    "rate limit",
-    "timeout",
-    "timed out",
-    "connection",
-    "network",
-    "unreachable",
-    "temporarily unavailable",
-    "temporarily busy",
-    "server busy",
-    "service unavailable",
-    "bad gateway",
-    "gateway timeout",
-    "服务器短暂繁忙",
-    "短暂繁忙",
-    "稍后重试",
-    "ECONN",
-    "ETIMEDOUT",
-    "EAI_AGAIN",
-)
-
-
-def _is_transient_llm_error(exc: BaseException) -> bool:
-    """Decide whether to retry the iteration after an LLM call fails.
-
-    Returns ``False`` for any non-``LLMError`` (those propagate; the loop
-    isn't responsible for catching foreign exceptions), for any of the
-    known *permanent* ``LLMError`` subclasses, and for ``LLMError``
-    messages that don't contain a transient-hint substring.
-    """
-    if not isinstance(exc, LLMError):
-        return False
-    if isinstance(exc, _NON_RETRYABLE_LLM_ERRORS):
-        return False
-    msg = str(exc).lower()
-    for hint in _TRANSIENT_LLM_HINTS:
-        if hint.lower() in msg:
-            return True
-    return False
-
-
-# Substrings that identify a *context-overflow* rejection across
-# providers. These are permanent for the same payload — but unlike other
-# permanent errors they are recoverable by shrinking the payload, which
-# is exactly what the reactive-compaction path does. Matched lowercase
-# against the provider error message.
-#
-# Samples seen in the wild:
-# - OpenAI:    "This model's maximum context length is 128000 tokens..."
-#              code "context_length_exceeded"
-# - Anthropic: "prompt is too long: 210032 tokens > 200000 maximum"
-# - Google:    "input token count ... exceeds the maximum number of tokens"
-# - MiniMax /
-#   GLM / Qwen: "tokens to process exceed", "Range of input length",
-#              "输入长度超过模型限制", HTTP 413 payload-too-large
-_CONTEXT_OVERFLOW_LLM_HINTS: tuple[str, ...] = (
-    "context_length_exceeded",
-    "context length",
-    "context_length",
-    "context window",
-    "context_window",
-    "maximum context",
-    "max context",
-    "prompt is too long",
-    "prompt too long",
-    "input is too long",
-    "input too long",
-    "too many tokens",
-    "tokens exceed",
-    "token count exceeds",
-    "exceeds the maximum number of tokens",
-    "exceeds model context",
-    "exceeds context",
-    "exceed context",
-    "request too large",
-    "request_too_large",
-    "payload too large",
-    "(413)",
-    "reduce the length of the messages",
-    "range of input length",
-    "input length should be",
-    "输入长度",
-    "超过最大长度",
-    "上下文长度",
-    "超出模型",
-    "超过模型",
-)
-
-
-def _is_context_overflow_llm_error(exc: BaseException) -> bool:
-    """True when the provider rejected the request as too large.
-
-    Treated separately from both transient errors (retrying the same
-    payload is pointless) and other permanent errors (shrinking the
-    payload makes it succeed). The reactive-compaction handler in the
-    LLM retry loop keys off this predicate.
-    """
-
-    if not isinstance(exc, LLMError):
-        return False
-    if isinstance(exc, _NON_RETRYABLE_LLM_ERRORS):
-        return False
-    msg = str(exc).lower()
-    return any(hint in msg for hint in _CONTEXT_OVERFLOW_LLM_HINTS)
-
-
-def _transcript_char_size(messages: list[dict[str, Any]]) -> int:
-    """Rough payload size of a transcript in JSON characters.
-
-    Used by reactive compaction to prove strict shrink progress between
-    attempts (guards against an overflow → compact → overflow livelock
-    when nothing droppable remains).
-    """
-
-    try:
-        return sum(
-            len(json.dumps(m, ensure_ascii=False, default=str))
-            for m in messages
-        )
-    except Exception:
-        return sum(len(str(m)) for m in messages)
-
-
-_LLM_SAFETY_REJECTION_HINTS = (
-    "不安全",
-    "敏感内容",
-    "内容安全",
-    "safety",
-    "unsafe",
-    "sensitive content",
-    "new_sensitive",
-    "input_sensitive",
-    "output_sensitive",
-    "content policy",
-    "moderation",
-)
-
-
-def _is_llm_safety_rejection(exc: BaseException) -> bool:
-    if not isinstance(exc, LLMError):
-        return False
-    status_code = int(getattr(exc, "status_code", 0) or 0)
-    if status_code not in {400, 403, 422}:
-        return False
-    msg = str(exc).lower()
-    return any(hint.lower() in msg for hint in _LLM_SAFETY_REJECTION_HINTS)
 
 
 def _build_deterministic_final_summary(
@@ -1845,31 +1302,6 @@ def _final_text_lost_prior_evidence(*, current_text: str, prior_text: str) -> bo
     if not current or not prior:
         return False
     return len(prior) >= 400 and len(current) < int(len(prior) * 0.35)
-
-
-def _optional_tool_gap_notes(results: list[ToolResult]) -> list[str]:
-    notes: list[str] = []
-    for result in results:
-        if _tool_result_counts_as_success(result):
-            continue
-        data = _tool_json_data(result) or _tool_compacted_kept_data(result)
-        fields: list[str] = []
-        if isinstance(data, dict):
-            status = str(data.get("status") or "").strip()
-            error = str(data.get("error") or "").strip()
-            next_required_action = str(
-                data.get("next_required_action") or ""
-            ).strip()
-            for value in (error, status, next_required_action):
-                if value and value not in fields:
-                    fields.append(value)
-        if not fields and result.is_error and result.error is not None:
-            fields.append(result.error.message)
-        if not fields:
-            fields.append("no new semantic evidence")
-        rendered = "; ".join(redact_text(value)[:180] for value in fields if value)
-        notes.append(f"- {result.name or 'tool'}: {rendered}")
-    return notes
 
 
 def _preserve_pre_tool_answer_after_optional_gap(
@@ -3054,32 +2486,6 @@ def _wall_time_final_synthesis_prompt(*, remaining_seconds: float) -> str:
     )
 
 
-def _wall_time_late_tool_abort_text(
-    tool_names: list[str],
-    *,
-    original_user_text: str = "",
-    pending_required_tool_names: tuple[str, ...] = (),
-) -> str:
-    names = ", ".join(name for name in tool_names if name) or "the remaining step"
-    lines = [
-        "I ran out of time on this turn before the last step, so I stopped "
-        "instead of starting it with too little time left — nothing was "
-        "changed or saved.",
-        f"Unfinished: {names}",
-    ]
-    request = redact_text(str(original_user_text or "").strip())
-    if request:
-        lines.append(f"Your request: {request}")
-    pending = ", ".join(
-        redact_text(str(name))
-        for name in pending_required_tool_names
-        if str(name).strip()
-    )
-    if pending:
-        lines.append(f"Still needed: {pending}")
-    lines.append("Ask me to continue and I'll finish from here.")
-    return "\n".join(lines)
-
 
 def _wall_time_llm_timeout_text(
     error: BaseException,
@@ -3160,24 +2566,6 @@ def _messages_response_text(response: MessagesResponse) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _append_completion_feedback(
-    user_message: str | list[dict[str, Any]],
-    feedback: str,
-) -> str | list[dict[str, Any]]:
-    """Append gate feedback without mutating the caller's message object."""
-
-    clean = str(feedback or "").strip()
-    if not clean:
-        return user_message
-    block = {
-        "role": "user",
-        "content": "[completion gate feedback]\n" + clean,
-    }
-    if isinstance(user_message, str):
-        return user_message + "\n\n" + block["content"]
-    return [*user_message, block]
-
-
 class WorkspaceNativeAgentLoop:
     """Main loop: ``messages -> tools -> tool_result -> messages``."""
 
@@ -3196,6 +2584,17 @@ class WorkspaceNativeAgentLoop:
         self.config = config or LoopConfig()
         self.event_sink = event_sink
 
+    def _call_messages_with_attempt_budget(
+        self,
+        *,
+        attempt_budget: AttemptBudget | None,
+        **kwargs: Any,
+    ) -> MessagesResponse:
+        """Bind the caller-owned turn budget through provider wire retries."""
+
+        with attempt_budget_scope(attempt_budget):
+            return self.gateway.call_messages(**kwargs)
+
     def _synthesize_team_run_final_answer(
         self,
         *,
@@ -3203,12 +2602,16 @@ class WorkspaceNativeAgentLoop:
         team_results: list[dict[str, Any]],
         deadline: float | None = None,
         remaining_seconds: float | None = None,
+        usage: LoopUsage | None = None,
+        iteration: int = 0,
+        attempt_budget: AttemptBudget | None = None,
     ) -> str:
         prompt = _build_team_run_final_synthesis_prompt(
             user_message=user_message,
             team_results=team_results,
         )
-        response = self.gateway.call_messages(
+        response = self._call_messages_with_attempt_budget(
+            attempt_budget=attempt_budget,
             task=self.config.task,
             caller=self.config.caller,
             system=_TEAM_RUN_FINAL_SYNTHESIS_SYSTEM,
@@ -3243,6 +2646,12 @@ class WorkspaceNativeAgentLoop:
                 "remaining_wall_seconds": remaining_seconds,
             },
         )
+        if usage is not None:
+            usage.record_response(
+                response,
+                iteration=iteration,
+                context_scope="team_final_synthesis",
+            )
         text = _messages_response_text(response)
         if response.stop_reason == "max_tokens":
             _LOG.warning(
@@ -3265,14 +2674,31 @@ class WorkspaceNativeAgentLoop:
         team_results: list[dict[str, Any]],
         deadline: float | None,
         remaining_seconds: float | None,
+        usage: LoopUsage | None = None,
+        iteration: int = 0,
+        attempt_budget: AttemptBudget | None = None,
     ) -> tuple[str, str]:
         """Return one bounded team report without duplicating recovery paths."""
+
+        if attempt_budget is not None and not attempt_budget.claim(
+            "team_final_synthesis"
+        ):
+            return (
+                _build_team_run_bounded_fallback(
+                    user_message=user_message,
+                    team_results=team_results,
+                ),
+                "team_result_attempt_budget_exhausted",
+            )
         try:
             text = self._synthesize_team_run_final_answer(
                 user_message=user_message,
                 team_results=team_results,
                 deadline=deadline,
                 remaining_seconds=remaining_seconds,
+                usage=usage,
+                iteration=iteration,
+                attempt_budget=attempt_budget,
             )
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("team result synthesis failed: %s", exc)
@@ -3300,14 +2726,46 @@ class WorkspaceNativeAgentLoop:
         steer_inbox: Optional[SteerInbox] = None,
         turn_id: Optional[str] = None,
         completion_gate: CompletionGateLike | None = None,
+        checkpoint: TurnCheckpoint | dict[str, Any] | None = None,
+        continuation_feedback: str = "",
     ) -> LoopOutcome:
         """Run one turn, optionally handing completion to a caller gate.
 
-        The gate is a fail-closed wrapper around the canonical provider/tool
-        loop; it cannot resume without caller-owned transcript state.
+        The first round uses the canonical provider/tool loop. A CONTINUE
+        decision resumes only from the returned :class:`TurnCheckpoint`; the
+        runtime never restarts the original input or resets tool budgets.
         """
 
         if completion_gate is None:
+            return self._run_legacy(
+                system=system,
+                user_message=user_message,
+                prior_messages=(None if checkpoint is not None else prior_messages),
+                tool_filter=tool_filter,
+                cancel_token=cancel_token,
+                steer_inbox=steer_inbox,
+                turn_id=turn_id,
+                checkpoint=checkpoint,
+                continuation_feedback=continuation_feedback,
+            )
+        if checkpoint is not None:
+            raise ValueError(
+                "external checkpoint continuation cannot be combined with "
+                "an internal completion_gate"
+            )
+
+        continuation_started = time.monotonic()
+
+        def _remaining_wall_seconds() -> float | None:
+            if self.config.max_wall_seconds is None:
+                return None
+            return max(
+                0.0,
+                float(self.config.max_wall_seconds)
+                - (time.monotonic() - continuation_started),
+            )
+
+        def _execute(_feedback: str) -> LoopOutcome:
             return self._run_legacy(
                 system=system,
                 user_message=user_message,
@@ -3316,28 +2774,36 @@ class WorkspaceNativeAgentLoop:
                 cancel_token=cancel_token,
                 steer_inbox=steer_inbox,
                 turn_id=turn_id,
+                max_wall_seconds=_remaining_wall_seconds(),
             )
 
-        continuation_started = time.monotonic()
-
-        def _execute(feedback: str) -> LoopOutcome:
-            kwargs: dict[str, Any] = {
-                "system": system,
-                "user_message": _append_completion_feedback(user_message, feedback),
-                "prior_messages": prior_messages,
-                "tool_filter": tool_filter,
-                "cancel_token": cancel_token,
-                "steer_inbox": steer_inbox,
-                "turn_id": turn_id,
-            }
-            if self.config.max_wall_seconds is not None:
-                kwargs["max_wall_seconds"] = max(
-                    0.0,
-                    float(self.config.max_wall_seconds)
-                    - (time.monotonic() - continuation_started),
+        def _continue_from(
+            previous: LoopOutcome,
+            feedback: str,
+        ) -> LoopOutcome:
+            checkpoint = previous.checkpoint
+            if checkpoint is None:
+                raise ContinuationUnavailable(
+                    "stateful_continuation_required",
+                    feedback=feedback,
+                )
+            if not checkpoint.resumable:
+                raise ContinuationUnavailable(
+                    checkpoint.resume_block_reason
+                    or "stateful_continuation_unavailable",
+                    feedback=feedback,
                 )
             return self._run_legacy(
-                **kwargs,
+                system=system,
+                user_message=user_message,
+                prior_messages=None,
+                tool_filter=tool_filter,
+                cancel_token=cancel_token,
+                steer_inbox=steer_inbox,
+                turn_id=checkpoint.turn_id,
+                max_wall_seconds=_remaining_wall_seconds(),
+                checkpoint=checkpoint,
+                continuation_feedback=feedback,
             )
 
         def _snapshot(outcome: LoopOutcome, round_index: int) -> TurnSnapshot:
@@ -3386,6 +2852,7 @@ class WorkspaceNativeAgentLoop:
             completion_gate,
             execute=_execute,
             snapshot=_snapshot,
+            continue_from=_continue_from,
         )
         outcome = result.value
         if outcome is None:
@@ -3435,6 +2902,8 @@ class WorkspaceNativeAgentLoop:
         steer_inbox: Optional[SteerInbox] = None,
         turn_id: Optional[str] = None,
         max_wall_seconds: Optional[float] = None,
+        checkpoint: TurnCheckpoint | dict[str, Any] | None = None,
+        continuation_feedback: str = "",
     ) -> LoopOutcome:
         """Run the canonical turn until ``end_turn`` or a budget fence.
 
@@ -3454,24 +2923,73 @@ class WorkspaceNativeAgentLoop:
         on the next round without losing tool work already done.
         """
 
-        turn_id = (
+        explicit_turn_id = (
             str(turn_id or "").strip()
             or str(self.config.turn_id or "").strip()
+        )
+        checkpoint_value: TurnCheckpoint | None = None
+        if checkpoint is not None:
+            checkpoint_value = (
+                checkpoint
+                if isinstance(checkpoint, TurnCheckpoint)
+                else TurnCheckpoint.from_dict(checkpoint)
+            )
+        requested_turn_id = (
+            explicit_turn_id
+            or (checkpoint_value.turn_id if checkpoint_value is not None else "")
             or uuid.uuid4().hex[:12]
         )
-        message_id = uuid.uuid4().hex[:12]
-        seq = 0
-        blocks: list[BlockEnvelope] = []
         effective_wall_seconds = (
             self.config.max_wall_seconds
             if max_wall_seconds is None
             else max(0.0, float(max_wall_seconds))
         )
-        deadline: Optional[float] = (
+        fresh_deadline: Optional[float] = (
             (time.time() + float(effective_wall_seconds))
             if effective_wall_seconds and effective_wall_seconds > 0
             else time.time() if max_wall_seconds is not None else None
         )
+        fresh_original_user_text = _stringify_user_message(user_message)
+        if checkpoint is None:
+            state = LoopRunState.new(
+                turn_id=requested_turn_id,
+                message_id=uuid.uuid4().hex[:12],
+                deadline_epoch=fresh_deadline,
+                original_user_text=fresh_original_user_text,
+                context_window=int(self.config.model_context_window or 0),
+                attempt_limit=int(
+                    self.config.max_extra_llm_attempts_per_turn
+                ),
+            )
+        else:
+            assert checkpoint_value is not None
+            if not checkpoint_value.resumable:
+                raise ContinuationUnavailable(
+                    checkpoint_value.resume_block_reason
+                    or "stateful_continuation_unavailable",
+                    feedback=continuation_feedback,
+                )
+            state = LoopRunState.from_checkpoint(checkpoint_value)
+            if (
+                explicit_turn_id
+                and state.turn_id
+                and explicit_turn_id != state.turn_id
+            ):
+                raise ValueError(
+                    "turn checkpoint mismatch: "
+                    f"requested={explicit_turn_id!r} checkpoint={state.turn_id!r}"
+                )
+            state.turn_id = state.turn_id or requested_turn_id
+            state.message_id = state.message_id or uuid.uuid4().hex[:12]
+            state.attempt_budget.constrain(
+                int(self.config.max_extra_llm_attempts_per_turn)
+            )
+
+        turn_id = state.turn_id
+        message_id = state.message_id
+        deadline = state.deadline_epoch
+        seq = state.seq
+        blocks = state.blocks
         max_total_calls = (
             int(self.config.max_total_tool_calls)
             if self.config.max_total_tool_calls is not None
@@ -3495,27 +3013,34 @@ class WorkspaceNativeAgentLoop:
                 except Exception:
                     _LOG.exception("event_sink failed")
 
-        transcript: list[dict[str, Any]] = []
-        # Replay prior user/assistant exchanges from earlier turns of
-        # the same chat session so the model has actual conversation
-        # context. The kernel rebuilds these from the journal; we
-        # preserve order and only accept the simple text shape.
-        if prior_messages:
-            for prior in prior_messages:
-                if not isinstance(prior, dict):
-                    continue
-                role = prior.get("role")
-                content = prior.get("content")
-                if role not in ("user", "assistant"):
-                    continue
-                if isinstance(content, str) and content.strip():
-                    transcript.append({"role": role, "content": content})
-                elif isinstance(content, list) and content:
-                    transcript.append({"role": role, "content": list(content)})
-        if isinstance(user_message, str):
-            transcript.append({"role": "user", "content": user_message})
+        transcript = state.transcript
+        if checkpoint is None:
+            # Replay prior user/assistant exchanges from earlier turns of the
+            # same chat session, then append the new user request exactly once.
+            if prior_messages:
+                for prior in prior_messages:
+                    if not isinstance(prior, dict):
+                        continue
+                    role = prior.get("role")
+                    content = prior.get("content")
+                    if role not in ("user", "assistant"):
+                        continue
+                    if isinstance(content, str) and content.strip():
+                        transcript.append({"role": role, "content": content})
+                    elif isinstance(content, list) and content:
+                        transcript.append({"role": role, "content": list(content)})
+            if isinstance(user_message, str):
+                transcript.append({"role": "user", "content": user_message})
+            else:
+                transcript.append({"role": "user", "content": list(user_message)})
         else:
-            transcript.append({"role": "user", "content": list(user_message)})
+            continuation_message = state.prepare_continuation(
+                continuation_feedback
+            )
+            emit(
+                "user",
+                TextBlock(text=continuation_message).as_dict(),
+            )
 
         provider_tools = self._render_tools(tool_filter)
         provider_tool_names = {
@@ -3526,51 +3051,56 @@ class WorkspaceNativeAgentLoop:
         # Re-render after mcp_describe promotes a lazy MCP namespace.
         last_render_lazy_sig = self._lazy_described_signature()
 
-        iterations = 0
-        total_tool_calls = 0
-        error_count = 0
-        stop_reason = ""
-        transition_reason = ""
-        final_text = ""
-        aborted_reason = ""
-        tool_result_by_fingerprint: dict[str, ToolResult] = {}
-        completed_tool_results: list[ToolResult] = []
-        recent_tool_fingerprints: list[str] = []
-        deduped_counts_by_fingerprint: dict[str, int] = {}
-        recovery_required_args_by_tool: dict[str, tuple[str, ...]] = {}
-        completed_tool_names: set[str] = set()
-        successful_tool_names: set[str] = set()
-        required_next_tool_names: set[str] = set()
-        next_action_nudges: set[tuple[str, ...]] = set()
-        required_artifact_announcements: set[tuple[str, ...]] = set()
-        required_action_read_only_retries: set[tuple[str, ...]] = set()
-        interrupted_required_tool_retry_keys: set[tuple[str, ...]] = set()
-        truncated_no_tool_retry_used = False
-        wall_time_final_synthesis_used = False
-        llm_safety_final_synthesis_retry_used = False
-        llm_safety_required_tool_retry_used = False
-        transient_final_synthesis_retry_used = False
-        transient_required_tool_retry_keys: set[tuple[tuple[str, ...], int, int]] = set()
-        text_only_final_attempt = False
-        preserved_pre_tool_answer = ""
-        last_tool_batch_had_semantic_success = False
-        last_optional_tool_gap_notes: list[str] = []
-        original_user_text = _stringify_user_message(user_message)
-        recent_text_lengths: list[int] = []
-        diminishing_returns_triggered = False
-        # ---- token usage telemetry + compaction accounting ----
-        usage_llm_calls = 0
-        usage_input_tokens_total = 0
-        usage_output_tokens_total = 0
-        usage_usd_total = 0.0
-        last_provider = ""
-        last_model = ""
-        model_calls: list[dict[str, Any]] = []
-        last_prompt_tokens = 0
-        observed_context_window = int(self.config.model_context_window or 0)
-        compaction_count = 0
-        reactive_compaction_count = 0
-        steer_message_count = 0
+        iterations = state.iterations
+        total_tool_calls = state.total_tool_calls
+        error_count = state.error_count
+        stop_reason = state.stop_reason
+        transition_reason = state.transition_reason
+        final_text = state.final_text
+        aborted_reason = state.aborted_reason
+        tool_result_by_fingerprint = state.tool_result_by_fingerprint
+        completed_tool_results = state.completed_tool_results
+        recent_tool_fingerprints = state.recent_tool_fingerprints
+        deduped_counts_by_fingerprint = state.deduped_counts_by_fingerprint
+        recovery_required_args_by_tool = state.recovery_required_args_by_tool
+        attempted_tool_names = state.attempted_tool_names
+        successful_tool_names = state.successful_tool_names
+        required_next_tool_names = state.required_next_tool_names
+        next_action_nudges = state.next_action_nudges
+        required_artifact_announcements = (
+            state.required_artifact_announcements
+        )
+        interrupted_required_tool_retry_keys = (
+            state.interrupted_required_tool_retry_keys
+        )
+        truncated_no_tool_retry_used = state.truncated_no_tool_retry_used
+        wall_time_final_synthesis_used = state.wall_time_final_synthesis_used
+        llm_safety_final_synthesis_retry_used = (
+            state.llm_safety_final_synthesis_retry_used
+        )
+        llm_safety_required_tool_retry_used = (
+            state.llm_safety_required_tool_retry_used
+        )
+        transient_final_synthesis_retry_used = (
+            state.transient_final_synthesis_retry_used
+        )
+        transient_required_tool_retry_keys = (
+            state.transient_required_tool_retry_keys
+        )
+        text_only_final_attempt = state.text_only_final_attempt
+        preserved_pre_tool_answer = state.preserved_pre_tool_answer
+        last_tool_batch_had_semantic_success = (
+            state.last_tool_batch_had_semantic_success
+        )
+        last_optional_tool_gap_notes = state.last_optional_tool_gap_notes
+        original_user_text = (
+            state.original_user_text or fresh_original_user_text
+        )
+        recent_text_lengths = state.recent_text_lengths
+        diminishing_returns_triggered = state.diminishing_returns_triggered
+        usage = state.usage
+        attempt_budget = state.attempt_budget
+        steer_message_count = state.steer_message_count
         repeated_tool_window = max(1, int(self.config.repeated_tool_window or 5))
         repeated_tool_threshold = max(2, int(self.config.repeated_tool_threshold or 3))
         repeated_tool_stop_after = max(
@@ -3651,8 +3181,7 @@ class WorkspaceNativeAgentLoop:
             if (
                 self.config.token_budget is not None
                 and int(self.config.token_budget) > 0
-                and (usage_input_tokens_total + usage_output_tokens_total)
-                >= int(self.config.token_budget)
+                and usage.total_tokens >= int(self.config.token_budget)
             ):
                 # Soft verifier: billed-token budget exhausted. Stop and
                 # let the abort summary synthesize from evidence rather
@@ -3670,26 +3199,26 @@ class WorkspaceNativeAgentLoop:
             _pressure_ratio = float(self.config.token_pressure_compact_ratio or 0.0)
             if (
                 _pressure_ratio > 0.0
-                and last_prompt_tokens > 0
-                and observed_context_window > 0
-                and last_prompt_tokens
-                >= int(observed_context_window * _pressure_ratio)
+                and usage.prompt_tokens_last > 0
+                and usage.context_window > 0
+                and usage.prompt_tokens_last
+                >= int(usage.context_window * _pressure_ratio)
             ):
                 force_compact_reason = (
-                    f"token_pressure:{last_prompt_tokens}"
-                    f"/{observed_context_window}"
+                    f"token_pressure:{usage.prompt_tokens_last}"
+                    f"/{usage.context_window}"
                 )
             _len_before_compact = len(transcript)
             transcript = self._maybe_compact(
                 transcript, force_reason=force_compact_reason
             )
             if len(transcript) != _len_before_compact:
-                compaction_count += 1
+                usage.compaction_count += 1
                 if force_compact_reason:
                     # Stale until the next response reports fresh usage;
                     # without the reset every following iteration would
                     # re-force a (now pointless) compaction.
-                    last_prompt_tokens = 0
+                    usage.prompt_tokens_last = 0
             # Microcompact runs *after* macro-compact so the per-result
             # token cap operates on the same set of messages the model
             # is about to see. The two are independent: macro drops
@@ -3713,7 +3242,8 @@ class WorkspaceNativeAgentLoop:
                 required_artifacts=self.config.required_artifacts,
                 provider_tool_names=provider_tool_names,
                 successful_tool_names=successful_tool_names,
-                completed_tool_names=completed_tool_names,
+                # Compatibility keyword: this set records attempted calls.
+                completed_tool_names=attempted_tool_names,
             )
             if required_artifact_tools:
                 required_next_tool_names.update(required_artifact_tools)
@@ -3994,7 +3524,8 @@ class WorkspaceNativeAgentLoop:
                                 effective_max_tokens,
                                 _COMPACT_REQUIRED_ACTION_MAX_TOKENS,
                             )
-                    response = self.gateway.call_messages(
+                    response = self._call_messages_with_attempt_budget(
+                        attempt_budget=attempt_budget,
                         task=self.config.task,
                         caller=self.config.caller,
                         system=system_for_iteration,
@@ -4017,7 +3548,9 @@ class WorkspaceNativeAgentLoop:
                             "max_iterations": self.config.max_iterations,
                             "llm_attempt": llm_attempt,
                             "tool_calls_completed": total_tool_calls,
-                            "completed_tool_names": sorted(completed_tool_names),
+                            # Compatibility telemetry key; values are attempted,
+                            # not guaranteed successful, tool names.
+                            "completed_tool_names": sorted(attempted_tool_names),
                             "successful_tool_names": sorted(successful_tool_names),
                             "required_next_tool_names": list(
                                 pending_required_for_iteration
@@ -4072,7 +3605,9 @@ class WorkspaceNativeAgentLoop:
                             pending_required_tool_names=pending_required_for_iteration,
                             error=exc,
                         )
-                        if retry_prompt:
+                        if retry_prompt and attempt_budget.claim(
+                            "safety_required_tool_retry"
+                        ):
                             llm_safety_required_tool_retry_used = True
                             safety_retry_messages = [{
                                 "role": "user",
@@ -4132,7 +3667,9 @@ class WorkspaceNativeAgentLoop:
                             pending_required_tool_names=pending_required_for_iteration,
                             error=exc,
                         )
-                        if retry_prompt:
+                        if retry_prompt and attempt_budget.claim(
+                            "transient_required_tool_retry"
+                        ):
                             transient_required_tool_retry_keys.add(
                                 transient_required_tool_retry_key
                             )
@@ -4200,7 +3737,9 @@ class WorkspaceNativeAgentLoop:
                                 transcript=transcript,
                                 original_user_text=original_user_text,
                             )
-                            if retry_prompt:
+                            if retry_prompt and attempt_budget.claim(
+                                "safety_final_synthesis_retry"
+                            ):
                                 llm_safety_final_synthesis_retry_used = True
                                 safety_retry_messages = [{
                                     "role": "user",
@@ -4273,10 +3812,14 @@ class WorkspaceNativeAgentLoop:
                                 len(_compacted) < _before_msgs
                                 or _after_chars < _before_chars
                             ):
+                                if not attempt_budget.claim(
+                                    "context_overflow_recovery"
+                                ):
+                                    break
                                 # In-place so messages_for_iteration (an
                                 # alias of transcript) sees the shrink.
                                 transcript[:] = _compacted
-                                reactive_compaction_count += 1
+                                usage.reactive_compaction_count += 1
                                 _adopted = True
                                 break
                         if _adopted:
@@ -4438,7 +3981,9 @@ class WorkspaceNativeAgentLoop:
                             original_user_text=original_user_text,
                             error=exc,
                         )
-                        if retry_prompt:
+                        if retry_prompt and attempt_budget.claim(
+                            "transient_final_synthesis_retry"
+                        ):
                             transient_final_synthesis_retry_used = True
                             safety_retry_messages = [{
                                 "role": "user",
@@ -4463,7 +4008,11 @@ class WorkspaceNativeAgentLoop:
                                 ).as_dict(),
                             )
                             continue
-                    if llm_attempt >= llm_max:
+                    retry_budget_available = (
+                        llm_attempt < llm_max
+                        and attempt_budget.claim("transient_retry")
+                    )
+                    if not retry_budget_available:
                         can_return_required_action_provider_gap = (
                             bool(pending_required_for_iteration)
                             and bool(pending_required_action_tools)
@@ -4604,64 +4153,15 @@ class WorkspaceNativeAgentLoop:
                         time.sleep(step)
                         waited += step
             assert response is not None  # for type-checkers
-            # Provider-reported usage: powers the token-pressure compact
-            # trigger, the token-budget soft verifier, and LoopOutcome
-            # telemetry. Synthetic fallback responses carry no usage and
-            # are skipped. Adapter-normalised keys are Anthropic-style
-            # (input_tokens/output_tokens); accept OpenAI-style too.
-            _usage = response.usage or {}
-            try:
-                _call_in = int(
-                    _usage.get("input_tokens")
-                    or _usage.get("prompt_tokens")
-                    or 0
-                )
-                _call_out = int(
-                    _usage.get("output_tokens")
-                    or _usage.get("completion_tokens")
-                    or 0
-                )
-            except Exception:
-                _call_in = 0
-                _call_out = 0
-            if _call_in > 0 or _call_out > 0:
-                usage_llm_calls += 1
-                usage_input_tokens_total += max(0, _call_in)
-                usage_output_tokens_total += max(0, _call_out)
-                if _call_in > 0:
-                    last_prompt_tokens = _call_in
-            call_provider = str(response.provider or "")
-            call_model = str(response.model or "")
-            if call_provider:
-                last_provider = call_provider
-            if call_model:
-                last_model = call_model
-            call_usd = max(0.0, float(getattr(response, "usd_cost", 0.0) or 0.0))
-            usage_usd_total += call_usd
-            model_calls.append({
-                "iteration": iterations,
-                "provider": call_provider,
-                "model": call_model,
-                "input_tokens": max(0, _call_in),
-                "output_tokens": max(0, _call_out),
-                "usd": call_usd,
-            })
-            if (
-                observed_context_window <= 0
-                and (response.provider or response.model)
-            ):
-                try:
-                    observed_context_window = int(
-                        _model_registry_lookup(
-                            response.provider, response.model
-                        ).context_window
-                        or 0
-                    )
-                except Exception:
-                    observed_context_window = 0
+            # One recorder owns usage, model attribution, cost and context
+            # pressure across the main call and every text-only side path.
+            usage.record_response(
+                response,
+                iteration=iterations,
+                context_scope="agent_loop",
+            )
             stop_reason = response.stop_reason
             assistant_blocks = list(response.content)
-            tool_uses = [b for b in assistant_blocks if b.get("type") == "tool_use"]
             allowed_iteration_tool_names = {
                 name
                 for name in (
@@ -4670,161 +4170,50 @@ class WorkspaceNativeAgentLoop:
                 )
                 if name
             }
+            tool_selection = ProviderToolSelection.from_blocks(
+                assistant_blocks,
+                allowed_tool_names=allowed_iteration_tool_names,
+            )
+            tool_uses = list(tool_selection.calls)
 
-            if tool_uses:
-                offered_tool_uses: list[dict[str, Any]] = []
-                rejected_tool_uses: list[dict[str, Any]] = []
-                for tool_use in tool_uses:
-                    name = str(tool_use.get("name") or "")
-                    if name and name in allowed_iteration_tool_names:
-                        offered_tool_uses.append(tool_use)
-                    else:
-                        rejected_tool_uses.append(tool_use)
-                if rejected_tool_uses:
-                    rejected_tool_names = [
-                        str(tool_use.get("name") or "")
-                        for tool_use in rejected_tool_uses
-                    ]
-                    # Keep the provider's original calls in the transcript.
-                    # The execution boundary below turns unadvertised names
-                    # into structured ``permission_denied`` results, which
-                    # preserves tool-use/tool-result pairing and telemetry.
-                    tool_uses = [*offered_tool_uses, *rejected_tool_uses]
-                    emit(
-                        "assistant",
-                        ThinkingBlock(
-                            text=(
-                                "Rejected provider tool call(s) not "
-                                "exposed in this iteration: "
-                                + (
-                                    ", ".join(name for name in rejected_tool_names if name)
-                                    or "unknown"
-                                )
-                            ),
-                        ).as_dict(),
-                    )
-                    if not tool_uses:
-                        remaining_before_unoffered = (
-                            deadline - time.time()
-                            if deadline is not None
-                            else None
-                        )
-                        action_tool_reserve = _action_tool_wall_reserve_seconds(
-                            self.config
-                        )
-                        rejected_action_tool_names = {
-                            str(tool_use.get("name") or "")
-                            for tool_use in rejected_tool_uses
-                            if not _tool_use_is_read_only(tool_use, self.registry)
-                        }
-                        if (
-                            deadline is not None
-                            and rejected_action_tool_names
-                            and total_tool_calls > 0
-                            and has_tool_result_evidence
-                            and remaining_before_unoffered is not None
-                            and 0 < remaining_before_unoffered <= action_tool_reserve
-                        ):
-                            pending_required_for_unoffered = set(
-                                _pending_required_tool_names(
-                                    required_next_tool_names,
-                                    successful_tool_names,
-                                )
-                            )
-                            final_text = _wall_time_late_tool_abort_text(
-                                rejected_tool_names,
-                                original_user_text=original_user_text,
-                                pending_required_tool_names=tuple(
-                                    sorted(pending_required_for_unoffered)
-                                ),
-                            )
-                            emit("assistant", TextBlock(text=final_text).as_dict())
-                            stop_reason = "end_turn"
-                            transition_reason = "wall_time_final_synthesis"
-                            break
-                        if pending_required_action_tools:
-                            retry_key = tuple(sorted(pending_required_action_tools))
-                            skipped_tool_names = sorted(
-                                name for name in rejected_tool_names if name
-                            )
-                            only_read_only_tools = all(
-                                _tool_use_is_read_only(tool_use, self.registry)
-                                for tool_use in rejected_tool_uses
-                            )
-                            if iterations < self.config.max_iterations:
-                                required_action_read_only_retries.add(retry_key)
-                                retry_prompt = (
-                                    _required_action_read_only_retry_prompt(
-                                        retry_key,
-                                        skipped_tool_names,
-                                    )
-                                    if only_read_only_tools
-                                    else _required_action_wrong_tool_retry_prompt(
-                                        retry_key,
-                                        skipped_tool_names,
-                                    )
-                                )
-                                transcript.append({
-                                    "role": "user",
-                                    "content": retry_prompt,
-                                })
-                                transition_reason = (
-                                    "next_required_action_read_only_retry"
-                                    if only_read_only_tools
-                                    else "next_required_action_wrong_tool_retry"
-                                )
-                                final_text = ""
-                                continue
-                            final_text = (
-                                _required_action_read_only_blocked_final_text(
-                                    retry_key,
-                                    skipped_tool_names,
-                                )
-                                if only_read_only_tools
-                                else _required_action_wrong_tool_blocked_final_text(
-                                    retry_key,
-                                    skipped_tool_names,
-                                )
-                            )
-                            transcript.append({
-                                "role": "assistant",
-                                "content": [{"type": "text", "text": final_text}],
-                            })
-                            emit("assistant", TextBlock(text=final_text).as_dict())
-                            stop_reason = "end_turn"
-                            transition_reason = (
-                                "next_required_action_read_only_blocked"
-                                if only_read_only_tools
-                                else "next_required_action_wrong_tool_blocked"
-                            )
-                            break
-                        if iterations < self.config.max_iterations:
-                            transcript.append({
-                                "role": "user",
-                                "content": _provider_unoffered_tool_retry_prompt(
-                                    allowed_tool_names=allowed_iteration_tool_names,
-                                    rejected_tool_names=rejected_tool_names,
-                                ),
-                            })
-                            transition_reason = "provider_unoffered_tool_retry"
-                            final_text = ""
-                            continue
-                        final_text = _provider_unoffered_tool_blocked_final_text(
-                            allowed_tool_names=allowed_iteration_tool_names,
-                            rejected_tool_names=rejected_tool_names,
-                        )
-                        transcript.append({
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": final_text}],
-                        })
-                        emit("assistant", TextBlock(text=final_text).as_dict())
-                        stop_reason = "end_turn"
-                        transition_reason = "provider_unoffered_tool_blocked"
-                        break
+            unoffered_decision = decide_unoffered_tool_calls(
+                tool_selection,
+                allowed_tool_names=allowed_iteration_tool_names,
+                registry=self.registry,
+                remaining_seconds=(
+                    deadline - time.time() if deadline is not None else None
+                ),
+                action_tool_reserve_seconds=_action_tool_wall_reserve_seconds(
+                    self.config
+                ),
+                total_tool_calls=total_tool_calls,
+                has_tool_result_evidence=has_tool_result_evidence,
+                pending_required_action_tools=pending_required_action_tools,
+                pending_required_tool_names=_pending_required_tool_names(
+                    required_next_tool_names,
+                    successful_tool_names,
+                ),
+                iteration=iterations,
+                max_iterations=self.config.max_iterations,
+                original_user_text=original_user_text,
+            )
+            if unoffered_decision.diagnostic:
+                emit(
+                    "assistant",
+                    ThinkingBlock(
+                        text=unoffered_decision.diagnostic
+                    ).as_dict(),
+                )
+            deferred_unoffered_retry_prompt = unoffered_decision.retry_prompt
+            deferred_unoffered_final_text = unoffered_decision.final_text
+            deferred_unoffered_transition_reason = (
+                unoffered_decision.transition_reason
+            )
 
             if (
                 tool_uses
                 and deadline is not None
+                and not tool_selection.only_rejected
             ):
                 remaining_before_tools = deadline - time.time()
                 action_tool_reserve = _action_tool_wall_reserve_seconds(
@@ -4941,7 +4330,9 @@ class WorkspaceNativeAgentLoop:
                             sorted(pending_required_for_late_tools)
                         ),
                     )
-                    if compact_prompt:
+                    if compact_prompt and attempt_budget.claim(
+                        "optional_final_synthesis"
+                    ):
                         emit(
                             "assistant",
                             ThinkingBlock(
@@ -4959,7 +4350,8 @@ class WorkspaceNativeAgentLoop:
                             ).as_dict(),
                         )
                         try:
-                            compact_response = self.gateway.call_messages(
+                            compact_response = self._call_messages_with_attempt_budget(
+                                attempt_budget=attempt_budget,
                                 task=self.config.task,
                                 caller=self.config.caller,
                                 system=_COMPACT_FINAL_SYNTHESIS_SYSTEM,
@@ -4984,7 +4376,9 @@ class WorkspaceNativeAgentLoop:
                                     "max_iterations": self.config.max_iterations,
                                     "llm_attempt": 1,
                                     "tool_calls_completed": total_tool_calls,
-                                    "completed_tool_names": sorted(completed_tool_names),
+                                    # Compatibility telemetry key; values are
+                                    # attempted before result semantics.
+                                    "completed_tool_names": sorted(attempted_tool_names),
                                     "successful_tool_names": sorted(successful_tool_names),
                                     "required_next_tool_names": list(
                                         pending_required_for_late_tools
@@ -5002,6 +4396,11 @@ class WorkspaceNativeAgentLoop:
                                         else None
                                     ),
                                 },
+                            )
+                            usage.record_response(
+                                compact_response,
+                                iteration=iterations,
+                                context_scope="optional_final_synthesis",
                             )
                             compact_text = _assistant_text_from_blocks(
                                 list(compact_response.content)
@@ -5050,6 +4449,7 @@ class WorkspaceNativeAgentLoop:
                 tool_uses
                 and pending_required_action_tools
                 and not text_only_final_attempt
+                and not tool_selection.only_rejected
             ):
                 tool_names_in_response = {
                     str(tool_use.get("name") or "")
@@ -5067,7 +4467,6 @@ class WorkspaceNativeAgentLoop:
                     retry_key = tuple(sorted(pending_required_action_tools))
                     skipped_tool_names = sorted(tool_names_in_response)
                     if iterations < self.config.max_iterations:
-                        required_action_read_only_retries.add(retry_key)
                         retry_prompt = (
                             _required_action_read_only_retry_prompt(
                                 retry_key,
@@ -5165,7 +4564,7 @@ class WorkspaceNativeAgentLoop:
                         started_at=time.time(),
                     )
                     emit("assistant", tu.as_dict())
-                elif btype in {"attachment", "image", "document", "file", "video", "audio"}:
+                elif btype in ATTACHMENT_BLOCK_TYPES:
                     emit("assistant", assistant_attachment_block(dict(block)))
 
             # Track text output for diminishing-returns detection.
@@ -5248,7 +4647,8 @@ class WorkspaceNativeAgentLoop:
                     required_artifacts=self.config.required_artifacts,
                     provider_tool_names=provider_tool_names,
                     successful_tool_names=successful_tool_names,
-                    completed_tool_names=completed_tool_names,
+                    # Compatibility keyword: this set records attempted calls.
+                    completed_tool_names=attempted_tool_names,
                 )
                 if (
                     final_text
@@ -5420,202 +4820,64 @@ class WorkspaceNativeAgentLoop:
                 if deadline is not None
                 else None
             )
-            calls = [
-                ToolCall(
-                    name=str(tu.get("name") or ""),
-                    arguments={
-                        **dict(
-                            self.config.tool_argument_defaults.get(
-                                str(tu.get("name") or ""),
-                                {},
-                            )
-                        ),
-                        **dict(tu.get("input") or {}),
-                    },
-                    id=str(tu.get("id") or ""),
+            calls = build_tool_calls(
+                tool_uses,
+                context=ToolCallBuildContext(
                     turn_id=turn_id,
                     iteration=iterations,
                     caller=self.config.caller,
-                    metadata={
-                        **dict(self.config.tool_call_metadata or {}),
-                        "session_id": self.config.session_id,
-                        "strategy_id": self.config.strategy_id,
-                        "trigger_event_id": self.config.trigger_event_id,
-                        "original_user_prompt": _stringify_user_message(user_message),
-                        "turn_deadline_epoch": deadline,
-                        "remaining_wall_seconds": tool_call_remaining_wall_seconds,
-                        "wall_time_final_synthesis_seconds": float(
-                            self.config.wall_time_final_synthesis_seconds or 0.0
-                        ),
-                        # Native delegation handlers use the same token as
-                        # the parent loop so cancellation reaches every
-                        # child/team boundary.
-                        "cancel_token": cancel_token,
-                    },
-                )
-                for tu in tool_uses
-            ]
-            for call in calls:
-                contract_arguments = _required_artifact_contract_for_tool(
-                    self.config.required_artifacts,
-                    call.name,
-                )
-                if contract_arguments:
-                    # Explicit caller constraints win over model guesses, but
-                    # the loop still forwards them as opaque tool arguments.
-                    call.arguments = {**call.arguments, **contract_arguments}
-            for call in calls:
-                if call.name:
-                    completed_tool_names.add(call.name)
-
-            prepared_results: list[ToolResult | None] = [None] * len(calls)
-            executable_calls: list[ToolCall] = []
-            executable_indices: list[int] = []
-            repeated_loop_abort = False
-            batch_budget_calls = 0
-            for idx, call in enumerate(calls):
-                if (
-                    max_total_calls is not None
-                    and total_tool_calls + batch_budget_calls
-                    >= max_total_calls
-                ):
-                    prepared_results[idx] = ToolResult.from_error(
-                        tool_use_id=call.id,
-                        name=call.name,
-                        error=ToolError(
-                            kind=ToolErrorKind.ABORTED,
-                            message=(
-                                "tool call skipped because the turn tool-call "
-                                "budget is exhausted"
-                            ),
-                            detail={
-                                "reason": "max_tool_calls",
-                                "limit": max_total_calls,
-                                "used": total_tool_calls + batch_budget_calls,
-                            },
-                            retryable=False,
-                            recovery_hint={"action": "finish_from_existing_evidence"},
-                        ),
-                    )
-                    continue
-                batch_budget_calls += 1
-                if call.name not in allowed_iteration_tool_names:
-                    prepared_results[idx] = ToolResult.from_error(
-                        tool_use_id=call.id,
-                        name=call.name,
-                        error=ToolError(
-                            kind=ToolErrorKind.PERMISSION_DENIED,
-                            message=(
-                                f"tool {call.name!r} is not available in the "
-                                "current runtime view"
-                            ),
-                            detail={
-                                "advertised": False,
-                                "available_tools": sorted(
-                                    allowed_iteration_tool_names
-                                ),
-                            },
-                            retryable=False,
-                            recovery_hint={
-                                "action": "choose_advertised_tool",
-                                "available_tools": sorted(
-                                    allowed_iteration_tool_names
-                                ),
-                            },
-                        ),
-                    )
-                    continue
-                fingerprint = _tool_call_fingerprint(call)
-                prior_result = tool_result_by_fingerprint.get(fingerprint)
-                repeat_count = recent_tool_fingerprints[-repeated_tool_window:].count(
-                    fingerprint
-                ) + 1
-                if prior_result is not None and repeat_count >= repeated_tool_threshold:
-                    prepared_results[idx] = _deduped_tool_loop_result(
-                        call,
-                        prior_result,
-                        repeat_count=repeat_count,
-                    )
-                    deduped_counts = deduped_counts_by_fingerprint.get(fingerprint, 0) + 1
-                    deduped_counts_by_fingerprint[fingerprint] = deduped_counts
-                    if deduped_counts >= repeated_tool_stop_after:
-                        repeated_loop_abort = True
-                    continue
-                executable_calls.append(call)
-                executable_indices.append(idx)
-
-            executed_batch = (
-                self.orchestrator.run_batch(executable_calls)
-                if executable_calls
-                else BatchResult()
+                    session_id=self.config.session_id,
+                    strategy_id=self.config.strategy_id,
+                    trigger_event_id=self.config.trigger_event_id,
+                    original_user_prompt=original_user_text,
+                    deadline=deadline,
+                    remaining_wall_seconds=tool_call_remaining_wall_seconds,
+                    wall_time_final_synthesis_seconds=float(
+                        self.config.wall_time_final_synthesis_seconds or 0.0
+                    ),
+                    cancel_token=cancel_token,
+                    argument_defaults=self.config.tool_argument_defaults,
+                    metadata=self.config.tool_call_metadata,
+                    contract_arguments_for_tool=lambda name: (
+                        _required_artifact_contract_for_tool(
+                            self.config.required_artifacts,
+                            name,
+                        )
+                    ),
+                ),
             )
-            for idx, result in zip(executable_indices, executed_batch.results):
-                prepared_results[idx] = result
-            batch_results = [r for r in prepared_results if r is not None]
-            batch = BatchResult(
-                results=batch_results,
-                total_elapsed_ms=executed_batch.total_elapsed_ms,
-                parallel_calls=executed_batch.parallel_calls,
-                serial_calls=executed_batch.serial_calls,
-                error_count=sum(1 for r in batch_results if r.is_error),
-                auto_retries=executed_batch.auto_retries,
-            )
-            completed_tool_results.extend(batch.results)
-            required_next_from_results = _extract_next_required_tools(
-                batch.results,
+            batch_state = ToolBatchState(
+                allowed_tool_names=allowed_iteration_tool_names,
                 provider_tool_names=provider_tool_names,
+                required_next_tool_names=required_next_tool_names,
+                attempted_tool_names=attempted_tool_names,
+                successful_tool_names=successful_tool_names,
+                completed_tool_results=completed_tool_results,
+                tool_result_by_fingerprint=tool_result_by_fingerprint,
+                recent_tool_fingerprints=recent_tool_fingerprints,
+                deduped_counts_by_fingerprint=deduped_counts_by_fingerprint,
+                checkpointed_fingerprints=state.checkpointed_fingerprints,
+                total_tool_calls=total_tool_calls,
+                error_count=error_count,
+                max_total_calls=max_total_calls,
+                repeated_tool_window=repeated_tool_window,
+                repeated_tool_threshold=repeated_tool_threshold,
+                repeated_tool_stop_after=repeated_tool_stop_after,
             )
-            required_next_tool_names.update(required_next_from_results)
-            self_required_next_tools = {
-                result.name
-                for result in batch.results
-                if (
-                    result.name
-                    and not result.is_error
-                    and result.name in required_next_from_results
-                    and result.name in _extract_next_required_tools(
-                        [result],
-                        provider_tool_names={result.name},
-                    )
-                )
-            }
-            total_tool_calls += len(calls)
-            error_count += batch.error_count
-            batch_semantic_success_names: set[str] = set()
-            completed_required_action_tool_names: set[str] = set()
-            for call, result in zip(calls, batch.results):
-                if result.name and not result.is_error:
-                    semantic_success = _tool_result_counts_as_success(result)
-                    if result.name in self_required_next_tools or not semantic_success:
-                        successful_tool_names.discard(result.name)
-                    else:
-                        successful_tool_names.add(result.name)
-                        batch_semantic_success_names.add(result.name)
-                        if (
-                            result.name in required_next_tool_names
-                            and not _tool_name_is_read_only(result.name, self.registry)
-                        ):
-                            completed_required_action_tool_names.add(result.name)
-                        required_next_tool_names.discard(result.name)
-                fingerprint = _tool_call_fingerprint(call)
-                recent_tool_fingerprints.append(fingerprint)
-                if len(recent_tool_fingerprints) > max(repeated_tool_window * 3, 12):
-                    del recent_tool_fingerprints[
-                        : len(recent_tool_fingerprints)
-                        - max(repeated_tool_window * 3, 12)
-                    ]
-                if not (
-                    result.is_error
-                    and result.error is not None
-                    and result.error.kind == ToolErrorKind.DEDUPED
-                ):
-                    tool_result_by_fingerprint[fingerprint] = result
-            if completed_required_action_tool_names:
-                for pending_name in list(required_next_tool_names):
-                    if _tool_name_is_read_only(pending_name, self.registry):
-                        required_next_tool_names.discard(pending_name)
-            last_tool_batch_had_semantic_success = bool(batch_semantic_success_names)
-            last_optional_tool_gap_notes = _optional_tool_gap_notes(batch.results)
+            batch_effects = ToolBatchPhase(
+                orchestrator=self.orchestrator,
+                registry=self.registry,
+            ).run(calls, state=batch_state)
+            batch = batch_effects.batch
+            total_tool_calls = batch_state.total_tool_calls
+            error_count = batch_state.error_count
+            repeated_loop_abort = batch_effects.repeated_loop_abort
+            last_tool_batch_had_semantic_success = bool(
+                batch_effects.semantic_success_names
+            )
+            last_optional_tool_gap_notes = list(
+                batch_effects.optional_gap_notes
+            )
 
             # per-batch summary so dashboards / TUI can show
             # one-liners ("3× read_file, 1× edit_file (+1 err)") without
@@ -5630,62 +4892,19 @@ class WorkspaceNativeAgentLoop:
             except Exception:
                 _LOG.debug("batch summary emit failed", exc_info=True)
 
-            tool_result_blocks: list[dict[str, Any]] = []
-            for r in batch.results:
-                rendered_result = self._render_tool_result(r)
-                tool_result_blocks.append(rendered_result)
-                visible_result = (
-                    self._rendered_tool_result_text(rendered_result)
-                    if not r.is_error
-                    else None
-                )
-                if visible_result is None and not r.is_error:
-                    visible_result = r.text()
-                trb = ToolResultBlock(
-                    call_id=r.tool_use_id,
-                    skill_id="native",
-                    action=r.name,
-                    ok=not r.is_error,
-                    result=visible_result,
-                    error=(r.error.message if r.error else None) if r.is_error else None,
-                    error_kind=(r.error.kind.value if r.error else None) if r.is_error else None,
-                    elapsed_ms=float(r.elapsed_ms),
-                    completed_at=r.completed_at,
-                    recovery=(
-                        dict(r.error.recovery_hint)
-                        if r.is_error
-                        and r.error is not None
-                        and isinstance(r.error.recovery_hint, dict)
-                        and r.error.recovery_hint
-                        else None
-                    ),
-                    compaction=rendered_result.get("compaction"),
-                )
-                emit("tool", trb.as_dict())
-                for part in r.content:
-                    if part.type not in {"image", "document", "file", "attachment", "video", "audio"}:
-                        continue
-                    payload = part.data if isinstance(part.data, dict) else {}
-                    emit(
-                        "tool",
-                        assistant_attachment_block(
-                            {
-                                "type": part.type,
-                                "source": payload.get("source") or payload,
-                                "name": payload.get("name")
-                                or part.metadata.get("name")
-                                or r.name
-                                or "tool-attachment",
-                                "mime_type": part.media_type
-                                or payload.get("mime_type")
-                                or payload.get("media_type"),
-                                "text": part.text,
-                                "source_kind": "tool",
-                            }
-                        ),
-                    )
-
-            transcript.append({"role": "user", "content": tool_result_blocks})
+            projection = project_tool_results(
+                batch.results,
+                render_tool_result=self._render_tool_result,
+                rendered_tool_result_text=self._rendered_tool_result_text,
+            )
+            for event_block in projection.event_blocks:
+                emit("tool", event_block)
+            for approval_block in projection.approval_blocks:
+                emit("tool", approval_block)
+            transcript.append({
+                "role": "user",
+                "content": list(projection.transcript_blocks),
+            })
             for name, values in _recovery_required_arguments_by_tool(
                 batch.results
             ).items():
@@ -5694,6 +4913,30 @@ class WorkspaceNativeAgentLoop:
                     if value not in current:
                         current.append(value)
                 recovery_required_args_by_tool[name] = tuple(current)
+
+            # Rejected-only provider calls are now fully observable: their
+            # assistant tool_use blocks and structured permission_denied
+            # tool_results are persisted/emitted before the retry or bounded
+            # final decision is applied.
+            if deferred_unoffered_retry_prompt:
+                transcript.append({
+                    "role": "user",
+                    "content": deferred_unoffered_retry_prompt,
+                })
+                transition_reason = deferred_unoffered_transition_reason
+                final_text = ""
+                continue
+            if deferred_unoffered_final_text:
+                final_text = deferred_unoffered_final_text
+                transcript.append({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": final_text}],
+                })
+                emit("assistant", TextBlock(text=final_text).as_dict())
+                stop_reason = "end_turn"
+                transition_reason = deferred_unoffered_transition_reason
+                break
+
             if repeated_loop_abort:
                 if pending_required_action_tools:
                     final_text = _required_action_repeated_error_blocked_final_text(
@@ -5748,7 +4991,8 @@ class WorkspaceNativeAgentLoop:
                     required_artifacts=self.config.required_artifacts,
                     provider_tool_names=provider_tool_names,
                     successful_tool_names=successful_tool_names,
-                    completed_tool_names=completed_tool_names,
+                    # Compatibility keyword: this set records attempted calls.
+                    completed_tool_names=attempted_tool_names,
                 )
                 pending_required_after_team = tuple(
                     dict.fromkeys(
@@ -5793,6 +5037,9 @@ class WorkspaceNativeAgentLoop:
                             team_results=degraded_results,
                             deadline=deadline,
                             remaining_seconds=remaining_after_team,
+                            usage=usage,
+                            iteration=iterations,
+                            attempt_budget=attempt_budget,
                         )
                     else:
                         final_text = _build_team_run_bounded_fallback(
@@ -5823,6 +5070,9 @@ class WorkspaceNativeAgentLoop:
                         team_results=usable_completed_results,
                         deadline=deadline,
                         remaining_seconds=remaining_after_team,
+                        usage=usage,
+                        iteration=iterations,
+                        attempt_budget=attempt_budget,
                     )
                     transcript.append({
                         "role": "assistant",
@@ -5843,6 +5093,9 @@ class WorkspaceNativeAgentLoop:
                             team_results=team_results,
                             deadline=deadline,
                             remaining_seconds=remaining_after_team,
+                            usage=usage,
+                            iteration=iterations,
+                            attempt_budget=attempt_budget,
                         )
                         transcript.append({
                             "role": "assistant",
@@ -5862,15 +5115,9 @@ class WorkspaceNativeAgentLoop:
             # a different action and bury the card under fresh blocks.
             # The next turn (after the operator approves/rejects) picks
             # up from the persisted approval state.
-            if any(
-                bool(r.is_error)
-                and r.error is not None
-                and r.error.kind is not None
-                and r.error.kind.value == "permission_pending"
-                for r in batch.results
-            ):
-                stop_reason = "approval_pending"
-                transition_reason = "approval_pending"
+            if first_approval_pause(batch.results) is not None:
+                stop_reason = APPROVAL_PENDING_REASON
+                transition_reason = APPROVAL_PENDING_REASON
                 break
 
             # Once tool_uses were emitted AND tool_results fed back, always
@@ -5911,7 +5158,8 @@ class WorkspaceNativeAgentLoop:
             required_artifacts=self.config.required_artifacts,
             provider_tool_names=provider_tool_names,
             successful_tool_names=successful_tool_names,
-            completed_tool_names=completed_tool_names,
+            # Compatibility keyword: this set records attempted calls.
+            completed_tool_names=attempted_tool_names,
         )
         generic_terminal_reasons = {
             "",
@@ -5979,14 +5227,78 @@ class WorkspaceNativeAgentLoop:
                 "content": [{"type": "text", "text": final_text}],
             })
             emit("assistant", TextBlock(text=summary).as_dict())
+        effective_stop_reason = stop_reason or (
+            "max_iterations"
+            if iterations >= self.config.max_iterations
+            else "end_turn"
+        )
+        resume_block_reason = ""
+        if was_aborted:
+            resume_block_reason = aborted_reason or effective_stop_reason or "aborted"
+        elif effective_stop_reason == APPROVAL_PENDING_REASON:
+            resume_block_reason = APPROVAL_PENDING_REASON
+        elif iterations >= self.config.max_iterations:
+            resume_block_reason = "max_iterations"
+        elif deadline is not None and time.time() >= deadline:
+            resume_block_reason = "runtime_wall_time_exceeded"
+
+        state.seq = seq
+        state.transcript = transcript
+        state.blocks = blocks
+        state.iterations = iterations
+        state.total_tool_calls = total_tool_calls
+        state.error_count = error_count
+        state.tool_result_by_fingerprint = tool_result_by_fingerprint
+        state.completed_tool_results = completed_tool_results
+        state.recent_tool_fingerprints = recent_tool_fingerprints
+        state.deduped_counts_by_fingerprint = deduped_counts_by_fingerprint
+        state.recovery_required_args_by_tool = recovery_required_args_by_tool
+        state.attempted_tool_names = attempted_tool_names
+        state.successful_tool_names = successful_tool_names
+        state.required_next_tool_names = required_next_tool_names
+        state.next_action_nudges = next_action_nudges
+        state.required_artifact_announcements = required_artifact_announcements
+        state.interrupted_required_tool_retry_keys = (
+            interrupted_required_tool_retry_keys
+        )
+        state.transient_required_tool_retry_keys = (
+            transient_required_tool_retry_keys
+        )
+        state.truncated_no_tool_retry_used = truncated_no_tool_retry_used
+        state.wall_time_final_synthesis_used = wall_time_final_synthesis_used
+        state.llm_safety_final_synthesis_retry_used = (
+            llm_safety_final_synthesis_retry_used
+        )
+        state.llm_safety_required_tool_retry_used = (
+            llm_safety_required_tool_retry_used
+        )
+        state.transient_final_synthesis_retry_used = (
+            transient_final_synthesis_retry_used
+        )
+        state.text_only_final_attempt = text_only_final_attempt
+        state.preserved_pre_tool_answer = preserved_pre_tool_answer
+        state.last_tool_batch_had_semantic_success = (
+            last_tool_batch_had_semantic_success
+        )
+        state.last_optional_tool_gap_notes = last_optional_tool_gap_notes
+        state.original_user_text = original_user_text
+        state.recent_text_lengths = recent_text_lengths
+        state.diminishing_returns_triggered = diminishing_returns_triggered
+        state.usage = usage
+        state.steer_message_count = steer_message_count
+        state.stop_reason = effective_stop_reason
+        state.transition_reason = transition_reason
+        state.final_text = final_text
+        state.aborted_reason = aborted_reason
+        turn_checkpoint = state.to_checkpoint(
+            resumable=not bool(resume_block_reason),
+            resume_block_reason=resume_block_reason,
+        )
+
         return LoopOutcome(
             transcript=transcript,
             iterations=iterations,
-            stop_reason=stop_reason or (
-                "max_iterations"
-                if iterations >= self.config.max_iterations
-                else "end_turn"
-            ),
+            stop_reason=effective_stop_reason,
             transition_reason=transition_reason,
             final_text=final_text,
             tool_calls=total_tool_calls,
@@ -5994,18 +5306,12 @@ class WorkspaceNativeAgentLoop:
             aborted=was_aborted,
             abort_reason=aborted_reason,
             blocks=blocks,
-            llm_calls=usage_llm_calls,
-            input_tokens_total=usage_input_tokens_total,
-            output_tokens_total=usage_output_tokens_total,
-            prompt_tokens_last=last_prompt_tokens,
-            context_window=observed_context_window,
-            compaction_count=compaction_count,
-            reactive_compaction_count=reactive_compaction_count,
             steer_messages=steer_message_count,
-            provider=last_provider,
-            model=last_model,
-            model_calls=model_calls,
-            usd_total=usage_usd_total,
+            extra_llm_attempts=attempt_budget.used,
+            extra_llm_attempt_limit=attempt_budget.limit,
+            extra_llm_attempts_by_reason=dict(attempt_budget.by_reason),
+            checkpoint=turn_checkpoint,
+            **usage.outcome_kwargs(),
         )
 
     # -------------------------------------------------------------- helpers
@@ -6101,7 +5407,7 @@ class WorkspaceNativeAgentLoop:
                     + (f"\n## stderr\n{stderr}\n" if stderr else "")
                 )
                 content.append({"type": "text", "text": shell_text})
-            elif part.type in {"image", "document", "file", "attachment", "video", "audio"}:
+            elif part.type in ATTACHMENT_BLOCK_TYPES:
                 payload = part.data if isinstance(part.data, dict) else {}
                 content.append(
                     {
@@ -6312,7 +5618,7 @@ class WorkspaceNativeAgentLoop:
                 "This lane does not permit the tool. Pick a different "
                 "tool or ask the operator to switch lanes."
             )
-        if kind == "permission_pending":
+        if kind == PERMISSION_PENDING_ERROR_KIND:
             return (
                 "Approval is owed by the operator. Either wait for "
                 "the approval event or send a message explaining the "

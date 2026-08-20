@@ -14,8 +14,7 @@ Modules:
   ``write_file``, ``apply_patch``.
 * :mod:`search`        — ``glob`` / ``grep``.
 * :mod:`shell`         — ``run_shell`` with risk classifier + timeout.
-* :mod:`task`          — ``todo_write``, ``enter_plan_mode``,
-  ``exit_plan_mode``.
+* :mod:`task`          — ``todo_write`` session progress tracking.
 * :mod:`skill`         — ``skill_index`` / ``skill_view`` /
   ``script_inspect`` / ``script_run``.
 * :mod:`skill_tool`    — ``Skill`` (playbook loader).

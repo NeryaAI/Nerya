@@ -26,6 +26,7 @@ from nerya.tools.native import agents as native_agents
 from nerya.tools.native import strategy_runtime
 from nerya.tools.native import tasks as native_tasks
 from nerya.tools.registry import ToolRegistry, make_native_descriptor
+from nerya.tools.tool_approvals import ToolApprovalResolution
 from nerya.tools.types import (
     PermissionScope,
     RiskLevel,
@@ -37,13 +38,20 @@ from nerya.tools.types import (
 pytestmark = pytest.mark.smoke
 
 
-def _runtime_with_executor(tmp_path, descriptor, *, mode=PermissionMode.DEFAULT):
+def _runtime_with_executor(
+    tmp_path,
+    descriptor,
+    *,
+    mode=PermissionMode.DEFAULT,
+    approval_resolver=None,
+):
     registry = ToolRegistry()
     registry.register(descriptor)
     executor = NativeToolExecutor(
         registry=registry,
         permission_engine=PermissionEngine(),
         permission_context=PermissionContext(mode=mode),
+        approval_resolver=approval_resolver,
     )
     runtime = SubAgentRuntime(
         config=Config(paths=WorkspacePaths(tmp_path), data={}),
@@ -109,10 +117,27 @@ def test_child_native_call_uses_parent_executor_approval_gate(tmp_path):
         risk=RiskLevel.EXEC,
         permission_scope=PermissionScope.SYSTEM,
     )
-    runtime, executor = _runtime_with_executor(tmp_path, descriptor)
-    pending: list[tuple[ToolCall, object]] = []
-    executor.add_permission_pending_hook(
-        lambda call, _descriptor, decision: pending.append((call, decision))
+    class PendingResolver:
+        def __init__(self):
+            self.seen: list[tuple[ToolCall, object]] = []
+
+        def resolve(self, call, _descriptor, decision):
+            self.seen.append((call, decision))
+            return ToolApprovalResolution(
+                request={
+                    "kind": "approval_request",
+                    "approval_id": "tool_batch_turn-2",
+                    "call_id": call.id,
+                    "action": call.name,
+                    "record": {"kind": "tool_permission_batch"},
+                }
+            )
+
+    resolver = PendingResolver()
+    runtime, _executor = _runtime_with_executor(
+        tmp_path,
+        descriptor,
+        approval_resolver=resolver,
     )
 
     record = runtime._dispatch_native(  # noqa: SLF001
@@ -130,8 +155,10 @@ def test_child_native_call_uses_parent_executor_approval_gate(tmp_path):
     assert record["ok"] is False
     assert record["error_kind"] == "permission_pending"
     assert invoked == []
-    assert len(pending) == 1
-    pending_call, pending_decision = pending[0]
+    assert record["recovery_hint"]["approval_id"] == "tool_batch_turn-2"
+    assert record["approval_request"]["approval_id"] == "tool_batch_turn-2"
+    assert len(resolver.seen) == 1
+    pending_call, pending_decision = resolver.seen[0]
     assert pending_call.id == record["tool_use_id"]
     assert pending_call.caller == record["caller"] == "subagent:researcher"
     assert pending_decision.risk is RiskLevel.EXEC

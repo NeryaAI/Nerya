@@ -101,12 +101,10 @@ class AcpServer:
         note: str,
         resolver_actor_id: str = "",
     ) -> dict[str, Any]:
-        # Keep ACP on the same locked, expiry-aware approval transition as
-        # HTTP and gateway callbacks.
-        from ..api import routes_approvals as _ra
+        from ..approval_service import ApprovalService
 
-        moved = _ra._move_record(
-            self.client,
+        service = ApprovalService(self.client.config)
+        moved = service.move(
             approval_id,
             state=state,
             note=note,
@@ -126,7 +124,7 @@ class AcpServer:
             "record": moved,
         }
         self.publish_event(event)
-        _ra._publish_approval_resolution(
+        service.publish_resolution(
             approval_id,
             state=state,
             record=moved,

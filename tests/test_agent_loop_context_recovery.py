@@ -26,6 +26,7 @@ from nerya.agent.loop import (
     _is_context_overflow_llm_error,
     _is_transient_llm_error,
 )
+from nerya.agent.loop_state import LoopRunState
 from nerya.agent.session_compaction import compact_session_history
 from nerya.agent.transcript_compact import compact_transcript
 from nerya.core.errors import LLMError, LLMStructuredOutputError
@@ -247,6 +248,82 @@ def test_reactive_compact_disabled_propagates_immediately() -> None:
     with pytest.raises(LLMError):
         loop.run(system="system", user_message="check the status")
     assert gateway.calls == 2
+
+
+class _TransientThenTextGateway:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def call_messages(self, **_kwargs):  # noqa: ANN001
+        self.calls += 1
+        if self.calls == 1:
+            raise LLMError("openai messages api error (503): unavailable")
+        return MessagesResponse(
+            content=[{"type": "text", "text": "recovered"}],
+            stop_reason="end_turn",
+        )
+
+
+def test_turn_attempt_budget_reports_generic_transient_retry() -> None:
+    gateway = _TransientThenTextGateway()
+    loop = _make_loop(
+        gateway,
+        config=LoopConfig(
+            max_iterations=2,
+            llm_retry_attempts=10,
+            max_extra_llm_attempts_per_turn=2,
+            llm_retry_base_delay=0.0,
+            llm_retry_max_delay=0.0,
+            llm_retry_full_jitter=False,
+        ),
+    )
+
+    outcome = loop.run(system="system", user_message="summarise")
+
+    assert outcome.final_text == "recovered"
+    assert gateway.calls == 2
+    assert outcome.extra_llm_attempts == 1
+    assert outcome.extra_llm_attempt_limit == 2
+    assert outcome.extra_llm_attempts_by_reason == {"transient_retry": 1}
+    assert outcome.checkpoint is not None
+    restored = LoopRunState.from_checkpoint(outcome.checkpoint)
+    assert restored.attempt_budget.used == 1
+    assert restored.attempt_budget.by_reason == {"transient_retry": 1}
+
+
+class _CrossIterationTransientGateway:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def call_messages(self, **_kwargs):  # noqa: ANN001
+        self.calls += 1
+        if self.calls == 1:
+            raise LLMError("openai messages api error (503): first iteration")
+        if self.calls == 2:
+            return _tool_use_response("toolu_budget")
+        raise LLMError("openai messages api error (503): second iteration")
+
+
+def test_turn_attempt_budget_does_not_reset_between_iterations() -> None:
+    gateway = _CrossIterationTransientGateway()
+    loop = _make_loop(
+        gateway,
+        config=LoopConfig(
+            max_iterations=4,
+            llm_retry_attempts=10,
+            max_extra_llm_attempts_per_turn=1,
+            llm_retry_base_delay=0.0,
+            llm_retry_max_delay=0.0,
+            llm_retry_full_jitter=False,
+        ),
+    )
+
+    with pytest.raises(LLMError):
+        loop.run(system="system", user_message="read and summarise")
+
+    # Iteration 1 consumes the only extra attempt, then succeeds with a tool.
+    # Iteration 2 gets its normal first call but cannot start another retry.
+    assert gateway.calls == 3
 
 
 # ---------------------------------------------------------------------------

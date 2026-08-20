@@ -19,10 +19,9 @@ this pass.
 
 from __future__ import annotations
 
-import time
-from contextlib import contextmanager
 from typing import Any
 
+from ..approval_service import ApprovalService
 from ..core import jsonl
 from ..core.time import now_iso
 from ..messaging.approval_prompts import (
@@ -33,45 +32,20 @@ from ..messaging.approval_prompts import (
 )
 
 
-@contextmanager
-def _approval_file_lock(path):
-    """Serialize approval queue moves across gateway/API workers."""
-
-    lock_path = path.with_name(f".{path.name}.lock")
-    # ponytail: one queue-wide lock is enough until approval throughput proves
-    # it needs per-record coordination.
-    with jsonl._open_append(lock_path):  # noqa: SLF001
-        yield
+def _service(client) -> ApprovalService:
+    return ApprovalService(client.config)
 
 
 def _is_native_tool_approval(rec: dict[str, Any]) -> bool:
-    return str(rec.get("kind") or "").strip() in {
-        "tool_permission",
-        "tool_permission_batch",
-    }
-
-
-_FINANCIAL_APPROVAL_KINDS = frozenset({"trade_intent", "wallet_swap"})
+    return ApprovalService.is_native_tool(rec)
 
 
 def _required_approval_scope(rec: dict[str, Any]) -> str:
-    """Return the least-privilege HTTP scope for this approval record."""
-
-    if str(rec.get("kind") or "").strip() in _FINANCIAL_APPROVAL_KINDS:
-        return "approve:trade"
-    return "approve:tool"
+    return ApprovalService.required_scope(rec)
 
 
 def _approval_owner_actor_id(rec: dict[str, Any]) -> str:
-    """Return the actor bound to an approval, or empty when unbound."""
-
-    for key in ("approval_actor_id", "actor_id"):
-        actor_id = str(rec.get(key) or "").strip()
-        if actor_id:
-            return actor_id
-    if _is_native_tool_approval(rec):
-        return str(rec.get("requester_actor_id") or "").strip()
-    return ""
+    return ApprovalService.owner_actor_id(rec)
 
 
 def _can_resolve(
@@ -80,17 +54,11 @@ def _can_resolve(
     *,
     operator_authorized: bool = False,
 ) -> bool:
-    """Keep native approvals bound to an owner or trusted operator scope."""
-
-    actor_id = str(actor_id or "").strip()
-    if not actor_id:
-        return False
-    owner = _approval_owner_actor_id(rec)
-    if _is_native_tool_approval(rec):
-        # Native permission prompts must never be ownerless. HTTP operators
-        # with approve:tool/api:all are the explicit exception.
-        return bool(owner) and (operator_authorized or actor_id == owner)
-    return not owner or operator_authorized or actor_id == owner
+    return ApprovalService.can_resolve(
+        rec,
+        actor_id,
+        operator_authorized=operator_authorized,
+    )
 
 
 def _trusted_operator(
@@ -98,55 +66,19 @@ def _trusted_operator(
     actor_id: str,
     rec: dict[str, Any],
 ) -> bool:
-    """Validate dispatcher auth and bind its scope to the record kind."""
-
-    stamped_actor = str(payload.get("_auth_actor_id") or "").strip()
-    if not stamped_actor or stamped_actor != str(actor_id or "").strip():
-        return False
-    raw_scopes = payload.get("_auth_scopes")
-    if isinstance(raw_scopes, str):
-        scopes = {
-            part.strip()
-            for part in raw_scopes.replace(",", " ").split()
-            if part.strip()
-        }
-    elif isinstance(raw_scopes, (list, tuple, set, frozenset)):
-        scopes = {str(part).strip() for part in raw_scopes if str(part).strip()}
-    else:
-        scopes = set()
-    return "api:all" in scopes or _required_approval_scope(rec) in scopes
+    return ApprovalService.trusted_operator(payload, actor_id, rec)
 
 
 def _expired(rec: dict[str, Any], *, now: float | None = None) -> bool:
-    """Return true only for an explicitly invalid/expired expiry value."""
-
-    if "expires_at" not in rec or rec.get("expires_at") in (None, ""):
-        return False  # legacy approval rows had no expiry field
-    try:
-        return float(rec["expires_at"]) <= float(now if now is not None else time.time())
-    except (TypeError, ValueError):
-        return True
+    return ApprovalService.expired(rec, now=now)
 
 
 def _read_pending(client) -> list[dict[str, Any]]:
-    p = client.config.paths.approvals_pending
-    if not p.exists():
-        return []
-    now = time.time()
-    return [
-        rec
-        for rec in jsonl.read_all(p)
-        if (not rec.get("state") or rec["state"] == "pending")
-        and not _expired(rec, now=now)
-    ]
+    return _service(client).pending()
 
 
 def _find_record(client, approval_id: str) -> dict[str, Any] | None:
-    rows = _read_pending(client)
-    for rec in rows:
-        if rec.get("approval_id") == approval_id or rec.get("id") == approval_id:
-            return rec
-    return None
+    return _service(client).find(approval_id)
 
 
 def _row_to_prompt(rec: dict[str, Any]) -> ApprovalPrompt:
@@ -199,60 +131,13 @@ def _move_record(
     resolver_actor_id: str = "",
     operator_authorized: bool = False,
 ) -> dict[str, Any] | None:
-    """Move a pending approval to the approved/rejected JSONL.
-
-    This is the canonical transition shared by HTTP, ACP, and gateway
-    approval surfaces.
-    """
-    paths = client.config.paths
-    src = paths.approvals_pending
-    if not src.exists():
-        return None
-    with _approval_file_lock(src):
-        rows = jsonl.read_all(src)
-        kept: list[dict[str, Any]] = []
-        moved: dict[str, Any] | None = None
-        for rec in rows:
-            if moved is None and (
-                rec.get("approval_id") == approval_id or rec.get("id") == approval_id
-            ):
-                if _expired(rec):
-                    return None
-                if not _can_resolve(
-                    rec,
-                    resolver_actor_id,
-                    operator_authorized=operator_authorized,
-                ):
-                    return None
-                rec["state"] = state
-                rec["state_ts"] = now_iso()
-                if note:
-                    rec["state_note"] = note
-                if resolver_actor_id:
-                    rec["resolved_by_actor_id"] = str(resolver_actor_id)
-                moved = rec
-                continue
-            kept.append(rec)
-        if moved is None:
-            return None
-        jsonl.write_all(src, kept)
-        dst = (
-            paths.approvals_approved if state == "approved" else paths.approvals_rejected
-        )
-        # Coordinate with the kernel's one-shot consumer, which rewrites the
-        # terminal queue after marking a verdict consumed.
-        with _approval_file_lock(dst):
-            jsonl.append(dst, moved)
-    try:
-        from ..db.repositories import ApprovalRepository
-        from ..db.sqlite import connect
-
-        con = connect(client.config.paths.db)
-        ApprovalRepository(con).set_state(approval_id, state)
-        con.close()
-    except Exception:
-        pass
-    return moved
+    return _service(client).move(
+        approval_id,
+        state=state,
+        note=note,
+        resolver_actor_id=resolver_actor_id,
+        operator_authorized=operator_authorized,
+    )
 
 
 def _retract_approval_cards(client, approval_id: str, *, state: str) -> None:
@@ -334,51 +219,13 @@ def _publish_approval_resolution(
     record: dict[str, Any] | None = None,
     config: Any = None,
 ) -> dict[str, Any] | None:
-    resume_result: dict[str, Any] | None = None
-    try:
-        from ..agent.streaming import get_default_bus
-
-        rec = record or {}
-        get_default_bus().publish(
-            "approval.resolved",
-            approval_id=approval_id,
-            state=state,
-            resolver_actor_id=rec.get("resolved_by_actor_id"),
-            approval_kind=rec.get("kind"),
-            session_id=rec.get("session_id"),
-            strategy_id=rec.get("strategy_id"),
-            record=rec,
-        )
-    except Exception:
-        pass
-    # The API server and AgentKernel commonly run as separate processes. In
-    # that deployment the kernel's event-bus subscriber is not present in the
-    # API process, so an approved trade would otherwise only move JSONL rows
-    # and never reach the executor. Resume directly when no subscriber is
-    # registered; the durable claim keeps this safe if both paths race.
-    kind = str((record or {}).get("kind") or "").strip()
-    if str(state or "").lower() == "approved" and config is not None:
-        try:
-            if kind == "trade_intent":
-                from ..trading import approval_resume
-
-                if not getattr(
-                    approval_resume, "_resume_subscriber_registered", False
-                ):
-                    resume_result = approval_resume.resume_approved(
-                        config, approval_id
-                    )
-            elif kind == "wallet_swap":
-                from ..wallet import swap_approval
-
-                resume_result = swap_approval.resume_approved(config, approval_id)
-        except Exception as exc:  # pragma: no cover - callback must still resolve
-            resume_result = {
-                "ok": False,
-                "approval_id": approval_id,
-                "error": f"approval_resume_dispatch_failed:{exc}",
-            }
-    return resume_result
+    if config is None:
+        return None
+    return ApprovalService(config).publish_resolution(
+        approval_id,
+        state=state,
+        record=record,
+    )
 
 
 def _callback(client, payload):

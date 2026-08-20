@@ -30,6 +30,7 @@ __all__ = [
     "ThinkingBlock",
     "ToolUseBlock",
     "ToolResultBlock",
+    "ApprovalRequestBlock",
     "BlockEnvelope",
     "make_block_id",
 ]
@@ -138,6 +139,56 @@ class ToolResultBlock:
             "completed_at": self.completed_at,
             "recovery": self.recovery,
             "compaction": self.compaction,
+        }
+
+
+@dataclass
+class ApprovalRequestBlock:
+    block_id: str = field(default_factory=lambda: make_block_id("approval"))
+    index: int = 0
+    approval_id: str = ""
+    call_id: str = ""
+    skill_id: str = "native"
+    action: str = ""
+    prompt: dict[str, Any] = field(default_factory=dict)
+    record: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+    status: str = "pending"
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ApprovalRequestBlock":
+        return cls(
+            approval_id=str(value.get("approval_id") or ""),
+            call_id=str(value.get("call_id") or ""),
+            skill_id=str(value.get("skill_id") or "native"),
+            action=str(value.get("action") or ""),
+            prompt=(
+                dict(value.get("prompt"))
+                if isinstance(value.get("prompt"), dict)
+                else {}
+            ),
+            record=(
+                dict(value.get("record"))
+                if isinstance(value.get("record"), dict)
+                else {}
+            ),
+            reason=str(value.get("reason") or ""),
+            status=str(value.get("status") or "pending"),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": "approval_request",
+            "block_id": self.block_id,
+            "index": self.index,
+            "approval_id": self.approval_id,
+            "call_id": self.call_id,
+            "skill_id": self.skill_id,
+            "action": self.action,
+            "prompt": dict(self.prompt),
+            "record": dict(self.record),
+            "reason": self.reason,
+            "status": self.status,
         }
 
 

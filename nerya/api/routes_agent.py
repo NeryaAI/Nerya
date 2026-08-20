@@ -10,6 +10,10 @@ from typing import Any
 
 from ..agent.attachments import upload_chat_attachments
 from ..agent.kernel import AgentKernel, AgentTurnResult
+from ..agent.loop_state import (
+    TurnCheckpointResumeError,
+    validate_turn_checkpoint_resume_request,
+)
 from ..agent.recovery import list_open_turns, load_turn_state
 from ..agent.session import (
     SessionStore,
@@ -602,7 +606,33 @@ def routes():
             payload,
         )
         requested_session_id = payload.get("session_id")
-        _user_text = _run_turn_user_text(payload)
+        trigger_payload = (
+            trigger.get("payload")
+            if isinstance(trigger.get("payload"), dict)
+            else {}
+        )
+        try:
+            resume_turn_id, continuation_feedback = (
+                validate_turn_checkpoint_resume_request(
+                    resume_turn_id=payload.get("resume_turn_id"),
+                    continuation_feedback=payload.get("continuation_feedback"),
+                    session_id=requested_session_id,
+                    turn_id=payload.get("turn_id"),
+                    has_attachments=bool(
+                        payload.get("attachments")
+                        or trigger_payload.get("attachments")
+                    ),
+                )
+            )
+        except TurnCheckpointResumeError as exc:
+            response = exc.asdict()
+            response["_status"] = response.pop("status")
+            return response
+        _user_text = (
+            continuation_feedback
+            if resume_turn_id
+            else _run_turn_user_text(payload)
+        )
 
         # Auto-classify the incoming operator/user/channel text against the
         # prompt-guard policy. ``review`` and ``block`` verdicts auto-enqueue
@@ -640,7 +670,11 @@ def routes():
                     }
         except Exception:  # pragma: no cover - defensive, never block on guard error
             _pg = None
-        command_response = _run_turn_command_response(client, payload, _user_text)
+        command_response = (
+            None
+            if resume_turn_id
+            else _run_turn_command_response(client, payload, _user_text)
+        )
         if command_response is not None:
             return command_response
         with _claim_run_turn_session(client, requested_session_id) as claimed:
@@ -680,7 +714,13 @@ def routes():
                         if isinstance(payload.get("evidence_contract"), dict)
                         else None
                     ),
+                    resume_turn_id=resume_turn_id or None,
+                    continuation_feedback=continuation_feedback,
                 )
+            except TurnCheckpointResumeError as exc:
+                response = exc.asdict()
+                response["_status"] = response.pop("status")
+                return response
             except Exception as exc:
                 tb = traceback.format_exc()
                 jsonl.append(client.config.paths.journal("errors"), {
@@ -699,22 +739,23 @@ def routes():
         # Operator profile self-learning capture — propose facts after
         # stable patterns are observed. Never blocks the turn; failures
         # are swallowed.
-        try:
-            from ..agent.profile_capture import observe_turn as _observe_turn
-            _channel_for_capture = (
-                (trigger.get("payload") or {}).get("channel")
-                if isinstance(trigger.get("payload"), dict)
-                else None
-            ) or trigger.get("source") or "chat"
-            _capture = _observe_turn(
-                client,
-                user_text=_user_text or "",
-                channel=str(_channel_for_capture),
-            )
-            if _capture and _capture.get("proposed"):
-                response["profile_capture"] = _capture
-        except Exception:  # pragma: no cover - defensive
-            pass
+        if not resume_turn_id:
+            try:
+                from ..agent.profile_capture import observe_turn as _observe_turn
+                _channel_for_capture = (
+                    (trigger.get("payload") or {}).get("channel")
+                    if isinstance(trigger.get("payload"), dict)
+                    else None
+                ) or trigger.get("source") or "chat"
+                _capture = _observe_turn(
+                    client,
+                    user_text=_user_text or "",
+                    channel=str(_channel_for_capture),
+                )
+                if _capture and _capture.get("proposed"):
+                    response["profile_capture"] = _capture
+            except Exception:  # pragma: no cover - defensive
+                pass
 
         # E2E auto-capture — opt-in via NERYA_E2E_AUTO_CAPTURE_RUN_TURN=1.
         # When enabled, each turn's request/response is captured as a

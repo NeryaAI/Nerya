@@ -5,7 +5,7 @@ Holds three classes of tools:
 1. **Native tools** — workspace primitives registered at startup
    (``read_file``, ``grep``, ``edit_file``, ``run_shell``, ``todo_write``,
    ``skill_index``, ``skill_view``, ``script_inspect``, ``script_run``,
-   ``enter_plan_mode``, ``exit_plan_mode``, ``agent_dispatch``).
+   ``agent_dispatch``).
 
 2. **MCP tools** — discovered at MCP connect time. Carry a server
    namespace prefix (e.g. ``mcp:figma.get_design``) so two servers can

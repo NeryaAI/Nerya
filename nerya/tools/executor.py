@@ -30,7 +30,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 from .permissions import (
     PermissionContext,
@@ -39,6 +39,10 @@ from .permissions import (
     PermissionRequest,
 )
 from .registry import ToolNotFoundError, ToolRegistry
+from .tool_approvals import (
+    ToolApprovalResolution,
+    ToolApprovalResolver,
+)
 from .tool_errors import (
     collect_schema_issues,
     format_schema_validation_error,
@@ -86,17 +90,6 @@ PermissionDeniedHook = Callable[
 this for analytics, transcript breadcrumbs, or to surface a
 dashboard banner — the call already has its denied tool_result by
 the time this runs."""
-
-PermissionPendingHook = Callable[
-    [ToolCall, ToolDescriptor, PermissionDecision], None
-]
-"""Fired when an ASK decision has no resolved operator verdict."""
-
-ApprovalCallback = Callable[
-    [ToolCall, ToolDescriptor, PermissionDecision],
-    Union[bool, "Awaitable[bool]"],
-]
-
 
 # ---------------------------------------------------------------------------
 # Schema validation (lightweight, no jsonschema dep)
@@ -354,24 +347,20 @@ class NativeToolExecutor:
         registry: ToolRegistry,
         permission_engine: PermissionEngine,
         permission_context: PermissionContext,
-        approval_cb: Optional[ApprovalCallback] = None,
+        approval_resolver: Optional[ToolApprovalResolver] = None,
         pre_hooks: Optional[list[PreHook]] = None,
         post_hooks: Optional[list[PostHook]] = None,
         permission_denied_hooks: Optional[list[PermissionDeniedHook]] = None,
-        permission_pending_hooks: Optional[list[PermissionPendingHook]] = None,
         options: Optional[ExecutorOptions] = None,
     ) -> None:
         self.registry = registry
         self.permission_engine = permission_engine
         self.permission_context = permission_context
-        self.approval_cb = approval_cb
+        self.approval_resolver = approval_resolver
         self.pre_hooks: list[PreHook] = list(pre_hooks or [])
         self.post_hooks: list[PostHook] = list(post_hooks or [])
         self.permission_denied_hooks: list[PermissionDeniedHook] = list(
             permission_denied_hooks or []
-        )
-        self.permission_pending_hooks: list[PermissionPendingHook] = list(
-            permission_pending_hooks or []
         )
         self.options = options or ExecutorOptions()
 
@@ -392,11 +381,6 @@ class NativeToolExecutor:
         """
 
         self.permission_denied_hooks.append(hook)
-
-    def add_permission_pending_hook(self, hook: PermissionPendingHook) -> None:
-        """Register an observer that persists an unresolved ASK decision."""
-
-        self.permission_pending_hooks.append(hook)
 
     # ------------------------------------------------------------------ exec
 
@@ -493,8 +477,8 @@ class NativeToolExecutor:
             return denied
 
         if decision.is_ask():
-            approved = self._resolve_approval(call, descriptor, decision)
-            if approved is False:
+            resolution = self._resolve_approval(call, descriptor, decision)
+            if resolution.verdict is False:
                 return ToolResult.from_error(
                     tool_use_id=call.id,
                     name=call.name,
@@ -505,15 +489,20 @@ class NativeToolExecutor:
                         retryable=False,
                     ),
                 )
-            if approved is None:
-                for hook in self.permission_pending_hooks:
-                    try:
-                        hook(call, descriptor, decision)
-                    except Exception:
-                        _LOG.exception(
-                            "permission-pending hook failed for %s", call.name,
-                        )
-                return ToolResult.from_error(
+            if resolution.verdict is None:
+                detail = decision.asdict()
+                recovery_hint: dict[str, Any] = {
+                    "action": "await_approval",
+                    "tool_use_id": call.id,
+                }
+                if resolution.request:
+                    approval_id = str(
+                        resolution.request.get("approval_id") or ""
+                    )
+                    if approval_id:
+                        detail["approval_id"] = approval_id
+                        recovery_hint["approval_id"] = approval_id
+                pending = ToolResult.from_error(
                     tool_use_id=call.id,
                     name=call.name,
                     error=ToolError(
@@ -522,14 +511,16 @@ class NativeToolExecutor:
                             decision.approval_reason
                             or "approval required before this tool can run"
                         ),
-                        detail=decision.asdict(),
+                        detail=detail,
                         retryable=True,
-                        recovery_hint={
-                            "action": "await_approval",
-                            "tool_use_id": call.id,
-                        },
+                        recovery_hint=recovery_hint,
                     ),
                 )
+                if resolution.request:
+                    pending.metadata["approval_request"] = dict(
+                        resolution.request
+                    )
+                return pending
 
         for hook in self.pre_hooks:
             try:
@@ -599,43 +590,19 @@ class NativeToolExecutor:
         call: ToolCall,
         descriptor: ToolDescriptor,
         decision: PermissionDecision,
-    ) -> Optional[bool]:
-        if call.id in self.permission_context.approved_calls:
-            # Compatibility escape hatch for callers that pre-populate the
-            # context. It is deliberately one-shot; durable approvals are
-            # resolved by ``approval_cb`` and must not become an in-memory
-            # reusable grant.
-            self.permission_context.approved_calls.discard(call.id)
-            return True
-        if call.id in self.permission_context.rejected_calls:
-            self.permission_context.rejected_calls.discard(call.id)
-            return False
-        if self.approval_cb is None:
-            return None
+    ) -> ToolApprovalResolution:
+        if self.approval_resolver is None:
+            return ToolApprovalResolution()
         try:
-            verdict = self.approval_cb(call, descriptor, decision)
+            return self.approval_resolver.resolve(call, descriptor, decision)
         except Exception:
-            _LOG.exception("approval callback failed for %s", call.name)
-            return None
-        if inspect.isawaitable(verdict):
-            try:
-                import asyncio
-
-                verdict = asyncio.run(verdict)  # type: ignore[arg-type]
-            except RuntimeError:
-                return None
-        if verdict is True:
-            return True
-        if verdict is False:
-            return False
-        return None
+            _LOG.exception("approval resolver failed for %s", call.name)
+            return ToolApprovalResolution()
 
 
 __all__ = [
-    "ApprovalCallback",
     "ExecutorOptions",
     "NativeToolExecutor",
-    "PermissionPendingHook",
     "PermissionDeniedHook",
     "PostHook",
     "PreHook",

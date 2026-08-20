@@ -14,6 +14,7 @@ from copy import deepcopy
 import pytest
 
 from nerya.agent.kernel import AgentTurnResult
+from nerya.agent.loop_state import TurnCheckpointResumeError
 from nerya.core.config import DEFAULT_CONFIG, Config
 from nerya.core.paths import WorkspacePaths
 from nerya.sdk import agent_api as agent_api_module
@@ -119,6 +120,64 @@ def test_sdk_agent_run_turn_returns_complete_kernel_contract(tmp_path, monkeypat
     assert result["execution_state"] == {"version": 1}
     assert result["final_report"] == {"summary": "done"}
     assert result["attachments"][0]["path"] == "report.md"
+
+
+def test_sdk_agent_run_turn_supports_explicit_checkpoint_continuation(
+    tmp_path,
+    monkeypatch,
+):
+    cfg = _config(tmp_path)
+    captured: dict[str, object] = {}
+    turn = AgentTurnResult(
+        trigger_event_id=None,
+        strategy_id=None,
+        session_id="session-resume",
+        turn_id="turn-resume",
+        decision={"action": "send_message", "text": "continued"},
+        actions=[],
+        tool_trace=[],
+        stopped_reason="end_turn",
+        final_text="continued",
+    )
+
+    class FakeKernel:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_turn(self, **kwargs):
+            captured.update(kwargs)
+            return turn
+
+    monkeypatch.setattr(agent_api_module, "AgentKernel", FakeKernel)
+
+    result = InternalClient.from_config(cfg).agent.run_turn(
+        session_id="session-resume",
+        resume_turn_id="turn-resume",
+        continuation_feedback="include verified evidence",
+    )
+
+    assert result["turn_id"] == "turn-resume"
+    assert captured["session_id"] == "session-resume"
+    assert captured["resume_turn_id"] == "turn-resume"
+    assert captured["continuation_feedback"] == "include verified evidence"
+    assert captured["trigger"] == {
+        "source": "sdk",
+        "kind": "agent.checkpoint_continue",
+        "payload": {},
+    }
+
+
+def test_sdk_agent_run_turn_rejects_partial_checkpoint_request(tmp_path):
+    cfg = _config(tmp_path)
+
+    with pytest.raises(TurnCheckpointResumeError) as exc_info:
+        InternalClient.from_config(cfg).agent.run_turn(
+            session_id="session-resume",
+            resume_turn_id="turn-resume",
+        )
+
+    assert exc_info.value.code == "turn_checkpoint_resume_fields_required"
+    assert exc_info.value.status == 400
 
 
 def test_sdk_messages_api_surface(tmp_path):

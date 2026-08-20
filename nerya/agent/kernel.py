@@ -22,11 +22,8 @@ the model decides which tool to call. The kernel only:
 from __future__ import annotations
 
 import logging
-import hashlib
 import json
 import re
-from contextlib import contextmanager
-import time
 from datetime import timezone
 from dataclasses import asdict as _dataclass_asdict, dataclass, field
 from pathlib import Path
@@ -34,7 +31,7 @@ from typing import Any, Optional
 
 from ..core import jsonl
 from ..core.config import Config
-from ..core.ids import turn_id as new_turn_id
+from ..core.ids import new_id, turn_id as new_turn_id
 from ..core.time import now, now_iso
 from ..llm.gateway import LLMGateway
 from ..skills.kernel import SkillKernel
@@ -48,6 +45,13 @@ from ..tools import (
     ToolOrchestrator,
     ToolRegistry,
 )
+from ..tools.approval_contracts import is_approval_pending_marker
+from ..tools.approval_runtime import approval_pause_from_block
+from ..tools.tool_approvals import (
+    ToolApprovalCoordinator,
+    ToolApprovalScope,
+    broadcast_tool_approval,
+)
 from ..tools.native.bootstrap import (
     NativeToolDeps,
     build_native_tool_deps,
@@ -57,6 +61,11 @@ from ..tools.native.conversation_files import render_conversation_file_policy
 from .file_state import FileStateCache
 from .hooks import HookContext, HookRegistry, _bind_config, _unbind_config
 from .loop import LoopConfig, LoopOutcome, WorkspaceNativeAgentLoop
+from .loop_state import (
+    TurnCheckpoint,
+    TurnCheckpointResumeError,
+    validate_turn_checkpoint_resume_request,
+)
 from .attachments import (
     prepare_user_message,
     public_attachment_blocks_from_envelopes,
@@ -88,16 +97,6 @@ from ..evolution.hooks import EvolutionHookBus
 
 
 _LOG = logging.getLogger(__name__)
-
-
-@contextmanager
-def _approval_file_lock(path: Path):
-    """Serialize approval JSONL read/modify/write across processes."""
-
-    lock_path = Path(path).with_name(f".{Path(path).name}.lock")
-    # jsonl already owns the portable POSIX/Windows file-lock details.
-    with jsonl._open_append(lock_path):  # noqa: SLF001
-        yield
 
 
 def _close_db_quietly(con: Any) -> None:
@@ -184,52 +183,6 @@ def _tool_result_payload_obj(raw: Any) -> dict[str, Any]:
     if start < 0 or end <= start:
         return {}
     return _json_obj(text[start : end + 1])
-
-
-def _captured_domain_approval_from_tool_result_block(
-    block: dict[str, Any],
-) -> tuple[str, dict[str, Any]] | None:
-    """Create a UI approval block for domain-gated tool results."""
-
-    if str(block.get("kind") or "") != "tool_result":
-        return None
-    if not bool(block.get("ok")):
-        return None
-    if str(block.get("action") or "") != "trade_intent_submit":
-        return None
-    data = _tool_result_payload_obj(block.get("result"))
-    if str(data.get("status") or "") != "pending_approval":
-        return None
-    approval_id = str(data.get("approval_id") or "").strip()
-    if not approval_id:
-        return None
-    call_id = str(block.get("call_id") or "")
-    prompt = {
-        "approval_id": approval_id,
-        "text": "Trade approval is required before this order can execute.",
-        "buttons": [],
-    }
-    record = {
-        "approval_id": approval_id,
-        "kind": "trade_intent",
-        "status": "pending",
-        "state": "pending",
-        "intent": data.get("intent"),
-        "risk": data.get("risk_decision"),
-    }
-    return (
-        call_id,
-        {
-            "kind": "approval_request",
-            "approval_id": approval_id,
-            "call_id": call_id,
-            "skill_id": str(block.get("skill_id") or "native"),
-            "action": "trade_intent_submit",
-            "prompt": prompt,
-            "record": record,
-            "reason": "trade approval required",
-        },
-    )
 
 
 def _compact_resume_value(value: Any, *, limit: int = 900) -> str:
@@ -361,15 +314,10 @@ def _tool_trace_from_event_rows(events: list[dict[str, Any]]) -> list[dict[str, 
 def _trace_paused_for_approval(tool_trace: Any) -> bool:
     if not isinstance(tool_trace, list):
         return False
-    approval_markers = {"permission_pending", "approval_pending"}
     for item in tool_trace:
         if not isinstance(item, dict):
             continue
-        kind = str(item.get("error_kind") or "").strip().lower()
-        if kind in approval_markers:
-            return True
-        error_text = str(item.get("error") or "").lower()
-        if any(marker in error_text for marker in approval_markers):
+        if approval_pause_from_block(item) is not None:
             return True
     return False
 
@@ -383,7 +331,7 @@ def _turn_paused_for_approval(turn: dict[str, Any]) -> bool:
         or turn.get("stop_reason")
         or ""
     ).strip().lower()
-    if reason in {"approval_pending", "permission_pending"}:
+    if is_approval_pending_marker(reason):
         return True
     trace = turn.get("tool_trace")
     if _trace_paused_for_approval(trace):
@@ -953,12 +901,6 @@ def _render_permission_mode_block(mode: PermissionMode) -> str:
             "secrets, live trading, or a tool/domain result that returns an "
             "approval or permission blocker."
         )
-    if mode is PermissionMode.PLAN:
-        return (
-            "Permission mode: plan.\n"
-            "Stay in planning/research mode unless execution is explicitly "
-            "approved."
-        )
     return (
         "Permission mode: default.\n"
         "Use the permission engine and domain gates as the approval boundary."
@@ -1145,6 +1087,9 @@ def _loop_config_from_config(
             else None
         ),
         llm_retry_attempts=int(config.get("agent.native.llm_retry_attempts", 10)),
+        max_extra_llm_attempts_per_turn=int(
+            config.get("agent.native.max_extra_llm_attempts_per_turn", 8)
+        ),
         llm_retry_base_delay=float(config.get("agent.native.llm_retry_base_delay", 3.0)),
         llm_retry_max_delay=float(config.get("agent.native.llm_retry_max_delay", 60.0)),
         llm_retry_full_jitter=bool(config.get("agent.native.llm_retry_full_jitter", True)),
@@ -1288,6 +1233,275 @@ class AgentKernel:
         except Exception:
             return False
 
+    def _claim_session_turn_checkpoint(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+    ) -> tuple[TurnCheckpoint, str]:
+        """Atomically claim and validate one private durable checkpoint."""
+
+        from ..db.repositories import AgentSessionRepository
+        from ..db.sqlite import connect
+
+        sid = str(session_id or "").strip()
+        tid = str(turn_id or "").strip()
+        claim_id = new_id("tcp")
+        con = connect(self.config.paths.db)
+        try:
+            repo = AgentSessionRepository(con)
+            claimed = repo.claim_turn_checkpoint(
+                sid,
+                turn_id=tid,
+                claim_id=claim_id,
+            )
+            if claimed is None:
+                existing = repo.peek_turn_checkpoint(sid)
+                if existing is None:
+                    raise TurnCheckpointResumeError(
+                        "turn_checkpoint_not_found",
+                        f"No durable checkpoint exists for session {sid!r}.",
+                        status=404,
+                    )
+                existing_turn_id = str(existing.get("turn_id") or "").strip()
+                if existing_turn_id != tid:
+                    raise TurnCheckpointResumeError(
+                        "turn_checkpoint_turn_mismatch",
+                        (
+                            "The durable checkpoint belongs to "
+                            f"{existing_turn_id!r}, not {tid!r}."
+                        ),
+                    )
+                if str(existing.get("claim_id") or "").strip():
+                    raise TurnCheckpointResumeError(
+                        "turn_checkpoint_already_claimed",
+                        "The durable checkpoint is already being resumed.",
+                    )
+                raise TurnCheckpointResumeError(
+                    "turn_checkpoint_claim_conflict",
+                    "The durable checkpoint could not be claimed atomically.",
+                )
+
+            raw_checkpoint = claimed.get("checkpoint")
+            if not isinstance(raw_checkpoint, dict):
+                raise TurnCheckpointResumeError(
+                    "turn_checkpoint_invalid",
+                    "The durable checkpoint payload is invalid.",
+                )
+            try:
+                checkpoint = TurnCheckpoint.from_dict(raw_checkpoint)
+            except Exception as exc:
+                raise TurnCheckpointResumeError(
+                    "turn_checkpoint_invalid",
+                    f"The durable checkpoint could not be decoded: {exc}",
+                ) from exc
+            if checkpoint.turn_id != tid:
+                raise TurnCheckpointResumeError(
+                    "turn_checkpoint_turn_mismatch",
+                    (
+                        "The decoded checkpoint belongs to "
+                        f"{checkpoint.turn_id!r}, not {tid!r}."
+                    ),
+                )
+            if not checkpoint.resumable:
+                raise TurnCheckpointResumeError(
+                    checkpoint.resume_block_reason
+                    or "turn_checkpoint_not_resumable",
+                    "The durable checkpoint is not resumable.",
+                )
+            return checkpoint, claim_id
+        finally:
+            con.close()
+
+    def _begin_session_turn_checkpoint_lease(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+    ) -> str:
+        """Acquire the cross-process lease for one ordinary session turn."""
+
+        from ..db.repositories import AgentSessionRepository
+        from ..db.sqlite import connect
+
+        sid = str(session_id or "").strip()
+        tid = str(turn_id or "").strip()
+        max_wall = float(
+            self.config.get("agent.native.max_wall_seconds", 300.0)
+            or 300.0
+        )
+        default_ttl = max(3600.0, max_wall * 2.0)
+        try:
+            claim_ttl = float(
+                self.config.get(
+                    "agent.native.turn_checkpoint_claim_ttl_seconds",
+                    default_ttl,
+                )
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            claim_ttl = default_ttl
+        stale_before = (
+            now().timestamp() - claim_ttl
+            if claim_ttl > 0
+            else None
+        )
+        claim_id = new_id("tcl")
+        placeholder = TurnCheckpoint(
+            turn_id=tid,
+            resumable=False,
+            resume_block_reason="turn_in_progress",
+        )
+        con = connect(self.config.paths.db)
+        try:
+            repo = AgentSessionRepository(con)
+            leased = repo.begin_turn_checkpoint_lease(
+                sid,
+                turn_id=tid,
+                claim_id=claim_id,
+                checkpoint=placeholder.asdict(),
+                stale_before=stale_before,
+            )
+            if leased is not None:
+                return claim_id
+            current = repo.peek_turn_checkpoint(sid)
+            if current is not None and str(
+                current.get("claim_id") or ""
+            ).strip():
+                raise TurnCheckpointResumeError(
+                    "turn_checkpoint_already_claimed",
+                    (
+                        "Another worker already owns the active turn for "
+                        f"session {sid!r}."
+                    ),
+                )
+            raise TurnCheckpointResumeError(
+                "turn_checkpoint_lease_conflict",
+                f"The active turn lease for session {sid!r} could not be acquired.",
+            )
+        finally:
+            con.close()
+
+    def _release_session_turn_checkpoint_lease(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        claim_id: str,
+    ) -> None:
+        """Release one owned turn lease when no resumable state was produced."""
+
+        from ..db.repositories import AgentSessionRepository
+        from ..db.sqlite import connect
+
+        con = connect(self.config.paths.db)
+        try:
+            cleared = AgentSessionRepository(con).clear_turn_checkpoint(
+                session_id,
+                turn_id=turn_id,
+                claim_id=claim_id,
+            )
+            if not cleared:
+                raise TurnCheckpointResumeError(
+                    "turn_checkpoint_clear_conflict",
+                    "The owned session turn lease could not be released.",
+                )
+        finally:
+            con.close()
+
+    def _persist_session_turn_checkpoint(
+        self,
+        *,
+        session_id: str,
+        checkpoint: TurnCheckpoint,
+        expected_claim_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Save or clear one checkpoint and expose only a safe status summary."""
+
+        from ..db.repositories import AgentSessionRepository
+        from ..db.sqlite import connect
+
+        sid = str(session_id or "").strip()
+        claim_id = str(expected_claim_id or "").strip() or None
+        max_bytes = int(
+            self.config.get(
+                "agent.native.turn_checkpoint_max_bytes",
+                2 * 1024 * 1024,
+            )
+        )
+        con = connect(self.config.paths.db)
+        try:
+            repo = AgentSessionRepository(con)
+            if not checkpoint.resumable:
+                cleared = repo.clear_turn_checkpoint(
+                    sid,
+                    turn_id=checkpoint.turn_id,
+                    claim_id=claim_id,
+                )
+                if claim_id and not cleared:
+                    raise TurnCheckpointResumeError(
+                        "turn_checkpoint_clear_conflict",
+                        "The claimed durable checkpoint could not be cleared.",
+                    )
+                return {
+                    "state": "cleared",
+                    "persisted": False,
+                    "resumable": False,
+                    "turn_id": checkpoint.turn_id,
+                    "resume_count": checkpoint.resume_count,
+                    "reason": checkpoint.resume_block_reason or "not_resumable",
+                }
+
+            try:
+                saved = repo.save_turn_checkpoint(
+                    sid,
+                    turn_id=checkpoint.turn_id,
+                    checkpoint=checkpoint.asdict(),
+                    expected_claim_id=claim_id,
+                    max_bytes=max_bytes,
+                )
+            except ValueError as exc:
+                if claim_id:
+                    raise TurnCheckpointResumeError(
+                        "turn_checkpoint_too_large",
+                        str(exc),
+                        status=413,
+                    ) from exc
+                _LOG.warning("durable turn checkpoint not saved: %s", exc)
+                return {
+                    "state": "not_saved",
+                    "persisted": False,
+                    "resumable": True,
+                    "turn_id": checkpoint.turn_id,
+                    "resume_count": checkpoint.resume_count,
+                    "reason": "size_limit",
+                }
+            if not saved:
+                if claim_id:
+                    raise TurnCheckpointResumeError(
+                        "turn_checkpoint_save_conflict",
+                        "The claimed durable checkpoint could not be replaced.",
+                    )
+                return {
+                    "state": "not_saved",
+                    "persisted": False,
+                    "resumable": True,
+                    "turn_id": checkpoint.turn_id,
+                    "resume_count": checkpoint.resume_count,
+                    "reason": "write_conflict",
+                }
+            row = repo.peek_turn_checkpoint(sid) or {}
+            return {
+                "state": "saved",
+                "persisted": True,
+                "resumable": True,
+                "turn_id": checkpoint.turn_id,
+                "resume_count": checkpoint.resume_count,
+                "bytes": int(row.get("checkpoint_bytes") or 0),
+            }
+        finally:
+            con.close()
+
     # ------------------------------------------------------------- run_turn
 
     def run_turn(
@@ -1300,6 +1514,8 @@ class AgentKernel:
         attached_skills: Optional[list[str]] = None,
         cancel_token: Any = None,
         evidence_contract: Optional[dict[str, Any]] = None,
+        resume_turn_id: Optional[str] = None,
+        continuation_feedback: str = "",
     ) -> AgentTurnResult:
         """Run a single agent turn for ``trigger``.
 
@@ -1311,15 +1527,50 @@ class AgentKernel:
         """
 
         trigger_event_id = trigger.get("id") or trigger.get("event_id")
-        turn_id = str(turn_id or "").strip() or new_turn_id()
+        requested_turn_id = str(turn_id or "").strip()
+        trigger_payload = (
+            trigger.get("payload")
+            if isinstance(trigger.get("payload"), dict)
+            else {}
+        )
+        resume_id, resume_feedback = validate_turn_checkpoint_resume_request(
+            resume_turn_id=resume_turn_id,
+            continuation_feedback=continuation_feedback,
+            session_id=session_id,
+            turn_id=requested_turn_id,
+            has_attachments=bool(trigger_payload.get("attachments")),
+        )
+        turn_id = resume_id or requested_turn_id or new_turn_id()
 
         session_existed = False
+        turn_checkpoint: TurnCheckpoint | None = None
+        checkpoint_claim_id: str | None = None
         if session_id:
             session_existed = self._session_exists_anywhere(session_id)
+            if resume_id and not session_existed:
+                raise TurnCheckpointResumeError(
+                    "turn_checkpoint_session_not_found",
+                    f"Session {session_id!r} does not exist.",
+                    status=404,
+                )
             strategy_id = self._bind_session_strategy(
                 session_id=session_id,
                 requested_strategy_id=strategy_id,
             )
+            if resume_id:
+                turn_checkpoint, checkpoint_claim_id = (
+                    self._claim_session_turn_checkpoint(
+                        session_id=session_id,
+                        turn_id=resume_id,
+                    )
+                )
+            else:
+                # Keep one private row leased for the whole session turn. This
+                # closes the cross-process gap left by clear-then-run designs.
+                checkpoint_claim_id = self._begin_session_turn_checkpoint_lease(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                )
 
         if cancel_token is not None:
             try:
@@ -1358,7 +1609,11 @@ class AgentKernel:
                 trigger_event_id=trigger_event_id,
                 strategy_id=strategy_id,
                 session_id=session_id,
-                data={"trigger": trigger},
+                data={
+                    "trigger": trigger,
+                    "checkpoint_continue": bool(turn_checkpoint),
+                    "resume_turn_id": resume_id or None,
+                },
             ),
         )
 
@@ -1375,6 +1630,9 @@ class AgentKernel:
                 steer_inbox=steer_inbox,
                 session_existed=session_existed,
                 evidence_contract=evidence_contract,
+                turn_checkpoint=turn_checkpoint,
+                continuation_feedback=resume_feedback,
+                checkpoint_claim_id=checkpoint_claim_id,
             )
             return result
         except Exception as exc:
@@ -1481,6 +1739,9 @@ class AgentKernel:
         steer_inbox: Any = None,
         session_existed: bool = False,
         evidence_contract: Optional[dict[str, Any]] = None,
+        turn_checkpoint: TurnCheckpoint | None = None,
+        continuation_feedback: str = "",
+        checkpoint_claim_id: str | None = None,
     ) -> AgentTurnResult:
         deps = self._ensure_registry()
         strategy_order_auto_approve = _strategy_triggered_order_turn(
@@ -1501,26 +1762,30 @@ class AgentKernel:
             else {}
         )
         approval_continue = _is_approval_continue_trigger(trigger, user_payload)
+        checkpoint_continue = turn_checkpoint is not None
+        if checkpoint_continue and approval_continue:
+            raise TurnCheckpointResumeError(
+                "turn_checkpoint_approval_resume_conflict",
+                (
+                    "Durable checkpoint continuation cannot be combined with "
+                    "approval_continue."
+                ),
+                status=400,
+            )
+        if checkpoint_continue and not session_id:
+            raise TurnCheckpointResumeError(
+                "turn_checkpoint_session_required",
+                "Durable checkpoint continuation requires session_id.",
+                status=400,
+            )
+        if checkpoint_continue and not str(checkpoint_claim_id or "").strip():
+            raise TurnCheckpointResumeError(
+                "turn_checkpoint_claim_required",
+                "Durable checkpoint continuation requires an atomic claim.",
+            )
         continuation_approval_id = str(
             user_payload.get("approval_id") or ""
         ).strip()
-        # In ``auto`` / ``yolo`` permission modes we run unattended, so any
-        # plan the previous turn submitted via ``exit_plan_mode`` would
-        # otherwise sit forever waiting for an operator that isn't there.
-        # Auto-resolve pending plans the same way an operator would tap
-        # "Approve" in the dashboard — the next turn's ``plan_status``
-        # poll then returns ``approved`` and the model proceeds with
-        # mutating tools. Plan mode itself stays on until the model exits
-        # it explicitly so progress remains in the audit trail.
-        if self.permission_mode in (PermissionMode.AUTO, PermissionMode.YOLO):
-            if (
-                deps.task_state.pending_plan_id is not None
-                and deps.task_state.plan_decision is None
-            ):
-                try:
-                    deps.task_state.resolve_plan(approved=True)
-                except Exception:
-                    _LOG.debug("auto plan approval failed", exc_info=True)
         todos_before = deps.task_state.snapshot_todos()
         gw = LLMGateway(self.config)
 
@@ -1536,51 +1801,23 @@ class AgentKernel:
             )
         engine = PermissionEngine()
 
-        def _approval_cb(call, _descriptor, _decision):
-            if not approval_continue or not continuation_approval_id:
-                return None
-            return self._lookup_tool_permission_decision(
+        approval_coordinator = ToolApprovalCoordinator(
+            self.config,
+            scope=ToolApprovalScope.from_values(
                 session_id=session_id,
                 strategy_id=strategy_id,
-                requester_actor_id=deps.active_actor_id,
-                approval_id=continuation_approval_id,
-                tool_name=str(getattr(call, "name", "") or ""),
-                payload=dict(getattr(call, "arguments", {}) or {}),
-                call_id=str(getattr(call, "id", "") or ""),
-            )
-
-        def _persist_child_permission_request(call, _descriptor, decision):
-            if not str(getattr(call, "caller", "") or "").startswith("subagent:"):
-                return
-            self._record_tool_permission_request(
-                turn_id=turn_id,
-                session_id=session_id,
-                strategy_id=strategy_id,
-                requester_actor_id=deps.active_actor_id,
-                block={
-                    "kind": "tool_result",
-                    "call_id": str(getattr(call, "id", "") or ""),
-                    "skill_id": "native",
-                    "action": str(getattr(call, "name", "") or ""),
-                    "payload": dict(getattr(call, "arguments", {}) or {}),
-                    "caller": str(getattr(call, "caller", "") or ""),
-                    "ok": False,
-                    "error": (
-                        decision.approval_reason
-                        or decision.reason
-                        or "approval required before this tool can run"
-                    ),
-                    "error_kind": "permission_pending",
-                },
-                broadcast=False,
-            )
-
+                actor_id=deps.active_actor_id,
+            ),
+            turn_id=turn_id,
+            resume_approval_id=(
+                continuation_approval_id if approval_continue else ""
+            ),
+        )
         executor = NativeToolExecutor(
             registry=self._registry,
             permission_engine=engine,
             permission_context=permission_context,
-            approval_cb=_approval_cb,
-            permission_pending_hooks=[_persist_child_permission_request],
+            approval_resolver=approval_coordinator,
         )
         # Child runtimes spawned by native delegation must share this exact
         # per-turn executor so schema, permission, approval, risk, and hooks
@@ -1685,19 +1922,23 @@ class AgentKernel:
             ),
             compact_preservation_cb=_compact_preservation_cb,
         )
+        checkpoint_for_run = turn_checkpoint
+        if checkpoint_continue and turn_checkpoint is not None:
+            checkpoint_payload = turn_checkpoint.asdict()
+            checkpoint_payload["deadline_epoch"] = (
+                now().timestamp() + float(loop_config.max_wall_seconds)
+                if loop_config.max_wall_seconds
+                and float(loop_config.max_wall_seconds) > 0
+                else None
+            )
+            checkpoint_for_run = TurnCheckpoint.from_dict(checkpoint_payload)
         bus = get_default_bus()
         tool_payloads: dict[str, dict[str, Any]] = {}
         captured_activity_events: list[dict[str, Any]] = []
         captured_team_run_ids: set[str] = set()
         captured_team_call_ids: set[str] = set()
         activity_min_seq = bus.latest_seq()
-        # Captured during ``permission_pending`` tool results so we can
-        # splice an ``approval_request`` block into ``outcome.blocks``
-        # after the loop returns. Without this, the approval card lives
-        # only on the in-memory event bus and disappears the moment the
-        # dashboard switches from the live stream to ``msg.turn.blocks``
-        # (page reload, session re-open, follow-up turn).
-        captured_approvals: list[tuple[str, dict[str, Any]]] = []
+        published_approval_ids: set[str] = set()
         # Captured during ``tool_result`` events that surface a
         # ``chart_blocks`` field. We splice these into ``outcome.blocks``
         # after the loop returns so the dashboard renders the chart in
@@ -1944,92 +2185,28 @@ class AgentKernel:
                                 )
                             except Exception:
                                 _LOG.debug("chart.block publish failed", exc_info=True)
-                    domain_approval = _captured_domain_approval_from_tool_result_block(block)
-                    if domain_approval is not None:
-                        call_id, approval_block = domain_approval
-                        approval_id = str(approval_block.get("approval_id") or "")
+                elif kind == "approval_request":
+                    approval_id = str(block.get("approval_id") or "").strip()
+                    if approval_id and approval_id not in published_approval_ids:
+                        published_approval_ids.add(approval_id)
+                        record = (
+                            dict(block.get("record"))
+                            if isinstance(block.get("record"), dict)
+                            else {}
+                        )
                         bus.publish(
                             "approval.request",
                             approval_id=approval_id,
-                            prompt=approval_block.get("prompt"),
-                            record=approval_block.get("record"),
-                            tool_call_id=call_id,
-                            call_id=call_id,
-                            skill_id=str(block.get("skill_id") or "native"),
-                            action=str(block.get("action") or ""),
-                            reason=approval_block.get("reason"),
-                            **common,
-                        )
-                        captured_approvals.append((call_id, approval_block))
-                    # surface approval requests as their
-                    # own event so the dashboard can render an
-                    # "approval pending" pill instead of just a
-                    # ``tool.complete`` carrying ``error_kind=
-                    # permission_pending``. Same shape, dedicated
-                    # channel: subscribers can listen for either.
-                    if (
-                        not bool(block.get("ok"))
-                        and str(block.get("error_kind") or "") == "permission_pending"
-                    ):
-                        approval_anchor_call_id = str(block.get("call_id") or "")
-                        recovery = (
-                            block.get("recovery")
-                            if isinstance(block.get("recovery"), dict)
-                            else {}
-                        )
-                        if recovery.get("nested_permission_pending") is True:
-                            block = {
-                                **block,
-                                "call_id": str(
-                                    recovery.get("nested_tool_use_id")
-                                    or block.get("call_id")
-                                    or ""
-                                ),
-                                "skill_id": "native",
-                                "action": str(
-                                    recovery.get("tool_name")
-                                    or block.get("action")
-                                    or ""
-                                ),
-                                "payload": dict(recovery.get("payload") or {}),
-                                "caller": str(recovery.get("caller") or ""),
-                            }
-                        call_id = str(block.get("call_id") or "")
-                        if call_id and not block.get("payload"):
-                            block = {
-                                **block,
-                                "payload": tool_payloads.get(call_id) or {},
-                            }
-                        approval_payload = self._record_tool_permission_request(
-                            turn_id=turn_id,
-                            session_id=session_id,
-                            strategy_id=strategy_id,
-                            block=block,
-                            requester_actor_id=deps.active_actor_id,
-                        )
-                        bus.publish(
-                            "approval.request",
-                            **approval_payload,
+                            prompt=block.get("prompt"),
+                            record=record,
                             tool_call_id=str(block.get("call_id") or ""),
                             call_id=str(block.get("call_id") or ""),
                             skill_id=str(block.get("skill_id") or "native"),
                             action=str(block.get("action") or ""),
-                            reason=block.get("error"),
+                            reason=block.get("reason"),
                             **common,
                         )
-                        captured_approvals.append((
-                            approval_anchor_call_id or call_id,
-                            {
-                                "kind": "approval_request",
-                                "approval_id": str(approval_payload.get("approval_id") or ""),
-                                "call_id": call_id,
-                                "skill_id": str(block.get("skill_id") or "native"),
-                                "action": str(block.get("action") or ""),
-                                "prompt": approval_payload.get("prompt"),
-                                "record": approval_payload.get("record"),
-                                "reason": block.get("error"),
-                            },
-                        ))
+                        broadcast_tool_approval(self.config, record)
                 elif kind == "system":
                     sub_kind = str(block.get("kind_detail") or block.get("event_kind") or "")
                     if sub_kind in {"compact.start", "compact.complete"}:
@@ -2053,14 +2230,25 @@ class AgentKernel:
             event_sink=_event_sink,
         )
 
-        user_text = _user_text_from_trigger(trigger)
+        request_user_text = _user_text_from_trigger(trigger)
+        user_text = (
+            str(continuation_feedback or "").strip()
+            if checkpoint_continue
+            else request_user_text
+        )
         model_user_text = _model_user_text_for_trigger(user_text, trigger)
+        checkpoint_original_user_text = (
+            str((turn_checkpoint.control or {}).get("original_user_text") or "")
+            if turn_checkpoint is not None
+            else ""
+        )
 
-        # Replay prior user/assistant exchanges before rendering the
-        # system prompt so approval continuations inherit the interrupted
-        # task's market/scope/language instead of the control message.
+        # Checkpoint continuation already owns the exact transcript. Loading
+        # session history again would duplicate the interrupted turn and reset
+        # its compaction/tool ordering. Approval continuation remains a separate
+        # compatibility path rebuilt from persisted chat history.
         prior_messages: list[dict[str, Any]] = []
-        if session_existed and session_id:
+        if not checkpoint_continue and session_existed and session_id:
             try:
                 prior_messages = self._load_prior_chat_messages(
                     session_id=session_id,
@@ -2072,7 +2260,9 @@ class AgentKernel:
                     "prior chat history load failed", exc_info=True,
                 )
         system_user_text = (
-            _latest_prior_user_text(prior_messages)
+            checkpoint_original_user_text
+            if checkpoint_continue and checkpoint_original_user_text
+            else _latest_prior_user_text(prior_messages)
             if approval_continue
             else user_text
         )
@@ -2095,23 +2285,36 @@ class AgentKernel:
             provider_override=self.model_provider,
             model_override=self.model_id,
         )
-        prepared_attachments = prepare_user_message(
-            model_user_text,
-            user_payload.get("attachments"),
-            paths=self.config.paths,
-            turn_id=turn_id,
-            provider=effective_provider,
-            model_metadata=effective_meta,
-        )
-        user_message = prepared_attachments.message
-        user_attachment_meta = prepared_attachments.attachments
+        if checkpoint_continue:
+            if user_payload.get("attachments"):
+                raise TurnCheckpointResumeError(
+                    "turn_checkpoint_attachments_not_supported",
+                    (
+                        "Durable continuation cannot attach new files; start "
+                        "a new turn to introduce additional attachments."
+                    ),
+                    status=400,
+                )
+            user_message = user_text
+            user_attachment_meta: list[dict[str, Any]] = []
+        else:
+            prepared_attachments = prepare_user_message(
+                model_user_text,
+                user_payload.get("attachments"),
+                paths=self.config.paths,
+                turn_id=turn_id,
+                provider=effective_provider,
+                model_metadata=effective_meta,
+            )
+            user_message = prepared_attachments.message
+            user_attachment_meta = prepared_attachments.attachments
 
         # Persist the actual prompt text (truncated) so subsequent
         # turns in the same session can replay the conversation back
         # into the loop transcript instead of starting from a blank
         # slate every time.
         _USER_TEXT_JOURNAL_CAP = 16_000
-        if session_id and not approval_continue:
+        if session_id and not approval_continue and not checkpoint_continue:
             self._record_session_db_message(
                 session_id=session_id,
                 strategy_id=strategy_id,
@@ -2137,6 +2340,8 @@ class AgentKernel:
                 "user_text": user_text[:_USER_TEXT_JOURNAL_CAP],
                 "user_text_truncated": len(user_text) > _USER_TEXT_JOURNAL_CAP,
                 "attachments": user_attachment_meta,
+                "checkpoint_continue": checkpoint_continue,
+                "resume_turn_id": turn_id if checkpoint_continue else None,
             },
         )
 
@@ -2173,10 +2378,14 @@ class AgentKernel:
             outcome: LoopOutcome = loop.run(
                 system=system_prompt,
                 user_message=user_message,
-                prior_messages=prior_messages or None,
+                prior_messages=(None if checkpoint_continue else prior_messages or None),
                 cancel_token=cancel_token,
                 steer_inbox=steer_inbox,
                 turn_id=turn_id,
+                checkpoint=checkpoint_for_run,
+                continuation_feedback=(
+                    continuation_feedback if checkpoint_continue else ""
+                ),
             )
         finally:
             if _unsubscribe_activity_events is not None:
@@ -2209,21 +2418,60 @@ class AgentKernel:
         except Exception:
             _LOG.debug("phase_o push failed", exc_info=True)
 
-        # Persist any permission_pending approvals as native blocks so
-        # the dashboard's ``msg.turn.blocks`` view (post-turn, after
-        # reload, in re-imported sessions) keeps showing the approval
-        # card. Without this the card is only present in the in-memory
-        # event bus and vanishes the moment the chat re-renders from
-        # ``turn.blocks``.
-        if captured_approvals:
-            self._splice_approval_blocks(outcome, captured_approvals, turn_id)
-
         # Splice captured chart blocks alongside their tool_results so
         # the chat (post-turn, after reload) keeps showing the K-line
         # the agent generated. Same shape as the approval splice — we
         # just mirror that pattern keyed on ``call_id``.
         if captured_charts:
             self._splice_chart_blocks(outcome, captured_charts, turn_id)
+            if outcome.checkpoint is not None:
+                checkpoint_payload = outcome.checkpoint.asdict()
+                checkpoint_payload["blocks"] = [
+                    envelope.as_dict() for envelope in outcome.blocks
+                ]
+                checkpoint_payload["seq"] = max(
+                    (envelope.seq for envelope in outcome.blocks),
+                    default=int(checkpoint_payload.get("seq") or 0),
+                )
+                outcome.checkpoint = TurnCheckpoint.from_dict(
+                    checkpoint_payload
+                )
+
+        checkpoint_status: dict[str, Any] = {
+            "state": "not_persisted",
+            "persisted": False,
+            "resumable": bool(
+                outcome.checkpoint and outcome.checkpoint.resumable
+            ),
+            "turn_id": turn_id,
+            "reason": "session_required",
+        }
+        if session_id:
+            if outcome.checkpoint is None:
+                if checkpoint_continue:
+                    raise TurnCheckpointResumeError(
+                        "turn_checkpoint_missing",
+                        "The resumed turn did not return a checkpoint.",
+                    )
+                if checkpoint_claim_id:
+                    self._release_session_turn_checkpoint_lease(
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        claim_id=checkpoint_claim_id,
+                    )
+                checkpoint_status = {
+                    "state": "released",
+                    "persisted": False,
+                    "resumable": False,
+                    "turn_id": turn_id,
+                    "reason": "loop_checkpoint_missing",
+                }
+            else:
+                checkpoint_status = self._persist_session_turn_checkpoint(
+                    session_id=session_id,
+                    checkpoint=outcome.checkpoint,
+                    expected_claim_id=checkpoint_claim_id,
+                )
 
         actions, tool_trace = self._project_blocks(outcome)
 
@@ -2265,6 +2513,8 @@ class AgentKernel:
                 "compaction_count": outcome.compaction_count,
                 "reactive_compaction_count": outcome.reactive_compaction_count,
                 "steer_messages": outcome.steer_messages,
+                "checkpoint_continue": checkpoint_continue,
+                "checkpoint": checkpoint_status,
             },
         )
 
@@ -2380,6 +2630,18 @@ class AgentKernel:
                 aborted=outcome.aborted,
                 abort_reason=outcome.abort_reason or None,
             )
+            execution_state_payload["checkpoint_continue"] = checkpoint_continue
+            execution_state_payload["checkpoint"] = dict(checkpoint_status)
+            execution_state_payload["attempt_budget"] = {
+                "limit": int(outcome.extra_llm_attempt_limit or 0),
+                "used": int(outcome.extra_llm_attempts or 0),
+                "remaining": max(
+                    0,
+                    int(outcome.extra_llm_attempt_limit or 0)
+                    - int(outcome.extra_llm_attempts or 0),
+                ),
+                "by_reason": dict(outcome.extra_llm_attempts_by_reason),
+            }
             jsonl.append(
                 self.config.paths.journal("agent"),
                 {
@@ -2465,6 +2727,15 @@ class AgentKernel:
                 "aborted": outcome.aborted,
                 "abort_reason": outcome.abort_reason or None,
                 "transition_reason": effective_transition_reason,
+                "checkpoint_continue": checkpoint_continue,
+                "checkpoint": dict(checkpoint_status),
+                "extra_llm_attempts": int(outcome.extra_llm_attempts or 0),
+                "extra_llm_attempt_limit": int(
+                    outcome.extra_llm_attempt_limit or 0
+                ),
+                "extra_llm_attempts_by_reason": dict(
+                    outcome.extra_llm_attempts_by_reason
+                ),
             },
             steps=block_dicts,
             blocks=block_dicts,
@@ -2639,233 +2910,6 @@ class AgentKernel:
         except Exception:
             _LOG.debug("failed turn persistence failed", exc_info=True)
 
-    @staticmethod
-    def _tool_permission_fingerprint(tool_name: str, payload: dict[str, Any]) -> str:
-        try:
-            body = json.dumps(
-                {"tool": tool_name, "payload": payload or {}},
-                sort_keys=True,
-                ensure_ascii=False,
-                default=str,
-            )
-        except Exception:
-            body = f"{tool_name}:{payload}"
-        return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-    def _iter_approval_rows(self, path) -> list[dict[str, Any]]:
-        if not path.exists():
-            return []
-        rows: list[dict[str, Any]] = []
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            return rows
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-        return rows
-
-    @staticmethod
-    def _approval_expired(row: dict[str, Any], *, now_ts: float | None = None) -> bool:
-        """Treat missing or malformed expiry as expired (fail closed)."""
-
-        raw = row.get("expires_at")
-        try:
-            return not raw or float(raw) <= float(now_ts or time.time())
-        except (TypeError, ValueError):
-            return True
-
-    @staticmethod
-    def _approval_scope_matches(
-        row: dict[str, Any],
-        parent: dict[str, Any] | None,
-        *,
-        session_id: str | None,
-        strategy_id: str | None,
-        requester_actor_id: str | None,
-    ) -> bool:
-        parent = parent or {}
-
-        def _value(name: str, legacy: str = "") -> str:
-            value = row.get(name) or row.get(legacy) or parent.get(name) or parent.get(legacy)
-            return str(value or "").strip()
-
-        # A tool approval is scoped to the exact requester session. A missing
-        # scope is not a wildcard: old/unscoped rows fail closed.
-        stored_session = _value("requester_session_id", "session_id")
-        requested_session = str(session_id or "").strip()
-        if not stored_session or not requested_session or stored_session != requested_session:
-            return False
-
-        stored_strategy = _value("requester_strategy_id", "strategy_id")
-        requested_strategy = str(strategy_id or "").strip()
-        if stored_strategy != requested_strategy:
-            return False
-
-        stored_actor = _value("requester_actor_id")
-        requested_actor = str(requester_actor_id or "").strip()
-        # Actor scope is mandatory for native approvals; an absent actor is
-        # never a wildcard that can be resumed by another requester.
-        if not stored_actor or not requested_actor or stored_actor != requested_actor:
-            return False
-        return True
-
-    def _lookup_tool_permission_decision(
-        self,
-        *,
-        session_id: str | None,
-        tool_name: str,
-        payload: dict[str, Any],
-        call_id: str,
-        strategy_id: str | None = None,
-        requester_actor_id: str | None = None,
-        approval_id: str | None = None,
-    ) -> bool | None:
-        """Return a persisted operator verdict for this exact tool call.
-
-        Approval cards are resolved out-of-band by the dashboard or a
-        gateway. The next time the model retries the same tool with the
-        same arguments, this callback lets the executor proceed without
-        requiring an in-memory UI callback.
-        """
-
-        fp = self._tool_permission_fingerprint(tool_name, payload)
-        requested_approval_id = str(approval_id or "").strip()
-        now_ts = time.time()
-
-        def _row_id(row: dict[str, Any]) -> str:
-            return str(row.get("approval_id") or row.get("id") or "").strip()
-
-        def _tool_payload(row: dict[str, Any], parent: dict[str, Any] | None = None) -> dict[str, Any]:
-            parent = parent or {}
-            raw_payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-            tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
-            payload_tool = (
-                raw_payload.get("tool")
-                if isinstance(raw_payload.get("tool"), dict)
-                else {}
-            )
-            parent_tool = parent.get("tool") if isinstance(parent.get("tool"), dict) else {}
-            return {**parent_tool, **payload_tool, **tool}
-
-        def _item_matches(
-            row: dict[str, Any],
-            parent: dict[str, Any] | None = None,
-        ) -> bool:
-            if parent is not None and self._approval_expired(parent, now_ts=now_ts):
-                return False
-            expiry_row = row if row.get("expires_at") is not None else (parent or row)
-            if self._approval_expired(expiry_row, now_ts=now_ts):
-                return False
-            if not self._approval_scope_matches(
-                row,
-                parent,
-                session_id=session_id,
-                strategy_id=strategy_id,
-                requester_actor_id=requester_actor_id,
-            ):
-                return False
-            tool = _tool_payload(row, parent)
-            parent_action = parent.get("action") if isinstance(parent, dict) else ""
-            row_tool_name = str(
-                tool.get("name")
-                or row.get("action")
-                or parent_action
-            ).strip()
-            if row_tool_name != str(tool_name or "").strip():
-                return False
-            # Never authorize by call id alone. Providers can regenerate or
-            # accidentally reuse ids; the canonical argument fingerprint is
-            # the actual approval binding.
-            row_fp = str(row.get("fingerprint") or tool.get("fingerprint") or "").strip()
-            return bool(row_fp and row_fp == fp)
-
-        def _items(row: dict[str, Any]) -> list[dict[str, Any]]:
-            payload_obj = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-            raw = row.get("items") or payload_obj.get("items") or []
-            return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
-
-        def _match_index(row: dict[str, Any]) -> int | None:
-            kind = str(row.get("kind") or "")
-            if requested_approval_id and _row_id(row) != requested_approval_id:
-                return None
-            if kind == "tool_permission":
-                return 0 if _item_matches(row) else None
-            if kind != "tool_permission_batch":
-                return None
-            for index, item in enumerate(_items(row)):
-                if item.get("consumed_at"):
-                    continue
-                if _item_matches(item, row):
-                    return index
-            return None
-
-        paths = self.config.paths
-        # A rejection is terminal for the exact scoped call, but an expired
-        # or unscoped historical row must never act as a wildcard.
-        rejected_path = paths.approvals_rejected
-        with _approval_file_lock(rejected_path):
-            rejected_rows = self._iter_approval_rows(rejected_path)
-            for row in reversed(rejected_rows):
-                index = _match_index(row)
-                if index is None:
-                    continue
-                items = _items(row)
-                target = (
-                    items[index]
-                    if str(row.get("kind") or "") == "tool_permission_batch"
-                    else row
-                )
-                if target.get("consumed_at"):
-                    continue
-                consumed_at = now_iso()
-                target["consumed_at"] = consumed_at
-                target["consumed_call_id"] = str(call_id or "")
-                if target is not row:
-                    row["items"] = items
-                    payload_obj = (
-                        row.get("payload")
-                        if isinstance(row.get("payload"), dict)
-                        else {}
-                    )
-                    row["payload"] = {**payload_obj, "items": items}
-                    if all(item.get("consumed_at") for item in items):
-                        row["consumed_at"] = consumed_at
-                        row["consumed_call_id"] = str(call_id or "")
-                jsonl.write_all(rejected_path, rejected_rows)
-                return False
-
-        approved_path = paths.approvals_approved
-        with _approval_file_lock(approved_path):
-            approved_rows = self._iter_approval_rows(approved_path)
-            for row in reversed(approved_rows):
-                index = _match_index(row)
-                if index is None:
-                    continue
-                items = _items(row)
-                target = items[index] if str(row.get("kind") or "") == "tool_permission_batch" else row
-                consumed_at = target.get("consumed_at")
-                if consumed_at:
-                    continue
-                consumed_at = now_iso()
-                target["consumed_at"] = consumed_at
-                target["consumed_call_id"] = str(call_id or "")
-                if target is not row:
-                    row["items"] = items
-                    payload_obj = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-                    row["payload"] = {**payload_obj, "items": items}
-                    if all(item.get("consumed_at") for item in items):
-                        row["consumed_at"] = consumed_at
-                        row["consumed_call_id"] = str(call_id or "")
-                jsonl.write_all(approved_path, approved_rows)
-                return True
-        return None
 
     def _record_session_db_message(
         self,
@@ -3135,356 +3179,6 @@ class AgentKernel:
                 _close_db_quietly(locals().get("con"))
         except Exception:
             _LOG.debug("auto session title failed", exc_info=True)
-
-    def _record_tool_permission_request(
-        self,
-        *,
-        turn_id: str,
-        session_id: str | None,
-        strategy_id: str | None,
-        block: dict[str, Any],
-        requester_actor_id: str | None = None,
-        broadcast: bool = True,
-    ) -> dict[str, Any]:
-        """Persist a tool permission prompt in the shared approval queue.
-
-        Multiple permission-pending tool calls in the same agent turn are
-        represented by one batch approval. The dashboard can then show one
-        chronological card, while the persisted verdict still resolves each
-        individual tool call by call id or fingerprint on the continuation
-        turn.
-        """
-
-        call_id = str(block.get("call_id") or block.get("tool_use_id") or "")
-        safe_call_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", call_id)[:80]
-        safe_turn_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", turn_id or "")[:80]
-        paths = self.config.paths
-        created_at = time.time()
-        try:
-            expires_s = max(
-                0.0,
-                float(self.config.get("approvals.expire_seconds", 600) or 600),
-            )
-        except (TypeError, ValueError):
-            expires_s = 600.0
-        expires_at = created_at + expires_s
-        requester_actor = str(
-            requester_actor_id or block.get("requester_actor_id") or ""
-        ).strip()
-        requester_session = str(
-            block.get("requester_session_id") or session_id or ""
-        ).strip()
-        requester_strategy = str(
-            block.get("requester_strategy_id") or strategy_id or ""
-        ).strip()
-        requester_caller = str(block.get("caller") or "").strip()
-        scope_hash = hashlib.sha256(
-            json.dumps(
-                [requester_session, requester_strategy, requester_actor],
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()[:12]
-        aid = (
-            f"tool_batch_{safe_turn_id or safe_call_id or 'pending'}_{scope_hash}"
-        )
-
-        reason = str(block.get("error") or "approval required before this tool can run")
-        action = str(block.get("action") or "")
-        skill_id = str(block.get("skill_id") or "native")
-        tool_payload = dict(block.get("payload") or {})
-        fingerprint = self._tool_permission_fingerprint(action, tool_payload)
-        item_payload = {
-            "tool": {
-                "name": action,
-                "skill_id": skill_id,
-                "call_id": call_id,
-                "fingerprint": fingerprint,
-            },
-            "risk": {
-                "reasons": [reason],
-            },
-            "arguments": tool_payload,
-        }
-        item = {
-            "approval_id": f"tool_{safe_call_id or fingerprint[:12]}",
-            "id": f"tool_{safe_call_id or fingerprint[:12]}",
-            "kind": "tool_permission",
-            "state": "pending",
-            "turn_id": turn_id,
-            "session_id": session_id,
-            "strategy_id": strategy_id,
-            "requester_actor_id": requester_actor,
-            "requester_session_id": requester_session,
-            "requester_strategy_id": requester_strategy,
-            "requester_caller": requester_caller,
-            "expires_at": expires_at,
-            "tool_use_id": call_id,
-            "tool": item_payload["tool"],
-            "reason": reason,
-            "fingerprint": fingerprint,
-            "payload": item_payload,
-        }
-
-        def _same_scope(row: dict[str, Any]) -> bool:
-            def _value(name: str, legacy: str = "") -> str:
-                return str(row.get(name) or row.get(legacy) or "").strip()
-
-            return (
-                _value("requester_session_id", "session_id") == requester_session
-                and _value("requester_strategy_id", "strategy_id")
-                == requester_strategy
-                and _value("requester_actor_id") == requester_actor
-            )
-
-        def _item_matches(row: dict[str, Any]) -> bool:
-            if not _same_scope(row):
-                return False
-            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-            tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
-            payload_tool = payload.get("tool") if isinstance(payload.get("tool"), dict) else {}
-            merged_tool = {**payload_tool, **tool}
-            row_call_id = str(
-                row.get("tool_use_id") or merged_tool.get("call_id") or ""
-            )
-            if call_id and row_call_id:
-                return row_call_id == call_id
-            row_fingerprint = str(
-                row.get("fingerprint") or merged_tool.get("fingerprint") or ""
-            )
-            return bool(row_fingerprint and row_fingerprint == fingerprint)
-
-        def _row_has_item(row: dict[str, Any]) -> bool:
-            kind = str(row.get("kind") or "")
-            if kind == "tool_permission":
-                return _item_matches(row)
-            if kind != "tool_permission_batch" or not _same_scope(row):
-                return False
-            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-            items = row.get("items") or payload.get("items") or []
-            return any(_item_matches(x) for x in items if isinstance(x, dict))
-
-        def _existing_terminal(path) -> dict[str, Any] | None:
-            with _approval_file_lock(path):
-                rows = self._iter_approval_rows(path)
-            for rec in reversed(rows):
-                if self._approval_expired(rec):
-                    continue
-                if not _row_has_item(rec):
-                    continue
-                payload_obj = (
-                    rec.get("payload")
-                    if isinstance(rec.get("payload"), dict)
-                    else {}
-                )
-                raw_items = rec.get("items") or payload_obj.get("items") or []
-                matching = (
-                    [
-                        row
-                        for row in raw_items
-                        if isinstance(row, dict) and _item_matches(row)
-                    ]
-                    if isinstance(raw_items, list)
-                    else []
-                )
-                if matching:
-                    if all(row.get("consumed_at") for row in matching):
-                        continue
-                elif rec.get("consumed_at"):
-                    continue
-                return rec
-            return None
-
-        def _merge_record(record: dict[str, Any]) -> dict[str, Any]:
-            existing_items = record.get("items")
-            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-            if not isinstance(existing_items, list):
-                existing_items = payload.get("items") if isinstance(payload.get("items"), list) else []
-            items = [x for x in existing_items if isinstance(x, dict)]
-            if not any(_item_matches(x) for x in items):
-                items.append(item)
-            def _tool_for(x: dict[str, Any]) -> dict[str, Any]:
-                tool = x.get("tool")
-                return tool if isinstance(tool, dict) else {}
-
-            reasons: list[str] = []
-            for x in items:
-                text = str(x.get("reason") or "")
-                if text and text not in reasons:
-                    reasons.append(text)
-            tool_use_ids = [
-                str(x.get("tool_use_id") or _tool_for(x).get("call_id") or "")
-                for x in items
-            ]
-            tool_use_ids = [x for x in dict.fromkeys(tool_use_ids) if x]
-            fingerprints = [
-                str(x.get("fingerprint") or _tool_for(x).get("fingerprint") or "")
-                for x in items
-            ]
-            fingerprints = [x for x in dict.fromkeys(fingerprints) if x]
-            first_tool = items[0].get("tool") if items and isinstance(items[0].get("tool"), dict) else {}
-            record = {
-                **record,
-                "approval_id": aid,
-                "id": aid,
-                "kind": "tool_permission_batch",
-                "state": str(record.get("state") or "pending"),
-                "updated_at": time.time(),
-                "updated_at_iso": now_iso(),
-                "turn_id": turn_id,
-                "session_id": session_id,
-                "strategy_id": strategy_id,
-                "requester_actor_id": (
-                    str(record.get("requester_actor_id") or requester_actor)
-                ),
-                "requester_session_id": (
-                    str(record.get("requester_session_id") or requester_session)
-                ),
-                "requester_strategy_id": (
-                    str(record.get("requester_strategy_id") or requester_strategy)
-                ),
-                "requester_caller": (
-                    str(record.get("requester_caller") or requester_caller)
-                ),
-                "expires_at": float(record.get("expires_at") or expires_at),
-                "tool_use_ids": tool_use_ids,
-                "fingerprints": fingerprints,
-                "tool": first_tool,
-                "reason": (
-                    f"{len(items)} tool calls require permission"
-                    if len(items) != 1
-                    else reasons[0] if reasons else reason
-                ),
-                "items": items,
-                "payload": {
-                    "kind": "tool_permission_batch",
-                    "items": items,
-                    "risk": {"reasons": reasons},
-                },
-            }
-            record.setdefault("created_at", created_at)
-            record.setdefault("created_at_iso", now_iso())
-            return record
-
-        terminal = (
-            _existing_terminal(paths.approvals_approved)
-            or _existing_terminal(paths.approvals_rejected)
-        )
-        if terminal is not None:
-            record = terminal
-        else:
-            record: dict[str, Any] | None = None
-            pending = paths.approvals_pending
-            pending.parent.mkdir(parents=True, exist_ok=True)
-            with _approval_file_lock(pending):
-                pending_rows = self._iter_approval_rows(pending)
-                for index, rec in enumerate(pending_rows):
-                    if (
-                        record is None
-                        and (
-                            (
-                                (
-                                    rec.get("approval_id") == aid
-                                    or rec.get("id") == aid
-                                )
-                                and _same_scope(rec)
-                            )
-                            or _row_has_item(rec)
-                        )
-                    ):
-                        record = _merge_record(rec)
-                        pending_rows[index] = record
-                        break
-                if record is None:
-                    record = _merge_record({
-                        "approval_id": aid,
-                        "id": aid,
-                        "kind": "tool_permission_batch",
-                        "state": "pending",
-                        "created_at": created_at,
-                        "created_at_iso": now_iso(),
-                        "turn_id": turn_id,
-                        "session_id": session_id,
-                        "strategy_id": strategy_id,
-                        "items": [],
-                    })
-                    pending_rows.append(record)
-                jsonl.write_all(pending, pending_rows)
-            if broadcast:
-                try:
-                    from ..trading.approval import _broadcast_approval
-
-                    _broadcast_approval(self.config, record)
-                except Exception:
-                    pass
-        try:
-            from ..messaging.approval_prompts import build_prompt
-
-            prompt = build_prompt(record).as_dict()
-        except Exception:
-            prompt = {"approval_id": aid, "text": reason, "buttons": []}
-        return {
-            "approval_id": aid,
-            "record": record,
-            "prompt": prompt,
-        }
-
-    @staticmethod
-    def _splice_approval_blocks(
-        outcome: LoopOutcome,
-        captured: list[tuple[str, dict[str, Any]]],
-        turn_id: str,
-    ) -> None:
-        """Insert ``approval_request`` block envelopes into the outcome.
-
-        Each captured entry pairs a ``call_id`` with the block payload
-        the dashboard's ``ApprovalRequestCard`` expects. We splice the
-        envelope right after the matching ``tool_result`` so the chat
-        renders the card adjacent to the call that triggered it; if the
-        tool_result can't be located we append at the end as a fallback.
-        """
-
-        if not captured or not outcome.blocks:
-            return
-
-        # Avoid duplicating an envelope when the loop is re-entered for
-        # the same turn (defensive — current loop builds outcome.blocks
-        # fresh each run).
-        existing_ids = {
-            str((env.block or {}).get("approval_id") or "")
-            for env in outcome.blocks
-            if (env.block or {}).get("kind") == "approval_request"
-        }
-
-        message_id = outcome.blocks[-1].message_id if outcome.blocks else turn_id
-        next_seq = max((env.seq for env in outcome.blocks), default=0) + 1
-
-        for call_id, block in captured:
-            approval_id = str(block.get("approval_id") or "")
-            if approval_id and approval_id in existing_ids:
-                continue
-            envelope = BlockEnvelope(
-                seq=next_seq,
-                turn_id=turn_id,
-                message_id=message_id,
-                role="tool",
-                block=dict(block),
-            )
-            next_seq += 1
-            insert_at: int | None = None
-            for idx in range(len(outcome.blocks) - 1, -1, -1):
-                candidate = outcome.blocks[idx].block or {}
-                if (
-                    candidate.get("kind") == "tool_result"
-                    and str(candidate.get("call_id") or "") == call_id
-                ):
-                    insert_at = idx + 1
-                    break
-            if insert_at is None:
-                outcome.blocks.append(envelope)
-            else:
-                outcome.blocks.insert(insert_at, envelope)
-            if approval_id:
-                existing_ids.add(approval_id)
 
     @staticmethod
     def _splice_chart_blocks(

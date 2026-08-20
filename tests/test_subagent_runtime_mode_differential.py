@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from nerya.agent.runtime import GateDecision
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
 from nerya.harness.cancellation import CancelToken
@@ -51,6 +52,7 @@ class _DualProtocolGateway:
         self._native = deque(native)
         self.legacy_prompts: list[str] = []
         self.native_tool_names: list[list[str]] = []
+        self.native_messages: list[list[dict[str, Any]]] = []
 
     def call(self, **kwargs: Any) -> LLMCall:
         self.legacy_prompts.append(str(kwargs["prompt"]))
@@ -68,6 +70,7 @@ class _DualProtocolGateway:
         )
 
     def call_messages(self, **kwargs: Any) -> MessagesResponse:
+        self.native_messages.append(list(kwargs.get("messages") or []))
         self.native_tool_names.append([
             str(tool.get("name") or "") for tool in kwargs.get("tools") or []
         ])
@@ -422,6 +425,60 @@ def test_native_child_matches_legacy_tool_allowlist(tmp_path: Path):
     assert len(_records(native, "rejected_actions")) == 1
     assert _records(native, "rejected_actions")[0]["skill"] == "blocked_probe"
     assert _records(native, "rejected_actions")[0]["error_kind"] == "permission_denied"
+
+
+def test_native_child_completion_gate_resumes_from_root_checkpoint(
+    tmp_path: Path,
+) -> None:
+    gateway = _DualProtocolGateway(
+        legacy=[],
+        native=[
+            _final_reply({"done": True, "summary": "draft"}),
+            _final_reply({"done": True, "summary": "evidence-backed"}),
+        ],
+    )
+    runtime, _executor = _runtime(tmp_path, gateway, [])
+
+    class _ContinueOnceGate:
+        max_rounds = 2
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def evaluate(self, _snapshot):  # noqa: ANN001
+            self.calls += 1
+            if self.calls == 1:
+                return GateDecision.continue_("include verified evidence")
+            return GateDecision.complete(reason="evidence_present")
+
+    result = runtime.run(
+        _spec(tmp_path),
+        trigger_event_id="event-1",
+        payload={"task": "produce a verified report"},
+        session_id="session-1",
+        turn_id="turn-native-continuation",
+        runtime_mode="native",
+        completion_gate=_ContinueOnceGate(),
+    )
+
+    assert result["output"]["summary"] == "evidence-backed"
+    assert result["completion_status"] == "complete"
+    assert result["completion_rounds"] == 2
+    assert result["completion"]["reason"] == "evidence_present"
+    assert result["metrics"]["iterations"] == 2
+    assert "_turn_checkpoint" not in result
+    assert len(gateway.native_messages) == 2
+
+    continuation_messages = [
+        message
+        for message in gateway.native_messages[1]
+        if isinstance(message, dict)
+        and message.get("role") == "user"
+        and "[completion gate continuation]" in str(message.get("content") or "")
+    ]
+    assert len(continuation_messages) == 1
+    assert "include verified evidence" in continuation_messages[0]["content"]
+    assert continuation_messages[0]["pinned"] is True
 
 
 def test_native_child_enforces_tool_budget_within_one_provider_batch(tmp_path: Path):

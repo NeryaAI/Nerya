@@ -108,7 +108,6 @@ def _tool_failure_signals(
             row.get("ok") is False
             or bool(row.get("error"))
             or "error_kind" in row
-            or "permission_pending" in blob
         )
         if not looks_like_tool or not failed:
             continue

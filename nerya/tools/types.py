@@ -409,7 +409,6 @@ class ContextModifier:
     * ``edit_file`` invalidates the cache for the path it just changed.
     * ``todo_write`` updates the session-level todo state.
     * ``run_shell`` records a command artifact.
-    * ``enter_plan_mode`` flips the session ``plan_mode`` flag.
     * a tool may return ``hide_in_recompact=True`` so micro-compact
       eagerly drops its output.
 
@@ -420,7 +419,7 @@ class ContextModifier:
 
     kind: str
     """One of ``file_read`` | ``file_mutate`` | ``todo_update`` |
-    ``plan_mode`` | ``artifact_index`` | ``invoked_skill`` |
+    ``artifact_index`` | ``invoked_skill`` |
     ``hide_in_recompact`` | ``permission_decision`` | ``custom``."""
 
     path: Optional[str] = None
@@ -464,22 +463,58 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     """Free-form telemetry: stdout bytes, file size, line count, etc."""
 
+    semantic_success: Optional[bool] = None
+    """Producer-declared progress semantics.
+
+    ``None`` keeps the compatibility path where the loop infers success from
+    common JSON fields. A concrete boolean is authoritative and prevents the
+    loop from guessing domain semantics from status/error-shaped payloads.
+    """
+
+    result_protocol: str = ""
+    """Stable producer-owned protocol identifier for post-tool handling.
+
+    This is an explicit extension contract, not an intent classification. The
+    loop may dispatch a registered result policy for this identifier without
+    knowing the concrete tool name that produced it.
+    """
+
     # ----- factories -----
 
     @classmethod
-    def from_text(cls, *, tool_use_id: str, name: str, text: str) -> "ToolResult":
+    def from_text(
+        cls,
+        *,
+        tool_use_id: str,
+        name: str,
+        text: str,
+        semantic_success: Optional[bool] = None,
+        result_protocol: str = "",
+    ) -> "ToolResult":
         return cls(
             tool_use_id=tool_use_id,
             name=name,
             content=[ToolResultPart.text_part(text)],
+            semantic_success=semantic_success,
+            result_protocol=str(result_protocol or ""),
         )
 
     @classmethod
-    def from_json(cls, *, tool_use_id: str, name: str, data: Any) -> "ToolResult":
+    def from_json(
+        cls,
+        *,
+        tool_use_id: str,
+        name: str,
+        data: Any,
+        semantic_success: Optional[bool] = None,
+        result_protocol: str = "",
+    ) -> "ToolResult":
         return cls(
             tool_use_id=tool_use_id,
             name=name,
             content=[ToolResultPart.json_part(data)],
+            semantic_success=semantic_success,
+            result_protocol=str(result_protocol or ""),
         )
 
     @classmethod
@@ -501,7 +536,7 @@ class ToolResult:
     # ----- helpers -----
 
     def asdict(self) -> dict[str, Any]:
-        return {
+        out = {
             "type": "tool_result",
             "tool_use_id": self.tool_use_id,
             "name": self.name,
@@ -513,6 +548,11 @@ class ToolResult:
             "context_modifiers": [m.asdict() for m in self.context_modifiers],
             "metadata": dict(self.metadata),
         }
+        if self.semantic_success is not None:
+            out["semantic_success"] = bool(self.semantic_success)
+        if self.result_protocol:
+            out["result_protocol"] = str(self.result_protocol)
+        return out
 
     def text(self) -> str:
         """Concatenate ``content`` text parts (best-effort)."""

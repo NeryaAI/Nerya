@@ -38,7 +38,6 @@ from ...core.redaction import redact_dict
 from ...core.time import now_iso
 from ...core.truth import (
     degraded_envelope,
-    live_envelope,
     mock_envelope,
     resolve_allow_mock,
 )
@@ -863,6 +862,49 @@ def kill_switch_set_handler(call: ToolCall, *, config: Config) -> ToolResult:
     )
 
 
+def _trade_result(call: ToolCall, envelope: dict[str, Any]) -> ToolResult:
+    result = ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data=envelope,
+    )
+    if str(envelope.get("status") or "") != "pending_approval":
+        return result
+    approval_id = str(envelope.get("approval_id") or "").strip()
+    if not approval_id:
+        return result
+    record = {
+        "approval_id": approval_id,
+        "kind": "trade_intent",
+        "state": "pending",
+        "status": "pending",
+        "intent": envelope.get("intent") or {},
+        "risk": envelope.get("risk_decision") or {},
+    }
+    try:
+        from ...messaging.approval_prompts import build_prompt
+
+        prompt = build_prompt(record).as_dict()
+    except Exception:
+        prompt = {
+            "approval_id": approval_id,
+            "text": "Trade approval is required before this order can execute.",
+            "buttons": [],
+        }
+    result.metadata["approval_request"] = {
+        "kind": "approval_request",
+        "approval_id": approval_id,
+        "call_id": str(call.id or ""),
+        "skill_id": "native",
+        "action": str(call.name or "trade_intent_submit"),
+        "prompt": prompt,
+        "record": record,
+        "reason": "trade approval required",
+        "status": "pending",
+    }
+    return result
+
+
 def trade_intent_submit_handler(
     call: ToolCall,
     *,
@@ -974,9 +1016,7 @@ def trade_intent_submit_handler(
                 message=f"{type(exc).__name__}: {exc}",
             ),
         )
-    return ToolResult.from_json(
-        tool_use_id=call.id, name=call.name, data=envelope,
-    )
+    return _trade_result(call, envelope)
 
 
 def _submit_with_protection(
@@ -1130,9 +1170,7 @@ def _submit_with_protection(
                 message=f"{type(exc).__name__}: {exc}",
             ),
         )
-    return ToolResult.from_json(
-        tool_use_id=call.id, name=call.name, data=envelope,
-    )
+    return _trade_result(call, envelope)
 
 
 __all__ = [

@@ -5,6 +5,7 @@ import pytest
 from nerya.agent.session import hydrate_db_session_counts
 from nerya.core.paths import WorkspacePaths
 from nerya.db.repositories import AgentSessionRepository
+from nerya.db.migrations import current_version
 from nerya.db.sqlite import connect
 from nerya.api.routes_agent import (
     _augment_turn_backtest_locators,
@@ -183,6 +184,186 @@ def test_tool_events_returns_events_in_insert_order(tmp_path):
         "t1:0:tool_use:call_1",
         "t1:1:tool_result:call_1",
     ]
+    con.close()
+
+
+def test_turn_checkpoint_repository_claim_and_cas(tmp_path):
+    con = connect(tmp_path / "nerya.db")
+    repo = AgentSessionRepository(con)
+    repo.upsert_session(session_id="s1", title="Session")
+
+    assert current_version(con) >= 10
+    columns = {
+        str(row[1])
+        for row in con.execute("PRAGMA table_info(agent_turn_checkpoints)")
+    }
+    assert {
+        "session_id",
+        "turn_id",
+        "checkpoint_json",
+        "checkpoint_bytes",
+        "saved_at",
+        "claim_id",
+        "claimed_at",
+    } <= columns
+
+    checkpoint = {
+        "version": 1,
+        "turn_id": "t1",
+        "message_id": "m1",
+        "transcript": [{"role": "user", "content": "task"}],
+        "resumable": True,
+    }
+    assert repo.save_turn_checkpoint(
+        "s1",
+        turn_id="t1",
+        checkpoint=checkpoint,
+        ts=1000,
+    )
+    stored = repo.peek_turn_checkpoint("s1")
+    assert stored is not None
+    assert stored["turn_id"] == "t1"
+    assert stored["claim_id"] is None
+    assert stored["checkpoint"] == checkpoint
+    assert stored["checkpoint_bytes"] > 0
+
+    claimed = repo.claim_turn_checkpoint(
+        "s1",
+        turn_id="t1",
+        claim_id="claim-1",
+        ts=1001,
+    )
+    assert claimed is not None
+    assert claimed["claim_id"] == "claim-1"
+    assert repo.claim_turn_checkpoint(
+        "s1",
+        turn_id="t1",
+        claim_id="claim-2",
+        ts=1002,
+    ) is None
+
+    updated = {**checkpoint, "resume_count": 1}
+    assert repo.save_turn_checkpoint(
+        "s1",
+        turn_id="t1",
+        checkpoint=updated,
+        expected_claim_id="wrong-claim",
+        ts=1003,
+    ) is False
+    assert repo.save_turn_checkpoint(
+        "s1",
+        turn_id="t1",
+        checkpoint=updated,
+        expected_claim_id="claim-1",
+        ts=1004,
+    ) is True
+    refreshed = repo.peek_turn_checkpoint("s1")
+    assert refreshed is not None
+    assert refreshed["claim_id"] is None
+    assert refreshed["checkpoint"]["resume_count"] == 1
+
+    assert repo.clear_turn_checkpoint("s1", turn_id="other") is False
+    assert repo.clear_turn_checkpoint("s1", turn_id="t1") is True
+    assert repo.peek_turn_checkpoint("s1") is None
+    con.close()
+
+
+def test_turn_checkpoint_repository_session_lease_serializes_turns(tmp_path):
+    con = connect(tmp_path / "nerya.db")
+    repo = AgentSessionRepository(con)
+    repo.upsert_session(session_id="s1", title="Session")
+
+    first = repo.begin_turn_checkpoint_lease(
+        "s1",
+        turn_id="t1",
+        claim_id="lease-1",
+        checkpoint={"version": 1, "turn_id": "t1", "resumable": False},
+        stale_before=0,
+        ts=100,
+    )
+    assert first is not None
+    assert first["turn_id"] == "t1"
+    assert first["claim_id"] == "lease-1"
+
+    # A second worker cannot replace a live lease.
+    assert repo.begin_turn_checkpoint_lease(
+        "s1",
+        turn_id="t2",
+        claim_id="lease-2",
+        checkpoint={"version": 1, "turn_id": "t2", "resumable": False},
+        stale_before=99,
+        ts=101,
+    ) is None
+    current = repo.peek_turn_checkpoint("s1")
+    assert current is not None
+    assert current["turn_id"] == "t1"
+    assert current["claim_id"] == "lease-1"
+
+    # Completing the first turn releases the row; the next turn replaces it
+    # atomically without a clear-then-insert gap.
+    assert repo.save_turn_checkpoint(
+        "s1",
+        turn_id="t1",
+        checkpoint={"version": 1, "turn_id": "t1", "resumable": True},
+        expected_claim_id="lease-1",
+        ts=102,
+    )
+    second = repo.begin_turn_checkpoint_lease(
+        "s1",
+        turn_id="t2",
+        claim_id="lease-2",
+        checkpoint={"version": 1, "turn_id": "t2", "resumable": False},
+        stale_before=99,
+        ts=103,
+    )
+    assert second is not None
+    assert second["turn_id"] == "t2"
+    assert second["claim_id"] == "lease-2"
+
+    # A stale crashed lease may be taken over only at/after the explicit TTL
+    # cutoff; an earlier cutoff remains fail-closed.
+    assert repo.begin_turn_checkpoint_lease(
+        "s1",
+        turn_id="t3",
+        claim_id="lease-3",
+        checkpoint={"version": 1, "turn_id": "t3", "resumable": False},
+        stale_before=102,
+        ts=104,
+    ) is None
+    takeover = repo.begin_turn_checkpoint_lease(
+        "s1",
+        turn_id="t3",
+        claim_id="lease-3",
+        checkpoint={"version": 1, "turn_id": "t3", "resumable": False},
+        stale_before=103,
+        ts=105,
+    )
+    assert takeover is not None
+    assert takeover["turn_id"] == "t3"
+    assert takeover["claim_id"] == "lease-3"
+    con.close()
+
+
+def test_turn_checkpoint_repository_size_limit_and_session_cascade(tmp_path):
+    con = connect(tmp_path / "nerya.db")
+    repo = AgentSessionRepository(con)
+    repo.upsert_session(session_id="s1", title="Session")
+
+    with pytest.raises(ValueError, match="exceeds size limit"):
+        repo.save_turn_checkpoint(
+            "s1",
+            turn_id="t1",
+            checkpoint={"payload": "x" * 100},
+            max_bytes=16,
+        )
+
+    assert repo.save_turn_checkpoint(
+        "s1",
+        turn_id="t1",
+        checkpoint={"version": 1, "turn_id": "t1"},
+    )
+    con.execute("DELETE FROM agent_sessions WHERE session_id='s1'")
+    assert repo.peek_turn_checkpoint("s1") is None
     con.close()
 
 

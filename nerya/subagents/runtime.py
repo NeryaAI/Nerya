@@ -25,23 +25,24 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from ..core.config import Config
-from ..core.errors import (
-    LLMApprovalRequired,
-    LLMError,
-    LLMScriptQuotaExceeded,
-    LLMStructuredOutputError,
-    LLMTaskNotAllowed,
-    LLMTierDenied,
-)
 from ..core.redaction import redact_display_dict, redact_text
 from ..core.time import now_iso
+from ..llm.attempt_budget import (
+    AttemptBudget,
+    DEFAULT_EXTRA_ATTEMPT_LIMIT,
+    attempt_budget_scope,
+)
 from ..llm.gateway import LLMGateway
 from ..llm.route_candidates import configured_models, configured_routes
 from ..security.prompt_injection import wrap_untrusted
 from ..skills.kernel import SkillKernel
+from ..agent.provider_errors import (
+    is_transient_error as _is_transient_subagent_llm_error,
+)
 from ..agent.runtime import (
     AgentRuntime,
     CompletionGateLike,
+    ContinuationUnavailable,
     RuntimeRequest,
     TurnSnapshot,
 )
@@ -168,20 +169,6 @@ def _split_task_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[s
     return task_envelope, data_payload
 
 
-def _append_completion_feedback_payload(
-    payload: dict[str, Any],
-    feedback: str,
-) -> dict[str, Any]:
-    """Copy a child payload before adding caller-gate feedback."""
-
-    clean = str(feedback or "").strip()
-    if not clean:
-        return dict(payload or {})
-    updated = dict(payload or {})
-    updated["__completion_gate_feedback"] = clean
-    return updated
-
-
 def _native_tool_records(
     blocks: list[Any],
     *,
@@ -190,6 +177,8 @@ def _native_tool_records(
     """Project canonical loop blocks onto the existing child metrics shape."""
 
     payload_by_call_id: dict[str, Any] = {}
+    approval_by_call_id: dict[str, dict[str, Any]] = {}
+    normalized_blocks: list[dict[str, Any]] = []
     successful: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for envelope in blocks or []:
@@ -198,13 +187,17 @@ def _native_tool_records(
             block = envelope.get("block", envelope)
         if not isinstance(block, dict):
             continue
+        normalized_blocks.append(block)
         call_id = str(block.get("call_id") or "")
-        if block.get("kind") == "tool_use":
-            if call_id:
-                payload_by_call_id[call_id] = block.get("payload") or {}
-            continue
+        if block.get("kind") == "tool_use" and call_id:
+            payload_by_call_id[call_id] = block.get("payload") or {}
+        elif block.get("kind") == "approval_request" and call_id:
+            approval_by_call_id[call_id] = dict(block)
+
+    for block in normalized_blocks:
         if block.get("kind") != "tool_result":
             continue
+        call_id = str(block.get("call_id") or "")
         tool_name = str(block.get("action") or block.get("skill_id") or "")
         result = _native_result_record(
             block.get("result"),
@@ -228,6 +221,11 @@ def _native_tool_records(
             "error_kind": block.get("error_kind"),
             "recovery_hint": block.get("recovery") or {},
         })
+        approval_request = approval_by_call_id.get(call_id)
+        if approval_request is not None:
+            record["approval_request"] = redact_display_dict(
+                approval_request
+            )
         rejected.append(record)
     return successful, rejected
 
@@ -347,47 +345,6 @@ def _render_subagent_task_assignment(
     return "\n".join(lines).strip()
 
 
-_NON_RETRYABLE_SUBAGENT_LLM_ERRORS: tuple[type[Exception], ...] = (
-    LLMTierDenied,
-    LLMTaskNotAllowed,
-    LLMScriptQuotaExceeded,
-    LLMStructuredOutputError,
-    LLMApprovalRequired,
-)
-
-_TRANSIENT_SUBAGENT_LLM_HINTS: tuple[str, ...] = (
-    "(429)",
-    "(500)",
-    "(502)",
-    "(503)",
-    "(504)",
-    "(522)",
-    "(524)",
-    "(529)",
-    "rate_limit",
-    "rate-limit",
-    "rate limit",
-    "timeout",
-    "timed out",
-    "connection",
-    "network",
-    "unreachable",
-    "temporarily unavailable",
-    "temporarily busy",
-    "server busy",
-    "service unavailable",
-    "bad gateway",
-    "gateway timeout",
-    "remote end closed connection",
-    "服务器短暂繁忙",
-    "短暂繁忙",
-    "稍后重试",
-    "ECONN",
-    "ETIMEDOUT",
-    "EAI_AGAIN",
-)
-
-
 @dataclass
 class _StepRecord:
     kind: str                # "think" | "act" | "observe" | "close"
@@ -488,6 +445,16 @@ class SubAgentRuntime:
             return max(1, int(policy_value))
         configured = self.config.get("agent.subagents.llm_max_attempts", 2)
         return max(1, int(2 if configured is None else configured))
+
+    def _max_extra_llm_attempts(self) -> int:
+        configured = self.config.get(
+            "agent.subagents.max_extra_llm_attempts_per_run",
+            DEFAULT_EXTRA_ATTEMPT_LIMIT,
+        )
+        try:
+            return max(0, int(configured))
+        except (TypeError, ValueError):
+            return DEFAULT_EXTRA_ATTEMPT_LIMIT
 
     def _model_override(self, spec: SubAgentSpec) -> tuple[str | None, str | None]:
         """Return a policy-approved per-role provider/model override.
@@ -596,7 +563,13 @@ class SubAgentRuntime:
 
         selected_runtime = self._resolve_runtime_mode(spec, runtime_mode)
 
-        def _run_once(next_payload: dict[str, Any], wall_seconds: float | None):
+        def _run_once(
+            next_payload: dict[str, Any],
+            wall_seconds: float | None,
+            *,
+            checkpoint: dict[str, Any] | None = None,
+            continuation_feedback: str = "",
+        ) -> dict[str, Any]:
             if selected_runtime == "native":
                 return self._run_native(
                     spec,
@@ -610,6 +583,13 @@ class SubAgentRuntime:
                     delegation_depth=delegation_depth,
                     cancel_token=cancel_token,
                     max_wall_seconds=wall_seconds,
+                    checkpoint=checkpoint,
+                    continuation_feedback=continuation_feedback,
+                )
+            if checkpoint is not None:
+                raise ContinuationUnavailable(
+                    "stateful_continuation_required",
+                    feedback=continuation_feedback,
                 )
             return self._run_legacy(
                 spec,
@@ -639,11 +619,8 @@ class SubAgentRuntime:
                 except (TypeError, ValueError):
                     pass
 
-        if completion_gate is None:
-            return _run_once(payload, max_wall_seconds)
-
-        def _execute(feedback: str) -> dict[str, Any]:
-            remaining = (
+        def _remaining_wall_seconds() -> float | None:
+            return (
                 max(
                     0.0,
                     continuation_wall_seconds
@@ -652,9 +629,35 @@ class SubAgentRuntime:
                 if continuation_wall_seconds is not None
                 else None
             )
+
+        if completion_gate is None:
+            output = _run_once(payload, max_wall_seconds)
+            output.pop("_turn_checkpoint", None)
+            return output
+
+        def _execute(_feedback: str) -> dict[str, Any]:
+            return _run_once(payload, _remaining_wall_seconds())
+
+        def _continue_from(
+            previous: dict[str, Any],
+            feedback: str,
+        ) -> dict[str, Any]:
+            if selected_runtime != "native":
+                raise ContinuationUnavailable(
+                    "stateful_continuation_required",
+                    feedback=feedback,
+                )
+            checkpoint = previous.get("_turn_checkpoint")
+            if not isinstance(checkpoint, dict):
+                raise ContinuationUnavailable(
+                    "stateful_continuation_required",
+                    feedback=feedback,
+                )
             return _run_once(
-                _append_completion_feedback_payload(payload, feedback),
-                remaining,
+                payload,
+                _remaining_wall_seconds(),
+                checkpoint=checkpoint,
+                continuation_feedback=feedback,
             )
 
         def _snapshot(output: dict[str, Any], round_index: int) -> TurnSnapshot:
@@ -720,6 +723,9 @@ class SubAgentRuntime:
             completion_gate,
             execute=_execute,
             snapshot=_snapshot,
+            continue_from=(
+                _continue_from if selected_runtime == "native" else None
+            ),
         )
         output = result.value or {
             "subagent": spec.name,
@@ -728,6 +734,7 @@ class SubAgentRuntime:
             "steps": [],
             "audit": {},
         }
+        output.pop("_turn_checkpoint", None)
         output["completion"] = result.decision.asdict()
         output["completion_rounds"] = result.rounds
         if result.decision.status == "blocked":
@@ -775,6 +782,8 @@ class SubAgentRuntime:
         delegation_depth: int = 0,
         cancel_token: Any = None,
         max_wall_seconds: float | None = None,
+        checkpoint: dict[str, Any] | None = None,
+        continuation_feedback: str = "",
     ) -> dict[str, Any]:
         """Run a child on the canonical messages -> tools loop."""
 
@@ -978,6 +987,7 @@ class SubAgentRuntime:
                 max(1.0, configured_wall / 2),
             ),
             llm_retry_attempts=self._llm_max_attempts(spec),
+            max_extra_llm_attempts_per_turn=self._max_extra_llm_attempts(),
             token_budget=(
                 int(self.config.get("agent.native.token_budget", 0) or 0) or None
             ),
@@ -1046,6 +1056,8 @@ class SubAgentRuntime:
             tool_filter=_tool_filter,
             cancel_token=cancel_token,
             turn_id=turn_id,
+            checkpoint=checkpoint,
+            continuation_feedback=continuation_feedback,
         )
 
         skill_calls, rejected_actions = _native_tool_records(
@@ -1167,6 +1179,16 @@ class SubAgentRuntime:
             "rejected_actions": rejected_actions,
             "uncertainty": uncertainty,
             "evidence": evidence,
+            "attempt_budget": {
+                "limit": int(outcome.extra_llm_attempt_limit or 0),
+                "used": int(outcome.extra_llm_attempts or 0),
+                "remaining": max(
+                    0,
+                    int(outcome.extra_llm_attempt_limit or 0)
+                    - int(outcome.extra_llm_attempts or 0),
+                ),
+                "by_reason": dict(outcome.extra_llm_attempts_by_reason),
+            },
         }
         _publish(
             "subagent.step",
@@ -1221,6 +1243,11 @@ class SubAgentRuntime:
             "metrics": {**contribution_metrics, "iterations": int(outcome.iterations or 0)},
             "steps": [step.asdict() for step in steps],
             "audit": audit,
+            "_turn_checkpoint": (
+                outcome.checkpoint.asdict()
+                if outcome.checkpoint is not None
+                else None
+            ),
         }
 
     def _run_legacy(
@@ -1338,6 +1365,7 @@ class SubAgentRuntime:
 
         max_iter = self._max_iterations(spec)
         max_calls = 0 if explicit_payload_only else self._max_skill_calls(spec)
+        attempt_budget = AttemptBudget(limit=self._max_extra_llm_attempts())
         configured_wall = self._max_wall_seconds(spec)
         if max_wall_seconds is not None:
             try:
@@ -1583,24 +1611,27 @@ class SubAgentRuntime:
             model_provider, model_id = self._model_override(spec)
             for llm_attempt in range(llm_max_attempts):
                 try:
-                    result = self.llm.call(
-                        task="subagent_analysis", caller=f"subagent:{spec.name}",
-                        tier=spec.tier, prompt=prompt,
-                        model_provider=model_provider,
-                        model_id=model_id,
-                        metadata={
-                            "session_id": session_id,
-                            "turn_id": turn_id,
-                            "iteration": i,
-                            "subagent": spec.name,
-                            "strategy_id": strategy_id,
-                            "trigger_event_id": trigger_event_id,
-                            "parent_call_id": parent_call_id,
-                            "context_scope": context_scope,
-                            "team_run_id": task_envelope.get("team_run_id"),
-                            "llm_attempt": llm_attempt + 1,
-                        },
-                    )
+                    with attempt_budget_scope(attempt_budget):
+                        result = self.llm.call(
+                            task="subagent_analysis",
+                            caller=f"subagent:{spec.name}",
+                            tier=spec.tier,
+                            prompt=prompt,
+                            model_provider=model_provider,
+                            model_id=model_id,
+                            metadata={
+                                "session_id": session_id,
+                                "turn_id": turn_id,
+                                "iteration": i,
+                                "subagent": spec.name,
+                                "strategy_id": strategy_id,
+                                "trigger_event_id": trigger_event_id,
+                                "parent_call_id": parent_call_id,
+                                "context_scope": context_scope,
+                                "team_run_id": task_envelope.get("team_run_id"),
+                                "llm_attempt": llm_attempt + 1,
+                            },
+                        )
                     fatal_llm_error = None
                     break
                 except Exception as exc:
@@ -1609,6 +1640,7 @@ class SubAgentRuntime:
                         llm_attempt + 1 < llm_max_attempts
                         and _is_transient_subagent_llm_error(exc)
                         and time.monotonic() - t_start < max_wall_seconds
+                        and attempt_budget.claim("transient_retry")
                     )
                     if can_retry:
                         steps.append(_StepRecord(
@@ -1926,6 +1958,8 @@ class SubAgentRuntime:
             remaining = max_wall_seconds - (time.monotonic() - t_start)
             if remaining < 5.0:
                 return None
+            if not attempt_budget.claim("final_observation_synthesis"):
+                return None
             prompt = self._render_prompt(
                 spec,
                 data_payload,
@@ -1967,30 +2001,31 @@ class SubAgentRuntime:
             t0 = time.monotonic()
             try:
                 model_provider, model_id = self._model_override(spec)
-                result = self.llm.call(
-                    task="subagent_analysis",
-                    caller=f"subagent:{spec.name}",
-                    tier=spec.tier,
-                    prompt=prompt,
-                    model_provider=model_provider,
-                    model_id=model_id,
-                    metadata={
-                        "session_id": session_id,
-                        "turn_id": turn_id,
-                        "iteration": iterations,
-                        "subagent": spec.name,
-                        "strategy_id": strategy_id,
-                        "trigger_event_id": trigger_event_id,
-                        "parent_call_id": parent_call_id,
-                        "context_scope": (
-                            context_scope
-                            if explicit_payload_only
-                            else "subagent_finalization"
-                        ),
-                        "team_run_id": task_envelope.get("team_run_id"),
-                        "finalization_reason": reason,
-                    },
-                )
+                with attempt_budget_scope(attempt_budget):
+                    result = self.llm.call(
+                        task="subagent_analysis",
+                        caller=f"subagent:{spec.name}",
+                        tier=spec.tier,
+                        prompt=prompt,
+                        model_provider=model_provider,
+                        model_id=model_id,
+                        metadata={
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "iteration": iterations,
+                            "subagent": spec.name,
+                            "strategy_id": strategy_id,
+                            "trigger_event_id": trigger_event_id,
+                            "parent_call_id": parent_call_id,
+                            "context_scope": (
+                                context_scope
+                                if explicit_payload_only
+                                else "subagent_finalization"
+                            ),
+                            "team_run_id": task_envelope.get("team_run_id"),
+                            "finalization_reason": reason,
+                        },
+                    )
             except Exception as exc:
                 err_msg = redact_text(f"{type(exc).__name__}: {exc}")[:500]
                 steps.append(_StepRecord(
@@ -2127,6 +2162,7 @@ class SubAgentRuntime:
             "rejected_actions": rejected_actions,
             "uncertainty": uncertainty,
             "evidence": evidence,
+            "attempt_budget": attempt_budget.asdict(),
         }
         _publish(
             "subagent.step",
@@ -2731,6 +2767,7 @@ class SubAgentRuntime:
                 "error_detail": error_detail,
                 "recovery_hint": result_dict.get("recovery_hint") or {},
                 "retryable": result_dict.get("retryable"),
+                "approval_request": result_dict.get("approval_request"),
                 "result": result_dict,
                 "payload": safe_payload,
                 "entry": entry,
@@ -2819,6 +2856,13 @@ def _tool_result_to_dict(result: Any) -> dict[str, Any]:
         out["recovery_hint"] = recovery_hint
     if retryable is not None:
         out["retryable"] = retryable
+    metadata = raw_dict.get("metadata")
+    if isinstance(metadata, dict) and isinstance(
+        metadata.get("approval_request"), dict
+    ):
+        out["approval_request"] = redact_display_dict(
+            metadata["approval_request"]
+        )
     return out
 
 
@@ -2899,15 +2943,6 @@ def _is_unstructured_protocol_miss(parsed: dict[str, Any], raw: str) -> bool:
     if parsed.get("done") is True or parsed.get("final") is True:
         return False
     return set(parsed).issubset({"raw", "text", "message", "content"})
-
-
-def _is_transient_subagent_llm_error(exc: BaseException) -> bool:
-    if not isinstance(exc, LLMError):
-        return False
-    if isinstance(exc, _NON_RETRYABLE_SUBAGENT_LLM_ERRORS):
-        return False
-    msg = str(exc).lower()
-    return any(hint.lower() in msg for hint in _TRANSIENT_SUBAGENT_LLM_HINTS)
 
 
 def _has_substantive_subagent_output(parsed: dict[str, Any]) -> bool:
