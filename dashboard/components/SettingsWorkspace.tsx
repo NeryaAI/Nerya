@@ -3,26 +3,21 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
 import { Advanced, Card, ErrorBanner, PageBody, PageHeader, Pill } from "./Page";
+import { TermTip } from "./TermTip";
 import { GatewayChannelsPanel } from "./GatewayChannelsPanel";
 import { MemoryEvidencePanel } from "./MemoryEvidencePanel";
 import { MemoryProfilePanel } from "./MemoryProfilePanel";
 import { RuntimeFlagsPanel } from "./RuntimeFlagsPanel";
 import { WorkspaceSyncPanel } from "./WorkspaceSyncPanel";
 import { SwitchControl } from "./SwitchControl";
-import { Select as PortalSelect, type SelectOption as PortalSelectOption } from "./Select";
+import { Select as PortalSelect } from "./Select";
+import { Row, Field, Metric, CompactSelect as Select } from "./settings/SettingsFields";
+import { InterfaceSettings } from "./settings/InterfaceSettings";
 import { PortalDropdown, useDropdown } from "./PortalDropdown";
 import { CheckIcon, ChevronDownIcon, PlusIcon, RefreshIcon, SearchIcon, SettingsIcon, SparkIcon, TrashIcon } from "./icons";
 import {
-  DEFAULT_SETTINGS,
-  useUiSettings,
-  type LanguagePreference,
-  type ThemeMode,
-} from "../lib/settings";
-import {
   clientApi,
-  type GatewayChannelConfig,
-  type GatewayPlatformSpec,
-  type GatewayUpsertRequest,
+  invalidateReadCache,
   type LlmProviderProfile,
   type LlmRouteConfig,
   type LlmTierConfig,
@@ -48,6 +43,7 @@ import {
   type TunnelProviderStatus,
 } from "../lib/clientApi";
 import { clearStoredAuthToken, isLocalDashboardHost, setStoredAuthToken } from "../lib/auth";
+import { confirm, toast } from "../lib/dialogs";
 
 const STANDARD_TIERS = ["light", "medium", "high"] as const;
 const INTENT_TIER = "intent";
@@ -141,47 +137,10 @@ const MEMORY_SUBTABS = ["notebook", "activity", "rules", "providers", "evidence"
 type MemorySubTabKey = typeof MEMORY_SUBTABS[number];
 type MemoryBackendChoice = "builtin" | "memsearch" | "agentmemory";
 
-type SettingsTabItem = {
-  key: SettingsTabKey;
-  label: string;
-  description: string;
-  meta: ReactNode;
-};
-
-type GatewayDraft = {
-  channel: string;
-  kind: string;
-  enabled: boolean;
-  mode: string;
-  polling: boolean;
-  trade_notifications: boolean;
-  approvals: boolean;
-  auto_reply: boolean;
-  allow_unknown_users: boolean;
-  group_sessions_per_user: boolean;
-  thread_sessions_per_user: boolean;
-  topicsCsv: string;
-  allowedChatIdsCsv: string;
-  allowedUserIdsCsv: string;
-  deniedUserIdsCsv: string;
-  // Generic per-platform credentials. ``secrets`` holds plaintext values
-  // typed in by the operator (vaulted server-side on save when the field
-  // ``kind`` is ``secret`` or ``url``; persisted as plaintext in
-  // ``messages/channels.yml`` when the kind is ``id``/``opaque``).
-  // ``secretRefs`` holds ``vault://...`` pointers returned by the backend
-  // after a previous save (or typed by the operator). Keys come from the
-  // platform spec (``bot_token``, ``chat_id``, ``app_id``, ``app_secret``,
-  // ``signing_secret``, ``verification_token``, ``webhook_url``,
-  // ``incoming_webhook_url``, ``status_webhook_url``, ``corp_id``,
-  // ``agent_id``, ``phone_number_id``, ``smtp_url``, ``imap_url``, ...).
-  secrets: Record<string, string>;
-  secretRefs: Record<string, string>;
-  username: string;
-  avatar_url: string;
-  parse_mode: string;
-  disable_web_page_preview: boolean;
-  timeout_s: string;
-};
+// Gateway channel forms now live exclusively in
+// ``components/GatewayChannelsPanel.tsx`` (shared draft helpers in
+// ``lib/gatewayDraft.ts``) — this file no longer carries a duplicate
+// draft builder.
 
 type TunnelDraft = {
   enabled: boolean;
@@ -214,135 +173,6 @@ function tunnelTargetHint(target: string, status: NetworkTunnelsStatus | null): 
   if (target === "api") return status?.auth.api_target || "http://127.0.0.1:18317";
   if (target === "custom") return "";
   return status?.auth.dashboard_target || "http://127.0.0.1:18380";
-}
-
-function emptyGatewayDraft(kind = "telegram"): GatewayDraft {
-  return {
-    channel: kind === "telegram" ? "telegram" : `${kind}_ops`,
-    kind,
-    enabled: true,
-    mode: kind === "telegram" ? "polling" : "send_only",
-    polling: kind === "telegram",
-    trade_notifications: true,
-    approvals: true,
-    auto_reply: true,
-    allow_unknown_users: true,
-    group_sessions_per_user: true,
-    thread_sessions_per_user: false,
-    topicsCsv: "trades, approvals",
-    allowedChatIdsCsv: "",
-    allowedUserIdsCsv: "",
-    deniedUserIdsCsv: "",
-    secrets: {},
-    secretRefs: {},
-    username: "Nerya",
-    avatar_url: "",
-    parse_mode: "HTML",
-    disable_web_page_preview: true,
-    timeout_s: "10",
-  };
-}
-
-function gatewayCfgValueAsString(cfg: Record<string, unknown>, key: string): string {
-  const value = cfg[key];
-  if (value === undefined || value === null) return "";
-  return String(value);
-}
-
-function strConfig(config: Record<string, unknown>, key: string, fallback = ""): string {
-  const value = config[key];
-  return value === undefined || value === null ? fallback : String(value);
-}
-
-function boolConfig(config: Record<string, unknown>, key: string, fallback: boolean): boolean {
-  const value = config[key];
-  return typeof value === "boolean" ? value : fallback;
-}
-
-function listConfig(config: Record<string, unknown>, key: string): string {
-  const value = config[key];
-  if (Array.isArray(value)) return value.map(String).join(", ");
-  return typeof value === "string" ? value : "";
-}
-
-function refOf(channel: GatewayChannelConfig, ...keys: string[]): string {
-  for (const key of keys) {
-    const ref = channel.secret_refs?.[key]?.ref;
-    if (ref) return ref;
-  }
-  return "";
-}
-
-function gatewayDraftFromChannel(channel: GatewayChannelConfig,
-                                  spec?: GatewayPlatformSpec): GatewayDraft {
-  const cfg = channel.config || {};
-  const topics = Array.isArray(cfg.topics) ? cfg.topics.map(String).join(", ") : "";
-  const secrets: Record<string, string> = {};
-  const secretRefs: Record<string, string> = {};
-  // Populate secret/url/id field map from the channel snapshot.
-  // ``secret_refs`` (vault pointers) come from the safe public envelope
-  // for ``secret``/``url`` fields. ``id``/``opaque`` values
-  // (chat_id, app_id, corp_id, agent_id, phone_number_id, …) come from
-  // ``config`` because they are persisted in plaintext YAML.
-  if (spec?.secret_fields) {
-    for (const field of spec.secret_fields) {
-      const ref = channel.secret_refs?.[field.ref_key]?.ref;
-      if (ref) {
-        secretRefs[field.key] = ref;
-      }
-      if (field.kind === "id" || field.kind === "opaque") {
-        const direct = gatewayCfgValueAsString(cfg, field.key);
-        if (direct) secrets[field.key] = direct;
-      }
-    }
-  } else {
-    // Spec hasn't loaded yet — preserve the legacy bot_token / webhook
-    // refs so the form still hydrates correctly on the very first paint.
-    const botTokenRef = refOf(channel, "bot_token_ref", "token_ref");
-    if (botTokenRef) secretRefs["bot_token"] = botTokenRef;
-    const webhookRef = refOf(channel, "webhook_url_ref", "url_ref", "incoming_webhook_url_ref");
-    if (webhookRef) secretRefs["webhook_url"] = webhookRef;
-    const statusRef = refOf(channel, "status_webhook_url_ref");
-    if (statusRef) secretRefs["status_webhook_url"] = statusRef;
-    // Telegram chat_id is the most common public identifier — surface it
-    // even when the platform catalog has not yet loaded so the operator
-    // can read their currently-bound chat without waiting for a refresh.
-    const directChat = gatewayCfgValueAsString(cfg, "chat_id");
-    if (directChat) secrets["chat_id"] = directChat;
-  }
-  return {
-    ...emptyGatewayDraft(channel.kind),
-    channel: channel.channel,
-    kind: channel.kind,
-    enabled: channel.enabled,
-    mode: strConfig(cfg, "mode", channel.mode),
-    polling: boolConfig(cfg, "polling", channel.kind === "telegram"),
-    trade_notifications: boolConfig(cfg, "trade_notifications", true),
-    approvals: boolConfig(cfg, "approvals", true),
-    auto_reply: boolConfig(cfg, "auto_reply", true),
-    allow_unknown_users: boolConfig(cfg, "allow_unknown_users", true),
-    group_sessions_per_user: boolConfig(cfg, "group_sessions_per_user", true),
-    thread_sessions_per_user: boolConfig(cfg, "thread_sessions_per_user", false),
-    topicsCsv: topics || "trades, approvals",
-    allowedChatIdsCsv: listConfig(cfg, "allowed_chat_ids"),
-    allowedUserIdsCsv: listConfig(cfg, "allowed_user_ids"),
-    deniedUserIdsCsv: listConfig(cfg, "denied_user_ids"),
-    secrets,
-    secretRefs,
-    username: strConfig(cfg, "username", "Nerya"),
-    avatar_url: strConfig(cfg, "avatar_url"),
-    parse_mode: strConfig(cfg, "parse_mode", "HTML"),
-    disable_web_page_preview: boolConfig(cfg, "disable_web_page_preview", true),
-    timeout_s: strConfig(cfg, "timeout_s", "10"),
-  };
-}
-
-function gatewayTopics(csv: string): string[] {
-  return csv.split(",").map((part) => part.trim()).filter(Boolean);
-}
-
-function gatewayCsvList(csv: string): string[] {
-  return csv.split(/[,\n]/).map((part) => part.trim()).filter(Boolean);
 }
 
 function splitRouteValues(value: string | string[] | undefined): string[] {
@@ -468,128 +298,6 @@ function ensureAssignmentTiers(rows: LlmTierConfig[]): LlmTierConfig[] {
     .map(tierWithRoutes)
     .sort((a, b) => a.tier.localeCompare(b.tier));
   return [...primary, ...extra];
-}
-
-function Row({
-  label,
-  desc,
-  children,
-}: {
-  label: string;
-  desc?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="settings-row flex items-center justify-between gap-3 border-b py-2.5 last:border-b-0">
-      <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] font-medium text-[color:var(--text-base)]">{label}</div>
-        {desc ? (
-          <div className="mt-0.5 text-[11px] leading-snug text-[color:var(--text-muted)] [overflow-wrap:anywhere]">{desc}</div>
-        ) : null}
-      </div>
-      {/* Cap the value slot so a long, unbreakable value (URI, path, model
-          id) wraps within the row instead of spilling past the card edge.
-          Narrow controls (switch / pill / select) sit well under the cap so
-          they are visually unaffected. */}
-      <div className="max-w-[56%] shrink-0 text-right [overflow-wrap:anywhere]">{children}</div>
-    </div>
-  );
-}
-
-/**
- * `<SettingsGroup>` — flat, un-boxed settings section (Codex-style).
- * Replaces the heavier `<Card>` frame for preference panels: a compact
- * group label + hairline divider, then divided `<Row>`s directly
- * beneath. Use this instead of `<Card>` for simple toggle/select
- * preference groups so the page reads as flat grouped rows rather than
- * a stack of boxes.
- */
-function SettingsGroup({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description?: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="min-w-0">
-      <div className="mb-2 px-0.5">
-        <h3 className="text-[13px] font-semibold text-[color:var(--text-base)]">{title}</h3>
-        {description ? (
-          <p className="mt-0.5 text-[11.5px] leading-snug text-[color:var(--text-muted)]">{description}</p>
-        ) : null}
-      </div>
-      <div className="settings-group-panel">{children}</div>
-    </section>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <label className="block text-[12px] text-ink-300">
-      <span className="flex items-center justify-between gap-2">
-        <span>{label}</span>
-        {hint ? <span className="text-[11px] text-ink-500">{hint}</span> : null}
-      </span>
-      <div className="mt-1">{children}</div>
-    </label>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  detail,
-  icon,
-}: {
-  label: string;
-  value: ReactNode;
-  detail?: ReactNode;
-  icon: ReactNode;
-}) {
-  return (
-    <div className="rounded-lg border border-[color:var(--line)] p-2.5">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[11px] text-ink-400 font-medium">
-          {label}
-        </span>
-        <span className="text-brand-300">{icon}</span>
-      </div>
-      <div className="mt-1 text-[15px] font-medium text-white tabular-nums">{value}</div>
-      {detail ? <div className="mt-0.5 text-[11px] text-ink-500">{detail}</div> : null}
-    </div>
-  );
-}
-
-function Select({
-  value,
-  onChange,
-  options,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-}) {
-  return (
-    <div className="inline-block min-w-[160px]">
-      <PortalSelect
-        value={value}
-        onChange={(next) => onChange(next)}
-        options={options as PortalSelectOption[]}
-        size="sm"
-      />
-    </div>
-  );
 }
 
 function ModelSelectInput({
@@ -727,60 +435,8 @@ function isSettingsTabKey(value: string): value is SettingsTabKey {
   return (SETTINGS_TABS as readonly string[]).includes(value);
 }
 
-function settingsTabId(tab: SettingsTabKey) {
-  return `settings-tab-${tab}`;
-}
-
 function settingsPanelId(tab: SettingsTabKey) {
   return `settings-panel-${tab}`;
-}
-
-function SettingsModuleTabs({
-  active,
-  ariaLabel,
-  items,
-  onChange,
-}: {
-  active: SettingsTabKey;
-  ariaLabel: string;
-  items: SettingsTabItem[];
-  onChange: (tab: SettingsTabKey) => void;
-}) {
-  return (
-    <nav
-      aria-label={ariaLabel}
-      className="shrink-0 md:sticky md:top-2 md:w-52 md:self-start"
-    >
-      <div
-        role="tablist"
-        className="flex gap-1 overflow-x-auto pb-1 md:flex-col md:overflow-visible md:pb-0"
-      >
-        {items.map((item) => {
-          const selected = item.key === active;
-          return (
-            <button
-              key={item.key}
-              id={settingsTabId(item.key)}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              aria-controls={settingsPanelId(item.key)}
-              title={item.description}
-              className={[
-                "flex shrink-0 items-center rounded-lg px-3 py-2 text-left text-[13px] transition-colors md:w-full",
-                selected
-                  ? "bg-brand-500/12 font-medium text-[color:var(--text-base)]"
-                  : "text-[color:var(--text-muted)] hover:bg-brand-500/8 hover:text-[color:var(--text-base)]",
-              ].join(" ")}
-              onClick={() => onChange(item.key)}
-            >
-              <span className="truncate">{item.label}</span>
-            </button>
-          );
-        })}
-      </div>
-    </nav>
-  );
 }
 
 function modelId(row: Record<string, unknown>): string {
@@ -834,11 +490,9 @@ function fingerprintConfig(
 
 // Props let the page render in one of two modes:
 //
-//   - Default (no props): regular /settings page with the section nav
-//     and the tabs that live there (Models / Access / Network & Env /
-//     Interface). The Memory / Web search / Browsers tabs were
-//     extracted into standalone top-bar "More" pages and are filtered
-//     out of the section nav here.
+//   - Default (no props): regular /settings page. Section navigation
+//     lives in the left rail (SettingsSidebar drives the panels via
+//     the location hash); the page body renders just the active panel.
 //   - `forceSection`: render ONLY the matching panel content (no
 //     section nav, no other tabs). Used by the standalone routes:
 //        /memory     → forceSection="memory"
@@ -846,8 +500,8 @@ function fingerprintConfig(
 //        /browsers   → forceSection="browsers"
 //     Each route is a 4-line wrapper that mounts the same
 //     SettingsWorkspace component so all those pages reuse the same
-//     ~7000 lines of state hooks + JSX + helpers. The PageHeader text
-//     for each standalone route is sourced from a dedicated
+//     state hooks + JSX + helpers. The PageHeader text for each
+//     standalone route is sourced from a dedicated
 //     `<section>Page.{eyebrow,title,description}` i18n namespace.
 //
 // `forceMemoryOnly` (legacy) is preserved as a thin alias for
@@ -858,7 +512,7 @@ function fingerprintConfig(
 // (/memory, /web-search, /browsers, /env-vault) used this. The
 // onboarding wizard (/setup) reuses the existing Models / Access /
 // Runtime sections via the same prop so the wizard never re-implements
-// password, LLM-tier, or gateway editing logic. Section-mode adds
+// password or LLM-tier editing logic. Section-mode adds
 // `(forceSection === "X")` to each tab's render gate (see below).
 export type ForceSectionKey =
   | "memory"
@@ -892,12 +546,13 @@ export interface SettingsPageProps {
    */
   compactLlm?: boolean;
   /**
-   * Hide the in-page section tab strip. The Codex-style settings
-   * takeover moves section navigation into the left rail
-   * (SettingsSidebar), so `/settings` mounts with this set — the page
-   * body then renders just the active panel at full width.
+   * Hide the built-in PageHeader. Layout-only escape hatch for hosts
+   * that render their own title chrome around the panel — the setup
+   * wizard mounts these sections inside its own step card, so a second
+   * "Settings / Memory …" header inside the card read as duplication.
+   * Standalone routes must NOT set this (they rely on the header).
    */
-  hideSectionNav?: boolean;
+  hideHeader?: boolean;
 }
 
 export function SettingsWorkspace({
@@ -905,19 +560,15 @@ export function SettingsWorkspace({
   forceSection: forceSectionProp,
   topBanner,
   compactLlm = false,
-  hideSectionNav = false,
+  hideHeader = false,
 }: SettingsPageProps) {
   // Normalise the two equivalent prop shapes into a single value the
   // rest of the component reads. `forceSection` wins if both are set.
   const forceSection: ForceSectionKey | undefined =
     forceSectionProp ?? (forceMemoryOnly ? "memory" : undefined);
   const inSectionMode = forceSection !== undefined;
-  // The in-page tab strip is shown only on the legacy full /settings
-  // page. Section-mode mounts (/memory etc.) and the Codex takeover
-  // (`hideSectionNav`, nav lives in the left rail) both suppress it.
-  const showSectionNav = !inSectionMode && !hideSectionNav;
-  const [uiSettings, patchUi] = useUiSettings();
   const t = useTranslations("settings");
+  const tUi = useTranslations("ui");
   const tProvider = useTranslations("settings.providerCard");
   const tModel = useTranslations("settings.modelCard");
   const tMemory = useTranslations("settings.memoryCard");
@@ -925,10 +576,8 @@ export function SettingsWorkspace({
   const tWebSearchPage = useTranslations("webSearchPage");
   const tBrowsersPage = useTranslations("browsersPage");
   const tEnvVaultPage = useTranslations("envVaultPage");
-  const tGateway = useTranslations("settings.gatewayCard");
-  const tDisplay = useTranslations("settings.displayCard");
-  const tChart = useTranslations("settings.chartCard");
-  const tAppearance = useTranslations("settings.appearance");
+  const tEnvCard = useTranslations("envVaultPage.envCard");
+  const tVaultCard = useTranslations("envVaultPage.vaultCard");
   const tAuth = useTranslations("settings.authCard");
   const tTabs = useTranslations("settings.tabs");
   const tCommon = useTranslations("common");
@@ -1103,13 +752,6 @@ export function SettingsWorkspace({
   // Independent from `memoryQuery` (the memsearch sub-tab's query input)
   // so toggling between backends doesn't surprise the operator.
   const [backendTestQuery, setBackendTestQuery] = useState("");
-  const [gatewayPlatforms, setGatewayPlatforms] = useState<GatewayPlatformSpec[]>([]);
-  const [gatewayChannels, setGatewayChannels] = useState<GatewayChannelConfig[]>([]);
-  const [gatewayDraft, setGatewayDraft] = useState<GatewayDraft>(() => emptyGatewayDraft());
-  const [gatewayBusy, setGatewayBusy] = useState("");
-  const [gatewayTestText, setGatewayTestText] = useState("Nerya gateway test message.");
-  const [gatewayResult, setGatewayResult] = useState<string | null>(null);
-  const [gatewayStatus, setGatewayStatus] = useState<Record<string, unknown> | null>(null);
   const [embProvider, setEmbProvider] = useState("openai");
   const [embModel, setEmbModel] = useState("text-embedding-3-small");
   const [embBaseUrl, setEmbBaseUrl] = useState("");
@@ -1122,9 +764,30 @@ export function SettingsWorkspace({
   const [milvusUri, setMilvusUri] = useState("~/.memsearch/milvus.db");
   const [milvusToken, setMilvusToken] = useState("");
   const [milvusCollection, setMilvusCollection] = useState("memsearch_chunks");
-  const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
+  // Action feedback (save/delete/test results) goes through the global
+  // toast stack instead of a page-top banner: these panels are far
+  // taller than one viewport, so a banner under the page header was
+  // invisible after any action performed at the bottom of the page.
+  function reportError(message: string) {
+    toast({ message, tone: "error" });
+  }
+  function reportOk(message: string) {
+    toast({ message, tone: "ok" });
+  }
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTabKey>("models");
+  const effectiveSettingsTab: SettingsTabKey | ForceSectionKey = forceSection ?? activeSettingsTab;
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [sectionStates, setSectionStates] = useState<Record<string, "loading" | "ready" | "error">>({});
+  const [sectionErrors, setSectionErrors] = useState<Record<string, string>>({});
+  const loadedSections = useRef(new Set<string>());
+  const sectionRequests = useRef(new Map<string, Promise<void>>());
+  const sectionKey = effectiveSettingsTab === "memory"
+    ? `memory:${activeMemorySubTab}${activeMemorySubTab === "activity" ? `:${memoryActivityFilter}` : ""}`
+    : effectiveSettingsTab;
+  const currentSectionKey = useRef(sectionKey);
+  currentSectionKey.current = sectionKey;
+  const sectionBusy = !settingsReady || sectionStates[sectionKey] === "loading";
+  const modelLoadError = sectionErrors.models;
   const memoryBackendChoice: MemoryBackendChoice =
     memoryExternalConfig?.enabled && memoryExternalConfig.provider === "agentmemory"
       ? "agentmemory"
@@ -1254,7 +917,7 @@ export function SettingsWorkspace({
       if (secretsRes) setVaultRefs(secretsRes.refs || []);
       return { envRes, secretsRes };
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
       return null;
     }
   }
@@ -1293,7 +956,7 @@ export function SettingsWorkspace({
       syncDashboardDraft(next);
       return next;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
       return null;
     }
   }
@@ -1301,12 +964,11 @@ export function SettingsWorkspace({
   async function saveDashboardEndpoint() {
     const port = Number(dashboardPortDraft.trim());
     if (!Number.isFinite(port) || port < 1 || port > 65535) {
-      setError(tTunnel("dashboardPortInvalid"));
+      reportError(tTunnel("dashboardPortInvalid"));
       return;
     }
     setDashboardBusy(true);
     setDashboardMessage(null);
-    setError(null);
     try {
       const next = await clientApi.networkDashboardSet({
         host: dashboardStatus?.config.host || "127.0.0.1",
@@ -1317,7 +979,7 @@ export function SettingsWorkspace({
       if (tunnels?.ok) syncTunnelDrafts(tunnels);
       setDashboardMessage(tTunnel("dashboardSaved"));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setDashboardBusy(false);
     }
@@ -1342,7 +1004,7 @@ export function SettingsWorkspace({
       syncTunnelDrafts(next);
       return next;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
       return null;
     }
   }
@@ -1361,8 +1023,6 @@ export function SettingsWorkspace({
     const draft = tunnelDrafts[provider] || emptyTunnelDraft();
     setTunnelBusy(`save:${provider}`);
     setTunnelMessage(null);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.networkTunnelConfig({
         provider,
@@ -1381,7 +1041,7 @@ export function SettingsWorkspace({
       setTunnelMessage(tTunnel("saved"));
       return true;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
       return false;
     } finally {
       setTunnelBusy("");
@@ -1391,15 +1051,13 @@ export function SettingsWorkspace({
   async function installTunnelProvider(provider: string) {
     setTunnelBusy(`install:${provider}`);
     setTunnelMessage(null);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.networkTunnelInstall({ provider, approve: true });
       if (!res.ok) throw new Error(res.detail || res.error || "tunnel install failed");
       setTunnelMessage(res.already_installed ? tTunnel("alreadyInstalled") : tTunnel("installFinished"));
       await loadNetworkTunnels();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setTunnelBusy("");
     }
@@ -1410,8 +1068,6 @@ export function SettingsWorkspace({
     if (!saved) return;
     setTunnelBusy(`start:${provider}`);
     setTunnelMessage(null);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.networkTunnelStart(provider);
       if (!res.ok) throw new Error(res.detail || res.error || "tunnel start failed");
@@ -1424,7 +1080,7 @@ export function SettingsWorkspace({
       setTunnelMessage(urls.length ? tTunnel("startedWithUrl", { url: urls[0] }) : tTunnel("started"));
       await loadNetworkTunnels();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setTunnelBusy("");
     }
@@ -1433,15 +1089,13 @@ export function SettingsWorkspace({
   async function stopTunnelProvider(provider: string) {
     setTunnelBusy(`stop:${provider}`);
     setTunnelMessage(null);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.networkTunnelStop(provider);
       if (!res.ok) throw new Error(res.detail || res.error || "tunnel stop failed");
       setTunnelMessage(tTunnel("stopFinished"));
       await loadNetworkTunnels();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setTunnelBusy("");
     }
@@ -1453,7 +1107,7 @@ export function SettingsWorkspace({
       syncProxyDrafts(next);
       return next;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
       return null;
     }
   }
@@ -1476,8 +1130,6 @@ export function SettingsWorkspace({
 
   async function saveNetworkProxy() {
     setProxyBusy("save");
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.networkProxySet({
         enabled: proxyEnabled,
@@ -1496,9 +1148,9 @@ export function SettingsWorkspace({
       });
       if (!res.ok) throw new Error(res.detail || res.error || "proxy save failed");
       syncProxyDrafts(res);
-      setInfo("Network proxy settings saved and applied to the runtime.");
+      reportOk(tProxy("saved"));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setProxyBusy("");
     }
@@ -1506,7 +1158,6 @@ export function SettingsWorkspace({
 
   async function testNetworkProxy() {
     setProxyBusy("test");
-    setError(null);
     setProxyTestResult(null);
     try {
       const res = await clientApi.networkProxyTest({ url: proxyTestUrl.trim() });
@@ -1524,8 +1175,6 @@ export function SettingsWorkspace({
 
   async function saveRuntimeEnv() {
     setSecurityBusy("env:save");
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.runtimeEnvPut({
         name: envNameDraft.trim(),
@@ -1533,26 +1182,34 @@ export function SettingsWorkspace({
       });
       if (!res.ok) throw new Error(res.detail || res.error || "env save failed");
       setEnvValueDraft("");
-      setInfo(`${res.env?.name || envNameDraft.trim()} saved to encrypted runtime env.`);
+      reportOk(tEnvCard("saved", { name: res.env?.name || envNameDraft.trim() }));
       await loadSecurityRuntime();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSecurityBusy("");
     }
   }
 
   async function deleteRuntimeEnv(name: string) {
+    // Destructive: every subprocess that relied on this env var stops
+    // receiving it on the next launch — require an explicit confirm.
+    const confirmed = await confirm({
+      title: tEnvCard("deleteTitle"),
+      message: tEnvCard("deleteMessage", { name }),
+      tone: "danger",
+      okLabel: tCommon("delete"),
+      cancelLabel: tCommon("cancel"),
+    });
+    if (!confirmed) return;
     setSecurityBusy(`env:delete:${name}`);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.runtimeEnvDelete(name);
       if (!res.ok) throw new Error(res.detail || res.error || "env delete failed");
-      setInfo(`${res.name || name} removed from runtime env.`);
+      reportOk(tEnvCard("removed", { name: res.name || name }));
       await loadSecurityRuntime();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSecurityBusy("");
     }
@@ -1560,8 +1217,6 @@ export function SettingsWorkspace({
 
   async function saveVaultSecret() {
     setSecurityBusy("vault:save");
-    setError(null);
-    setInfo(null);
     try {
       const scopes = vaultScopeDraft
         .split(",")
@@ -1575,26 +1230,34 @@ export function SettingsWorkspace({
       });
       if (!res.ok) throw new Error(res.detail || res.error || "vault save failed");
       setVaultValueDraft("");
-      setInfo(`${res.ref?.ref || vaultNameDraft.trim()} saved to SecretVault.`);
+      reportOk(tVaultCard("saved", { name: res.ref?.ref || vaultNameDraft.trim() }));
       await loadSecurityRuntime();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSecurityBusy("");
     }
   }
 
   async function deleteVaultSecret(name: string) {
+    // Destructive: anything still pointing at this vault:// ref fails
+    // to resolve afterwards — require an explicit confirm.
+    const confirmed = await confirm({
+      title: tVaultCard("deleteTitle"),
+      message: tVaultCard("deleteMessage", { name }),
+      tone: "danger",
+      okLabel: tCommon("delete"),
+      cancelLabel: tCommon("cancel"),
+    });
+    if (!confirmed) return;
     setSecurityBusy(`vault:delete:${name}`);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.secretsDelete(name);
       if (!res.ok) throw new Error(res.error || "vault delete failed");
-      setInfo(`${res.name || name} removed from SecretVault.`);
+      reportOk(tVaultCard("removed", { name: res.name || name }));
       await loadSecurityRuntime();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSecurityBusy("");
     }
@@ -1626,39 +1289,7 @@ export function SettingsWorkspace({
       applySearchStatus(res);
       return res;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }
-
-  function applyGatewayConfig(cfg: { channels?: GatewayChannelConfig[]; platforms?: GatewayPlatformSpec[]; status?: Record<string, unknown> } | null) {
-    if (!cfg) return;
-    const channels = cfg.channels || [];
-    const platforms = cfg.platforms || [];
-    setGatewayChannels(channels);
-    setGatewayPlatforms(platforms);
-    setGatewayStatus(cfg.status || null);
-    const platformLookup = new Map<string, GatewayPlatformSpec>();
-    for (const p of platforms) platformLookup.set(p.id, p);
-    setGatewayDraft((current) => {
-      const match = channels.find((row) => row.channel === current.channel);
-      if (match) return gatewayDraftFromChannel(match, platformLookup.get(match.kind));
-      if (channels[0] && (!current.channel || current.channel === "telegram")) {
-        const head = channels[0];
-        return gatewayDraftFromChannel(head, platformLookup.get(head.kind));
-      }
-      return current;
-    });
-  }
-
-  async function loadGatewayConfig() {
-    try {
-      const cfg = await clientApi.gatewayConfig();
-      if (!cfg.ok) throw new Error(cfg.error || "cannot load gateway config");
-      applyGatewayConfig(cfg);
-      return cfg;
-    } catch (e) {
-      setGatewayResult(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
       return null;
     }
   }
@@ -1666,24 +1297,12 @@ export function SettingsWorkspace({
   async function loadModelConfig() {
     setLoading(true);
     try {
-      const [cfg, providerRes, modelRes, venueRes, memoryRes, gatewayRes, authRes, searchRes, browsersRes, fdRes, catalogRes, oauthRes, runtimeEnvRes, secretsRes, proxyRes, dashboardRes, tunnelsRes] = await Promise.all([
+      const [cfg, providerRes, modelRes, catalogRes, oauthRes] = await Promise.all([
         clientApi.llmConfig(),
         clientApi.llmProviders(),
         clientApi.llmModels(),
-        clientApi.marketVenues().catch(() => ({ venues: [] })),
-        clientApi.memoryVectorStatus().catch(() => null),
-        clientApi.gatewayConfig().catch(() => null),
-        clientApi.authStatus().catch(() => null),
-        clientApi.searchEnginesStatus().catch(() => null),
-        clientApi.browsersStatus().catch(() => null),
-        clientApi.financialDatasetsStatus().catch(() => null),
         clientApi.llmCatalog().catch(() => null),
         clientApi.llmOauthProviders().catch(() => null),
-        clientApi.runtimeEnvList().catch(() => null),
-        clientApi.secretsList().catch(() => null),
-        clientApi.networkProxy().catch(() => null),
-        clientApi.networkDashboard().catch(() => null),
-        clientApi.networkTunnels().catch(() => null),
       ]);
       if (!cfg.ok) throw new Error(cfg.error || "cannot load llm config");
       const loadedDefaultTier = cfg.default_tier || "medium";
@@ -1721,54 +1340,153 @@ export function SettingsWorkspace({
         nextCatalog[provider] = rows.map(modelId).filter(Boolean).slice(0, 400);
       }
       setModelCatalog(nextCatalog);
-      setVenues((venueRes.venues || []).map((v) => ({ name: v.name, label: v.label })));
-      setMemoryStatus(memoryRes);
-      syncMemoryDrafts(memoryRes);
-      applyGatewayConfig(gatewayRes);
-      setAuthStatus(authRes);
-      applySearchStatus(searchRes);
-      setBrowsersStatus(browsersRes);
-      setFdStatus(fdRes);
-      if (runtimeEnvRes?.ok) setRuntimeEnv(runtimeEnvRes.env || []);
-      if (secretsRes) setVaultRefs(secretsRes.refs || []);
-      if (proxyRes?.ok) syncProxyDrafts(proxyRes);
-      if (dashboardRes?.ok) syncDashboardDraft(dashboardRes);
-      if (tunnelsRes?.ok) syncTunnelDrafts(tunnelsRes);
-      setError(null);
+      setSectionErrors((previous) => ({ ...previous, models: "" }));
+      return true;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setSectionErrors((previous) => ({ ...previous, models: e instanceof Error ? e.message : String(e) }));
+      return false;
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => {
-    void loadModelConfig();
-    // Memory activity / notebook / write rules load in the background
-    // so the memory tab is populated even if the operator opens it
-    // immediately after a refresh.
-    void loadMemoryActivity();
-    void loadNotebook();
-    void loadWriteRules();
-    void loadMemoryProviders();
-  }, []);
+  // Scope reads to the visible panel. Reusing a resolved/in-flight request also
+  // prevents tab changes, locale changes and StrictMode from overwriting drafts.
+  function checked<T>(result: T): T {
+    if (result && typeof result === "object" && "ok" in result && result.ok === false) {
+      const error = result as { error?: string; detail?: string };
+      throw new Error(error.detail || error.error || tUi("loadFailed"));
+    }
+    return result;
+  }
 
-  // Re-fetch the activity stream when the kind filter changes so the
-  // dropdown response feels instant. Keep this separate from the
-  // initial load so the bootstrap fires once.
+  function loadSettingsSection(refresh = false): Promise<void> {
+    const key = sectionKey;
+    const pending = sectionRequests.current.get(key);
+    if (pending) return pending;
+    if (!refresh && loadedSections.current.has(key) && !key.startsWith("memory:activity")) return Promise.resolve();
+    if (refresh) invalidateReadCache();
+    setSectionStates((previous) => ({ ...previous, [key]: "loading" }));
+    setSectionErrors((previous) => ({ ...previous, [key]: "" }));
+    const request = Promise.resolve().then(async () => {
+      switch (effectiveSettingsTab) {
+        case "models":
+          if (!(await loadModelConfig())) throw new Error(tUi("loadFailed"));
+          break;
+        case "interface": {
+          const result = checked(await clientApi.marketVenues());
+          setVenues((result.venues || []).map((venue) => ({ name: venue.name, label: venue.label })));
+          break;
+        }
+        case "access": {
+          const [auth, datasets] = await Promise.all([clientApi.authStatus(), clientApi.financialDatasetsStatus()]);
+          setAuthStatus(checked(auth));
+          setFdStatus(checked(datasets));
+          break;
+        }
+        case "runtime": {
+          const [proxy, dashboard, tunnels] = await Promise.all([clientApi.networkProxy(), clientApi.networkDashboard(), clientApi.networkTunnels()]);
+          syncProxyDrafts(checked(proxy));
+          syncDashboardDraft(checked(dashboard));
+          syncTunnelDrafts(checked(tunnels));
+          break;
+        }
+        case "envvault": {
+          const [env, secrets] = await Promise.all([clientApi.runtimeEnvList(), clientApi.secretsList()]);
+          setRuntimeEnv(checked(env).env || []);
+          setVaultRefs(checked(secrets).refs || []);
+          break;
+        }
+        case "search":
+          applySearchStatus(checked(await clientApi.searchEnginesStatus()));
+          break;
+        case "browsers":
+          setBrowsersStatus(checked(await clientApi.browsersStatus()));
+          break;
+        case "memory": {
+          if (refresh || !loadedSections.current.has("memory:status")) {
+            const [status, external] = await Promise.all([clientApi.memoryVectorStatus(), clientApi.memoryExternalConfig()]);
+            setMemoryStatus(checked(status));
+            syncMemoryDrafts(status);
+            setMemoryExternalConfig(checked(external));
+            syncMemoryExternalDrafts(external);
+            loadedSections.current.add("memory:status");
+          }
+          if (activeMemorySubTab === "notebook") {
+            const notebook = checked(await clientApi.memoryNotebookList());
+            setNotebookAgent(notebook.agent || null);
+            setNotebookOperator(notebook.operator || null);
+          } else if (activeMemorySubTab === "activity") {
+            const activity = checked(await clientApi.memoryActivity({ limit: 200, kinds: memoryActivityFilter ? [memoryActivityFilter] : undefined }));
+            if (currentSectionKey.current === key) {
+              setMemoryActivityEvents(activity.events || []);
+              setMemoryActivityStats(activity.stats || null);
+            }
+          } else if (activeMemorySubTab === "rules") {
+            await loadWriteRules(true);
+          } else if (activeMemorySubTab === "providers") {
+            setMemoryProvidersData(checked(await clientApi.memoryProviders()));
+          }
+          // Evidence/Profile panels own their requests when mounted.
+          break;
+        }
+        // RuntimeFlagsPanel and GatewayChannelsPanel own their own reads.
+        default:
+          break;
+      }
+      loadedSections.current.add(key);
+      setSectionStates((previous) => ({ ...previous, [key]: "ready" }));
+    }).catch((error: unknown) => {
+      setSectionErrors((previous) => ({ ...previous, [key]: error instanceof Error ? error.message : String(error) }));
+      setSectionStates((previous) => ({ ...previous, [key]: "error" }));
+    }).finally(() => { sectionRequests.current.delete(key); });
+    sectionRequests.current.set(key, request);
+    return request;
+  }
+
   useEffect(() => {
-    void loadMemoryActivity();
-  }, [memoryActivityFilter]);
+    if (settingsReady) void loadSettingsSection();
+    // sectionKey includes the activity filter; translations are not a data dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsReady, sectionKey]);
+
+  async function refreshCurrentSection() {
+    if (effectiveSettingsTab === "models" && dirty && !(await confirm({
+      title: tUi("discardChanges"), message: tUi("discardChangesDescription"), tone: "warning",
+    }))) return;
+    await loadSettingsSection(true);
+  }
+
+  // Keep the memory sub-tab in the URL (`/memory?tab=evidence`) so
+  // sub-tabs can be deep-linked, shared, and survive a page refresh —
+  // mirroring how the /settings panels are driven by the hash.
+  useEffect(() => {
+    if (forceSection !== "memory" || typeof window === "undefined") return;
+    const sync = () => {
+      const tab = new URLSearchParams(window.location.search).get("tab");
+      setActiveMemorySubTab(tab && (MEMORY_SUBTABS as readonly string[]).includes(tab) ? tab as MemorySubTabKey : "notebook");
+    };
+    sync();
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, [forceSection]);
+
+  function switchMemorySubTab(key: MemorySubTabKey) {
+    setActiveMemorySubTab(key);
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", key);
+    if (url.href !== window.location.href) window.history.pushState(window.history.state, "", url);
+  }
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (inSectionMode) return;
+    if (inSectionMode) { setSettingsReady(true); return; }
     // Each moved section now has a dedicated top-level route. The map
     // catches anyone landing on `/settings#<section>` (old bookmarks,
     // in-doc deep-links, etc.) and rewrites them to the new page so
     // they don't end up on a tab that no longer exists in the section
-    // nav. New tabs added here MUST also be removed from the
-    // settingsTabs list below or the redirect just bounces back.
+    // nav.
     const movedSections: Record<string, string> = {
       memory: "/memory",
       search: "/web-search",
@@ -1782,7 +1500,8 @@ export function SettingsWorkspace({
         window.location.replace(target);
         return;
       }
-      if (isSettingsTabKey(tab)) setActiveSettingsTab(tab);
+      setActiveSettingsTab(isSettingsTabKey(tab) ? tab : "models");
+      setSettingsReady(true);
     };
     syncHash();
     window.addEventListener("hashchange", syncHash);
@@ -1951,38 +1670,6 @@ export function SettingsWorkspace({
 
   const dirty = Boolean(loadedFingerprint && currentFingerprint !== loadedFingerprint);
 
-  const gatewayPlatformMap = useMemo(() => {
-    const map = new Map<string, GatewayPlatformSpec>();
-    for (const platform of gatewayPlatforms) map.set(platform.id, platform);
-    return map;
-  }, [gatewayPlatforms]);
-
-  const gatewayPlatformOptions = useMemo(() => {
-    const rows = gatewayPlatforms.filter((platform) => platform.id !== "local");
-    return rows.length ? rows : [
-      {
-        id: "telegram", title: "Telegram", alias_id: "telegram", status: "native",
-        inbound: "polling", outbound: "bot_api", typing: "sendChatAction",
-        menu: "setMyCommands", support_level: "tested",
-      },
-      {
-        id: "discord", title: "Discord", alias_id: "discord", status: "webhook",
-        inbound: "generic_inbound", outbound: "webhook", typing: "status_webhook",
-        menu: "slash_commands_scaffold", support_level: "send_only",
-      },
-      {
-        id: "webhook", title: "Generic Webhook", alias_id: "webhook", status: "native",
-        inbound: "http", outbound: "json_webhook", typing: "status_webhook",
-        menu: "none", support_level: "full_duplex",
-      },
-    ];
-  }, [gatewayPlatforms]);
-
-  const gatewayConfiguredCount = useMemo(
-    () => gatewayChannels.filter((channel) => channel.configured && channel.enabled).length,
-    [gatewayChannels],
-  );
-
   const tunnelEnabledCount = useMemo(
     () => tunnelsStatus?.providers.filter((row) => row.config.enabled).length || 0,
     [tunnelsStatus],
@@ -2002,9 +1689,6 @@ export function SettingsWorkspace({
     ? (tunnelDrafts[selectedTunnel.spec.id] || emptyTunnelDraft(selectedTunnel.config, selectedTunnel.spec.modes?.[0] || "public"))
     : null;
   const selectedTunnelExternalUrls = selectedTunnel?.state?.external_urls?.filter(Boolean) || [];
-
-  const selectedGatewayPlatform = gatewayPlatformMap.get(gatewayDraft.kind);
-  const gatewayIsTelegram = gatewayDraft.kind === "telegram";
 
   function setProviderDraftFromSelect(provider: string) {
     // Free-text combo: normalise common case differences so typing
@@ -2138,180 +1822,6 @@ export function SettingsWorkspace({
     return profiles.filter((row) => row.provider);
   }
 
-  function setGatewayKind(kind: string) {
-    setGatewayDraft((current) => {
-      const next = emptyGatewayDraft(kind);
-      return {
-        ...next,
-        channel: current.channel && current.channel !== "telegram" ? current.channel : next.channel,
-      };
-    });
-    setGatewayResult(null);
-  }
-
-  function setGatewaySecret(key: string, value: string) {
-    setGatewayDraft((cur) => ({
-      ...cur,
-      secrets: { ...cur.secrets, [key]: value },
-    }));
-  }
-
-  function setGatewaySecretRef(key: string, value: string) {
-    setGatewayDraft((cur) => ({
-      ...cur,
-      secretRefs: { ...cur.secretRefs, [key]: value },
-    }));
-  }
-
-  function gatewayUpsertPayload(): GatewayUpsertRequest {
-    const channel = gatewayDraft.channel.trim().toLowerCase();
-    const body: GatewayUpsertRequest = {
-      channel,
-      kind: gatewayDraft.kind,
-      enabled: gatewayDraft.enabled,
-      mode: gatewayDraft.mode,
-      trade_notifications: gatewayDraft.trade_notifications,
-      approvals: gatewayDraft.approvals,
-      auto_reply: gatewayDraft.auto_reply,
-      allow_unknown_users: gatewayDraft.allow_unknown_users,
-      group_sessions_per_user: gatewayDraft.group_sessions_per_user,
-      thread_sessions_per_user: gatewayDraft.thread_sessions_per_user,
-      topics: gatewayTopics(gatewayDraft.topicsCsv),
-      allowed_chat_ids: gatewayCsvList(gatewayDraft.allowedChatIdsCsv),
-      allowed_user_ids: gatewayCsvList(gatewayDraft.allowedUserIdsCsv),
-      denied_user_ids: gatewayCsvList(gatewayDraft.deniedUserIdsCsv),
-    };
-    // Walk the platform's secret_fields catalog and emit only the keys
-    // the operator has actually populated. ``secret``/``url`` fields go
-    // through the vault (plaintext if typed, ref otherwise);
-    // ``id``/``opaque`` fields stay in plaintext (chat_id, app_id, …).
-    const spec = gatewayPlatformMap.get(gatewayDraft.kind);
-    const fields = spec?.secret_fields || [];
-    if (fields.length) {
-      for (const field of fields) {
-        const plain = (gatewayDraft.secrets[field.key] || "").trim();
-        const ref = (gatewayDraft.secretRefs[field.key] || "").trim();
-        const isVaulted = field.kind === "secret" || field.kind === "url";
-        if (isVaulted) {
-          if (plain) body[field.key] = plain;
-          else if (ref) body[field.ref_key] = ref;
-        } else if (plain) {
-          body[field.key] = plain;
-        }
-      }
-    } else {
-      // Unknown platform (no spec yet): fall back to the legacy
-      // bot_token / webhook / status_webhook keys so the form stays
-      // usable until /gateway/config returns.
-      const botToken = (gatewayDraft.secrets["bot_token"] || "").trim();
-      const botRef = (gatewayDraft.secretRefs["bot_token"] || "").trim();
-      if (botToken) body.bot_token = botToken;
-      else if (botRef) body.bot_token_ref = botRef;
-      const webhook = (gatewayDraft.secrets["webhook_url"] || "").trim();
-      const webhookRef = (gatewayDraft.secretRefs["webhook_url"] || "").trim();
-      if (gatewayDraft.kind === "webhook") {
-        if (webhook) body.url = webhook;
-        else if (webhookRef) body.url_ref = webhookRef;
-      } else {
-        if (webhook) body.webhook_url = webhook;
-        else if (webhookRef) body.webhook_url_ref = webhookRef;
-      }
-      const statusUrl = (gatewayDraft.secrets["status_webhook_url"] || "").trim();
-      const statusRef = (gatewayDraft.secretRefs["status_webhook_url"] || "").trim();
-      if (statusUrl) body.status_webhook_url = statusUrl;
-      else if (statusRef) body.status_webhook_url_ref = statusRef;
-      const chatId = (gatewayDraft.secrets["chat_id"] || "").trim();
-      if (chatId) body.chat_id = chatId;
-    }
-    // Telegram-specific extras live outside ``secret_fields`` because
-    // they are runtime tunables, not credentials.
-    if (gatewayIsTelegram) {
-      body.polling = gatewayDraft.polling;
-      if (gatewayDraft.parse_mode.trim()) body.parse_mode = gatewayDraft.parse_mode.trim();
-      body.disable_web_page_preview = gatewayDraft.disable_web_page_preview;
-    }
-    if (gatewayDraft.username.trim()) body.username = gatewayDraft.username.trim();
-    if (gatewayDraft.avatar_url.trim()) body.avatar_url = gatewayDraft.avatar_url.trim();
-    const timeout = Number(gatewayDraft.timeout_s);
-    if (Number.isFinite(timeout) && timeout > 0) body.timeout_s = timeout;
-    return body;
-  }
-
-  async function saveGatewayConfig() {
-    setGatewayBusy("save");
-    setError(null);
-    setInfo(null);
-    setGatewayResult(null);
-    try {
-      const res = await clientApi.gatewayConfigUpsert(gatewayUpsertPayload());
-      if (!res.ok) throw new Error(res.error || "gateway save failed");
-      if (res.config) applyGatewayConfig(res.config);
-      if (res.channel) {
-        // After a successful upsert the backend returns the canonical
-        // sanitized channel snapshot. Hydrate from it (using the spec
-        // we already loaded) so the form clears any plaintext the
-        // operator just typed and surfaces the freshly-stored vault://
-        // refs instead.
-        setGatewayDraft(gatewayDraftFromChannel(res.channel, gatewayPlatformMap.get(res.channel.kind)));
-      } else {
-        setGatewayDraft((current) => ({ ...current, secrets: {} }));
-      }
-      setInfo(tGateway("saved"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setGatewayBusy("");
-    }
-  }
-
-  async function deleteGatewayConfig() {
-    if (!gatewayDraft.channel.trim()) return;
-    setGatewayBusy("delete");
-    setError(null);
-    setInfo(null);
-    setGatewayResult(null);
-    try {
-      const res = await clientApi.gatewayConfigDelete(gatewayDraft.channel.trim().toLowerCase());
-      if (!res.ok) throw new Error(res.error || "gateway delete failed");
-      if (res.config) applyGatewayConfig(res.config);
-      setGatewayDraft(emptyGatewayDraft(gatewayDraft.kind));
-      setInfo(tGateway("deleted"));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setGatewayBusy("");
-    }
-  }
-
-  async function testGatewayConfig() {
-    if (!gatewayDraft.channel.trim()) return;
-    setGatewayBusy("test");
-    setError(null);
-    setInfo(null);
-    setGatewayResult(null);
-    try {
-      const res = await clientApi.gatewayConfigTest({
-        channel: gatewayDraft.channel.trim().toLowerCase(),
-        text: gatewayTestText.trim() || "Nerya gateway test message.",
-        mode: "agent",
-      });
-      const note = res.delivery?.delivery_note ? String(res.delivery.delivery_note) : "";
-      if (!res.ok) throw new Error(res.detail || res.error || note || "gateway test failed");
-      const turnId = res.agent?.turn_id || "";
-      const reply = res.reply_text ? String(res.reply_text).slice(0, 220) : "";
-      setGatewayResult(
-        turnId
-          ? `${tGateway("agentTestDelivered")} ${turnId}${reply ? ` · ${reply}` : ""}`
-          : note || tGateway("testDelivered"),
-      );
-      await loadGatewayConfig();
-    } catch (e) {
-      setGatewayResult(e instanceof Error ? e.message : String(e));
-    } finally {
-      setGatewayBusy("");
-    }
-  }
-
   async function saveModelConfig() {
     setSaving(true);
     try {
@@ -2373,10 +1883,9 @@ export function SettingsWorkspace({
       setTierRows(nextTiers);
       setProviderProfiles(savedProfiles);
       setLoadedFingerprint(fingerprintConfig(savedDefaultTier, savedIntentTier, nextTiers, savedProfiles));
-      setInfo("Model providers and assignments saved to workspace nerya.yml.");
-      setError(null);
+      reportOk(tModel("savedToWorkspace"));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -2385,13 +1894,11 @@ export function SettingsWorkspace({
   async function discoverProviderModels() {
     const provider = providerDraft.trim().toLowerCase();
     if (!provider) {
-      setError("Provider is required.");
+      reportError(tProvider("providerRequired"));
       return;
     }
     setDiscovering(true);
-    setError(null);
     setDiscoveryError(null);
-    setInfo(null);
     try {
       const key = providerKeyDraft.trim();
       // For a provider id that isn't in the catalogue we forward the
@@ -2442,13 +1949,13 @@ export function SettingsWorkspace({
         });
         return next.sort((a, b) => a.provider.localeCompare(b.provider));
       });
-      setInfo(`Discovered ${rows.length} model(s) from ${resolvedProvider}. Select what to import.`);
+      reportOk(tProvider("discovered", { count: rows.length, provider: resolvedProvider }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Mirror the failure both to the global banner (for visibility)
       // and to the inline ``discoveryError`` so the operator can react
       // without leaving the discover form.
-      setError(msg);
+      reportError(msg);
       setDiscoveryError(msg);
     } finally {
       setDiscovering(false);
@@ -2463,7 +1970,6 @@ export function SettingsWorkspace({
     const id = manualModelDraft.trim();
     if (!id) return;
     setDiscoveryError(null);
-    setError(null);
     const provider = providerDraft.trim().toLowerCase();
     if (provider && !discoveredProvider) {
       setDiscoveredProvider(provider);
@@ -2492,19 +1998,17 @@ export function SettingsWorkspace({
       return next;
     });
     setManualModelDraft("");
-    setInfo(`Added ${id} to the import queue. Click "Import selected" to persist.`);
+    reportOk(tProvider("manualQueued", { id }));
   }
 
   async function importSelectedModels() {
     const provider = discoveredProvider || providerDraft.trim().toLowerCase();
     const selected = discoveredModels.filter((row) => selectedModelIds.has(modelId(row)));
     if (!provider || selected.length === 0) {
-      setError("Select at least one discovered model to import.");
+      reportError(tProvider("selectAtLeastOne"));
       return;
     }
     setImporting(true);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.llmModelsImport({
         provider,
@@ -2517,9 +2021,9 @@ export function SettingsWorkspace({
         nextCatalog[name] = rows.map(modelId).filter(Boolean).slice(0, 400);
       }
       setModelCatalog(nextCatalog);
-      setInfo(`Imported ${selected.length} model(s) for ${provider}. Use assignments below to bind them to tiers.`);
+      reportOk(tProvider("imported", { count: selected.length, provider }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setImporting(false);
     }
@@ -2543,9 +2047,9 @@ export function SettingsWorkspace({
         nextCatalog[provider] = rows.map(modelId).filter(Boolean).slice(0, 400);
       }
       setModelCatalog(nextCatalog);
-      setInfo("Model catalog refreshed.");
+      reportOk(tModel("catalogRefreshed"));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setRefreshing(false);
     }
@@ -2553,8 +2057,6 @@ export function SettingsWorkspace({
 
   async function runMemoryAction(action: string, fn: () => Promise<unknown>) {
     setMemoryBusy(action);
-    setError(null);
-    setInfo(null);
     try {
       const result = await fn();
       if (result && typeof result === "object" && "ok" in result && !(result as { ok?: boolean }).ok) {
@@ -2564,7 +2066,7 @@ export function SettingsWorkspace({
       await loadMemoryStatus();
       return result;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
       return null;
     } finally {
       setMemoryBusy("");
@@ -2611,8 +2113,6 @@ export function SettingsWorkspace({
 
   async function setMemoryBackendChoice(next: MemoryBackendChoice) {
     setMemoryBusy(`backend:${next}`);
-    setError(null);
-    setInfo(null);
     try {
       if (next === "builtin") {
         await clientApi.memoryVectorConfig({ enabled: false, watch_enabled: false });
@@ -2650,7 +2150,7 @@ export function SettingsWorkspace({
         syncMemoryExternalDrafts(ext);
       }
       await Promise.all([loadMemoryStatus(), loadMemoryProviders()]);
-      setInfo(tMemory(`backendSaved_${next}`));
+      reportOk(tMemory(`backendSaved_${next}`));
       // Auto-reveal the matching detail sub-tab so the operator sees
       // config for the backend they just selected without hunting.
       // builtin → notebook (curated content), agentmemory → providers
@@ -2659,12 +2159,12 @@ export function SettingsWorkspace({
       // backend settings panel above — only visible when memsearch is
       // the active backend.
       if (next === "builtin") {
-        setActiveMemorySubTab("notebook");
+        switchMemorySubTab("notebook");
       } else if (next === "agentmemory") {
-        setActiveMemorySubTab("providers");
+        switchMemorySubTab("providers");
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setMemoryBusy("");
     }
@@ -2672,8 +2172,6 @@ export function SettingsWorkspace({
 
   async function saveAgentmemoryConfig(enable?: boolean) {
     setMemoryBusy("agentmemory:save");
-    setError(null);
-    setInfo(null);
     try {
       const enabled = enable ?? Boolean(memoryExternalConfig?.enabled);
       const res = await clientApi.memoryExternalConfigSet({
@@ -2692,9 +2190,9 @@ export function SettingsWorkspace({
       if (res.ok === false) throw new Error(res.error || "agentmemory config failed");
       syncMemoryExternalDrafts(res);
       await Promise.all([loadMemoryStatus(), loadMemoryProviders()]);
-      setInfo(enabled ? tMemory("agentmemoryEnabled") : tMemory("agentmemoryDisabled"));
+      reportOk(enabled ? tMemory("agentmemoryEnabled") : tMemory("agentmemoryDisabled"));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setMemoryBusy("");
     }
@@ -2702,7 +2200,6 @@ export function SettingsWorkspace({
 
   async function loadAgentmemoryInstall() {
     setMemoryBusy("agentmemory:install");
-    setError(null);
     try {
       const res = await clientApi.memoryExternalInstall();
       setAgentmemoryInstall({
@@ -2713,7 +2210,7 @@ export function SettingsWorkspace({
         note: res.note,
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setMemoryBusy("");
     }
@@ -2726,8 +2223,6 @@ export function SettingsWorkspace({
   // can see why a real install failed without leaving the dashboard.
   async function runBackendInstall(backend: "memsearch" | "agentmemory") {
     setMemoryBusy(`${backend}:install:run`);
-    setError(null);
-    setInfo(null);
     setBackendInstallResult(null);
     try {
       let res: {
@@ -2759,13 +2254,13 @@ export function SettingsWorkspace({
         detail: res.detail ?? null,
       });
       if (res.ok) {
-        setInfo(
+        reportOk(
           backend === "memsearch"
-            ? "memsearch dependency installed."
-            : "agentmemory dependency installed.",
+            ? tMemory("memsearchInstalled")
+            : tMemory("agentmemoryInstalled"),
         );
       } else if (res.error || res.detail) {
-        setError(res.detail || res.error || "install failed");
+        reportError(res.detail || res.error || "install failed");
       }
       // Refresh memsearch status so the "dependency_available" pill on the
       // summary card flips ok/warn without a manual reload. agentmemory's
@@ -2773,7 +2268,7 @@ export function SettingsWorkspace({
       // here.
       if (backend === "memsearch") await loadMemoryStatus();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setMemoryBusy("");
     }
@@ -2786,8 +2281,6 @@ export function SettingsWorkspace({
   async function runBackendTest(query?: string) {
     const q = (query ?? backendTestQuery).trim();
     setMemoryBusy("memory:test");
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.memoryTest(q ? { query: q } : {});
       setBackendTestResult({
@@ -2795,7 +2288,7 @@ export function SettingsWorkspace({
         backends: res.backends || [],
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setMemoryBusy("");
     }
@@ -2953,7 +2446,7 @@ export function SettingsWorkspace({
     }
   }
 
-  async function loadWriteRules() {
+  async function loadWriteRules(throwOnError = false) {
     try {
       const res = await clientApi.memoryWriteRulesGet();
       setWriteRules(res.rules || {});
@@ -2968,7 +2461,8 @@ export function SettingsWorkspace({
         setWriteRuleDedupes(res.dedupe_strategies);
       }
     } catch (e) {
-      console.warn("memory write rules load failed", e);
+      if (throwOnError) throw e;
+      reportError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -3010,16 +2504,14 @@ export function SettingsWorkspace({
 
   async function saveAdminPassword() {
     if (newAdminPassword.length < 8) {
-      setError(tAuth("tooShort"));
+      reportError(tAuth("tooShort"));
       return;
     }
     if (newAdminPassword !== confirmAdminPassword) {
-      setError(tAuth("mismatch"));
+      reportError(tAuth("mismatch"));
       return;
     }
     setAuthBusy(true);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.authSetPassword({
         ...(authStatus?.password_configured ? { current_password: currentAdminPassword } : {}),
@@ -3030,10 +2522,10 @@ export function SettingsWorkspace({
       setCurrentAdminPassword("");
       setNewAdminPassword("");
       setConfirmAdminPassword("");
-      setInfo(tAuth("saved"));
+      reportOk(tAuth("saved"));
       await loadAuthStatus();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setAuthBusy(false);
     }
@@ -3041,7 +2533,7 @@ export function SettingsWorkspace({
 
   function logoutAdmin() {
     clearStoredAuthToken();
-    setInfo(tAuth("loggedOut"));
+    reportOk(tAuth("loggedOut"));
     if (!isLocalDashboardHost()) {
       window.location.assign("/login");
     }
@@ -3056,8 +2548,6 @@ export function SettingsWorkspace({
 
   async function saveSearchEngines(opts: { keysOnly?: boolean } = {}) {
     setSearchBusy("save");
-    setError(null);
-    setInfo(null);
     try {
       const body: Parameters<typeof clientApi.searchEnginesConfig>[0] = {
         store: searchStore,
@@ -3090,9 +2580,9 @@ export function SettingsWorkspace({
       if (Object.keys(drafts).length) body.keys = drafts;
       const res = await clientApi.searchEnginesConfig(body);
       applySearchStatus(res);
-      setInfo(tSearch("savedAll"));
+      reportOk(tSearch("savedAll"));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSearchBusy("");
     }
@@ -3100,17 +2590,15 @@ export function SettingsWorkspace({
 
   async function clearSearchKeys(engine: string) {
     setSearchBusy(`clear:${engine}`);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.searchEnginesConfig({
         store: searchStore,
         keys: { [engine]: [] },
       });
       applySearchStatus(res);
-      setInfo(`Cleared keys for ${engine}.`);
+      reportOk(tSearch("keysCleared", { engine }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSearchBusy("");
     }
@@ -3118,8 +2606,6 @@ export function SettingsWorkspace({
 
   async function saveSearchEngineRow(engine: string) {
     setSearchBusy(`save:${engine}`);
-    setError(null);
-    setInfo(null);
     try {
       const body: Parameters<typeof clientApi.searchEnginesConfig>[0] = {
         store: searchStore,
@@ -3199,8 +2685,6 @@ export function SettingsWorkspace({
 
   async function deploySearxng() {
     setSearchBusy("searxng-deploy");
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.searchSearxngDeploy({
         host_port: searxngHostPort.trim() ? Number(searxngHostPort.trim()) : undefined,
@@ -3210,10 +2694,10 @@ export function SettingsWorkspace({
       if (!res.ok) {
         throw new Error(res.detail || res.error || "deploy failed");
       }
-      setInfo(`SearXNG deployed at ${res.base_url || "http://127.0.0.1:" + searxngHostPort}.`);
+      reportOk(tSearch("searxngDeployed", { url: res.base_url || `http://127.0.0.1:${searxngHostPort}` }));
       await loadSearchStatus();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSearchBusy("");
     }
@@ -3221,17 +2705,15 @@ export function SettingsWorkspace({
 
   async function teardownSearxng(opts: { remove?: boolean } = {}) {
     setSearchBusy(opts.remove === false ? "searxng-stop" : "searxng-teardown");
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.searchSearxngTeardown({
         remove: opts.remove !== false,
       });
       if (!res.ok) throw new Error(res.detail || res.error || "teardown failed");
-      setInfo(opts.remove === false ? "SearXNG container stopped." : "SearXNG container removed.");
+      reportOk(opts.remove === false ? tSearch("searxngStopped") : tSearch("searxngRemoved"));
       await loadSearchStatus();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setSearchBusy("");
     }
@@ -3249,14 +2731,12 @@ export function SettingsWorkspace({
 
   async function selectBrowser(name: string) {
     setBrowsersBusy(`select:${name}`);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.browsersSelect(name);
       setBrowsersStatus(res);
-      setInfo(`Selected ${name}.`);
+      reportOk(tBrowsers("selectedToast", { name }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setBrowsersBusy("");
     }
@@ -3264,8 +2744,6 @@ export function SettingsWorkspace({
 
   async function installBrowser(name: string) {
     setBrowsersBusy(`install:${name}`);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.browsersInstall(name);
       if (!res.ok) {
@@ -3273,9 +2751,9 @@ export function SettingsWorkspace({
       }
       if (res.status) setBrowsersStatus(res.status);
       else await loadBrowsersStatus();
-      setInfo(`Installed ${name}${res.version ? ` (${res.version})` : ""}.`);
+      reportOk(tBrowsers("installedToast", { name, version: res.version ? ` (${res.version})` : "" }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setBrowsersBusy("");
     }
@@ -3283,16 +2761,14 @@ export function SettingsWorkspace({
 
   async function uninstallBrowser(name: string) {
     setBrowsersBusy(`uninstall:${name}`);
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.browsersUninstall(name);
       if (!res.ok) throw new Error(res.detail || res.error || "uninstall failed");
       if (res.status) setBrowsersStatus(res.status);
       else await loadBrowsersStatus();
-      setInfo(`Uninstalled ${name}.`);
+      reportOk(tBrowsers("uninstalledToast", { name }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setBrowsersBusy("");
     }
@@ -3309,8 +2785,6 @@ export function SettingsWorkspace({
 
   async function saveFinancialDatasetsKeys() {
     setFdBusy("save");
-    setError(null);
-    setInfo(null);
     try {
       const text = fdKeysDraft.trim();
       const res = await clientApi.financialDatasetsSetKeys({
@@ -3319,9 +2793,9 @@ export function SettingsWorkspace({
       });
       setFdStatus(res);
       setFdKeysDraft("");
-      setInfo("Financial Datasets API keys saved.");
+      reportOk(tFdApi("keysSaved"));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setFdBusy("");
     }
@@ -3329,8 +2803,6 @@ export function SettingsWorkspace({
 
   async function clearFinancialDatasetsKeys() {
     setFdBusy("clear");
-    setError(null);
-    setInfo(null);
     try {
       const res = await clientApi.financialDatasetsSetKeys({
         keys: [],
@@ -3338,9 +2810,9 @@ export function SettingsWorkspace({
       });
       setFdStatus(res);
       setFdKeysDraft("");
-      setInfo(`Cleared Financial Datasets keys (${fdStore}).`);
+      reportOk(tFdApi("keysCleared", { store: fdStore }));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setFdBusy("");
     }
@@ -3438,72 +2910,6 @@ export function SettingsWorkspace({
       setSearchBusy("");
     }
   }
-
-  function selectSettingsTab(tab: SettingsTabKey) {
-    setActiveSettingsTab(tab);
-    if (typeof window !== "undefined") {
-      const url = new URL(window.location.href);
-      url.hash = tab;
-      window.history.replaceState(null, "", url);
-    }
-  }
-
-  // Memory / Access & Gateways / Web search / Browsers are intentionally
-  // OMITTED from the settings section nav. Each lives on its own top-bar
-  // "More" route (/memory, /access, /web-search, /browsers) and is
-  // rendered by mounting this component with `forceSection=<key>`. The
-  // section nav below only shows what's still managed inside /settings.
-  const settingsTabs: SettingsTabItem[] = [
-    {
-      key: "models",
-      label: tTabs("models"),
-      description: tTabs("modelsDesc"),
-      meta: tTabs("modelsMeta", {
-        configured: configuredTierCount,
-        total: tierRows.length || ASSIGNMENT_TIERS.length,
-        providers: readyProviderCount,
-        models: catalogModelCount,
-      }),
-    },
-    {
-      key: "access",
-      label: tTabs("access"),
-      description: tTabs("accessDesc"),
-      meta: tTabs("accessMeta", {
-        auth: authStatus?.password_configured ? tAuth("configured") : tAuth("notConfigured"),
-      }),
-    },
-    {
-      key: "runtime",
-      label: tTabs("runtime"),
-      description: tTabs("runtimeDesc"),
-      meta: tTabs("runtimeMeta", {
-        proxy: proxyEnabled ? tTabs("enabled") : tTabs("disabled"),
-        tunnels: tunnelRunningCount,
-      }),
-    },
-    {
-      key: "capabilityGates",
-      label: tTabs("capabilityGates"),
-      description: tTabs("capabilityGatesDesc"),
-      meta: tTabs("capabilityGatesMeta"),
-    },
-    {
-      key: "interface",
-      label: tTabs("interface"),
-      description: tTabs("interfaceDesc"),
-      meta: tTabs("interfaceMeta", {
-        timezone: uiSettings.timezone,
-        symbol: uiSettings.kline.symbol,
-      }),
-    },
-  ];
-
-  // In section mode (mounted by /memory, /access, /web-search,
-  // /browsers) we pin the active tab to the forced section so the
-  // matching panel renders even though it's no longer in the section
-  // nav above.
-  const effectiveSettingsTab: SettingsTabKey | ForceSectionKey = forceSection ?? activeSettingsTab;
 
   // Pick which i18n namespace owns the PageHeader title/description for
   // the current standalone route. Each section page brands itself
@@ -3674,24 +3080,26 @@ export function SettingsWorkspace({
 
   return (
     <PageBody>
-      <PageHeader
-        title={tSectionPage ? tSectionPage("title") : t("title")}
-        description={
-          tSectionPage ? tSectionPage("description") : t("description")
-        }
-        eyebrow={tSectionPage ? tSectionPage("eyebrow") : undefined}
-        actions={
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => void loadModelConfig()}
-            disabled={loading}
-          >
-            <RefreshIcon size={14} />
-            {loading ? tCommon("loading") : tCommon("refresh")}
-          </button>
-        }
-      />
+      {hideHeader ? null : (
+        <PageHeader
+          title={tSectionPage ? tSectionPage("title") : t("title")}
+          description={
+            tSectionPage ? tSectionPage("description") : t("description")
+          }
+          eyebrow={tSectionPage ? tSectionPage("eyebrow") : undefined}
+          actions={
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => void refreshCurrentSection()}
+              disabled={sectionBusy || (effectiveSettingsTab === "models" && (loading || saving))}
+            >
+              <RefreshIcon size={14} />
+              {sectionBusy ? tCommon("loading") : tCommon("refresh")}
+            </button>
+          }
+        />
+      )}
 
       {/* Optional banner injected by a host page (e.g. /browsers
           passes its Engines/Session tab strip here so the strip lives
@@ -3699,35 +3107,54 @@ export function SettingsWorkspace({
           the panel content). */}
       {inSectionMode && topBanner ? topBanner : null}
 
-      {error ? <ErrorBanner error={error} /> : null}
-      {info ? (
-        <div className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">
-          {info}
-        </div>
-      ) : null}
+      {/* Loading failures remain visible; transient action results use toasts.
+          Never allow server-setting edits against an uninitialized form. */}
+      <ErrorBanner error={sectionErrors[sectionKey]} onRetry={() => void refreshCurrentSection()} />
+      {sectionBusy ? <div role="status" className="text-sm text-[color:var(--text-muted)]">{tUi("loading")}</div> : null}
+      <div aria-busy={sectionBusy}>
+        <fieldset
+          className="settings-flat m-0 min-w-0 space-y-6 border-0 p-0"
+          disabled={!["interface", "capabilityGates", "gateway"].includes(effectiveSettingsTab) && sectionStates[sectionKey] !== "ready"}
+        >
 
-      {/* Hide the section nav whenever this component is mounted in
-          section mode (/memory, /access, /web-search, /browsers) —
-          each standalone page owns its own top-level header and
-          doesn't need the full Settings tab bar above it. */}
-      <div className={showSectionNav ? "flex flex-col gap-6 md:flex-row md:items-start" : ""}>
-        {showSectionNav ? (
-          <SettingsModuleTabs
-            active={activeSettingsTab}
-            ariaLabel={tTabs("ariaLabel")}
-            items={settingsTabs}
-            onChange={selectSettingsTab}
-          />
-        ) : null}
-        <div className={showSectionNav ? "settings-flat min-w-0 flex-1 space-y-6" : "settings-flat space-y-6"}>
-
-      {effectiveSettingsTab === "models" && (!inSectionMode || forceSection === "models") ? (
+      {settingsReady && effectiveSettingsTab === "models" && !loading && !modelLoadError && (!inSectionMode || forceSection === "models") ? (
         <div
           id={settingsPanelId("models")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("models")}
+          role="region"
+          aria-label={tTabs("models")}
           className="space-y-5"
         >
+          {/* Plain-language orientation strip. The models panel is the
+              first thing every new operator must configure and the old
+              copy assumed familiarity with vault refs and model ids.
+              Three steps + inline TermTips orient before the form
+              starts. */}
+          <div className="rounded-lg border border-brand-500/15 bg-brand-500/[0.04] px-4 py-3">
+            <div className="text-[13px] font-medium text-[color:var(--text-base)]">
+              {tProvider("introTitle")}
+            </div>
+            <ol className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {[
+                { title: tProvider("introStep1"), desc: tProvider("introStep1Desc") },
+                { title: tProvider("introStep2"), desc: tProvider("introStep2Desc") },
+                { title: tProvider("introStep3"), desc: tProvider("introStep3Desc") },
+              ].map((step, i) => (
+                <li
+                  key={step.title}
+                  className="flex items-start gap-2 rounded-md border border-brand-500/10 bg-ink-950/30 px-2.5 py-2"
+                >
+                  <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-brand-500/30 bg-brand-500/10 text-[11px] font-medium text-brand-200">
+                    {i + 1}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-[12px] font-medium text-ink-100">{step.title}</span>
+                    <span className="mt-0.5 block text-[11px] leading-snug text-ink-400">{step.desc}</span>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
           <Card
             title={tProvider("title")}
             description={tProvider("description")}
@@ -4032,7 +3459,15 @@ export function SettingsWorkspace({
                   })}
                 </datalist>
               </Field>
-              <Field label={tProvider("apiKeyLabel")} hint={tProvider("apiKeyHint")}>
+              <Field
+                label={
+                  <>
+                    {tProvider("apiKeyLabel")}
+                    <TermTip term="vaultRef" />
+                  </>
+                }
+                hint={tProvider("apiKeyHint")}
+              >
                 <input
                   className="input-dark font-mono"
                   value={providerKeyDraft}
@@ -4051,6 +3486,7 @@ export function SettingsWorkspace({
                   <SearchIcon size={14} />
                   {discovering ? tProvider("fetching") : tProvider("fetchModels")}
                 </button>
+                <TermTip term="fetchModels" />
                 <button
                   type="button"
                   className="btn btn-ghost"
@@ -4227,6 +3663,7 @@ export function SettingsWorkspace({
               <span className="inline-flex items-center gap-2">
                 <SparkIcon size={16} className="text-fluid-300" />
                 {tModel("title")}
+                <TermTip term="tier" />
               </span>
             }
             description={tModel("description")}
@@ -4286,13 +3723,19 @@ export function SettingsWorkspace({
                 type="button"
                 className="btn btn-primary ml-auto"
                 onClick={saveModelConfig}
-                disabled={saving || tierRows.length === 0}
+                disabled={saving || loading || !dirty || tierRows.length === 0}
               >
                 <CheckIcon size={14} />
                 {saving ? tCommon("saving") : tModel("saveAssignments")}
               </button>
             </div>
 
+            <Advanced
+              title={tUi("advancedRouting")}
+              description={tUi("advancedRoutingDescription")}
+              defaultOpen={configuredTierCount === 0}
+              storageKey="nerya.settings.models.advancedRouting"
+            >
             <div className="space-y-3">
               {tierRows.map((row, index) => {
                 const routes = routesOf(row);
@@ -4541,6 +3984,7 @@ export function SettingsWorkspace({
                 );
               })}
             </div>
+            </Advanced>
           </Card>
           )}
         </div>
@@ -4549,8 +3993,8 @@ export function SettingsWorkspace({
       {effectiveSettingsTab === "access" && (!inSectionMode || forceSection === "access") ? (
         <div
           id={settingsPanelId("access")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("access")}
+          role="region"
+          aria-label={tTabs("access")}
           className="grid grid-cols-1 gap-5"
         >
           <div className="space-y-5">
@@ -4734,8 +4178,8 @@ export function SettingsWorkspace({
       {effectiveSettingsTab === "runtime" && (!inSectionMode || forceSection === "runtime") ? (
         <div
           id={settingsPanelId("runtime")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("runtime")}
+          role="region"
+          aria-label={tTabs("runtime")}
           className="grid grid-cols-1 gap-5 xl:grid-cols-[380px_1fr]"
         >
           <div className="xl:col-span-2">
@@ -4963,7 +4407,12 @@ export function SettingsWorkspace({
 
           <div className="xl:col-span-2">
             <Advanced
-              title={tTunnel("title")}
+              title={
+                <span className="inline-flex items-center gap-2">
+                  {tTunnel("title")}
+                  <TermTip term="tunnel" />
+                </span>
+              }
               description={tTunnel("description")}
               storageKey="nerya.settings.runtime.advanced.tunnel"
               count={
@@ -5247,14 +4696,23 @@ export function SettingsWorkspace({
               </div>
             </Advanced>
           </div>
+
+          {/* Pointer to the standalone /advanced page so the power-user
+              shortcut promised by app/advanced/page.tsx is actually
+              reachable from the UI. */}
+          <div className="xl:col-span-2 flex justify-end">
+            <a className="btn btn-ghost" href="/advanced">
+              {t("openAdvanced")}
+            </a>
+          </div>
         </div>
       ) : null}
 
       {effectiveSettingsTab === "capabilityGates" && (!inSectionMode || forceSection === "capabilityGates") ? (
         <div
           id={settingsPanelId("capabilityGates")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("capabilityGates")}
+          role="region"
+          aria-label={tTabs("capabilityGates")}
           className="space-y-5"
         >
           <RuntimeFlagsPanel />
@@ -5264,14 +4722,14 @@ export function SettingsWorkspace({
       {effectiveSettingsTab === "envvault" && forceSection === "envvault" ? (
         <div
           id={settingsPanelId("envvault")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("envvault")}
+          role="region"
+          aria-label={tTabs("envvault")}
           className="grid grid-cols-1 gap-5 xl:grid-cols-2"
         >
           <Card
-            title="Runtime environment"
-            description="Encrypted variables injected into run_shell, skill script subprocesses, and stdio MCP servers."
-            actions={<Pill tone={runtimeEnv.length ? "ok" : "warn"}>{runtimeEnv.length} configured</Pill>}
+            title={tEnvCard("title")}
+            description={tEnvCard("description")}
+            actions={<Pill tone={runtimeEnv.length ? "ok" : "warn"}>{tEnvCard("configuredCount", { count: runtimeEnv.length })}</Pill>}
           >
             <div className="space-y-3">
               <div className="embedded-list-scroll-sm rounded-lg border border-brand-500/10 bg-ink-950/35">
@@ -5295,13 +4753,13 @@ export function SettingsWorkspace({
                   </div>
                 )) : (
                   <div className="px-3 py-6 text-center text-[12px] text-ink-500">
-                    No runtime env variables configured.
+                    {tEnvCard("empty")}
                   </div>
                 )}
               </div>
 
               <div className="grid grid-cols-1 gap-3">
-                <Field label="Variable name" hint="Uppercase shell env name; saved value is encrypted">
+                <Field label={tEnvCard("nameLabel")} hint={tEnvCard("nameHint")}>
                   <input
                     className="input-dark font-mono text-xs"
                     value={envNameDraft}
@@ -5311,7 +4769,7 @@ export function SettingsWorkspace({
                     autoCorrect="off"
                   />
                 </Field>
-                <Field label="Value" hint="Not shown again after save">
+                <Field label={tEnvCard("valueLabel")} hint={tEnvCard("valueHint")}>
                   <input
                     className="input-dark font-mono text-xs"
                     type="password"
@@ -5339,22 +4797,26 @@ export function SettingsWorkspace({
                   disabled={Boolean(securityBusy) || !envNameDraft.trim()}
                 >
                   <CheckIcon size={14} />
-                  {securityBusy === "env:save" ? tCommon("saving") : "Save env"}
+                  {securityBusy === "env:save" ? tCommon("saving") : tEnvCard("save")}
                 </button>
               </div>
 
               <p className="text-[11px] leading-5 text-ink-500">
-                These variables are resolved from SecretVault only at process-launch time. The agent sees the names and refs, not plaintext values.
+                {tEnvCard("footnote")}
               </p>
             </div>
           </Card>
 
           <Card
-            title="SecretVault references"
-            description="Manage reusable vault:// refs for providers, accounts, MCP config, gateway tokens, and runtime env."
-            actions={<Pill tone={vaultRefs.length ? "brand" : "warn"}>{vaultRefs.length} refs</Pill>}
+            title={tVaultCard("title")}
+            description={tVaultCard("description")}
+            actions={<Pill tone={vaultRefs.length ? "brand" : "warn"}>{tVaultCard("refsCount", { count: vaultRefs.length })}</Pill>}
           >
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_360px]">
+            {/* This card shares a 2-col section grid with the runtime-env
+                card, so a nested side-by-side split squeezes the refs list
+                into a ~120px gutter (letters wrap vertically). Stack
+                list → form instead; the form itself goes 2-col on sm+. */}
+            <div className="space-y-4">
               <div className="embedded-list-scroll rounded-lg border border-brand-500/10 bg-ink-950/35">
                 {vaultRefs.length ? vaultRefs.map((row) => (
                   <div
@@ -5367,8 +4829,8 @@ export function SettingsWorkspace({
                         <Pill tone={row.kind === "env" ? "ok" : "brand"}>{row.kind}</Pill>
                       </div>
                       <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-ink-500">
-                        <span>preview {row.preview}</span>
-                        <span>sha {row.fingerprint}</span>
+                        <span>{tVaultCard("previewLabel")} {row.preview}</span>
+                        <span>{tVaultCard("shaLabel")} {row.fingerprint}</span>
                         {row.scope?.length ? <span>{row.scope.join(", ")}</span> : null}
                       </div>
                     </div>
@@ -5383,13 +4845,13 @@ export function SettingsWorkspace({
                   </div>
                 )) : (
                   <div className="px-3 py-10 text-center text-[12px] text-ink-500">
-                    SecretVault is empty.
+                    {tVaultCard("empty")}
                   </div>
                 )}
               </div>
 
               <div className="space-y-3 rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
-                <Field label="Vault name" hint="lowercase a-z0-9_-.">
+                <Field label={tVaultCard("nameLabel")} hint={tVaultCard("nameHint")}>
                   <input
                     className="input-dark font-mono text-xs"
                     value={vaultNameDraft}
@@ -5399,7 +4861,7 @@ export function SettingsWorkspace({
                     autoCorrect="off"
                   />
                 </Field>
-                <Field label="Kind">
+                <Field label={tVaultCard("kindLabel")}>
                   <input
                     className="input-dark font-mono text-xs"
                     value={vaultKindDraft}
@@ -5407,7 +4869,7 @@ export function SettingsWorkspace({
                     placeholder="bearer"
                   />
                 </Field>
-                <Field label="Scopes" hint="comma-separated">
+                <Field label={tVaultCard("scopesLabel")} hint={tVaultCard("scopesHint")}>
                   <input
                     className="input-dark font-mono text-xs"
                     value={vaultScopeDraft}
@@ -5415,7 +4877,7 @@ export function SettingsWorkspace({
                     placeholder="mcp.read, env"
                   />
                 </Field>
-                <Field label="Value" hint="Encrypted; never revealed back">
+                <Field label={tVaultCard("valueLabel")} hint={tVaultCard("valueHint")}>
                   <input
                     className="input-dark font-mono text-xs"
                     type="password"
@@ -5431,7 +4893,7 @@ export function SettingsWorkspace({
                   disabled={Boolean(securityBusy) || !vaultNameDraft.trim() || !vaultValueDraft}
                 >
                   <PlusIcon size={14} />
-                  {securityBusy === "vault:save" ? tCommon("saving") : "Save vault ref"}
+                  {securityBusy === "vault:save" ? tCommon("saving") : tVaultCard("save")}
                 </button>
               </div>
             </div>
@@ -5442,8 +4904,8 @@ export function SettingsWorkspace({
       {effectiveSettingsTab === "search" && (!inSectionMode || forceSection === "search") ? (
         <div
           id={settingsPanelId("search")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("search")}
+          role="region"
+          aria-label={tTabs("search")}
           className="space-y-5"
         >
           <Card
@@ -5629,7 +5091,18 @@ export function SettingsWorkspace({
                 <button
                   type="button"
                   className="btn btn-ghost"
-                  onClick={() => void teardownSearxng({ remove: true })}
+                  onClick={async () => {
+                    // Removing the container also wipes its data —
+                    // confirm before the destructive teardown.
+                    const confirmed = await confirm({
+                      title: tSearch("removeConfirmTitle"),
+                      message: tSearch("removeConfirmMessage"),
+                      tone: "danger",
+                      okLabel: tCommon("delete"),
+                      cancelLabel: tCommon("cancel"),
+                    });
+                    if (confirmed) void teardownSearxng({ remove: true });
+                  }}
                   disabled={Boolean(searchBusy) || searchStatus?.searxng?.deployed === false}
                 >
                   {searchBusy === "searxng-teardown" ? tSearch("removing") : tSearch("remove")}
@@ -5689,8 +5162,8 @@ export function SettingsWorkspace({
       {effectiveSettingsTab === "browsers" && (!inSectionMode || forceSection === "browsers") ? (
         <div
           id={settingsPanelId("browsers")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("browsers")}
+          role="region"
+          aria-label={tTabs("browsers")}
           className="space-y-5"
         >
           <Card
@@ -5944,8 +5417,8 @@ export function SettingsWorkspace({
       {effectiveSettingsTab === "memory" && forceSection === "memory" ? (
         <div
           id={settingsPanelId("memory")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("memory")}
+          role="region"
+          aria-label={tTabs("memory")}
           className="max-w-5xl space-y-5"
         >
           <Card title={tMemory("backendTitle")}>
@@ -6013,21 +5486,21 @@ export function SettingsWorkspace({
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    onClick={() => setActiveMemorySubTab("notebook")}
+                    onClick={() => switchMemorySubTab("notebook")}
                   >
                     {tMemory("backendSummary_builtin_open_notebook")}
                   </button>
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    onClick={() => setActiveMemorySubTab("rules")}
+                    onClick={() => switchMemorySubTab("rules")}
                   >
                     {tMemory("backendSummary_builtin_open_rules")}
                   </button>
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    onClick={() => setActiveMemorySubTab("activity")}
+                    onClick={() => switchMemorySubTab("activity")}
                   >
                     {tMemory("backendSummary_builtin_open_activity")}
                   </button>
@@ -6135,7 +5608,7 @@ export function SettingsWorkspace({
                   <button
                     type="button"
                     className="btn btn-primary"
-                    onClick={() => setActiveMemorySubTab("providers")}
+                    onClick={() => switchMemorySubTab("providers")}
                   >
                     {tMemory("backendSummary_agentmemory_open")}
                   </button>
@@ -6181,7 +5654,7 @@ export function SettingsWorkspace({
                 operator can debug a failed install without opening a
                 separate terminal. */}
             {backendInstallResult && (
-              <div className="mt-3 rounded-md border border-line-700 bg-card-800 p-3 text-[12px]">
+              <div className="mt-3 rounded-md border border-brand-500/10 bg-ink-950/35 p-3 text-[12px]">
                 <div className="flex flex-wrap items-center gap-2">
                   <Pill tone={backendInstallResult.ok ? "ok" : "danger"}>
                     {backendInstallResult.ok
@@ -6245,7 +5718,7 @@ export function SettingsWorkspace({
                 the operator can compare reach (built-in entries,
                 memsearch matches, agentmemory health) side-by-side. */}
             {backendTestResult && (
-              <div className="mt-3 rounded-md border border-line-700 bg-card-800 p-3 text-[12px]">
+              <div className="mt-3 rounded-md border border-brand-500/10 bg-ink-950/35 p-3 text-[12px]">
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   <span className="text-ink-300">{tMemory("testResultsTitle")}</span>
                   <span className="font-mono text-ink-500">
@@ -6256,7 +5729,7 @@ export function SettingsWorkspace({
                   {backendTestResult.backends.map((b) => (
                     <div
                       key={b.backend}
-                      className="flex flex-wrap items-center gap-2 rounded border border-line-800 bg-card-900 p-2"
+                      className="flex flex-wrap items-center gap-2 rounded border border-brand-500/10 bg-ink-950/30 p-2"
                     >
                       <Pill tone={b.ok ? "ok" : b.enabled === false ? "neutral" : "warn"}>
                         {b.backend}
@@ -6292,9 +5765,9 @@ export function SettingsWorkspace({
             )}
           </Card>
 
-          {/* Memory sub-tab nav. Plain inline pills (not the larger
-              ``SettingsModuleTabs`` cards used at the top of the page)
-              because we're already inside a panel. */}
+          {/* Memory sub-tab nav. Plain inline pills because we're
+              already inside a panel; the selected sub-tab is mirrored
+              to ?tab= so it can be deep-linked and survives refresh. */}
           <nav aria-label={tMemory("subtabsAriaLabel")} className="flex flex-wrap gap-1.5">
             {MEMORY_SUBTABS.map((key) => {
               const selected = key === activeMemorySubTab;
@@ -6322,7 +5795,7 @@ export function SettingsWorkspace({
                       ? "border-brand-300/60 bg-brand-500/15 text-white"
                       : "border-brand-500/15 bg-ink-950/30 text-ink-300 hover:border-brand-500/30 hover:text-ink-100",
                   ].join(" ")}
-                  onClick={() => setActiveMemorySubTab(key)}
+                  onClick={() => switchMemorySubTab(key)}
                 >
                   {tMemory(labelKey)}
                 </button>
@@ -6470,10 +5943,10 @@ export function SettingsWorkspace({
                 </Field>
               </div>
               <div className="text-[11px] text-ink-500">
-                Milvus store (leave defaults to use the local file-backed vector store).
+                {tMemory("milvusStoreHint")}
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Milvus URI">
+                <Field label={tMemory("milvusUriLabel")}>
                   <input
                     className="input-dark text-xs"
                     value={milvusUri}
@@ -6481,7 +5954,7 @@ export function SettingsWorkspace({
                     placeholder="~/.memsearch/milvus.db"
                   />
                 </Field>
-                <Field label="Collection">
+                <Field label={tMemory("milvusCollectionLabel")}>
                   <input
                     className="input-dark text-xs"
                     value={milvusCollection}
@@ -6490,15 +5963,15 @@ export function SettingsWorkspace({
                   />
                 </Field>
                 <Field
-                  label="Milvus token"
-                  hint={memoryStatus?.milvus?.has_token ? "token stored" : "optional"}
+                  label={tMemory("milvusTokenLabel")}
+                  hint={memoryStatus?.milvus?.has_token ? tMemory("milvusTokenStored") : tMemory("milvusTokenOptional")}
                 >
                   <input
                     className="input-dark text-xs"
                     type="password"
                     value={milvusToken}
                     onChange={(e) => setMilvusToken(e.target.value)}
-                    placeholder={memoryStatus?.milvus?.has_token ? "•••••••• (unchanged)" : "optional"}
+                    placeholder={memoryStatus?.milvus?.has_token ? tMemory("milvusTokenUnchanged") : tMemory("milvusTokenOptional")}
                   />
                 </Field>
               </div>
@@ -6534,7 +6007,7 @@ export function SettingsWorkspace({
                         },
                       });
                       if (res.ok) {
-                        setInfo("Memory vector embedding settings saved.");
+                        reportOk(tMemory("embeddingSaved"));
                         setMilvusToken("");
                         setEmbKeyPlain("");
                         // Reflect the freshly-minted vault ref in the
@@ -6547,7 +6020,7 @@ export function SettingsWorkspace({
                     })
                   }
                 >
-                  Save embedding settings
+                  {tMemory("saveEmbedding")}
                 </button>
               </div>
             </div>
@@ -6559,7 +6032,7 @@ export function SettingsWorkspace({
                 onClick={() =>
                   void runMemoryAction("install", async () => {
                     const res = await clientApi.memoryVectorInstall();
-                    if (res.ok) setInfo("memsearch dependency installed.");
+                    if (res.ok) reportOk(tMemory("memsearchInstalled"));
                     return res;
                   })
                 }
@@ -6573,7 +6046,7 @@ export function SettingsWorkspace({
                 onClick={() =>
                   void runMemoryAction("reindex", async () => {
                     const res = await clientApi.memoryVectorReindex({ force: false });
-                    if (res.ok) setInfo("Memory vector index rebuilt.");
+                    if (res.ok) reportOk(tMemory("indexRebuilt"));
                     return res;
                   })
                 }
@@ -6840,14 +6313,13 @@ export function SettingsWorkspace({
                   disabled={writeRuleBusy}
                   onClick={async () => {
                     setWriteRuleBusy(true);
-                    setError(null);
                     try {
                       const res = await clientApi.memoryWriteRulesSet(writeRules);
                       if (!res.ok && res.error) throw new Error(res.error);
                       setWriteRules(res.rules || writeRules);
-                      setInfo(tMemory("rulesSaved"));
+                      reportOk(tMemory("rulesSaved"));
                     } catch (e) {
-                      setError(e instanceof Error ? e.message : String(e));
+                      reportError(e instanceof Error ? e.message : String(e));
                     } finally {
                       setWriteRuleBusy(false);
                     }
@@ -7039,7 +6511,7 @@ export function SettingsWorkspace({
                   <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
                     <Field label={tMemory("agentmemoryBaseUrl")}>
                       <input
-                        className="input"
+                        className="input-dark font-mono text-xs"
                         value={agentmemoryDraft.base_url}
                         onChange={(e) =>
                           setAgentmemoryDraft((prev) => ({
@@ -7051,7 +6523,7 @@ export function SettingsWorkspace({
                     </Field>
                     <Field label={tMemory("agentmemoryProject")}>
                       <input
-                        className="input"
+                        className="input-dark font-mono text-xs"
                         value={agentmemoryDraft.project}
                         onChange={(e) =>
                           setAgentmemoryDraft((prev) => ({
@@ -7063,7 +6535,7 @@ export function SettingsWorkspace({
                     </Field>
                     <Field label={tMemory("agentmemorySecretRef")} hint={tMemory("agentmemorySecretHint")}>
                       <input
-                        className="input"
+                        className="input-dark font-mono text-xs"
                         value={agentmemoryDraft.secret_ref}
                         onChange={(e) =>
                           setAgentmemoryDraft((prev) => ({
@@ -7076,7 +6548,7 @@ export function SettingsWorkspace({
                     </Field>
                     <Field label={tMemory("agentmemorySecretEnv")}>
                       <input
-                        className="input"
+                        className="input-dark font-mono text-xs"
                         value={agentmemoryDraft.secret_env}
                         onChange={(e) =>
                           setAgentmemoryDraft((prev) => ({
@@ -7088,7 +6560,7 @@ export function SettingsWorkspace({
                     </Field>
                     <Field label={tMemory("agentmemorySessionId")} hint={tMemory("agentmemoryOptional")}>
                       <input
-                        className="input"
+                        className="input-dark font-mono text-xs"
                         value={agentmemoryDraft.session_id}
                         onChange={(e) =>
                           setAgentmemoryDraft((prev) => ({
@@ -7101,7 +6573,7 @@ export function SettingsWorkspace({
                     <div className="grid grid-cols-2 gap-2">
                       <Field label={tMemory("agentmemoryBudget")}>
                         <input
-                          className="input"
+                          className="input-dark font-mono text-xs"
                           type="number"
                           min={1}
                           value={agentmemoryDraft.context_budget}
@@ -7115,7 +6587,7 @@ export function SettingsWorkspace({
                       </Field>
                       <Field label={tMemory("agentmemoryTimeout")}>
                         <input
-                          className="input"
+                          className="input-dark font-mono text-xs"
                           type="number"
                           min={0.1}
                           step={0.1}
@@ -7231,137 +6703,8 @@ export function SettingsWorkspace({
         </div>
       ) : null}
 
-      {effectiveSettingsTab === "interface" && !inSectionMode ? (
-        <div
-          id={settingsPanelId("interface")}
-          role="tabpanel"
-          aria-labelledby={settingsTabId("interface")}
-          className="space-y-5"
-        >
-          <SettingsGroup title={tAppearance("title")} description={tAppearance("description")}>
-            <Row label={tAppearance("theme")} desc={tAppearance("themeDesc")}>
-              <Select
-                value={uiSettings.darkMode}
-                onChange={(v) => patchUi({ darkMode: v as ThemeMode })}
-                options={[
-                  { value: "system", label: tAppearance("themeSystem") },
-                  { value: "light", label: tAppearance("themeLight") },
-                  { value: "dark", label: tAppearance("themeDark") },
-                ]}
-              />
-            </Row>
-            <Row label={tAppearance("language")} desc={tAppearance("languageDesc")}>
-              <Select
-                value={uiSettings.language === "zh" ? "zh" : "en"}
-                onChange={(v) => patchUi({ language: v as LanguagePreference })}
-                options={[
-                  { value: "en", label: "English" },
-                  { value: "zh", label: "中文" },
-                ]}
-              />
-            </Row>
-          </SettingsGroup>
-
-          <SettingsGroup title={tDisplay("title")} description={tDisplay("description")}>
-            <Row label={tDisplay("timezone")} desc={tDisplay("timezoneDesc")}>
-              <Select
-                value={uiSettings.timezone}
-                onChange={(v) => patchUi({ timezone: v as typeof uiSettings.timezone })}
-                options={[
-                  { value: "auto", label: "Auto" },
-                  { value: "utc+0", label: "UTC+0" },
-                  { value: "utc+8", label: "UTC+8 Shanghai" },
-                  { value: "utc+9", label: "UTC+9 Tokyo" },
-                  { value: "utc-5", label: "UTC-5 New York" },
-                  { value: "utc-8", label: "UTC-8 Los Angeles" },
-                ]}
-              />
-            </Row>
-            <Row label={tDisplay("refreshCadence")} desc={tDisplay("refreshCadenceDesc")}>
-              <Select
-                value={String(uiSettings.refreshSeconds || 0)}
-                onChange={(v) => patchUi({ refreshSeconds: Number(v) })}
-                options={[
-                  { value: "0", label: tDisplay("refreshOff") },
-                  { value: "5", label: "5 sec" },
-                  { value: "10", label: "10 sec" },
-                  { value: "30", label: "30 sec" },
-                  { value: "60", label: "1 min" },
-                ]}
-              />
-            </Row>
-            <Row label={tDisplay("compactMode")} desc={tDisplay("compactModeDesc")}>
-              <SwitchControl
-                checked={uiSettings.compact}
-                label={tDisplay("compactMode")}
-                onCheckedChange={(v) => patchUi({ compact: v })}
-              />
-            </Row>
-          </SettingsGroup>
-
-          <SettingsGroup title={tChart("title")} description={tChart("description")}>
-            <Row label={tChart("venue")} desc={tChart("venueDesc")}>
-              {venues.length ? (
-                <Select
-                  value={uiSettings.kline.venue}
-                  onChange={(v) => patchUi({ kline: { ...uiSettings.kline, venue: v as typeof uiSettings.kline.venue } })}
-                  options={venues.map((v) => ({ value: v.name, label: v.label }))}
-                />
-              ) : (
-                <span className="text-[11px] text-ink-400">{tModel("noVenues")}</span>
-              )}
-            </Row>
-            <Row label={tChart("symbol")} desc={tChart("symbolDesc")}>
-              <input
-                value={uiSettings.kline.symbol}
-                onChange={(e) => patchUi({ kline: { ...uiSettings.kline, symbol: e.target.value.toUpperCase() } })}
-                className="h-8 min-w-[160px] rounded-lg border border-[color:var(--line)] bg-[color:var(--card-hi)] px-2.5 font-mono text-xs text-[color:var(--text-base)] focus:border-brand-500/55 focus:outline-none"
-                placeholder="BTCUSDT"
-              />
-            </Row>
-            <Row label={tChart("timeframe")} desc={tChart("timeframeDesc")}>
-              <Select
-                value={uiSettings.kline.interval}
-                onChange={(v) => patchUi({ kline: { ...uiSettings.kline, interval: v as typeof uiSettings.kline.interval } })}
-                options={[
-                  { value: "1m", label: "1m" },
-                  { value: "5m", label: "5m" },
-                  { value: "15m", label: "15m" },
-                  { value: "1h", label: "1H" },
-                  { value: "4h", label: "4H" },
-                  { value: "1d", label: "1D" },
-                ]}
-              />
-            </Row>
-            <Row label={tChart("candles")} desc={tChart("candlesDesc")}>
-              <Select
-                value={String(uiSettings.kline.count)}
-                onChange={(v) => patchUi({ kline: { ...uiSettings.kline, count: Number(v) } })}
-                options={[
-                  { value: "48", label: "48" },
-                  { value: "96", label: "96" },
-                  { value: "192", label: "192" },
-                  { value: "288", label: "288" },
-                ]}
-              />
-            </Row>
-            <Row label={tChart("showVolume")} desc={tChart("showVolumeDesc")}>
-              <SwitchControl
-                checked={uiSettings.showVolume}
-                label={tChart("showVolume")}
-                onCheckedChange={(v) => patchUi({ showVolume: v })}
-              />
-            </Row>
-            <Row label={tChart("resetSettings")} desc={tChart("resetSettingsDesc")}>
-              <button className="btn btn-ghost" onClick={() => patchUi(DEFAULT_SETTINGS)}>
-                <SettingsIcon size={14} />
-                {tCommon("reset")}
-              </button>
-            </Row>
-          </SettingsGroup>
-        </div>
-      ) : null}
-        </div>
+      {effectiveSettingsTab === "interface" && !inSectionMode ? <InterfaceSettings venues={venues} /> : null}
+        </fieldset>
       </div>
     </PageBody>
   );

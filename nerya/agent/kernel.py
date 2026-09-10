@@ -1043,73 +1043,10 @@ def _loop_config_from_config(
     required_artifacts: tuple[dict[str, Any], ...] = (),
     compact_preservation_cb: Any = None,
 ) -> LoopConfig:
-    """Build native loop limits from config, preserving legacy harness knobs."""
-
-    raw_action_reserve = config.get(
-        "agent.native.action_tool_wall_reserve_seconds"
-    )
-    return LoopConfig(
-        turn_id=turn_id,
-        max_iterations=int(
-            config.get(
-                "agent.native.max_iterations",
-                config.get("agent.harness.max_iterations", 48),
-            )
-        ),
-        compact_threshold=int(config.get("agent.native.compact_threshold", 60)),
-        keep_tail_messages=int(config.get("agent.native.keep_tail_messages", 24)),
-        max_tokens=int(config.get("agent.native.max_tokens", 4096)),
-        tier=llm_tier or config.get("agent.native.tier"),
-        max_wall_seconds=(
-            float(
-                config.get(
-                    "agent.native.max_wall_seconds",
-                    config.get("agent.harness.max_wall_seconds", 0.0),
-                )
-            )
-            or None
-        ),
-        max_total_tool_calls=(
-            int(
-                config.get(
-                    "agent.native.max_total_tool_calls",
-                    config.get("agent.harness.max_tool_calls", 0),
-                )
-            )
-            or None
-        ),
-        wall_time_final_synthesis_seconds=float(
-            config.get("agent.native.wall_time_final_synthesis_seconds", 60.0)
-        ),
-        action_tool_wall_reserve_seconds=(
-            float(raw_action_reserve)
-            if raw_action_reserve is not None
-            else None
-        ),
-        llm_retry_attempts=int(config.get("agent.native.llm_retry_attempts", 10)),
-        max_extra_llm_attempts_per_turn=int(
-            config.get("agent.native.max_extra_llm_attempts_per_turn", 8)
-        ),
-        llm_retry_base_delay=float(config.get("agent.native.llm_retry_base_delay", 3.0)),
-        llm_retry_max_delay=float(config.get("agent.native.llm_retry_max_delay", 60.0)),
-        llm_retry_full_jitter=bool(config.get("agent.native.llm_retry_full_jitter", True)),
-        token_budget=(
-            int(config.get("agent.native.token_budget", 0)) or None
-        ),
-        enable_diminishing_returns=bool(
-            config.get("agent.native.enable_diminishing_returns", False)
-        ),
-        reactive_compact_max_attempts=int(
-            config.get("agent.native.reactive_compact_max_attempts", 3)
-        ),
-        model_context_window=(
-            int(config.get("agent.native.model_context_window", 0)) or None
-        ),
-        token_pressure_compact_ratio=float(
-            config.get("agent.native.token_pressure_compact_ratio", 0.85)
-        ),
-        reasoning_effort=reasoning_effort,
-        reasoning_summary=reasoning_summary,
+    """Build the native execution policy with caller-owned identity and hooks."""
+    return LoopConfig.from_config(
+        config, turn_id=turn_id, tier=llm_tier or config.get("agent.native.tier"),
+        reasoning_effort=reasoning_effort, reasoning_summary=reasoning_summary,
         model_provider=model_provider,
         model_id=model_id,
         session_id=session_id,
@@ -1144,8 +1081,12 @@ class AgentKernel:
         self._registry = ToolRegistry()
         self._deps: Optional[NativeToolDeps] = None
         self._evolution_hooks = EvolutionHookBus(self.config)
+        # Extension host for workspace plugins (nerya.harness.extensions).
+        # Populated lazily by _ensure_registry; None when plugin loading
+        # is disabled or nothing loaded.
+        self._ext_host: Optional[Any] = None
         # Per-kernel turn counter feeds the periodic memory compaction
-        # tick so we don't run a full filesystem walk after every
+        # tick so we don't do a full filesystem walk after every
         # single turn — only every Nth.
         self._turn_count: int = 0
 
@@ -1819,6 +1760,16 @@ class AgentKernel:
             permission_context=permission_context,
             approval_resolver=approval_coordinator,
         )
+        # Bridge workspace-plugin waterfall listeners onto this turn's
+        # executor chokepoint. Skipped entirely when no plugin subscribed,
+        # so a plugin-free workspace pays zero overhead. Listener failures
+        # are contained inside the bridges — plugins cannot crash a turn.
+        if self._ext_host is not None:
+            bus = self._ext_host.bus
+            if bus.has_listeners("tools/pre-execute"):
+                executor.add_pre_hook(self._ext_host.tool_pre_hook())
+            if bus.has_listeners("tools/post-execute"):
+                executor.add_post_hook(self._ext_host.tool_post_hook())
         # Child runtimes spawned by native delegation must share this exact
         # per-turn executor so schema, permission, approval, risk, and hooks
         # remain one policy boundary. ``NativeToolDeps`` is mutable because
@@ -3581,7 +3532,7 @@ class AgentKernel:
         strategy_id: Optional[str],
         session_id: Optional[str] = None,
     ) -> None:
-        """Optional: append a one-line summary of the turn to memory.
+        """Optionally persist the turn report and its unresolved work.
 
         Disabled by default — the agent already has
         :func:`memory_remember` for explicit writes, and writing every
@@ -3598,35 +3549,16 @@ class AgentKernel:
         if not text:
             return
         try:
-            preview = text.splitlines()[0][:200]
-            note = (
-                f"turn={turn_id} action={result.actions[0].get('action') if result.actions else 'noop'}"
-                f" stopped={result.stopped_reason} :: {preview}"
-            )
+            note = f"turn={turn_id} stopped={result.stopped_reason}\n{text}"
             if session_id:
                 scope = "session"
             elif strategy_id:
                 scope = "strategy"
             else:
                 scope = "global"
-            if strategy_id:
-                self._evolution_hooks.on_memory_write(
-                    target=f"strategy:{strategy_id}",
-                    content=note,
-                    source="after_turn_memory",
-                    evidence_refs=[f"turn:{turn_id}"],
-                    strategy_id=strategy_id,
-                )
-            else:
-                self._evolution_hooks.on_memory_write(
-                    target="global.md",
-                    content=note,
-                    source="after_turn_memory",
-                    evidence_refs=[f"turn:{turn_id}"],
-                )
             from ..memory.runtime import MemoryRuntime
 
-            MemoryRuntime(
+            remembered = MemoryRuntime(
                 self.config,
                 actor_id=(
                     self._deps.active_actor_id
@@ -3645,6 +3577,13 @@ class AgentKernel:
                 evidence_refs=[f"turn:{turn_id}"],
                 writer_id="agent_kernel",
             )
+            if remembered.ok and not remembered.skipped:
+                self._evolution_hooks.on_memory_write(
+                    target=f"{scope}:{session_id or strategy_id or 'default'}",
+                    content=remembered.record.content if remembered.record else note,
+                    source="after_turn_memory", evidence_refs=[f"turn:{turn_id}"],
+                    strategy_id=strategy_id,
+                )
         except Exception:
             _LOG.debug("after-turn memory hook failed", exc_info=True)
 
@@ -3780,8 +3719,71 @@ class AgentKernel:
         # Default-off so existing tests / operators don't pay the
         # subprocess + network cost without explicit opt-in.
         self._maybe_attach_mcp_connectors()
+        # Workspace plugins (nerya.harness): tool contributions land on
+        # the same registry; waterfall listeners are bridged onto each
+        # turn's executor in run_turn. Failures are journaled, never fatal.
+        self._maybe_attach_extension_host()
         self._deps = deps
         return deps
+
+    def _maybe_attach_extension_host(self) -> None:
+        """Load workspace plugins onto an :class:`ExtensionHost`.
+
+        Gated by ``plugins.enabled`` (default True — same trust model
+        as ``workspace/hooks`` and ``workspace/providers``). Import or
+        activation failures are recorded on the host and journaled to
+        ``journals/plugins.jsonl``; boot never fails because of a bad
+        plugin.
+        """
+
+        if self._ext_host is not None:
+            return
+        from ..harness.extensions import ExtensionHost
+        from ..harness.loader import build_host
+
+        try:
+            plugins_cfg = self.config.get("plugins", {}) or {}
+            if not bool(plugins_cfg.get("enabled", True)):
+                return
+            disabled = list(plugins_cfg.get("disabled", []) or [])
+            host, load_errors = build_host(
+                self.config.paths.plugins,
+                services={
+                    "config": self.config,
+                    "paths": self.config.paths,
+                },
+                config=dict(plugins_cfg),
+                disabled=disabled,
+            )
+            registered = host.attach_tools(self._registry)
+            self._ext_host = host
+
+            if load_errors or host.errors or registered:
+                record = {
+                    "kind": "plugins.boot",
+                    "active": host.active_plugins,
+                    "tools_registered": registered,
+                    "load_errors": [e.asdict() for e in load_errors],
+                    "activation_errors": [str(e) for e in host.errors],
+                }
+                try:
+                    jsonl.append(self.config.paths.journal("plugins"), record)
+                except Exception:
+                    _LOG.debug("plugin boot journal write failed", exc_info=True)
+        except Exception:
+            # The extension skeleton must never take the kernel down.
+            _LOG.warning("extension host attach failed", exc_info=True)
+            try:
+                self._ext_host = ExtensionHost()
+            except Exception:
+                self._ext_host = None
+
+    @property
+    def ext_host(self) -> Optional[Any]:
+        """The workspace-plugin host (attached lazily with the registry)."""
+
+        self._ensure_registry()
+        return self._ext_host
 
     def _maybe_attach_mcp_connectors(self) -> None:
         """Attach MCP connectors when ``mcp.connectors.enabled`` is true.

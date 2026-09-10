@@ -564,7 +564,7 @@ def routes():
             return None
         return raw[:160]
 
-    def run_turn(client, payload):
+    def run_turn(client, payload, *, enforce_public_gate: bool = True):
         payload = payload if isinstance(payload, dict) else {}
         # Permission mode resolution order (most → least specific):
         # explicit payload field, env override, default. Env override
@@ -633,6 +633,20 @@ def routes():
             if resume_turn_id
             else _run_turn_user_text(payload)
         )
+
+        # Public research-only boundary. This must precede prompt-guard,
+        # slash-command dispatch, and AgentKernel; every continuation is
+        # classified again and missing text is isolated.
+        _intent = None
+        if enforce_public_gate and client.config.get("runtime.intent_gate.enabled", False):
+            from ..agent.intent_gate import classify_request, extract_user_text as _intent_text
+            _user_text = _intent_text(trigger) or _user_text
+            if resume_turn_id and not str(_user_text or "").strip():
+                _intent = {"status": "isolated", "allowed": False, "reason_code": "resume_missing_continuation"}
+            else:
+                _intent = classify_request(client, text=_user_text, source="POST /agent/run_turn")
+            if not _intent.get("allowed"):
+                return {"_status": 403, "ok": False, "error": "intent_gate_blocked", "isolated": True, "intent_gate": _intent, "message": "This public agent endpoint accepts research and market-analysis requests only. The request was isolated before execution."}
 
         # Auto-classify the incoming operator/user/channel text against the
         # prompt-guard policy. ``review`` and ``block`` verdicts auto-enqueue
@@ -735,6 +749,8 @@ def routes():
         # circuited above). Operators see this in the dashboard turn detail.
         if _pg and _pg.get("verdict") in ("review", "block"):
             response["prompt_guard"] = _pg
+        if _intent is not None:
+            response["intent_gate"] = _intent
 
         # Operator profile self-learning capture — propose facts after
         # stable patterns are observed. Never blocks the turn; failures
@@ -1374,8 +1390,20 @@ def routes():
     def tool_registry(client, _payload):
         return client.agent.list_tools()
 
+    def run_turn_internal(client, payload):
+        """Dashboard-only loopback entry point.
+
+        The HTTP dispatcher enforces the loopback boundary for this route.
+        Keeping it as a distinct route (rather than trusting a payload
+        ``source`` field) prevents a public caller from self-declaring an
+        internal origin. Nerya's prompt firewall and normal permission/Risk
+        gates still run; only the public research-only gate is skipped.
+        """
+        return run_turn(client, payload, enforce_public_gate=False)
+
     return [
         ("POST", "/agent/run_turn", run_turn),
+        ("POST", "/agent/run_turn_internal", run_turn_internal),
         ("POST", "/agent/attachments/upload", attachments_upload),
         ("POST", "/agent/trace", get_trace),
         ("POST", "/agent/explain", explain),

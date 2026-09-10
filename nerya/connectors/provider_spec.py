@@ -441,8 +441,13 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     def _mock_chain(cfg, **_kw):
         return MockChain()
 
-    def _ccxt_factory(default_id: str):
-        """Build a factory that binds a venue to a concrete ccxt exchange id."""
+    def _ccxt_factory(default_id: str, *, prefer_perpetual: bool = False):
+        """Build a factory that binds a venue to a concrete ccxt exchange id.
+
+        ``prefer_perpetual`` is set for perp/linear venue specs so the
+        adapter resolves bare BASE/QUOTE symbols to the linear swap
+        contract instead of spot (E3/C3).
+        """
 
         def _build(cfg, *, workspace=None, vault_passphrase=None):
             raw = cfg.get("ccxt_id") or cfg.get("exchange_id")
@@ -475,6 +480,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
                 credentials=creds, live=bool(cfg.get("live", False)),
                 options=options,
                 timeout_ms=timeout_ms,
+                prefer_perpetual=prefer_perpetual,
             )
 
         return _build
@@ -515,9 +521,15 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     def _evm(cfg, *, workspace=None, vault_passphrase=None):
         venue = (cfg.get("venue") or "evm").lower()
         chain = venue if venue != "evm" else cfg.get("chain", "ethereum")
+        # Default chain_id from the canonical name->id map: a venue row
+        # `arbitrum` without an explicit chain_id previously signed with
+        # Ethereum mainnet's chain-id 1 (an unreplayable EIP-155 sig).
+        from .evm_native import EVM_CHAIN_IDS
+        chain_l = str(chain or "ethereum").lower()
+        default_chain_id = EVM_CHAIN_IDS.get(chain_l, 1)
         return EVMNative(
             chain=chain,
-            chain_id=int(cfg.get("chain_id", 1)),
+            chain_id=int(cfg.get("chain_id") or default_chain_id),
             rpc_url=cfg.get("rpc_url", ""),
             live=bool(cfg.get("live", False)),
             credentials=DEXCredentials(
@@ -554,7 +566,11 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     reg.register(ExchangeProviderSpec(
         id="binance", label="Binance Spot (ccxt)", kind="cex",
         runtime="python_ccxt",
-        aliases=("binance_spot", "binanceusdm", "binancecoinm"),
+        # F7: "binanceusdm"/"binancecoinm" used to sit here, and since
+        # this spec registers before the perpetual ones, first-match
+        # find() built a SPOT connector for those venues. The perp
+        # specs below own them now.
+        aliases=("binance_spot",),
         factory=_binance,
         install_hint="pip install ccxt",
         install_command="pip install ccxt",
@@ -655,8 +671,13 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
                "api": "https://docs.polymarket.com/developers/CLOB/overview"},
         description="Prediction-market orderbook on Polygon. Reads via "
                     "CLOB+Gamma+Data APIs; writes need EIP-712 signing.",
+        # F9: place_order currently requires the operator to hand us a
+        # pre-signed order via credentials.extras['signed_order'] —
+        # nothing produces that payload yet, so advertising write
+        # support forced live orders into a guaranteed failure. Flip
+        # back to True once a real EIP-712 signing path exists.
         supports={"ticker": True, "klines": True, "order_book": True,
-                  "balances": True, "place_order": True},
+                  "balances": True, "place_order": False},
         credential_fields=(
             CredentialField(
                 name="api_key", label="Polygon Address", kind="public",
@@ -856,7 +877,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
             ccxt_id,
             fallback_passphrase=with_passphrase,
         )
-        base_factory = _ccxt_factory(ccxt_id)
+        base_factory = _ccxt_factory(ccxt_id, prefer_perpetual=True)
 
         def factory(cfg, *, workspace=None, vault_passphrase=None):
             new_cfg = dict(cfg or {})
@@ -892,7 +913,8 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     reg.register(_perp_spec(
         "binance_coinm_perpetual", "Binance COIN-M Perpetual",
         ccxt_id="binancecoinm",
-        aliases=("binance_coinm",),
+        # "binancecoinm" moved here from the spot binance spec (F7).
+        aliases=("binance_coinm", "binancecoinm"),
         docs_url="https://developers.binance.com/docs/derivatives/coin-margined-futures/general-info",
     ))
     reg.register(_perp_spec(
@@ -1154,8 +1176,13 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
                      "options, FX. Requires a running TWS or IB Gateway "
                      "process for trading; data-only paper mode is "
                      "available without it."),
+        # F13: get_order/cancel_order raise NotImplementedError, so a
+        # placed order could never be tracked or cancelled. Advertise
+        # read-only so intake forces paper mode until the order
+        # lifecycle methods are implemented (follow-up: implement
+        # IBKRConnector.get_order / cancel_order over ib_async).
         supports={"ticker": True, "klines": True, "order_book": True,
-                  "balances": True, "place_order": True},
+                  "balances": True, "place_order": False},
         instrument_types=("equity", "future", "option", "fx", "etf"),
         credential_fields=(
             CredentialField(
@@ -1194,8 +1221,13 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         description=("MetaTrader 5 connector for forex / CFDs / futures. "
                      "Windows only; the Python package speaks to a "
                      "running MT5 terminal over local IPC."),
+        # F13: place_order can submit, but get_order/cancel_order are
+        # unimplemented — placed orders could never be tracked or
+        # cancelled. Advertise read-only so intake forces paper mode
+        # until MT5Connector.get_order exists (follow-up: implement
+        # order lifecycle over mt5.orders_get / order_check).
         supports={"ticker": True, "klines": True, "order_book": False,
-                  "balances": True, "place_order": True},
+                  "balances": True, "place_order": False},
         instrument_types=("fx", "cfd", "future", "equity"),
         credential_fields=(
             CredentialField(
@@ -1236,8 +1268,13 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         description=("US equities + crypto broker with a clean REST API. "
                      "Free paper accounts; live trading requires an "
                      "approved brokerage account."),
+        # F13: get_order/cancel_order raise NotImplementedError, so a
+        # placed order could never be tracked or cancelled. Advertise
+        # read-only so intake forces paper mode until the order
+        # lifecycle methods are implemented (follow-up: implement
+        # AlpacaConnector.get_order / cancel_order over alpaca-py).
         supports={"ticker": True, "klines": True, "order_book": True,
-                  "balances": True, "place_order": True},
+                  "balances": True, "place_order": False},
         instrument_types=("equity", "etf", "spot", "option"),
         credential_fields=(
             _CEX_API_KEY, _CEX_API_SECRET,

@@ -33,4 +33,15 @@ subagents:
   explore_lane: subagents/explore_lane.agent.md
   verification_lane: subagents/verification_lane.agent.md
   web_researcher: subagents/web_researcher.agent.md
+  strategy_tuner: subagents/strategy_tuner.agent.md
+  coding_agent: subagents/coding_agent.agent.md
+  code_critic: subagents/code_critic.agent.md
+  buffett_lens: subagents/buffett_lens.agent.md
+  damodaran_lens: subagents/damodaran_lens.agent.md
+  marks_lens: subagents/marks_lens.agent.md
+  mauboussin_lens: subagents/mauboussin_lens.agent.md
+  druckenmiller_lens: subagents/druckenmiller_lens.agent.md
+  serenity_lens: subagents/serenity_lens.agent.md
+  unusual_whales_lens: subagents/unusual_whales_lens.agent.md
+  kobeissi_lens: subagents/kobeissi_lens.agent.md
 execution_policies: execution-policies.json

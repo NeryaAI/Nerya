@@ -263,7 +263,9 @@ export function StrategyProposalApprovalCard({
     !validationPending &&
     !validating;
   const notice = onNotice ? null : localNotice;
-  const error = localError;
+  // When the parent handles errors (toast on the strategies page), the
+  // inline bar is suppressed so the failure isn't reported twice.
+  const error = onError ? null : localError;
 
   async function validateProposal(): Promise<StrategyValidationReport | null> {
     if (!proposalId) return null;
@@ -521,7 +523,7 @@ function IssueList({
 }) {
   const cls =
     tone === "danger"
-      ? "border-danger/30 bg-danger/10 text-rose-300"
+      ? "border-danger/30 bg-danger/10 text-danger"
       : "border-warn/30 bg-warn/10 text-warn";
   return (
     <div className={`rounded-md border px-3 py-2 ${cls}`}>

@@ -65,22 +65,24 @@ def test_default_stock_research_aliases_inherit_research_profile(tmp_path):
         assert "web_search_fetch" in spec.allowed_skills
 
 
-def test_risk_critic_prompt_requires_market_data_before_risk_verdict():
+def test_risk_role_uses_declared_evidence_contract_not_a_fixed_tool_sequence():
+    from nerya.workspace.prompt_bundles import load_bundle
     prompt = DEFAULT_SUBAGENT_PROMPTS["risk_critic"]
+    assert prompt == load_bundle().subagents["risk_critic"]
+    assert all(field in prompt for field in ("verdict", "invalidation", "evidence", "confidence"))
+    assert "never invent" in prompt
+    assert "get_candles" not in prompt
 
-    assert "market_data" in prompt
-    assert "get_candles" in prompt
-    assert "ATR" in prompt
-    assert "Do not declare market data unavailable" in prompt
 
-
-def test_fundamentals_prompt_requires_quote_and_fallback_data_sources():
+def test_all_default_roles_have_one_packaged_prompt_source():
+    from nerya.workspace.prompt_bundles import load_bundle
+    bundle = load_bundle()
+    assert set(DEFAULT_SUBAGENT_SKILLS) <= set(bundle.subagents)
+    assert DEFAULT_SUBAGENT_PROMPTS == bundle.subagents
     prompt = DEFAULT_SUBAGENT_PROMPTS["fundamentals_analyst"]
-
-    assert "market_data" in prompt
-    assert "get_ticker" in prompt
-    assert "financial statement source fails" in prompt
-    assert "Do not mark valuation unavailable" in prompt
+    assert all(field in prompt for field in ("valuation", "evidence", "confidence"))
+    assert "native tool contracts" in prompt
+    assert "get_ticker" not in prompt
 
 
 def test_strategy_registry_uses_tuning_subagent_prompt_and_tier(tmp_path):

@@ -37,6 +37,75 @@ log = logging.getLogger(__name__)
 _PAPER_FEE_BPS = 5.0
 _PAPER_SLIPPAGE_BPS = 2.0
 
+# Transport-level failure signatures — the venue outcome is unknown, so
+# the tracked order must stay recoverable instead of being rejected.
+_AMBIGUOUS_PLACE_PATTERNS = (
+    "timeout", "timed out", "networkerror", "network error",
+    "connectionerror", "connection error", "connectionreset",
+    "connection reset", "econnreset", "econnaborted", "socket",
+    "readerror", "read error", "remoteendclosed", "remotedisconnected",
+    "temporarilyunavailable", "temporarily unavailable", "service unavailable",
+    "etimedout", "ehostunreach", "enetunreach",
+)
+
+# Definitive venue/local rejects — the order was never accepted, so
+# marking the row ``rejected`` is honest and terminal.
+_DEFINITIVE_REJECT_PATTERNS = (
+    "badrequest", "invalidorder", "invalid order", "insufficientfunds",
+    "insufficient balance", "insufficientbalance", "permissiondenied",
+    "permission denied", "invalid api-key", "invalidapikey", "apikey",
+    "unauthorized", "forbidden", "accountdisabled", "account disabled",
+    "notsupported", "not supported", "unsupported", "invalidsymbol",
+    "invalid symbol", "vault", "passphrase", "credentials", "mock_mode",
+    "kill_switch", "live_trading_disabled", "reduceonly", "rejected",
+)
+
+
+def _is_ambiguous_place_error(exc: BaseException) -> bool:
+    """Classify a ``place_order`` failure as venue-outcome-unknown.
+
+    B1: connectors wrap ccxt failures in ``TradingError`` and network
+    code raises plain exceptions — neither reliably distinguishes
+    "request never reached the venue" from "venue accepted but the
+    response was lost". Only definitive rejects (bad params,
+    insufficient funds, permission/config problems) may take the
+    terminal ``rejected`` path; everything else is treated as
+    ambiguous so the order stays tracked and pollable.
+
+    R2B4: when the exception carries an explicit ``ambiguous`` attribute
+    (``TradingError`` always does; the ccxt adapter sets it from its own
+    transport classification) we trust it *exactly* — ``False`` means the
+    adapter knows the order was never accepted (min notional, markets
+    unavailable, leverage set failure) and must decay to a clean
+    ``rejected`` instead of aging to ``lost``. Heuristics only apply to
+    plain exceptions without the flag.
+    """
+    explicit = getattr(exc, "ambiguous", None)
+    if explicit is not None:
+        return bool(explicit)
+    haystack = f"{type(exc).__name__} {exc}".lower()
+    if any(pattern in haystack for pattern in _AMBIGUOUS_PLACE_PATTERNS):
+        return True
+    if any(pattern in haystack for pattern in _DEFINITIVE_REJECT_PATTERNS):
+        return False
+    # Unknown error shapes fail safe: keep the order recoverable rather
+    # than orphan a possibly-live venue order.
+    return True
+
+
+def _reference_mark(candidate: OrderCandidate) -> float | None:
+    """Best reference price for adapter-local cost checks (R3T6).
+
+    Market orders have no order price; the BudgetChecker stashes the
+    frozen mark in ``candidate.meta``. Used ONLY for the connector's
+    min-notional guard — never sent to the venue.
+    """
+    try:
+        mark = float((candidate.meta or {}).get("mark_price") or 0.0)
+    except Exception:
+        return None
+    return mark if mark > 0 else None
+
 
 @dataclass
 class MarketOrderConfig(ExecutorConfig):
@@ -129,8 +198,22 @@ class MarketOrderExecutor(Executor):
         # If we've already reached a terminal order state, finalize.
         if order.state == "filled":
             return self._finalize(filled=True)
-        if order.state in ("rejected", "failed", "expired"):
-            return self._finalize(filled=False, reason=order.state)
+        if order.state in ("rejected", "failed", "expired", "lost"):
+            # ``lost`` must finalize too — it is in TERMINAL_STATES and
+            # leaving the run polling forever wedges the executor and
+            # holds reservations (F5).
+            reason = "order_lost" if order.state == "lost" else order.state
+            if order.state == "lost" and any(
+                str(note).startswith("place_unknown_expired")
+                for note in ((order.meta or {}).get("notes") or [])
+            ):
+                # R2B3: the place outcome stayed unknown past the age
+                # bound — label the run so operators see why.
+                reason = "place_unknown_expired"
+            return self._finalize(
+                filled=False,
+                reason=reason,
+            )
         if order.state == "canceled":
             return self._finalize(filled=False, reason="canceled")
 
@@ -171,6 +254,12 @@ class MarketOrderExecutor(Executor):
             profile = None
         registry = None
         conn = None
+        # Reservations that must stay ACTIVE after this cancel (R3T1):
+        # when the venue keeps filling (partial fill) or the cancel
+        # outcome is still unknown (R3T2), releasing here orphans the
+        # capital while the order is still live — the poller's
+        # completion path settles the reservation instead.
+        keep_reserved: set[str] = set()
         # Resolve the connector once for live/canary modes so we can
         # actually cancel at the venue instead of only flipping local state.
         if profile is not None and profile.mode in ("live", "canary"):
@@ -215,18 +304,80 @@ class MarketOrderExecutor(Executor):
                     )
                     status = (getattr(ack, "status", "") or "").lower()
                     if status in ("filled", "closed"):
-                        tracker.update_state(order_id, "filled")
+                        # R2B1: a cancel raced with a *partial* fill —
+                        # stay non-terminal so the remainder keeps being
+                        # polled instead of going filled prematurely.
+                        ack_filled = float(getattr(ack, "filled", None) or 0.0)
+                        if self._fill_completes_order(order, ack_filled):
+                            tracker.update_state(order_id, "filled")
+                            # R2B6: the fill really happened, so consume
+                            # the reservation instead of letting the
+                            # release below free capital for a position
+                            # that is now open.
+                            store = CapitalReservationStore(self.paths)
+                            for rid in self.run.reservation_ids:
+                                store.consume(rid)
+                        else:
+                            # R3T1: the venue keeps filling the remainder
+                            # after this run goes terminal — do NOT
+                            # release its reservation here. The
+                            # background poller drives the order to
+                            # ``filled`` and consumes the reservation
+                            # (same id: the tracker row carries it).
+                            keep_reserved.update(self.run.reservation_ids)
+                            tracker.update_state(order_id, "partially_filled")
                     elif status in ("canceled", "cancelled"):
                         tracker.confirm_cancel(order_id)
+                    elif status in ("rejected", "expired"):
+                        # R3T2: definitive venue outcomes are recorded as
+                        # themselves, not as a local ``failed``.
+                        tracker.update_state(
+                            order_id, status,  # type: ignore[arg-type]
+                            payload={"reason": f"cancel_failed:{exc}"},
+                        )
                     else:
-                        tracker.update_state(order_id, "failed", payload={"reason": f"cancel_failed:{exc}"})
-                except Exception:
-                    tracker.update_state(order_id, "failed", payload={"reason": f"cancel_failed:{exc}"})
-        self._release_reservations()
+                        # R3T2: the cancel failed but the re-fetch shows
+                        # the order still live (open / partial / unknown
+                        # status). ``failed`` is terminal and would stop
+                        # polling while the venue order may still fill —
+                        # stay non-terminal in ``cancel_requested`` and
+                        # let the poller drive a real terminal state.
+                        keep_reserved.update(self.run.reservation_ids)
+                        tracker.annotate(order_id, f"cancel_failed_still_polling:{exc}")
+                except Exception as refetch_exc:
+                    # R3T2: BOTH the cancel and the re-fetch failed
+                    # (transient errors) — the venue outcome is unknown,
+                    # so a terminal ``failed`` here orphans a possibly
+                    # live order + its fill. Stay ``cancel_requested``
+                    # (non-terminal) with a note; the poller keeps
+                    # driving it and settles the reservation when the
+                    # venue reports a real terminal state.
+                    keep_reserved.update(self.run.reservation_ids)
+                    tracker.annotate(
+                        order_id,
+                        f"cancel_failed_still_polling:{exc};refetch:{refetch_exc}",
+                    )
+        self._release_reservations(skip=keep_reserved or None)
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _fill_completes_order(order: Any, filled: float) -> bool:
+        """True when ``filled`` covers the tracked order's full size.
+
+        The epsilon scales with the order size so float noise on large
+        notionals never wedges an order in ``partially_filled``, while
+        tiny orders still require an exact cover. Orders without a known
+        target size treat any positive fill as complete (matches the
+        tracker's own rollup rule in ``record_fill``).
+        """
+        target = float(getattr(order, "size_base", None) or 0.0)
+        if target <= 0:
+            return True
+        eps = max(1e-12, abs(target) * 1e-9)
+        return float(filled or 0.0) >= target - eps
+
     def _candidate(self) -> OrderCandidate:
         raw = (self.run.config_json or {}).get("candidate") or {}
         return _candidate_from_payload(raw)
@@ -277,6 +428,13 @@ class MarketOrderExecutor(Executor):
         """
         tracker = self._tracker()
         order = tracker.get(order_id)
+        # B12: a cancel may have raced with this trigger. Re-read the
+        # row and respect the cancel — never fill a canceled /
+        # cancel-requested order.
+        if order is not None and (
+            order.is_terminal or order.state == "cancel_requested"
+        ):
+            return order.state
         mark_price = self._paper_mark_price(
             candidate,
             prefer_frozen=bool(order is None or order.state == "created"),
@@ -476,12 +634,30 @@ class MarketOrderExecutor(Executor):
                 take_profit=tp_price,
                 trigger_price=candidate.stop_price,
                 extra_params=self._connector_extra_params(),
+                # R3T6: market orders carry no order price, so the
+                # adapter's min-notional guard needs a reference mark to
+                # estimate the order cost. Meta.mark_price is the frozen
+                # mark the BudgetChecker stashed; connectors that don't
+                # accept the kwarg never see it (signature-filtered).
+                reference_price=_reference_mark(candidate),
             )
         except NotImplementedError as exc:
             tracker.mark_rejected(order_id, reason=f"unsupported:{exc}")
             self.transition("failed", close_type="failed")
             return
         except Exception as exc:
+            if _is_ambiguous_place_error(exc):
+                # B1: a timeout / network failure *after* the venue may
+                # have accepted the order must NOT orphan a live venue
+                # order behind a local ``rejected`` row (excluded from
+                # active_orders, never re-attached). Keep the order
+                # tracked in ``submitted`` with no exchange id and a
+                # ``place_unknown`` note so the poller / resume path can
+                # adopt it by client id. Release nothing.
+                tracker.mark_submitted(order_id)
+                tracker.annotate(order_id, f"place_unknown:{exc}")
+                self.transition("submitted")
+                return
             tracker.mark_rejected(order_id, reason=f"place_error:{exc}")
             self.transition("failed", close_type="failed")
             return
@@ -500,20 +676,34 @@ class MarketOrderExecutor(Executor):
         filled = float(getattr(ack, "filled", None) or 0.0)
         avg_price = float(getattr(ack, "avg_price", None) or 0.0)
         if filled > 0 and avg_price > 0:
-            fee_usd = float(getattr(ack, "fee_usd", None) or 0.0)
+            # B2: ``ack.fee_usd`` is the venue's *cumulative* order fee —
+            # only the not-yet-recorded increment may be added.
+            prev_fee = float(tracker.get(order_id).fee_usd or 0.0)
+            fee_usd = max(0.0, float(getattr(ack, "fee_usd", None) or 0.0) - prev_fee)
             fill = tracker.record_fill(
                 order_id=order_id,
                 price=avg_price,
                 size_base=filled,
                 fee_usd=fee_usd,
                 source="live" if profile.mode in ("live", "canary") else "shadow",
+                cumulative_filled=filled,
             )
-            # Atomic PositionBook update — keep the book in lock-step with
-            # the broker so protection, exposure caps, and reconciliation
-            # see the fill immediately rather than waiting for the
-            # background poller side-channel.
-            self._apply_fill_to_book(order_id=order_id, fill=fill, candidate=candidate, profile=profile)
-            tracker.update_state(order_id, "filled")
+            if fill is not None:
+                # Atomic PositionBook update — keep the book in lock-step
+                # with the broker so protection, exposure caps, and
+                # reconciliation see the fill immediately rather than
+                # waiting for the background poller side-channel.
+                self._apply_fill_to_book(order_id=order_id, fill=fill, candidate=candidate, profile=profile)
+            # R2B1: only go terminal when the ack fill covers the whole
+            # order. A partial ack fill must stay ``partially_filled`` so
+            # active_orders keeps including it — the poller / executor
+            # tick drives the remainder to completion (and only a
+            # complete fill consumes the reservation in full).
+            order_now = tracker.get(order_id) or order
+            if self._fill_completes_order(order_now, filled):
+                tracker.update_state(order_id, "filled")
+            else:
+                tracker.update_state(order_id, "partially_filled")
 
         self.transition("submitted")
 
@@ -564,6 +754,11 @@ class MarketOrderExecutor(Executor):
 
     def _poll_live(self, *, order_id: str, profile) -> str | None:
         from ...connectors import ConnectorRegistry
+        from ..order_polling import (
+            adopt_venue_order,
+            is_definitive_not_found_error,
+            is_place_unknown_order,
+        )
         tracker = self._tracker()
         order = tracker.get(order_id)
         if order is None:
@@ -572,29 +767,69 @@ class MarketOrderExecutor(Executor):
         legacy_account = profile.to_connector_account()
         try:
             conn = registry.get(profile.id, legacy_account.connector_cfg())
-            ack = conn.get_order(market=order.market, order_id=order.exchange_order_id or order.order_id)
-        except NotImplementedError:
-            # Connector cannot poll — assume the ack on submit was final.
-            return order.state
         except Exception:
-            tracker.mark_not_found(order_id)
+            # Registry/transport trouble is not venue not-found evidence —
+            # never advance the lost counter for it.
             return None
+
+        if order.exchange_order_id is None and is_place_unknown_order(order):
+            # B1 resume path: the place outcome was ambiguous. Try to
+            # adopt the venue order by client id before any not-found
+            # bookkeeping — never re-place while the outcome is unknown.
+            ack = adopt_venue_order(conn, tracker, order)
+            if ack is None:
+                return None
+            order = tracker.get(order_id) or order
+        else:
+            try:
+                ack = conn.get_order(
+                    market=order.market,
+                    order_id=order.exchange_order_id or order.order_id,
+                )
+            except NotImplementedError:
+                # Connector cannot poll — assume the ack on submit was final.
+                return order.state
+            except Exception as exc:
+                if is_definitive_not_found_error(exc):
+                    # F5: attempt one recovery by client id before
+                    # counting the not-found strike.
+                    adopted = adopt_venue_order(conn, tracker, order)
+                    if adopted is not None:
+                        ack = adopted
+                        order = tracker.get(order_id) or order
+                    else:
+                        tracker.mark_not_found(order_id)
+                        return None
+                else:
+                    # Transport / auth / unknown errors must not push a
+                    # live order toward ``lost``.
+                    log.warning(
+                        "poll_live: transient error for order %s: %s", order_id, exc,
+                    )
+                    return None
 
         tracker.mark_seen(order_id)
         ack_filled = float(getattr(ack, "filled", None) or 0.0)
         ack_status = (getattr(ack, "status", None) or "").lower()
         if ack_filled > order.filled_size + 1e-12:
             extra = ack_filled - order.filled_size
-            fee_usd = float(getattr(ack, "fee_usd", None) or 0.0)
+            # B2: ``ack.fee_usd`` is the venue's *cumulative* order fee —
+            # only the not-yet-recorded increment may be added.
+            fee_usd = max(
+                0.0,
+                float(getattr(ack, "fee_usd", None) or 0.0) - float(order.fee_usd or 0.0),
+            )
             fill = tracker.record_fill(
                 order_id=order_id,
                 price=float(getattr(ack, "avg_price", None) or order.price or 0.0),
                 size_base=extra,
                 fee_usd=fee_usd,
                 source="live" if profile.mode in ("live", "canary") else "shadow",
+                cumulative_filled=ack_filled,
             )
-            # Mirror the incremental fill into PositionBook atomically.
-            self._apply_fill_to_book(order_id=order_id, fill=fill, candidate=self._candidate(), profile=profile)
+            if fill is not None:
+                # Mirror the incremental fill into PositionBook atomically.
+                self._apply_fill_to_book(order_id=order_id, fill=fill, candidate=self._candidate(), profile=profile)
         if ack_status in ("filled", "closed"):
             tracker.update_state(order_id, "filled")
             return "filled"
@@ -714,9 +949,21 @@ class MarketOrderExecutor(Executor):
             self.transition("failed", close_type="failed")
         return True
 
-    def _release_reservations(self) -> None:
+    def _release_reservations(self, *, skip: set[str] | None = None) -> None:
+        """Release this run's capital reservations.
+
+        R3T1: ``skip`` omits reservations that must stay active — a
+        cancel that raced a partial fill (or a cancel whose venue
+        outcome is still unknown, R3T2) leaves the order pollable, and
+        the background poller's completion path consumes/releases the
+        reservation once the venue reports a real terminal state. The
+        release is a guarded transition (R2B6), so a reservation the
+        executor already consumed is never flipped back.
+        """
         store = CapitalReservationStore(self.paths)
         for rid in self.run.reservation_ids:
+            if skip and rid in skip:
+                continue
             store.release(rid)
 
     def _maybe_attach_protection(self) -> None:

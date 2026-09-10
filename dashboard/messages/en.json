@@ -1,4 +1,66 @@
 {
+  "ui": {
+    "attachmentLimits": "Up to 8 files, 8 MB per file and 20 MB in total.",
+    "modelOptions": "Model options",
+    "modelNoMatches": "No matching models. Try another search.",
+    "resetPreferences": "Reset interface preferences?",
+    "resetPreferencesDescription": "Restore this browser’s theme, language and chart preferences. Server configuration will not change.",
+    "confirm": "Confirm action",
+    "cancel": "Cancel",
+    "apply": "Apply",
+    "notice": "Notice",
+    "enterValue": "Enter a value",
+    "dismiss": "Dismiss notification",
+    "close": "Close",
+    "navigation": "Navigation",
+    "openNavigation": "Open navigation",
+    "closeNavigation": "Close navigation",
+    "skipToContent": "Skip to content",
+    "noOptions": "No options available",
+    "noSettingsResults": "No matching settings",
+    "clearSearch": "Clear search",
+    "retry": "Try again",
+    "loading": "Loading settings…",
+    "loadFailed": "Settings could not be loaded. Your saved configuration has not changed.",
+    "advancedRouting": "Advanced model routing",
+    "advancedRoutingDescription": "Customize task tiers and fallback routes. Existing routes stay unchanged when this section is collapsed.",
+    "discardChanges": "Discard unsaved changes?",
+    "discardChangesDescription": "Refreshing reloads the saved model configuration and discards your unsaved edits."
+  },
+  "terms": {
+    "vaultRef": {
+      "label": "Vault ref",
+      "explain": "How Nerya remembers your API key safely. The key itself is encrypted in the local vault; the config only keeps a vault:// address pointing at it. Just paste the key in plain text when setting up, Nerya converts it for you."
+    },
+    "fetchModels": {
+      "label": "Fetch models",
+      "explain": "Asks the provider for the list of models your key can use. Run this after pasting a key, then tick the models you want Nerya to work with."
+    },
+    "tier": {
+      "label": "Model tier",
+      "explain": "A slot that decides which model handles which kind of work. Heavy analysis uses the High tier, everyday replies Medium, quick lookups Low, and Intent recognizes what a message is asking for. One model can fill several tiers."
+    },
+    "apiShape": {
+      "label": "API shape",
+      "explain": "The dialect the provider's API speaks. Most providers are OpenAI-compatible; Anthropic has its own. Leave it on Auto-detect unless the connection test fails."
+    },
+    "webhook": {
+      "label": "Webhook",
+      "explain": "A URL the platform calls to push messages to Nerya in real time. The alternative is polling, where Nerya checks for new messages every few seconds."
+    },
+    "polling": {
+      "label": "Polling",
+      "explain": "Nerya periodically asks the platform for new messages instead of waiting to be pushed. Works everywhere and needs no public URL, at the cost of a little extra quota."
+    },
+    "capabilityGate": {
+      "label": "Capability gate",
+      "explain": "A hard on/off switch for an entire feature area (trading, browsing, network). When off, that feature stays blocked no matter how complete the rest of the setup is."
+    },
+    "tunnel": {
+      "label": "Tunnel",
+      "explain": "A secure bridge that makes your local Nerya reachable from the internet, so chat platforms can deliver messages to it."
+    }
+  },
   "common": {
     "refresh": "Refresh",
     "loading": "Loading...",
@@ -24,7 +86,8 @@
     "create": "Create",
     "approve": "Approve",
     "reject": "Reject",
-    "stats": "Stats"
+    "stats": "Stats",
+    "retry": "Retry"
   },
   "sidebar": {
     "brandName": "Nerya",
@@ -142,7 +205,7 @@
   },
   "settings": {
     "title": "Settings",
-    "description": "Runtime model routing, provider onboarding, memory indexing, and browser-local dashboard preferences.",
+    "description": "Model providers, access, network, and interface preferences.",
     "tabs": {
       "ariaLabel": "Settings sections",
       "models": "Models",
@@ -177,7 +240,14 @@
     },
     "providerCard": {
       "title": "Provider and model inventory",
-      "description": "Select a provider, store its key as a vault ref, fetch /models, then import the exact model ids Nerya can assign.",
+      "description": "Connect a provider in three steps: paste its API key, load the model list, then tick the models you want. Keys are encrypted automatically.",
+      "introTitle": "How model setup works",
+      "introStep1": "Connect a provider",
+      "introStep1Desc": "Pick one (OpenAI, Anthropic, ...) and paste its API key.",
+      "introStep2": "Load the model list",
+      "introStep2Desc": "Fetch the models your key can use and tick the ones you want.",
+      "introStep3": "Assign tiers below",
+      "introStep3Desc": "Decide which model handles heavy, everyday, and quick work.",
       "providerLabel": "Provider",
       "providerHint": "Type any provider id or pick one from the catalogue.",
       "providerPlaceholder": "openai, anthropic, my-ollama, ...",
@@ -239,11 +309,16 @@
         "error": "error"
       },
       "advancedTitle": "Connection options and manual model entry",
-      "advancedDesc": "Base URL is auto-filled for known providers. Open this only for custom endpoints or to add a model id by hand."
+      "advancedDesc": "Base URL is auto-filled for known providers. Open this only for custom endpoints or to add a model id by hand.",
+      "providerRequired": "Provider is required.",
+      "selectAtLeastOne": "Select at least one discovered model to import.",
+      "discovered": "Discovered {count} model(s) from {provider}. Select what to import.",
+      "manualQueued": "Added {id} to the import queue. Click \"Import selected\" to persist.",
+      "imported": "Imported {count} model(s) for {provider}. Use assignments below to bind them to tiers."
     },
     "modelCard": {
       "title": "Model assignments",
-      "description": "Choose imported provider+model pairs for high, medium, light, and intent/classification work. Tiers inherit provider keys from the provider profile.",
+      "description": "Decide which model does which kind of work: heavy analysis, everyday replies, quick lookups, and intent recognition. Provider keys are inherited automatically.",
       "catalogModels": "{count} catalog models",
       "unsaved": "unsaved",
       "defaultLabel": "Default",
@@ -294,11 +369,19 @@
         "extra_high": "Extra high (xhigh)",
         "xhigh": "Extra high (xhigh)",
         "max": "Max"
-      }
+      },
+      "savedToWorkspace": "Model providers and assignments saved to workspace nerya.yml.",
+      "catalogRefreshed": "Model catalog refreshed."
     },
     "gatewayCard": {
       "title": "Gateway channels",
-      "description": "Configure Telegram, Discord, Slack, Feishu, WeCom, DingTalk, webhooks, and other gateway channels. Plaintext tokens are stored as vault refs.",
+      "description": "Let Nerya reach you on a chat platform: pick a platform, paste its bot token, save, then send a test message. Tokens are encrypted automatically.",
+      "introTitle": "How a channel works",
+      "introBody": "A channel connects one chat platform to Nerya. Configure a bot on the platform side, paste its token here, and Nerya can notify you about trades, ask for approvals, and answer questions in chat.",
+      "supportTested": "Tested",
+      "supportSendOnly": "Send only",
+      "supportFullDuplex": "Two-way",
+      "supportExperimental": "Experimental",
       "configuredCount": "{count} ready",
       "empty": "No gateway channel configured yet.",
       "ready": "ready",
@@ -366,7 +449,16 @@
       "deleted": "Gateway channel deleted.",
       "testDelivered": "Gateway test delivered.",
       "agentTestDelivered": "Agent-backed gateway test delivered.",
-      "runtimeStatus": "Runtime sees {count} configured gateway channel(s)."
+      "runtimeStatus": "Runtime sees {count} configured gateway channel(s).",
+      "testMessageDefault": "Nerya gateway test message.",
+      "showSecret": "Show",
+      "hideSecret": "Hide",
+      "timeoutUnit": "sec",
+      "modeSendOnly": "send only",
+      "errorLoadFailed": "Cannot load gateway config",
+      "errorSaveFailed": "Gateway save failed",
+      "errorDeleteFailed": "Gateway delete failed",
+      "errorTestFailed": "Gateway test failed"
     },
     "tunnelCard": {
       "title": "Remote access tunnels",
@@ -587,7 +679,19 @@
       "agentmemoryEnabled": "agentmemory external memory enabled.",
       "agentmemoryDisabled": "agentmemory external memory disabled.",
       "subtabEvidence": "Evidence",
-      "subtabProfile": "Profile"
+      "subtabProfile": "Profile",
+      "milvusStoreHint": "Milvus store (leave defaults to use the local file-backed vector store).",
+      "milvusUriLabel": "Milvus URI",
+      "milvusCollectionLabel": "Collection",
+      "milvusTokenLabel": "Milvus token",
+      "milvusTokenStored": "token stored",
+      "milvusTokenOptional": "optional",
+      "milvusTokenUnchanged": "•••••••• (unchanged)",
+      "saveEmbedding": "Save embedding settings",
+      "embeddingSaved": "Memory vector embedding settings saved.",
+      "memsearchInstalled": "memsearch dependency installed.",
+      "agentmemoryInstalled": "agentmemory dependency installed.",
+      "indexRebuilt": "Memory vector index rebuilt."
     },
     "displayCard": {
       "title": "Dashboard display",
@@ -626,7 +730,8 @@
       "themeDark": "Dark",
       "language": "Language",
       "languageDesc": "Interface language for this browser."
-    }
+    },
+    "openAdvanced": "Open advanced runtime flags"
   },
   "login": {
     "headline": "Remote access requires verification",
@@ -680,8 +785,8 @@
     "send": "Send",
     "addAttachment": "Attach file",
     "removeAttachment": "Remove attachment",
-    "uploadingAttachment": "Reading attachment...",
-    "uploadFailed": "Could not read the selected file.",
+    "uploadingAttachment": "Preparing and uploading attachments…",
+    "uploadFailed": "The selected file could not be uploaded. Choose it again to retry, or close this notice to send without it.",
     "attachmentNotReady": "Attachment upload is not ready in this chat view.",
     "cancelTurn": "Cancel in-flight turn (client-side only; the backend may still finish)",
     "planLabel": "plan: {value}",
@@ -768,7 +873,13 @@
     "starterMacroNewsBody": "Collect major economic headlines and return a structured summary.",
     "starterMacroNewsPrompt": "Help me get popular economic news and summarize it",
     "yoloHint": "Auto-approve every tool call in this chat: no approval cards. Trades still pass the risk gate.",
-    "cancelNotice": "Task cancelled. An interrupt was sent to the backend; if background tools are still wrapping up, check the journals for the final state."
+    "cancelNotice": "Task cancelled. An interrupt was sent to the backend; if background tools are still wrapping up, check the journals for the final state.",
+    "loadingChat": "Loading chat…",
+    "loadingConversation": "Loading conversation…",
+    "sessionNotFound": "Session not found",
+    "transcriptLoadFailed": "Failed to load conversation",
+    "sessionNotFoundBody": "The conversation <code>{sessionId}</code> isn't available locally and the backend has no transcript for it.",
+    "startNewChat": "Start a new chat"
   },
   "chatChartPanel": {
     "title": "Agent charts",
@@ -846,7 +957,7 @@
     "title": "Portfolio",
     "description": "Per-account view of NAV, exposure, margin, protections, and reconciliation status.",
     "killSwitchOn": "kill-switch ON",
-    "liveTrading": "live trading",
+    "liveTrading": "Live trading",
     "paperOnly": "Paper only",
     "reconcileAll": "Reconcile all",
     "reconcileAllTitle": "Run reconciliation across all accounts",
@@ -869,7 +980,7 @@
     "accountsDesc": "{count} recorded trade(s) across all accounts.",
     "loadingAccounts": "Loading accounts...",
     "noAccountsFound": "No accounts found.",
-    "live": "live",
+    "live": "Live",
     "paper": "Paper",
     "cashLower": "cash",
     "equityLower": "equity",
@@ -918,7 +1029,21 @@
     "liveDisabled": "live disabled",
     "running": "Running...",
     "reconcile": "Reconcile",
-    "inspect": "Inspect"
+    "inspect": "Inspect",
+    "range24H": "24H",
+    "range7D": "7D",
+    "range30D": "30D",
+    "sevInfo": "Info",
+    "sevWarning": "Warning",
+    "sevActionRequired": "Action required",
+    "sevTradingHalted": "Trading halted",
+    "healthOk": "ok",
+    "healthDegraded": "degraded",
+    "healthStale": "stale",
+    "modeCanary": "Canary",
+    "modeShadow": "Shadow",
+    "retry": "Retry",
+    "loadFailed": "Failed to load portfolio summary"
   },
   "strategies": {
     "title": "Strategies",
@@ -954,8 +1079,18 @@
     "strategiesDesc": "Click any card to open its dedicated workspace.",
     "filterPlaceholder": "Filter id / title / market...",
     "allStatuses": "all statuses",
+    "status": {
+      "draft": "Draft",
+      "paper": "Paper",
+      "canary": "Canary",
+      "live": "Live",
+      "paused": "Paused",
+      "archived": "Archived",
+      "static_review": "Static review",
+      "backtested": "Backtested"
+    },
     "noStrategiesTitle": "No strategies yet",
-    "noStrategiesSubtitle": "Create one above or ask the chat agent to scaffold one for you.",
+    "noStrategiesSubtitle": "Use the “+ New strategy” button above, or ask the chat agent to scaffold one for you.",
     "noMatchTitle": "Nothing matches your filter",
     "noMatchSubtitle": "Clear the filter to see every strategy.",
     "untitledStrategy": "Untitled strategy",
@@ -1009,7 +1144,17 @@
     "kpiPending": "Pending",
     "kpiTotalPnl": "Total PnL",
     "createAdvancedTitle": "New strategy",
-    "createAdvancedHint": "Expand to set strategy ID, markets, prompts and subagents"
+    "createAdvancedHint": "Optional: wallet, trigger kinds, subagents, driver, and prompt bodies.",
+    "createAdvancedGroupTitle": "Advanced fields",
+    "fieldMarketsPlaceholder": "binance:BTCUSDT, bybit:ETHUSDT",
+    "fieldTriggerKindsPlaceholder": "price.breakout, indicator.rsi_divergence",
+    "fieldSubagentsPlaceholder": "market_analyst, risk_critic",
+    "kpiTotalPnlMixed": "mixed paper + live accounts",
+    "deleteWithPositionsConfirm": "Strategy {id} still has {count} open position(s) (notional ${notional}). Confirming will close them first, then delete the strategy.",
+    "closeAndDelete": "Close & delete",
+    "unsavedLeaveTitle": "Unsaved changes",
+    "unsavedLeaveMessage": "Files & prompts have unsaved edits. Leave this tab and discard them?",
+    "unsavedLeaveConfirm": "Discard and leave"
   },
   "strategyProposal": {
     "approveAdd": "Approve and add",
@@ -1112,7 +1257,13 @@
         "label": "Raw",
         "description": "Manifest and config fallback editors"
       }
-    }
+    },
+    "backtestsLink": "Backtests",
+    "dangerZone": "Danger zone",
+    "dangerZoneDesc": "Pause stops new runs (positions stay). Delete removes the strategy package; open positions are closed first when present.",
+    "workspaceLoadFailed": "Runtime workspace failed to load",
+    "notConfigured": "not configured",
+    "saveShortcutHint": "Save (⌘/Ctrl+S)"
   },
   "strategyBacktests": {
     "title": "Backtests",
@@ -1160,12 +1311,51 @@
     "title": "Browsers",
     "description": "Install browser engines and drive an interactive session from one workspace.",
     "tabEngines": "Engines",
-    "tabSession": "Session"
+    "tabSession": "Session",
+    "openEngines": "Open Engines tab",
+    "closeSessionTitle": "Close session",
+    "closeSessionConfirm": "Close browser session {sid}? Unsaved pages in this session are lost."
   },
   "envVaultPage": {
     "eyebrow": "Operator",
     "title": "Env & Vault",
-    "description": "Encrypted runtime env vars and vault:// references, reused across providers, accounts, MCP, and gateway."
+    "description": "Encrypted runtime env vars and vault:// references, reused across providers, accounts, MCP, and gateway.",
+    "envCard": {
+      "title": "Runtime environment",
+      "description": "Encrypted variables injected into run_shell, skill script subprocesses, and stdio MCP servers.",
+      "configuredCount": "{count} configured",
+      "empty": "No runtime env variables configured.",
+      "nameLabel": "Variable name",
+      "nameHint": "Uppercase shell env name; saved value is encrypted",
+      "valueLabel": "Value",
+      "valueHint": "Not shown again after save",
+      "save": "Save env",
+      "footnote": "These variables are resolved from SecretVault only at process-launch time. The agent sees the names and refs, not plaintext values.",
+      "saved": "{name} saved to encrypted runtime env.",
+      "removed": "{name} removed from runtime env.",
+      "deleteTitle": "Remove runtime env variable",
+      "deleteMessage": "Remove {name} from the encrypted runtime environment? Subprocesses will stop receiving it on the next launch."
+    },
+    "vaultCard": {
+      "title": "SecretVault references",
+      "description": "Manage reusable vault:// refs for providers, accounts, MCP config, gateway tokens, and runtime env.",
+      "refsCount": "{count} refs",
+      "empty": "SecretVault is empty.",
+      "previewLabel": "preview",
+      "shaLabel": "sha",
+      "nameLabel": "Vault name",
+      "nameHint": "lowercase a-z0-9_-.",
+      "kindLabel": "Kind",
+      "scopesLabel": "Scopes",
+      "scopesHint": "comma-separated",
+      "valueLabel": "Value",
+      "valueHint": "Encrypted; never revealed back",
+      "save": "Save vault ref",
+      "saved": "{name} saved to SecretVault.",
+      "removed": "{name} removed from SecretVault.",
+      "deleteTitle": "Delete vault secret",
+      "deleteMessage": "Delete {name} from SecretVault? Anything still pointing at this vault:// ref will fail to resolve."
+    }
   },
   "gatewayPage": {
     "eyebrow": "Operator",
@@ -1198,7 +1388,18 @@
     "diagnose": "Diagnose",
     "diagnoseRunning": "Diagnosing…",
     "gotchaTitle": "Heads up: chat_id matters",
-    "gotchaBody": "Telegram: a 'chat_id' from @userinfobot is your private DM. Group chats use a negative id (open the group and use @userinfobot inside it). Leave chat_id blank to accept any chat. WeChat / Feishu / WeCom / DingTalk: configure the receiver in the platform's admin console (App ID + Secret for Feishu/WeCom; webhook URL for DingTalk's group robot). Once saved, watch /gateway → Live status while you send a test message: every drop now surfaces a hint here."
+    "gotchaBody": "Telegram: a 'chat_id' from @userinfobot is your private DM. Group chats use a negative id (open the group and use @userinfobot inside it). Leave chat_id blank to accept any chat. WeChat / Feishu / WeCom / DingTalk: configure the receiver in the platform's admin console (App ID + Secret for Feishu/WeCom; webhook URL for DingTalk's group robot). Once saved, watch /gateway → Live status while you send a test message: every drop now surfaces a hint here.",
+    "eventPollingAlive": "polling alive",
+    "eventAgentReply": "agent reply",
+    "eventUserMessage": "user message",
+    "eventCommand": "command",
+    "eventError": "error",
+    "eventInfo": "info",
+    "kindError": "Error",
+    "kindHeartbeat": "Heartbeat",
+    "kindOutbound": "Outbound",
+    "kindInbound": "Inbound",
+    "kindInfo": "Info"
   },
   "inbox": {
     "eyebrow": "",
@@ -1234,7 +1435,19 @@
     "rawPayload": "Raw payload",
     "selectItem": "Select an item",
     "selectItemHint": "Pick an inbox item on the left to see details and act on it.",
-    "resolveFailed": "resolve failed"
+    "resolveFailed": "resolve failed",
+    "severityInfo": "Info",
+    "severityWarn": "Warning",
+    "severityDanger": "Critical",
+    "statusOk": "OK",
+    "statusPending": "Pending",
+    "statusPendingReview": "Pending review",
+    "statusOpen": "Open",
+    "statusResolved": "Resolved",
+    "statusApplied": "Applied",
+    "statusRejected": "Rejected",
+    "statusBlocked": "Blocked",
+    "statusFailed": "Failed"
   },
   "tasks": {
     "eyebrow": "Agent Workspace",
@@ -1289,33 +1502,41 @@
     "starting": "Starting...",
     "startTask": "Start task",
     "taskPromptRequired": "task prompt is required",
-    "createdInfo": "Created {sessionId}{turnSuffix}"
+    "createdInfo": "Created {sessionId}{turnSuffix}",
+    "detailMore": "More details"
+  },
+  "tasksPage": {
+    "statusInProgress": "In progress",
+    "statusDone": "Done",
+    "statusFailed": "Failed",
+    "statusEmpty": "Empty"
   },
   "agentsPage": {
     "eyebrow": "Agents library",
     "title": "Agents",
-    "description": "Subagent and persona prompt library, reused by strategies and team_run.",
+    "description": "Agent prompt library, reused by strategies and team_run.",
     "newAgent": "New agent",
-    "personasCount": "Personas ({count})",
+    "personasCount": "Agents ({count})",
     "personasCountsDesc": "{workspace} workspace · {defaults} default",
     "searchPlaceholder": "Search agents or skills",
     "noAgentsYet": "No agents yet",
     "noAgentsYetHint": "Click + New agent to create one.",
     "noMatchingAgents": "No matching agents",
     "noMatchingAgentsHint": "Try another search.",
+    "loadFailedTitle": "Failed to load agents",
+    "loadFailedHint": "Check the gateway connection and try again.",
+    "retry": "Retry",
     "skillsCount": "{count} skills",
     "pickAgent": "Pick an agent",
-    "pickAgentHint": "Select a persona on the left to inspect or edit it.",
+    "pickAgentHint": "Select an agent on the left to inspect or edit it.",
     "detailDescription": "{source} · tier {tier} · {count} preloaded skill(s)",
     "sourceDefault": "default",
+    "sourceDefaultProfile": "default (alias)",
     "sourceWorkspace": "workspace",
     "tierHigh": "high",
     "tierMedium": "medium",
     "tierLight": "light",
-    "tierIntent": "intent",
-    "noSelection": "No selection",
-    "noSelectionHint": "Pick an agent from the list.",
-    "createPersona": "Create persona",
+    "createPersona": "Create agent",
     "createPersonaPath": "Persisted under <code>workspace/subagents/&lt;name&gt;.agent.md</code>.",
     "nameLabel": "Name",
     "llmTier": "LLM tier",
@@ -1324,21 +1545,28 @@
     "promptBodyShort": "Prompt body",
     "create": "Create",
     "saveAsOverride": "Save as workspace override",
-    "roleNotFound": "role not found",
+    "roleNotFound": "Agent not found",
     "saveFailed": "save failed",
     "deleteFailed": "delete failed",
     "savedInfo": "Saved {name}",
     "deletedInfo": "Deleted {name}",
     "createdInfo": "Created {name}",
-    "deleteConfirm": "Delete persona \"{name}\" from the workspace? Default fallback (if any) will be used instead.",
+    "deleteConfirm": "Delete agent \"{name}\" from the workspace? The default fallback (if any) will be used instead.",
+    "discardDraftConfirm": "You have unsaved changes. Switch agents and discard them?",
     "nameValidation": "Name must match [A-Za-z0-9_]+",
     "noSkillsLoaded": "No skills loaded yet.",
+    "skillsLoadFailed": "Failed to load skills — the selector below may be incomplete.",
     "noSkillsSelected": "No skills selected",
     "clear": "Clear",
     "add": "Add",
     "searchSkillsPlaceholder": "Search skills",
     "noSkillsMatch": "No skills match this search.",
-    "selectedShown": "{selected} selected · {shown} shown"
+    "selectedShown": "{selected} selected · {shown} shown",
+    "advancedTitle": "Backend fields",
+    "advProvider": "Provider",
+    "advModel": "Model",
+    "advLockedTier": "Locked tier",
+    "advPromptExcerpt": "Prompt excerpt"
   },
   "home": {
     "greetingMorning": "Good morning",
@@ -1361,7 +1589,7 @@
     "tradesTitle": "Recent trades",
     "totalEquity": "Total Equity",
     "accountCount": "{count} account(s)",
-    "realizedPnl": "Today's PnL",
+    "realizedPnl": "Cumulative realized PnL",
     "strategiesCount": "{count} strategies",
     "symbolDelta": "{symbol} Δ",
     "winRate": "Win Rate",
@@ -1374,7 +1602,7 @@
     "noVenues": "No venues registered",
     "refresh": "Refresh",
     "equityCurve": "Equity Curve",
-    "equityPoints": "{count} point(s) from pnl journal",
+    "equityPoints": "{count} recent equity points",
     "equity": "equity",
     "portfolioAllocation": "Portfolio Allocation",
     "noHoldings": "No holdings yet.",
@@ -1512,6 +1740,7 @@
     "lineageGraphOther": "Other",
     "lineageGraphDetails": "Lineage details",
     "lineageGraphDetailsDesc": "nodes and connections",
+    "loading": "Loading...",
     "candidateOptimizer": "Candidate optimizer",
     "candidateOptimizerDesc": "Local scoring chose one tuning candidate before proposal creation.",
     "optimizerCandidates": "{count} candidate(s)",
@@ -1520,7 +1749,9 @@
     "optimizerFeedbackDelta": "feedback {delta}",
     "optimizerTruncated": "truncated",
     "optimizerSelected": "selected",
-    "optimizerScore": "score {score}",
+    "optimizerNoEligible": "No eligible candidate. Review the recorded blockers; no strategy proposal was created.",
+    "optimizerSelectionUnresolved": "No unambiguous candidate selection is recorded. Inspect the evidence before proceeding.",
+    "optimizerScore": "heuristic score {score}",
     "optimizerValidation": "Validation",
     "optimizerValidationPreview": "Validation preview",
     "optimizerBacktestPreview": "Backtest preview",
@@ -1679,6 +1910,7 @@
     "validationPlanDebugDesc": "Original validation JSON, folded for troubleshooting.",
     "steps": "steps",
     "required": "required",
+    "manual": "Manual",
     "commands": "commands",
     "noTriggerExplanation": "No trigger explanation recorded.",
     "evidence": "Evidence",
@@ -1979,11 +2211,26 @@
     "walletPanelTitle": "On-chain wallet providers",
     "walletPanelDesc": "Install on-chain wallet providers and bind them to accounts. Only expand for on-chain trading."
   },
+  "accountsPage": {
+    "statusActive": "Active",
+    "statusReadOnly": "Read-only",
+    "statusDisabled": "Disabled",
+    "statusQuarantined": "Quarantined",
+    "kindChip": "kind: {value}",
+    "kindCex": "CEX",
+    "kindDex": "DEX",
+    "kindBroker": "Broker",
+    "kindChain": "Chain",
+    "kindDataSource": "Data source",
+    "kindPredictionMarket": "Prediction market"
+  },
   "financialDatasets": {
     "title": "Financial Datasets API",
     "description": "API keys for the equity_research / dcf_valuation / sec_filings skills. Multi-key rotation: paste comma-separated keys to enable failover on quota or auth errors.",
     "keysReady": "{count} key ready",
-    "keysReadyPlural": "{count} keys ready"
+    "keysReadyPlural": "{count} keys ready",
+    "keysSaved": "Financial Datasets API keys saved.",
+    "keysCleared": "Cleared Financial Datasets keys ({store})."
   },
   "networkProxy": {
     "title": "Network proxy",
@@ -2025,7 +2272,8 @@
     "apiKeysHint": "comma-separated · leave blank to keep existing",
     "apiKeysSave": "save key(s)",
     "clearLower": "clear",
-    "docsFinancialDatasets": "Financial Datasets API docs ↗"
+    "docsFinancialDatasets": "Financial Datasets API docs ↗",
+    "saved": "Network proxy settings saved and applied to the runtime."
   },
   "walletSetup": {
     "title": "On-chain wallet providers",
@@ -2742,6 +2990,54 @@
     "detailRowTerminal": "Terminal",
     "detailRowAge": "Age"
   },
+  "ordersPage": {
+    "statusOpen": "Open",
+    "statusSubmitted": "Submitted",
+    "statusPartiallyFilled": "Partially filled",
+    "statusFilled": "Filled",
+    "statusCanceled": "Canceled",
+    "statusRejected": "Rejected",
+    "statusExpired": "Expired",
+    "statusLost": "Lost",
+    "sideBuy": "Buy",
+    "sideSell": "Sell",
+    "typeLimit": "Limit",
+    "typeMarket": "Market",
+    "sideType": "Side · Type",
+    "sizeFilled": "Size / Filled",
+    "executorCreated": "Created",
+    "executorReserving": "Reserving",
+    "executorReady": "Ready",
+    "executorSubmitted": "Submitted",
+    "executorWorking": "Working",
+    "executorClosing": "Closing",
+    "executorCanceling": "Canceling",
+    "executorCanceled": "Canceled",
+    "executorDone": "Done",
+    "executorFailed": "Failed",
+    "executorRejected": "Rejected",
+    "kindMarketOrder": "Market order",
+    "kindLimitOrder": "Limit order",
+    "kindLimitChaser": "Limit chaser",
+    "kindTwap": "TWAP",
+    "kindPositionProtection": "Position protection",
+    "kindRebalance": "Rebalance"
+  },
+  "incidentsPage": {
+    "severityInfo": "Info",
+    "severityWarning": "Warning",
+    "severityActionRequired": "Action required",
+    "severityTradingHalted": "Trading halted",
+    "kindReconcileDrift": "Reconcile drift",
+    "kindLostOrder": "Lost order",
+    "kindAuthError": "Auth error",
+    "kindMaxLossBreach": "Max loss breach",
+    "kindSnapshotUnhealthy": "Unhealthy snapshot",
+    "filterAll": "All",
+    "runReconcile": "Run reconcile",
+    "reconcileDone": "Reconciliation finished",
+    "viewOrders": "View orders"
+  },
   "incidents": {
     "title": "Incident Center",
     "description": "Drift, lost orders, stale snapshots, auth failures, and other live-trading exceptions.",
@@ -2781,6 +3077,7 @@
     "eyebrow": "Skill playbooks",
     "title": "Skills",
     "description": "Browse SKILL.md playbooks, folder assets, workspace installs, and editable workspace skills.",
+    "discardDraftConfirm": "You have unsaved changes. Switch skills and discard them?",
     "createSkill": "Create skill",
     "metricLoaded": "Loaded",
     "metricLoadedDetail": "runtime visible",
@@ -2926,7 +3223,11 @@
     "fieldDeliveryPlatform": "Platform",
     "fieldDeliveryChannel": "Channel",
     "fieldDeliveryUrl": "Webhook URL",
+    "fieldDeliveryExtra": "More delivery targets (JSON array)",
+    "deliveryExtraCount": "+{count} more target(s) will be saved with it",
     "fieldEnabled": "Enabled",
+    "advancedTitle": "Advanced",
+    "fieldTtl": "Session TTL (seconds)",
     "cadenceCron": "Cron",
     "cadenceInterval": "Interval",
     "sessionEphemeral": "New session per run",
@@ -2944,6 +3245,7 @@
     "metricCadence": "Cadence",
     "metricTimezone": "Timezone",
     "metricLastRun": "Last run",
+    "metricNextRun": "Next run",
     "metricTarget": "Target",
     "metricDelivery": "Delivery",
     "metricSession": "Session",
@@ -2958,7 +3260,12 @@
     "runFailed": "{id} trigger failed",
     "tickResult": "Triggered {count} task(s) this tick",
     "runStrategyTitle": "Run strategy schedule now",
-    "runStrategyConfirm": "{id} is strategy-related and may enter the trading risk path. Continue?"
+    "runStrategyConfirm": "{id} is strategy-related and may enter the trading risk path. Continue?",
+    "errCronRequired": "Cron expression is required",
+    "errIntervalInvalid": "Interval must be a positive number of seconds",
+    "errCronUnparseable": "Cannot parse this cron expression",
+    "errJsonInvalid": "Invalid JSON",
+    "errDeliveryExtraArray": "Must be a JSON array of delivery targets"
   },
   "browserEmbed": {
     "ariaLabel": "Interactive browser viewport",
@@ -3285,7 +3592,13 @@
     "engineOverridePlaceholder": "exa | tavily | searxng | …",
     "probing": "probing…",
     "defaultsAdvancedTitle": "Region, safety & key storage",
-    "otherEnginesTitle": "Other engines ({count})"
+    "otherEnginesTitle": "Other engines ({count})",
+    "keysCleared": "Cleared keys for {engine}.",
+    "searxngDeployed": "SearXNG deployed at {url}.",
+    "searxngStopped": "SearXNG container stopped.",
+    "searxngRemoved": "SearXNG container removed.",
+    "removeConfirmTitle": "Remove SearXNG container",
+    "removeConfirmMessage": "Remove the local SearXNG Docker container and its data? You can redeploy it afterwards."
   },
   "settingsBrowsers": {
     "cardTitle": "Headless browser engines",
@@ -3325,7 +3638,10 @@
     "engineOverridePlaceholder": "camofox | cloakbrowser | lightpanda | obscura",
     "probe": "probe",
     "probing": "probing…",
-    "rowDetailsToggle": "Details"
+    "rowDetailsToggle": "Details",
+    "selectedToast": "Selected {name}.",
+    "installedToast": "Installed {name}{version}.",
+    "uninstalledToast": "Uninstalled {name}."
   },
   "memoryEvidence": {
     "title": "Trading evidence vault",
@@ -3396,7 +3712,7 @@
   },
   "runtimeFlags": {
     "title": "Runtime capability gates",
-    "description": "Controls whether this workspace exposes runtime surfaces such as the capability catalog, sync-state views, evidence vault, and review queue. When disabled, related routes return blocked and the dashboard hides the matching cards.",
+    "description": "Master switches for whole feature areas such as the evidence vault and the review queue. Turn one off and that area disappears from Nerya until you switch it back on.",
     "statusSummary": "{enabled} of {total} enabled",
     "enabledStatus": "Enabled",
     "disabledStatus": "Off",
@@ -3474,6 +3790,7 @@
     "readyToStart": "Setup complete: Nerya is ready to run.",
     "blockingRemaining": "{count} blocking item(s) remain. You can re-run setup any time from the CLI ({command}).",
     "rerunHint": "Re-run anytime with",
+    "readinessTitle": "Readiness checks",
     "steps": {
       "password": "Password",
       "passwordDesc": "Set a password for access from other devices. Default: none, only this machine can connect.",
@@ -3665,7 +3982,9 @@
     "runDone": "{action} completed.",
     "loadFailed": "Could not load workspace sync status.",
     "saveFailed": "Could not save workspace sync configuration.",
-    "runFailed": "Workspace sync failed."
+    "runFailed": "Workspace sync failed.",
+    "forcePushConfirmTitle": "Force push will overwrite the remote",
+    "forcePushConfirmMessage": "Push with \"Force overwrite on conflict\" replaces remote files with local workspace content. Continue?"
   },
   "settingsNav": {
     "title": "Settings",

@@ -262,7 +262,7 @@ _REASONING_MODEL_PREFIXES: tuple[str, ...] = (
     # exhaust ``max_tokens`` on reasoning and emit zero visible content
     # (observed empirically with step-3.6 + reasoning_effort=high on 44k
     # char subagent prompts).
-    "step-3", "step-r1",
+    "step-3", "step-r1", "deepseek-v4",
 )
 
 

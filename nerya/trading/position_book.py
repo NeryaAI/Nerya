@@ -369,8 +369,33 @@ class PositionBook:
         market)`` after this returns. If the fill closes both the
         share AND the merged position, the returned object has
         ``closed_at != None`` and ``is_open == False``.
+
+        Idempotent on ``fill_id``: an event with the same ``fill_id``
+        already in ``position_events`` short-circuits the apply — this
+        is what makes the executor tick + background poller race safe.
         """
         ts = ts if ts is not None else time.time()
+        if fill_id:
+            already = self._con_lazy().execute(
+                "SELECT 1 FROM position_events WHERE fill_id = ? LIMIT 1",
+                (str(fill_id),),
+            ).fetchone()
+            if already is not None:
+                # B4: this exact fill was applied before — return the
+                # current state without touching size/PnL/fees.
+                merged = self.get_open_merged(account_id=account_id, market=market)
+                if merged is not None:
+                    return merged
+                row = self._con_lazy().execute(
+                    "SELECT * FROM positions WHERE account_id = ? AND market = ?"
+                    " ORDER BY updated_at DESC LIMIT 1",
+                    (account_id, market),
+                ).fetchone()
+                if row is not None:
+                    return _row_to_position(row)
+                raise ValueError(
+                    f"apply_fill: fill {fill_id} already applied but no position found"
+                )
         signed = float(size_base) if side == "buy" else -float(size_base)
         if abs(signed) < 1e-12:
             # Empty fill — nothing to do. Still return the current

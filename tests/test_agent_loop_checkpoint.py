@@ -9,7 +9,7 @@ from nerya.agent.loop_state import LoopRunState, TurnCheckpoint
 from nerya.agent.runtime import GateDecision
 from nerya.agent.tool_phase import (
     ToolBatchPhase,
-    ToolBatchState,
+    ToolBatchPolicy,
     tool_call_fingerprint,
 )
 from nerya.agent.transcript_blocks import BlockEnvelope, TextBlock
@@ -363,9 +363,8 @@ def test_checkpointed_read_only_fingerprint_can_refresh_evidence() -> None:
         permission_engine=PermissionEngine(),
         permission_context=PermissionContext(mode=PermissionMode.AUTO),
     )
-    state = ToolBatchState(
-        allowed_tool_names={"read_status"},
-        provider_tool_names={"read_status"},
+    state = LoopRunState(
+        turn_id="turn-1", message_id="message-1",
         required_next_tool_names=set(),
         attempted_tool_names=set(),
         successful_tool_names={"read_status"},
@@ -374,13 +373,14 @@ def test_checkpointed_read_only_fingerprint_can_refresh_evidence() -> None:
         recent_tool_fingerprints=[fingerprint],
         deduped_counts_by_fingerprint={},
         checkpointed_fingerprints={fingerprint},
-        repeated_tool_threshold=3,
     )
 
     effects = ToolBatchPhase(
         orchestrator=ToolOrchestrator(registry=registry, executor=executor),
         registry=registry,
-    ).run([call], state=state)
+    ).run([call], state=state, policy=ToolBatchPolicy(
+        frozenset({"read_status"}), frozenset({"read_status"}),
+    ))
 
     assert executions == ["call-new"]
     assert effects.batch.results[0].is_error is False
@@ -403,9 +403,8 @@ def test_checkpointed_tool_fingerprint_reuses_prior_result_without_execution() -
         semantic_success=True,
     )
     orchestrator = _RecordingOrchestrator()
-    state = ToolBatchState(
-        allowed_tool_names={"write_file"},
-        provider_tool_names={"write_file"},
+    state = LoopRunState(
+        turn_id="turn-1", message_id="message-1",
         required_next_tool_names=set(),
         attempted_tool_names=set(),
         successful_tool_names={"write_file"},
@@ -414,13 +413,14 @@ def test_checkpointed_tool_fingerprint_reuses_prior_result_without_execution() -
         recent_tool_fingerprints=[fingerprint],
         deduped_counts_by_fingerprint={},
         checkpointed_fingerprints={fingerprint},
-        repeated_tool_threshold=3,
     )
 
     effects = ToolBatchPhase(
         orchestrator=orchestrator,  # type: ignore[arg-type]
         registry=ToolRegistry(),
-    ).run([call], state=state)
+    ).run([call], state=state, policy=ToolBatchPolicy(
+        frozenset({"write_file"}), frozenset({"write_file"}),
+    ))
 
     assert orchestrator.calls == []
     assert len(effects.batch.results) == 1

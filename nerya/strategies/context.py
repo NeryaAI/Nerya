@@ -130,6 +130,43 @@ def _market_key(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Run deadline (timeout fail-closed flag)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class StrategyRunDeadline:
+    """Shared run-cancellation flag for wall-clock timeouts.
+
+    CPython cannot hard-kill a thread, so when a strategy exceeds
+    ``policy.max_run_seconds`` the worker thread keeps running. The
+    runner flips :attr:`exceeded` on the deadline *before* raising
+    :class:`StrategyTimeoutError`; every money-moving / state-write
+    facade method then checks it and raises
+    :class:`StrategyRuntimeError` so a timed-out zombie tick cannot
+    submit orders or mutate state after the run was journaled as
+    ``strategy_timeout`` (fail closed).
+    """
+
+    exceeded: bool = False
+    reason: str = ""
+
+    def trigger(self, reason: str) -> None:
+        """Mark the run as timed out (idempotent, first reason wins)."""
+
+        if not self.exceeded:
+            self.reason = str(reason)
+        self.exceeded = True
+
+    def raise_if_exceeded(self) -> None:
+        if self.exceeded:
+            raise StrategyRuntimeError(
+                f"run timed out ({self.reason or 'max_run_seconds exceeded'}); "
+                f"late side effects are refused (fail closed)"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Sub-facades — all read-only or scoped to one strategy
 # ---------------------------------------------------------------------------
 
@@ -331,12 +368,22 @@ class StrategyMarket:
         )
         venue = market.split(":", 1)[0].upper() if ":" in market else ""
         if venue and venue not in {"MOCK", "PAPER"}:
-            return fetch_candles(
+            rows = fetch_candles(
                 market,
                 count=limit,
                 interval=timeframe,
                 allow_mock=False,
             )
+            # A total data-source failure surfaces as ``[]`` from the
+            # fetcher — indistinguishable from "no history". Live venues
+            # fail closed like ``ticker`` does; MOCK/PAPER legitimately
+            # return empty history before the first bar.
+            if not rows:
+                raise StrategyRuntimeError(
+                    f"candles failed: no_live_candles market={market} "
+                    f"timeframe={timeframe}"
+                )
+            return rows
 
         conn = self._connector_for(market, account=account)
         try:
@@ -820,32 +867,25 @@ class StrategySubAgents:
     session_id: Optional[str] = None
     tool_registry: Any = None
     executor: Any = None
-    runtime_mode: str = "auto"
+    audit: Optional["StrategyAudit"] = None
     _dispatcher: Any = field(default=None, init=False, repr=False)
 
     def _disp(self) -> Any:
         if self._dispatcher is None:
             from ..subagents.dispatcher import SubAgentDispatcher
 
-            kwargs: dict[str, Any] = {
-                "config": self.config,
-                "skills": self.skills,
-            }
-            if self.tool_registry is not None:
-                kwargs["tool_registry"] = self.tool_registry
-            if self.executor is not None:
-                kwargs["executor"] = self.executor
-            mode = self.runtime_mode
-            if mode == "auto" and (
-                self.tool_registry is None or self.executor is None
-            ):
-                # SDK/scheduler callers have no turn-owned policy chokepoint;
-                # preserve their pre-native legacy behavior instead of
-                # fabricating one or advertising an unusable native surface.
-                mode = "legacy"
-            if mode != "auto":
-                kwargs["runtime_mode"] = mode
-            self._dispatcher = SubAgentDispatcher(**kwargs)
+            if self.tool_registry is None and self.executor is None:
+                self._dispatcher = SubAgentDispatcher.for_workspace(
+                    self.config, self.skills,
+                    strategy_id=self.strategy_id, session_id=self.session_id,
+                )
+            elif self.tool_registry is not None and self.executor is not None:
+                self._dispatcher = SubAgentDispatcher(
+                    config=self.config, skills=self.skills,
+                    tool_registry=self.tool_registry, executor=self.executor,
+                )
+            else:
+                raise StrategyRuntimeError("subagent execution scope requires both registry and executor")
         return self._dispatcher
 
     def run(
@@ -866,6 +906,7 @@ class StrategySubAgents:
         """
 
         target = name if name.startswith("subagent:") else f"subagent:{name}"
+        started = time.monotonic()
         envelope = self._disp().dispatch(
             target,
             payload=dict(payload or {}),
@@ -873,6 +914,18 @@ class StrategySubAgents:
             strategy_id=self.strategy_id,
             session_id=self.session_id,
         )
+        # Per-invocation audit row so the runner's ``subagent_calls``
+        # counter (kind ``strategy.subagent.run``) works without
+        # strategies having to log it themselves. Payload stays small.
+        if self.audit is not None:
+            self.audit.log(
+                "subagent.run",
+                {
+                    "name": str(name),
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                    "ok": bool(envelope.get("ok")) if isinstance(envelope, dict) else False,
+                },
+            )
         if schema is not None:
             output = envelope.get("output") if isinstance(envelope, dict) else None
             if isinstance(output, dict):
@@ -956,6 +1009,59 @@ class StrategyTrading:
     accounts: tuple[str, ...]
     execution_mode: str = "paper"
     session_id: Optional[str] = None
+    run_deadline: Optional[StrategyRunDeadline] = None
+
+    def _ensure_run_active(self) -> None:
+        """Fail closed when this run already exceeded its wall-clock budget.
+
+        A timed-out tick's worker thread cannot be killed; without this
+        check the zombie thread could still submit orders after the run
+        was journaled as ``strategy_timeout``.
+        """
+
+        if self.run_deadline is not None:
+            self.run_deadline.raise_if_exceeded()
+
+    @staticmethod
+    def _notional_usd_for_cap(
+        *,
+        market: str,
+        size: float,
+        size_unit: str,
+        market_snapshot: Optional[dict[str, Any]] = None,
+    ) -> float:
+        """Best-effort USD notional for the ``max_single_order_usd`` cap.
+
+        Mirrors the kernel's ``size_unit`` vocabulary:
+
+        * ``"usd"``   — the size already is the notional;
+        * ``"quote"`` — USD-equivalent when the market's quote asset is
+          a USD stable (the kernel rejects ``quote`` on non-stable
+          markets, so a 0 here just defers to that rejection);
+        * ``"base"``  — ``size * price`` when a price is available from
+          the caller-supplied ``market_snapshot``; without a price the
+          cap check cannot estimate and stays out of the way.
+        """
+
+        try:
+            size_f = float(size)
+        except (TypeError, ValueError):
+            size_f = 0.0
+        unit = str(size_unit or "usd").strip().lower()
+        if unit == "usd":
+            return size_f
+        if unit == "quote":
+            from ..trading.risk import is_usd_stable_quote
+
+            return size_f if is_usd_stable_quote(market) else 0.0
+        if unit == "base":
+            snap = market_snapshot if isinstance(market_snapshot, dict) else {}
+            price = _coerce_float(
+                snap.get("mid") or snap.get("last") or snap.get("price")
+            )
+            if price > 0:
+                return abs(size_f) * price
+        return 0.0
 
     def _resolve_account(self, account: Optional[str]) -> str:
         if account:
@@ -1056,12 +1162,24 @@ class StrategyTrading:
         omitting it falls back to the default resolver in
         :func:`submit_trade_intent`.
 
-        ``plan_action`` (e.g. ``"close"``, ``"reduce_position"``,
-        ``"open_long"``) is forwarded to the risk gate via
-        :attr:`TradeIntent.meta`. The risk gate uses it to (a)
-        relax snapshot-freshness gates for risk-reducing intents and
-        (b) tell the reconciliation layer apart "operator opens fresh
-        position" from "operator flattens an existing one".
+        ``plan_action`` accepts the strategy vocabulary — close aliases
+        (``"close"``, ``"exit"``, ``"flatten"``, ``"close_all"``),
+        reduce aliases (``"reduce"``, ``"partial_exit"``) and open
+        aliases (``"open_long"``, ``"open_short"``), plus the
+        canonical plan tokens (``"close_position"`` /
+        ``"reduce_position"`` / ``"open_position"`` /
+        ``"attach_protection"``) which pass through unchanged. The
+        kernel normalizes these before the risk gate: close aliases map
+        to the ``close_position`` plan action, reduce aliases to
+        ``reduce_position``, and open aliases to ``open_position`` — a
+        ``sell`` intent carrying ``plan_action="close"`` therefore
+        closes/reduces the position instead of opening a short.
+        Unknown values keep the kernel's historical open default. The
+        token is forwarded to the risk gate via :attr:`TradeIntent.meta`
+        and is used to (a) relax snapshot-freshness gates for
+        risk-reducing intents and (b) tell the reconciliation layer
+        apart "operator opens fresh position" from "operator flattens
+        an existing one".
 
         ``metadata`` and any other ``**extra`` kwargs are merged into
         ``meta`` as well so the strategy can stamp evidence trails
@@ -1076,8 +1194,14 @@ class StrategyTrading:
                 f"strategy {self.strategy_id!r}: allow_direct_order=False; "
                 f"submit_intent calls are disabled by policy"
             )
+        self._ensure_run_active()
         account_id = self._resolve_execution_account(account)
-        notional_usd = float(size) if size_unit == "usd" else 0.0
+        notional_usd = self._notional_usd_for_cap(
+            market=market,
+            size=size,
+            size_unit=size_unit,
+            market_snapshot=market_snapshot,
+        )
         if (
             self.policy.max_single_order_usd > 0
             and notional_usd > self.policy.max_single_order_usd
@@ -1182,6 +1306,7 @@ class StrategyTrading:
                 f"strategy {self.strategy_id!r}: allow_direct_order=False; "
                 f"open_position calls are disabled by policy"
             )
+        self._ensure_run_active()
         from ..sdk.trading_api import TradingAPI
         # Lazy SkillKernel import to avoid a circular import.
         from ..skills.kernel import SkillKernel
@@ -1230,6 +1355,7 @@ class StrategyTrading:
                 f"strategy {self.strategy_id!r}: allow_direct_order=False; "
                 f"close_position calls are disabled by policy"
             )
+        self._ensure_run_active()
         from ..sdk.trading_api import TradingAPI
         from ..skills.kernel import SkillKernel
 
@@ -1276,6 +1402,7 @@ class StrategyTrading:
                 f"strategy {self.strategy_id!r}: allow_direct_order=False; "
                 f"reduce_position calls are disabled by policy"
             )
+        self._ensure_run_active()
         from ..sdk.trading_api import TradingAPI
         from ..skills.kernel import SkillKernel
 
@@ -1320,6 +1447,7 @@ class StrategyTrading:
         mode: str = "soft",
         account: Optional[str] = None,
     ) -> dict[str, Any]:
+        self._ensure_run_active()
         from ..sdk.trading_api import TradingAPI
         from ..skills.kernel import SkillKernel
 
@@ -1452,20 +1580,33 @@ class StrategyState:
 
     Persisted at ``<strategy_root>/state/state.json``. Reads return a
     snapshot; writes serialise via the underlying :class:`StateStore`'s
-    file lock. Strategy code should treat the store as eventually-
+    lock. Strategy code should treat the store as eventually-
     consistent (a sibling tick can mutate values between calls) and
-    use ``compare_and_set`` when ordering matters.
+    use ``compare_and_set`` when ordering matters. Cross-tick
+    exclusion is provided by the runner's per-strategy tick file lock;
+    the store's own ``compare_and_set`` is process-wide (shared store
+    instances per path) but not a cross-process atomic CAS on the
+    JSON file.
     """
 
     store: StateStore
+    run_deadline: Optional[StrategyRunDeadline] = None
+
+    def _ensure_run_active(self) -> None:
+        # Same fail-closed rule as StrategyTrading: a timed-out zombie
+        # thread must not keep mutating persisted state.
+        if self.run_deadline is not None:
+            self.run_deadline.raise_if_exceeded()
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.store.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
+        self._ensure_run_active()
         self.store.set(key, value)
 
     def update(self, **kwargs: Any) -> None:
+        self._ensure_run_active()
         self.store.update(**kwargs)
 
     def compare_and_set(
@@ -1477,6 +1618,7 @@ class StrategyState:
     ) -> bool:
         """Set ``key`` to ``new_value`` only if its current value equals ``expect``."""
 
+        self._ensure_run_active()
         with self.store._lock:  # underlying RLock — module-internal access
             data = self.store._read()
             if data.get(key) != expect:
@@ -1486,6 +1628,7 @@ class StrategyState:
             return True
 
     def delete(self, key: str) -> None:
+        self._ensure_run_active()
         with self.store._lock:
             data = self.store._read()
             if key in data:
@@ -1515,7 +1658,10 @@ class StrategyClock:
         return int(self._now_ms_fn())
 
     def now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        # Derive from the same injectable ms provider ``now_ms()`` uses so
+        # ``freeze()`` pins all three accessors (previously ``now()`` ignored
+        # the freeze and diverged from the backtest MockClock).
+        return datetime.fromtimestamp(int(self._now_ms_fn()) / 1000, tz=timezone.utc)
 
     def freeze(self, *, iso: str, ms: Optional[int] = None) -> None:
         """Pin the clock for tests / replay sessions.
@@ -1966,6 +2112,7 @@ class StrategyContext:
     audit: StrategyAudit
     result: ResultBuilder = field(default_factory=ResultBuilder)
     backtest_replay: Callable[..., dict[str, Any]] | None = None
+    run_deadline: StrategyRunDeadline = field(default_factory=StrategyRunDeadline)
 
     @property
     def mode(self) -> str:
@@ -2259,7 +2406,8 @@ def build_strategy_context(
 
     state_path = package.state_dir / "state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state = StrategyState(store=StateStore(state_path))
+    run_deadline = StrategyRunDeadline()
+    state = StrategyState(store=StateStore(state_path), run_deadline=run_deadline)
 
     dedupe = StrategyDedupe(state=state)
 
@@ -2271,6 +2419,13 @@ def build_strategy_context(
         max_calls_per_run=int(manifest.llm_policy.max_calls_per_run or 0),
     )
 
+    audit = StrategyAudit(
+        paths=paths,
+        strategy_id=manifest.strategy_id,
+        run_id=rid,
+        session_id=sid,
+    )
+
     subagents = StrategySubAgents(
         config=config,
         skills=skills,
@@ -2278,6 +2433,7 @@ def build_strategy_context(
         session_id=sid,
         tool_registry=tool_registry,
         executor=executor,
+        audit=audit,
     )
 
     trading = StrategyTrading(
@@ -2287,6 +2443,7 @@ def build_strategy_context(
         accounts=manifest.accounts,
         execution_mode=resolved_mode,
         session_id=sid,
+        run_deadline=run_deadline,
     )
     portfolio = StrategyPortfolio(paths=paths, strategy_id=manifest.strategy_id)
     pnl = StrategyPnL(paths=paths, strategy_id=manifest.strategy_id)
@@ -2294,13 +2451,6 @@ def build_strategy_context(
     messages = StrategyMessages(
         paths=paths,
         strategy_id=manifest.strategy_id,
-        session_id=sid,
-    )
-
-    audit = StrategyAudit(
-        paths=paths,
-        strategy_id=manifest.strategy_id,
-        run_id=rid,
         session_id=sid,
     )
 
@@ -2332,6 +2482,7 @@ def build_strategy_context(
         clock=clock or StrategyClock(),
         audit=audit,
         backtest_replay=_bound_backtest_replay,
+        run_deadline=run_deadline,
     )
 
 
@@ -2384,6 +2535,7 @@ __all__ = [
     "StrategyPosition",
     "StrategyPolicyView",
     "StrategyResult",
+    "StrategyRunDeadline",
     "StrategyRuntimeError",
     "StrategyState",
     "StrategySubAgents",

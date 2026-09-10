@@ -9,6 +9,7 @@ import {
   type WorkspaceSyncConfig,
   type WorkspaceSyncStatus,
 } from "../lib/clientApi";
+import { confirm } from "../lib/dialogs";
 
 const EMPTY_CONFIG: WorkspaceSyncConfig = {
   enabled: false,
@@ -89,6 +90,21 @@ export function WorkspaceSyncPanel() {
     } finally {
       setBusy("");
     }
+  }
+
+  // Force-push overwrites the remote copy with local content. That is
+  // the one genuinely destructive action here, so it gets an explicit
+  // danger confirm before running.
+  async function runPush() {
+    if (force) {
+      const confirmed = await confirm({
+        title: t("forcePushConfirmTitle"),
+        message: t("forcePushConfirmMessage"),
+        tone: "danger",
+      });
+      if (!confirmed) return;
+    }
+    await run("push");
   }
 
   const configured = Boolean(draft.remote.trim());
@@ -216,7 +232,7 @@ export function WorkspaceSyncPanel() {
           <button className="btn btn-ghost" disabled={Boolean(busy) || !draft.enabled || !configured} onClick={() => void run("sync")}>
             {busy === "sync" ? t("running") : t("sync")}
           </button>
-          <button className="btn btn-ghost" disabled={Boolean(busy) || !draft.enabled || !configured} onClick={() => void run("push")}>
+          <button className="btn btn-ghost" disabled={Boolean(busy) || !draft.enabled || !configured} onClick={() => void runPush()}>
             {busy === "push" ? t("running") : t("push")}
           </button>
           <label className="ml-auto flex items-center gap-2 text-[11px] text-ink-500">

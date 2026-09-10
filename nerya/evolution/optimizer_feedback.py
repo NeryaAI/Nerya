@@ -88,7 +88,7 @@ def optimizer_feedback_summary(
             _merge_source_counts(target, feature, key="sources")
             _merge_source_weights(target, feature, key="positive_by_source")
             _merge_source_weights(target, feature, key="negative_by_source")
-        selected = _selected_candidate(report)
+        selected = selected_optimizer_candidate(report)
         run_id = str(row.get("run_id") or "")
         evidence_refs.extend([
             f"proposal:{proposal_id}",
@@ -461,16 +461,26 @@ def _feature_rows(feedback: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _selected_candidate(report: dict[str, Any]) -> dict[str, Any] | None:
-    candidates = [row for row in report.get("candidates", []) if isinstance(row, dict)]
-    selected_id = str(report.get("selected_candidate_id") or "")
-    selected_index = _maybe_int(report.get("selected_index"))
-    for index, candidate in enumerate(candidates):
-        if selected_id and str(candidate.get("candidate_id") or "") == selected_id:
-            return candidate
-        if selected_index is not None and index == selected_index:
-            return candidate
-    return candidates[0] if candidates else None
+def selected_optimizer_candidate(report: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve one explicit selection, rejecting absent, duplicate or conflicting identity."""
+    if report.get("selection_status") not in (None, "selected"):
+        return None
+    selected_id = report.get("selected_candidate_id")
+    candidates = report.get("candidates")
+    if not isinstance(selected_id, str) or not selected_id.strip() or not isinstance(candidates, list):
+        return None
+    matches = [(index, row) for index, row in enumerate(candidates)
+               if isinstance(row, dict) and row.get("candidate_id") == selected_id]
+    if len(matches) != 1:
+        return None
+    position, candidate = matches[0]
+    selected_index = report.get("selected_index")
+    if selected_index is not None:
+        actual_index = candidate.get("index", position)
+        if (type(selected_index) is not int or selected_index < 0
+                or type(actual_index) is not int or actual_index != selected_index):
+            return None
+    return candidate
 
 
 def _float(value: Any) -> float:
@@ -478,13 +488,6 @@ def _float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
-
-
-def _maybe_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _unique_strings(values: list[str]) -> list[str]:

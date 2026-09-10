@@ -18,7 +18,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
 
-import { Card, Empty, Json, Kpi, Pill } from "../Page";
+import { Card, Empty, ErrorBanner, Json, Kpi, Pill } from "../Page";
+import { ModePill } from "../ModePill";
 import { Sparkline } from "../Sparkline";
 import {
   clientApi,
@@ -32,6 +33,13 @@ import {
 interface Props {
   strategyId: string;
   /**
+   * Trading mode of the underlying execution account ("paper" /
+   * "live"), used to badge the PnL numbers with their provenance —
+   * big green figures must never be readable as real-money profit
+   * without a source label.
+   */
+  mode?: string;
+  /**
    * Poll cadence in ms. Defaults to 15s. The card is a heavy SQL read
    * but the data is cheap on the backend (paginated + indexed), and
    * operators expect "live" PnL on the performance surface.
@@ -41,6 +49,7 @@ interface Props {
 
 export function StrategyPerformanceCard({
   strategyId,
+  mode,
   refreshMs = 15_000,
 }: Props) {
   const t = useTranslations("strategyPerformance");
@@ -110,9 +119,10 @@ export function StrategyPerformanceCard({
   if (error && !envelope) {
     return (
       <Card title={t("title")} description={t("description")}>
-        <div className="rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-[12px] text-rose-300">
-          {t("loadError", { error })}
-        </div>
+        {/* Toast via ErrorBanner + a quiet empty state instead of a
+            hand-rolled red bar. */}
+        <ErrorBanner error={error} />
+        <Empty label={t("loadError", { error })} />
       </Card>
     );
   }
@@ -146,7 +156,12 @@ export function StrategyPerformanceCard({
             inline
             label={t("kpiRealized")}
             tone={pnlTone(kpis?.total_realized_usd ?? 0)}
-            value={fmtUSD(kpis?.total_realized_usd ?? 0)}
+            value={
+              <span className="inline-flex flex-wrap items-center gap-2">
+                {fmtUSD(kpis?.total_realized_usd ?? 0)}
+                <ModePill mode={mode} />
+              </span>
+            }
           />
           <Kpi
             inline
@@ -264,7 +279,9 @@ function PositionRow({
   const t = useTranslations("strategyPerformance");
   const [expanded, setExpanded] = useState(false);
   const co = pos.merged?.co_strategies ?? [];
-  const sideTone = pos.side === "long" ? "ok" : "warn";
+  // Direction is not a warning — sell/short reads as danger so the
+  // amber/warn palette stays reserved for actual risk signals.
+  const sideTone = pos.side === "long" ? "ok" : "danger";
 
   return (
     <div className="rounded-md border border-brand-500/10 bg-ink-950/40">
@@ -483,7 +500,7 @@ function OrdersTable({
               </td>
               <td className="py-1.5 pr-3 font-mono">{o.market}</td>
               <td className="py-1.5 pr-3">
-                <Pill tone={o.side === "buy" ? "ok" : "warn"}>{o.side}</Pill>
+                <Pill tone={o.side === "buy" ? "ok" : "danger"}>{o.side}</Pill>
               </td>
               <td className="py-1.5 pr-3 font-mono">
                 {fmtBase(o.size_base)}
@@ -537,7 +554,7 @@ function FillsTable({
               </td>
               <td className="py-1.5 pr-3 font-mono">{f.market}</td>
               <td className="py-1.5 pr-3">
-                <Pill tone={f.side === "buy" ? "ok" : "warn"}>{f.side}</Pill>
+                <Pill tone={f.side === "buy" ? "ok" : "danger"}>{f.side}</Pill>
               </td>
               <td className="py-1.5 pr-3 font-mono">{fmtBase(f.size_base)}</td>
               <td className="py-1.5 pr-3 font-mono">{fmtUSD(f.price)}</td>
@@ -605,8 +622,8 @@ function pnlTone(v: number): "ok" | "danger" | "neutral" {
 }
 
 function pnlClass(v: number): string {
-  if (v > 0) return "text-emerald-400";
-  if (v < 0) return "text-rose-400";
+  if (v > 0) return "text-accent-400";
+  if (v < 0) return "text-danger";
   return "text-[color:var(--text-muted)]";
 }
 

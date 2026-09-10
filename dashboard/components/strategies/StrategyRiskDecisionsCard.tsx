@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Card, Pill } from "../Page";
+import { Card, ErrorBanner, Pill } from "../Page";
 import { clientApi, type RiskEvaluationRow } from "../../lib/clientApi";
 
 interface Props {
@@ -63,11 +63,9 @@ export function StrategyRiskDecisionsCard({ strategyId }: Props) {
     // Auto-refreshes every 30s — a manual Refresh button here was the
     // fourth one on the page. Empty state stays a single quiet line.
     <Card title={t("title")} description={t("description")}>
-      {error && (
-        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
-          {error}
-        </div>
-      )}
+      {/* Load errors surface as a toast (ErrorBanner) instead of a
+          hand-rolled red bar stacking above the list. */}
+      <ErrorBanner error={error} />
       {!loading && rows.length === 0 ? (
         <div className="text-[12px] italic text-[color:var(--text-muted)]">
           {t("noRejections")}

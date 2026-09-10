@@ -129,7 +129,7 @@ def test_activity_search_never_persists_a_plaintext_secret(tmp_path):
     assert "[redacted unsafe memory query]" in raw
 
 
-def test_projection_jsonl_excludes_session_and_carries_actor_marker(tmp_path):
+def test_markdown_projection_excludes_private_session_records(tmp_path):
     from nerya.memory.projection import (
         GENERATED_PROJECTION_MARKER,
         MemoryProjection,
@@ -138,7 +138,7 @@ def test_projection_jsonl_excludes_session_and_carries_actor_marker(tmp_path):
 
     config = Config(
         paths=WorkspacePaths(root=tmp_path),
-        data={"memory": {"legacy_owner_actor": "operator-1"}},
+        data={"memory": {"projection_actor": "operator-1"}},
     )
     store = MemoryStore(config.paths.db)
     common = {
@@ -168,17 +168,10 @@ def test_projection_jsonl_excludes_session_and_carries_actor_marker(tmp_path):
 
     MemoryProjection(config, store).sync(actor_id="operator-1")
 
-    rows = [
-        json.loads(line)
-        for line in config.paths.memory_index.read_text(encoding="utf-8").splitlines()
-    ]
-    assert len(rows) == 1
-    assert rows[0]["actor_id"] == "operator-1"
-    assert rows[0]["scope"] == "global"
-    assert "session private fact" not in config.paths.memory_index.read_text(
-        encoding="utf-8"
-    )
+    assert not config.paths.memory_index.exists()
     markdown = (config.paths.memory / "global.md").read_text(encoding="utf-8")
+    assert "global projected fact" in markdown
+    assert "session private fact" not in markdown
     assert GENERATED_PROJECTION_MARKER in markdown
     assert "do-not-import" in markdown
 

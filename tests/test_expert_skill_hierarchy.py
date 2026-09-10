@@ -99,7 +99,10 @@ def test_expert_lens_default_roles_are_wired() -> None:
         assert role in DEFAULT_TIERS
         prompt = DEFAULT_SUBAGENT_PROMPTS[role]
         assert skill_id in DEFAULT_SUBAGENT_EXECUTION_POLICIES[role].preload_skills
-        assert "already-loaded expert lens and research" in prompt
+        from nerya.workspace.prompt_bundles import load_bundle
+        assert prompt == load_bundle().subagents[role]
+        assert skill_id in prompt
+        assert all(field in prompt for field in ("facts_used", "invalidation", "source_ids"))
         assert "How you work" not in prompt
         assert "skill_view" not in prompt
         assert "Never submit orders" in prompt

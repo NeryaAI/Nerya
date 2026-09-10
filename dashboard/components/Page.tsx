@@ -1,11 +1,10 @@
 "use client";
 
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useId, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Sparkline } from "./Sparkline";
 import { JsonView } from "./JsonView";
 import { ChevronRightIcon } from "./icons";
-import { toast as dispatchToast } from "../lib/dialogs";
 
 export function PageHeader({ title, description, actions, eyebrow }: {
   title: string;
@@ -21,13 +20,13 @@ export function PageHeader({ title, description, actions, eyebrow }: {
             {eyebrow}
           </div>
         ) : null}
-        <h2 className="text-[19px] leading-[1.25] font-medium text-[color:var(--text-base)]">
+        <h1 className="text-xl leading-tight font-semibold tracking-tight text-[color:var(--text-base)] sm:text-2xl">
           {title}
-        </h2>
+        </h1>
         {description ? (
-          <p className="text-[13px] text-[color:var(--text-muted)] mt-1.5 max-w-2xl leading-relaxed">
+          <div className="text-[13px] text-[color:var(--text-muted)] mt-1.5 max-w-2xl leading-relaxed">
             {description}
-          </p>
+          </div>
         ) : null}
       </div>
       {actions ? (
@@ -59,8 +58,8 @@ export function Section({
         <div
           className={
             divider
-              ? "mb-4 flex items-start justify-between gap-3 border-b border-[color:var(--line)] pb-3"
-              : "mb-3 flex items-start justify-between gap-3"
+              ? "mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-[color:var(--line)] pb-3"
+              : "mb-3 flex flex-wrap items-start justify-between gap-3"
           }
         >
           <div className="min-w-0">
@@ -122,25 +121,25 @@ export function Advanced({
   children: ReactNode;
 }) {
   const controlled = controlledOpen != null;
-  const [internalOpen, setInternalOpen] = useState<boolean>(() => {
-    if (controlled) return false;
-    if (storageKey && typeof window !== "undefined") {
-      try {
-        const saved = window.localStorage.getItem(storageKey);
-        if (saved != null) return saved === "1";
-      } catch {
-      }
-    }
-    return defaultOpen;
-  });
+  const contentId = useId();
+  // The server and first client render must agree; restore preferences after mount.
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const [restoredKey, setRestoredKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (controlled || !storageKey) return;
+    let next = defaultOpen;
+    try {
+      const saved = window.localStorage.getItem(storageKey);
+      if (saved === "1" || saved === "0") next = saved === "1";
+    } catch { /* Storage may be unavailable in private browsing. */ }
+    setInternalOpen(next);
+    setRestoredKey(storageKey);
+  }, [controlled, storageKey, defaultOpen]);
   const open = controlled ? Boolean(controlledOpen) : internalOpen;
   useEffect(() => {
-    if (controlled || !storageKey || typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(storageKey, internalOpen ? "1" : "0");
-    } catch {
-    }
-  }, [controlled, storageKey, internalOpen]);
+    if (controlled || !storageKey || restoredKey !== storageKey) return;
+    try { window.localStorage.setItem(storageKey, internalOpen ? "1" : "0"); } catch { /* Preference only. */ }
+  }, [controlled, storageKey, internalOpen, restoredKey]);
   function toggle() {
     const next = !open;
     if (!controlled) setInternalOpen(next);
@@ -152,7 +151,8 @@ export function Advanced({
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        className="flex w-full items-center justify-between gap-3 py-1 text-left text-[13px] text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]"
+        aria-controls={contentId}
+        className="flex min-h-9 w-full items-center justify-between gap-3 py-1 text-left text-[13px] text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]"
       >
         <span className="flex min-w-0 items-center gap-2">
           <ChevronRightIcon
@@ -171,7 +171,7 @@ export function Advanced({
       {open && description ? (
         <p className="ml-5 mt-1 text-[12px] text-[color:var(--text-muted)]">{description}</p>
       ) : null}
-      {open ? <div className="mt-3">{children}</div> : null}
+      <div id={contentId} hidden={!open} className={open ? "mt-3" : undefined}>{open ? children : null}</div>
     </section>
   );
 }
@@ -251,11 +251,13 @@ export function Kpi({
    */
   inline?: boolean;
 }) {
+  // Tone colours use the console-wide status tokens (text-ok/warn/danger),
+  // matching Pill/StatusDot so every KPI number sits in the token system.
   const toneClass = {
     neutral: "text-[color:var(--text-base)]",
-    ok: "text-emerald-500",
-    warn: "text-amber-500",
-    danger: "text-rose-500",
+    ok: "text-ok",
+    warn: "text-warn",
+    danger: "text-danger",
     brand: "text-brand-300",
   }[tone];
 
@@ -304,53 +306,36 @@ export function Empty({
   label,
   title,
   subtitle,
+  action,
 }: {
   label?: string;
   title?: string;
   subtitle?: string;
+  action?: ReactNode;
 }) {
   const t = useTranslations("pageCommon");
   const heading = title || label || t("noData");
   return (
-    <div className="text-ink-400 text-sm italic py-8 text-center">
-      <div>{heading}</div>
-      {subtitle ? (
-        <div className="mt-1 text-[12px] text-ink-500">{subtitle}</div>
-      ) : null}
+    <div className="py-10 text-center text-sm text-[color:var(--text-muted)]">
+      <div className="font-medium text-[color:var(--text-base)]">{heading}</div>
+      {subtitle ? <div className="mx-auto mt-2 max-w-md text-[13px] leading-relaxed">{subtitle}</div> : null}
+      {action ? <div className="mt-4 flex justify-center">{action}</div> : null}
     </div>
   );
 }
 
-/**
- * `<ErrorBanner>` is a **side-effect-only** component since the
- * Toast migration. It used to render a red bar inline at the
- * top of the page; that pattern stacked multiple bars on busy pages and
- * pushed content downward. Now it fires a single bottom-right toast
- * whenever the `error` prop changes and renders nothing — every call
- * site (≈24 pages) keeps its existing `<ErrorBanner error={…} />` JSX
- * unchanged, so this is a zero-touch migration.
- *
- * Empty / falsy errors are ignored. Repeated identical messages within
- * the same render cycle are de-duped (we keep the last surfaced
- * message in a ref) so a polling loop that keeps re-setting the same
- * error doesn't fire a new toast every render.
- */
-export function ErrorBanner({ error }: { error: unknown }) {
-  const lastRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (error == null || error === false) return;
-    const msg =
-      error instanceof Error
-        ? error.message
-        : typeof error === "string"
-        ? error
-        : String(error);
-    if (!msg || msg === "null" || msg === "undefined") return;
-    if (lastRef.current === msg) return;
-    lastRef.current = msg;
-    dispatchToast({ message: msg, tone: "error", durationMs: 6000 });
-  }, [error]);
-  return null;
+/** Loading failures stay visible until resolved; transient action feedback uses toast(). */
+export function ErrorBanner({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
+  const t = useTranslations("ui");
+  if (error == null || error === false || error === "") return null;
+  const message = error instanceof Error ? error.message : String(error);
+  if (!message || message === "null" || message === "undefined") return null;
+  return (
+    <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[color:var(--err)] bg-[color:var(--card)] px-4 py-3 text-sm">
+      <span className="min-w-0 flex-1 break-words text-[color:var(--text-base)]">{message}</span>
+      {onRetry ? <button type="button" className="btn btn-ghost shrink-0" onClick={onRetry}>{t("retry")}</button> : null}
+    </div>
+  );
 }
 
 export function Pill({ tone = "neutral", children }: {
@@ -382,16 +367,16 @@ export function StatusDot({
   dot?: boolean;
 }) {
   const textClass = {
-    ok: "text-emerald-500",
-    warn: "text-amber-500",
-    danger: "text-rose-500",
+    ok: "text-ok",
+    warn: "text-warn",
+    danger: "text-danger",
     brand: "text-brand-300",
     neutral: "text-[color:var(--text-muted)]",
   }[tone];
   const dotClass = {
-    ok: "bg-emerald-500",
-    warn: "bg-amber-500",
-    danger: "bg-rose-500",
+    ok: "bg-ok",
+    warn: "bg-warn",
+    danger: "bg-danger",
     brand: "bg-brand-400",
     neutral: "bg-[color:var(--text-muted)]",
   }[tone];

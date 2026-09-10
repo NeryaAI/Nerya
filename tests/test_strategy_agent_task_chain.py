@@ -146,7 +146,7 @@ def _write_agent_task_strategy(cfg: Config) -> None:
     )
 
 
-def _write_legacy_team_strategy(cfg: Config) -> None:
+def _write_team_task_strategy(cfg: Config) -> None:
     root = cfg.paths.strategy("amzn_daily_team_long")
     yaml_io.dump(
         root / "strategy.yml",
@@ -154,10 +154,8 @@ def _write_legacy_team_strategy(cfg: Config) -> None:
             "version": 1,
             "strategy_id": "amzn_daily_team_long",
             "title": "AMZN daily Agent Team long",
-            "description": (
-                "Legacy generated team strategy with direct subagent calls "
-                "and fundamental analysis intent."
-            ),
+            "description": "Explicit strategy-owned team task and evidence contract.",
+            "agent_task": {"enabled": True, "mode": "agent_team"},
             "mode": "paper",
             "entrypoint": "main.py:run",
             "markets": ["mock:AMZN"],
@@ -182,8 +180,15 @@ def _write_legacy_team_strategy(cfg: Config) -> None:
     (root / "main.py").write_text(
         "\n".join(
             [
+                "from nerya.strategies.agent_task import StrategyAgentTask",
+                "def build_agent_task(ctx):",
+                "    return StrategyAgentTask.dispatch(",
+                "        prompt='Use team_run with technical_analyst and fundamentals_analyst. Final response contract: cite evidence and explain the guarded trade or hold decision.',",
+                "        metadata={'execution_mode': 'agent_team', 'roles': ['technical_analyst', 'fundamentals_analyst', 'news_interpreter', 'risk_critic'], 'market': 'mock:AMZN', 'timeframe': '1d', 'account_id': 'paper_main'},",
+                "        attached_skills=['team', 'trading', 'market_research', 'research', 'market_data_routing'],",
+                "    )",
                 "def run(ctx):",
-                "    raise RuntimeError('legacy direct tick path should not run')",
+                "    return build_agent_task(ctx)",
             ]
         ),
         encoding="utf-8",
@@ -322,12 +327,12 @@ def test_trigger_runtime_dispatches_strategy_built_prompt_to_stable_agent_sessio
     assert strategy_api.history("macd_agent")["ledgers"]["agent_tasks"]["count"] == 2
 
 
-def test_legacy_agent_team_schedule_targets_agent_task_and_builds_team_prompt(
+def test_explicit_agent_team_schedule_uses_strategy_owned_prompt(
     tmp_path,
     monkeypatch,
 ):
     cfg = _config(tmp_path)
-    _write_legacy_team_strategy(cfg)
+    _write_team_task_strategy(cfg)
     package = load_package(cfg.paths, "amzn_daily_team_long")
     entry = compile_trading_schedule(package)
     fake = _FakeKernel()
@@ -409,7 +414,7 @@ def test_agent_team_task_executes_required_team_run_before_final_decision(
     monkeypatch,
 ):
     cfg = _config(tmp_path)
-    _write_legacy_team_strategy(cfg)
+    _write_team_task_strategy(cfg)
     package = load_package(cfg.paths, "amzn_daily_team_long")
     entry = compile_trading_schedule(package)
     fake = _FakeKernel()

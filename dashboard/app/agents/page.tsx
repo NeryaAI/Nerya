@@ -1,8 +1,9 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
@@ -22,16 +23,24 @@ import {
   XIcon,
 } from "../../components/icons";
 import { clientApi, type SkillSummary } from "../../lib/clientApi";
-import { confirm as confirmDialog } from "../../lib/dialogs";
+import { confirm as confirmDialog, toast } from "../../lib/dialogs";
 import { Select } from "../../components/Select";
+
+// Backend actually sends source: "workspace" | "default" | "default_profile"
+// (describe_role marks alias roles), plus provider/model/execution_policy/
+// prompt_excerpt that this page renders read-only in the Advanced panel.
+type AgentExecutionPolicy = Record<string, unknown>;
 
 type AgentSummary = {
   name: string;
   tier: string;
   allowed_skills: string[];
-  source: "workspace" | "default";
+  source: string;
   prompt_path?: string;
-  description?: string;
+  prompt_excerpt?: string;
+  provider?: string;
+  model?: string;
+  execution_policy?: AgentExecutionPolicy;
 };
 
 type AgentDetail = {
@@ -40,9 +49,14 @@ type AgentDetail = {
   allowed_skills: string[];
   prompt: string;
   prompt_path?: string;
-  source: "workspace" | "default";
+  source: string;
   persistent: boolean;
+  provider?: string;
+  model?: string;
+  execution_policy?: AgentExecutionPolicy;
 };
+
+type Tier = "light" | "medium" | "high";
 
 const DEFAULT_PROMPT_TEMPLATE = `# <role-name>
 
@@ -70,6 +84,7 @@ type Translator = (key: string) => string;
 function translateSource(t: Translator, source: string): string {
   const map: Record<string, string> = {
     default: "sourceDefault",
+    default_profile: "sourceDefaultProfile",
     workspace: "sourceWorkspace",
   };
   const key = map[source];
@@ -81,10 +96,62 @@ function translateTier(t: Translator, tier: string): string {
     high: "tierHigh",
     medium: "tierMedium",
     light: "tierLight",
-    intent: "tierIntent",
   };
   const key = map[tier];
   return key ? t(key) : tier;
+}
+
+function tierOptions(t: Translator): Array<{ value: Tier; label: string }> {
+  return [
+    { value: "light", label: t("tierLight") },
+    { value: "medium", label: t("tierMedium") },
+    { value: "high", label: t("tierHigh") },
+  ];
+}
+
+// List avatar: first letter of the agent name, tinted by tier so the
+// column reads as a spectrum instead of 40 identical violet icons.
+function tierAvatarClass(tier: string): string {
+  if (tier === "high") {
+    return "border-magenta-400/30 bg-magenta-500/10 text-magenta-400";
+  }
+  if (tier === "light") {
+    return "border-ink-500/20 bg-ink-900/60 text-ink-300";
+  }
+  return "border-brand-400/30 bg-brand-500/10 text-brand-200";
+}
+
+// Flattened execution_policy rows for the read-only Advanced panel.
+// Keeps scalar/list values; drops empty entries and nested objects.
+function policyRows(
+  policy: AgentExecutionPolicy | undefined,
+): Array<[string, string]> {
+  if (!policy) return [];
+  return Object.entries(policy)
+    .filter(([key, value]) => {
+      if (key === "locked_tier") return false;
+      if (value == null || value === "") return false;
+      if (Array.isArray(value)) return value.length > 0;
+      if (typeof value === "object") return false;
+      return true;
+    })
+    .map(
+      ([key, value]) =>
+        [
+          key,
+          Array.isArray(value) ? value.map(String).join(", ") : String(value),
+        ] as [string, string],
+    );
+}
+
+function AdvancedRow({ label, value }: { label: string; value: string }) {
+  if (!value) return null;
+  return (
+    <div className="flex gap-2">
+      <span className="w-32 shrink-0 text-ink-500">{label}</span>
+      <span className="min-w-0 break-words font-mono text-ink-200">{value}</span>
+    </div>
+  );
 }
 
 export default function AgentsPage() {
@@ -108,15 +175,52 @@ export default function AgentsPage() {
   const [agentQuery, setAgentQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [fetchingDetail, setFetchingDetail] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+
+  function applySelected(name: string | null) {
+    setSelected(name);
+    // Keep the selection deep-linkable: /agents?agent=<name>.
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (name) url.searchParams.set("agent", name);
+    else url.searchParams.delete("agent");
+    window.history.replaceState(null, "", url);
+  }
+
+  async function selectAgent(name: string) {
+    if (name === selected) return;
+    if (editorDirty) {
+      const ok = await confirmDialog({
+        message: t("discardDraftConfirm"),
+        tone: "warning",
+      });
+      if (!ok) return;
+    }
+    applySelected(name);
+  }
+
+  function loadSkills() {
+    setSkillsError(null);
+    clientApi
+      .skills()
+      .then((res) => {
+        const rows = (res.skills || []).slice();
+        rows.sort((a, b) => a.id.localeCompare(b.id));
+        setSkills(rows);
+      })
+      .catch(() => setSkillsError(t("skillsLoadFailed")));
+  }
 
   async function refreshList(focus?: string | null) {
     setLoading(true);
     try {
       const res = await clientApi.agentsList();
-      const list = (res.roles || []).slice();
+      const list: AgentSummary[] = (res.roles || []).slice();
       list.sort((a, b) => {
         if (a.source !== b.source) return a.source === "workspace" ? -1 : 1;
         return a.name.localeCompare(b.name);
@@ -125,7 +229,7 @@ export default function AgentsPage() {
       const next = focus && list.some((r) => r.name === focus)
         ? focus
         : list[0]?.name || null;
-      setSelected(next);
+      applySelected(next);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -135,15 +239,13 @@ export default function AgentsPage() {
   }
 
   useEffect(() => {
-    refreshList();
-    clientApi
-      .skills()
-      .then((res) => {
-        const rows = (res.skills || []).slice();
-        rows.sort((a, b) => a.id.localeCompare(b.id));
-        setSkills(rows);
-      })
-      .catch(() => setSkills([]));
+    const fromUrl =
+      typeof window !== "undefined"
+        ? new URLSearchParams(window.location.search).get("agent")
+        : null;
+    void refreshList(fromUrl);
+    loadSkills();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -154,7 +256,7 @@ export default function AgentsPage() {
         cancelled = true;
       };
     }
-    setBusy(true);
+    setFetchingDetail(true);
     clientApi
       .agentsGet(selected)
       .then((res) => {
@@ -172,12 +274,25 @@ export default function AgentsPage() {
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
-        if (!cancelled) setBusy(false);
+        if (!cancelled) setFetchingDetail(false);
       });
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
+
+  // Create-modal a11y: Escape closes, focus moves to the first field on
+  // open (mirrors lib/dialogs.tsx DialogShell behaviour).
+  useEffect(() => {
+    if (!creating) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setCreating(false);
+    };
+    document.addEventListener("keydown", onKey);
+    nameInputRef.current?.focus();
+    return () => document.removeEventListener("keydown", onKey);
+  }, [creating]);
 
   const counts = useMemo(() => {
     const ws = items.filter((i) => i.source === "workspace").length;
@@ -191,8 +306,10 @@ export default function AgentsPage() {
       [
         agent.name,
         agent.tier,
+        translateTier(t, agent.tier),
         agent.source,
-        agent.description,
+        translateSource(t, agent.source),
+        agent.prompt_excerpt,
         ...(agent.allowed_skills || []),
       ]
         .filter(Boolean)
@@ -200,7 +317,13 @@ export default function AgentsPage() {
         .toLowerCase()
         .includes(needle),
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentQuery, items]);
+
+  const selectedSummary = useMemo(
+    () => items.find((i) => i.name === selected) ?? null,
+    [items, selected],
+  );
 
   const skillOptions = useMemo(
     () =>
@@ -223,7 +346,7 @@ export default function AgentsPage() {
       });
       if (!res.ok || !res.role) throw new Error(res.error || t("saveFailed"));
       setDetail(res.role);
-      setInfo(t("savedInfo", { name: next.name }));
+      toast({ message: t("savedInfo", { name: next.name }), tone: "ok" });
       await refreshList(next.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -242,7 +365,7 @@ export default function AgentsPage() {
     try {
       const res = await clientApi.agentsDelete(name);
       if (!res.ok) throw new Error(res.error || t("deleteFailed"));
-      setInfo(t("deletedInfo", { name }));
+      toast({ message: t("deletedInfo", { name }), tone: "ok" });
       await refreshList();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -267,7 +390,7 @@ export default function AgentsPage() {
           .filter(Boolean),
       });
       if (!res.ok || !res.role) throw new Error(res.error || t("saveFailed"));
-      setInfo(t("createdInfo", { name: draft.name }));
+      toast({ message: t("createdInfo", { name: draft.name }), tone: "ok" });
       setCreating(false);
       setDraft({
         name: "",
@@ -315,9 +438,16 @@ export default function AgentsPage() {
       <SectionTabs section="runtime" />
 
       {error ? <ErrorBanner error={error} /> : null}
-      {info ? (
-        <div className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">
-          {info}
+      {skillsError ? (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] text-warn">
+          <span>{skillsError}</span>
+          <button
+            type="button"
+            className="shrink-0 rounded-md border border-warn/40 px-2 py-0.5 text-[11px] hover:bg-warn/10 cursor-pointer"
+            onClick={loadSkills}
+          >
+            {t("retry")}
+          </button>
         </div>
       ) : null}
 
@@ -335,7 +465,34 @@ export default function AgentsPage() {
               placeholder={t("searchPlaceholder")}
             />
           </div>
-          {items.length === 0 ? (
+          {loading && items.length === 0 ? (
+            <div className="space-y-2" aria-hidden>
+              {[0, 1, 2, 3, 4].map((i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-2.5 rounded-lg border border-[color:var(--line)] px-3 py-2.5"
+                >
+                  <div className="skeleton h-8 w-8 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="skeleton h-3 w-1/2" />
+                    <div className="skeleton mt-2 h-2.5 w-1/3" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : error && items.length === 0 ? (
+            <div className="rounded-lg border border-[color:var(--line)] bg-ink-950/30 px-3 py-6 text-center">
+              <p className="text-[13px] text-ink-200">{t("loadFailedTitle")}</p>
+              <p className="mt-1 text-[11px] text-ink-500">{t("loadFailedHint")}</p>
+              <button
+                type="button"
+                className="btn btn-primary mt-3 cursor-pointer"
+                onClick={() => refreshList(selected)}
+              >
+                {t("retry")}
+              </button>
+            </div>
+          ) : items.length === 0 ? (
             <Empty title={t("noAgentsYet")} subtitle={t("noAgentsYetHint")} />
           ) : filteredItems.length === 0 ? (
             <Empty title={t("noMatchingAgents")} subtitle={t("noMatchingAgentsHint")} />
@@ -350,34 +507,31 @@ export default function AgentsPage() {
                         ? "border-brand-400/60 bg-brand-500/10"
                         : "border-brand-500/10 bg-ink-950/30 hover:border-brand-500/25 hover:bg-brand-500/[0.04]"
                     }`}
-                    onClick={() => setSelected(agent.name)}
+                    onClick={() => selectAgent(agent.name)}
                   >
                     <div className="flex items-start gap-2.5">
-                      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-brand-500/15 bg-brand-500/10 text-brand-200">
-                        <AgentsIcon size={15} />
+                      <span
+                        className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border font-mono text-[13px] font-semibold ${tierAvatarClass(agent.tier)}`}
+                        aria-hidden
+                      >
+                        {agent.name.charAt(0).toUpperCase()}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center justify-between gap-2">
                           <span className="truncate font-mono text-[12px] text-ink-100">
                             {agent.name}
                           </span>
-                          <Pill tone={agent.source === "workspace" ? "ok" : "neutral"}>
-                            {translateSource(t, agent.source)}
-                          </Pill>
                         </span>
-                        <span className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-ink-500">
-                          <span className="rounded-md border border-brand-500/10 bg-ink-900/70 px-1.5 py-0.5 text-ink-300">
-                            {translateTier(t, agent.tier)}
-                          </span>
-                          <span>{t("skillsCount", { count: agent.allowed_skills.length })}</span>
-                          {agent.allowed_skills.slice(0, 2).map((skill) => (
-                            <span
-                              key={skill}
-                              className="max-w-[96px] truncate rounded-md border border-brand-500/10 bg-white/[0.03] px-1.5 py-0.5 font-mono"
-                            >
-                              {skill}
-                            </span>
-                          ))}
+                        <span
+                          className="mt-1 block truncate text-[11px] text-ink-500"
+                          title={(agent.allowed_skills || []).join(", ") || undefined}
+                        >
+                          {translateTier(t, agent.tier)}
+                          {" · "}
+                          {t("skillsCount", { count: agent.allowed_skills.length })}
+                          {agent.source !== "workspace"
+                            ? ` · ${translateSource(t, agent.source)}`
+                            : ""}
                         </span>
                       </span>
                     </div>
@@ -389,7 +543,7 @@ export default function AgentsPage() {
         </Card>
 
         <Card
-          title={detail?.name || t("pickAgent")}
+          title={detail ? <span className="font-mono">{detail.name}</span> : t("pickAgent")}
           description={
             detail
               ? t("detailDescription", {
@@ -403,7 +557,7 @@ export default function AgentsPage() {
             detail && detail.source === "workspace" ? (
               <button
                 type="button"
-                className="btn btn-ghost cursor-pointer text-rose-300"
+                className="btn btn-ghost cursor-pointer text-danger"
                 onClick={() => deleteAgent(detail.name)}
                 disabled={busy}
               >
@@ -414,15 +568,60 @@ export default function AgentsPage() {
           }
         >
           {detail ? (
-            <AgentEditor
-              key={detail.name}
-              detail={detail}
-              busy={busy}
-              skillOptions={skillOptions}
-              onSave={persistDetailEdit}
-            />
+            <>
+              {/* Detail fetch no longer touches `busy`: while it is in
+                  flight the previous editor dims instead of faking
+                  "Saving..." on every button. */}
+              <div
+                className={`transition-opacity ${
+                  fetchingDetail ? "pointer-events-none opacity-60" : ""
+                }`}
+              >
+                <AgentEditor
+                  key={detail.name}
+                  detail={detail}
+                  busy={busy}
+                  skillOptions={skillOptions}
+                  onSave={persistDetailEdit}
+                  onDirtyChange={setEditorDirty}
+                />
+              </div>
+              <Advanced title={t("advancedTitle")}>
+                <div className="space-y-1.5 text-[12px]">
+                  <AdvancedRow
+                    label={t("advProvider")}
+                    value={detail.provider || selectedSummary?.provider || ""}
+                  />
+                  <AdvancedRow
+                    label={t("advModel")}
+                    value={detail.model || selectedSummary?.model || ""}
+                  />
+                  <AdvancedRow
+                    label={t("advLockedTier")}
+                    value={
+                      detail.execution_policy?.locked_tier
+                        ? translateTier(t, String(detail.execution_policy.locked_tier))
+                        : ""
+                    }
+                  />
+                  {policyRows(detail.execution_policy).map(([key, value]) => (
+                    <AdvancedRow key={key} label={key} value={value} />
+                  ))}
+                  {selectedSummary?.prompt_excerpt ? (
+                    <div className="pt-1">
+                      <div className="text-[11px] text-ink-500">
+                        {t("advPromptExcerpt")}
+                      </div>
+                      <p className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-[color:var(--line)] bg-ink-950/40 p-2 font-mono text-[11px] leading-relaxed text-ink-400">
+                        {selectedSummary.prompt_excerpt}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              </Advanced>
+            </>
           ) : (
-            <Empty title={t("noSelection")} subtitle={t("noSelectionHint")} />
+            <Empty title={t("pickAgent")} subtitle={t("pickAgentHint")} />
           )}
         </Card>
       </div>
@@ -434,7 +633,7 @@ export default function AgentsPage() {
             if (e.target === e.currentTarget) setCreating(false);
           }}
         >
-          <div className="embedded-scroll w-[760px] max-w-[92vw] max-h-[88vh] rounded-2xl border border-brand-500/20 bg-bg-card shadow-glow">
+          <div className="embedded-scroll w-[760px] max-w-[92vw] max-h-[88vh] rounded-2xl border border-brand-500/20 bg-bg-card shadow-glow" role="dialog" aria-modal="true" aria-label={t("createPersona")}>
             <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-6 py-4">
               <div className="flex items-start gap-3">
                 <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-brand-500/20 bg-brand-500/10 text-brand-200">
@@ -465,26 +664,22 @@ export default function AgentsPage() {
                   {t("nameLabel")}
                   <input
                     type="text"
+                    ref={nameInputRef}
                     className="input-dark mt-1 w-full"
                     placeholder="risk_critic"
                     value={draft.name}
                     onChange={(e) =>
                       setDraft({ ...draft, name: e.target.value })
                     }
-                    autoFocus
                   />
                 </label>
                 <label className="text-[12px] text-ink-300 block">
                   {t("llmTier")}
                   <div className="mt-1">
-                    <Select<"light" | "medium" | "high">
+                    <Select<Tier>
                       value={draft.tier}
                       onChange={(value) => setDraft({ ...draft, tier: value })}
-                      options={[
-                        { value: "light", label: "light" },
-                        { value: "medium", label: "medium" },
-                        { value: "high", label: "high" },
-                      ]}
+                      options={tierOptions(t)}
                       size="sm"
                       ariaLabel={t("llmTier")}
                     />
@@ -546,11 +741,13 @@ function AgentEditor({
   busy,
   skillOptions,
   onSave,
+  onDirtyChange,
 }: {
   detail: AgentDetail;
   busy: boolean;
   skillOptions: Array<{ id: string; label: string; style: string }>;
   onSave: (next: AgentDetail) => void | Promise<void>;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const t = useTranslations("agentsPage");
   const tCommon = useTranslations("common");
@@ -562,12 +759,21 @@ function AgentEditor({
     setTier(detail.tier || "medium");
     setAllowed(detail.allowed_skills || []);
     setPrompt(detail.prompt || "");
-  }, [detail.name, detail.tier, detail.prompt]);
+  }, [detail.name, detail.tier, detail.allowed_skills, detail.prompt]);
 
   const dirty =
     tier !== detail.tier ||
     allowed.join(",") !== (detail.allowed_skills || []).join(",") ||
     prompt !== detail.prompt;
+
+  // Expose dirty to the parent so switching agents can guard the draft.
+  // The cleanup resets the flag when the editor unmounts (agentsGet
+  // failure clears detail, selection cleared) so a stale dirty=true can't
+  // make the next list click prompt about a draft that no longer exists.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+  }, [dirty, onDirtyChange]);
 
   return (
     <div className="space-y-3">
@@ -578,11 +784,7 @@ function AgentEditor({
             <Select
               value={tier}
               onChange={(value) => setTier(value)}
-              options={[
-                { value: "light", label: "light" },
-                { value: "medium", label: "medium" },
-                { value: "high", label: "high" },
-              ]}
+              options={tierOptions(t)}
               size="sm"
               ariaLabel={t("llmTier")}
             />

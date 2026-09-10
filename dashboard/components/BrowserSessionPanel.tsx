@@ -32,8 +32,9 @@ import { useTranslations } from "next-intl";
 
 import { Card, Pill } from "./Page";
 import { Select } from "./Select";
+import { XIcon } from "./icons";
 import { clientApi } from "../lib/clientApi";
-import { toast } from "../lib/dialogs";
+import { confirm, toast } from "../lib/dialogs";
 import type {
   BrowserConsoleEvent,
   BrowserCdpAction,
@@ -60,8 +61,17 @@ function fmtTs(ts?: string): string {
   return m ? m[1] : ts;
 }
 
-export function BrowserSessionPanel() {
+/** Show at most this many characters of a session id, then ellipsis. */
+const SESSION_ID_PREFIX = 10;
+
+export function BrowserSessionPanel({
+  onGoToEngines,
+}: {
+  /** Offered by the "no engines installed" banner → Engines sub-tab. */
+  onGoToEngines?: () => void;
+}) {
   const t = useTranslations("browserSession");
+  const tBrowsers = useTranslations("browsersPage");
   const [browsers, setBrowsers] = useState<BrowsersStatus | null>(null);
   const [sessions, setSessions] = useState<BrowserSessionListResponse | null>(
     null,
@@ -274,19 +284,27 @@ export function BrowserSessionPanel() {
     }
   }
 
-  async function handleClose() {
-    if (!activeSessionId) return;
-    setBusy("close");
+  /** Danger-confirm, then close a single session (row ✕ or Close button). */
+  async function closeSession(sid: string) {
+    const ok = await confirm({
+      title: tBrowsers("closeSessionTitle"),
+      message: tBrowsers("closeSessionConfirm", { sid }),
+      tone: "danger",
+      okLabel: t("close"),
+    });
+    if (!ok) return;
+    setBusy(`close:${sid}`);
     try {
-      await clientApi.browserSessionCdpClose(activeSessionId);
-      await clientApi.browserSessionClose(activeSessionId);
-      const closedSid = activeSessionId;
-      setActiveSessionId("");
-      setActiveRecord(null);
-      setConsoleEvents([]);
-      setNetworkEvents([]);
+      await clientApi.browserSessionCdpClose(sid);
+      await clientApi.browserSessionClose(sid);
+      if (sid === activeSessionId) {
+        setActiveSessionId("");
+        setActiveRecord(null);
+        setConsoleEvents([]);
+        setNetworkEvents([]);
+      }
       await refreshSessions();
-      toast({ tone: "ok", message: t("sessionClosedWithId", { sid: closedSid }) });
+      toast({ tone: "ok", message: t("sessionClosedWithId", { sid }) });
     } catch (e) {
       toast({
         tone: "error",
@@ -295,6 +313,11 @@ export function BrowserSessionPanel() {
     } finally {
       setBusy("");
     }
+  }
+
+  async function handleClose() {
+    if (!activeSessionId) return;
+    await closeSession(activeSessionId);
   }
 
   function pickSession(sid: string) {
@@ -422,33 +445,56 @@ export function BrowserSessionPanel() {
             </div>
             {(sessions?.sessions || []).map((s) => {
               const active = s.session_id === activeSessionId;
+              const sid = s.session_id;
               return (
-                <button
-                  type="button"
-                  key={s.session_id}
-                  className={`w-full text-left rounded-md border px-3 py-2 ${
+                <div
+                  key={sid}
+                  className={`group relative rounded-md border px-3 py-2 transition-colors ${
                     active
                       ? "border-brand-400/50 bg-brand-500/10"
                       : "border-brand-500/10 bg-ink-900/40 hover:bg-ink-900/60"
                   }`}
-                  onClick={() => pickSession(s.session_id)}
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-[12px] text-ink-100">
-                      {s.session_id}
-                    </span>
-                    <Pill tone={s.last_ok ? "ok" : "warn"}>
-                      {s.engine || "?"}
-                    </Pill>
-                  </div>
-                  <div className="mt-1 truncate text-[11px] text-ink-400">
-                    {s.current_url || "–"}
-                  </div>
-                  <div className="mt-1 text-[10px] text-ink-500">
-                    {s.last_fetch_method || "?"} ·{" "}
-                    {summariseBytes(s.last_bytes)} · {s.last_elapsed_ms ?? 0}ms
-                  </div>
-                </button>
+                  <button
+                    type="button"
+                    className="w-full text-left"
+                    onClick={() => pickSession(sid)}
+                  >
+                    <div className="flex items-center justify-between gap-2 pr-6">
+                      <span
+                        className="truncate font-mono text-[12px] text-ink-100"
+                        title={sid}
+                      >
+                        {sid.length > SESSION_ID_PREFIX
+                          ? `${sid.slice(0, SESSION_ID_PREFIX)}…`
+                          : sid}
+                      </span>
+                      <Pill tone={s.last_ok ? "ok" : "warn"}>
+                        {s.engine || "?"}
+                      </Pill>
+                    </div>
+                    <div className="mt-1 truncate text-[11px] text-ink-400">
+                      {s.current_url || "–"}
+                    </div>
+                    <div className="mt-1 text-[10px] text-ink-500">
+                      {s.last_fetch_method || "?"} ·{" "}
+                      {summariseBytes(s.last_bytes)} · {s.last_elapsed_ms ?? 0}ms
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-sm text-ink-400 opacity-0 transition-opacity hover:bg-danger/15 hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+                    title={tBrowsers("closeSessionTitle")}
+                    aria-label={`${tBrowsers("closeSessionTitle")}: ${sid}`}
+                    disabled={Boolean(busy)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void closeSession(sid);
+                    }}
+                  >
+                    <XIcon size={12} />
+                  </button>
+                </div>
               );
             })}
             {(!sessions || !sessions.sessions || sessions.sessions.length === 0)
@@ -482,10 +528,21 @@ export function BrowserSessionPanel() {
               />
               {noEnginesInstalled
                 ? (
-                  <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-100">
-                    {t("noEnginesInstalledBanner", {
-                      settingsLink: t("settingsLink"),
-                    })}
+                  <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
+                    <span className="min-w-0 flex-1">
+                      {t("noEnginesInstalledBanner", {
+                        settingsLink: t("settingsLink"),
+                      })}
+                    </span>
+                    {onGoToEngines ? (
+                      <button
+                        type="button"
+                        className="shrink-0 rounded-full border border-warn/40 px-2 py-0.5 text-[10px] font-medium text-warn transition-colors hover:bg-warn/20"
+                        onClick={onGoToEngines}
+                      >
+                        {tBrowsers("openEngines")}
+                      </button>
+                    ) : null}
                   </div>
                 )
                 : null}
@@ -845,10 +902,12 @@ export function BrowserSessionPanel() {
             <div className="max-h-[40vh] space-y-1 overflow-auto">
               {consoleEvents.map((evt, i) => {
                 const level = (evt.level || evt.kind || "log").toLowerCase();
-                const tone: "ok" | "warn" | "neutral" =
-                  level === "error" || level === "warn"
+                const tone: "ok" | "warn" | "danger" | "neutral" =
+                  level === "error"
+                    ? "danger"
+                    : level === "warn"
                     ? "warn"
-                    : level === "log" || level === "info"
+                    : level === "info" || level === "success"
                     ? "ok"
                     : "neutral";
                 return (

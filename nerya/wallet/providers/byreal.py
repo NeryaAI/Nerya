@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -37,7 +38,13 @@ import shutil
 import subprocess
 from typing import Any
 
-from ..errors import WalletDependencyError, WalletPolicyDenied
+from ..errors import (
+    WalletDependencyError,
+    WalletError,
+    WalletPolicyDenied,
+    WalletQuoteError,
+    WalletTransportError,
+)
 from ..protocol import (
     WalletBalance,
     WalletCapabilities,
@@ -60,6 +67,14 @@ _VERSION = "0.3.6"
 _INSTALL_COMMAND = f"npm:{_PACKAGE}#version={_VERSION}&entry={_ENTRY}"
 
 _SOLANA_ALIASES = {"solana", "sol", "mainnet-beta", "mainnet", ""}
+
+# Balance-request routing: "" / native names must return ONLY native SOL,
+# never a sum over every token row; "usd"/"total" is the explicit
+# portfolio-USD request.
+_NATIVE_SOL_TOKENS = {"", "sol", "wsol", "native"}
+_PORTFOLIO_USD_TOKENS = {"usd", "total"}
+# Canonical wrapped-SOL mint (case-folded) used to spot the native row.
+_WRAPPED_SOL_MINT = "so11111111111111111111111111111111111111112"
 
 # byreal-cli K-line intervals (src/core/types.ts KlineInterval).
 _BYREAL_INTERVALS = {
@@ -231,7 +246,7 @@ class ByrealWallet(WalletProvider):
                 "Install Node 18+: https://nodejs.org/",
             ) from exc
         except subprocess.TimeoutExpired as exc:
-            raise WalletPolicyDenied(
+            raise WalletTransportError(
                 f"byreal-cli {' '.join(args)} timed out after {timeout_s}s"
             ) from exc
         doc = self._extract_json(proc.stdout or "")
@@ -241,10 +256,16 @@ class ByrealWallet(WalletProvider):
                 msg = err.get("message") or err.get("code") or "unknown error"
             else:
                 msg = str(err or "unknown error")
-            raise WalletPolicyDenied(f"byreal-cli {' '.join(args)} failed: {msg}")
-        if proc.returncode != 0 and doc is None:
+            raise WalletTransportError(f"byreal-cli {' '.join(args)} failed: {msg}")
+        if proc.returncode != 0 and not (
+            isinstance(doc, dict) and doc.get("success") is True
+        ):
+            # A failing CLI can still print parseable JSON (partial
+            # output, banner, error payload without success:false).
+            # Non-zero exit is a transport failure unless the doc
+            # explicitly reports success — never a silent pass.
             detail = (proc.stderr or proc.stdout or "").strip()[-512:]
-            raise WalletPolicyDenied(
+            raise WalletTransportError(
                 f"byreal-cli {' '.join(args)} exited {proc.returncode}: {detail}"
             )
         if isinstance(doc, dict) and "data" in doc:
@@ -263,13 +284,22 @@ class ByrealWallet(WalletProvider):
     # ------------------------------------------------------------------
     def readiness(self) -> WalletReadiness:
         missing = self._missing()
+        reasons: list[str] = []
+        if missing:
+            reasons.append("Byreal CLI (byreal-cli) is not installed.")
+        keypair = str(
+            self.keypair_path or self.config.get("keypair_path") or ""
+        ).strip()
+        if keypair and not Path(keypair).expanduser().exists():
+            missing = [*missing, f"keypair:{keypair}"]
+            reasons.append(f"Configured keypair path does not exist: {keypair}")
         ready = not missing
         return WalletReadiness(
             provider=self.id,
             ready=ready,
             missing=missing,
             install_hint="" if ready else self._install_hint(),
-            reason="" if ready else "Byreal CLI (byreal-cli) is not installed.",
+            reason="" if ready else " ".join(reasons),
         )
 
     def capabilities(self) -> WalletCapabilities:
@@ -422,6 +452,34 @@ class ByrealWallet(WalletProvider):
     # ------------------------------------------------------------------
     # Wallet-bound surface (requires `byreal-cli setup`)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _row_amount(
+        row: dict[str, Any], *, default_symbol: str, default_decimals: int,
+    ) -> tuple[float, str, int]:
+        try:
+            amount = float(
+                row.get("uiAmount") or row.get("amount") or row.get("balance") or 0.0
+            )
+        except (TypeError, ValueError):
+            amount = 0.0
+        symbol = str(row.get("symbol") or "") or default_symbol
+        try:
+            decimals = int(row.get("decimals") or default_decimals)
+        except (TypeError, ValueError):
+            decimals = default_decimals
+        return amount, symbol, decimals
+
+    @staticmethod
+    def _native_sol_row(balances: Any) -> dict[str, Any] | None:
+        for row in balances if isinstance(balances, list) else []:
+            if not isinstance(row, dict):
+                continue
+            mint = str(row.get("mint") or row.get("address") or "").lower()
+            sym = str(row.get("symbol") or "").lower()
+            if row.get("isNative") or sym in ("sol", "wsol") or mint == _WRAPPED_SOL_MINT:
+                return row
+        return None
+
     def get_balance(
         self, *, chain: str, address: str, token: str, **kw: Any,
     ) -> WalletBalance:
@@ -431,45 +489,108 @@ class ByrealWallet(WalletProvider):
         if isinstance(data, dict):
             balances = data.get("balances") or data.get("tokens") or []
         token_s = str(token or "").strip().lower()
-        total = 0.0
-        symbol = str(token or "SOL")
-        decimals = 9
+
+        if token_s in _PORTFOLIO_USD_TOKENS:
+            # Explicit portfolio-USD request only — never folded into a
+            # token balance. Reported honestly as symbol USD / token "".
+            total = 0.0
+            if isinstance(data, dict):
+                try:
+                    total = float(
+                        data.get("totalValueUsd") or data.get("total") or 0.0
+                    )
+                except (TypeError, ValueError):
+                    total = 0.0
+            return WalletBalance(
+                provider=self.id, chain="solana", address=address, token="",
+                balance=total, symbol="USD", decimals=2,
+            )
+
+        if token_s in _NATIVE_SOL_TOKENS:
+            # Native SOL only: the "" / unset token must NOT sum every
+            # token row into an "SOL"-labelled total.
+            row = self._native_sol_row(balances)
+            if row is not None:
+                total, symbol, decimals = self._row_amount(
+                    row, default_symbol="SOL", default_decimals=9,
+                )
+            else:
+                total, symbol, decimals = 0.0, "SOL", 9
+                if isinstance(data, dict):
+                    for key in ("sol", "nativeBalance", "native", "solBalance"):
+                        if data.get(key) is None:
+                            continue
+                        try:
+                            total = float(data[key])
+                            break
+                        except (TypeError, ValueError):
+                            continue
+            return WalletBalance(
+                provider=self.id, chain="solana", address=address, token=token,
+                balance=total, symbol=symbol, decimals=decimals,
+            )
+
+        # Specific token request: match by mint or case-insensitive symbol.
+        total, symbol, decimals = 0.0, token_s.upper(), 9
         for row in balances if isinstance(balances, list) else []:
             if not isinstance(row, dict):
                 continue
             mint = str(row.get("mint") or row.get("address") or "").lower()
             sym = str(row.get("symbol") or "")
-            if token_s and token_s not in (mint, sym.lower()):
+            if token_s not in (mint, sym.lower()):
                 continue
-            try:
-                total += float(row.get("uiAmount") or row.get("amount") or row.get("balance") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if sym:
-                symbol = sym
-            try:
-                decimals = int(row.get("decimals") or decimals)
-            except (TypeError, ValueError):
-                pass
-            if token_s:
-                break
-        if not balances and isinstance(data, dict):
-            try:
-                total = float(data.get("totalValueUsd") or data.get("total") or 0.0)
-                symbol = "USD"
-                decimals = 2
-            except (TypeError, ValueError):
-                total = 0.0
+            total, symbol, decimals = self._row_amount(
+                row, default_symbol=sym or token_s.upper(), default_decimals=9,
+            )
+            break
         return WalletBalance(
             provider=self.id, chain="solana", address=address, token=token,
             balance=total, symbol=symbol, decimals=decimals,
         )
+
+    @staticmethod
+    def _decimals_in(kw: dict[str, Any]) -> int:
+        """Validate the ``decimals_in`` kwarg (default 9 for SOL UI amounts).
+
+        Documented unit contract: NO in-repo evidence (no vendored
+        byreal-cli source, skill doc, or README under agent/) states what
+        unit ``byreal-cli swap execute --amount`` expects, so we do not
+        guess a raw-base-unit conversion. ``amount_in`` is passed through
+        as a UI float (current behaviour) and the assumption is recorded
+        in the returned ``extra`` (``amount_units`` / ``decimals_in``).
+        """
+        raw = kw.get("decimals_in")
+        if raw is None:
+            return 9
+        try:
+            val = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise WalletError(
+                f"Byreal: decimals_in must be an integer, got {raw!r}"
+            ) from exc
+        if val < 0:
+            raise WalletError(f"Byreal: decimals_in must be >= 0, got {val}")
+        return val
+
+    @staticmethod
+    def _first_positive(doc: dict[str, Any], keys: tuple[str, ...]) -> float:
+        for key in keys:
+            if doc.get(key) is None:
+                continue
+            try:
+                val = float(doc[key])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(val) and val > 0:
+                return val
+        return 0.0
 
     def quote(
         self, *, chain: str, token_in: str, token_out: str,
         amount_in: float, slippage_bps: int = 50, **kw: Any,
     ) -> WalletQuote:
         self._require_solana(chain)
+        dec_in = self._decimals_in(kw)
         data = self._run_cli(
             [
                 "swap",
@@ -479,7 +600,7 @@ class ByrealWallet(WalletProvider):
                 "--output-mint",
                 str(token_out),
                 "--amount",
-                str(amount_in),
+                str(float(amount_in)),
                 "--slippage-bps",
                 str(int(slippage_bps)),
                 "--dry-run",
@@ -487,19 +608,19 @@ class ByrealWallet(WalletProvider):
             timeout_s=45.0,
         )
         doc = data if isinstance(data, dict) else {}
-        expected = float(
-            doc.get("expectedOut")
-            or doc.get("estimatedOut")
-            or doc.get("outAmount")
-            or doc.get("expected_out")
-            or 0.0
+        expected = self._first_positive(
+            doc, ("expectedOut", "estimatedOut", "outAmount", "expected_out"),
         )
-        min_out = float(
-            doc.get("minOut")
-            or doc.get("minimumOut")
-            or doc.get("min_out")
-            or expected * (1.0 - slippage_bps / 10_000)
-        )
+        if expected <= 0:
+            # An unparseable quote must fail loudly instead of freezing an
+            # approval with expected_out=0 / min_out=0.
+            raise WalletQuoteError(
+                f"byreal-cli quote returned no positive output amount for "
+                f"{token_in} -> {token_out}: {str(doc)[:512]}"
+            )
+        min_out = self._first_positive(doc, ("minOut", "minimumOut", "min_out"))
+        if min_out <= 0:
+            min_out = expected * (1.0 - slippage_bps / 10_000)
         impact = doc.get("priceImpactBps") or doc.get("price_impact_bps")
         if impact is None:
             pct = doc.get("priceImpactPct") or doc.get("priceImpact") or 0.0
@@ -515,7 +636,11 @@ class ByrealWallet(WalletProvider):
             min_out=min_out,
             slippage_bps=slippage_bps,
             price_impact_bps=int(impact or 0),
-            extra={"raw": doc},
+            extra={
+                "raw": doc,
+                "amount_units": "ui",
+                "decimals_in": dec_in,
+            },
         )
 
     def swap(
@@ -530,6 +655,11 @@ class ByrealWallet(WalletProvider):
                 amount_in=float(amount_in),
             )
         self._require_solana(chain)
+        dec_in = self._decimals_in(kw)
+        # See _decimals_in: no in-repo evidence documents the CLI's
+        # --amount unit, so keep passing the UI float and record the
+        # assumption. If the CLI is later confirmed to take raw base
+        # units, convert here: str(int(round(amount_in * 10 ** dec_in))).
         data = self._run_cli(
             [
                 "swap",
@@ -539,7 +669,7 @@ class ByrealWallet(WalletProvider):
                 "--output-mint",
                 str(token_out),
                 "--amount",
-                str(amount_in),
+                str(float(amount_in)),
                 "--slippage-bps",
                 str(int(slippage_bps)),
                 "--confirm",
@@ -547,14 +677,34 @@ class ByrealWallet(WalletProvider):
             timeout_s=120.0,
         )
         doc = data if isinstance(data, dict) else {}
+        tx_hash = str(
+            doc.get("txid") or doc.get("signature") or doc.get("tx_hash") or ""
+        )
+        reason = str(doc.get("reason") or "")
+        extra: dict[str, Any] = {
+            "raw": doc,
+            "amount_units": "ui",
+            "decimals_in": dec_in,
+        }
+        if receiver:
+            # No in-repo evidence that byreal-cli exposes a swap recipient
+            # flag, so we do NOT invent one. Funds land in the CLI keypair
+            # wallet; surface the ignored receiver so the approval record
+            # stays honest.
+            extra["receiver_ignored"] = str(receiver)
+            note = (
+                "receiver not forwarded: byreal-cli recipient flag "
+                "unverified; funds go to the CLI keypair wallet"
+            )
+            reason = f"{reason} {note}".strip() if reason else note
         return WalletSwapResult(
             provider=self.id, chain="solana",
-            ok=bool(doc.get("txid") or doc.get("signature") or doc.get("ok")),
-            tx_hash=str(doc.get("txid") or doc.get("signature") or doc.get("tx_hash") or ""),
+            ok=bool(tx_hash or doc.get("ok")),
+            tx_hash=tx_hash,
             amount_in=float(amount_in),
             amount_out=float(
                 doc.get("outAmount") or doc.get("amountOut") or doc.get("amount_out") or 0.0
             ),
-            reason=str(doc.get("reason") or ""),
-            extra={"raw": doc},
+            reason=reason,
+            extra=extra,
         )

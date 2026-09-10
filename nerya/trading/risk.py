@@ -32,6 +32,182 @@ from .virtual_ledger import open_ledger
 log = logging.getLogger(__name__)
 
 
+# USD-stable quote assets. A ``size_unit="quote"`` intent is only a USD
+# notional when the market's quote asset is one of these (C9/D2).
+USD_STABLE_QUOTES: tuple[str, ...] = ("USDT", "USDC", "BUSD", "TUSD", "DAI", "USD")
+
+# Venue-family suffixes stripped when comparing a market's venue prefix
+# against an account's venue (C7): ``bybit_perpetual`` ≡ ``bybit``.
+_VENUE_FAMILY_SUFFIXES = (
+    "_perpetual", "_futures", "_coinm", "_linear", "_swap", "_perp", "_spot",
+)
+
+
+def market_quote_asset(market: str) -> str:
+    """Return the quote asset of ``'``<venue>:``<symbol>'`` (upper-cased).
+
+    Handles both ``mock:BTC/USDT`` and compact ``BINANCE:BTCUSDT`` shapes
+    (plus a perp settlement suffix like ``SOL/USDT:USDT``). Returns ``""``
+    when the quote asset cannot be determined from the string alone.
+    """
+    raw = str(market or "").strip()
+    symbol = raw.split(":", 1)[1] if ":" in raw else raw
+    # Drop a perp settlement suffix ("SOL/USDT:USDT" -> "SOL/USDT").
+    symbol = symbol.split(":", 1)[0].strip().upper()
+    if "/" in symbol:
+        return symbol.rsplit("/", 1)[-1].strip()
+    # Longest-first so "USDT" wins over its "USD" suffix.
+    for quote in sorted(USD_STABLE_QUOTES, key=len, reverse=True):
+        if symbol.endswith(quote):
+            return quote
+    return ""
+
+
+def is_usd_stable_quote(market: str) -> bool:
+    """True iff ``market``'s quote asset is a USD stablecoin."""
+    return market_quote_asset(market) in USD_STABLE_QUOTES
+
+
+def _venue_family(venue: str) -> str:
+    """Canonicalize a venue token for mismatch comparison."""
+    raw = str(venue or "").strip()
+    if not raw:
+        return ""
+    try:
+        from ..data.candles import canonical_venue
+
+        raw = canonical_venue(raw)
+    except Exception:
+        pass
+    family = raw.lower()
+    for suffix in _VENUE_FAMILY_SUFFIXES:
+        if family.endswith(suffix):
+            return family[: -len(suffix)]
+    return family
+
+
+def _venues_compatible(market: str, account_venue: str) -> bool:
+    """Whether a market's venue prefix may execute on ``account_venue``.
+
+    The connector strips everything before ':' from the market string, so
+    the prefix is a promise about *which venue* will see the order. Two
+    tokens are compatible when they normalize to the same venue family
+    or resolve to the same provider spec (``paper`` ≡ ``mock`` via the
+    registry, ``BYBIT_PERP`` ≡ ``bybit`` via family stripping). Unknown
+    or empty venues produce no mismatch evidence.
+    """
+    raw = str(market or "").strip()
+    market_venue = ""
+    if ":" in raw:
+        head, _tail = raw.split(":", 1)
+        # "SOL/USDT:USDT" is a unified contract symbol with NO venue
+        # prefix — the text before the first ":" is the base asset, not
+        # a venue promise (same split rule as the connector's
+        # _normalise_symbol). Only a slash-free head is a venue prefix.
+        if "/" not in head:
+            market_venue = head
+    a = _venue_family(market_venue)
+    b = _venue_family(account_venue)
+    if not a or not b:
+        return True
+    if a == b:
+        return True
+    try:
+        from ..connectors.provider_spec import get_registry
+
+        registry = get_registry()
+        spec_a = registry.find(a)
+        spec_b = registry.find(b)
+        if spec_a is not None and spec_b is not None and spec_a.id == spec_b.id:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# Instrument-type tokens a provider spec can advertise (R2C3) that mean
+# its connectors can trade contract-suffixed symbols.
+_DERIVATIVE_INSTRUMENT_TYPES = frozenset({
+    "perpetual", "perp", "swap", "future", "futures",
+    "inverse", "linear", "derivatives",
+})
+
+# R2C3 fallback: provider specs that publish no ``instrument_types``
+# metadata but whose builtin factory is unambiguously spot-only — an
+# explicit contract symbol ("SOL/USDT:USDT") forwarded verbatim fails at
+# the venue with a late, confusing BadSymbol. Unified venues whose spot
+# spec genuinely loads + routes contract markets (bybit, okx, gate,
+# hyperliquid, …) are deliberately absent: they pass here, which is a
+# documented false-negative, not a safety hole — the venue still fails
+# closed on any symbol it cannot trade.
+_KNOWN_SPOT_ONLY_PROVIDER_IDS = frozenset({
+    "binance",           # derivatives live on binance_perpetual(_coinm)
+    "ccxt",              # unified default factory → binance spot connector
+    "kraken",            # futures are a separate ccxt class (krakenfutures)
+    "kucoin",            # futures live on kucoin_perpetual (kucoinfutures)
+    "coinbase",
+    "coinbase_exchange",
+    "bitstamp",
+    "bitmart",
+    "btcmarkets",
+    "bitrue",
+    "ndax",
+    "backpack",
+})
+
+
+def _market_has_contract_suffix(market: str) -> bool:
+    """True when the market carries an explicit unified contract suffix
+    — a ":" after the ``BASE/QUOTE`` part, e.g. ``SOL/USDT:USDT`` or
+    ``BYBIT:SOL/USDT:USDT``."""
+    raw = str(market or "").strip()
+    if not raw:
+        return False
+    symbol = raw
+    if ":" in raw:
+        head, tail = raw.split(":", 1)
+        # A venue prefix ("BYBIT:SOLUSDT") sits before the symbol and
+        # never contains a slash — same split rule as _venues_compatible.
+        if "/" not in head:
+            symbol = tail
+    return "/" in symbol and ":" in symbol
+
+
+def _venue_supports_derivatives(account_venue: str) -> bool:
+    """Whether ``account_venue`` can trade contract-suffixed symbols.
+
+    Resolution order (R2C3):
+
+    1. Empty / mock venues pass (same exemption as the mismatch gate).
+    2. Registry spec with ``instrument_types`` metadata: any derivative
+       token → True; metadata without one → False.
+    3. No metadata: pass unless the spec id is in the known-spot-only
+       set. LIMITATION: this is a static allowlist, not a markets
+       snapshot — a user-authored spot-only provider without
+       ``instrument_types`` passes here and only fails at the venue.
+    4. Unknown venue (not in the registry, not mock) → False: the
+       connector would forward the symbol verbatim and the venue would
+       reject it late, so we fail closed at the gate instead.
+    """
+    raw = str(account_venue or "").strip()
+    if not raw or _venue_family(raw) == "mock":
+        return True
+    try:
+        from ..connectors.provider_spec import get_registry
+
+        spec = get_registry().find(raw)
+    except Exception:
+        spec = None
+    if spec is None:
+        return False
+    instrument_types = {
+        str(t).strip().lower() for t in (spec.instrument_types or ())
+    }
+    if instrument_types:
+        return bool(instrument_types & _DERIVATIVE_INSTRUMENT_TYPES)
+    return spec.id not in _KNOWN_SPOT_ONLY_PROVIDER_IDS
+
+
 @dataclass
 class RiskDecision:
     intent_id: str
@@ -153,6 +329,63 @@ class RiskGate:
                 fix_hints=derive_fix_hints(reasons, intent=intent),
             )
 
+        # 1c. Market venue ↔ account venue consistency.
+        #
+        # The connector strips everything before ':' from a market
+        # string, so an intent for ``BINANCE:DOGEUSDT`` or
+        # ``PAPER:BTCUSDT`` would silently execute on a Bybit account —
+        # every cap, snapshot, and position then refers to the wrong
+        # venue. Reject when the market's venue prefix does not resolve
+        # to the account's venue (alias/family aware — see
+        # :func:`_venues_compatible`).
+        #
+        # A simulated account venue (mock) intentionally executes any
+        # market prefix — paper accounts exist precisely so strategies
+        # configured with BYBIT:/BINANCE: markets can rehearse without a
+        # real venue. The mismatch gate is only evidence on real venues;
+        # the dangerous direction (fake prefix on a live account) stays
+        # fully enforced.
+        if (
+            _venue_family(str(account_profile.venue or "")) != "mock"
+            and not _venues_compatible(intent.market, str(account_profile.venue or ""))
+        ):
+            reasons.append(
+                f"market_venue_account_mismatch:{intent.market}"
+                f"!={account_profile.venue}"
+            )
+            return RiskDecision(
+                intent.intent_id,
+                "reject",
+                reasons,
+                limits_snapshot=asdict(strategy.limits),
+                estimated_notional_usd=intent.notional_usd_estimate,
+                fix_hints=derive_fix_hints(reasons, intent=intent),
+            )
+
+        # 1d. Contract-suffixed markets need a derivatives-capable venue.
+        #
+        # An explicit unified contract symbol ("SOL/USDT:USDT") stays
+        # verbatim in the connector, so an account whose venue cannot
+        # trade derivatives (spot-only specs, unknown venues) would only
+        # fail at the venue with a late, confusing BadSymbol. When the
+        # market carries an explicit contract suffix, require the
+        # account's venue to support derivatives (mock venues stay
+        # exempt, same as the mismatch gate above).
+        if (
+            _market_has_contract_suffix(intent.market)
+            and _venue_family(str(account_profile.venue or "")) != "mock"
+            and not _venue_supports_derivatives(str(account_profile.venue or ""))
+        ):
+            reasons.append(f"market_instrument_unsupported:{intent.market}")
+            return RiskDecision(
+                intent.intent_id,
+                "reject",
+                reasons,
+                limits_snapshot=asdict(strategy.limits),
+                estimated_notional_usd=intent.notional_usd_estimate,
+                fix_hints=derive_fix_hints(reasons, intent=intent),
+            )
+
         # 2. Execution-mode gates. Use AccountProfile rather than the
         # compatibility Account view: load_accounts intentionally collapses
         # canary to paper, which previously made canary orders pass paper-cash
@@ -238,6 +471,18 @@ class RiskGate:
             notional = float(intent.size)
         elif intent.size_unit == "base":
             notional = float(intent.size) * float(mark or 0)
+        elif intent.size_unit == "quote":
+            # A quote-unit size is a USD notional only when the market's
+            # quote asset is a USD stable. Anything else previously fell
+            # through as "quote == usd" (1 unit of a BTC-quoted pair
+            # counted as 1 dollar) — fail closed instead of silently
+            # miscalculating every notional-scaled cap.
+            if is_usd_stable_quote(intent.market):
+                notional = float(intent.size)
+            else:
+                reasons.append(f"unsupported_quote_size_unit:{intent.market}")
+                decision = "reject"
+                notional = 0.0
         else:
             notional = float(intent.size)
 
@@ -530,7 +775,9 @@ class RiskGate:
                 meta.get("protection_present")
                 or meta.get("plan_protection_attached")
             )
-            if intent.side == "buy" and not protection_present:
+            # Both open sides need protection: a canary short without
+            # SL/TP is exactly as naked as a canary long.
+            if not protection_present:
                 reasons.append("canary_requires_protection_rule")
                 decision = "reject"
             if decision != "reject":
@@ -601,6 +848,192 @@ class RiskGate:
         return decision_obj
 
     # --------------------------------------------------------------- persistence
+
+    def evaluate_resolved_notional(
+        self,
+        intent: TradeIntent,
+        *,
+        notional_usd: float,
+        mark_price: float | None = None,
+    ) -> RiskDecision:
+        """Re-run the notional-dependent checks against a *resolved* notional.
+
+        NAV-derived sizing (``pct_nav`` / ``risk_to_stop`` /
+        ``volatility_target`` / ``target_weight`` / position-relative
+        methods) reaches :meth:`evaluate` through a placeholder notional
+        because the real amount only exists once
+        :class:`~nerya.trading.capital.BudgetChecker` resolves it against
+        the account snapshot. This method re-validates that resolved
+        amount against every cap that scales with order size — the
+        single-order cap, the canary cap, total exposure, the per-market
+        position cap, the daily notional cap, and the approval-threshold
+        escalation — so a strategy cannot open full-NAV positions while
+        every notional gate sees ≈$0.
+
+        Callers must skip this for risk-reducing plans (close/reduce),
+        which stay exempt from the caps by design. The returned decision
+        is always at least as strict as the original: it only ever adds
+        reject/escalate reasons.
+        """
+
+        paths = self.config.paths
+        notional = float(max(0.0, notional_usd))
+        reasons: list[str] = []
+        decision: str = "allow"
+
+        try:
+            strategy: Strategy = load_strategy(paths, intent.strategy_id)
+        except Exception as exc:
+            return RiskDecision(
+                intent.intent_id,
+                "reject",
+                [f"strategy_unknown:{exc}"],
+                estimated_notional_usd=notional,
+                fix_hints=derive_fix_hints([f"strategy_unknown:{exc}"], intent=intent),
+            )
+        try:
+            account_profile = get_account_profile(paths, intent.account_id)
+        except Exception as exc:
+            return RiskDecision(
+                intent.intent_id,
+                "reject",
+                [f"account_profile_unavailable:{exc}"],
+                estimated_notional_usd=notional,
+                fix_hints=derive_fix_hints(
+                    [f"account_profile_unavailable:{exc}"], intent=intent,
+                ),
+            )
+
+        # Single-order cap (check 6) + canary cap (6b).
+        cap = strategy.limits.max_single_order_usd
+        if cap > 0 and notional > cap:
+            reasons.append(f"max_single_order_exceeded:{notional:.2f}>{cap:.2f}")
+            decision = "reject"
+        if strategy.status == "canary":
+            canary_cap = float(self.config.get("trading.canary.max_single_order_usd", 250.0))
+            if canary_cap > 0 and notional > canary_cap:
+                reasons.append(
+                    f"canary_max_single_order_exceeded:{notional:.2f}>{canary_cap:.2f}"
+                )
+                decision = "reject"
+
+        # Total exposure cap (check 7) + per-market merged-position cap
+        # (7b) — same reads as evaluate().
+        ledger = open_ledger(paths, intent.account_id, account_profile.initial_balance_usd)
+        ledger_snapshot = ledger.snapshot()
+        book = PositionBook(paths)
+        try:
+            book_open = book.open_positions(account_id=intent.account_id)
+        except Exception:
+            book_open = []
+        if book_open:
+            current_exposure = 0.0
+            current_merged_size_by_market: dict[str, float] = {}
+            current_merged_avg_by_market: dict[str, float] = {}
+            for pos in book_open:
+                size = float(pos.size_base or 0.0)
+                current_exposure += abs(size * float(pos.mark_price or pos.avg_entry_price or 0.0))
+                current_merged_size_by_market[pos.market] = size
+                current_merged_avg_by_market[pos.market] = float(pos.avg_entry_price or 0.0)
+        else:
+            current_exposure = sum(
+                abs(p.get("size", 0) * p.get("avg_price", 0))
+                for p in ledger_snapshot["positions"].values()
+            )
+            current_merged_size_by_market = {
+                m: float((p or {}).get("size") or 0.0)
+                for m, p in (ledger_snapshot["positions"] or {}).items()
+            }
+            current_merged_avg_by_market = {
+                m: float((p or {}).get("avg_price") or 0.0)
+                for m, p in (ledger_snapshot["positions"] or {}).items()
+            }
+        total_cap = strategy.limits.max_total_exposure_usd
+        if total_cap > 0 and current_exposure + notional > total_cap:
+            reasons.append(
+                f"max_total_exposure_exceeded:{current_exposure:.2f}+{notional:.2f}>"
+                f"{total_cap:.2f}"
+            )
+            decision = "reject"
+
+        per_market_cap = strategy.limits.max_position_size_usd
+        if per_market_cap > 0 and notional > 0 and mark_price and mark_price > 0:
+            current_size = current_merged_size_by_market.get(intent.market, 0.0)
+            current_avg = current_merged_avg_by_market.get(intent.market, 0.0)
+            base_size = notional / float(mark_price)
+            signed_delta = base_size if intent.side == "buy" else -base_size
+            projected_notional = abs(current_size + signed_delta) * float(
+                mark_price or current_avg or 0.0
+            )
+            if projected_notional > per_market_cap:
+                reasons.append(
+                    f"max_position_size_exceeded:{intent.market}:"
+                    f"{projected_notional:.2f}>{per_market_cap:.2f}"
+                )
+                decision = "reject"
+
+        # Daily notional cap (14b) — fail closed on real money when the
+        # ledger is unreadable, exactly like evaluate().
+        daily_cap = strategy.limits.max_daily_notional_usd
+        if daily_cap > 0:
+            spent_today = _strategy_daily_notional(paths, intent.strategy_id)
+            if spent_today is None:
+                if account_profile.is_real_money:
+                    reasons.append("daily_notional_ledger_unreadable")
+                    decision = "reject"
+                spent_today = 0.0
+            if spent_today + notional > daily_cap:
+                reasons.append(
+                    f"max_daily_notional_exceeded:{spent_today:.2f}+{notional:.2f}>"
+                    f"{daily_cap:.2f}"
+                )
+                decision = "reject"
+
+        # Approval-threshold escalation (12) — only fires when the
+        # resolved notional crosses the threshold.
+        if (
+            decision != "reject"
+            and strategy.limits.approval_threshold_usd > 0
+            and notional >= strategy.limits.approval_threshold_usd
+        ):
+            reasons.append(
+                f"approval_required_threshold:{notional:.2f}>="
+                f"{strategy.limits.approval_threshold_usd:.2f}"
+            )
+            decision = "escalate"
+
+        if not reasons:
+            reasons = ["ok"]
+
+        resolved = RiskDecision(
+            intent_id=intent.intent_id,
+            decision=decision,  # type: ignore[arg-type]
+            reasons=reasons,
+            limits_snapshot=asdict(strategy.limits),
+            estimated_notional_usd=notional,
+            promotion_state=strategy.status,
+            fix_hints=derive_fix_hints(reasons, intent=intent),
+        )
+        if resolved.decision != "allow":
+            # Persist enforcement events so reservations / operators can
+            # pin themselves to the binding decision. An allow just
+            # mirrors the original evaluation and needs no second row.
+            try:
+                self._persist(resolved, intent=intent)
+            except Exception:
+                log.exception(
+                    "resolved-notional risk persistence failed for intent %s",
+                    intent.intent_id,
+                )
+                if account_profile.is_real_money:
+                    resolved.decision = "reject"
+                    resolved.reasons = [
+                        r for r in resolved.reasons if r != "ok"
+                    ] + ["risk_persistence_failed"]
+                    resolved.fix_hints = derive_fix_hints(
+                        resolved.reasons, intent=intent,
+                    )
+        return resolved
 
     def _persist(self, decision: RiskDecision, *, intent: TradeIntent) -> None:
         con = self._con_lazy()

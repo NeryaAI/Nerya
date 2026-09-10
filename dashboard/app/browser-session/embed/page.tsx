@@ -1,8 +1,10 @@
 "use client";
 
 import { useTranslations } from "next-intl";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { GlobeIcon, PanelLeftIcon } from "../../../components/icons";
 import { clientApi } from "../../../lib/clientApi";
 import type {
   BrowserCdpAction,
@@ -41,6 +43,7 @@ function keyForBrowser(key: string): string {
 
 export default function BrowserSessionEmbedPage() {
   const t = useTranslations("browserEmbed");
+  const router = useRouter();
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const lastWheelAtRef = useRef(0);
@@ -223,6 +226,19 @@ export default function BrowserSessionEmbedPage() {
     }
   }
 
+  /** Overlay exit: toggle fullscreen on the interactive viewport. */
+  async function toggleFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await viewportRef.current?.requestFullscreen();
+      }
+    } catch {
+      // Host page may refuse fullscreen (permissions policy) — ignore.
+    }
+  }
+
   const directUrl = frame?.url || record?.current_url || initialUrl;
 
   if (!sessionId) {
@@ -276,6 +292,34 @@ export default function BrowserSessionEmbedPage() {
           <div className="truncate font-mono">{directUrl || sessionId}</div>
         </div>
 
+        {/* Overlay exits: fullscreen + back to the /browsers workspace.
+            Events are stopped so a click here is not forwarded to the
+            remote page as a CDP click. */}
+        <div
+          className="absolute right-3 top-3 flex gap-2"
+          onMouseDown={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            title="fullscreen"
+            aria-label="fullscreen"
+            className="pointer-events-auto rounded-md border border-black/40 bg-black/60 p-1.5 text-white/80 shadow-lg backdrop-blur transition-colors hover:text-white"
+            onClick={() => void toggleFullscreen()}
+          >
+            <PanelLeftIcon size={14} />
+          </button>
+          <button
+            type="button"
+            title="workspace"
+            aria-label="workspace"
+            className="pointer-events-auto rounded-md border border-black/40 bg-black/60 p-1.5 text-white/80 shadow-lg backdrop-blur transition-colors hover:text-white"
+            onClick={() => router.push("/browsers?tab=session")}
+          >
+            <GlobeIcon size={14} />
+          </button>
+        </div>
+
         <div className="pointer-events-none absolute bottom-3 left-3 flex max-w-[calc(100%-1.5rem)] flex-wrap gap-2">
           <span className="rounded-md border border-black/40 bg-black/60 px-2 py-1 text-[11px] text-white/75 shadow-lg backdrop-blur">
             {busy ? t("busy") : focused ? t("focused") : t("clickToFocus")}
@@ -286,7 +330,7 @@ export default function BrowserSessionEmbedPage() {
             </span>
           ) : null}
           {error ? (
-            <span className="rounded-md border border-danger/40 bg-danger/15 px-2 py-1 text-[11px] text-rose-300 shadow-lg backdrop-blur">
+            <span className="rounded-md border border-danger/40 bg-danger/15 px-2 py-1 text-[11px] text-danger shadow-lg backdrop-blur">
               {error}
             </span>
           ) : null}

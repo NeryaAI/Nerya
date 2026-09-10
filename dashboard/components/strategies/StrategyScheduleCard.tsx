@@ -3,6 +3,7 @@
 import { useTranslations } from "next-intl";
 import { Card, Empty, Pill } from "../Page";
 import { clientApi } from "../../lib/clientApi";
+import { useCadenceHint } from "../../lib/useStrategyLifecycle";
 import type {
   StrategyScheduleEntry,
   StrategyScheduleStatus,
@@ -128,6 +129,7 @@ function ScheduleRow({
   entry: StrategyScheduleEntry | null;
 }) {
   const t = useTranslations("strategySchedule");
+  const cadenceHint = useCadenceHint();
   if (!entry) {
     return (
       <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3">
@@ -140,6 +142,7 @@ function ScheduleRow({
       </div>
     );
   }
+  const hint = cadenceHint(entry.cron, entry.every_seconds);
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-900/40 p-3 text-sm">
       <div className="flex items-center justify-between">
@@ -155,10 +158,8 @@ function ScheduleRow({
       </div>
       <div className="mt-1 text-[12px] text-ink-400">
         {entry.cron
-          ? `cron: ${entry.cron}`
-          : entry.every_seconds
-            ? t("everySeconds", { n: entry.every_seconds })
-            : "–"}
+          ? `cron: ${entry.cron}${hint ? ` · ${hint}` : ""}`
+          : (hint ?? "–")}
       </div>
       <div className="mt-0.5 text-[11px] text-ink-500 truncate">
         {t("targetArrow")} <span className="font-mono">{entry.target}</span>

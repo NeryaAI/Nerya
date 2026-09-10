@@ -1079,13 +1079,25 @@ def _submit_with_protection(
         return _usage_error(call, "size must be positive for an open/reduce intent")
 
     sizing: dict[str, Any]
+    market = str(spec.get("market") or "").strip()
     if size_unit == "usd":
         sizing = {"method": "fixed_usd", "fixed_usd": size_val}
-    elif size_unit in ("base", "quote"):
-        # The TradePlan SizingPolicy doesn't have a separate quote
-        # method — quote ≈ base for spot, BudgetChecker resolves
-        # final notional from the snapshot. Treat both as fixed_base
-        # at the policy layer.
+    elif size_unit == "quote":
+        # Quote-unit sizes are USD amounts only on USD-stable quote
+        # assets. Anything else previously fell into fixed_base and
+        # traded the quote count as BASE units (100 USDT requested →
+        # 100 BTC ordered, C9/D2) — reject loudly instead.
+        from nerya.trading.risk import is_usd_stable_quote
+
+        if not is_usd_stable_quote(market):
+            return _usage_error(
+                call,
+                f"size_unit='quote' is only supported on USD-stable quote "
+                f"assets; market {market!r} does not have one — resubmit "
+                "with size_unit='base' or 'usd'",
+            )
+        sizing = {"method": "fixed_usd", "fixed_usd": size_val}
+    elif size_unit == "base":
         sizing = {"method": "fixed_base", "fixed_base": size_val}
     else:
         return _usage_error(
@@ -1095,7 +1107,6 @@ def _submit_with_protection(
     account_id = str(spec.get("account_id") or "").strip()
     if not account_id:
         return _usage_error(call, "account_id is required")
-    market = str(spec.get("market") or "").strip()
     if not market:
         return _usage_error(call, "market is required")
 
@@ -1123,12 +1134,18 @@ def _submit_with_protection(
                 market_snapshot=market_snapshot,
             )
         elif action == "reduce_position":
+            if size_unit == "quote":
+                return _usage_error(
+                    call,
+                    "size_unit='quote' is not supported for reduce_position — "
+                    "resubmit with size_unit='base' or use reduce_pct",
+                )
             envelope = api.reduce_position(
                 strategy_id=strategy_id,
                 account_id=account_id,
                 market=market,
                 side=position_side,  # type: ignore[arg-type]
-                fixed_base=size_val if size_unit in ("base", "quote") else None,
+                fixed_base=size_val if size_unit == "base" else None,
                 reduce_pct=(
                     float(protection.get("reduce_pct"))
                     if protection.get("reduce_pct")

@@ -20,18 +20,16 @@ delegated to a subagent runtime.
 from __future__ import annotations
 
 import json
-import inspect
-import tempfile
+import math
 import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Optional
 
 from ..core import jsonl
 from ..core.config import Config
-from ..core.paths import WorkspacePaths
+from ..harness.cancellation import is_cancelled as _token_is_set
 from ..core.redaction import redact_display_dict
 from ..core.time import now_iso
 from ..skills.kernel import SkillKernel
@@ -86,7 +84,21 @@ class TeamRunRequest:
     executor: Any = None
 
     def __post_init__(self) -> None:
-        self.roles = [str(role) for role in (self.roles or []) if str(role).strip()]
+        if self.timeout_s is not None:
+            try:
+                self.timeout_s = float(self.timeout_s)
+                if not math.isfinite(self.timeout_s) or self.timeout_s < 0:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("timeout_s must be finite and non-negative, or None") from exc
+        if self.max_parallel is not None:
+            try:
+                self.max_parallel = int(self.max_parallel)
+                if self.max_parallel < 1:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("max_parallel must be a positive integer, or None") from exc
+        self.roles = list(dict.fromkeys(str(role).strip() for role in (self.roles or []) if str(role).strip()))
         self.role_payloads = {
             str(name): dict(payload)
             for name, payload in (self.role_payloads or {}).items()
@@ -102,16 +114,6 @@ class TeamRunRequest:
 
 class _TeamCancelled(RuntimeError):
     """Internal cooperative stop used to close a durable team cleanly."""
-
-
-def _token_is_set(token: Any) -> bool:
-    if token is None:
-        return False
-    state = getattr(token, "is_set", False)
-    try:
-        return bool(state() if callable(state) else state)
-    except Exception:
-        return True
 
 
 def _permission_pending_record(result: SubAgentResult) -> dict[str, Any] | None:
@@ -152,45 +154,22 @@ class TeamOrchestrator:
 
     def __post_init__(self) -> None:
         if self.dispatcher is None:
-            kwargs: dict[str, Any] = {}
-            if self.tool_registry is not None:
-                kwargs["tool_registry"] = self.tool_registry
-            if self.executor is not None:
-                kwargs["executor"] = self.executor
-            self.dispatcher = SubAgentDispatcher(self.config, self.skills, **kwargs)
-        else:
-            # A caller may inject a test/custom dispatcher. Keep the parent
-            # executor on that same object so nested members cannot silently
-            # fall back to an unguarded native path.
-            if self.tool_registry is not None and not hasattr(self.dispatcher, "tool_registry"):
-                try:
-                    self.dispatcher.tool_registry = self.tool_registry
-                except Exception:
-                    pass
-            if self.executor is not None:
-                try:
-                    self.dispatcher.executor = self.executor
-                except Exception:
-                    pass
-        paths = getattr(self.config, "paths", None)
-        if paths is None:
-            # Keep lightweight injected test configs usable without writing to
-            # the repository or a shared default workspace.
-            paths = WorkspacePaths(root=Path(tempfile.mkdtemp(prefix="nerya-team-")))
-        self.store = TeamStore(paths)
+            if self.tool_registry is None and self.executor is None:
+                self.dispatcher = SubAgentDispatcher.for_workspace(self.config, self.skills)
+            elif self.tool_registry is not None and self.executor is not None:
+                self.dispatcher = SubAgentDispatcher(
+                    self.config, self.skills, self.tool_registry, self.executor,
+                )
+            else:
+                raise ValueError("team execution scope requires both registry and executor")
+        self.store = TeamStore(self.config.paths)
         self.aggregator = TeamAggregator(self.store)
 
     def run_request(self, request: TeamRunRequest) -> TeamRunResult:
         """Run a typed native/durable request through this orchestrator."""
 
-        if request.executor is not None:
-            self.executor = request.executor
-            try:
-                self.dispatcher.executor = request.executor  # type: ignore[union-attr]
-            except Exception:
-                pass
-        if request.cancel_token is not None:
-            self.cancel_token = request.cancel_token
+        if request.executor is not None and request.executor is not self.executor:
+            raise ValueError("team request cannot replace its execution scope")
         template: TeamTemplate | str
         if request.roles:
             template = self._template_from_request(request)
@@ -362,7 +341,7 @@ class TeamOrchestrator:
             )
 
             gates_ok = all(g.ok for g in outcomes) and not any(
-                task.required and task.status == "blocked" for task in tasks
+                task.required and task.status != "completed" for task in tasks
             )
 
             run.phase = "synthesis"
@@ -467,11 +446,14 @@ class TeamOrchestrator:
 
     # ------------------------------------------------------------------ helpers
     def _resolve_template(self, template: TeamTemplate | str) -> TeamTemplate:
-        if isinstance(template, TeamTemplate):
-            return template
-        tpl = get_template(str(template))
+        tpl = template if isinstance(template, TeamTemplate) else get_template(
+            str(template), getattr(self.config, "paths", None)
+        )
         if tpl is None:
             raise ValueError(f"unknown team template: {template!r}")
+        task_ids = [task.id for task in tpl.tasks]
+        if any(not isinstance(tid, str) or not tid.strip() for tid in task_ids) or len(set(task_ids)) != len(task_ids):
+            raise ValueError("team task ids must be non-empty and unique")
         return tpl
 
     def _materialise_tasks(self, run: TeamRun, tpl: TeamTemplate) -> list[TeamTask]:
@@ -506,12 +488,14 @@ class TeamOrchestrator:
         bb = Blackboard(self.store, run.id)
         mailbox = Mailbox(self.store, run.id)
         max_parallel = max(1, int(template.max_parallel or 1))
+        if request is not None and request.max_parallel is not None:
+            max_parallel = min(max_parallel, request.max_parallel)
         index = {t.id: t for t in tasks}
         remaining = {t.id for t in tasks}
         members = {member.name: member for member in template.members}
         member_results: list[SubAgentResult] = []
         deadline = None
-        if request is not None and request.timeout_s and request.timeout_s > 0:
+        if request is not None and request.timeout_s is not None:
             deadline = time.monotonic() + float(request.timeout_s)
 
         def stop_reason() -> str | None:
@@ -535,93 +519,93 @@ class TeamOrchestrator:
                 remaining.discard(tid)
             raise _TeamCancelled(reason)
 
-        while remaining:
-            reason = stop_reason()
-            if reason is not None:
-                cancel_remaining(reason)
-            ready = [
-                tid for tid in (t.id for t in tasks)
-                if tid in remaining
-                if index[tid].status == "pending"
-                and all(index[d].status == "completed" or
-                        (not index[d].required and index[d].status in ("failed", "blocked"))
-                        for d in index[tid].depends_on)
-            ]
-            if not ready:
-                # Deadlock or unavailable required deps; mark blocked.
-                for tid in list(remaining):
-                    t = index[tid]
-                    blocked_by = [d for d in t.depends_on
-                                  if index[d].status not in ("completed",)]
-                    if any(
-                        index[b].required
-                        and index[b].status in {"failed", "blocked", "cancelled"}
-                        for b in blocked_by
-                    ):
-                        t.status = "blocked"
-                        t.error = f"blocked by deps: {blocked_by}"
-                        t.completed_at = now_iso()
-                        self.store.update_task(t)
-                        remaining.discard(tid)
-                if remaining:
-                    # Nothing made progress and nothing is blocked — break to avoid infinite loop.
-                    break
-                continue
+        def block(task: TeamTask, reason: str) -> None:
+            task.status = "blocked"
+            task.error = reason
+            task.completed_at = now_iso()
+            self.store.update_task(task)
+            remaining.discard(task.id)
 
-            pool = ThreadPoolExecutor(max_workers=min(max_parallel, len(ready)))
-            futures: dict[Future, str] = {}
-            try:
-                for tid in ready:
-                    t = index[tid]
-                    t.status = "in_progress"
-                    t.started_at = now_iso()
+        # One bounded pool per run: completed prerequisites release downstream
+        # work immediately, without a barrier on unrelated running members.
+        pool = ThreadPoolExecutor(max_workers=max_parallel)
+        futures: dict[Future, str] = {}
+        try:
+            while remaining:
+                reason = stop_reason()
+                if reason is not None:
+                    cancel_remaining(reason, futures)
+                blocked_this_pass = False
+                for task in tasks:
+                    if task.id not in remaining or task.status != "pending":
+                        continue
+                    blockers = [dep for dep in task.depends_on if (
+                        dep not in index or (
+                            index[dep].required
+                            and index[dep].status in {"failed", "blocked", "cancelled"}
+                        )
+                    )]
+                    if blockers:
+                        block(task, f"blocked by deps: {blockers}")
+                        blocked_this_pass = True
+                ready = [task for task in tasks if (
+                    task.id in remaining and task.status == "pending"
+                    and all(index[dep].status == "completed" or (
+                        not index[dep].required and index[dep].status in {"failed", "blocked", "cancelled"}
+                    ) for dep in task.depends_on)
+                )]
+                for task in ready[:max(0, max_parallel - len(futures))]:
+                    if reason := stop_reason():
+                        cancel_remaining(reason, futures)
+                    task.status = "in_progress"
+                    task.started_at = now_iso()
                     payload = self._task_payload(
-                        run=run, template=template, task=t,
-                        blackboard=bb, mailbox=mailbox,
-                        request=request,
+                        run=run, template=template, task=task,
+                        blackboard=bb, mailbox=mailbox, request=request,
                     )
-                    t.payload = {
-                        **(t.payload or {}),
+                    task.payload = {
+                        **(task.payload or {}),
                         "input_payload": redact_display_dict(payload),
                         "assignment_prompt": (
-                            (request.role_assignment_prompts.get(t.owner) if request else None)
-                            or self._assignment_prompt(
-                                run=run, template=template, task=t, payload=payload,
-                            )
+                            (request.role_assignment_prompts.get(task.owner) if request else None)
+                            or self._assignment_prompt(run=run, template=template, task=task, payload=payload)
                         ),
                     }
-                    self.store.update_task(t)
-                    futures[pool.submit(
-                        self._run_task,
-                        task=t, payload=payload,
+                    self.store.update_task(task)
+                    future = pool.submit(
+                        self._run_task, task=task, payload=payload,
                         trigger_event_id=run.trigger_event_id,
                         strategy_id=strategy_id, session_id=session_id,
-                        member_spec=members.get(t.owner),
-                        request=request,
-                        turn_id=run.turn_id,
-                        deadline=deadline,
-                    )] = tid
-                pending = set(futures)
-                while pending:
-                    reason = stop_reason()
-                    if reason is not None:
-                        cancel_remaining(reason, pending)
-                    done, pending = wait(
-                        pending,
-                        timeout=0.05,
-                        return_when=FIRST_COMPLETED,
+                        member_spec=members.get(task.owner), request=request,
+                        turn_id=run.turn_id, deadline=deadline,
                     )
-                    for fut in done:
-                        tid = futures[fut]
-                        res: SubAgentResult = fut.result()
-                        member_results.append(res)
-                        self._integrate_result(
-                            task=index[tid], result=res, blackboard=bb,
-                            mailbox=mailbox,
+                    futures[future] = task.id
+                if not futures:
+                    if blocked_this_pass:
+                        continue  # Propagate blockers even when tasks are listed in reverse order.
+                    for task in tasks:
+                        if task.id in remaining:
+                            block(task, "unresolved dependency cycle or unavailable prerequisite")
+                    break
+                done, _ = wait(futures, timeout=0.05, return_when=FIRST_COMPLETED)
+                if reason := stop_reason():
+                    cancel_remaining(reason, futures)
+                for future in done:
+                    tid = futures.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = SubAgentResult(
+                            ok=False, subagent=index[tid].subagent_name,
+                            error=f"{type(exc).__name__}: {exc}", error_kind="unknown",
                         )
-                        remaining.discard(tid)
-            finally:
-                pool.shutdown(wait=False, cancel_futures=True)
+                    member_results.append(result)
+                    self._integrate_result(
+                        task=index[tid], result=result, blackboard=bb, mailbox=mailbox,
+                    )
+                    remaining.discard(tid)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         return member_results
 
     def _task_payload(
@@ -637,6 +621,8 @@ class TeamOrchestrator:
         preview = blackboard.preview_for_agent(task.owner, max_entries=10)
         inbox = [m.asdict() for m in mailbox.peek(task.owner, limit=10)]
         payload = {
+            **(request.shared_payload if request is not None else {}),
+            **((request.role_payloads.get(task.owner) or {}) if request is not None else {}),
             "team_run_id": run.id,
             "team_template": template.id,
             "team_goal": run.goal,
@@ -652,13 +638,11 @@ class TeamOrchestrator:
                 "an optional `signal` (one of: bullish|bearish|neutral|none), "
                 "`confidence` (0..1), `evidence` (list of {summary, source}), "
                 "`risks` (list), and `output` (final structured payload). "
-                "Use `signal_calls` to request follow-up evidence "
-                "from your `allowed_skills`."
+                "Gather missing evidence using the tool-calling protocol "
+                "and capabilities supplied by your runtime."
             ),
         }
         if request is not None:
-            payload.update(request.shared_payload)
-            payload.update(request.role_payloads.get(task.owner) or {})
             payload.update({
                 "output_language": request.output_language,
                 "analysis_language": request.analysis_language,
@@ -714,9 +698,9 @@ class TeamOrchestrator:
             if request is not None and task.owner in request.role_specs
             else None
         )
-        if inline_spec is None and member_spec is not None and request is None:
+        if inline_spec is None and member_spec is not None:
             inline_spec = build_inline_spec(
-                self.config.paths,
+                self.store.paths,
                 name=task.subagent_name,
                 allowed_skills=list(member_spec.allowed_skills or []) or None,
                 tier=member_spec.tier or None,
@@ -739,57 +723,12 @@ class TeamOrchestrator:
                 kwargs["max_wall_seconds"] = max(
                     0.0, deadline - time.monotonic()
                 )
-        dispatch = getattr(self.dispatcher, "dispatch", None)
-        if callable(dispatch):
-            target = f"subagent:{task.subagent_name}"
-            if request is not None:
-                kwargs["cancel_token"] = request.cancel_token
-            envelope = dispatch(target, **self._supported_kwargs(dispatch, kwargs))
-            if isinstance(envelope, SubAgentResult):
-                return envelope
-            if isinstance(envelope, dict):
-                return SubAgentResult(
-                    ok=bool(envelope.get("ok", True)),
-                    subagent=task.subagent_name,
-                    tier=str(envelope.get("tier") or "medium"),
-                    provider=str(envelope.get("provider") or ""),
-                    model=str(envelope.get("model") or ""),
-                    output=dict(envelope.get("output") or {}),
-                    tokens=int(envelope.get("tokens") or 0),
-                    usd=float(envelope.get("usd") or 0.0),
-                    wall_ms=int(envelope.get("wall_ms") or 0),
-                    error=envelope.get("error"),
-                    error_kind=envelope.get("error_kind"),
-                    metrics=dict(envelope.get("metrics") or {}),
-                    steps=list(envelope.get("steps") or []),
-                    audit=dict(envelope.get("audit") or {}),
-                )
-            return SubAgentResult(
-                ok=False,
-                subagent=task.subagent_name,
-                error="dispatcher returned an invalid envelope",
-                error_kind="unknown",
-            )
-        return self.dispatcher._run_one(
-            task.subagent_name,
-            **self._supported_kwargs(self.dispatcher._run_one, kwargs),
-        )
+        kwargs["cancel_token"] = request.cancel_token if request is not None else self.cancel_token
+        envelope = self.dispatcher.dispatch(f"subagent:{task.subagent_name}", **kwargs)
+        if not isinstance(envelope, dict) or type(envelope.get("ok")) is not bool:
+            raise TypeError("dispatcher must return the canonical SubAgentResult dictionary")
+        return SubAgentResult(**envelope)
 
-    @staticmethod
-    def _supported_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Keep compatibility with injected dispatchers that predate new kwargs."""
-        try:
-            params = inspect.signature(callable_obj).parameters.values()
-        except (TypeError, ValueError):
-            return kwargs
-        if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params):
-            return kwargs
-        accepted = {
-            param.name
-            for param in params
-            if param.kind is not inspect.Parameter.POSITIONAL_ONLY
-        }
-        return {name: value for name, value in kwargs.items() if name in accepted}
 
     def _integrate_result(
         self,

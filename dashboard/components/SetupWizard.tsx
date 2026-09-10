@@ -111,11 +111,11 @@ function Stepper({
           const selected = step === current;
           const tone =
             status === "blocked"
-              ? "border-rose-500/50 text-rose-200"
+              ? "border-danger/50 text-danger"
               : status === "warn"
-                ? "border-amber-500/50 text-amber-200"
+                ? "border-warn/50 text-warn"
                 : status === "ok"
-                  ? "border-emerald-500/50 text-emerald-200"
+                  ? "border-ok/50 text-ok"
                   : "border-[color:var(--line)] text-ink-300";
           return (
             <li key={step}>
@@ -185,7 +185,7 @@ function AccountStep() {
       <div className="space-y-3">
         <div className="rounded-lg border border-[color:var(--line)] bg-ink-950/40 p-3 text-[13px] text-ink-200">
           {accountsCount === 0 ? (
-            <span className="text-amber-200">{t("account.noneConfigured")}</span>
+            <span className="text-warn">{t("account.noneConfigured")}</span>
           ) : (
             <>
               <div className="text-ink-400">{t("account.current")}</div>
@@ -217,12 +217,13 @@ function AccountStep() {
 // ---------------------------------------------------------------------------
 
 function ReadinessSummary({ env }: { env: SetupReadinessEnvelope | null }) {
+  const t = useTranslations("setupWizard");
   if (!env) return null;
   const checks = env.data.checks || [];
   if (!checks.length) return null;
   return (
     <Card
-      title="Readiness checks"
+      title={t("readinessTitle")}
       description={env.summary}
       actions={<Pill tone={env.status === "ok" ? "ok" : env.status === "warn" ? "warn" : "danger"}>{env.status}</Pill>}
     >
@@ -236,10 +237,10 @@ function ReadinessSummary({ env }: { env: SetupReadinessEnvelope | null }) {
               className={[
                 "mt-1 inline-block h-2 w-2 rounded-full",
                 chk.status === "ok"
-                  ? "bg-emerald-400"
+                  ? "bg-ok"
                   : chk.status === "warn"
-                    ? "bg-amber-400"
-                    : "bg-rose-400",
+                    ? "bg-warn"
+                    : "bg-danger",
               ].join(" ")}
             />
             <div className="min-w-0 flex-1">
@@ -423,6 +424,10 @@ export function SetupWizard() {
             <SettingsWorkspace
               forceSection={sectionKey}
               compactLlm={quickMode && sectionKey === "models"}
+              // Layout-only: the wizard step card already carries the
+              // domain title + step counter, so the embedded panel must
+              // not render a second ("Settings" / "Memory"…) header.
+              hideHeader
             />
           ) : (
             <AccountStep />
@@ -495,14 +500,14 @@ export function SetupWizard() {
             </Link>
           </div>
           {blocking ? (
-            <p className="mt-3 text-[12px] text-amber-200">
+            <p className="mt-3 text-[12px] text-warn">
               {t("blockingRemaining", {
                 count: blocking,
                 command: "nerya setup",
               })}
             </p>
           ) : (
-            <p className="mt-3 text-[12px] text-emerald-300">
+            <p className="mt-3 text-[12px] text-ok">
               {t("readyToStart")}
             </p>
           )}

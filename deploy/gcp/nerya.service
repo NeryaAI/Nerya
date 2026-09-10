@@ -1,0 +1,22 @@
+[Unit]
+Description=Nerya Agent runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nerya
+Group=nerya
+WorkingDirectory=/opt/nerya/agent
+EnvironmentFile=-/etc/nerya/nerya.env
+ExecStart=/opt/nerya/venv/bin/python -m nerya.cli.app serve --workspace /opt/nerya/workspace --host 127.0.0.1 --port 18317 --no-dashboard
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/nerya/workspace
+
+[Install]
+WantedBy=multi-user.target

@@ -40,6 +40,38 @@ import { BrowserSessionPanel } from "../../components/BrowserSessionPanel";
 
 type SubTab = "engines" | "session";
 
+/** Single source for the sub-tab strip (rendered on both tab branches). */
+function TabStrip({
+  tabs,
+  active,
+  onSelect,
+  className,
+}: {
+  tabs: { id: SubTab; label: string }[];
+  active: SubTab;
+  onSelect: (id: SubTab) => void;
+  className?: string;
+}) {
+  return (
+    <div className={`flex flex-wrap gap-2 ${className || ""}`}>
+      {tabs.map((entry) => (
+        <button
+          key={entry.id}
+          type="button"
+          onClick={() => onSelect(entry.id)}
+          className={`rounded-full border px-3 py-1 text-[11px] transition-colors ${
+            active === entry.id
+              ? "border-brand-500/50 bg-brand-500/15 text-brand-100"
+              : "border-brand-500/15 bg-ink-950/40 text-ink-300 hover:border-brand-500/30 hover:text-ink-100"
+          }`}
+        >
+          {entry.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function pickInitialTab(): SubTab {
   if (typeof window === "undefined") return "engines";
   const params = new URLSearchParams(window.location.search);
@@ -90,24 +122,7 @@ export default function BrowsersPage() {
     return (
       <SettingsWorkspace
         forceSection="browsers"
-        topBanner={
-          <div className="mb-3 flex flex-wrap gap-2">
-            {tabs.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                onClick={() => setTab(entry.id)}
-                className={`rounded-full border px-3 py-1 text-[11px] transition-colors ${
-                  tab === entry.id
-                    ? "border-brand-500/50 bg-brand-500/15 text-brand-100"
-                    : "border-brand-500/15 bg-ink-950/40 text-ink-300 hover:border-brand-500/30 hover:text-ink-100"
-                }`}
-              >
-                {entry.label}
-              </button>
-            ))}
-          </div>
-        }
+        topBanner={<TabStrip tabs={tabs} active={tab} onSelect={selectTab} className="mb-3" />}
       />
     );
   }
@@ -120,24 +135,9 @@ export default function BrowsersPage() {
         description={t("description")}
       />
 
-      <div className="flex flex-wrap gap-2">
-        {tabs.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            onClick={() => setTab(entry.id)}
-            className={`rounded-full border px-3 py-1 text-[11px] transition-colors ${
-              tab === entry.id
-                ? "border-brand-500/50 bg-brand-500/15 text-brand-100"
-                : "border-brand-500/15 bg-ink-950/40 text-ink-300 hover:border-brand-500/30 hover:text-ink-100"
-            }`}
-          >
-            {entry.label}
-          </button>
-        ))}
-      </div>
+      <TabStrip tabs={tabs} active={tab} onSelect={selectTab} />
 
-      <BrowserSessionPanel />
+      <BrowserSessionPanel onGoToEngines={() => selectTab("engines")} />
     </PageBody>
   );
 }

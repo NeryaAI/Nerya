@@ -22,6 +22,11 @@
   "dependencies": {
     "@goat-sdk/core": "^0.5.0",
     "@goat-sdk/wallet-viem": "^0.3.0",
+    "@radix-ui/react-dialog": "^1.1.23",
+    "@radix-ui/react-dropdown-menu": "^2.1.24",
+    "@radix-ui/react-popover": "^1.1.23",
+    "@radix-ui/react-tabs": "^1.1.21",
+    "@radix-ui/react-tooltip": "^1.2.16",
     "framer-motion": "^12.38.0",
     "lightweight-charts": "^4.2.0",
     "nerya-workspace": "file:..",

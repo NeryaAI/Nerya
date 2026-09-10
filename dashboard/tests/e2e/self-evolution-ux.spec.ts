@@ -6,6 +6,42 @@ const VALIDATION_ID = "vpl_ux_ready";
 const EVIDENCE_REF = "strategy_tuning:tune_ux_smoke";
 
 test.describe("Self-evolution UX smoke", () => {
+  const invalidSelections: Array<{ name: string; selection: Record<string, unknown> }> = [
+    { name: "no eligible candidate", selection: {
+      selection_status: "no_eligible_candidate", eligible_count: 0,
+      selected_candidate_id: null, selected_index: null, selected_score: null,
+    } },
+    { name: "conflicting candidate identity", selection: { selected_index: 0 } },
+    { name: "duplicate candidate identity", selection: {
+      selected_candidate_id: "duplicate", selected_index: 0,
+      candidates: [{ candidate_id: "duplicate", index: 0 }, { candidate_id: "duplicate", index: 1 }],
+    } },
+  ];
+  for (const { name, selection } of invalidSelections) {
+    test(`Optimizer does not invent a selection: ${name}`, async ({ page }) => {
+      await page.route("**/api/proxy/**", (route) => route.fulfill({
+        status: 200, contentType: "application/json", body: "{}",
+      }));
+      await mockSelfEvolutionApi(page, selection);
+      await page.goto("/self-evolution");
+      await page.getByRole("tab", { name: "Proposals", exact: true }).click();
+      const row = page.getByTestId("proposal-row").filter({
+        hasText: "High-volatility alpha filter update ready for approval",
+      });
+      await row.getByRole("button", { name: "Inspect" }).click();
+      const detail = page.getByTestId("proposal-detail-drawer");
+      await detail.getByText("Why and trust").click();
+      const panel = detail.getByTestId("candidate-optimizer-panel");
+      await expect(panel.getByTestId("optimizer-no-selection")).toBeVisible();
+      await panel.getByText("Candidate selection details").click();
+      await expect(panel.getByText("selected", { exact: true })).toHaveCount(0);
+      if (selection.selection_status === "no_eligible_candidate") {
+        await expect(panel.getByTestId("optimizer-no-selection")).toContainText("No eligible candidate");
+      }
+      await expectNoHorizontalOverflow(page);
+    });
+  }
+
   test("Inbox lineage, proposal detail, and evidence drawer stay readable", async ({ page }) => {
     await mockSelfEvolutionApi(page);
 
@@ -235,9 +271,13 @@ test.describe("Self-evolution UX smoke", () => {
   });
 });
 
-async function mockSelfEvolutionApi(page: import("@playwright/test").Page) {
+async function mockSelfEvolutionApi(
+  page: import("@playwright/test").Page,
+  selection: Record<string, unknown> = {},
+) {
   const timelineEnvelope = buildTimelineEnvelope();
   const proposalDetail = buildProposalDetail();
+  Object.assign(proposalDetail.optimizer_report, selection);
 
   await page.route("**/api/proxy/evolution/timeline", async (route) => {
     await route.fulfill({

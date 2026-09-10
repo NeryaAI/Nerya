@@ -1,556 +1,153 @@
 "use client";
 
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import type {
-  ChatModelOption,
-  ChatRunSettings,
-  ModelContextWindow,
-  PermissionMode,
-  ReasoningEffort,
-} from "../../lib/chat";
-import {
-  CheckIcon,
-  ChevronDownIcon,
-  SearchIcon,
-  ShieldCheckIcon,
-  SparkIcon,
-} from "../icons";
-import { PortalDropdown, useDropdown } from "../PortalDropdown";
+import * as Popover from "@radix-ui/react-popover";
+import * as Menu from "@radix-ui/react-dropdown-menu";
+import type { ChatModelOption, ChatRunSettings, ModelContextWindow, PermissionMode, ReasoningEffort } from "../../lib/chat";
+import { CheckIcon, ChevronDownIcon, SearchIcon, SettingsIcon, ShieldCheckIcon, SparkIcon, XIcon } from "../icons";
+import { Select } from "../Select";
 
-type ComposerControlSize = "hero" | "docked";
-
-const REASONING_LEVELS: ReasoningEffort[] = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-];
-
-const CONTEXT_WINDOWS: Array<{ value: ModelContextWindow; label: string }> = [
-  { value: 131072, label: "128k" },
-  { value: 262144, label: "256k" },
-  { value: 1048576, label: "1m" },
-];
-
-function reasoningKey(level: ReasoningEffort): string {
-  return `thinkLevel${level.charAt(0).toUpperCase()}${level.slice(1)}`;
-}
-
-function tierBadge(tier?: string): string {
-  const value = String(tier || "").trim();
-  const normalized = value.toLowerCase();
-  if (!normalized) return "";
-  if (normalized === "high") return "5.5";
-  if (normalized === "medium") return "5.4";
-  if (normalized === "light" || normalized === "low") return "5.3";
-  return value;
-}
-
-function compactModelName(model?: string): string {
-  const raw = String(model || "").trim();
-  if (!raw) return "";
-  return raw
-    .replace(/^claude-/i, "")
-    .replace(/^gpt-/i, "GPT-")
-    .replace(/^gemini-/i, "Gemini ")
-    .replace(/-/g, " ")
-    .replace(/\b\d{4}\d{2}\d{2}\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function selectedModelKey(
-  settings: ChatRunSettings,
-  modelOptions: ChatModelOption[],
-): string {
-  return (
-    modelOptions.find(
-      (option) =>
-        option.provider === settings.model_provider &&
-        option.model === settings.model_id &&
-        (option.tier || "") === (settings.model_tier || ""),
-    )?.key ||
-    modelOptions.find(
-      (option) =>
-        option.provider === settings.model_provider &&
-        option.model === settings.model_id,
-    )?.key ||
-    modelOptions.find(
-      (option) =>
-        option.tier === settings.model_tier &&
-        !settings.model_provider &&
-        !settings.model_id,
-    )?.key ||
-    (settings.model_provider || settings.model_id || settings.model_tier
-      ? "__custom"
-      : "__default")
-  );
-}
-
-function triggerSizeClasses(size: ComposerControlSize): string {
-  return size === "hero"
-    ? "h-7 px-2 text-[12px]"
-    : "h-7 px-2 text-[12px]";
-}
-
-function contextLabel(value: ModelContextWindow | undefined): string {
-  return CONTEXT_WINDOWS.find((item) => item.value === value)?.label || "256k";
-}
-
-export function ComposerPermissionMenu({
-  settings,
-  onSettingsChange,
-  disabled,
-  size = "docked",
-}: {
+type ControlProps = {
   settings: ChatRunSettings;
   onSettingsChange: (settings: ChatRunSettings) => void;
   disabled?: boolean;
-  size?: ComposerControlSize;
-}) {
+  size?: "hero" | "docked";
+};
+const REASONING_LEVELS: ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const CONTEXT_WINDOWS: { value: ModelContextWindow; label: string }[] = [
+  { value: 131072, label: "128k" }, { value: 262144, label: "256k" }, { value: 1048576, label: "1M" },
+];
+const reasoningKey = (level: ReasoningEffort) => `thinkLevel${level.charAt(0).toUpperCase()}${level.slice(1)}`;
+const contextLabel = (value?: ModelContextWindow) => CONTEXT_WINDOWS.find((item) => item.value === value)?.label || "256k";
+const controlClass = "inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-[color:var(--text-base)] transition-colors hover:bg-brand-500/10 disabled:cursor-not-allowed disabled:opacity-45";
+
+function selectedModelKey(settings: ChatRunSettings, options: ChatModelOption[]): string {
+  return options.find((item) => item.provider === settings.model_provider && item.model === settings.model_id && (item.tier || "") === (settings.model_tier || ""))?.key
+    || options.find((item) => item.provider === settings.model_provider && item.model === settings.model_id)?.key
+    || options.find((item) => item.tier === settings.model_tier && !settings.model_provider && !settings.model_id)?.key
+    || (settings.model_provider || settings.model_id || settings.model_tier ? "__custom" : "__default");
+}
+
+export function ComposerPermissionMenu({ settings, onSettingsChange, disabled }: ControlProps) {
   const t = useTranslations("chat");
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const dropdown = useDropdown();
-  const fullAccess = settings.permission_mode === "yolo";
-  const label = fullAccess ? t("fullAccess") : t("approveActions");
-
-  function setMode(permission_mode: PermissionMode) {
-    onSettingsChange({ ...settings, permission_mode });
-    dropdown.close();
-  }
-
+  const label = settings.permission_mode === "yolo" ? t("fullAccess") : t("approveActions");
   return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        aria-haspopup="menu"
-        aria-expanded={dropdown.open}
-        disabled={disabled}
-        onClick={() => {
-          if (!disabled) dropdown.toggle();
-        }}
-        className={[
-          "inline-flex min-w-0 shrink items-center gap-1.5 rounded-full font-semibold transition-colors",
-          fullAccess ? "text-[#ff8a4c]" : "text-ink-300",
-          dropdown.open ? "bg-white/[0.07] text-white" : "hover:bg-white/5 hover:text-white",
-          disabled ? "cursor-not-allowed opacity-45" : "cursor-pointer",
-          triggerSizeClasses(size),
-        ].join(" ")}
-        title={label}
-      >
-        <ShieldCheckIcon size={14} />
-        <span className="min-w-0 truncate">{label}</span>
-        <ChevronDownIcon
-          size={12}
-          className={dropdown.open ? "rotate-180 transition-transform" : "transition-transform"}
-        />
-      </button>
-      <PortalDropdown
-        open={dropdown.open}
-        onClose={dropdown.close}
-        anchorRef={triggerRef}
-        align="left"
-        width={280}
-        offset={8}
-        className="overflow-hidden rounded-[16px] border border-[color:var(--line-hi)] bg-[color:var(--card)] p-1.5 shadow-[0_18px_38px_rgba(0,0,0,0.34)] backdrop-blur-xl"
-      >
-        <div className="px-2 pb-1.5 pt-1 text-[11px] font-medium uppercase tracking-[0.08em] text-ink-500">
-          {t("modeMenuTitle")}
-        </div>
-        {[
-          { value: "default" as const, label: t("approveActions") },
-          { value: "yolo" as const, label: t("fullAccess") },
-        ].map((item) => {
-          const active = settings.permission_mode === item.value;
-          return (
-            <button
-              key={item.value}
-              type="button"
-              onClick={() => setMode(item.value)}
-              className={[
-                "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[13px] transition-colors",
-                active ? "bg-brand-500/12 text-white" : "text-ink-200 hover:bg-white/[0.045] hover:text-white",
-              ].join(" ")}
-            >
-              <ShieldCheckIcon
-                size={15}
-                className={item.value === "yolo" ? "text-[#ff8a4c]" : "text-ink-400"}
-              />
-              <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              {active ? <CheckIcon size={15} className="text-brand-300" /> : null}
-            </button>
-          );
-        })}
-      </PortalDropdown>
-    </>
+    <Menu.Root>
+      <Menu.Trigger asChild>
+        <button type="button" disabled={disabled} className={controlClass} aria-label={label}>
+          <ShieldCheckIcon size={15} className={settings.permission_mode === "yolo" ? "text-[color:var(--warn)]" : ""} />
+          <span className="truncate">{label}</span><ChevronDownIcon size={12} />
+        </button>
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Content className="ui-select-menu w-64" align="start" sideOffset={8} collisionPadding={8} aria-label={t("modeMenuTitle")}>
+          <Menu.Label className="px-3 py-2 text-xs text-[color:var(--text-muted)]">{t("modeMenuTitle")}</Menu.Label>
+          <Menu.RadioGroup value={settings.permission_mode} onValueChange={(permission_mode) => onSettingsChange({ ...settings, permission_mode: permission_mode as PermissionMode })}>
+            {(["default", "yolo"] as const).map((mode) => <Menu.RadioItem key={mode} value={mode} className="ui-select-option">
+              <ShieldCheckIcon size={15} /><span className="flex-1">{t(mode === "yolo" ? "fullAccess" : "approveActions")}</span>
+              <Menu.ItemIndicator><CheckIcon size={14} /></Menu.ItemIndicator>
+            </Menu.RadioItem>)}
+          </Menu.RadioGroup>
+        </Menu.Content>
+      </Menu.Portal>
+    </Menu.Root>
   );
 }
 
-export function ComposerModelMenu({
-  settings,
-  onSettingsChange,
-  modelOptions,
-  disabled,
-  size = "docked",
-}: {
-  settings: ChatRunSettings;
-  onSettingsChange: (settings: ChatRunSettings) => void;
-  modelOptions: ChatModelOption[];
-  disabled?: boolean;
-  size?: ComposerControlSize;
-}) {
+export function ComposerModelMenu({ settings, onSettingsChange, modelOptions, disabled }: ControlProps & { modelOptions: ChatModelOption[] }) {
   const t = useTranslations("chat");
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const dropdown = useDropdown();
+  const tUi = useTranslations("ui");
+  const tModel = useTranslations("settings.modelCard");
+  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [editKey, setEditKey] = useState<string | null>(null);
   const activeKey = selectedModelKey(settings, modelOptions);
-  const activeOption = modelOptions.find((option) => option.key === activeKey) ?? null;
-  const modelLabel =
-    activeKey === "__default"
-      ? t("runtimeDefault")
-      : activeOption
-      ? tierBadge(activeOption.tier) || compactModelName(activeOption.model)
-      : tierBadge(settings.model_tier) ||
-        compactModelName(settings.model_id) ||
-        t("customOverride");
-  const reasonLabel = t(reasoningKey(settings.reasoning_effort));
-  const contextText = contextLabel(settings.model_context_window);
-  const editingKey = editKey || activeKey;
-
-  const filteredOptions = useMemo(() => {
+  const active = modelOptions.find((item) => item.key === activeKey);
+  const tierName = (tier?: string) => tier === "light" ? tModel("tierLight") : tier === "medium" ? tModel("tierMedium") : tier === "high" ? tModel("tierHigh") : tier || "";
+  const modelLabel = activeKey === "__default" ? t("runtimeDefault") : active?.model || settings.model_id || tierName(active?.tier || settings.model_tier) || t("customOverride");
+  const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const rows = needle
-      ? modelOptions.filter((option) =>
-          [option.label, option.provider, option.model, option.tier]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase()
-            .includes(needle),
-        )
-      : modelOptions;
-    return rows.slice(0, 80);
+    return modelOptions.filter((item) => !needle || [item.label, item.model, item.provider, item.tier].join(" ").toLowerCase().includes(needle)).slice(0, 80);
   }, [modelOptions, query]);
 
-  function overrideFor(key: string) {
-    return settings.model_overrides?.[key] ?? {};
-  }
-
-  function settingsForModelKey(key: string) {
-    const override = overrideFor(key);
+  function optionsFor(key: string) {
+    const override = settings.model_overrides?.[key] ?? {};
     const option = modelOptions.find((item) => item.key === key);
     return {
-      reasoning_effort: override.reasoning_effort ?? option?.reasoning_effort ?? "off",
-      model_context_window: override.model_context_window ?? 262144,
+      reasoning_effort: override.reasoning_effort ?? (key === activeKey ? settings.reasoning_effort : option?.reasoning_effort) ?? "off",
+      model_context_window: override.model_context_window ?? (key === activeKey ? settings.model_context_window : undefined) ?? 262144,
     };
   }
-
   function applyModel(key: string) {
-    const modelSettings = settingsForModelKey(key);
-    if (key === "__default") {
-      onSettingsChange({
-        ...settings,
-        ...modelSettings,
-        model_tier: "",
-        model_provider: "",
-        model_id: "",
-      });
-      dropdown.close();
-      return;
+    if (key === "__default") onSettingsChange({ ...settings, ...optionsFor(key), model_tier: "", model_provider: "", model_id: "" });
+    else {
+      const option = modelOptions.find((item) => item.key === key);
+      if (option) onSettingsChange({ ...settings, ...optionsFor(key), model_tier: option.tier || "", model_provider: option.provider, model_id: option.model });
     }
-    if (key === "__add_custom") {
-      if (typeof window !== "undefined") {
-        window.location.href = "/settings#models";
-      }
-      return;
-    }
-    if (key === "__custom") {
-      dropdown.close();
-      return;
-    }
-    const option = modelOptions.find((item) => item.key === key);
-    if (!option) return;
-    onSettingsChange({
-      ...settings,
-      ...modelSettings,
-      model_tier: option.tier || "",
-      model_provider: option.provider,
-      model_id: option.model,
-    });
-    dropdown.close();
+    setOpen(false);
   }
-
-  function updateModelSetting(
-    key: string,
-    patch: {
-      reasoning_effort?: ReasoningEffort;
-      model_context_window?: ModelContextWindow;
-    },
-  ) {
-    const nextOverride = {
-      ...overrideFor(key),
-      ...patch,
-    };
-    const nextOverrides = {
-      ...(settings.model_overrides ?? {}),
-      [key]: nextOverride,
-    };
+  function patchOptions(key: string, patch: { reasoning_effort?: ReasoningEffort; model_context_window?: ModelContextWindow }) {
     onSettingsChange({
-      ...settings,
-      ...(key === activeKey ? patch : {}),
-      model_overrides: nextOverrides,
+      ...settings, ...(key === activeKey ? patch : {}),
+      model_overrides: { ...settings.model_overrides, [key]: { ...settings.model_overrides?.[key], ...patch } },
     });
   }
+  const rows = [
+    { key: "__default", title: t("runtimeDefault"), detail: "" },
+    ...(activeKey === "__custom" ? [{ key: "__custom", title: modelLabel, detail: settings.model_provider || t("customOverride") }] : []),
+    ...filtered.map((item) => ({ key: item.key, title: item.model || item.label, detail: [item.provider, tierName(item.tier)].filter(Boolean).join(" · ") })),
+  ];
 
   return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        aria-haspopup="menu"
-        aria-expanded={dropdown.open}
-        disabled={disabled}
-        onClick={() => {
-          if (!disabled) dropdown.toggle();
-        }}
-        className={[
-          "inline-flex min-w-0 shrink items-center gap-1.5 rounded-full font-semibold text-ink-100 transition-colors",
-          dropdown.open ? "bg-white/[0.07]" : "hover:bg-white/5",
-          disabled ? "cursor-not-allowed opacity-45" : "cursor-pointer",
-          size === "hero" ? "max-w-[220px]" : "max-w-[200px]",
-          triggerSizeClasses(size),
-        ].join(" ")}
-        title={`${modelLabel} ${contextText} ${reasonLabel}`}
-      >
-        <span className="min-w-0 truncate">{modelLabel}</span>
-        <span className="shrink-0 text-ink-500">{contextText}</span>
-        <span className="shrink-0 text-ink-500">{reasonLabel}</span>
-        <ChevronDownIcon
-          size={12}
-          className={[
-            "shrink-0 text-ink-400 transition-transform",
-            dropdown.open ? "rotate-180" : "",
-          ].join(" ")}
-        />
-      </button>
-      <PortalDropdown
-        open={dropdown.open}
-        onClose={dropdown.close}
-        anchorRef={triggerRef}
-        align="right"
-        width={editKey ? 720 : 420}
-        offset={8}
-        className="overflow-hidden rounded-[18px] border border-[color:var(--line-hi)] bg-[color:var(--card)] shadow-[0_18px_42px_rgba(0,0,0,0.36)] backdrop-blur-xl"
-      >
-        <div className="flex">
-          <div className={editKey ? "w-[420px] shrink-0 p-1.5" : "w-full p-1.5"}>
-            <div className="p-2">
-              <label className="flex h-10 items-center gap-2 rounded-xl border border-[color:var(--line)] bg-black/10 px-3 text-ink-400 focus-within:border-[color:var(--line-hi)]">
-                <SearchIcon size={15} />
-                <input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder={t("modelSearchPlaceholder")}
-                  className="min-w-0 flex-1 bg-transparent text-[14px] text-ink-100 placeholder:text-ink-500 focus:outline-none"
-                />
-              </label>
-            </div>
-
-            <div className="max-h-[260px] overflow-y-auto py-1">
-              <ModelRow
-                active={activeKey === "__default"}
-                title={t("runtimeDefault")}
-                detail={`${contextLabel(settingsForModelKey("__default").model_context_window)} · ${t(reasoningKey(settingsForModelKey("__default").reasoning_effort))}`}
-                editLabel={t("editModelSettings")}
-                onClick={() => applyModel("__default")}
-                onEdit={() => setEditKey("__default")}
-              />
-              {activeKey === "__custom" ? (
-                <ModelRow
-                  active
-                  title={t("customOverride")}
-                  detail={[
-                    settings.model_provider,
-                    settings.model_id,
-                    contextText,
-                    reasonLabel,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                  editLabel={t("editModelSettings")}
-                  onClick={() => applyModel("__custom")}
-                  onEdit={() => setEditKey("__custom")}
-                />
-              ) : null}
-              {filteredOptions.map((option) => {
-                const modelSettings = settingsForModelKey(option.key);
-                return (
-                  <ModelRow
-                    key={option.key}
-                    active={option.key === activeKey}
-                    title={tierBadge(option.tier) || compactModelName(option.model)}
-                    detail={[
-                      option.tier ? compactModelName(option.model) : option.provider,
-                      contextLabel(modelSettings.model_context_window),
-                      t(reasoningKey(modelSettings.reasoning_effort)),
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                    editLabel={t("editModelSettings")}
-                    onClick={() => applyModel(option.key)}
-                    onEdit={() => setEditKey(option.key)}
-                  />
-                );
-              })}
-            </div>
-
-            <div className="border-t border-[color:var(--line)] px-1 pt-1">
-              <button
-                type="button"
-                onClick={() => applyModel("__add_custom")}
-                className="flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-[14px] text-ink-300 transition-colors hover:bg-white/[0.045] hover:text-white"
-              >
-                <SparkIcon size={15} />
-                <span>{t("addCustomProvider")}</span>
-              </button>
-            </div>
+    <Popover.Root open={open} onOpenChange={(next) => { setOpen(next); if (!next) { setQuery(""); setEditKey(null); } }}>
+      <Popover.Trigger asChild>
+        <button type="button" disabled={disabled} className={`${controlClass} max-w-[240px]`} aria-label={tUi("modelOptions")}
+          title={`${modelLabel} · ${contextLabel(settings.model_context_window)} · ${t(reasoningKey(settings.reasoning_effort))}`}>
+          <SparkIcon size={14} className="shrink-0" /><span className="truncate">{modelLabel}</span><ChevronDownIcon size={12} className="shrink-0" />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content aria-label={tUi("modelOptions")} align="end" sideOffset={8} collisionPadding={8}
+          className="z-[1250] w-[400px] max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl border border-[color:var(--line-hi)] bg-[color:var(--overlay-surface)] p-2 text-[color:var(--text-base)] shadow-lg"
+          style={{ maxHeight: "min(620px, var(--radix-popover-content-available-height))" }}>
+          <div className="flex items-center gap-2 px-1 pb-2">
+            <label className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-[color:var(--line)] px-2 py-2">
+              <SearchIcon size={15} className="shrink-0 text-[color:var(--text-muted)]" />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("modelSearchPlaceholder")} aria-label={t("modelSearchPlaceholder")}
+                className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
+            </label>
+            <Popover.Close className="ui-icon-button shrink-0" aria-label={tUi("close")}><XIcon size={16} /></Popover.Close>
           </div>
-
-          {editKey ? (
-            <div className="max-h-[430px] w-[300px] shrink-0 overflow-y-auto border-l border-[color:var(--line)] bg-black/[0.08] p-2">
-              <div className="px-3 py-2 text-[17px] text-ink-300">
-                {t("optionsTitle")}
-              </div>
-
-              <OptionSection title={t("think")}>
-                {REASONING_LEVELS.map((level) => (
-                  <OptionRow
-                    key={level}
-                    active={settingsForModelKey(editingKey).reasoning_effort === level}
-                    label={t(reasoningKey(level))}
-                    onClick={() => updateModelSetting(editingKey, { reasoning_effort: level })}
-                  />
-                ))}
-              </OptionSection>
-
-              <OptionSection title={t("contextLength")}>
-                {CONTEXT_WINDOWS.map((item) => (
-                  <OptionRow
-                    key={item.value}
-                    active={settingsForModelKey(editingKey).model_context_window === item.value}
-                    label={item.label}
-                    onClick={() =>
-                      updateModelSetting(editingKey, {
-                        model_context_window: item.value,
-                      })
-                    }
-                  />
-                ))}
-              </OptionSection>
-            </div>
-          ) : null}
-        </div>
-      </PortalDropdown>
-    </>
-  );
-}
-
-function OptionSection({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="border-t border-[color:var(--line)] py-1.5">
-      <div className="px-3 py-0.5 text-[13px] text-ink-500">{title}</div>
-      <div>{children}</div>
-    </div>
-  );
-}
-
-function OptionRow({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        "flex w-full items-center gap-3 rounded-xl px-3 py-1 text-left text-[14px] transition-colors",
-        active ? "text-white" : "text-ink-200 hover:bg-white/[0.045] hover:text-white",
-      ].join(" ")}
-    >
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      {active ? <CheckIcon size={15} className="shrink-0 text-ink-300" /> : null}
-    </button>
-  );
-}
-
-function ModelRow({
-  active,
-  title,
-  detail,
-  editLabel,
-  onClick,
-  onEdit,
-}: {
-  active: boolean;
-  title: string;
-  detail?: string;
-  editLabel?: string;
-  onClick: () => void;
-  onEdit?: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        "group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors",
-        active ? "bg-white/[0.07] text-white" : "text-ink-200 hover:bg-white/[0.045] hover:text-white",
-      ].join(" ")}
-    >
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-[14px] leading-5">{title}</span>
-        {detail ? (
-          <span className="block truncate text-[12px] leading-4 text-ink-500">{detail}</span>
-        ) : null}
-      </span>
-      {onEdit ? (
-        <span
-          role="button"
-          tabIndex={0}
-          onClick={(event) => {
-            event.stopPropagation();
-            onEdit();
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            event.preventDefault();
-            event.stopPropagation();
-            onEdit();
-          }}
-          className={[
-            "inline-flex shrink-0 items-center rounded-lg px-2 py-1 text-[12px] text-ink-300 transition-colors hover:bg-white/10 hover:text-white",
-            active ? "" : "opacity-70 group-hover:opacity-100",
-          ].join(" ")}
-        >
-          {editLabel}
-        </span>
-      ) : null}
-      {active ? <CheckIcon size={15} className="shrink-0 text-ink-300" /> : null}
-    </button>
+          <div className="max-h-64 overflow-y-auto">
+            {rows.map((row) => <div key={row.key} className={`flex items-center gap-1 rounded-lg ${row.key === activeKey ? "bg-brand-500/10" : "hover:bg-brand-500/5"}`}>
+              <button type="button" onClick={() => applyModel(row.key)} aria-pressed={row.key === activeKey} className="flex min-w-0 flex-1 items-center gap-2 px-3 py-3 text-left">
+                <span className="min-w-0 flex-1"><span className="block break-words text-sm">{row.title}</span>{row.detail ? <span className="block text-xs text-[color:var(--text-muted)]">{row.detail}</span> : null}</span>
+                {row.key === activeKey ? <CheckIcon size={14} className="shrink-0" /> : null}
+              </button>
+              <button type="button" className="ui-icon-button mr-1 shrink-0" aria-label={`${t("editModelSettings")}: ${row.title}`} aria-expanded={row.key === editKey}
+                onClick={() => setEditKey(row.key === editKey ? null : row.key)}><SettingsIcon size={15} /></button>
+            </div>)}
+            {query.trim() && !filtered.length ? <p role="status" className="px-3 py-3 text-sm text-[color:var(--text-muted)]">{tUi("modelNoMatches")}</p> : null}
+          </div>
+          {editKey ? <section aria-label={t("optionsTitle")} className="mt-2 space-y-3 border-t border-[color:var(--line)] p-3">
+            <h3 className="text-sm font-semibold">{rows.find((row) => row.key === editKey)?.title || tUi("modelOptions")}</h3>
+            <label className="block space-y-1 text-xs"><span>{t("think")}</span>
+              <Select value={optionsFor(editKey).reasoning_effort} onChange={(value) => patchOptions(editKey, { reasoning_effort: value })}
+                ariaLabel={t("think")} options={REASONING_LEVELS.map((value) => ({ value, label: t(reasoningKey(value)) }))} />
+            </label>
+            <label className="block space-y-1 text-xs"><span>{t("contextLength")}</span>
+              <Select value={String(optionsFor(editKey).model_context_window)} onChange={(value) => patchOptions(editKey, { model_context_window: Number(value) as ModelContextWindow })}
+                ariaLabel={t("contextLength")} options={CONTEXT_WINDOWS.map((item) => ({ value: String(item.value), label: item.label }))} />
+            </label>
+          </section> : null}
+          <div className="mt-2 border-t border-[color:var(--line)] px-1 pt-1">
+            <a href="/settings#models" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-2 rounded-lg px-3 text-sm text-[color:var(--text-muted)] hover:bg-brand-500/5">
+              <SparkIcon size={15} />{t("addCustomProvider")}<span aria-hidden className="ml-auto">↗</span>
+            </a>
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

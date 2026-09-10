@@ -17,6 +17,7 @@ import type {
   ReconciliationReport,
 } from "../../lib/clientApi";
 import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
@@ -25,10 +26,44 @@ import {
   PageBody,
   PageHeader,
   Pill,
+  StatusDot,
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
 import { Sparkline } from "../../components/Sparkline";
+import { ModePill } from "../../components/ModePill";
 import { formatTsShort } from "../../lib/format";
+
+/** Equity-curve time ranges → API `limit` (number of points). */
+type CurveRange = "24H" | "7D" | "30D";
+const CURVE_RANGE_LIMIT: Record<CurveRange, number> = {
+  "24H": 24,
+  "7D": 168,
+  "30D": 720,
+};
+const CURVE_RANGE_KEY: Record<CurveRange, string> = {
+  "24H": "range24H",
+  "7D": "range7D",
+  "30D": "range30D",
+};
+
+// Raw backend enums → i18n keys (fall back to the raw value when unknown).
+const SEVERITY_LABEL_KEYS: Record<string, string> = {
+  info: "sevInfo",
+  warning: "sevWarning",
+  action_required: "sevActionRequired",
+  trading_halted: "sevTradingHalted",
+};
+const HEALTH_LABEL_KEYS: Record<string, string> = {
+  ok: "healthOk",
+  degraded: "healthDegraded",
+  stale: "healthStale",
+};
+const MODE_LABEL_KEYS: Record<string, string> = {
+  live: "live",
+  paper: "paper",
+  canary: "modeCanary",
+  shadow: "modeShadow",
+};
 
 function money(value: unknown): string {
   let n = Number(value);
@@ -37,6 +72,31 @@ function money(value: unknown): string {
   if (Math.abs(n) < 0.005) n = 0;
   const abs = Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
   return n < 0 ? `-$${abs}` : `$${abs}`;
+}
+
+/** Signed variant for PnL figures — positives carry an explicit "+", zeros
+ * stay unsigned, matching the dashboard's fmtSigned semantics. */
+function moneySigned(value: unknown): string {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return money(value);
+  return `+${money(n)}`;
+}
+
+/** Colour class for PnL cells: green only for real gains, red for losses,
+ * neutral for zero/missing — zero is not a profit. */
+function pnlToneClass(value: unknown): string {
+  const n = Number(value);
+  if (value == null || !Number.isFinite(n) || n === 0) {
+    return "text-[color:var(--text-muted)]";
+  }
+  return n > 0 ? "text-ok" : "text-danger";
+}
+
+/** Same semantics as {@link pnlToneClass} for the <Kpi> tone prop. */
+function pnlToneKpi(value: unknown): "neutral" | "ok" | "danger" {
+  const n = Number(value);
+  if (value == null || !Number.isFinite(n) || n === 0) return "neutral";
+  return n > 0 ? "ok" : "danger";
 }
 
 function numberish(value: unknown): string {
@@ -77,8 +137,10 @@ function severityTone(
   severity?: string,
 ): "ok" | "warn" | "danger" | "neutral" | "brand" {
   switch (severity) {
+    // Neutral, not green: green is reserved for "healthy / all-clear", and
+    // an info-level report is not a positive signal.
     case "info":
-      return "ok";
+      return "neutral";
     case "warning":
       return "warn";
     case "action_required":
@@ -90,19 +152,28 @@ function severityTone(
   }
 }
 
-function modePill(mode: string): "ok" | "warn" | "danger" | "brand" | "neutral" {
-  switch (mode) {
-    case "live":
-      return "danger";
-    case "canary":
-      return "warn";
-    case "shadow":
-      return "brand";
-    case "paper":
-      return "ok";
-    default:
-      return "neutral";
-  }
+/**
+ * Enum → localized label. Unknown values fall through to the raw string so a
+ * new backend enum degrades visibly instead of rendering nothing.
+ */
+function enumLabel(
+  keys: Record<string, string>,
+  t: (k: string) => string,
+  value?: string,
+): string {
+  if (!value) return "–";
+  const key = keys[value];
+  return key ? t(key) : value;
+}
+
+/** Shimmer placeholder for the first-load window. */
+function Skel({ className }: { className?: string }) {
+  return (
+    <span
+      aria-hidden
+      className={`skeleton inline-block rounded-md ${className ?? "h-4 w-24 align-middle"}`}
+    />
+  );
 }
 
 export default function PortfolioPage() {
@@ -137,51 +208,93 @@ export default function PortfolioPage() {
   >([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // First-load gate: skeletons show only until the initial round lands, so
+  // background 30s refreshes never flash placeholders over real values.
+  const [loaded, setLoaded] = useState(false);
   const [reconcileBusy, setReconcileBusy] = useState<string | null>(null);
+  // summary is the page's primary feed — its failure gets a visible banner
+  // + retry instead of silently rendering $0.00.
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [curveRange, setCurveRange] = useState<CurveRange>("7D");
+  const [curveLoading, setCurveLoading] = useState(true);
+  const [curveError, setCurveError] = useState<string | null>(null);
+
+  async function loadCurve(range: CurveRange) {
+    setCurveLoading(true);
+    setCurveError(null);
+    try {
+      const res = await clientApi.portfolioEquityCurve(CURVE_RANGE_LIMIT[range]);
+      setCurve(res.points || []);
+    } catch (e) {
+      console.error("portfolio equity curve failed:", e);
+      setCurveError(e instanceof Error ? e.message : String(e));
+      setCurve([]);
+    } finally {
+      setCurveLoading(false);
+    }
+  }
 
   async function load() {
     setLoading(true);
     setError(null);
-    try {
-      const [
-        summaryRes,
-        positionsRes,
-        pnlRes,
-        curveRes,
-        healthRes,
-        reportsRes,
-        killRes,
-        walletPortfolioRes,
-      ] = await Promise.all([
-        clientApi.portfolioSummary(),
-        clientApi.portfolioPositions().catch(() => ({ positions: [] })),
-        clientApi.portfolioPnl().catch(() => null),
-        clientApi
-          .portfolioEquityCurve(160)
-          .catch(() => ({ points: [], equity_usd: 0 })),
-        clientApi.portfolioHealth().catch(() => null),
-        clientApi
-          .controlReconciliationReports({ limit: 12 })
-          .catch(() => ({ reports: [], worst_recent: null, filter: {} })),
-        clientApi.controlKillSwitchGet().catch(() => null),
-        clientApi
-          .walletPortfolio({})
-          .catch(() => ({ ok: false, accounts: [] })),
-      ]);
-      setSummary(summaryRes);
-      setPositions(positionsRes.positions || []);
-      setPnl(pnlRes);
-      setCurve(curveRes.points || []);
-      setHealth(healthRes);
-      setReports(reportsRes.reports || []);
-      setWorstReport(reportsRes.worst_recent ?? null);
-      setKillSwitch(killRes);
-      setWalletPortfolio(walletPortfolioRes.accounts || []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
+    const summaryP = clientApi
+      .portfolioSummary()
+      .then((res) => {
+        setSummaryError(null);
+        return res;
+      })
+      .catch((e: unknown) => {
+        console.error("portfolio summary failed:", e);
+        setSummaryError(e instanceof Error ? e.message : String(e));
+        return null;
+      });
+    const [
+      summaryRes,
+      positionsRes,
+      pnlRes,
+      healthRes,
+      reportsRes,
+      killRes,
+      walletPortfolioRes,
+    ] = await Promise.all([
+      summaryP,
+      clientApi.portfolioPositions().catch((e: unknown) => {
+        console.error("portfolio positions failed:", e);
+        return { positions: [] };
+      }),
+      clientApi.portfolioPnl().catch((e: unknown) => {
+        console.error("portfolio pnl failed:", e);
+        return null;
+      }),
+      clientApi.portfolioHealth().catch((e: unknown) => {
+        console.error("portfolio health failed:", e);
+        return null;
+      }),
+      clientApi
+        .controlReconciliationReports({ limit: 12 })
+        .catch((e: unknown) => {
+          console.error("reconciliation reports failed:", e);
+          return { reports: [], worst_recent: null, filter: {} };
+        }),
+      clientApi.controlKillSwitchGet().catch((e: unknown) => {
+        console.error("kill switch state failed:", e);
+        return null;
+      }),
+      clientApi.walletPortfolio({}).catch((e: unknown) => {
+        console.error("wallet portfolio failed:", e);
+        return { ok: false, accounts: [] };
+      }),
+    ]);
+    if (summaryRes) setSummary(summaryRes);
+    setPositions(positionsRes.positions || []);
+    setPnl(pnlRes);
+    setHealth(healthRes);
+    setReports(reportsRes.reports || []);
+    setWorstReport(reportsRes.worst_recent ?? null);
+    setKillSwitch(killRes);
+    setWalletPortfolio(walletPortfolioRes.accounts || []);
+    setLoaded(true);
+    setLoading(false);
   }
 
   async function runReconcile(account_id?: string) {
@@ -213,6 +326,12 @@ export default function PortfolioPage() {
     return () => clearInterval(t);
   }, []);
 
+  // Equity curve refetches on its own so switching the time range doesn't
+  // re-run the whole 7-endpoint poll.
+  useEffect(() => {
+    void loadCurve(curveRange);
+  }, [curveRange]);
+
   const accounts = summary?.accounts || [];
   const allPositions = useMemo(
     () => flattenPositions(summary, positions),
@@ -228,6 +347,27 @@ export default function PortfolioPage() {
     }
     return map;
   }, [accounts]);
+  const modeByAccount = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const account of accounts) {
+      map[account.id] = account.mode;
+    }
+    return map;
+  }, [accounts]);
+  // Paper and live equity are never meaningful summed together (paper is
+  // simulated capital) — the KPI carries a per-mode split under the total.
+  const equityByMode = useMemo(() => {
+    const out = { paper: 0, live: 0 };
+    for (const account of accounts) {
+      const eq = Number(account.equity_usd || 0);
+      if (account.mode === "live") out.live += eq;
+      else out.paper += eq;
+    }
+    return out;
+  }, [accounts]);
+  const curveUp =
+    equityValues.length > 1 &&
+    equityValues[equityValues.length - 1] >= equityValues[0];
 
   const totals = health?.totals;
   const hasHealth = !!health && health.accounts.length > 0;
@@ -240,7 +380,17 @@ export default function PortfolioPage() {
         actions={
           <div className="flex items-center gap-2">
             {killSwitch ? (
-              <Pill tone={killSwitch.kill_switch ? "danger" : "ok"}>
+              // Unified trading-mode semantics: live = danger red,
+              // paper = brand violet (same as <ModePill> everywhere else).
+              <Pill
+                tone={
+                  killSwitch.kill_switch
+                    ? "danger"
+                    : killSwitch.live_trading_enabled
+                      ? "danger"
+                      : "brand"
+                }
+              >
                 {killSwitch.kill_switch
                   ? t("killSwitchOn")
                   : killSwitch.live_trading_enabled
@@ -270,19 +420,38 @@ export default function PortfolioPage() {
       <PageBody>
         {error && <ErrorBanner error={error} />}
 
+        {/* summary is the primary feed — surface its failure loudly with a
+            retry instead of letting the page read as "no positions, no
+            wallets, $0 equity". */}
+        {summaryError ? (
+          <div className="rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-[13px] text-danger flex flex-wrap items-center gap-3">
+            <span className="min-w-0 flex-1 truncate" title={summaryError}>
+              {t("loadFailed")} · {summaryError}
+            </span>
+            <button
+              onClick={load}
+              disabled={loading}
+              className="btn-ghost text-xs border border-danger/40"
+            >
+              {t("retry")}
+            </button>
+          </div>
+        ) : null}
+        <ErrorBanner error={summaryError} />
+
         {worstReport &&
         (worstReport.severity === "action_required" ||
           worstReport.severity === "trading_halted") ? (
           <div
             className={`rounded-lg border px-4 py-3 text-[13px] ${
               worstReport.severity === "trading_halted"
-                ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
-                : "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                ? "border-danger/40 bg-danger/10 text-danger"
+                : "border-warn/40 bg-warn/10 text-warn"
             }`}
           >
             <div className="flex items-center gap-2">
               <Pill tone={severityTone(worstReport.severity)}>
-                {worstReport.severity.replace("_", " ")}
+                {enumLabel(SEVERITY_LABEL_KEYS, t, worstReport.severity)}
               </Pill>
               <span className="font-mono text-[12px]">
                 {worstReport.scope}
@@ -292,7 +461,7 @@ export default function PortfolioPage() {
                 {formatTsShort(worstReport.ts)}
               </span>
             </div>
-            <div className="mt-1 text-[12.5px]">
+            <div className="mt-1 text-[13px]">
               {t("driftIssues", { count: Number(worstReport.summary?.issue_count ?? 0) })}
             </div>
           </div>
@@ -302,25 +471,44 @@ export default function PortfolioPage() {
           <Kpi
             inline
             label={t("equity")}
-            value={money(summary?.totals?.equity_usd ?? pnl?.equity_usd)}
+            value={
+              loaded ? (
+                money(summary?.totals?.equity_usd ?? pnl?.equity_usd)
+              ) : (
+                <Skel className="h-6 w-28" />
+              )
+            }
             tone="brand"
+            delta={
+              accounts.length > 0 ? (
+                // Never present paper + live as one headline number without
+                // context — split the total by mode under it.
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <ModePill mode="paper" />
+                  <span className="font-mono">{money(equityByMode.paper)}</span>
+                  <span className="text-[color:var(--text-muted)]">·</span>
+                  <ModePill mode="live" />
+                  <span className="font-mono">{money(equityByMode.live)}</span>
+                </span>
+              ) : undefined
+            }
           />
           <Kpi
             inline
             label={t("cash")}
-            value={money(summary?.totals?.cash_usd)}
+            value={loaded ? money(summary?.totals?.cash_usd) : <Skel className="h-6 w-24" />}
           />
           <Kpi
             inline
             label={t("realizedPnl")}
-            value={money(pnl?.realized_usd)}
-            tone={Number(pnl?.realized_usd || 0) >= 0 ? "ok" : "danger"}
+            value={loaded ? moneySigned(pnl?.realized_usd) : <Skel className="h-6 w-24" />}
+            tone={pnlToneKpi(pnl?.realized_usd)}
           />
           <Kpi
             inline
             label={t("unrealizedPnl")}
-            value={money(pnl?.unrealized_usd)}
-            tone={Number(pnl?.unrealized_usd || 0) >= 0 ? "ok" : "danger"}
+            value={loaded ? moneySigned(pnl?.unrealized_usd) : <Skel className="h-6 w-24" />}
+            tone={pnlToneKpi(pnl?.unrealized_usd)}
           />
         </section>
 
@@ -355,17 +543,17 @@ export default function PortfolioPage() {
               {accounts.map((account) => (
                 <div
                   key={account.id}
-                  className="rounded-lg border border-[color:var(--line)] p-3"
+                  className="rounded-lg border border-[color:var(--line)] p-4"
                 >
                   <div className="flex items-center gap-2">
                     <span className="font-mono text-[13px] text-[color:var(--text-base)]">
                       {account.id}
                     </span>
-                    <Pill tone={account.live_trading_enabled ? "warn" : "brand"}>
+                    <Pill tone={account.live_trading_enabled ? "danger" : "brand"}>
                       {account.live_trading_enabled ? t("live") : t("paper")}
                     </Pill>
                     <span className="ml-auto text-[12px] text-[color:var(--text-muted)]">
-                      {account.mode}
+                      {enumLabel(MODE_LABEL_KEYS, t, account.mode)}
                     </span>
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-[12px]">
@@ -396,19 +584,19 @@ export default function PortfolioPage() {
               ))}
             </div>
           </Card>
-        ) : !loading && !error ? (
+        ) : !loading && !error && !summaryError ? (
           <Card
             title={t("noAccountsTitle")}
             description={t("noAccountsDesc")}
           >
             <div className="text-sm text-ink-300">
               {t("noAccountsUse")}{" "}
-              <a
+              <Link
                 className="text-brand-300 hover:text-brand-200"
                 href="/settings"
               >
                 {t("settingsLink")}
-              </a>{" "}
+              </Link>{" "}
               {t("noAccountsHint")}
             </div>
           </Card>
@@ -418,34 +606,41 @@ export default function PortfolioPage() {
           <Card
             title={t("equityCurve")}
             description={t("equityCurveDesc")}
+            actions={
+              <div className="flex gap-1">
+                {(["24H", "7D", "30D"] as CurveRange[]).map((range) => (
+                  <button
+                    key={range}
+                    onClick={() => setCurveRange(range)}
+                    className={`px-2 py-0.5 text-[12px] rounded-md font-medium ${
+                      curveRange === range
+                        ? "bg-brand-500/15 text-brand-200 border border-brand-500/30"
+                        : "text-ink-400 hover:text-ink-100"
+                    }`}
+                  >
+                    {t(CURVE_RANGE_KEY[range])}
+                  </button>
+                ))}
+              </div>
+            }
           >
-            {curve.length === 0 ? (
-              <Empty label={t("noEquityPoints")} />
+            {curveLoading && curve.length === 0 ? (
+              <div className="skeleton h-[120px] w-full" aria-hidden />
+            ) : curve.length === 0 ? (
+              <Empty
+                label={curveError ? `${t("loadFailed")} · ${curveError}` : t("noEquityPoints")}
+              />
             ) : (
+              /* Color follows the range direction: up = ok mint, down =
+                 danger red — same semantics as the PnL KPIs above. */
               <div>
                 <Sparkline
                   values={equityValues}
                   width={420}
                   height={120}
-                  tone="brand"
+                  tone={curveUp ? "accent" : "danger"}
                   fill
                 />
-                <div className="embedded-list-scroll-sm mt-3 text-[12px] font-mono text-[color:var(--text-muted)] space-y-1">
-                  {curve
-                    .slice(-12)
-                    .reverse()
-                    .map((point, index) => (
-                      <div
-                        key={`${point.ts}-${index}`}
-                        className="flex justify-between gap-3"
-                      >
-                        <span>{formatTsShort(point.ts)}</span>
-                        <span className="text-[color:var(--text-base)]">
-                          {money(point.equity_usd)}
-                        </span>
-                      </div>
-                    ))}
-                </div>
               </div>
             )}
           </Card>
@@ -454,19 +649,25 @@ export default function PortfolioPage() {
             title={t("reconciliation")}
             description={t("reconciliationDesc")}
           >
-            {reports.length === 0 ? (
+            {!loaded ? (
+              <div className="space-y-2.5" aria-hidden>
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="skeleton h-9 w-full" />
+                ))}
+              </div>
+            ) : reports.length === 0 ? (
               <Empty label={t("noReconciliation")} />
             ) : (
-              <div className="embedded-list-scroll space-y-2">
+              <div className="embedded-list-scroll divide-y divide-[color:var(--line)]">
                 {reports.slice(0, 8).map((report) => (
                   <div
                     key={report.report_id}
-                    className="flex items-start justify-between gap-2 border border-[color:var(--line)] rounded-md px-2.5 py-2"
+                    className="flex items-start justify-between gap-2 py-2"
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <Pill tone={severityTone(report.severity)}>
-                          {report.severity.replace("_", " ")}
+                          {enumLabel(SEVERITY_LABEL_KEYS, t, report.severity)}
                         </Pill>
                         <span className="font-mono text-[12px] text-[color:var(--text-muted)]">
                           {report.scope}
@@ -477,7 +678,7 @@ export default function PortfolioPage() {
                         {t("issueCount", { count: Number(report.summary?.issue_count ?? 0) })}
                       </div>
                     </div>
-                    <span className="text-[11px] text-[color:var(--text-muted)] font-mono shrink-0">
+                    <span className="text-[12px] text-[color:var(--text-muted)] font-mono shrink-0">
                       {formatTsShort(report.ts)}
                     </span>
                   </div>
@@ -501,24 +702,30 @@ export default function PortfolioPage() {
                     <th>{t("colWallet")}</th>
                     <th>{t("colMode")}</th>
                     <th>{t("colHealth")}</th>
-                    <th>{t("colStableNav")}</th>
-                    <th>{t("colAssets")}</th>
+                    <th className="text-right">{t("colStableNav")}</th>                    <th>{t("colAssets")}</th>
                     <th>{t("colSnapshot")}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {walletPortfolio.map((row) => {
+                  {walletPortfolio.map((row, index) => {
+                    // Backend snapshots carry epoch seconds
+                    // (account_snapshots uses time.time()); pass the raw
+                    // number through — formatTs's parseDate heuristic
+                    // already handles seconds-vs-milliseconds, so the
+                    // manual ×1000 here produced double conversion.
                     const ts = Number(row.ts);
                     const tsLabel = Number.isFinite(ts)
-                      ? formatTsShort(new Date(ts * 1000).toISOString())
+                      ? formatTsShort(ts)
                       : "–";
                     const assets = Object.entries(row.free_by_asset || {})
                       .sort(([, a], [, b]) => Number(b) - Number(a))
                       .slice(0, 3)
-                      .map(([k, v]) => `${k}=${numberish(v)}`)
+                      .map(([k, v]) => `${numberish(v)} ${k}`)
                       .join(" · ") || "–";
                     return (
-                      <tr key={row.account_id}>
+                      // account_id alone is not unique — one account can
+                      // expose several wallets.
+                      <tr key={`${row.account_id}:${row.wallet_id}:${index}`}>
                         <td className="font-mono text-[12px]">
                           <Link
                             href={`/accounts/${encodeURIComponent(row.account_id)}`}
@@ -531,18 +738,22 @@ export default function PortfolioPage() {
                           {row.wallet_id}
                         </td>
                         <td>
-                          <Pill
-                            tone={row.mode === "live" ? "danger" : "brand"}
-                          >
-                            {row.mode}
-                          </Pill>
+                          {row.mode === "live" || row.mode === "paper" ? (
+                            <ModePill mode={row.mode} />
+                          ) : (
+                            <Pill
+                              tone={row.mode === "canary" ? "warn" : "neutral"}
+                            >
+                              {enumLabel(MODE_LABEL_KEYS, t, row.mode)}
+                            </Pill>
+                          )}
                         </td>
                         <td>
                           <Pill tone={snapshotHealthTone(row.health)}>
-                            {row.health}
+                            {enumLabel(HEALTH_LABEL_KEYS, t, row.health)}
                           </Pill>
                         </td>
-                        <td className="font-mono text-[12px]">
+                        <td className="text-right font-mono tabular-nums text-[12px]">
                           {money(row.nav_usd)}
                         </td>
                         <td className="font-mono text-[12px] text-[color:var(--text-muted)]">
@@ -565,7 +776,13 @@ export default function PortfolioPage() {
           description={t("openPositionsDesc")}
           padded={false}
         >
-          {allPositions.length === 0 ? (
+          {!loaded ? (
+            <div className="px-5 py-4 space-y-2.5" aria-hidden>
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="skeleton h-5 w-full" />
+              ))}
+            </div>
+          ) : allPositions.length === 0 ? (
             <div className="px-5 py-4">
               <Empty label={t("noOpenPositions")} />
             </div>
@@ -575,12 +792,13 @@ export default function PortfolioPage() {
                 <thead>
                   <tr>
                     <th>{t("colAccount")}</th>
+                    <th>{t("colMode")}</th>
                     <th>{t("colMarket")}</th>
                     <th>{t("colSide")}</th>
-                    <th>{t("colSize")}</th>
-                    <th>{t("colAvgEntry")}</th>
-                    <th>{t("colUnrealized")}</th>
-                    <th>{t("colRealized")}</th>
+                    <th className="text-right">{t("colSize")}</th>
+                    <th className="text-right">{t("colAvgEntry")}</th>
+                    <th className="text-right">{t("colUnrealized")}</th>
+                    <th className="text-right">{t("colRealized")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -589,27 +807,33 @@ export default function PortfolioPage() {
                     const sideLabel = p.side
                       ? p.side[0].toUpperCase() + p.side.slice(1).toLowerCase()
                       : "–";
+                    const posMode = p.account_id
+                      ? modeByAccount[p.account_id]
+                      : undefined;
                     return (
                       <tr key={`${p.account_id}-${p.market}-${index}`}>
                         <td className="font-mono text-[12px]">{p.account_id}</td>
+                        <td>
+                          {posMode ? (
+                            <ModePill mode={posMode} />
+                          ) : (
+                            <span className="text-[12px] text-[color:var(--text-muted)]">–</span>
+                          )}
+                        </td>
                         <td className="font-mono text-[12px] text-[color:var(--text-base)]">
                           {p.market || "–"}
                         </td>
                         <td>
                           <Pill tone={isShort ? "danger" : "ok"}>{sideLabel}</Pill>
                         </td>
-                        <td>{numberish(p.size)}</td>
-                        <td>{numberish(p.avg_entry_price)}</td>
-                        <td
-                          className={
-                            Number(p.unrealized_pnl_usd || 0) < 0
-                              ? "text-rose-500"
-                              : "text-emerald-500"
-                          }
-                        >
-                          {money(p.unrealized_pnl_usd)}
+                        <td className="text-right font-mono tabular-nums">{numberish(p.size)}</td>
+                        <td className="text-right font-mono tabular-nums">{numberish(p.avg_entry_price)}</td>
+                        <td className={`text-right font-mono tabular-nums ${pnlToneClass(p.unrealized_pnl_usd)}`}>
+                          {moneySigned(p.unrealized_pnl_usd)}
                         </td>
-                        <td>{money(p.realized_pnl_usd)}</td>
+                        <td className={`text-right font-mono tabular-nums ${pnlToneClass(p.realized_pnl_usd)}`}>
+                          {moneySigned(p.realized_pnl_usd)}
+                        </td>
                       </tr>
                     );
                   })}
@@ -624,31 +848,16 @@ export default function PortfolioPage() {
             title={t("advancedPayloads")}
             description={t("advancedPayloadsDesc")}
           >
-            <details>
-              <summary className="cursor-pointer text-[12px] text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]">
-                {t("portfolioSummary")}
-              </summary>
-              <div className="mt-2">
-                <Json value={summary} />
-              </div>
-            </details>
-            <details className="mt-2">
-              <summary className="cursor-pointer text-[12px] text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]">
-                {t("pnlPayload")}
-              </summary>
-              <div className="mt-2">
-                <Json value={pnl} />
-              </div>
-            </details>
+            <Advanced title={t("portfolioSummary")} storageKey="portfolio-raw-summary">
+              <Json value={summary} />
+            </Advanced>
+            <Advanced title={t("pnlPayload")} storageKey="portfolio-raw-pnl">
+              <Json value={pnl} />
+            </Advanced>
             {health ? (
-              <details className="mt-2">
-                <summary className="cursor-pointer text-[12px] text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]">
-                  {t("controlPlaneHealth")}
-                </summary>
-                <div className="mt-2">
-                  <Json value={health} />
-                </div>
-              </details>
+              <Advanced title={t("controlPlaneHealth")} storageKey="portfolio-raw-health">
+                <Json value={health} />
+              </Advanced>
             ) : null}
           </Card>
         )}
@@ -690,7 +899,7 @@ function AccountHealthCard({
       ? Math.min(1, entry.reserved_usd / Math.max(1, Number(snapshot.total_usd)))
       : 0;
   return (
-    <div className="group rounded-lg border border-[color:var(--line)] p-3.5 space-y-3">
+    <div className="group rounded-lg border border-[color:var(--line)] p-4 space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
         <Link
           href={`/accounts/${encodeURIComponent(entry.account_id)}`}
@@ -698,15 +907,35 @@ function AccountHealthCard({
         >
           {entry.account_id}
         </Link>
-        <Pill tone={modePill(entry.mode)}>{entry.mode}</Pill>
+        {entry.mode === "live" || entry.mode === "paper" ? (
+          <ModePill mode={entry.mode} />
+        ) : (
+          <Pill tone={entry.mode === "canary" ? "warn" : "neutral"}>
+            {enumLabel(MODE_LABEL_KEYS, t, entry.mode)}
+          </Pill>
+        )}
         <span className="text-[12px] text-[color:var(--text-muted)]">
           {entry.venue}/{entry.kind}
         </span>
         <span className="ml-auto">
+          {/* Healthy snapshots read as a quiet dot+label; only degraded /
+              stale / missing states escalate to a coloured Pill so the
+              six-card grid doesn't paint every card green. */}
           {snapshot ? (
-            <Pill tone={snapshotHealthTone(snapshot.health)}>
-              {t("snapshotWithHealth", { health: snapshot.health })}
-            </Pill>
+            snapshot.health === "ok" ? (
+              <StatusDot
+                tone="ok"
+                label={t("snapshotWithHealth", {
+                  health: enumLabel(HEALTH_LABEL_KEYS, t, snapshot.health),
+                })}
+              />
+            ) : (
+              <Pill tone={snapshotHealthTone(snapshot.health)}>
+                {t("snapshotWithHealth", {
+                  health: enumLabel(HEALTH_LABEL_KEYS, t, snapshot.health),
+                })}
+              </Pill>
+            )
           ) : (
             <Pill tone="warn">{t("noSnapshot")}</Pill>
           )}
@@ -739,7 +968,7 @@ function AccountHealthCard({
         {entry.reserved_usd > 0 ? (
           <div>
             <div className="text-[color:var(--text-muted)]">{t("reservedLower")}</div>
-            <div className="text-amber-500">{money(entry.reserved_usd)}</div>
+            <div className="text-warn">{money(entry.reserved_usd)}</div>
           </div>
         ) : null}
         {entry.protection_count > 0 ? (
@@ -760,10 +989,10 @@ function AccountHealthCard({
             <div
               className={`h-full ${
                 reservedShare > 0.7
-                  ? "bg-rose-500"
+                  ? "bg-danger"
                   : reservedShare > 0.4
-                    ? "bg-amber-500"
-                    : "bg-emerald-500"
+                    ? "bg-warn"
+                    : "bg-ok"
               }`}
               style={{ width: `${Math.round(reservedShare * 100)}%` }}
             />
@@ -781,15 +1010,16 @@ function AccountHealthCard({
         <span className="ml-auto flex gap-1.5 flex-wrap items-center">
           {/* "live disabled" is the default for paper accounts — repeating
               it on every card was pure noise, so only the live state gets a
-              pill. Reconcile reveals on hover; "Inspect" was removed because
-              the account id link above opens the same page. */}
+              pill (danger red, same as <ModePill> semantics). The reconcile
+              action is always visible — hover-only controls are unreachable
+              on touch devices. */}
           {entry.live_trading_enabled ? (
-            <Pill tone="warn">{t("liveOk")}</Pill>
+            <Pill tone="danger">{t("liveOk")}</Pill>
           ) : null}
           <button
             onClick={onReconcile}
             disabled={busy}
-            className="btn-ghost text-[12px] py-0.5 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+            className="btn-ghost text-[12px] py-0.5 opacity-60 transition-opacity hover:opacity-100 focus-visible:opacity-100"
           >
             {busy ? t("running") : t("reconcile")}
           </button>

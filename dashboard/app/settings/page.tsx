@@ -17,5 +17,5 @@ export default function SettingsPage() {
   // Section navigation lives in the Codex-style SettingsSidebar (the
   // left rail takeover wired up in AppShell), so the page body renders
   // just the active panel at full width.
-  return <SettingsWorkspace hideSectionNav />;
+  return <SettingsWorkspace />;
 }

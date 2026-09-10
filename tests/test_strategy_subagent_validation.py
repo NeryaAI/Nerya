@@ -41,7 +41,7 @@ subagents: []
 def _files_with_main(main_py: str, *, agent_task: bool = False) -> dict[str, str]:
     files = _files()
     if agent_task:
-        files["strategy.yml"] += "\nexecution_mode: agent\n"
+        files["strategy.yml"] += "\nagent_task:\n  enabled: true\n"
     files["main.py"] = main_py
     return files
 

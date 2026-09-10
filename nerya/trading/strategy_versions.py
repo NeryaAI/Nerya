@@ -175,6 +175,46 @@ def apply_snapshot(paths: WorkspacePaths, sid: str,
             atomic_write_text(root / "prompts" / pname, body)
 
 
+def _current_status(paths: WorkspacePaths, sid: str) -> str:
+    """The strategy's current lifecycle status (empty when unreadable)."""
+    from ..core import yaml_io
+
+    try:
+        doc = yaml_io.load(paths.strategy(sid) / "strategy.yml", default={}) or {}
+    except Exception:
+        return ""
+    return str(doc.get("status") or "") if isinstance(doc, dict) else ""
+
+
+def _with_status(snapshot: dict[str, Any], status: str) -> dict[str, Any]:
+    """Return a copy of ``snapshot`` with ``strategy.yml``'s status set.
+
+    Rollback restores code/config/limits but must never restore a stale
+    lifecycle status (a paused strategy must not resurrect as live), so
+    the caller re-stamps the current status into the manifest before it
+    is written back to disk.
+    """
+    from ..core import yaml_io
+
+    if not status:
+        return snapshot
+    body = (snapshot.get("files") or {}).get("strategy.yml")
+    if not isinstance(body, str):
+        return snapshot
+    try:
+        doc = yaml_io.loads(body)
+    except Exception:
+        return snapshot
+    if not isinstance(doc, dict):
+        return snapshot
+    doc["status"] = str(status)
+    out = dict(snapshot)
+    files = dict(snapshot.get("files") or {})
+    files["strategy.yml"] = yaml_io.dumps(doc)
+    out["files"] = files
+    return out
+
+
 # ---------------------------------------------------------------- versions
 def record_version(paths: WorkspacePaths, sid: str, *,
                    status: str,
@@ -297,29 +337,45 @@ def record_promotion(paths: WorkspacePaths, sid: str, *,
 
 def rollback_to(paths: WorkspacePaths, sid: str, version_id: str, *,
                 reason: str = "",
-                author: str = "runtime") -> PromotionRecord:
+                author: str = "runtime",
+                force: bool = False) -> PromotionRecord:
     """Roll the live strategy files back to the snapshot of ``version_id``.
 
     Writes every file in the target version's snapshot back to disk,
     updates the active pointer, and appends a promotion row tagged
     ``kind="rollback"`` so the history is explicit.
+
+    The lifecycle ``status`` is deliberately NOT restored from the
+    snapshot: a rollback must never resurrect a ``paused`` /
+    ``quarantined`` strategy back to ``live`` (B10) — the current status
+    is preserved and re-stamped onto the restored manifest. Rolling back
+    a canary/live strategy requires ``force`` (or a paused strategy) so
+    code cannot change under in-flight orders.
     """
     target = get_version(paths, sid, version_id)
     if target is None:
         raise ValueError(f"unknown version {version_id!r} for strategy {sid!r}")
+    current_status = _current_status(paths, sid)
+    if current_status in ("canary", "live") and not force:
+        raise ValueError(
+            f"strategy {sid!r} is {current_status}; pause it before rolling "
+            "back, or pass force=True"
+        )
     current_active = active_version_id(paths, sid)
-    apply_snapshot(paths, sid, target.snapshot)
+    apply_snapshot(paths, sid, _with_status(target.snapshot, current_status))
     _set_active_version(paths, sid, target.version_id)
     # Also append a ledger row so the most-recent active matches.
     snapshot_again = build_snapshot(paths, sid)
-    # After apply_snapshot the live files equal the target snapshot; the
-    # resulting content-hash equals target.version_id.
-    assert ("v-" + _hash_snapshot(snapshot_again)) == target.version_id, (
+    # After apply_snapshot the live files equal the target snapshot
+    # except the lifecycle status, which stays at its current value by
+    # design; restoring the target's status on the re-read snapshot must
+    # reproduce the target's content hash exactly.
+    assert ("v-" + _hash_snapshot(_with_status(snapshot_again, target.status))) == target.version_id, (
         "rollback snapshot did not produce the expected version id"
     )
     rec = PromotionRecord(
         strategy_id=sid, ts=now_iso(), kind="rollback",
-        from_status=target.status, to_status=target.status,
+        from_status=current_status, to_status=current_status,
         version_id=target.version_id,
         previous_version_id=current_active,
         reason=reason or f"rollback_to:{version_id}",

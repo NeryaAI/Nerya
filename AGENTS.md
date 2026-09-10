@@ -211,7 +211,47 @@ lands it under `workspace/providers/`.
 Drop a new file in `nerya/llm/adapters/<provider>.py` inheriting
 `OpenAICompatAdapter` (if OpenAI-compatible) or a fresh adapter that
 returns `ProviderResult`. Register it in
-`nerya/llm/adapters/__init__.py::builtin_providers`.
+`nerya/llm/adapters/__init__.py::builtin_providers`. Workspace-only
+providers don't need source changes: call
+`nerya/llm/adapters::register_custom_provider(name, factory)` (a
+workspace plugin can do this from `setup`) and the factory is merged
+into every future `builtin_providers()` call.
+
+### A workspace plugin (tools / events / providers / team templates)
+
+Two ways in:
+
+- **Operator-authored**: create `workspace/plugins/<id>/plugin.py`
+  directly — see `nerya/harness/loader.py` and the working example in
+  `workspace_template/plugins/example_audit_log/`.
+- **Agent-authored** (on operator request): the `plugin_author` skill
+  drafts the code, statically validates it without executing it, and
+  stages a `plugin_proposal` (kind in
+  `nerya/evolution/patch_proposal.py::ALLOWED_KINDS`, never
+  auto-applied) under `evolution/proposals/*/after/plugins/<id>/`.
+  Operator approval lands it in `plugins/<id>/`; the kernel loads it
+  at next boot. Never `write_file` into `plugins/` to bypass the lane.
+
+From `setup(ctx)` the plugin may:
+
+- `ctx.register_tool(ToolDescriptor(...))` — lands on the kernel's
+  `ToolRegistry` (cannot shadow native/MCP tools).
+- `ctx.on_waterfall("tools/pre-execute" | "tools/post-execute", fn)` —
+  interceptable tool-pipeline events; post-execute listeners may
+  mutate or replace results. Bridge failures never crash a turn.
+- `ctx.register_llm_provider(...)` / `ctx.register_team_template(...)`.
+- Every contribution returns a disposer; plugin failures are journaled
+  to `journals/plugins.jsonl` and never abort boot.
+
+Design brief: `docs/extensibility-upgrade.md`.
+
+### A new team template
+
+Write `workspace/teams/templates/<id>.yml` (exact
+`TeamTemplate.asdict()` shape; example shipped in
+`workspace_template/teams/templates/`). Workspace templates cannot
+shadow builtin ids. Builtin templates stay in
+`nerya/teams/templates.py::BUILTIN_TEMPLATES`.
 
 ## 6. Testing guarantees
 

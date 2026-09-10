@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { useTranslations } from "next-intl";
 import type {
   AssistantMessage,
@@ -13,6 +13,7 @@ import type { ApprovalCard } from "../../lib/clientApi";
 import {
   AgentSegmentBlock,
   type AgentSegmentInfo,
+  formatDuration,
   LiveAgentTranscriptBlock,
   type MemberStep,
   NativeBlocksTrack,
@@ -43,34 +44,6 @@ function formatTime(ts: number): string {
 }
 
 
-function PendingTrail() {
-  // Lightweight placeholder shown only before the first event lands.
-  // Once the kernel emits its first ``message.delta`` / ``tool.start`` /
-  // ``turn.step`` we switch to the real ``NativeBlocksTrack`` stream.
-  const steps = [
-    "route selection",
-    "model decision",
-    "tool execution",
-    "observation / replan",
-  ];
-  return (
-    <div className="mt-2 grid grid-cols-2 gap-1.5">
-      {steps.map((step, i) => (
-        <div
-          key={step}
-          className="rounded-md border border-brand-500/10 bg-brand-500/[0.04] px-2 py-1.5 text-[11px] text-ink-300 flex items-center gap-2"
-        >
-          <span
-            className="typing-dot"
-            style={{ animationDelay: `${i * 0.18}s` }}
-          />
-          <span>{step}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function withoutTextBlocks(blocks: NativeBlockEnvelope[]): NativeBlockEnvelope[] {
   return blocks.filter((env) => {
     const block = env.block ?? (env as unknown as { kind?: string });
@@ -94,38 +67,6 @@ function mergeActivityEvents(
     out.push(ev);
   }
   return out;
-}
-
-function useReplyStreamActive(msg: AssistantMessage, text: string): boolean {
-  const [activeUntil, setActiveUntil] = useState(0);
-  const wasLoadingRef = useRef(Boolean(msg.loading));
-  const justSettled =
-    wasLoadingRef.current && !msg.loading && !msg.error && Boolean(text.trim());
-
-  useEffect(() => {
-    const wasLoading = wasLoadingRef.current;
-    const isLoading = Boolean(msg.loading);
-
-    if (isLoading || msg.error) {
-      wasLoadingRef.current = isLoading;
-      setActiveUntil(0);
-      return;
-    }
-    if (!wasLoading || !text.trim()) {
-      wasLoadingRef.current = isLoading;
-      return;
-    }
-
-    const chars = Array.from(text).length;
-    const timeoutMs = Math.min(12_000, Math.max(1_600, chars * 18));
-    const until = Date.now() + timeoutMs;
-    wasLoadingRef.current = isLoading;
-    setActiveUntil(until);
-    const timer = window.setTimeout(() => setActiveUntil(0), timeoutMs);
-    return () => window.clearTimeout(timer);
-  }, [msg.error, msg.loading, msg.id, text]);
-
-  return justSettled || activeUntil > Date.now();
 }
 
 function classifyError(raw: string): {
@@ -206,7 +147,8 @@ function classifyError(raw: string): {
   return { kind, message: message || text, hint, showRawByDefault };
 }
 
-function ErrorCard({ error }: { error: string }) {
+function ErrorCard({ error, onRetry }: { error: string; onRetry?: () => void }) {
+  const tCommon = useTranslations("common");
   const { kind, message, hint, showRawByDefault } = classifyError(error);
   const [showRaw, setShowRaw] = useState(showRawByDefault);
   // The classifier collapses the original ``LLMError: openai messages
@@ -216,32 +158,44 @@ function ErrorCard({ error }: { error: string }) {
   const hasRawDetail = error.trim() !== `${kind}: ${message}`;
   return (
     <div
-      className="rounded-lg border border-rose-500/30 bg-rose-500/[0.06] px-3 py-2.5 space-y-1.5"
+      className="rounded-lg border border-danger/30 bg-danger/[0.06] px-3 py-2.5 space-y-1.5"
       data-turn-section="error"
       role="alert"
     >
-      <div className="flex items-center gap-2 text-[12px] text-rose-300 font-medium">
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-rose-500" />
+      <div className="flex items-center gap-2 text-[12px] text-danger font-medium">
+        <span className="inline-block w-1.5 h-1.5 rounded-full bg-danger" />
         Turn failed · {kind}
       </div>
-      <div className="text-sm text-rose-50 whitespace-pre-wrap break-words">
+      <div className="text-sm text-ink-100 whitespace-pre-wrap break-words">
         {message}
       </div>
       {hint ? (
-        <div className="text-xs text-rose-200/70">{hint}</div>
+        <div className="text-xs text-danger/70">{hint}</div>
+      ) : null}
+      {onRetry ? (
+        <div className="pt-0.5">
+          <button
+            type="button"
+            onClick={onRetry}
+            className="inline-flex items-center gap-1 rounded-md border border-danger/40 px-2 py-0.5 text-[12px] text-danger hover:bg-danger/10 transition-colors"
+            data-turn-section="error-retry"
+          >
+            {tCommon("retry")}
+          </button>
+        </div>
       ) : null}
       {hasRawDetail ? (
         <div className="pt-1">
           <button
             onClick={() => setShowRaw((v) => !v)}
-            className="text-[12px] text-rose-300/80 hover:text-rose-200 cursor-pointer transition-colors"
+            className="text-[12px] text-danger/80 hover:text-danger cursor-pointer transition-colors"
             data-turn-section="error-toggle"
           >
             {showRaw ? "▾ hide raw error" : "▸ show raw error / trace"}
           </button>
           {showRaw ? (
             <pre
-              className="mt-1.5 text-[11px] leading-relaxed text-rose-100/85 bg-rose-950/40 border border-rose-500/20 rounded-md px-2.5 py-2 overflow-x-auto whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto font-mono"
+              className="mt-1.5 text-[11px] leading-relaxed text-danger/85 bg-danger/10 border border-danger/20 rounded-md px-2.5 py-2 overflow-x-auto whitespace-pre-wrap break-all max-h-[280px] overflow-y-auto font-mono"
               data-turn-section="error-raw"
             >
               {error}
@@ -280,7 +234,7 @@ function NeryaSpeaker({
 }) {
   return (
     <div className="flex justify-start">
-      <div className="max-w-[92%] min-w-[200px] w-full">
+      <div className="group max-w-[92%] min-w-[200px] w-full">
         <div className="flex items-center gap-2 mb-1.5">
           <div className="relative h-8 w-8 shrink-0">
             {streaming ? (
@@ -304,7 +258,9 @@ function NeryaSpeaker({
             </div>
           ) : null}
           {elapsedMs ? (
-            <div className="text-[10px] text-ink-500 font-mono">{elapsedMs}ms</div>
+            <div className="text-[10px] text-ink-500 font-mono">
+              {formatDuration(elapsedMs)}
+            </div>
           ) : null}
         </div>
         <div className="bubble-ai space-y-2">{children}</div>
@@ -315,14 +271,10 @@ function NeryaSpeaker({
 }
 
 function AnswerPanel({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-lg border border-ink-700/70 bg-ink-800/55 px-3 py-2.5">
-      <div className="mb-1.5 text-[12px] font-semibold leading-none text-ink-400">
-        Answer
-      </div>
-      <div className="leading-relaxed text-ink-100">{children}</div>
-    </div>
-  );
+  // ``bubble-ai`` already draws the single bubble chrome (border + bg);
+  // wrapping the reply in another bordered panel produced a
+  // bubble-in-bubble, so this is now just a text container.
+  return <div className="leading-relaxed text-ink-100">{children}</div>;
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -394,8 +346,13 @@ function MessageActions({
   onDelete?: () => void;
 }) {
   const t = useTranslations("chat");
+  // Hidden until the parent message (``group``) is hovered or the row
+  // itself receives keyboard focus — keeps long threads quiet while the
+  // copy/edit/delete actions stay reachable and accessible. Touch devices
+  // have no hover, so the row falls back to always-visible via the
+  // ``hover:none`` media query.
   return (
-    <div className="mt-1 flex items-center gap-1.5 text-[10px]">
+    <div className="mt-1 flex items-center gap-1.5 text-[10px] opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
       <CopyButton text={text} />
       {onEdit ? (
         <IconButton label={t("editMessage")} onClick={onEdit}>
@@ -540,7 +497,7 @@ export function UserBubble({
 }) {
   return (
     <div className="flex justify-end" data-turn-role="user" data-turn-id={msg.id}>
-      <div className="max-w-[85%]">
+      <div className="group max-w-[85%]">
         <div className="bubble-user space-y-2">
           {editing ? (
             <InlineEditor
@@ -579,6 +536,7 @@ export function AssistantBubble({
   pendingApprovals,
   onApprovalAction,
   resolvingApprovalIds,
+  onRetry,
   onEdit,
   onDelete,
   editing = false,
@@ -591,6 +549,7 @@ export function AssistantBubble({
   pendingApprovals?: Map<string, ApprovalCard>;
   onApprovalAction?: (callbackData: string) => void;
   resolvingApprovalIds?: Set<string>;
+  onRetry?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
   editing?: boolean;
@@ -686,7 +645,6 @@ export function AssistantBubble({
       ),
     }));
   })();
-  const streamFinalReply = useReplyStreamActive(msg, reasoning);
 
   // --- LIVE multi-agent layout -------------------------------------------
   // Nerya streams in its own bubble (team traces hoisted out), followed by one
@@ -715,7 +673,7 @@ export function AssistantBubble({
           ) : (
             <div className="text-ink-400 text-xs italic" data-turn-section="pending">
               {/* team dispatched but Nerya has no other inline activity yet */}
-              <PendingTrail />
+              Waiting for the kernel to emit the first block…
             </div>
           )}
         </NeryaSpeaker>
@@ -746,7 +704,6 @@ export function AssistantBubble({
             resolvingApprovalIds={resolvingApprovalIds}
             suppressTopProposalHoist
             suppressAgentResultCallIds={agentSegments.suppressedCallIds}
-            streamText={streamFinalReply}
           />
         </NeryaSpeaker>
 
@@ -778,7 +735,7 @@ export function AssistantBubble({
                   />
                 ) : (
                   <>
-                    <StreamedMarkdown text={reasoning} active={streamFinalReply} />
+                    <StreamedMarkdown text={reasoning} />
                     <MessageActions
                       text={reasoning}
                       onEdit={onEdit}
@@ -805,7 +762,7 @@ export function AssistantBubble({
       data-turn-id={msg.id}
       data-turn-loading={msg.loading ? "true" : "false"}
     >
-      <div className="max-w-[92%] min-w-[200px] w-full">
+      <div className="group max-w-[92%] min-w-[200px] w-full">
         <div className="flex items-center gap-2 mb-1.5">
           <div className="relative h-8 w-8 shrink-0">
             {showStreaming ? (
@@ -825,7 +782,7 @@ export function AssistantBubble({
           ) : null}
           {msg.elapsed_ms && !msg.loading ? (
             <div className="text-[10px] text-ink-500 font-mono">
-              {msg.elapsed_ms}ms
+              {formatDuration(msg.elapsed_ms)}
             </div>
           ) : null}
         </div>
@@ -846,12 +803,11 @@ export function AssistantBubble({
             </div>
           ) : null}
 
-          {msg.error ? <ErrorCard error={msg.error} /> : null}
+          {msg.error ? <ErrorCard error={msg.error} onRetry={onRetry} /> : null}
 
           {msg.loading && !hasLive && !hasTurnBody ? (
             <div className="text-ink-400 text-xs italic" data-turn-section="pending">
               Waiting for the kernel to emit the first block…
-              <PendingTrail />
             </div>
           ) : null}
 
@@ -887,7 +843,6 @@ export function AssistantBubble({
                 replayEvents={replayEvents}
                 resolvingApprovalIds={resolvingApprovalIds}
                 suppressTopProposalHoist
-                streamText={streamFinalReply}
               />
             </div>
           ) : null}
@@ -927,7 +882,7 @@ export function AssistantBubble({
                   />
                 ) : (
                   <>
-                    <StreamedMarkdown text={reasoning} active={streamFinalReply} />
+                    <StreamedMarkdown text={reasoning} />
                     <MessageActions
                       text={reasoning}
                       onEdit={onEdit}

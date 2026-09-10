@@ -33,7 +33,7 @@ export function WorkspaceUiHome() {
       <WorkspaceUiRenderer widgets={widgets} />
 
       {ui.data?.warnings?.length ? (
-        <div className="mt-2 text-[11px] text-amber-400/90">
+        <div className="mt-2 text-[11px] text-warn">
           {ui.data.warnings.join(" · ")}
         </div>
       ) : null}

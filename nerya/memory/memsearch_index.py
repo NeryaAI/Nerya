@@ -515,13 +515,11 @@ def search(config: Config, *, query: str, top_k: int = 5) -> dict[str, Any]:
     # live-feed shows operator searches as they happen. Best-effort —
     # failures here never block the result.
     try:
-        from .writer import MemoryWriter
-        MemoryWriter(config=config).record_search(
-            query=clean,
-            result_count=len(rows or []),
-            latency_ms=latency_ms,
-            source="api:memsearch",
-        )
+        from .activity import MemoryActivityLog, MemoryActivityEvent
+        MemoryActivityLog(config=config).append(MemoryActivityEvent.search(
+            query=clean, result_count=len(rows or []),
+            latency_ms=latency_ms, source="api:memsearch",
+        ))
     except Exception:
         pass
     return {

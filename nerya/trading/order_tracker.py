@@ -23,8 +23,10 @@ view computed from ``state``/``terminal_at``/``not_found_streak``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -53,7 +55,7 @@ OrderState = Literal[
 ]
 
 TERMINAL_STATES: tuple[OrderState, ...] = (
-    "filled", "canceled", "rejected", "expired", "failed",
+    "filled", "canceled", "rejected", "expired", "failed", "lost",
 )
 
 
@@ -68,17 +70,27 @@ LOST_ORDER_NOT_FOUND_THRESHOLD = 4
 def make_client_order_id(
     *, strategy_id: str, executor_id: str, leg: str = "0", seq: int = 0
 ) -> str:
-    """stable, traceable client order id.
+    """Stable, venue-safe client order id.
 
-    ``nerya:{strategy_id}:{executor_id}:{leg}:{seq}`` is a 64-char
-    upper bound which fits Binance's 36-char clientOrderId limit *only*
-    for short ids — callers should keep ``strategy_id`` and
-    ``executor_id`` ≤14 chars each. Longer ids fall back to a hash
-    suffix (TODO).
+    Venues (Bybit ``orderLinkId``, Binance ``newClientOrderId``, …) only
+    accept ``[A-Za-z0-9_-]`` and cap the length at 36 — the old
+    colon-delimited format (``nerya:a:b:c:d``) violated both. The
+    descriptive scope is folded into an 8-char sha1 hex prefix while the
+    monotonic ``seq`` stays in the clear:
+
+        ``nerya-<sha1(strategy|executor|leg)[:8]>-<seq>``
+
+    e.g. ``nerya-1a2b3c4d-17`` — deterministic, unique per ``seq``,
+    and always within the charset/length limits regardless of how long
+    ``strategy_id`` / ``executor_id`` are.
     """
-    safe_strategy = strategy_id.replace(":", "_")[:14]
-    safe_executor = executor_id.replace(":", "_")[:14]
-    return f"nerya:{safe_strategy}:{safe_executor}:{leg}:{seq}"
+    digest = hashlib.sha1(
+        f"{strategy_id}|{executor_id}|{leg}".encode("utf-8")
+    ).hexdigest()[:8]
+    client_order_id = f"nerya-{digest}-{max(0, int(seq))}"
+    if len(client_order_id) > 36:  # absurd seq values still stay venue-safe
+        client_order_id = client_order_id[:36]
+    return client_order_id
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +193,10 @@ class OrderTracker:
         self.cached_retention_s = float(cached_retention_s)
         self.lost_threshold = int(lost_threshold)
         self._con = None
+        # Serialises the read-check-write in ``record_fill`` so the
+        # background poller and a concurrent executor tick cannot both
+        # observe the same ``filled_size`` watermark and double-insert.
+        self._lock = threading.Lock()
 
     def _con_lazy(self):
         if self._con is None:
@@ -354,15 +370,79 @@ class OrderTracker:
         side: Literal["buy", "sell"] | None = None,
         ts: float | None = None,
         meta: dict[str, Any] | None = None,
-    ) -> TrackedFill:
+        cumulative_filled: float | None = None,
+    ) -> TrackedFill | None:
+        """Record a fill and roll it up onto the order row.
+
+        When ``cumulative_filled`` (the venue's cumulative filled size,
+        e.g. ``ack.filled``) is supplied it acts as a watermark: the
+        recorded increment is ``cumulative_filled - order.filled_size``
+        and a report at or below the watermark is a replay — ``None`` is
+        returned and nothing is inserted. The fill id is then derived
+        deterministically (``<order_id>:<cumulative>``) so the executor
+        tick and the background poller converge on the same row instead
+        of double-counting a partial fill. Callers must tolerate a
+        ``None`` return (skip the PositionBook mirror — the winning
+        caller already applied it).
+        """
+        with self._lock:
+            return self._record_fill_locked(
+                order_id=order_id,
+                price=price,
+                size_base=size_base,
+                fee_usd=fee_usd,
+                funding_usd=funding_usd,
+                source=source,
+                side=side,
+                ts=ts,
+                meta=meta,
+                cumulative_filled=cumulative_filled,
+            )
+
+    def _record_fill_locked(
+        self,
+        *,
+        order_id: str,
+        price: float,
+        size_base: float,
+        fee_usd: float,
+        funding_usd: float,
+        source: str,
+        side: Literal["buy", "sell"] | None,
+        ts: float | None,
+        meta: dict[str, Any] | None,
+        cumulative_filled: float | None,
+    ) -> TrackedFill | None:
         ts = ts if ts is not None else time.time()
         order = self.get(order_id)
         if order is None:
             raise ValueError(f"unknown order_id: {order_id}")
+        # R2B9: a late venue fill must not resurrect an already-finalized
+        # order. ``lost``/``rejected``/``failed``/``expired`` rows have
+        # been finalized (reservation released, run closed) — flipping
+        # them back to partially_filled/filled would mirror position that
+        # the run already accounted as dead. ``filled`` and ``canceled``
+        # stay allowed: a cancel/complete race may still book the last
+        # venue fill on an otherwise-terminal order.
+        if order.state in ("lost", "rejected", "failed", "expired"):
+            log.warning(
+                "refusing late %s fill for order %s in terminal state %s",
+                source, order_id, order.state,
+            )
+            return None
+        if cumulative_filled is not None:
+            cumulative_filled = round(float(cumulative_filled), 12)
+            size_base = cumulative_filled - float(order.filled_size or 0.0)
+            if size_base <= 1e-12:
+                # Stale/replayed ack — the fill was already recorded.
+                return None
+            fill_id = f"{order_id}:{cumulative_filled}"
+        else:
+            fill_id = _new_fill_id()
         eff_side = side or order.side
         notional = float(price) * float(size_base)
         fill = TrackedFill(
-            fill_id=_new_fill_id(),
+            fill_id=fill_id,
             order_id=order_id,
             client_order_id=order.client_order_id,
             account_id=order.account_id,
@@ -433,7 +513,84 @@ class OrderTracker:
             "source": source,
         })
         self._notify_fill(order, fill, new_state)
+        self._mirror_fill_to_history(order, fill)
         return fill
+
+    def _mirror_fill_to_history(self, order: TrackedOrder, fill: TrackedFill) -> None:
+        """Best-effort write-side mirror into the strategy history ledger.
+
+        D6: strategy performance / tuning metrics read
+        ``strategy_history/<id>/fills.jsonl``, which nothing in the
+        execution path wrote — mirror every recorded fill (and, when the
+        order's own average price makes it meaningful, an approximate
+        realized-PnL line) so those readers see real data. Trading must
+        never fail because history mirroring fails.
+        """
+        if not order.strategy_id:
+            return
+        try:
+            from ..strategy_history import store as _history
+
+            session_id = order.meta.get("session_id")
+            _history.record_fill(
+                self.paths,
+                strategy_id=order.strategy_id,
+                session_id=session_id,
+                fill={
+                    "fill_id": fill.fill_id,
+                    "order_id": fill.order_id,
+                    "client_order_id": fill.client_order_id,
+                    "market": fill.market,
+                    "side": fill.side,
+                    "price": fill.price,
+                    "size_base": fill.size_base,
+                    "notional_usd": fill.notional_usd,
+                    "fee_usd": fill.fee_usd,
+                    "source": fill.source,
+                    "ts": fill.ts,
+                },
+            )
+            prev_avg = float(order.avg_price or 0.0)
+            prev_filled = float(order.filled_size or 0.0)
+            if prev_avg > 0 and prev_filled > 0:
+                # Approximate realized PnL from the order's own rolling
+                # average: sells are treated as closing long size, buys
+                # as closing short size. Best effort only.
+                if fill.side == "sell":
+                    realized = (fill.price - prev_avg) * fill.size_base
+                else:
+                    realized = (prev_avg - fill.price) * fill.size_base
+                _history.record_pnl(
+                    self.paths,
+                    strategy_id=order.strategy_id,
+                    session_id=session_id,
+                    pnl={
+                        "fill_id": fill.fill_id,
+                        "order_id": fill.order_id,
+                        "market": fill.market,
+                        "realized_pnl_usd": realized,
+                        "fee_usd": fill.fee_usd,
+                        "ts": fill.ts,
+                    },
+                )
+        except Exception:  # pragma: no cover - mirroring must never throw
+            log.exception("strategy history fill mirror failed for order %s", fill.order_id)
+
+    def annotate(self, order_id: str, note: str) -> None:
+        """Append a durable note to the order's meta + event log."""
+        order = self.get(order_id)
+        if order is None:
+            return
+        meta = dict(order.meta)
+        notes = list(meta.get("notes") or [])
+        notes.append(note)
+        meta["notes"] = notes
+        con = self._con_lazy()
+        con.execute(
+            "UPDATE orders SET meta_json = ?, updated_at = ? WHERE order_id = ?",
+            (json.dumps(meta), time.time(), order_id),
+        )
+        self._record_event(order_id, "note", {"note": note})
 
     # -- exchange feedback ------------------------------------------------------
     def mark_seen(self, order_id: str, *, ts: float | None = None) -> None:

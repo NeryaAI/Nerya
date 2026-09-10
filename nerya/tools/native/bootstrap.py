@@ -192,6 +192,7 @@ from .strategy_runtime import (
     STRATEGY_BACKTEST_SCHEMA,
     STRATEGY_DELETE_PROPOSAL_SCHEMA,
     STRATEGY_DRAFT_PROPOSAL_SCHEMA,
+    STRATEGY_IMPORT_EXTERNAL_SCHEMA,
     STRATEGY_KILL_SWITCH_SCHEMA,
     STRATEGY_PROMOTE_SCHEMA,
     STRATEGY_RUN_HISTORY_SCHEMA,
@@ -205,6 +206,7 @@ from .strategy_runtime import (
     strategy_backtest_handler,
     strategy_delete_proposal_handler,
     strategy_draft_proposal_handler,
+    strategy_import_external_handler,
     strategy_kill_switch_handler,
     strategy_promote_handler,
     strategy_run_history_handler,
@@ -1401,6 +1403,13 @@ def _wrap_strategy_submit_proposal(deps: NativeToolDeps):
 def _wrap_strategy_validate(deps: NativeToolDeps):
     def handler(call: ToolCall):
         return strategy_validate_handler(call, config=deps.config)
+
+    return handler
+
+
+def _wrap_strategy_import_external(deps: NativeToolDeps):
+    def handler(call: ToolCall):
+        return strategy_import_external_handler(call, config=deps.config)
 
     return handler
 
@@ -3189,6 +3198,31 @@ def register_native_tools(
                 tags=("strategy", "validate", "read"),
                 result_kind="json",
                 auto_approve=True,
+            ),
+            make_native_descriptor(
+                name="strategy_import_external",
+                description=(
+                    "Import strategy code written for a mainstream quant "
+                    "framework (Freqtrade IStrategy, VNpy CtaTemplate) as "
+                    "a Nerya strategy package. The source is detected via "
+                    "AST scan (framework='auto'), copied into "
+                    "workspace/strategies/<strategy_id>/, and wrapped in a "
+                    "generated entrypoint so it runs on Nerya's own "
+                    "runtime — paper/shadow/live ticks and backtest replay "
+                    "— with every order still flowing through the Risk "
+                    "Gate. Returns the package location plus the standard "
+                    "validator verdict; follow up with strategy_backtest "
+                    "or strategy_run_tick."
+                ),
+                input_schema=STRATEGY_IMPORT_EXTERNAL_SCHEMA,
+                handler=_wrap_strategy_import_external(deps),
+                risk=RiskLevel.WRITE,
+                permission_scope=PermissionScope.WORKSPACE,
+                read_only=False,
+                is_concurrency_safe=False,
+                mutates_paths=True,
+                tags=("strategy", "import", "compat", "write"),
+                result_kind="json",
             ),
             make_native_descriptor(
                 name="strategy_delete_proposal",

@@ -105,7 +105,7 @@ export function StrategyStatusBar({
           <button
             onClick={() => void runNow()}
             disabled={disabled || busy !== null}
-            className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-50 text-white text-xs rounded px-3 py-1.5"
+            className="btn btn-primary text-xs"
           >
             {busy === "run_tick" ? t("running") : t("runTick")}
           </button>

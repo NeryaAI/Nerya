@@ -38,6 +38,7 @@ from ..wallet.errors import (
     WalletDependencyError,
     WalletPolicyDenied,
     WalletProviderNotFound,
+    WalletTransportError,
 )
 
 
@@ -67,6 +68,12 @@ def _meaningful_wallet_cfg(cfg: dict[str, Any]) -> bool:
             "dist/index.js",
             "scripts/bitget-wallet-agent-api.py",
         }:
+            continue
+        if key == "chains":
+            # Shipped by DEFAULT_CONFIG (deep-merged into every config);
+            # its presence does not mean the operator configured a legacy
+            # block here. Customized chain lists belong in
+            # wallet.providers.<id> bindings.
             continue
         return True
     return False
@@ -179,11 +186,21 @@ def _maybe_create_wallet_account(
     aid_hint = _sanitize_account_id(aid_hint)
     if existing_wallet_profile is not None:
         aid = existing_wallet_profile.id
-    elif aid_hint in existing_profiles:
-        aid = aid_hint
     else:
+        # An operator-typed hint that collides with an existing row may
+        # only be adopted when that row is itself wallet-shaped
+        # (kind=chain/dex) and carries no conflicting wallet_id.
+        # Otherwise (e.g. the hint matches an existing CEX account)
+        # allocating a fresh id stops the wallet payload from
+        # overwriting that row's identity.
+        clash = existing_profiles.get(aid_hint) if aid_hint in existing_profiles else None
+        adopt_hint = clash is not None and str(
+            getattr(clash, "kind", "") or ""
+        ) in ("chain", "dex") and str(
+            getattr(clash, "wallet_id", "") or ""
+        ) in ("", wallet_id)
         try:
-            aid = _next_available_account_id(client, aid_hint)
+            aid = aid_hint if adopt_hint else _next_available_account_id(client, aid_hint)
         except TradingError as exc:
             return {"ok": False, "error": "account_id_allocation_failed",
                     "detail": str(exc)}
@@ -345,6 +362,19 @@ def _configure_wallet_binding(
             initial_balance_usd=initial_balance_usd,
             balances=balances,
         )
+    # The binding itself saved, but the auto-created chain account row
+    # may not have. Surface that failure as a top-level ``account_warning``
+    # (shape mirrors the dashboard's ``WalletAutoCreateAccountWarning`` in
+    # clientApi.ts: {error, detail, attempted_mode}) so the UI renders a
+    # warning instead of a silent success toast.
+    account_warning: dict[str, Any] | None = None
+    if account_result is not None and account_result.get("ok") is False:
+        detail = account_result.get("detail")
+        account_warning = {
+            "error": str(account_result.get("error") or "account_create_failed"),
+            "detail": str(detail) if detail else None,
+            "attempted_mode": str(account_mode) if account_mode else None,
+        }
     return {
         "ok": True,
         "provider": name,
@@ -354,6 +384,7 @@ def _configure_wallet_binding(
         "config": clean_cfg if name else {},
         "bindings": wallet_mod.list_configured_providers(client.config.data),
         "account": account_result,
+        "account_warning": account_warning,
     }
 
 
@@ -374,6 +405,16 @@ def _wallet_schema(provider: str) -> list[dict[str, Any]]:
     return [dict(f) for f in fields]
 
 
+# Config keys that stay in plaintext even when the provider schema does
+# not declare them: operator-facing labels/descriptions. Plain boolean
+# values are equally public. Everything else missing from the schema is
+# treated as sensitive by default so mystery credential fields (e.g.
+# ``mnemonic``, ``seed_phrase``) never land unencrypted in nerya.yml.
+_WALLET_PUBLIC_CFG_FIELDS = frozenset({
+    "label", "labels", "title", "description", "notes", "comment",
+})
+
+
 def _vaultify_wallet_config(
     client,
     *,
@@ -386,7 +427,10 @@ def _vaultify_wallet_config(
 
     Wallet providers accept ``<field>_ref`` keys for sensitive fields.
     Public fields (project ids, skill paths, RPC URLs) stay in the config
-    block so the dashboard can keep rendering them.
+    block so the dashboard can keep rendering them. Fields absent from
+    the provider schema default to *sensitive* — except a small public
+    allowlist (labels/descriptions, plain booleans) — so unknown
+    credentials are vaultified instead of being persisted in plaintext.
     """
 
     schema = {f.get("name"): f for f in _wallet_schema(provider)}
@@ -399,7 +443,15 @@ def _vaultify_wallet_config(
             continue
         value = raw
         spec = schema.get(field)
-        sensitive = bool(spec.get("sensitive", True)) if spec else field.endswith(("_key", "_secret", "_passphrase", "_token"))
+        if spec is not None:
+            sensitive = bool(spec.get("sensitive", True))
+        elif field in _WALLET_PUBLIC_CFG_FIELDS or isinstance(value, bool):
+            # Explicitly public: labels/descriptions and plain booleans.
+            sensitive = False
+        else:
+            # Unknown field: default to sensitive (vaultified) so an
+            # unrecognised credential never persists in plaintext.
+            sensitive = True
         if value in (None, ""):
             continue
         if isinstance(value, (dict, list)):
@@ -1000,7 +1052,9 @@ def _auth_start_args(provider: str, payload: dict[str, Any]) -> tuple[list[str] 
         return ["auth", "login", email, "--json"], "otp", ["otp"]
     if provider == "binance_agentic":
         return ["auth", "signin", "--json"], "qr_approval", ["qrCodeId"]
-    if provider in {"bitget", "self_custody", "byreal"}:
+    if provider in {"bitget", "self_custody", "byreal", "metamask"}:
+        # No external login CLI: credentials come from the workspace vault
+        # (metamask seed/key) or a local CLI keypair (byreal).
         return None, "no_login_required", []
     return None, "auth_cli_unavailable", []
 
@@ -1304,6 +1358,11 @@ def routes():
             )
         except WalletProviderNotFound as exc:
             return {"provider": name, "ready": False, "reason": str(exc)}
+        except wallet_mod.WalletError as exc:
+            # e.g. an unreadable vault: a config/ops problem must come
+            # back as a clean wallet error, not a 500 with a traceback.
+            return {"provider": name, "ready": False,
+                    "error": "wallet_config_error", "reason": str(exc)}
         r = p.readiness().to_dict()
         r["active"] = (name == (client.config.data.get("wallet") or {}).get("provider"))
         try:
@@ -1430,6 +1489,13 @@ def routes():
                     "install_hint": exc.install_hint}
         except WalletPolicyDenied as exc:
             return {"ok": False, "error": "policy_denied", "reason": str(exc)}
+        except WalletTransportError as exc:
+            # Provider transport failure (RPC 5xx, timeout, crash): a
+            # 200 + ok:false envelope hides the outage from proxy
+            # monitoring. The dispatcher honours a ``_status`` key
+            # (local_server._status_body_from_result) — surface a 502.
+            return {"ok": False, "error": "provider_error",
+                    "reason": str(exc), "_status": 502}
         except Exception as exc:  # pragma: no cover
             return {"ok": False, "error": "provider_error", "reason": str(exc)}
 

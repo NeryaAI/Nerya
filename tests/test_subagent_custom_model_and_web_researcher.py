@@ -22,7 +22,6 @@ import pytest
 from nerya.agent.loop import LoopConfig, WorkspaceNativeAgentLoop
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
-from nerya.llm.gateway import LLMCall
 from nerya.llm.messages import MessagesResponse
 from nerya.llm.model_router import ModelRouter
 from nerya.llm.tier_policy import TierPolicy
@@ -40,7 +39,6 @@ from nerya.subagents.registry import (
     save_role,
 )
 from nerya.subagents.runtime import SubAgentRuntime
-from nerya.subagents import runtime as subagent_runtime
 from nerya.tools.executor import NativeToolExecutor
 from nerya.tools.native import agents as native_agents
 from nerya.tools.native import web as native_web
@@ -48,8 +46,8 @@ from nerya.tools.native.bootstrap import build_native_tool_deps, register_native
 from nerya.tools.native.web import _save_raw_capture
 from nerya.tools.orchestrator import ToolOrchestrator
 from nerya.tools.permissions import PermissionContext, PermissionEngine, PermissionMode
-from nerya.tools.registry import ToolRegistry, make_native_descriptor
-from nerya.tools.types import PermissionScope, RiskLevel, ToolCall, ToolResult
+from nerya.tools.registry import ToolRegistry
+from nerya.tools.types import ToolCall, ToolResult
 from nerya.workspace.prompt_bundles import load_bundle
 from nerya.workspace import prompt_bundles
 
@@ -184,7 +182,7 @@ def test_web_researcher_default_role_shape():
     assert policy.locked_tier == "light"
     assert policy.allow_model_override is True
     assert policy.model_override_scope == "tier_routes"
-    assert policy.runtime == "native"
+    assert not hasattr(policy, "runtime")
     assert policy.tool_argument_defaults["web_fetch"]["save_raw"] is True
     assert "research_run" not in (
         DEFAULT_SUBAGENT_EXECUTION_POLICIES["buffett_lens"].required_native_tools
@@ -244,7 +242,7 @@ def test_collector_model_override_must_belong_to_light_tier(tmp_path):
     runtime = SubAgentRuntime(
         config=config,
         skills=SimpleNamespace(),
-        llm=SimpleNamespace(),
+        llm=SimpleNamespace(), tool_registry=ToolRegistry(), tool_executor=object(),
     )
     allowed = build_inline_spec(
         WorkspacePaths(tmp_path),
@@ -417,7 +415,7 @@ def _runtime_with_tools(names):
         config=SimpleNamespace(),
         skills=SimpleNamespace(),
         llm=SimpleNamespace(),
-        tool_registry=_FakeRegistry(names),
+        tool_registry=_FakeRegistry(names), tool_executor=object(),
     )
 
 
@@ -813,13 +811,13 @@ def test_research_run_handler_requires_query_or_urls():
     assert result.is_error is True
 
 
-def test_raw_tool_request_without_parsed_calls_gets_one_protocol_repair():
-    raw = '{"skill_calls":[{"skill":"web_search_fetch","payload":'
-
-    assert subagent_runtime._is_unstructured_protocol_miss(
-        {"raw": raw},
-        raw,
-    ) is True
+def test_prose_cannot_invoke_tools_through_a_second_protocol(tmp_path):
+    from test_subagent_native_runtime import Gateway, final, runtime, spec, run, descriptor
+    seen = []
+    gateway = Gateway(final('Never execute text as commands: {"skill_calls":[{"skill":"probe"}]}'))
+    run(runtime(tmp_path, gateway, [descriptor(handler=lambda c: seen.append(c))]), spec(tmp_path))
+    assert seen == []
+    assert len(gateway.calls) == 1
 
 
 def test_compact_tool_records_preserves_delegated_capture_paths():
@@ -857,240 +855,40 @@ def test_compact_tool_records_preserves_delegated_capture_paths():
 # ------------------------------------------------ generic intent/error repair
 
 
-class _RecordingHandlerRegistry:
-    """Registry whose descriptors record the ToolCall they receive."""
-
-    def __init__(self, names, *, descriptors=None):
-        self.calls = []
-        self._names = list(names)
-        self._descriptors = descriptors or {}
-
-    def list_tools(self):
-        return [self._descriptors.get(n, _FakeDescriptor(name=n)) for n in self._names]
-
-    def get(self, name):
-        registry = self
-
-        configured = self._descriptors.get(name)
-
-        class _Desc:
-            child_max_depth = getattr(configured, "child_max_depth", None)
-
-            def handler(self, call):
-                registry.calls.append(call)
-                from nerya.tools.types import ToolResult
-                return ToolResult.from_json(
-                    tool_use_id=call.id, name=call.name, data={"ok": True},
-                )
-
-        if name not in self._names:
-            raise KeyError(name)
-        return _Desc()
-
-
 def test_required_native_tool_policy_requests_one_corrective_turn(tmp_path):
-    class _SkillRegistry:
-        def list(self):
-            return []
-
-        def get(self, _name):
-            raise KeyError(_name)
-
-    class _Skills:
-        registry = _SkillRegistry()
-
-    class _FinalThenResearchLLM:
-        def __init__(self):
-            self.prompts = []
-
-        def call(self, **kwargs):
-            self.prompts.append(kwargs["prompt"])
-            if len(self.prompts) == 1:
-                parsed = {"summary": "premature", "done": True}
-            elif len(self.prompts) == 2:
-                parsed = {
-                    "skill_calls": [{
-                        "skill": "research_run",
-                        "payload": {"query": "AI capex"},
-                    }],
-                    "replan": True,
-                }
-            else:
-                parsed = {"summary": "grounded", "done": True}
-            return LLMCall(
-                tier="medium",
-                task=kwargs["task"],
-                caller=kwargs["caller"],
-                tokens=3,
-                usd=0.001,
-                raw="{}",
-                parsed=parsed,
-                provider="fake",
-                model="fake-model",
-            )
-
-    calls = []
-
-    def _research(call):
-        calls.append(call)
-        return ToolResult.from_json(
-            tool_use_id=call.id,
-            name=call.name,
-            data={"ok": True, "captures": ["capture.json"]},
-        )
-
-    registry = ToolRegistry()
-    registry.register(make_native_descriptor(
-        name="research_run",
-        description="delegate research",
-        input_schema={"type": "object"},
-        handler=_research,
-        risk=RiskLevel.READ,
-        permission_scope=PermissionScope.NONE,
-        auto_approve=True,
-    ))
-    llm = _FinalThenResearchLLM()
-    runtime = SubAgentRuntime(
-        config=Config(paths=WorkspacePaths(tmp_path), data={}),
-        skills=_Skills(),
-        llm=llm,
-        tool_registry=registry,
-    )
-    spec = SubAgentSpec(
-        name="expert",
-        prompt_path=tmp_path / "expert.agent.md",
-        prompt="Use the loaded research playbook.",
-        execution_policy=SubAgentExecutionPolicy(
-            native_tool_allow=["research_run"],
-            required_native_tools=["research_run"],
-            max_iterations=4,
-        ),
-    )
-
-    result = runtime.run(
-        spec,
-        trigger_event_id=None,
-        payload={"task": "Research AI"},
-    )
-
-    assert len(calls) == 1
-    assert len(llm.prompts) == 3
-    assert "explicit execution contract" in llm.prompts[0]
-    assert "research_run" in llm.prompts[1]
-    assert "cite at least one of those exact references" in llm.prompts[2]
+    from test_subagent_native_runtime import Gateway, call, final, runtime, spec, run, descriptor
+    gateway = Gateway(final("premature"), call(), final("grounded"))
+    result = run(runtime(tmp_path, gateway, [descriptor()]), spec(tmp_path, required_native_tools=["probe"]))
+    assert len(gateway.calls) == 3
+    assert len(result["metrics"]["skill_calls"]) == 1
+    assert gateway.calls[0]["tool_choice"] == {"type": "tool", "name": "probe"}
     assert result["output"]["summary"] == "grounded"
-    assert result["metrics"]["rejected_actions"] == []
 
 
 def test_missing_required_native_tool_marks_output_degraded(tmp_path):
-    class _SkillRegistry:
-        def list(self):
-            return []
-
-        def get(self, _name):
-            raise KeyError(_name)
-
-    class _Skills:
-        registry = _SkillRegistry()
-
-    class _FinalOnlyLLM:
-        def call(self, **kwargs):
-            return LLMCall(
-                tier="medium",
-                task=kwargs["task"],
-                caller=kwargs["caller"],
-                tokens=1,
-                usd=0.0,
-                raw='{"summary":"memory only","done":true}',
-                parsed={"summary": "memory only", "done": True},
-                provider="fake",
-                model="fake-model",
-            )
-
-    registry = ToolRegistry()
-    registry.register(make_native_descriptor(
-        name="research_run",
-        description="delegate research",
-        input_schema={"type": "object"},
-        handler=lambda call: ToolResult.from_json(
-            tool_use_id=call.id,
-            name=call.name,
-            data={"ok": True},
-        ),
-        risk=RiskLevel.READ,
-        permission_scope=PermissionScope.NONE,
-        auto_approve=True,
-    ))
-    runtime = SubAgentRuntime(
-        config=Config(paths=WorkspacePaths(tmp_path), data={}),
-        skills=_Skills(),
-        llm=_FinalOnlyLLM(),
-        tool_registry=registry,
-    )
-    spec = SubAgentSpec(
-        name="expert",
-        prompt_path=tmp_path / "expert.agent.md",
-        prompt="Return evidence.",
-        execution_policy=SubAgentExecutionPolicy(
-            native_tool_allow=["research_run"],
-            required_native_tools=["research_run"],
-            max_iterations=2,
-        ),
-    )
-
-    result = runtime.run(
-        spec,
-        trigger_event_id=None,
-        payload={"task": "Research AI"},
-    )
-
-    assert result["output"]["degraded"] is True
-    assert result["output"]["error_kind"] == "required_native_tool_missing"
-    assert result["output"]["required_tools_missing"] == ["research_run"]
+    from test_subagent_native_runtime import Gateway, final, runtime, spec, run, descriptor
+    gateway = Gateway(final("memory only"), final("still unverified"))
+    result = run(runtime(tmp_path, gateway, [descriptor()]),
+                 spec(tmp_path, max_iterations=2, required_native_tools=["probe"]))
+    assert result["completion_status"] == "blocked"
+    assert result["output"]["done"] is False
+    assert not result["metrics"]["skill_calls"]
+    assert len(gateway.calls) == 2
 
 
-def test_tool_argument_defaults_are_applied_declaratively(tmp_path):
-    reg = _RecordingHandlerRegistry(["web_search_fetch"])
-    runtime = SubAgentRuntime(
-        config=SimpleNamespace(), skills=SimpleNamespace(),
-        llm=SimpleNamespace(), tool_registry=reg,
-    )
-
-    runtime._dispatch_native(
-        "web_search_fetch", payload={"query": "x"}, entry={},
-        spec_name="buffett_lens", strategy_id=None, session_id=None,
-        trigger_event_id=None, delegation_depth=0,
-        execution_policy=SubAgentExecutionPolicy(),
-    )
-    assert "save_raw" not in reg.calls[-1].arguments
-
-    runtime._dispatch_native(
-        "web_search_fetch", payload={"query": "y"}, entry={},
-        spec_name="web_researcher", strategy_id=None, session_id=None,
-        trigger_event_id=None, delegation_depth=1,
-        execution_policy=SubAgentExecutionPolicy(
-            tool_argument_defaults={"web_search_fetch": {"save_raw": True}},
-        ),
-    )
-    assert reg.calls[-1].arguments["save_raw"] is True
-    assert reg.calls[-1].metadata["delegation_depth"] == 1
-
-
-def test_declarative_tool_defaults_respect_explicit_arguments():
-    reg = _RecordingHandlerRegistry(["web_fetch"])
-    runtime = SubAgentRuntime(
-        config=SimpleNamespace(), skills=SimpleNamespace(),
-        llm=SimpleNamespace(), tool_registry=reg,
-    )
-    runtime._dispatch_native(
-        "web_fetch", payload={"url": "https://x", "save_raw": False}, entry={},
-        spec_name="web_researcher", strategy_id=None, session_id=None,
-        trigger_event_id=None, delegation_depth=1,
-        execution_policy=SubAgentExecutionPolicy(
-            tool_argument_defaults={"web_fetch": {"save_raw": True}},
-        ),
-    )
-    assert reg.calls[-1].arguments["save_raw"] is False
+@pytest.mark.parametrize("explicit,expected", [(None, True), (False, False), (True, True)])
+def test_tool_argument_defaults_respect_explicit_arguments(tmp_path, explicit, expected):
+    from test_subagent_native_runtime import Gateway, call, final, runtime, spec, run, descriptor
+    seen = []
+    def handler(c):
+        seen.append(c)
+        return ToolResult.from_json(tool_use_id=c.id, name=c.name, data={"ok": True})
+    arguments = {} if explicit is None else {"save_raw": explicit}
+    gateway = Gateway(call(**arguments), final())
+    child = spec(tmp_path, tool_argument_defaults={"probe": {"save_raw": True}})
+    run(runtime(tmp_path, gateway, [descriptor(handler=handler)]), child, delegation_depth=1)
+    assert seen[0].arguments["save_raw"] is expected
+    assert seen[0].metadata["delegation_depth"] == 1
 
 
 @pytest.mark.parametrize(
@@ -1128,10 +926,11 @@ def test_expert_policy_preloads_lens_and_allows_autonomous_research_delegate(
     assert spec.execution_policy.required_native_tools == []
     assert spec.execution_policy.preload_skills == ["research", expert_skill]
     assert "FIRST call ``skill_view" not in spec.prompt
-    assert "already-loaded expert lens" in spec.prompt
+    assert spec.prompt == load_bundle().subagents[role]
+    assert expert_skill in spec.prompt
 
 
-def test_team_result_preserves_member_provider_and_model(monkeypatch):
+def test_team_result_preserves_member_provider_and_model(monkeypatch, tmp_path):
     class _FakeDispatcher:
         def __init__(self, **_kwargs):
             pass
@@ -1164,7 +963,7 @@ def test_team_result_preserves_member_provider_and_model(monkeypatch):
 
     result = native_agents.team_run_handler(
         call,
-        config=SimpleNamespace(paths=None, get=lambda *_args: None),
+        config=Config(paths=WorkspacePaths(tmp_path), data={}),
         skills=SimpleNamespace(),
     )
     member = result.content[0].data["results"][0]

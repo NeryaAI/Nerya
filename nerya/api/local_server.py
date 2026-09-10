@@ -7,6 +7,7 @@ and CI. Production deployments should front it with a real framework.
 from __future__ import annotations
 
 import gc
+import hmac
 import json
 import logging
 import math
@@ -70,12 +71,14 @@ def _json_safe(value: Any) -> Any:
 
 _TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
     "/agent/run_turn",
+    "/agent/run_turn_internal",
     "/approvals/callback",
     "/strategy/close_positions",
     "/trading/cancel",
     "/trading/submit",
     "/wallet/swap",
 })
+_DASHBOARD_INTERNAL_HEADER = "x-nerya-dashboard-internal"
 
 
 def _stamp_trusted_auth(payload: dict[str, Any], auth: auth_mod.AuthResult) -> dict[str, Any]:
@@ -193,7 +196,17 @@ def _register(method: str, path: str, handler):
     _ROUTES.append((method.upper(), path, handler))
 
 
-def _collect_routes() -> None:
+def _collect_routes(extra_modules: tuple = ()) -> None:
+    """Merge every route module into ``_ROUTES`` exactly once.
+
+    The explicit tuple below is the *order anchor* — it keeps route
+    registration deterministic and reviewable. Any ``routes_*`` module
+    present in the package but missing from the tuple is picked up by
+    :func:`_discover_route_modules` (pkgutil scan) and appended in
+    alphabetical order, so adding a route module no longer requires
+    editing two places (imports + tuple) in this file. Test seams may
+    inject synthetic modules via ``extra_modules``.
+    """
     if _ROUTES:
         return
     base_modules = (routes_health, routes_auth, routes_workspace, routes_workspace_ui, routes_agent,
@@ -216,9 +229,40 @@ def _collect_routes() -> None:
                             routes_runtime_flags,
                             # Raw tool-result store
                             routes_tool_raw)
-    for mod in base_modules:
+    modules = base_modules + _discover_route_modules(base_modules) + tuple(extra_modules)
+    for mod in modules:
         for method, path, handler in mod.routes():
             _register(method, path, handler)
+
+
+def _discover_route_modules(known: tuple) -> tuple:
+    """Import every ``nerya.api.routes_*`` module missing from ``known``.
+
+    Failure to import a discovered module is logged and skipped — a
+    broken optional surface must not prevent the API from booting.
+    """
+
+    import importlib
+    import pkgutil
+    from pathlib import Path
+
+    known_names = {getattr(m, "__name__", "") for m in known}
+    package_dir = Path(__file__).resolve().parent
+    discovered: list = []
+    for _, mod_name, _ in pkgutil.iter_modules([str(package_dir)]):
+        if not mod_name.startswith("routes_"):
+            continue
+        full = f"{__package__}.{mod_name}"
+        if full in known_names:
+            continue
+        try:
+            discovered.append(importlib.import_module(full))
+        except Exception:
+            log.warning("route module %s failed to import", full,
+                        exc_info=True)
+    # Alphabetical for deterministic ordering of the tail.
+    discovered.sort(key=lambda m: m.__name__)
+    return tuple(discovered)
 
 
 def _path_params(pattern: str, path: str) -> dict[str, str] | None:
@@ -542,6 +586,18 @@ def build_server(
                     path=path,
                     client_addr=client_addr,
                 )
+            if result.ok and path == "/agent/run_turn_internal":
+                expected = str(
+                    os.environ.get("NERYA_DASHBOARD_INTERNAL_TOKEN")
+                    or config.get("runtime.auth.dashboard_internal_token")
+                    or ""
+                ).strip()
+                presented = self.headers.get(_DASHBOARD_INTERNAL_HEADER, "").strip()
+                if not expected or not presented or not hmac.compare_digest(presented, expected):
+                    result = auth_mod.AuthResult(
+                        ok=False, status=403, actor="unknown",
+                        reason="dashboard_internal_assertion_required",
+                    )
             return result
 
         def do_GET(self):  # noqa: N802

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-import json
 from threading import Barrier
 import time
 
@@ -154,203 +153,22 @@ def test_concurrent_runtime_startup_applies_migrations_once(tmp_path):
     assert actor_ids == [f"operator-{index}" for index in range(workers)]
 
 
-def test_existing_jsonl_facts_are_imported_without_losing_query_recall(tmp_path):
+def test_owned_markdown_projection_scrubs_forgotten_records(tmp_path):
     from nerya.memory.runtime import MemoryRuntime
-
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(parents=True)
-    legacy_fact = {
-        "ts": "2026-01-02T03:04:05Z",
-        "scope": "global",
-        "file": "memory/global.md",
-        "strategy_id": "",
-        "key": "trading.preferred_horizon",
-        "value": "操作者偏好三到五天的波段周期。",
-        "tags": ["preference"],
-        "source_turn": "legacy-turn",
-        "superseded": False,
-    }
-    legacy_line = json.dumps(legacy_fact, ensure_ascii=False) + "\n"
-    (memory_dir / "index.jsonl").write_text(legacy_line, encoding="utf-8")
-
-    runtime = MemoryRuntime(
-        Config(paths=WorkspacePaths(root=tmp_path), data={}),
-        actor_id="default",
-    )
-
-    hits = runtime.recall("偏好的波段周期", limit=5)
-    assert [hit.content for hit in hits] == [legacy_fact["value"]]
-
-    assert (
-        runtime.forget(
-            key="trading.preferred_horizon",
-            scope="global",
-        )
-        == 1
-    )
-    (memory_dir / "index.jsonl").write_text(legacy_line, encoding="utf-8")
-    restarted = MemoryRuntime(
-        Config(paths=WorkspacePaths(root=tmp_path), data={}),
-        actor_id="default",
-    )
-    assert restarted.recall("偏好的波段周期", limit=5) == []
-
-
-def test_non_owner_actor_cannot_claim_workspace_legacy_memory(tmp_path):
-    from nerya.memory.runtime import MemoryRuntime
-
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(parents=True)
-    (memory_dir / "global.md").write_text(
-        "# Global memory\n\n## 2026-02-03T04:05:06Z\n工作区旧偏好只属于默认操作者。\n",
-        encoding="utf-8",
-    )
-    config = Config(paths=WorkspacePaths(root=tmp_path), data={})
-
-    gateway_user = MemoryRuntime(config, actor_id="gateway-user")
-    owner = MemoryRuntime(config, actor_id="default")
-
-    assert gateway_user.recall("工作区旧偏好") == []
-    assert [hit.content for hit in owner.recall("工作区旧偏好")] == [
-        "工作区旧偏好只属于默认操作者。"
-    ]
-
-
-def test_non_owner_write_cannot_overwrite_unclaimed_legacy_memory(tmp_path):
-    from nerya.memory.runtime import MemoryRuntime
-
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(parents=True)
-    legacy_markdown = (
-        "# Global memory\n\n"
-        "## 2026-02-03T04:05:06Z\n"
-        "尚未迁移的旧 Markdown 记忆必须保留。\n"
-    )
-    legacy_jsonl = (
-        json.dumps(
-            {
-                "ts": "2026-02-03T04:05:07Z",
-                "scope": "global",
-                "file": "memory/global.md",
-                "key": "legacy.jsonl.fact",
-                "value": "尚未迁移的旧 JSONL 记忆也必须保留。",
-                "tags": ["learning"],
-                "superseded": False,
-            },
-            ensure_ascii=False,
-        )
-        + "\n"
-    )
-    (memory_dir / "global.md").write_text(legacy_markdown, encoding="utf-8")
-    (memory_dir / "index.jsonl").write_text(legacy_jsonl, encoding="utf-8")
-    config = Config(paths=WorkspacePaths(root=tmp_path), data={})
-
-    non_owner = MemoryRuntime(config, actor_id="gateway-user")
-    written = non_owner.remember(
-        category="learning",
-        content="网关用户自己的 SQLite 记忆。",
-        key="gateway.private.fact",
-        scope="global",
-    )
-
-    assert written.ok
-    assert [hit.content for hit in non_owner.recall("网关用户自己的 SQLite 记忆")] == [
-        "网关用户自己的 SQLite 记忆。"
-    ]
-    assert (memory_dir / "global.md").read_text(encoding="utf-8") == legacy_markdown
-    assert (memory_dir / "index.jsonl").read_text(encoding="utf-8") == legacy_jsonl
-
-    owner = MemoryRuntime(config, actor_id="default")
-    assert owner.recall("旧 Markdown 记忆")[0].content == (
-        "尚未迁移的旧 Markdown 记忆必须保留。"
-    )
-    assert owner.recall("旧 JSONL 记忆")[0].content == (
-        "尚未迁移的旧 JSONL 记忆也必须保留。"
-    )
-
-
-def test_existing_timestamped_markdown_is_imported_as_structured_memory(tmp_path):
-    from nerya.memory.runtime import MemoryRuntime
-
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(parents=True)
-    (memory_dir / "global.md").write_text(
-        "# Global memory\n\n"
-        "## 2026-02-03T04:05:06Z\n"
-        "实盘前必须先完成至少七天的纸面执行。\n",
-        encoding="utf-8",
-    )
-
-    runtime = MemoryRuntime(
-        Config(paths=WorkspacePaths(root=tmp_path), data={}),
-        actor_id="default",
-    )
-
-    hits = runtime.recall("实盘纸面执行", limit=5)
-    assert [hit.content for hit in hits] == ["实盘前必须先完成至少七天的纸面执行。"]
-
-
-def test_legacy_decision_and_signal_markdown_files_are_imported(tmp_path):
-    from nerya.memory.runtime import MemoryRuntime
-
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(parents=True)
-    (memory_dir / "decisions.md").write_text(
-        "# Decisions\n\n## 2026-02-03T04:05:06Z\n杠杆上限固定为两倍。\n",
-        encoding="utf-8",
-    )
-    (memory_dir / "signals.md").write_text(
-        "# Signals\n\n## 2026-02-03T04:05:07Z\n资金费率出现异常抬升。\n",
-        encoding="utf-8",
-    )
-
-    runtime = MemoryRuntime(
-        Config(paths=WorkspacePaths(root=tmp_path), data={}),
-        actor_id="default",
-    )
-
-    assert runtime.recall("杠杆上限")[0].category == "decision"
-    assert runtime.recall("资金费率异常")[0].category == "signal"
-
-
-def test_markdown_and_jsonl_are_scrubbable_compatibility_projections(tmp_path):
-    from nerya.memory.runtime import MemoryRuntime
-
-    runtime = MemoryRuntime(
-        Config(
-            paths=WorkspacePaths(root=tmp_path),
-            data={"memory": {"legacy_owner_actor": "operator-1"}},
-        ),
-        actor_id="operator-1",
-    )
-    secret = "最大可接受回撤是百分之八。"
-    runtime.remember(
-        category="preference",
-        content=secret,
-        key="risk.max_drawdown",
-        scope="global",
-    )
-
-    markdown = (tmp_path / "memory" / "global.md").read_text(encoding="utf-8")
-    jsonl_projection = (tmp_path / "memory" / "index.jsonl").read_text(
-        encoding="utf-8",
-    )
-    assert secret in markdown
-    assert secret in jsonl_projection
-
-    runtime.forget(key="risk.max_drawdown", scope="global")
-
-    assert secret not in (tmp_path / "memory" / "global.md").read_text(
-        encoding="utf-8",
-    )
-    assert secret not in (tmp_path / "memory" / "index.jsonl").read_text(
-        encoding="utf-8",
-    )
+    config = Config(paths=WorkspacePaths(tmp_path), data={"memory": {"projection_actor": "operator-1"}})
+    memory = MemoryRuntime(config, actor_id="operator-1")
+    content = "最大可接受回撤是百分之八。"
+    assert memory.remember(category="preference", content=content, key="risk.max_drawdown").ok
+    target = tmp_path / "memory" / "global.md"
+    assert content in target.read_text(encoding="utf-8")
+    assert not config.paths.memory_index.exists()
+    assert memory.forget(key="risk.max_drawdown") == 1
+    assert content not in target.read_text(encoding="utf-8")
+    assert memory.recall("可接受回撤") == []
 
 
 def test_context_strips_forged_memory_fence_tags(tmp_path):
     from nerya.memory.runtime import MemoryRuntime
-
     runtime = MemoryRuntime(
         Config(paths=WorkspacePaths(root=tmp_path), data={}),
         actor_id="operator-1",
@@ -421,7 +239,7 @@ def test_retention_days_expires_canonical_memory_and_its_projection(
         paths=WorkspacePaths(root=tmp_path),
         data={
             "memory": {
-                "legacy_owner_actor": "operator-1",
+                "projection_actor": "operator-1",
                 "write_rules": {
                     "preference": {"retention_days": 1},
                 },
@@ -555,7 +373,7 @@ def test_generated_projections_never_cross_actor_boundaries(tmp_path):
 
     config = Config(
         paths=WorkspacePaths(root=tmp_path),
-        data={"memory": {"legacy_owner_actor": "alice"}},
+        data={"memory": {"projection_actor": "alice"}},
     )
     alice = MemoryRuntime(config, actor_id="alice")
     alice.remember(
@@ -589,7 +407,7 @@ def test_generated_markdown_is_not_reimported_as_memory(tmp_path):
 
     config = Config(
         paths=WorkspacePaths(root=tmp_path),
-        data={"memory": {"legacy_owner_actor": "operator-1"}},
+        data={"memory": {"projection_actor": "operator-1"}},
     )
     content = "异常处理笔记如下。\n## Exception\n只记录真实错误，不记录生成标记。"
     runtime = MemoryRuntime(config, actor_id="operator-1")
@@ -771,7 +589,7 @@ def test_recall_expiry_also_scrubs_the_human_projection(tmp_path, monkeypatch):
         paths=WorkspacePaths(root=tmp_path),
         data={
             "memory": {
-                "legacy_owner_actor": "operator-1",
+                "projection_actor": "operator-1",
                 "write_rules": {"preference": {"retention_days": 1}},
             }
         },

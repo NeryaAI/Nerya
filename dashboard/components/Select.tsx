@@ -1,28 +1,9 @@
 "use client";
 
-/**
- * Custom <Select> built on PortalDropdown.
- *
- * Replaces native ``<select>`` elements which inherit OS chrome that
- * clashes with the airy violet-glass design. The portal anchor avoids
- * any clipping issues from ``overflow-x-auto`` / ``overflow-hidden``
- * on parent layout shells.
- *
- * The trigger and option list both share the airy violet/glass tokens
- * used elsewhere on the dashboard so it slots into existing forms
- * without any custom alignment.
- */
-
-import {
-  ReactNode,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { ChevronDownIcon } from "./icons";
-import { PortalDropdown, useDropdown } from "./PortalDropdown";
+import { useMemo, type ReactNode } from "react";
+import * as Menu from "@radix-ui/react-dropdown-menu";
+import { useTranslations } from "next-intl";
+import { CheckIcon, ChevronDownIcon } from "./icons";
 
 export interface SelectOption<T extends string = string> {
   value: T;
@@ -30,7 +11,6 @@ export interface SelectOption<T extends string = string> {
   description?: ReactNode;
   disabled?: boolean;
 }
-
 interface SelectProps<T extends string = string> {
   value: T | null | undefined;
   onChange: (value: T) => void;
@@ -46,151 +26,67 @@ interface SelectProps<T extends string = string> {
   renderTrigger?: (active: SelectOption<T> | null) => ReactNode;
 }
 
-const SIZE_CLASSES: Record<NonNullable<SelectProps["size"]>, string> = {
-  sm: "h-8 px-2.5 text-[12px]",
-  md: "h-9 px-3 text-[13px]",
-};
-
+/** Backwards-compatible form API, backed by Radix's single-choice menu.
+ * Radix owns arrow navigation, typeahead, disabled items, collision and focus.
+ * Keep its native menu/radio semantics instead of nesting buttons in a listbox.
+ */
 export function Select<T extends string = string>({
-  value,
-  onChange,
-  options,
-  placeholder,
-  className,
-  disabled,
-  id,
-  ariaLabel,
-  panelWidth,
-  align = "left",
-  size = "md",
-  renderTrigger,
+  value, onChange, options, placeholder, className, disabled, id, ariaLabel,
+  panelWidth, align = "left", size = "md", renderTrigger,
 }: SelectProps<T>) {
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const dropdown = useDropdown();
-  const active = useMemo(
-    () => options.find((option) => option.value === value) ?? null,
-    [options, value],
-  );
-  const sizeCls = SIZE_CLASSES[size];
-
-  const [autoWidth, setAutoWidth] = useState<number>(220);
-  useLayoutEffect(() => {
-    if (panelWidth || !triggerRef.current) return;
-    const update = () => {
-      const w = triggerRef.current?.offsetWidth;
-      if (w && w > 0) setAutoWidth(w);
-    };
-    update();
-    if (typeof ResizeObserver !== "undefined") {
-      const obs = new ResizeObserver(update);
-      obs.observe(triggerRef.current);
-      return () => obs.disconnect();
-    }
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, [panelWidth]);
-
-  // Track open transitions so we re-measure right before opening.
-  useEffect(() => {
-    if (!dropdown.open) return;
-    if (panelWidth || !triggerRef.current) return;
-    const w = triggerRef.current.offsetWidth;
-    if (w && w > 0) setAutoWidth(w);
-  }, [dropdown.open, panelWidth]);
-
+  const t = useTranslations("ui");
+  const active = useMemo(() => options.find((option) => option.value === value) ?? null, [options, value]);
   return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        id={id}
-        aria-haspopup="listbox"
-        aria-expanded={dropdown.open}
-        aria-label={ariaLabel}
-        disabled={disabled}
-        onClick={() => {
-          if (!disabled) dropdown.toggle();
-        }}
-        className={[
-          "inline-flex w-full items-center justify-between gap-2 rounded-lg",
-          "border border-[color:var(--line)] bg-[color:var(--card-hi)] hover:border-[color:var(--line-hi)]",
-          "text-[color:var(--text-base)] transition-colors backdrop-blur-soft",
-          dropdown.open ? "border-brand-500/45 bg-[color:var(--card-hi)]" : "",
-          disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer",
-          sizeCls,
-          className ?? "",
-        ].join(" ")}
-      >
-        <span className="min-w-0 flex-1 truncate text-left">
-          {renderTrigger
-            ? renderTrigger(active)
-            : active
-            ? active.label
-            : (
-              <span className="text-[color:var(--text-muted)]">{placeholder ?? "–"}</span>
-            )}
-        </span>
-        <ChevronDownIcon
-          size={14}
+    <Menu.Root>
+      <Menu.Trigger asChild>
+        <button
+          type="button"
+          id={id}
+          aria-label={ariaLabel}
+          disabled={disabled}
           className={[
-            "shrink-0 text-[color:var(--text-muted)] transition-transform",
-            dropdown.open ? "rotate-180" : "",
+            "group inline-flex w-full min-w-0 items-center justify-between gap-2 rounded-lg border border-[color:var(--line)] bg-[color:var(--card-hi)] text-[color:var(--text-base)] transition-colors",
+            "hover:border-[color:var(--line-hi)] data-[state=open]:border-brand-500/55 disabled:cursor-not-allowed disabled:opacity-60",
+            size === "sm" ? "min-h-8 px-2.5 text-xs" : "min-h-9 px-3 text-[13px]",
+            className ?? "",
           ].join(" ")}
-        />
-      </button>
-      <PortalDropdown
-        open={dropdown.open}
-        onClose={dropdown.close}
-        anchorRef={triggerRef}
-        align={align}
-        width={panelWidth ?? autoWidth}
-        offset={6}
-        className="max-h-72 overflow-y-auto rounded-xl border border-[color:var(--line)] bg-[color:var(--card)] py-1 shadow-[0_2px_8px_rgba(2,6,23,0.18)]"
-      >
-        <ul role="listbox" className="text-[13px]">
-          {options.length === 0 ? (
-            <li className="px-3 py-2 text-[12px] text-ink-500 italic">
-              No options
-            </li>
-          ) : (
-            options.map((option) => {
-              const selected = option.value === value;
-              return (
-                <li key={option.value} role="option" aria-selected={selected}>
-                  <button
-                    type="button"
-                    disabled={option.disabled}
-                    onClick={() => {
-                      if (option.disabled) return;
-                      onChange(option.value);
-                      dropdown.close();
-                    }}
-                    className={[
-                      "flex w-full items-start gap-2 px-3 py-1.5 text-left transition-colors",
-                      option.disabled
-                        ? "cursor-not-allowed opacity-50"
-                        : "cursor-pointer hover:bg-brand-500/12",
-                      selected ? "bg-brand-500/14 text-[color:var(--text-base)]" : "text-[color:var(--text-base)]",
-                    ].join(" ")}
-                  >
-                    <span className="min-w-0 flex-1 truncate">
-                      {option.label}
-                    </span>
-                    {selected ? (
-                      <span className="mt-[2px] h-1.5 w-1.5 rounded-full bg-brand-300" />
-                    ) : null}
-                  </button>
-                  {option.description ? (
-                    <div className="px-3 pb-1.5 text-[11px] text-ink-500">
-                      {option.description}
-                    </div>
-                  ) : null}
-                </li>
-              );
-            })
-          )}
-        </ul>
-      </PortalDropdown>
-    </>
+        >
+          <span className="min-w-0 flex-1 truncate text-left">
+            {renderTrigger ? renderTrigger(active) : active ? active.label : <span className="text-[color:var(--text-muted)]">{placeholder ?? "–"}</span>}
+          </span>
+          <ChevronDownIcon size={14} className="shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+        </button>
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Content
+          align={align === "right" ? "end" : "start"}
+          sideOffset={6}
+          collisionPadding={8}
+          className="ui-select-menu"
+          style={{ width: panelWidth ?? "var(--radix-dropdown-menu-trigger-width)" }}
+          aria-label={ariaLabel}
+        >
+          {options.length ? (
+            <Menu.RadioGroup value={value ?? ""} onValueChange={(next) => onChange(next as T)}>
+              {options.map((option) => (
+                <Menu.RadioItem
+                  key={option.value}
+                  value={option.value}
+                  disabled={option.disabled}
+                  textValue={typeof option.label === "string" ? option.label : undefined}
+                  className="ui-select-option"
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block break-words">{option.label}</span>
+                    {option.description ? <span className="mt-0.5 block text-xs leading-relaxed text-[color:var(--text-muted)]">{option.description}</span> : null}
+                  </span>
+                  <span className="flex w-4 shrink-0 items-center justify-center"><Menu.ItemIndicator><CheckIcon size={14} /></Menu.ItemIndicator></span>
+                </Menu.RadioItem>
+              ))}
+            </Menu.RadioGroup>
+          ) : <div className="px-3 py-3 text-sm text-[color:var(--text-muted)]">{t("noOptions")}</div>}
+        </Menu.Content>
+      </Menu.Portal>
+    </Menu.Root>
   );
 }

@@ -13,6 +13,7 @@ from ..skills.builtin.backtest.scripts.engine import run_backtest
 from ..skills.builtin.backtest.scripts.metrics import assemble_metrics
 from ..skills.builtin.backtest.scripts.render_chart import render_chart
 from ..skills.builtin.backtest.scripts.report import render_report
+from ..skills.builtin.backtest.scripts.slippage import venue_of
 from ..skills.builtin.backtest.scripts.writers import write_csv_artifacts
 from ..core import yaml_io
 import json
@@ -32,10 +33,16 @@ def backtest_replay(
 ) -> dict[str, Any]:
     chosen_markets = list(markets or engine_kwargs.pop("markets", None) or ["MOCK:BTCUSDT"])
     overrides: dict[str, Any] = {"window_days": window_days, "tf": tf}
+    # Key the per-venue overrides by the venues actually present in the
+    # markets list (same ``VENUE:SYMBOL`` prefix convention the engine's
+    # fee/slippage lookup uses), so BYBIT/other-venue strategies get the
+    # requested fees too. The legacy three stay included for callers
+    # that swap in MOCK/PAPER/BINANCE markets downstream.
+    venues = {venue_of(m) for m in chosen_markets} | {"MOCK", "PAPER", "BINANCE"}
     if fee_bps is not None:
-        overrides["fee_bps_by_venue"] = {"MOCK": fee_bps, "PAPER": fee_bps, "BINANCE": fee_bps}
+        overrides["fee_bps_by_venue"] = {venue: fee_bps for venue in sorted(venues)}
     if slippage_bps is not None:
-        overrides["slip_bps_by_venue"] = {"MOCK": slippage_bps, "PAPER": slippage_bps, "BINANCE": slippage_bps}
+        overrides["slip_bps_by_venue"] = {venue: slippage_bps for venue in sorted(venues)}
     overrides.update(engine_kwargs)
     cfg = load_config(preset="default", markets=chosen_markets, overrides=overrides)
     if candles_by_market is None:

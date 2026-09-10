@@ -1,5 +1,7 @@
 "use client";
 
+import { useId } from "react";
+
 export function Sparkline({
   values,
   width = 100,
@@ -13,6 +15,7 @@ export function Sparkline({
   tone?: "brand" | "accent" | "magenta" | "warn" | "danger";
   fill?: boolean;
 }) {
+  const reactId = useId();
   if (!values.length) {
     return <div style={{ width, maxWidth: "100%", height }} className="opacity-40" />;
   }
@@ -41,7 +44,11 @@ export function Sparkline({
     danger: { stroke: "#ef4560", fill: "rgba(239,69,96,0.22)" },
   };
   const c = colorMap[tone];
-  const gradId = `spark-${tone}`;
+  // Gradient ids were previously shared per tone (`spark-${tone}`), so two
+  // same-tone sparklines on one page fought over a single <defs> entry.
+  // Derive a per-instance id from React's useId (stripped to safe chars
+  // for SVG url(#…) references).
+  const gradId = `spark-${tone}-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
   return (
     <svg

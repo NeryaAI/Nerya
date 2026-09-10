@@ -19,7 +19,31 @@ class TriggerError(NeryaError): ...
 class TriggerRouteError(TriggerError): ...
 class TriggerValidationError(TriggerError): ...
 
-class TradingError(NeryaError): ...
+class TradingError(NeryaError):
+    """Trading-layer failure.
+
+    ``ambiguous=True`` marks a venue-outcome-unknown failure (F4/B1:
+    e.g. a timeout after a request that may have been accepted). The
+    executor reads it to keep the order tracked + pollable instead of
+    marking it rejected. Defaults to False (definitive failure) so all
+    existing call sites keep their semantics.
+
+    R3T3: ``not_found=True`` marks a definitive "no such order" answer
+    from the venue (e.g. the ccxt adapter catching ``OrderNotFound``).
+    The order poller reads it to advance the 4-strike ``lost`` counter
+    without relying on fragile message substrings.
+    """
+
+    def __init__(
+        self,
+        *args,
+        ambiguous: bool = False,
+        not_found: bool = False,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.ambiguous = bool(ambiguous)
+        self.not_found = bool(not_found)
 class IntentValidationError(TradingError): ...
 class RiskRejection(TradingError):
     """Raised when Risk Gate decides `reject`. `escalate` does not raise —

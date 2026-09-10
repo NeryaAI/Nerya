@@ -89,22 +89,41 @@ def _assert_allowed_skills(spec: SubAgentSpec) -> None:
 class SubAgentDispatcher:
     config: Config
     skills: SkillKernel
-    # Allow subagents to inherit the parent's native-tool surface
-    # (connector_list / connector_view, memory, search, file primitives,
-    # …), not just the skill kernel. When the parent passes a tool
-    # registry, the runtime can fall through to native tools whenever the
-    # model
-    # emits a ``skill_call`` whose ``skill`` name matches a registered
-    # native tool. Default ``None`` keeps every existing test / call
-    # site (which only ever passes ``config + skills``) working.
-    tool_registry: Any = None
-    # Parent-owned native executor. Child runtimes use this shared
-    # chokepoint for schema validation, permission, approval, and risk checks.
-    # Optional for legacy/ad-hoc callers that only expose the skill runtime.
-    executor: Any = None
-    # Explicit compatibility override for callers that outlive a parent turn
-    # (for example detached async workers). ``auto`` keeps role policy intact.
-    runtime_mode: str = "auto"
+    # Every caller supplies an execution scope. Standalone jobs construct one explicitly.
+    tool_registry: Any
+    executor: Any
+
+    @classmethod
+    def for_workspace(
+        cls, config: Config, skills: SkillKernel, *,
+        session_id: str | None = None, strategy_id: str | None = None,
+        turn_id: str = "", actor_id: str = "default",
+    ) -> "SubAgentDispatcher":
+        from ..tools import NativeToolExecutor, PermissionContext, PermissionEngine
+        from ..tools.native.bootstrap import build_native_tool_deps, register_native_tools
+        from ..tools.registry import ToolRegistry
+        from ..tools.tool_approvals import ToolApprovalCoordinator, ToolApprovalScope
+
+        registry = ToolRegistry()
+        deps = build_native_tool_deps(
+            workspace_root=config.paths.root, skill_roots=[],
+            paths=config.paths, config=config, skills=skills,
+        )
+        deps.active_session_id = session_id
+        deps.active_strategy_id = strategy_id
+        deps.active_actor_id = actor_id
+        register_native_tools(registry, deps)
+        executor = NativeToolExecutor(
+            registry=registry, permission_engine=PermissionEngine(),
+            permission_context=PermissionContext(),
+            approval_resolver=ToolApprovalCoordinator(
+                config, scope=ToolApprovalScope.from_values(
+                    session_id=session_id, strategy_id=strategy_id, actor_id=actor_id,
+                ), turn_id=turn_id,
+            ),
+        )
+        deps.executor = executor
+        return cls(config=config, skills=skills, tool_registry=registry, executor=executor)
 
     def _registry_for(self, strategy_id: str | None) -> StrategySubAgentRegistry:
         """Build a fresh strategy-scoped registry for the active run.
@@ -173,7 +192,6 @@ class SubAgentDispatcher:
                 llm=LLMGateway(self.config),
                 tool_registry=self.tool_registry,
                 tool_executor=self.executor,
-                require_tool_executor=self.tool_registry is not None,
             )
             runtime_kwargs = {
                 "trigger_event_id": trigger_event_id,
@@ -189,8 +207,6 @@ class SubAgentDispatcher:
                 runtime_kwargs["cancel_token"] = cancel_token
             if max_wall_seconds is not None:
                 runtime_kwargs["max_wall_seconds"] = max_wall_seconds
-            if self.runtime_mode != "auto":
-                runtime_kwargs["runtime_mode"] = self.runtime_mode
             raw = runtime.run(spec, **runtime_kwargs)
             cancelled = (
                 bool(raw.get("cancelled")) or _token_is_set(cancel_token)
@@ -307,23 +323,7 @@ class SubAgentDispatcher:
             trigger_event_id=trigger_event_id,
             strategy_id=strategy_id, session_id=session_id,
         )
-        if not res.ok:
-            # Backwards-compatible shape for existing callers.
-            return {
-                "subagent": name, "output": {}, "tier": res.tier,
-                "provider": res.provider, "model": res.model,
-                "tokens": 0, "usd": 0.0, "wall_ms": res.wall_ms,
-                "metrics": res.metrics, "steps": res.steps,
-                "audit": res.audit,
-                "ok": False, "error": res.error, "error_kind": res.error_kind,
-            }
-        return {
-            "subagent": name, "output": res.output, "tier": res.tier,
-            "provider": res.provider, "model": res.model,
-            "tokens": res.tokens, "usd": res.usd, "wall_ms": res.wall_ms,
-            "metrics": res.metrics, "steps": res.steps, "audit": res.audit,
-            "ok": True,
-        }
+        return res.asdict()
 
     def dispatch_many(
         self,

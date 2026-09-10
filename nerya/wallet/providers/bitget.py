@@ -8,17 +8,23 @@ and keeps the older Node-skill adapter only as a compatibility fallback.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Iterator
 
-from ..errors import WalletDependencyError, WalletPolicyDenied
+from ..errors import (
+    WalletDependencyError,
+    WalletPolicyDenied,
+    WalletTransportError,
+)
 from ..protocol import (
     WalletBalance,
     WalletCapabilities,
@@ -100,6 +106,16 @@ _BITGET_PERIODS = {
 }
 
 
+def _normalize_kline_ts(ts: int) -> int:
+    """Normalize a kline timestamp to **seconds**.
+
+    This matches the okx_os / byreal / binance_agentic providers
+    (``if ts > 1e12: ts //= 1000``): whatever unit the backend returns,
+    Nerya's candle contract is seconds since the epoch.
+    """
+    return ts // 1000 if ts > 1_000_000_000_000 else ts
+
+
 @dataclass
 class BitgetWalletSkill(WalletProvider):
     id: str = "bitget"
@@ -146,6 +162,13 @@ class BitgetWalletSkill(WalletProvider):
             ok, missing = self._python_skill_ready()
         else:
             ok, missing = self._ref().skill_ready()
+        # NOTE: the operator-facing ``bitget_token`` / ``bitget_api_url``
+        # config fields (registry schema) are OPTIONAL skill overrides.
+        # They are forwarded to the skill process as BITGET_TOKEN /
+        # BITGET_API_URL (see ``_skill_env``) and are deliberately NOT
+        # required here — the official skill ships a built-in default
+        # token, so requiring them would make every stock install
+        # report not-ready.
         return WalletReadiness(
             provider=self.id, ready=ok, missing=missing,
             install_hint=self._ref().install_hint() if not ok else "",
@@ -156,7 +179,83 @@ class BitgetWalletSkill(WalletProvider):
         return _CAPABILITIES
 
     # ------------------------------------------------------------------
-    def _run_python_skill(self, args: list[str], *, timeout_s: float = 30.0) -> dict[str, Any]:
+    def _skill_env_extras(self) -> dict[str, str]:
+        """Operator overrides for the skill process environment.
+
+        ``wallet.bitget.{bitget_token, bitget_api_url}`` (optional in the
+        registry schema) map onto the skill's documented
+        ``BITGET_TOKEN`` / ``BITGET_API_URL`` env contract.
+        """
+        extras: dict[str, str] = {}
+        token = str((self.config or {}).get("bitget_token") or "").strip()
+        api_url = str((self.config or {}).get("bitget_api_url") or "").strip()
+        if token:
+            extras["BITGET_TOKEN"] = token
+        if api_url:
+            extras["BITGET_API_URL"] = api_url
+        return extras
+
+    @contextmanager
+    def _skill_env(self) -> Iterator[None]:
+        """Expose ``_skill_env_extras`` to a child process.
+
+        Used around the Node-skill invoke (which inherits ``os.environ``);
+        the python-skill path passes the mapping directly to
+        ``subprocess.run(env=...)`` instead. Saved vars are restored.
+        """
+        extras = self._skill_env_extras()
+        if not extras:
+            yield
+            return
+        saved = {k: os.environ.get(k) for k in extras}
+        try:
+            os.environ.update(extras)
+            yield
+        finally:
+            for key, old in saved.items():
+                if old is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old
+
+    def _py_action_argv(self, action: str, payload: dict[str, Any]) -> list[str]:
+        """Build the python-skill argv for a wallet action.
+
+        The official script is flag-driven — the registry auth-flow
+        documents ``bitget-wallet-agent-api.py --action token-price
+        --chain eth --contract <token>`` — so every action maps to
+        ``--action <name>`` plus the payload keys as kebab-case flags,
+        the same convention the kline call already uses (``--chain``,
+        ``--contract``, ``--period`` ...).
+        """
+        argv = ["--action", action]
+        for key, value in payload.items():
+            if value is None or value == "":
+                continue
+            argv.extend([f"--{str(key).replace('_', '-')}", str(value)])
+        return argv
+
+    def _invoke_skill(
+        self, command: str, payload: dict[str, Any], *, timeout_s: float = 30.0,
+    ) -> dict[str, Any]:
+        """Route one wallet action to the right skill backend.
+
+        The default entry (``scripts/bitget-wallet-agent-api.py``) is a
+        PYTHON script — running it through ``node`` would fail on every
+        action — so python-skill installs go through
+        :meth:`_run_python_skill`; only a legacy ``.js`` entry keeps the
+        Node stdin/stdout protocol.
+        """
+        if self._uses_python_skill() and self.skill_path:
+            return self._run_python_skill(
+                self._py_action_argv(command, payload), timeout_s=timeout_s,
+            )
+        with self._skill_env():
+            return self._ref().invoke(command, payload, timeout_s=timeout_s)
+
+    def _run_python_skill(
+        self, args: list[str], *, timeout_s: float = 30.0,
+    ) -> dict[str, Any]:
         ok, missing = self._python_skill_ready()
         if not ok:
             raise WalletDependencyError(self.id, missing, self._ref().install_hint())
@@ -172,17 +271,18 @@ class BitgetWalletSkill(WalletProvider):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env={**os.environ, **self._skill_env_extras()},
             )
         except subprocess.TimeoutExpired as exc:
-            raise WalletPolicyDenied(f"Bitget wallet skill timed out after {timeout_s}s") from exc
+            raise WalletTransportError(f"Bitget wallet skill timed out after {timeout_s}s") from exc
         text = (proc.stdout or "").strip()
         if proc.returncode != 0:
             detail = (proc.stderr or text or f"exit {proc.returncode}")[-800:]
-            raise WalletPolicyDenied(f"Bitget wallet skill failed: {detail}")
+            raise WalletTransportError(f"Bitget wallet skill failed: {detail}")
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
-            raise WalletPolicyDenied(f"Bitget wallet skill returned non-JSON output: {text[-800:]}") from exc
+            raise WalletTransportError(f"Bitget wallet skill returned non-JSON output: {text[-800:]}") from exc
 
     def _market_headers(self, path: str, body_json: str) -> dict[str, str]:
         if not self.market_api_key or not self.market_api_secret:
@@ -256,9 +356,7 @@ class BitgetWalletSkill(WalletProvider):
                 if not isinstance(row, dict):
                     continue
                 try:
-                    ts = int(row.get("ts") or 0)
-                    if ts and ts < 10_000_000_000:
-                        ts *= 1000
+                    ts = _normalize_kline_ts(int(float(row.get("ts") or 0)))
                     out.append({
                         "ts": ts,
                         "open": float(row.get("open") or 0),
@@ -308,7 +406,7 @@ class BitgetWalletSkill(WalletProvider):
                 continue
             try:
                 out.append({
-                    "ts": int(float(row.get("ts") or 0)),
+                    "ts": _normalize_kline_ts(int(float(row.get("ts") or 0))),
                     "open": float(row.get("open") or 0),
                     "high": float(row.get("high") or 0),
                     "low": float(row.get("low") or 0),
@@ -328,7 +426,7 @@ class BitgetWalletSkill(WalletProvider):
     def get_balance(
         self, *, chain: str, address: str, token: str, **kw: Any,
     ) -> WalletBalance:
-        doc = self._ref().invoke("balance", {
+        doc = self._invoke_skill("balance", {
             "chain": chain, "address": address, "token": token, **kw,
         })
         return WalletBalance(
@@ -342,7 +440,7 @@ class BitgetWalletSkill(WalletProvider):
         self, *, chain: str, token_in: str, token_out: str,
         amount_in: float, slippage_bps: int = 50, **kw: Any,
     ) -> WalletQuote:
-        doc = self._ref().invoke("quote", {
+        doc = self._invoke_skill("quote", {
             "chain": chain, "token_in": token_in, "token_out": token_out,
             "amount_in": float(amount_in), "slippage_bps": slippage_bps, **kw,
         })
@@ -370,14 +468,20 @@ class BitgetWalletSkill(WalletProvider):
                 reason="live=False; Bitget skill swap requires runtime.live_trading_enabled",
                 amount_in=float(amount_in),
             )
-        doc = self._ref().invoke("swap", {
-            "chain": chain, "token_in": token_in, "token_out": token_out,
-            "amount_in": float(amount_in), "slippage_bps": slippage_bps,
-            "receiver": receiver or "", **kw,
-        })
+        doc = self._invoke_skill(
+            "swap",
+            {
+                "chain": chain, "token_in": token_in, "token_out": token_out,
+                "amount_in": float(amount_in), "slippage_bps": slippage_bps,
+                "receiver": receiver or "", **kw,
+            },
+            timeout_s=60.0,
+        )
+        # Default ok=False: a skill doc that omits "ok" must never be
+        # reported as a successful transaction.
         return WalletSwapResult(
             provider=self.id, chain=chain,
-            ok=bool(doc.get("ok", True)),
+            ok=bool(doc.get("ok", False)),
             tx_hash=str(doc.get("tx_hash") or ""),
             amount_in=float(amount_in),
             amount_out=float(doc.get("amount_out") or 0.0),

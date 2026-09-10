@@ -32,9 +32,13 @@ async function request<T>(
     if (s) url += (url.includes("?") ? "&" : "?") + s;
   }
 
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (path === "/agent/run_turn_internal" && process.env.NERYA_DASHBOARD_INTERNAL_TOKEN) {
+    headers["X-Nerya-Dashboard-Internal"] = process.env.NERYA_DASHBOARD_INTERNAL_TOKEN;
+  }
   const res = await fetch(url, {
     method: init?.method || "GET",
-    headers: { "content-type": "application/json" },
+    headers,
     body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
     cache: "no-store",
   });
@@ -109,7 +113,7 @@ export const api = {
   // ``dashboard/lib/chat.ts``); we pass `unknown` here so callers
   // explicitly opt into the typed cast where they consume it.
   agentRun: (trigger: { source: string; kind: string; payload?: unknown; target?: string; strategy_id?: string }) =>
-    request<unknown>("/agent/run_turn", { method: "POST", body: trigger }),
+    request<unknown>("/agent/run_turn_internal", { method: "POST", body: trigger }),
   agentTools: () =>
     request<{
       ok: boolean;

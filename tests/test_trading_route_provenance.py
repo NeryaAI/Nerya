@@ -151,7 +151,8 @@ def test_http_trade_spoof_is_frozen_as_operator_approval_end_to_end(tmp_path):
     result = _submit_route()(client, _stamped_spoofed_strategy_payload())
 
     assert result["status"] == "pending_approval"
-    assert result["order_id"] is None
+    assert not result.get("order_id")
+    assert not result.get("orders")
     assert result["intent"]["source"] == "agent:native"
     assert "operator_agent_trade_approval_required" in result["risk_decision"]["reasons"]
 

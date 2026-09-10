@@ -29,6 +29,7 @@
   --ink-900: 10 11 26;
   --ink-950: 4 4 13;
 
+  --overlay-surface: #131426;
   --grid: rgba(139, 92, 246, 0.06);
   --bg-deep: #04040d;
   --bg: #0a0b1a;
@@ -70,6 +71,7 @@ html.light {
   --ink-900: 242 240 255;
   --ink-950: 248 247 255;
 
+  --overlay-surface: #fcfbff;
   --grid: rgba(139, 92, 246, 0.05);
   --bg-deep: #ebe8ff;
   --bg: #f3f0ff;
@@ -198,7 +200,7 @@ body::after {
         rgba(139, 92, 246, 0) 360deg);
   }
   .card-head {
-    @apply flex items-center justify-between px-4 py-3 border-b border-brand-500/10;
+    @apply flex flex-wrap items-start justify-between gap-3 px-4 py-3 border-b border-brand-500/10;
   }
   html.light .card-head {
     @apply border-b-[rgba(109,40,217,0.08)];
@@ -222,8 +224,8 @@ body::after {
     color: var(--text-base);
     letter-spacing: 0;
   }
-  .stat-delta-up { @apply text-emerald-500 text-[12px] font-medium; }
-  .stat-delta-down { @apply text-rose-500 text-[12px] font-medium; }
+  .stat-delta-up { @apply text-ok text-[12px] font-medium; }
+  .stat-delta-down { @apply text-danger text-[12px] font-medium; }
 
   .pill {
     @apply inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-medium;
@@ -238,9 +240,9 @@ body::after {
     white-space: nowrap;
     overflow: hidden;
   }
-  .pill-ok { @apply border-emerald-500/30 bg-emerald-500/10 text-emerald-500; }
-  .pill-warn { @apply border-amber-500/30 bg-amber-500/10 text-amber-500; }
-  .pill-err { @apply border-rose-500/30 bg-rose-500/10 text-rose-500; }
+  .pill-ok { @apply border-ok/30 bg-ok/10 text-ok; }
+  .pill-warn { @apply border-warn/30 bg-warn/10 text-warn; }
+  .pill-err { @apply border-danger/30 bg-danger/10 text-danger; }
   .pill-brand { @apply border-brand-500/30 bg-brand-500/10 text-brand-300; }
 
   .chip {
@@ -250,6 +252,50 @@ body::after {
   }
   html.light .chip {
     background: rgba(252, 251, 255, 0.7);
+  }
+
+  /* <TermTip> — inline jargon explainer. The trigger inherits the
+     surrounding text style with a dashed underline; the standalone
+     "?" badge variant is a quiet circle. The popover itself is portaled
+     to <body> with fixed positioning (see TermTip.tsx). */
+  .term-tip {
+    @apply inline-flex items-center align-baseline;
+    border-bottom: 1px dashed color-mix(in oklab, currentColor 55%, transparent);
+    cursor: help;
+  }
+  .term-tip:hover {
+    border-bottom-color: currentColor;
+  }
+  .term-tip:focus-visible {
+    @apply outline-none rounded-sm;
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--violet) 45%, transparent);
+  }
+  .term-tip-badge {
+    @apply inline-flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-full border align-[1px] text-[10px] font-medium leading-none;
+    border-color: var(--line-hi);
+    color: var(--text-muted);
+    background: var(--card);
+  }
+  .term-tip:hover .term-tip-badge {
+    color: var(--text-base);
+  }
+  .term-tip-popover {
+    @apply fixed z-[70] rounded-lg border px-3 py-2.5;
+    border-color: var(--line-hi);
+    background: var(--card);
+    box-shadow: 0 8px 24px rgba(2, 6, 23, 0.35);
+    overflow-y: auto;
+  }
+  html.light .term-tip-popover {
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  }
+  .term-tip-title {
+    @apply text-[12px] font-medium;
+    color: var(--text-base);
+  }
+  .term-tip-body {
+    @apply mt-1 text-[12px] leading-relaxed;
+    color: var(--text-muted);
   }
   .divider { @apply border-t border-brand-500/10; }
 
@@ -324,6 +370,11 @@ body::after {
   }
   .btn-primary {
     @apply btn bg-brand-500 text-white hover:bg-brand-400;
+  }
+  /* Disabled actions must stop competing with the screen's single solid
+     primary (e.g. an untouched "Save" next to the header CTA). */
+  .btn:disabled {
+    @apply cursor-not-allowed opacity-45;
   }
 
   .input-dark {
@@ -482,7 +533,8 @@ body::after {
   }
   html.light .nerya-app-shell .text-emerald-100,
   html.light .nerya-app-shell .text-emerald-200,
-  html.light .nerya-app-shell .text-emerald-200\/90 {
+  html.light .nerya-app-shell .text-emerald-200\/90,
+  html.light .nerya-app-shell .text-ok {
     color: #047857;
   }
   html.light .nerya-app-shell .text-sky-200 {
@@ -714,7 +766,10 @@ body::after {
   .nerya-sidebar {
     backdrop-filter: blur(18px);
   }
-  .nerya-settings-shell {
+  /* Dark-only palette takeover: in light mode these surfaces must follow
+     the ``html.light`` token overrides instead of forcing dark values
+     (custom properties on a closer element always beat inherited ones). */
+  html:not(.light) .nerya-settings-shell {
     --bg-deep: #04040d;
     --bg: #0a0b1a;
     --card: rgba(19, 20, 38, 0.76);
@@ -803,7 +858,7 @@ body::after {
     color: var(--text-base);
     border-color: var(--line-hi);
   }
-  .nerya-app-shell:has(.command-home-root) {
+  html:not(.light) .nerya-app-shell:has(.command-home-root) {
     --bg-deep: #04040d;
     --bg: #0a0b1a;
     --card: rgba(19, 20, 38, 0.72);
@@ -818,11 +873,11 @@ body::after {
     --scrollbar-thumb-hover: #454560;
   }
   .command-home-root {
-    background: #04040d;
-    color: #f4f4f4;
+    background: var(--bg-deep);
+    color: var(--text-base);
   }
   .nerya-app-shell:has(.command-home-root) main {
-    background: #04040d;
+    background: var(--bg-deep);
   }
   .nerya-app-shell:has(.command-home-root) .grid-bg {
     display: none;
@@ -865,4 +920,51 @@ body::after {
     border-radius: 10px;
     background: var(--card);
   }
+}
+
+/* Shared accessible overlays: opaque in both themes, one layering scale. */
+.ui-modal-overlay { position: fixed; inset: 0; z-index: 1200; background: rgb(2 6 23 / 48%); }
+.ui-dialog {
+  position: fixed; z-index: 1201; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(500px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto;
+  border: 1px solid var(--line-hi); border-radius: 16px; padding: 24px;
+  background: var(--overlay-surface); color: var(--text-base);
+  box-shadow: 0 12px 40px rgb(2 6 23 / 20%);
+}
+.ui-dialog.ui-command-palette { top: min(12dvh, 96px); transform: translateX(-50%); width: min(600px, calc(100vw - 24px)); padding: 0; overflow: hidden; }
+.ui-select-menu {
+  z-index: 1250; min-width: 120px; max-width: calc(100vw - 16px);
+  max-height: min(320px, var(--radix-dropdown-menu-content-available-height)); overflow-y: auto;
+  border: 1px solid var(--line-hi); border-radius: 12px; padding: 4px;
+  background: var(--overlay-surface); color: var(--text-base); box-shadow: 0 6px 20px rgb(2 6 23 / 14%);
+}
+.ui-select-option { display: flex; gap: 8px; align-items: center; min-height: 36px; padding: 8px 10px; border-radius: 8px; font-size: 13px; cursor: pointer; outline: none; }
+.ui-select-option[data-highlighted] { background: rgb(139 92 246 / 15%); }
+.ui-select-option[data-state=checked] { font-weight: 600; }
+.ui-select-option[data-disabled] { opacity: .45; cursor: not-allowed; }
+.ui-icon-button { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; min-width: 32px; border-radius: 8px; color: var(--text-muted); }
+.ui-icon-button:hover { background: rgb(139 92 246 / 10%); color: var(--text-base); }
+.ui-danger-button { background: var(--err); color: white; border-color: transparent; }
+.ui-danger-button:hover { filter: brightness(.92); }
+.ui-toast-stack { position: fixed; z-index: 1300; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); width: min(380px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.ui-toast { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--line-hi); border-radius: 12px; background: var(--overlay-surface); color: var(--text-base); font-size: 13px; line-height: 1.5; box-shadow: 0 4px 16px rgb(2 6 23 / 12%); pointer-events: auto; }
+.ui-toast[data-tone=error] { border-color: var(--err); }
+.ui-toast[data-tone=warn] { border-color: var(--warn); }
+.ui-toast[data-tone=ok] { border-color: var(--ok); }
+.ui-drawer-overlay { z-index: 1100; }
+.ui-navigation-drawer { position: fixed; z-index: 1101; inset: 0 auto 0 0; display: flex; flex-direction: column; width: min(320px, calc(100vw - 40px)); height: 100dvh; background: var(--overlay-surface); color: var(--text-base); border-right: 1px solid var(--line); }
+.ui-navigation-drawer .nerya-sidebar { width: 100%; height: 100%; border: 0; }
+.nerya-app-shell { height: 100dvh; }
+.nerya-app-shell > .ui-desktop-navigation { height: 100%; }
+.ui-desktop-navigation .nerya-sidebar { height: 100%; }
+:where(button, a, input, textarea, select, [tabindex]):focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
+.ui-skip-link { position: fixed; z-index: 1400; left: 12px; top: -100px; padding: 10px 14px; border-radius: 8px; background: var(--overlay-surface); color: var(--text-base); }
+.ui-skip-link:focus { top: 12px; }
+@media (max-width: 767px) {
+  .ui-navigation-drawer .sidebar-item { min-height: 42px; }
+  .ui-dialog { padding: 20px; }
+  .ui-select-option { min-height: 42px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-dialog, .ui-select-menu, .ui-navigation-drawer, .nerya-sidebar { animation: none !important; transition: none !important; }
 }

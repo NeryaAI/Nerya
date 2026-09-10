@@ -11,8 +11,10 @@ Endpoints used (public):
 
 Writes (``place_order``) require EIP-712 signing via the API user's
 Polygon wallet — we require the caller to pass a pre-built JSON order
-payload + signature in ``credentials.extra["signed_order"]`` since
-EIP-712 on-chain signing lives in the wallet layer, not here.
+payload + signature in ``credentials.extras["signed_order"]`` since
+EIP-712 on-chain signing lives in the wallet layer, not here. Until a
+real signing path is wired, the provider spec advertises
+``place_order=False`` so intake keeps Polymarket accounts in paper mode.
 
 Markets can be referenced by *asset/token id* (Polymarket's long
 decimal CLOB token id, or a 0x condition token id when supplied by an
@@ -207,12 +209,13 @@ class PolymarketConnector(CEXConnectorBase):
                     time_in_force: str = "GTC") -> OrderAck:
         self._require_ready()
         token_id, _meta = self._resolve_token(market)
-        signed = getattr(self.credentials, "extra", {}).get("signed_order") \
-            if hasattr(self.credentials, "extra") else None
+        # F9: the field is ``extras`` (``extra`` never existed, so the
+        # old read silently returned None on every call).
+        signed = (self.credentials.extras or {}).get("signed_order")
         if not signed:
             raise TradingError(
                 "polymarket.place_order requires a pre-signed EIP-712 order "
-                "payload in credentials.extra['signed_order'] — "
+                "payload in credentials.extras['signed_order'] — "
                 "build one with py-clob-client or the wallet skill first"
             )
         if not isinstance(signed, dict):

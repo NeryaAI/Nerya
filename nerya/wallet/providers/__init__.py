@@ -3,6 +3,7 @@ so the parent package keeps loading even when none of the optional SDKs
 are installed."""
 
 from .self_custody import SelfCustodyWallet
+from .metamask import MetaMaskWallet
 from .okx_os import OkxOsWallet
 from .bitget import BitgetWalletSkill
 from .binance_agentic import BinanceAgenticWallet
@@ -11,6 +12,7 @@ from .byreal import ByrealWallet
 
 __all__ = [
     "SelfCustodyWallet",
+    "MetaMaskWallet",
     "OkxOsWallet",
     "BitgetWalletSkill",
     "BinanceAgenticWallet",

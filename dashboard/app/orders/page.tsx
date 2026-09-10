@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { clientApi } from "../../lib/clientApi";
 import type {
@@ -20,6 +20,7 @@ import {
 import { JsonView } from "../../components/JsonView";
 import { SectionTabs } from "../../components/SectionTabs";
 import { Select } from "../../components/Select";
+import { ModePill } from "../../components/ModePill";
 import { formatTsShort } from "../../lib/format";
 import { confirm as confirmDialog } from "../../lib/dialogs";
 
@@ -40,6 +41,61 @@ function executorStateTone(state: string): "neutral" | "ok" | "warn" | "danger" 
   if (state === "running") return "brand";
   if (state === "pending" || state === "submitted") return "warn";
   return "neutral";
+}
+
+// Raw enum -> ordersPage.* translation key. Values missing from the map
+// (new backend enums) fall back to the raw string instead of crashing.
+const ORDER_STATUS_KEYS: Record<string, string> = {
+  open: "statusOpen",
+  submitted: "statusSubmitted",
+  partially_filled: "statusPartiallyFilled",
+  filled: "statusFilled",
+  canceled: "statusCanceled",
+  rejected: "statusRejected",
+  expired: "statusExpired",
+  lost: "statusLost",
+};
+
+const ORDER_SIDE_KEYS: Record<string, string> = {
+  buy: "sideBuy",
+  sell: "sideSell",
+};
+
+const ORDER_TYPE_KEYS: Record<string, string> = {
+  limit: "typeLimit",
+  market: "typeMarket",
+};
+
+const EXECUTOR_STATE_KEYS: Record<string, string> = {
+  created: "executorCreated",
+  reserving: "executorReserving",
+  ready: "executorReady",
+  submitted: "executorSubmitted",
+  working: "executorWorking",
+  closing: "executorClosing",
+  canceling: "executorCanceling",
+  canceled: "executorCanceled",
+  done: "executorDone",
+  failed: "executorFailed",
+  rejected: "executorRejected",
+};
+
+const EXECUTOR_KIND_KEYS: Record<string, string> = {
+  market_order: "kindMarketOrder",
+  limit_order: "kindLimitOrder",
+  limit_chaser: "kindLimitChaser",
+  twap: "kindTwap",
+  position_protection: "kindPositionProtection",
+  rebalance: "kindRebalance",
+};
+
+function enumLabel(
+  map: Record<string, string>,
+  value: string,
+  t: (key: string) => string,
+): string {
+  const key = map[value] ?? map[value.toLowerCase()];
+  return key ? t(key) : value;
 }
 
 function ageMs(ts?: number | null): string {
@@ -70,6 +126,7 @@ function num(v: unknown, digits = 6): string {
 export default function OrdersPage() {
   const t = useTranslations("orders");
   const tCommon = useTranslations("common");
+  const tEnum = useTranslations("ordersPage");
   const [stateFilter, setStateFilter] = useState<OrderState>("recent");
   const [accountFilter, setAccountFilter] = useState<string>("");
   const [orders, setOrders] = useState<ControlPlaneOrder[]>([]);
@@ -77,7 +134,14 @@ export default function OrdersPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [selected, setSelected] = useState<ControlPlaneOrder | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [accountModes, setAccountModes] = useState<Record<string, string>>({});
+  const detailRef = useRef<HTMLDivElement | null>(null);
+
+  const selected = useMemo(
+    () => orders.find((o) => o.order_id === selectedId) ?? null,
+    [orders, selectedId],
+  );
 
   const STATE_LABELS: { value: OrderState; label: string; tone: "neutral" | "ok" | "warn" | "danger" | "brand" }[] = [
     { value: "active", label: t("stateActive"), tone: "ok" },
@@ -90,7 +154,7 @@ export default function OrdersPage() {
     setLoading(true);
     setError(null);
     try {
-      const [ordersRes, executorsRes] = await Promise.all([
+      const [ordersRes, executorsRes, accountsRes] = await Promise.all([
         clientApi.controlOrdersList({
           state: stateFilter,
           account_id: accountFilter || undefined,
@@ -101,9 +165,15 @@ export default function OrdersPage() {
           account_id: accountFilter || undefined,
           limit: 100,
         }),
+        clientApi.accountsList().catch(() => ({ accounts: [], ts: 0 })),
       ]);
       setOrders(ordersRes.orders || []);
       setExecutors(executorsRes.executors || []);
+      const modes: Record<string, string> = {};
+      for (const a of accountsRes.accounts || []) {
+        modes[a.profile.id] = a.profile.mode;
+      }
+      if (Object.keys(modes).length > 0) setAccountModes(modes);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -113,10 +183,24 @@ export default function OrdersPage() {
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), 15_000);
-    return () => clearInterval(t);
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, 15_000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void load();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stateFilter, accountFilter]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    detailRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [selectedId]);
 
   async function cancelOrder(order: ControlPlaneOrder) {
     const ok = await confirmDialog({
@@ -267,66 +351,101 @@ export default function OrdersPage() {
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
+                    {/* 8 columns (was 12): side+type merged, size+fill merged,
+                        strategy/executor moved down to the detail card (which
+                        already carries both fields). */}
                     <th>{t("colState")}</th>
                     <th>{t("colAccount")}</th>
                     <th>{t("colMarket")}</th>
-                    <th>{t("colSide")}</th>
-                    <th>{t("colType")}</th>
-                    <th>{t("colSize")}</th>
-                    <th>{t("colFilled")}</th>
-                    <th>{t("colAvgPrice")}</th>
+                    <th>{tEnum("sideType")}</th>
+                    <th className="text-right">{tEnum("sizeFilled")}</th>
+                    <th className="text-right">{t("colAvgPrice")}</th>
                     <th>{t("colAge")}</th>
-                    <th>{t("colStrategy")}</th>
-                    <th>{t("colExecutor")}</th>
                     <th></th>
                   </tr>
                 </thead>
                 <tbody>
                   {orders.map((o) => {
-                    const remaining =
-                      Number(o.size_base || 0) - Number(o.filled_size || 0);
+                    const filledNum = Number(o.filled_size || 0);
+                    const sizeNum = Number(o.size_base || 0);
+                    const fillPct =
+                      sizeNum > 0 ? Math.min(100, (filledNum / sizeNum) * 100) : 0;
                     return (
-                      <tr key={o.order_id} className="text-xs">
+                      <tr
+                        key={o.order_id}
+                        onClick={() => setSelectedId(o.order_id)}
+                        className={`text-xs cursor-pointer ${
+                          selectedId === o.order_id ? "bg-brand-500/10" : ""
+                        }`}
+                      >
                         <td>
-                          <Pill tone={orderStateTone(o.state)}>{o.state}</Pill>
-                        </td>
-                        <td className="font-mono">{o.account_id}</td>
-                        <td className="font-mono">{o.market}</td>
-                        <td>
-                          <Pill
-                            tone={
-                              String(o.side).toLowerCase() === "sell"
-                                ? "danger"
-                                : "ok"
-                            }
-                          >
-                            {o.side}
+                          <Pill tone={orderStateTone(o.state)}>
+                            {enumLabel(ORDER_STATUS_KEYS, o.state, tEnum)}
                           </Pill>
                         </td>
-                        <td>{o.order_type}</td>
-                        <td>{num(o.size_base)}</td>
+                        <td className="font-mono">
+                          <span className="flex items-center gap-1.5 whitespace-nowrap">
+                            {o.account_id}
+                            <ModePill mode={accountModes[o.account_id]} />
+                          </span>
+                        </td>
+                        <td className="font-mono">{o.market}</td>
                         <td>
-                          {num(o.filled_size)}
-                          {remaining > 0 && o.size_base ? (
-                            <span className="text-ink-500">
-                              {" "}
-                              / {num(remaining)}
+                          {/* Side as the colour-coded Pill, type as a muted
+                              suffix — one column instead of two. */}
+                          <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                            <Pill
+                              tone={
+                                String(o.side).toLowerCase() === "sell"
+                                  ? "danger"
+                                  : "ok"
+                              }
+                            >
+                              {enumLabel(ORDER_SIDE_KEYS, String(o.side), tEnum)}
+                            </Pill>
+                            <span className="text-[11px] text-ink-400">
+                              {enumLabel(ORDER_TYPE_KEYS, o.order_type, tEnum)}
                             </span>
+                          </span>
+                        </td>
+                        <td className="text-right font-mono tabular-nums">
+                          {/* Size with the fill progress underneath (count +
+                              percent + mini bar) — was two columns. */}
+                          <div>{num(sizeNum)}</div>
+                          {sizeNum > 0 ? (
+                            <>
+                              <div className="text-[10px] text-ink-500">
+                                {num(filledNum)} / {num(sizeNum)}
+                                {fillPct > 0 && fillPct < 100
+                                  ? ` · ${fillPct.toFixed(1)}%`
+                                  : null}
+                              </div>
+                              <div className="ml-auto mt-0.5 h-0.5 w-14 overflow-hidden rounded-full bg-ink-900">
+                                <div
+                                  className={`h-full rounded-full transition-[width] duration-300 ${
+                                    fillPct >= 100 ? "bg-ok" : "bg-brand-500/70"
+                                  }`}
+                                  style={{ width: `${fillPct.toFixed(1)}%` }}
+                                />
+                              </div>
+                            </>
                           ) : null}
                         </td>
-                        <td>{num(o.avg_price, 4)}</td>
+                        <td className="text-right font-mono tabular-nums">
+                          {num(o.avg_price, 4)}
+                        </td>
                         <td className="font-mono text-ink-400">
                           {ageMs(o.created_at)}
                         </td>
-                        <td className="font-mono text-ink-400">
-                          {o.strategy_id || "–"}
-                        </td>
-                        <td className="font-mono text-ink-400 truncate max-w-[120px]">
-                          {o.executor_id || "–"}
-                        </td>
-                        <td className="flex gap-1">
+                        <td>
+                          {/* Buttons live in a div inside the td — display:flex
+                              on a td breaks table-cell layout semantics. */}
+                          <div className="flex gap-1">
                           <button
-                            onClick={() => setSelected(o)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedId(o.order_id);
+                            }}
                             className="btn-ghost text-[11px] py-0.5"
                           >
                             {t("inspect")}
@@ -335,13 +454,17 @@ export default function OrdersPage() {
                             o.state === "submitted" ||
                             o.state === "partially_filled") && (
                             <button
-                              onClick={() => cancelOrder(o)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void cancelOrder(o);
+                              }}
                               disabled={busy === o.order_id}
                               className="btn-ghost text-[11px] py-0.5 text-danger"
                             >
                               {busy === o.order_id ? "…" : t("cancel")}
                             </button>
                           )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -372,7 +495,7 @@ export default function OrdersPage() {
                     <th>{t("colMarket")}</th>
                     <th>{t("colCreated")}</th>
                     <th>{t("colLastHeartbeat")}</th>
-                    <th>{t("colOrders")}</th>
+                    <th className="text-right">{t("colOrders")}</th>
                     <th>{t("colExecutorId")}</th>
                     <th></th>
                   </tr>
@@ -381,9 +504,11 @@ export default function OrdersPage() {
                   {executors.map((e) => (
                     <tr key={e.executor_id} className="text-xs">
                       <td>
-                        <Pill tone={executorStateTone(e.state)}>{e.state}</Pill>
+                        <Pill tone={executorStateTone(e.state)}>
+                          {enumLabel(EXECUTOR_STATE_KEYS, e.state, tEnum)}
+                        </Pill>
                       </td>
-                      <td>{e.kind}</td>
+                      <td>{enumLabel(EXECUTOR_KIND_KEYS, e.kind, tEnum)}</td>
                       <td className="font-mono">{e.account_id}</td>
                       <td className="font-mono text-ink-300">
                         {e.strategy_id}
@@ -395,7 +520,7 @@ export default function OrdersPage() {
                       <td className="font-mono text-ink-400">
                         {fmtTs(e.last_heartbeat)}
                       </td>
-                      <td className="font-mono text-ink-400">
+                      <td className="font-mono text-ink-400 text-right tabular-nums">
                         {(e.order_ids || []).length}
                       </td>
                       <td className="font-mono text-ink-400 truncate max-w-[160px]">
@@ -423,28 +548,40 @@ export default function OrdersPage() {
         </Advanced>
 
         {selected ? (
-          <Card
-            title={t("orderDetailTitle", { orderId: selected.order_id })}
-            description={`${selected.market} · ${selected.side} ${selected.order_type}`}
-            actions={
-              <button
-                onClick={() => setSelected(null)}
-                className="btn-ghost text-xs"
-              >
-                {tCommon("close")}
-              </button>
-            }
-          >
-            <OrderDetail order={selected} />
-          </Card>
+          <div ref={detailRef}>
+            <Card
+              title={t("orderDetailTitle", { orderId: selected.order_id })}
+              description={`${selected.market} · ${enumLabel(ORDER_SIDE_KEYS, selected.side, tEnum)} ${enumLabel(ORDER_TYPE_KEYS, selected.order_type, tEnum)}`}
+              actions={
+                <button
+                  onClick={() => setSelectedId(null)}
+                  className="btn-ghost text-xs"
+                >
+                  {tCommon("close")}
+                </button>
+              }
+            >
+              <OrderDetail
+                order={selected}
+                mode={accountModes[selected.account_id]}
+              />
+            </Card>
+          </div>
         ) : null}
       </PageBody>
     </div>
   );
 }
 
-function OrderDetail({ order }: { order: ControlPlaneOrder }) {
+function OrderDetail({
+  order,
+  mode,
+}: {
+  order: ControlPlaneOrder;
+  mode?: string;
+}) {
   const t = useTranslations("orders");
+  const tEnum = useTranslations("ordersPage");
   const filled = Number(order.filled_size || 0);
   const size = Number(order.size_base || 0);
   const remaining = Math.max(0, size - filled);
@@ -454,13 +591,18 @@ function OrderDetail({ order }: { order: ControlPlaneOrder }) {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <DetailStat
           label={t("detailStateLabel")}
-          value={<Pill tone={orderStateTone(order.state)}>{order.state}</Pill>}
+          value={
+            <Pill tone={orderStateTone(order.state)}>
+              {enumLabel(ORDER_STATUS_KEYS, order.state, tEnum)}
+            </Pill>
+          }
         />
         <DetailStat
           label={t("detailSideTypeLabel")}
           value={
             <span className="font-mono text-ink-100 text-[12px]">
-              {order.side} · {order.order_type}
+              {enumLabel(ORDER_SIDE_KEYS, order.side, tEnum)} ·{" "}
+              {enumLabel(ORDER_TYPE_KEYS, order.order_type, tEnum)}
             </span>
           }
         />
@@ -474,6 +616,9 @@ function OrderDetail({ order }: { order: ControlPlaneOrder }) {
             <div className="space-y-1">
               <div className="font-mono text-ink-100 text-[12px]">
                 {num(filled)} <span className="text-ink-500">/ {num(size)}</span>
+                {fillPct > 0 && fillPct < 100 ? (
+                  <span className="text-ink-500"> · {fillPct.toFixed(1)}%</span>
+                ) : null}
               </div>
               <div className="h-1.5 rounded-full bg-ink-900 overflow-hidden">
                 <div
@@ -500,7 +645,16 @@ function OrderDetail({ order }: { order: ControlPlaneOrder }) {
           {order.exchange_order_id ? (
             <DetailRow label={t("detailRowExchangeOrderId")} value={order.exchange_order_id} mono />
           ) : null}
-          <DetailRow label={t("detailRowAccount")} value={order.account_id} mono />
+          <DetailRow
+            label={t("detailRowAccount")}
+            value={
+              <span className="inline-flex items-center gap-1.5">
+                {order.account_id}
+                <ModePill mode={mode} />
+              </span>
+            }
+            mono
+          />
           <DetailRow label={t("detailRowMarket")} value={order.market} mono />
           {order.strategy_id ? (
             <DetailRow label={t("detailRowStrategy")} value={order.strategy_id} mono />

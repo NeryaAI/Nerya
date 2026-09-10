@@ -49,6 +49,17 @@ class SolanaNative(NativeDEXConnector):
                 total += float(amt)
         return total
 
+    def get_mint_decimals(self, mint: str) -> int:
+        """On-chain decimals for an SPL mint (getTokenSupply)."""
+        res = self._rpc("getTokenSupply", [mint])
+        val = (res or {}).get("value") if isinstance(res, dict) else None
+        if not isinstance(val, dict) or "decimals" not in val:
+            raise TradingError(
+                f"getTokenSupply failed for mint {mint} — cannot scale "
+                "amounts safely; pass decimals explicitly"
+            )
+        return int(val["decimals"])
+
     def get_slot(self) -> int:
         res = self._rpc("getSlot", [])
         return int(res) if res is not None else 0
@@ -99,6 +110,42 @@ class SolanaNative(NativeDEXConnector):
         }
 
     # ------------------------------------------------------------- swap
+    def wait_for_signature(
+        self,
+        signature: str,
+        *,
+        timeout_s: float = 60.0,
+        poll_s: float = 2.0,
+    ) -> dict[str, Any]:
+        """Poll ``getSignatureStatuses`` until the tx confirms or fails.
+
+        Without this, a broadcast that the node accepted but the cluster
+        rejected (or dropped) looks like a success and invites duplicate
+        sends.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            res = self._rpc(
+                "getSignatureStatuses",
+                [[signature], {"searchStatusHistory": True}],
+            )
+            statuses = (res or {}).get("value") if isinstance(res, dict) else None
+            st = (statuses or [None])[0] if statuses else None
+            if st:
+                if st.get("err"):
+                    raise TradingError(
+                        f"solana tx {signature} failed on-chain: {st['err']}"
+                    )
+                if st.get("confirmationStatus") in ("confirmed", "finalized"):
+                    return st
+            time.sleep(poll_s)
+        raise TradingError(
+            f"solana tx {signature} not confirmed after {timeout_s:.0f}s — "
+            "it may still land; check the explorer before re-sending"
+        )
+
     def swap(
         self,
         *,
@@ -110,18 +157,23 @@ class SolanaNative(NativeDEXConnector):
         user_public_key: str | None = None,
         wrap_and_unwrap_sol: bool = True,
         priority_fee_lamports: int | None = None,
+        confirm: bool = True,
+        quote: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Execute a Jupiter swap end-to-end.
 
-        1. quote from /quote
+        1. quote from /quote (or use the caller-supplied ``quote`` so the
+           exact quote that was price-checked is the one executed)
         2. /swap to get a base64 v0 tx
         3. sign + sendTransaction
+        4. (default) poll until the signature confirms
         """
         self._check_live()
-        quote = self.quote_jupiter(
-            input_mint=input_mint, output_mint=output_mint,
-            amount_in_raw=amount_in_raw, slippage_bps=slippage_bps,
-        )
+        if quote is None:
+            quote = self.quote_jupiter(
+                input_mint=input_mint, output_mint=output_mint,
+                amount_in_raw=amount_in_raw, slippage_bps=slippage_bps,
+            )
         user_pubkey = user_public_key or _pubkey_from_signer(signer_private_key)
         body: dict[str, Any] = {
             "quoteResponse": quote,
@@ -146,14 +198,21 @@ class SolanaNative(NativeDEXConnector):
                                           "maxRetries": 3}])
         if not tx_sig:
             raise TradingError("solana sendTransaction returned empty signature")
-        return {
+        out: dict[str, Any] = {
             "signature": tx_sig,
             "input_mint": input_mint,
             "output_mint": output_mint,
             "amount_in_raw": amount_in_raw,
             "quote": quote,
             "user": user_pubkey,
+            "confirmed": False,
         }
+        if confirm:
+            st = self.wait_for_signature(tx_sig)
+            out["confirmed"] = True
+            out["confirmation_status"] = st.get("confirmationStatus")
+            out["slot"] = st.get("slot")
+        return out
 
     def place_order(self, *args, **kw) -> OrderAck:
         raise NotImplementedError(
@@ -176,7 +235,11 @@ def _sign_solana_v0_tx(b64_tx: str, signer_private_key: str) -> str:
         <num_signatures:shortvec_u8> <sig_1:64b> ... <sig_n:64b> <message>
 
     The message hash (first-message-signer = fee-payer = our key) is
-    signed and written into the first signature slot.
+    signed and written into the first signature slot. Before signing we
+    verify (F12) that the message's first required signer really is our
+    pubkey — overwriting slot 0 of a tx built for another keypair would
+    otherwise spend *that* wallet's funds/ATAs with our signature
+    rejected (or worse, slot-swap confusion on multi-sig txs).
     """
     try:
         import base64
@@ -194,6 +257,15 @@ def _sign_solana_v0_tx(b64_tx: str, signer_private_key: str) -> str:
     message_bytes = raw[sig_end:]
 
     sk = _signing_key_from_secret(signer_private_key)
+    our_pubkey = base58.b58encode(bytes(sk.verify_key)).decode("ascii")
+    first_signer = _first_required_signer(message_bytes)
+    if first_signer != our_pubkey:
+        raise TradingError(
+            f"solana tx first required signer {first_signer} is not this "
+            f"wallet ({our_pubkey}) — refusing to sign a transaction that "
+            "was not built for our keypair (destination wallets are not "
+            "supported on this path)"
+        )
     sig = sk.sign(message_bytes).signature
     if len(sig) != 64:
         raise TradingError("unexpected ed25519 signature length")
@@ -201,6 +273,31 @@ def _sign_solana_v0_tx(b64_tx: str, signer_private_key: str) -> str:
     out = bytearray(raw)
     out[off:off + 64] = sig
     return base64.b64encode(bytes(out)).decode("ascii")
+
+
+def _first_required_signer(message: bytes) -> str:
+    """Base58 pubkey of a legacy/v0 message's first required signer.
+
+    Both layouts open with a 3-byte header (numRequiredSignatures,
+    numReadonlySignedAccounts, numReadonlyUnsignedAccounts) followed by
+    the compact-u16 account list — signer 0 is the fee payer and the
+    only key this connector ever signs with.
+    """
+    import base58  # type: ignore
+
+    n_required, off = _read_shortvec_u16(message, 0)
+    if n_required < 1:
+        raise TradingError(
+            "solana message declares no required signers — refusing to sign"
+        )
+    off += 2  # numReadonlySignedAccounts + numReadonlyUnsignedAccounts
+    n_accounts, off = _read_shortvec_u16(message, off)
+    if n_accounts < 1 or off + 32 > len(message):
+        raise TradingError(
+            "solana message is not a parseable legacy/v0 transaction "
+            "(account list truncated) — refusing to blind-sign"
+        )
+    return base58.b58encode(message[off:off + 32]).decode("ascii")
 
 
 def _pubkey_from_signer(signer_private_key: str) -> str:

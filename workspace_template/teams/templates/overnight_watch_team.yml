@@ -1,0 +1,53 @@
+# Example operator-authored team template.
+# Copy or edit freely — picked up automatically on next team listing/run.
+id: overnight_watch_team
+description: >-
+  Overnight watch desk. Monitors funding and momentum for one symbol,
+  then has the risk critic sign off before anything is escalated.
+  Produces a watch report with explicit escalation guidance.
+lead: watch-lead
+members:
+  - name: watch-lead
+    role: research_manager
+    subagent_name: technical_analyst
+    required: true
+    tier: medium
+    description: Drives the watch loop and writes the final report.
+  - name: watch-risk
+    role: risk_manager
+    subagent_name: risk_critic
+    required: true
+    tier: medium
+    description: Independent risk sign-off on any escalation.
+tasks:
+  - id: t-watch
+    owner: watch-lead
+    subagent_name: technical_analyst
+    subject: >-
+      Poll funding rate, open interest, and momentum for the target
+      symbol; summarise anomalies with timestamps.
+    output_kinds: [decision_input]
+    required: true
+  - id: t-risk
+    owner: watch-risk
+    subagent_name: risk_critic
+    subject: >-
+      Stress-test the watch findings; flag anything that should NOT be
+      escalated and say why.
+    depends_on: [t-watch]
+    output_kinds: [risk, decision_input]
+    required: true
+gates:
+  - id: required_tasks_t_watch_t_risk
+    kind: required_tasks
+    detail: {tasks: [t-watch, t-risk]}
+  - id: required_artifacts_watch
+    kind: required_artifacts
+    detail: {kinds: [decision_input]}
+max_rounds: 1
+max_parallel: 2
+output_schema:
+  symbol: string
+  findings: string
+  escalation: string
+  risk_notes: string

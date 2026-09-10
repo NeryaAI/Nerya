@@ -283,9 +283,10 @@ def routes():
             return _error("strategy_id required")
         patch = {k: v for k, v in body.items() if k != "strategy_id"}
         reason = str(patch.pop("reason", "") or "dashboard_update")
+        force = bool(patch.pop("force", False))
         try:
             return strategy_crud.update(
-                client.config.paths, sid, patch=patch, reason=reason,
+                client.config.paths, sid, patch=patch, reason=reason, force=force,
             )
         except (TradingError, NeryaError) as exc:
             return _error(str(exc))
@@ -338,6 +339,7 @@ def routes():
             return strategy_crud.bind_wallet(
                 client.config.paths, sid,
                 str(wallet_id) if wallet_id else None,
+                force=bool(body.get("force", False)),
             )
         except TradingError as exc:
             return _error(str(exc))
@@ -351,6 +353,7 @@ def routes():
         try:
             return strategy_crud.bind_account(
                 client.config.paths, sid, str(aid),
+                force=bool(body.get("force", False)),
             )
         except TradingError as exc:
             return _error(str(exc))
@@ -397,6 +400,7 @@ def routes():
         if not isinstance(content, str):
             return _error("content must be a string")
         reason = str(body.get("reason") or "dashboard_write_file")
+        force = bool(body.get("force", False))
         try:
             return strategy_crud.write_file(
                 client.config.paths,
@@ -404,6 +408,7 @@ def routes():
                 rel_path=str(rel),
                 content=content,
                 reason=reason,
+                force=force,
             )
         except (TradingError, NeryaError) as exc:
             return _error(str(exc))

@@ -105,7 +105,7 @@ _DEFAULT_ENABLED_SKILLS = [
     "markets", "memory", "news_social", "notify", "quant-strategy-loop",
     "quant_research",
     "research", "research_report", "strategy_author", "tasks", "team",
-    "trading", "triggers", "self_modify",
+    "trading", "triggers", "self_modify", "plugin_author",
     # Integration-gated: listed here but loaded only after configuration.
     "dcf_valuation", "equity_research", "sec_filings",
 ]

@@ -265,7 +265,6 @@ def _coerce_rule(category_id: str, raw: Any) -> MemoryWriteRule:
     if base is None:
         # Unknown category — return a rule that's safe to read but
         # validate() will flag it.
-        base_default = _rule_from_category(MEMORY_CATEGORIES[0])
         return MemoryWriteRule(
             category=category_id,
             enabled=False,

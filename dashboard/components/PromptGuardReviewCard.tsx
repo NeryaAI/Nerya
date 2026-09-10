@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Card, ErrorBanner, Pill } from "./Page";
+import { Advanced, Card, ErrorBanner, Json, Pill } from "./Page";
 import { clientApi } from "../lib/clientApi";
 import type { PromptGuardItem } from "../lib/operatorTypes";
 
@@ -139,21 +139,21 @@ export function PromptGuardReviewCard() {
                 <button
                   disabled={busyId === item.id}
                   onClick={() => resolve(item, "reject")}
-                  className="text-[11px] px-2 py-0.5 rounded-md border border-rose-500/40 text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"
+                  className="text-[11px] px-2 py-0.5 rounded-md border border-danger/40 text-danger hover:bg-danger/10 disabled:opacity-50"
                 >
                   {t("reject")}
                 </button>
                 <button
                   disabled={busyId === item.id}
                   onClick={() => resolve(item, "trust_source")}
-                  className="text-[11px] px-2 py-0.5 rounded-md border border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/10 disabled:opacity-50"
+                  className="text-[11px] px-2 py-0.5 rounded-md border border-ok/40 text-ok hover:bg-ok/10 disabled:opacity-50"
                 >
                   {t("trustSource")}
                 </button>
                 <button
                   disabled={busyId === item.id}
                   onClick={() => resolve(item, "escalate")}
-                  className="text-[11px] px-2 py-0.5 rounded-md border border-amber-400/40 text-amber-200 hover:bg-amber-400/10 disabled:opacity-50"
+                  className="text-[11px] px-2 py-0.5 rounded-md border border-warn/40 text-warn hover:bg-warn/10 disabled:opacity-50"
                 >
                   {t("escalate")}
                 </button>
@@ -163,9 +163,11 @@ export function PromptGuardReviewCard() {
         </ul>
       )}
       {stats ? (
-        <div className="mt-2 text-[10.5px] text-ink-500 font-mono">
-          {tCommon("stats")}: {JSON.stringify(stats)}
-        </div>
+        // Debug-ish counters stay behind progressive disclosure instead of
+        // leaking a raw JSON blob into the operator view.
+        <Advanced title={tCommon("stats")}>
+          <Json value={stats} />
+        </Advanced>
       ) : null}
     </Card>
   );

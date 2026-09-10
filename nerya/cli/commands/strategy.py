@@ -7,6 +7,7 @@ operator can drive every package-lifecycle step from the terminal:
 nerya strategy list
 nerya strategy show btc_scalper
 nerya strategy generate --strategy-id btc_scalper --markets PAPER:BTCUSDT --accounts paper_main
+nerya strategy import-external my_strat.py --framework auto --markets PAPER:BTCUSDT
 nerya strategy validate btc_scalper
 nerya strategy promote prp_<id>
 nerya strategy run btc_scalper [--dry-run] [--trigger-event-id evt_xyz]
@@ -47,6 +48,33 @@ def cmd_show(args) -> int:
     client = _client(args.workspace, getattr(args, "profile", None))
     _print(client.strategy.get_package(args.strategy_id))
     return 0
+
+
+def cmd_import_external(args) -> int:
+    """Import a Freqtrade / VNpy strategy source as a Nerya package."""
+
+    client = _client(args.workspace, getattr(args, "profile", None))
+    settings: dict | None = None
+    if getattr(args, "settings", None):
+        try:
+            settings = json.loads(args.settings)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"--settings must be valid JSON: {exc}")
+    result = client.strategy.import_external(
+        args.sources,
+        strategy_id=getattr(args, "strategy_id", None),
+        framework=getattr(args, "framework", "auto"),
+        title=getattr(args, "title", None),
+        markets=list(args.markets) if getattr(args, "markets", None) else None,
+        accounts=list(args.accounts) if getattr(args, "accounts", None) else None,
+        timeframe=getattr(args, "timeframe", None),
+        settings=settings,
+        mode=getattr(args, "mode", "paper"),
+        stake_amount=float(getattr(args, "stake_amount", 0.0) or 0.0),
+        overwrite=bool(getattr(args, "overwrite", False)),
+    )
+    _print(result)
+    return 0 if result.get("validation_ok") else 1
 
 
 def cmd_generate(args) -> int:
@@ -302,6 +330,60 @@ def register(sub) -> None:
     _add_ws(sp)
     sp.add_argument("strategy_id")
     sp.set_defaults(func=cmd_show)
+
+    sp = sub2.add_parser(
+        "import-external",
+        help=(
+            "Import a Freqtrade / VNpy strategy source file (or directory) "
+            "as a Nerya strategy package"
+        ),
+    )
+    _add_ws(sp)
+    sp.add_argument("sources", nargs="+", help="Strategy .py file(s) or directory")
+    sp.add_argument("--strategy-id", dest="strategy_id", default=None)
+    sp.add_argument(
+        "--framework",
+        choices=["auto", "freqtrade", "vnpy"],
+        default="auto",
+        help="Framework detection (default: auto-detect via AST scan)",
+    )
+    sp.add_argument("--title", default=None)
+    sp.add_argument(
+        "--mode",
+        choices=["paper", "shadow", "live"],
+        default="paper",
+        help=(
+            "Import lifecycle. External imports never start on live: "
+            "--mode live imports as paper and records promotion_request: "
+            "live in the manifest for the normal promotion ladder"
+        ),
+    )
+    sp.add_argument("--markets", nargs="+", default=None)
+    sp.add_argument("--accounts", nargs="+", default=None)
+    sp.add_argument(
+        "--timeframe",
+        default=None,
+        help="Override the candle timeframe (e.g. 5m / 1h)",
+    )
+    sp.add_argument(
+        "--settings",
+        default=None,
+        help="Strategy parameters as JSON, e.g. '{\"fast_window\": 8}'",
+    )
+    sp.add_argument(
+        "--stake-amount",
+        dest="stake_amount",
+        type=float,
+        default=0.0,
+        help="Per-entry notional in USD (freqtrade semantics)",
+    )
+    sp.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Replace an existing package with the same strategy_id",
+    )
+    sp.set_defaults(func=cmd_import_external)
 
     sp = sub2.add_parser("generate", help="Generate a strategy package proposal")
     _add_ws(sp)

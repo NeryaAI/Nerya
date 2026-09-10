@@ -87,15 +87,17 @@ export default function LoginPage() {
                   {t("subtitle")}
                 </p>
               </div>
-              <Pill tone={status?.password_configured ? "ok" : "warn"}>
-                {status?.password_configured ? t("configured") : t("notConfigured")}
-              </Pill>
+              <div className="shrink-0">
+                <Pill tone={status?.password_configured ? "ok" : "warn"}>
+                  {status?.password_configured ? t("configured") : t("notConfigured")}
+                </Pill>
+              </div>
             </div>
 
             {error ? <ErrorBanner error={error} /> : null}
 
             {!status?.password_configured ? (
-              <div className="mt-4 rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-[12px] leading-5 text-amber-100">
+              <div className="mt-4 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] leading-5 text-warn">
                 {t("setupRequired")}
               </div>
             ) : null}

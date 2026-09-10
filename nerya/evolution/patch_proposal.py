@@ -85,6 +85,10 @@ ALLOWED_KINDS = {
     "skill_scaffold",           # runnable skill scaffolded in-place
     "gateway_platform_proposal", # messaging gateway adapter / platform support
     "core_feature_proposal",     # non-protected runtime/core feature plan
+    "plugin_proposal",          # agent-authored workspace plugin under
+                                 # after/plugins/<id>/*; new executable code
+                                 # so it is never auto-applied — operator
+                                 # approval is always required.
     "strategy_package_proposal", # agent-generated strategy package; brings
                                  # files under after/strategies/<id>/* that
                                  # promotion.py copies into the workspace.

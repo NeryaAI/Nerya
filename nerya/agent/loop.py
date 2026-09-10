@@ -36,9 +36,6 @@ import logging
 import re
 import secrets
 import time
-import unicodedata
-import uuid
-from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from ..core.redaction import redact_text
@@ -46,7 +43,6 @@ from ..core.errors import LLMError
 from ..harness.cancellation import CancelToken, SteerInbox
 from ..llm.attempt_budget import (
     AttemptBudget,
-    DEFAULT_EXTRA_ATTEMPT_LIMIT,
     attempt_budget_scope,
 )
 from ..llm.gateway import LLMGateway
@@ -64,12 +60,10 @@ from ..tools.result_contracts import (
     compacted_kept_data as _tool_compacted_kept_data,
     parse_compacted_kept_jsonish as _parse_compacted_kept_jsonish,
     parse_json_text as _parse_json_text,
-    team_report_data as _team_result_data,
-    team_report_has_usable_output as _team_result_has_usable_output,
-    team_report_should_finalize as _team_result_should_finalize,
     tool_json_data as _tool_json_data,
 )
-from ..tools.types import RiskLevel, ToolResult
+from ..tools.types import ToolResult
+from ..tools.execution_contracts import is_read_only_tool as _tool_name_is_read_only
 from .artifact_index import summarize_batch
 from .attachments import ATTACHMENT_BLOCK_TYPES, assistant_attachment_block
 from .transcript_blocks import (
@@ -78,9 +72,9 @@ from .transcript_blocks import (
     ThinkingBlock,
     ToolUseBlock,
 )
+from .loop_contracts import LoopConfig as LoopConfig, LoopOutcome as LoopOutcome
 from .loop_state import (
     LoopRunState,
-    LoopUsage,
     ProviderToolSelection,
     TurnCheckpoint,
     filter_provider_tools_by_names as _filter_provider_tools_by_names,
@@ -88,7 +82,7 @@ from .loop_state import (
 )
 from .tool_phase import (
     ToolBatchPhase,
-    ToolBatchState,
+    ToolBatchPolicy,
     ToolCallBuildContext,
     build_tool_calls,
     truncate_tool_loop_text as _truncate_for_tool_loop,
@@ -112,6 +106,8 @@ from .microcompact import microcompact
 from .transcript_compact import compact_transcript
 from .runtime import (
     AgentRuntime,
+    GateDecision,
+    evaluate_completion_gate,
     CompletionGateLike,
     ContinuationUnavailable,
     RuntimeRequest,
@@ -142,9 +138,6 @@ _LOG = logging.getLogger(__name__)
 
 
 EventSink = Callable[[BlockEnvelope], None]
-
-
-_NO_SUBSTANTIVE_EVIDENCE_FINAL_SYNTHESIS_SECONDS = 15.0
 
 
 def _pending_required_tool_names(
@@ -540,263 +533,6 @@ def _render_report_markdown(output: Any, *, limit: int = 4200) -> str:
         text = str(output or "").strip()
     return _clip_report_text(text, limit=limit)
 
-
-# ---------------------------------------------------------------------------
-# Loop config
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class LoopConfig:
-    turn_id: Optional[str] = None
-    """External turn id assigned by the kernel/API layer.
-
-    When omitted, standalone loop tests still get an internal id. In
-    production this must match the API/journal turn id so context-full
-    provider logs can be joined to per-case and session logs directly.
-    """
-
-    max_iterations: int = 24
-    """Hard ceiling on the number of model -> tools -> model rounds."""
-
-    compact_threshold: int = 60
-    """When transcript length exceeds this, run compaction."""
-
-    keep_tail_messages: int = 24
-    """How many recent messages to always preserve during compaction."""
-
-    max_tokens: int = 4096
-    temperature: float = 0.2
-    tier: Optional[str] = None
-    task: str = "agent.loop"
-    caller: str = "agent:loop"
-    reasoning_effort: Optional[str] = None
-    reasoning_summary: Optional[str] = None
-    model_provider: Optional[str] = None
-    model_id: Optional[str] = None
-    session_id: Optional[str] = None
-    strategy_id: Optional[str] = None
-    trigger_event_id: Optional[str] = None
-    required_artifacts: tuple[dict[str, Any], ...] = field(default_factory=tuple)
-    max_wall_seconds: Optional[float] = None
-    """Wall-clock budget cap. ``None`` (default) means no cap — the
-    loop only respects ``max_iterations``. When set, the loop checks
-    elapsed time at the top of every iteration and aborts with
-    ``stop_reason='timeout'`` once exceeded. Tool calls themselves
-    have their own per-call timeouts (``run_shell.timeout_sec``,
-    HTTP retries, …); this cap is the *outer* fence so a runaway
-    agent can't burn through tokens or budget for hours.
-    """
-
-    wall_time_final_synthesis_seconds: float = 60.0
-    """Near the wall-clock budget, prefer one text-only final synthesis
-    from completed tool evidence over starting another open-ended tool round.
-    """
-
-    action_tool_wall_reserve_seconds: Optional[float] = None
-    """Optional override for the late action-tool reserve.
-
-    ``None`` keeps the production reserve policy (at least 60 seconds,
-    scaled by the turn budget).  Callers with a deliberately short,
-    deterministic budget such as the offline eval harness may set ``0``.
-    """
-
-    max_total_tool_calls: Optional[int] = None
-    """Optional per-turn total tool call budget. ``None`` defaults
-    to ``max_iterations * 4`` — generous enough for normal turns
-    but a fence against pathological loops where the model emits a
-    big batch on every iteration."""
-
-    repeated_tool_window: int = 5
-    """Recent tool-call window used for loop detection. If the same
-    tool+arguments fingerprint appears too often in this sliding
-    window, the loop suppresses the duplicate instead of executing it
-    again."""
-
-    repeated_tool_threshold: int = 3
-    """Suppress the Nth identical tool+arguments call within the recent
-    window. ``3`` means two exact repeats may execute, while the third
-    receives a deduped observation that points at the prior result."""
-
-    repeated_tool_stop_after: int = 2
-    """Abort the turn after this many deduped observations for the same
-    tool+arguments fingerprint. This is the soft verifier that prevents
-    a model from burning the whole max-iteration budget on one stale
-    action."""
-
-    max_extra_llm_attempts_per_turn: int = DEFAULT_EXTRA_ATTEMPT_LIMIT
-    """Shared budget for attempts beyond the first provider call of each
-    semantic iteration. Adapter wire retries, context recovery, safety retry,
-    and compact final-synthesis retries all consume this same turn-scoped
-    ledger. Checkpoint continuation preserves the remaining allowance."""
-
-    llm_retry_attempts: int = 10
-    """Per-iteration compatibility ceiling for transient logical retries.
-
-    ``max_extra_llm_attempts_per_turn`` is the authoritative cross-layer cap,
-    so this value no longer multiplies with adapter wire retries or recovery
-    paths. Set to ``1`` to disable generic loop-level retry.
-    """
-
-    llm_retry_base_delay: float = 3.0
-    """Base seconds for exponential backoff between iteration-level
-    LLM retries. Effective wait is ``base * 2^(attempt-1)`` capped at
-    ``llm_retry_max_delay`` and then *full-jittered* (uniform(0, x)) so a
-    herd of concurrent agents does not synchronise its retries.
-    With 10 attempts this gives a worst-case timeline of roughly
-    3 + 6 + 12 + 24 + 48 + 60 + 60 + 60 + 60 = 333s (~5.5min), with
-    the actual delays averaging ~half that under uniform jitter. Slow
-    enough that a real provider outage almost always clears, fast
-    enough that a transient blip on attempt 1 only adds a few
-    seconds on average."""
-
-    llm_retry_max_delay: float = 60.0
-    """Hard cap (seconds) on each iteration-level retry sleep, before
-    jitter is applied."""
-
-    llm_retry_full_jitter: bool = True
-    """If true, each retry sleeps ``uniform(0, computed_delay)`` instead
-    of the bare exponential delay. Full jitter prevents thundering-herd
-    retries when many agents share a provider account. Disable only for
-    deterministic test runs."""
-
-    enable_microcompact: bool = True
-    """Run the per-tool-result token cap before every model round.
-    Bulk read/grep/glob/shell results that exceed
-    ``microcompact_max_chars`` get truncated to head + tail with a
-    breadcrumb in the middle. Disable only for benchmarking compact
-    behaviour; production should leave this on."""
-
-    microcompact_max_chars: int = 8000
-    microcompact_keep_recent: int = 3
-
-    compact_preservation_cb: Optional[
-        Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
-    ] = None
-    """Optional callback fired *after* macro-compaction, with the
-    post-compact transcript. Returns the (possibly augmented)
-    transcript. The kernel uses this to inject one synthetic
-    system message listing files the agent had already read /
-    edited (per :class:`FileStateCache`), so the model doesn't lose
-    track of "these are the artefacts I'm working on" when the
-    raw read/edit blocks were dropped during compaction. Idempotent
-    — adding the same attachment twice should be a no-op."""
-
-    token_budget: Optional[int] = None
-    """Total billed-token budget for this turn (sum of input+output
-    tokens across every LLM call, as reported by provider usage).
-    ``None`` disables budget tracking. When set, the loop stops with
-    ``stop_reason='token_budget_exceeded'`` once cumulative usage
-    crosses the budget — the canonical *soft verifier* from the
-    agent-architecture pattern docs (budget check, not correctness)."""
-
-    enable_diminishing_returns: bool = False
-    """Enable the diminishing-returns soft verifier independently of
-    ``token_budget``. Historically the text-output heuristic was gated
-    behind ``token_budget is not None`` which production never set,
-    leaving the verifier dead. Opt-in because terse tool-grinding
-    models can legitimately emit little prose per iteration."""
-
-    diminishing_returns_threshold: int = 500
-    """If 3 consecutive iterations each produce less than this many characters
-    of new assistant text, the soft verifier triggers (diminishing returns)."""
-
-    diminishing_returns_window: int = 3
-    """Number of consecutive low-output iterations before triggering."""
-
-    reactive_compact_max_attempts: int = 3
-    """How many times one iteration may respond to a provider
-    *context-overflow* error (``context_length_exceeded`` / "prompt is
-    too long" / 413 …) by compacting the live transcript and retrying
-    the same request. Mirrors Codex's ``ContextWindowExceeded`` →
-    auto-compact recovery: without it a single overflow throws away the
-    whole turn even though all tool work is already on disk. Each
-    attempt escalates aggressiveness (tighter tail, emergency
-    microcompact over *all* tool results). ``0`` disables recovery and
-    restores fail-fast behaviour."""
-
-    model_context_window: Optional[int] = None
-    """Static fallback for the active model's context window (total
-    tokens). When the model registry can resolve the window from the
-    observed provider/model pair this value is ignored. Used by the
-    token-pressure compaction trigger below."""
-
-    token_pressure_compact_ratio: float = 0.85
-    """Proactive mid-turn compaction trigger: when the *last observed*
-    prompt token count (``usage.input_tokens`` from the provider)
-    reaches this fraction of the model context window, force a
-    macro-compaction even if the message-count threshold has not been
-    hit yet. Message count is a weak proxy for tokens — a transcript of
-    40 messages full of large tool results can overflow a 128k window
-    long before ``compact_threshold=60`` trips. ``0`` disables the
-    token-pressure trigger."""
-
-    # Explicit workspace for best-effort raw tool persistence. Keeping this
-    # caller-owned avoids falling back to a process-global home directory in
-    # scratch/eval runs.
-    workspace_root: Optional[str] = None
-
-    # Caller-owned child policy. Defaults are applied before model arguments,
-    # so an explicit tool call can still override a role-level convenience
-    # default such as ``save_raw=True``.
-    tool_argument_defaults: dict[str, dict[str, Any]] = field(default_factory=dict)
-    tool_call_metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class LoopOutcome:
-    """Final state after the loop completes (or aborts)."""
-
-    transcript: list[dict[str, Any]]
-    iterations: int
-    stop_reason: str
-    final_text: str
-    tool_calls: int
-    error_count: int
-    transition_reason: str = ""
-    aborted: bool = False
-    abort_reason: str = ""
-    blocks: list[BlockEnvelope] = field(default_factory=list)
-    # ---- token usage telemetry (provider-reported, 0 = unknown) ----
-    llm_calls: int = 0
-    """LLM calls that returned provider usage data."""
-    input_tokens_total: int = 0
-    """Sum of prompt/input tokens across all billed calls (each call
-    re-bills the whole context, so this tracks actual spend)."""
-    output_tokens_total: int = 0
-    """Sum of completion/output tokens across all billed calls."""
-    prompt_tokens_last: int = 0
-    """Prompt tokens of the *last* call — live context-size proxy."""
-    context_window: int = 0
-    """Model context window resolved from registry/config (0 = unknown)."""
-    compaction_count: int = 0
-    """Macro-compactions performed during the turn (threshold + forced)."""
-    reactive_compaction_count: int = 0
-    """Emergency compactions triggered by provider context-overflow errors."""
-    steer_messages: int = 0
-    """Operator mid-turn steer messages injected into the transcript."""
-    completion_status: str = "complete"
-    """Caller-owned completion-gate decision (when a gate was supplied)."""
-    completion_reason: str = ""
-    completion_feedback: str = ""
-    completion_rounds: int = 1
-    provider: str = ""
-    model: str = ""
-    model_calls: list[dict[str, Any]] = field(default_factory=list)
-    usd_total: float = 0.0
-    extra_llm_attempts: int = 0
-    """Extra logical/wire attempts consumed after normal first calls."""
-    extra_llm_attempt_limit: int = 0
-    extra_llm_attempts_by_reason: dict[str, int] = field(default_factory=dict)
-    checkpoint: TurnCheckpoint | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-    """Internal state required for safe caller-owned continuation."""
-
-
-
 def _build_deterministic_final_summary(
     *,
     iterations: int,
@@ -1074,181 +810,10 @@ _COMPACT_REQUIRED_TOOL_SYSTEM = (
     "Do not answer with prose unless the tool call is impossible under the "
     "provided schema."
 )
-_LARGE_FINAL_SYNTHESIS_PAYLOAD_CHARS = 50_000
-_LARGE_PAYLOAD_FINAL_SYNTHESIS_SECONDS = 120.0
-_FINAL_SYNTHESIS_RETRY_RESERVE_SECONDS = 30.0
-_TOOL_EVIDENCE_FINAL_SYNTHESIS_SECONDS = 120.0
-_HIGH_VOLUME_TOOL_EVIDENCE_CALLS = 12
-_HIGH_VOLUME_TOOL_EVIDENCE_FINAL_SYNTHESIS_SECONDS = 210.0
-_TEAM_RUN_FINAL_SYNTHESIS_SECONDS = 150.0
-_TEAM_RUN_FINAL_SYNTHESIS_MAX_TOKENS = 8192
-_TEAM_RUN_FINAL_SYNTHESIS_SYSTEM = (
-    "You are Nerya's final-report synthesizer. Use only the provided "
-    "AgentTeam evidence. Do not call tools. Do not expose raw JSON, internal "
-    "schemas, or fallback markers. State evidence gaps honestly."
-)
-_TEAM_RUN_FINAL_SYNTHESIS_PROMPT_LIMIT = 18000
 _ACTION_TOOL_MIN_WALL_RESERVE_SECONDS = 60.0
 _ACTION_TOOL_MAX_WALL_RESERVE_SECONDS = 300.0
 _ACTION_TOOL_WALL_RESERVE_FRACTION = 0.33
-_COMPACT_REQUIRED_ACTION_MAX_TOKENS = 1024
 _MIN_TEXT_ONLY_PROVIDER_WINDOW_SECONDS = 1.0
-
-
-_TOOL_SCHEMA_SAFETY_RETRY_KEEP_KEYS = frozenset({
-    "$defs",
-    "additionalProperties",
-    "allOf",
-    "anyOf",
-    "default",
-    "enum",
-    "format",
-    "items",
-    "maxItems",
-    "maxLength",
-    "maximum",
-    "minItems",
-    "minLength",
-    "minimum",
-    "oneOf",
-    "pattern",
-    "properties",
-    "required",
-    "type",
-})
-
-
-def _compact_schema_for_safety_retry(
-    value: Any,
-    *,
-    depth: int = 0,
-    in_schema_name_map: bool = False,
-) -> Any:
-    if depth > 8:
-        return {}
-    if isinstance(value, dict):
-        out: dict[str, Any] = {}
-        for key, child in value.items():
-            key_text = str(key)
-            if key_text == "description" and not in_schema_name_map:
-                continue
-            if (
-                not in_schema_name_map
-                and key_text not in _TOOL_SCHEMA_SAFETY_RETRY_KEEP_KEYS
-            ):
-                continue
-            out[key_text] = _compact_schema_for_safety_retry(
-                child,
-                depth=depth + 1,
-                in_schema_name_map=key_text in {"$defs", "properties"},
-            )
-        return out
-    if isinstance(value, list):
-        return [
-            _compact_schema_for_safety_retry(item, depth=depth + 1)
-            for item in value[:40]
-        ]
-    if isinstance(value, str):
-        text = redact_text(value)
-        return text[:240].rstrip() + ("..." if len(text) > 240 else "")
-    return value
-
-
-def _schema_required_properties_only(
-    schema: Any,
-    *,
-    recovery_required: tuple[str, ...] = (),
-) -> Any:
-    if not isinstance(schema, dict):
-        return schema
-    properties = schema.get("properties")
-    required = schema.get("required")
-    if not isinstance(properties, dict) or not isinstance(required, list):
-        return schema
-    required_order = [str(item) for item in required if str(item) in properties]
-    keep_order = list(required_order)
-    for item in recovery_required:
-        if item in properties and item not in keep_order:
-            keep_order.append(item)
-        if item in properties and item not in required_order:
-            required_order.append(item)
-    if not keep_order:
-        return schema
-    narrowed = dict(schema)
-    narrowed["properties"] = {name: properties[name] for name in keep_order}
-    narrowed["required"] = required_order
-    return narrowed
-
-
-def _recovery_required_arguments_by_tool(
-    results: list[ToolResult],
-) -> dict[str, tuple[str, ...]]:
-    required_by_tool: dict[str, list[str]] = {}
-    for result in results:
-        if not result.is_error or result.error is None:
-            continue
-        hint = (
-            result.error.recovery_hint
-            if isinstance(result.error.recovery_hint, dict)
-            else {}
-        )
-        raw_tool = hint.get("tool_name") or result.name
-        tool_name = str(raw_tool or "").strip()
-        if not tool_name:
-            continue
-        raw_required = hint.get("required_arguments")
-        if isinstance(raw_required, str):
-            candidates = [raw_required]
-        elif isinstance(raw_required, list):
-            candidates = [str(item) for item in raw_required]
-        else:
-            candidates = []
-        if not candidates:
-            continue
-        bucket = required_by_tool.setdefault(tool_name, [])
-        for item in candidates:
-            text = str(item or "").strip()
-            if text and text not in bucket:
-                bucket.append(text)
-    return {name: tuple(values) for name, values in required_by_tool.items()}
-
-
-def _compact_provider_tools_for_safety_retry(
-    tools: list[dict[str, Any]],
-    *,
-    required_only: bool = False,
-    recovery_required_args: dict[str, tuple[str, ...]] | None = None,
-) -> list[dict[str, Any]]:
-    compacted: list[dict[str, Any]] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        name = _provider_tool_name(tool)
-        if not name:
-            continue
-        schema = tool.get("input_schema")
-        input_schema = _compact_schema_for_safety_retry(
-            schema or {"type": "object"}
-        )
-        if required_only:
-            input_schema = _schema_required_properties_only(
-                input_schema,
-                recovery_required=(
-                    tuple(recovery_required_args.get(name, ()))
-                    if recovery_required_args
-                    else ()
-                ),
-            )
-        description = (
-            f"Required native tool {name}. Use concise JSON arguments "
-            "based only on the provided evidence and advertised schema."
-        )
-        compacted.append({
-            "name": name,
-            "description": description,
-            "input_schema": input_schema,
-        })
-    return compacted
 
 
 def _assistant_text_from_blocks(blocks: list[dict[str, Any]]) -> str:
@@ -1705,14 +1270,7 @@ def _tool_use_batch_has_action_tools(
     tool_uses: list[dict[str, Any]],
     registry: ToolRegistry,
 ) -> bool:
-    for tool_use in tool_uses:
-        name = str(tool_use.get("name") or "")
-        descriptor = registry.find(name)
-        if descriptor is None:
-            return True
-        if not (descriptor.read_only and descriptor.risk == RiskLevel.READ):
-            return True
-    return False
+    return any(not _tool_use_is_read_only(tool, registry) for tool in tool_uses)
 
 
 def _tool_use_batch_is_optional_llm_helper_only(
@@ -1738,13 +1296,6 @@ def _tool_use_is_read_only(
 ) -> bool:
     name = str(tool_use.get("name") or "")
     return _tool_name_is_read_only(name, registry)
-
-
-def _tool_name_is_read_only(name: str, registry: ToolRegistry) -> bool:
-    descriptor = registry.find(name)
-    if descriptor is None:
-        return False
-    return descriptor.read_only and descriptor.risk == RiskLevel.READ
 
 
 def _split_tool_uses_by_action_risk(
@@ -1780,35 +1331,23 @@ def _action_tool_wall_reserve_seconds(config: "LoopConfig") -> float:
     return min(reserve, _ACTION_TOOL_MAX_WALL_RESERVE_SECONDS)
 
 
-def _required_action_min_wall_seconds() -> float:
-    """Keep a small retry window for required calls."""
-
-    return _ACTION_TOOL_MIN_WALL_RESERVE_SECONDS
+def _required_action_min_wall_seconds(config: "LoopConfig") -> float:
+    """Bound required retries without overriding a smaller caller-owned reserve."""
+    return min(
+        _ACTION_TOOL_MIN_WALL_RESERVE_SECONDS,
+        _action_tool_wall_reserve_seconds(config),
+    )
 
 
 def _required_action_retry_window_available(
     deadline: float | None,
     tool_names: set[str],
+    config: "LoopConfig",
 ) -> bool:
-    if deadline is None:
-        return True
-    if not tool_names:
-        return False
-    return deadline - time.time() > _required_action_min_wall_seconds()
-
-
-def _clip_prompt_payload(text: str, *, limit: int = 50_000) -> str:
-    text = str(text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "\n\n[truncated for final synthesis]"
-
-
-def _clip_team_final_text(value: Any, *, limit: int = 900) -> str:
-    text = " ".join(str(value or "").split())
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "..."
+    return bool(tool_names) and (
+        deadline is None
+        or deadline - time.time() > _required_action_min_wall_seconds(config)
+    )
 
 
 def _stringify_user_message(message: str | list[dict[str, Any]]) -> str:
@@ -1826,654 +1365,6 @@ def _stringify_user_message(message: str | list[dict[str, Any]]) -> str:
             continue
         parts.append(json.dumps(item, ensure_ascii=False, default=str))
     return "\n".join(part for part in parts if part).strip()
-
-
-_TEAM_FINAL_INTERNAL_KEYS = frozenset({
-    "__team_task",
-    "call_id",
-    "close_reason",
-    "done",
-    "error_kind",
-    "llm_error",
-    "ok",
-    "partial",
-    "payload",
-    "provider_recovery",
-    "quality",
-    "raw",
-    "role",
-    "role_profile",
-    "skill_calls",
-    "status",
-    "subject",
-    "task_id",
-    "task_owner",
-    "task_subject",
-    "team_call_id",
-    "team_run_id",
-    "tool_errors",
-    "tool_call_id",
-    "tools_used",
-    "truncated",
-})
-_TEAM_FINAL_TELEMETRY_KEYS = frozenset({
-    "data_coverage",
-    "evidence_contract",
-    "metrics",
-})
-_TEAM_INTERNAL_QUALITY_VALUES = frozenset({
-    "tool_observation_fallback",
-    "degraded_missing_evidence",
-    "subagent_finalization_reserve",
-})
-_TEAM_OBSERVATION_FALLBACK_ONLY_KEYS = frozenset({
-    "observations",
-    "tools_used",
-    "tool_errors",
-    "llm_error",
-    "close_reason",
-    "subject",
-    "done",
-    "role_profile",
-    "data_coverage",
-    "metrics",
-})
-_TEAM_SUMMARY_WRAPPER_KEYS = frozenset({"summary", "truncated"})
-
-
-def _team_payload_has_observation_fallback_markers(parsed: Any) -> bool:
-    if not isinstance(parsed, dict):
-        return False
-    quality = str(parsed.get("quality") or "").strip().lower()
-    if quality in _TEAM_INTERNAL_QUALITY_VALUES:
-        return True
-    error_kind = str(parsed.get("error_kind") or "").strip().lower()
-    if error_kind == "tool_observation_fallback":
-        return True
-    close_reason = str(parsed.get("close_reason") or "").strip().lower()
-    if "tool_observation" in close_reason or "after_tool_observations" in close_reason:
-        return True
-    summary = str(parsed.get("summary") or "").strip().lower()
-    if "collected tool observations" in summary and (
-        "did not emit" in summary or "did not produce" in summary
-    ):
-        return True
-    if parsed.get("partial") is True and (
-        "observations" in parsed or "tools_used" in parsed or "tool_errors" in parsed
-    ):
-        return True
-    return False
-
-
-def _team_unwrap_summary_payload(value: Any) -> Any:
-    parsed = _parse_jsonish(value)
-    if not isinstance(parsed, dict):
-        return parsed
-    keys = {str(key).lower().replace("-", "_") for key in parsed}
-    summary = parsed.get("summary")
-    nested = _parse_jsonish(summary)
-    if isinstance(nested, dict) and keys <= _TEAM_SUMMARY_WRAPPER_KEYS and (
-        "truncated" in keys
-        or _team_payload_has_observation_fallback_markers(nested)
-    ):
-        return nested
-    return parsed
-
-
-def _strip_team_final_internal_fields(value: Any, *, depth: int = 0) -> Any:
-    parsed = _team_unwrap_summary_payload(value)
-    if depth >= 6:
-        return None
-    if isinstance(parsed, dict):
-        cleaned: dict[str, Any] = {}
-        observation_fallback = _team_payload_has_observation_fallback_markers(parsed)
-        for key, child in parsed.items():
-            normalized = str(key).lower().replace("-", "_")
-            if observation_fallback and (
-                normalized in _TEAM_OBSERVATION_FALLBACK_ONLY_KEYS
-            ):
-                continue
-            if (
-                normalized in _TEAM_FINAL_INTERNAL_KEYS
-                or normalized in _TEAM_FINAL_TELEMETRY_KEYS
-                or normalized == "raw"
-            ):
-                continue
-            child_cleaned = _strip_team_final_internal_fields(
-                child,
-                depth=depth + 1,
-            )
-            if child_cleaned not in (None, "", [], {}):
-                cleaned[str(key)] = child_cleaned
-        return cleaned
-    if isinstance(parsed, list):
-        return [
-            child
-            for item in parsed[:20]
-            if (child := _strip_team_final_internal_fields(item, depth=depth + 1))
-            not in (None, "", [], {})
-        ]
-    return parsed
-
-
-def _team_summary_fragments(value: Any, *, limit: int = 4) -> list[str]:
-    """Render a bounded, producer-ordered summary without field guesses."""
-
-    parsed = _strip_team_final_internal_fields(value)
-    if parsed in (None, "", [], {}):
-        return []
-    if not isinstance(parsed, dict):
-        return [_clip_team_final_text(parsed, limit=700)]
-
-    scalar: list[str] = []
-    short_lists: list[str] = []
-    for key, child in parsed.items():
-        if child in (None, "", [], {}):
-            continue
-        label = _report_label(str(key))
-        if isinstance(child, (str, int, float, bool)):
-            rendered = _one_line(child, key=str(key), limit=420)
-            if rendered:
-                scalar.append(rendered if str(key) in {"summary", "headline"} else f"{label}: {rendered}")
-        elif isinstance(child, list) and child and all(
-            isinstance(item, (str, int, float, bool)) for item in child[:4]
-        ):
-            rendered = _one_line(child, key=str(key), limit=420)
-            if rendered:
-                short_lists.append(f"{label}: {rendered}")
-        if len(scalar) >= limit:
-            break
-    parts = [*scalar, *short_lists]
-    if parts:
-        return list(dict.fromkeys(parts))[:limit]
-    rendered = _render_report_markdown(parsed, limit=900)
-    return [rendered] if rendered else []
-
-
-def _team_final_output_summary(output: Any) -> str:
-    parsed = _team_unwrap_summary_payload(output)
-    fallback = _team_payload_has_observation_fallback_markers(parsed)
-    parts = _team_summary_fragments(parsed)
-    if parts:
-        return _clip_team_final_text(" ".join(parts), limit=1300)
-    if fallback:
-        return "collected tool evidence but did not produce a complete role narrative"
-    return ""
-
-
-def _team_final_tools(output: Any) -> list[dict[str, Any]]:
-    parsed = _parse_jsonish(output)
-    if not isinstance(parsed, dict):
-        return []
-    raw_tools = parsed.get("tools_used") or []
-    if not isinstance(raw_tools, list):
-        return []
-    tools: list[dict[str, Any]] = []
-    for item in raw_tools[:8]:
-        item = _parse_jsonish(item)
-        if isinstance(item, dict) and "summary" in item:
-            nested = _parse_jsonish(item.get("summary"))
-            if isinstance(nested, dict):
-                item = nested
-        if not isinstance(item, dict):
-            continue
-        skill = str(item.get("skill") or item.get("name") or "").strip()
-        action = str(item.get("action") or "").strip()
-        if not skill and not action:
-            continue
-        tools.append({k: v for k, v in {"skill": skill, "action": action}.items() if v})
-    return tools
-
-
-def _team_final_data_coverage(output: Any) -> dict[str, Any]:
-    parsed = _parse_jsonish(output)
-    if not isinstance(parsed, dict):
-        return {}
-    coverage = parsed.get("data_coverage")
-    if not isinstance(coverage, dict):
-        return {}
-    keep: dict[str, Any] = {}
-    for key, value in coverage.items():
-        normalized = str(key).lower().replace("-", "_")
-        if normalized in _TEAM_FINAL_INTERNAL_KEYS | _TEAM_FINAL_TELEMETRY_KEYS:
-            continue
-        if isinstance(value, bool):
-            keep[str(key)] = value
-        if len(keep) >= 12:
-            break
-    return keep
-
-
-def _team_final_evidence_coverage(output: Any) -> dict[str, list[str]]:
-    coverage = _team_final_data_coverage(output)
-    available: list[str] = []
-    missing: list[str] = []
-    for key, value in coverage.items():
-        label = str(key).removeprefix("has_").replace("_", " ")
-        if value is True:
-            available.append(label)
-        elif value is False:
-            missing.append(label)
-    result: dict[str, list[str]] = {}
-    if available:
-        result["available"] = available
-    if missing:
-        result["missing"] = missing
-    return result
-
-
-def _team_final_user_visible_error(value: Any) -> str:
-    text = _clip_team_final_text(value, limit=500)
-    lowered = text.lower()
-    if not text:
-        return ""
-    if "promptinjectiondetected" in lowered or "prompt injection" in lowered:
-        return "a safety guard blocked one member report; diagnostic details are available in logs"
-    internal_markers = (
-        "\\b(",
-        ".{0,",
-        "tool_call_id",
-        "task_id",
-        "stack trace",
-        "traceback",
-        "exfiltrate",
-    )
-    if any(marker in lowered for marker in internal_markers):
-        return "an internal diagnostic was omitted from the user-facing report; details are available in logs"
-    return text
-
-
-def _compact_team_results_for_final_synthesis(
-    team_results: list[dict[str, Any]],
-    *,
-    for_model: bool = False,
-) -> list[dict[str, Any]]:
-    compact_runs: list[dict[str, Any]] = []
-    for data in team_results[:4]:
-        if not isinstance(data, dict):
-            continue
-        if for_model:
-            run: dict[str, Any] = {
-                "team_template": data.get("team_template"),
-                "completion": _team_final_completion_label(str(data.get("status") or "")),
-                "task": _clip_team_final_text(data.get("task"), limit=800),
-                "roles_completed": list(data.get("roles_succeeded") or [])[:12],
-                "roles_incomplete": list(data.get("roles_failed") or [])[:12],
-            }
-        else:
-            run = {
-                "team_run_id": data.get("team_run_id"),
-                "team_template": data.get("team_template"),
-                "status": data.get("status"),
-                "task": _clip_team_final_text(data.get("task"), limit=800),
-                "roles_succeeded": list(data.get("roles_succeeded") or [])[:12],
-                "roles_failed": list(data.get("roles_failed") or [])[:12],
-            }
-        aggregated = data.get("aggregated")
-        if aggregated not in (None, "", [], {}):
-            run["aggregated_summary"] = _clip_team_final_text(
-                _render_report_markdown(aggregated, limit=1000),
-                limit=1000,
-            )
-        role_results: list[dict[str, Any]] = []
-        for entry in (data.get("results") if isinstance(data.get("results"), list) else [])[:12]:
-            if not isinstance(entry, dict):
-                continue
-            output = entry.get("output")
-            role_completion = "partial" if (
-                isinstance(_parse_jsonish(output), dict)
-                and (
-                    _parse_jsonish(output).get("partial") is True
-                    or _parse_jsonish(output).get("quality") == "tool_observation_fallback"
-                )
-            ) else "completed"
-            if for_model:
-                role: dict[str, Any] = {
-                    "subagent": entry.get("subagent") or entry.get("role"),
-                    "completion": _team_final_role_completion_label(role_completion),
-                    "summary": _team_final_output_summary(output),
-                }
-            else:
-                role = {
-                    "subagent": entry.get("subagent") or entry.get("role"),
-                    "status": role_completion,
-                    "summary": _team_final_output_summary(output),
-                }
-                cleaned_output = _strip_team_final_internal_fields(output)
-                if cleaned_output not in (None, "", [], {}):
-                    role["output"] = cleaned_output
-            tools = _team_final_tools(output)
-            if tools:
-                role["tools_used"] = tools
-            if for_model:
-                coverage = _team_final_evidence_coverage(output)
-                if coverage:
-                    role["evidence_coverage"] = coverage
-            else:
-                coverage = _team_final_data_coverage(output)
-                if coverage:
-                    role["data_coverage"] = coverage
-            role_results.append(role)
-        if role_results:
-            run["role_results"] = role_results
-        failures: list[dict[str, Any]] = []
-        for failure in (
-            data.get("failures") if isinstance(data.get("failures"), list) else []
-        )[:12]:
-            if not isinstance(failure, dict):
-                continue
-            output = failure.get("output")
-            item: dict[str, Any] = {
-                "subagent": (
-                    failure.get("subagent")
-                    or failure.get("role")
-                    or failure.get("owner")
-                ),
-            }
-            error_summary = _team_final_user_visible_error(
-                failure.get("error") or failure.get("summary")
-            )
-            if error_summary:
-                item["gap" if for_model else "error"] = error_summary
-            if output not in (None, "", [], {}):
-                item["summary"] = _team_final_output_summary(output)
-                if not for_model:
-                    cleaned_output = _strip_team_final_internal_fields(output)
-                    if cleaned_output not in (None, "", [], {}):
-                        item["output"] = cleaned_output
-                tools = _team_final_tools(output)
-                if tools:
-                    item["tools_used"] = tools
-            failures.append(item)
-        if failures:
-            run["failures"] = failures
-        compact_runs.append({k: v for k, v in run.items() if v not in (None, "", [], {})})
-    return compact_runs
-
-
-def _team_final_completion_label(status: str) -> str:
-    normalized = str(status or "").strip().lower()
-    if normalized in {"completed", "ok", "success"}:
-        return "completed"
-    if normalized in {"completed_with_failures", "partial", "degraded"}:
-        return "partial"
-    if normalized in {"failed", "error", "timeout"}:
-        return "failed"
-    return "partial"
-
-
-def _team_final_role_completion_label(status: str) -> str:
-    normalized = str(status or "").strip().lower()
-    if normalized == "partial":
-        return "partial"
-    if normalized in {"failed", "error", "timeout"}:
-        return "failed"
-    return "completed"
-
-
-def _team_final_text_exposes_internal_dump(text: str) -> bool:
-    return any(
-        pattern.search(text or "")
-        for pattern in (
-            re.compile(r'\b"status"\s*:'),
-            re.compile(r'\b"iteration"\s*:\s*\d+'),
-            re.compile(r"\btool_observation_fallback\b", re.IGNORECASE),
-        )
-    )
-
-
-def _team_final_tool_names(tools: Any) -> str:
-    if not isinstance(tools, list):
-        return ""
-    names: list[str] = []
-    for tool in tools[:5]:
-        if not isinstance(tool, dict):
-            continue
-        name = str(tool.get("skill") or tool.get("action") or "").strip()
-        if name:
-            names.append(name)
-    return ", ".join(dict.fromkeys(names))
-
-
-def _team_bounded_visible_gap(value: Any) -> str:
-    text = _clip_team_final_text(value, limit=500)
-    lowered = text.lower()
-    if not text:
-        return ""
-    if "team_run timeout" in lowered or " timeout after " in lowered:
-        return "one team member did not complete its conclusion within the turn budget"
-    if (
-        "remote-close" in lowered
-        or "remote end closed" in lowered
-        or "network error calling provider" in lowered
-        or "read operation timed out" in lowered
-    ):
-        return "this role hit a provider/runtime interruption before completing its conclusion"
-    return text
-
-
-def _team_bounded_fallback_role_line(role: dict[str, Any]) -> str:
-    name = _clip_team_final_text(
-        redact_text(str(role.get("subagent") or "team_member")),
-        limit=120,
-    )
-    summary = _clip_team_final_text(role.get("summary"), limit=700)
-    output = role.get("output")
-    if output in (None, "", [], {}) and isinstance(role, dict):
-        output = {
-            key: value
-            for key, value in role.items()
-            if key not in {
-                "subagent",
-                "status",
-                "summary",
-                "tools_used",
-                "data_coverage",
-            }
-        }
-    detail_text = ""
-    if output not in (None, "", [], {}):
-        rendered_detail = _render_report_markdown(output, limit=1200)
-        if rendered_detail:
-            filtered_lines: list[str] = []
-            for line in rendered_detail.splitlines():
-                lowered = line.lower()
-                if lowered.startswith("- **details**:"):
-                    continue
-                if "sections: summary:" in lowered:
-                    continue
-                filtered_lines.append(line)
-            detail_text = "\n".join(filtered_lines).strip()
-    used_coverage_summary = False
-    if not summary:
-        coverage = _team_final_evidence_coverage({
-            "data_coverage": role.get("data_coverage") or {},
-        })
-        coverage_parts: list[str] = []
-        if coverage.get("available"):
-            coverage_parts.append("available: " + ", ".join(coverage["available"]))
-        if coverage.get("missing"):
-            coverage_parts.append("missing: " + ", ".join(coverage["missing"]))
-        summary = "; ".join(coverage_parts)
-        used_coverage_summary = bool(summary)
-    if not summary:
-        summary = "bounded evidence was collected, but this role did not produce a complete narrative"
-    status_label = _team_final_role_completion_label(str(role.get("status") or ""))
-    if status_label == "partial" and "partial" not in summary.lower():
-        summary = f"partial evidence: {summary}"
-    elif status_label == "failed" and "incomplete" not in summary.lower():
-        summary = f"incomplete evidence: {summary}"
-    tool_names = "" if used_coverage_summary else _team_final_tool_names(role.get("tools_used"))
-    if tool_names:
-        summary = f"{summary}; tools: {tool_names}"
-    if detail_text and detail_text not in summary:
-        summary = f"{summary}\n{detail_text}".strip()
-    label = _report_label(name)
-    heading = f"### {name} ({label})" if label != name else f"### {name}"
-    return f"{heading}\n{summary}"
-
-
-def _team_bounded_fallback_failure_line(failure: dict[str, Any]) -> str:
-    name = _clip_team_final_text(
-        redact_text(str(failure.get("subagent") or "team_member")),
-        limit=120,
-    )
-    detail = _clip_team_final_text(failure.get("summary"), limit=500)
-    if not detail:
-        detail = _team_bounded_visible_gap(failure.get("error"))
-    if not detail:
-        detail = "one team member did not complete its conclusion in this turn"
-    tool_names = _team_final_tool_names(failure.get("tools_used"))
-    if tool_names:
-        detail = f"{detail}; tools: {tool_names}"
-    label = _report_label(name)
-    heading = f"### {name} ({label})" if label != name else f"### {name}"
-    return f"{heading}\n{detail}"
-
-
-def _build_team_run_bounded_fallback(
-    *,
-    user_message: str | list[dict[str, Any]],
-    team_results: list[dict[str, Any]],
-) -> str:
-    original_prompt = _stringify_user_message(user_message)
-    compact_runs = _compact_team_results_for_final_synthesis(team_results)
-    title = _clip_team_final_text(redact_text(original_prompt), limit=160)
-    lines = [f"# {title}" if title else "# AgentTeam evidence"]
-    summaries = [
-        _clip_team_final_text(run.get("aggregated_summary"), limit=900)
-        for run in compact_runs
-        if isinstance(run, dict) and run.get("aggregated_summary")
-    ]
-    if summaries:
-        lines.extend(["", "## Summary", *summaries[:4]])
-    role_lines: list[str] = []
-    for run in compact_runs:
-        role_results = run.get("role_results") or []
-        for role in role_results:
-            if isinstance(role, dict):
-                role_lines.append(_team_bounded_fallback_role_line(role))
-        failures = run.get("failures") or []
-        for failure in failures[:8]:
-            if isinstance(failure, dict):
-                role_lines.append(_team_bounded_fallback_failure_line(failure))
-    if role_lines:
-        lines.extend(["", "## Role findings", *role_lines[:12]])
-    if not role_lines:
-        lines.extend([
-            "",
-            "## Role findings",
-            "The team gathered some partial results, but there wasn't a clean "
-            "per-role summary to fold into the final answer.",
-        ])
-    return "\n".join(line for line in lines if str(line).strip())
-
-
-def _first_team_run_id(team_results: list[dict[str, Any]]) -> str | None:
-    for result in team_results or []:
-        if not isinstance(result, dict):
-            continue
-        for key in ("team_run_id", "run_id", "id"):
-            value = str(result.get(key) or "").strip()
-            if value:
-                return value
-    return None
-
-
-def _build_team_run_final_synthesis_prompt(
-    *,
-    user_message: str | list[dict[str, Any]],
-    team_results: list[dict[str, Any]],
-) -> str:
-    original_prompt = _stringify_user_message(user_message)
-    compact_results = _compact_team_results_for_final_synthesis(
-        team_results,
-        for_model=True,
-    )
-    conclusions = _clip_prompt_payload(
-        json.dumps(compact_results, ensure_ascii=False, indent=2, default=str),
-        limit=_TEAM_RUN_FINAL_SYNTHESIS_PROMPT_LIMIT,
-    )
-    return (
-        "Produce the final answer for the completed AgentTeam run.\n\n"
-        "Original user prompt:\n"
-        f"{original_prompt or '[empty prompt]'}\n\n"
-        "AgentTeam conclusions (all roles, failures, and aggregate data):\n"
-        "```json\n"
-        f"{conclusions}\n"
-        "```\n\n"
-        "Instructions:\n"
-        "- Answer the original user prompt directly using the AgentTeam "
-        "conclusions above.\n"
-        "- Use the same natural language as the original user prompt for all "
-        "user-visible prose. Infer it from the prompt itself; do not rely on "
-        "fixed language-name mappings.\n"
-        "- Synthesize and translate member outputs, headings, labels, and "
-        "natural-language schema fields as needed so the final report is not "
-        "mixed-language just because the tool data used another language.\n"
-        "- Preserve proper nouns, source names, URLs, code identifiers, and "
-        "numeric values in their original form.\n"
-        "- Report each member's data coverage honestly. Do not claim that all "
-        "required data was obtained if any member output mentions missing "
-        "fields, failed sources, low-confidence evidence, or data gaps; carry "
-        "those gaps into the final report with the exact attempted source or "
-        "tool when available.\n"
-        "- When two members give conflicting conclusions about the same claim "
-        "or subject, surface the conflict explicitly instead of silently "
-        "picking one side.\n"
-        "- Prefer member ``data_coverage`` / ``tools_used`` over stale prose "
-        "inside a member output when they conflict. If prose says a source is "
-        "missing but data_coverage shows a successful tool call, use the tool "
-        "coverage to correct the final wording.\n"
-        "- Do not dump raw JSON or expose internal schema keys unless the user "
-        "explicitly asked for raw tool data."
-    )
-
-
-def _team_final_text_appears_complete(text: str) -> bool:
-    stripped = str(text or "").strip()
-    if not stripped:
-        return False
-    if _team_final_text_exposes_internal_dump(stripped):
-        return False
-    if stripped.count("```") % 2:
-        return False
-    lines = [line.rstrip() for line in stripped.splitlines() if line.strip()]
-    if not lines:
-        return False
-    tail = lines[-1].strip()
-    if not tail:
-        return False
-    if tail.startswith("|") and tail.endswith("|"):
-        return False
-    # Reports legitimately end with a bullet or numbered list (e.g. a final
-    # recommendations section), so a trailing list item only signals
-    # truncation when its body is empty or does not close a sentence.
-    # A bare prefix match must not swallow markdown emphasis
-    # ("**Outlook:** ..."), hence the explicit "- " / "* " / "+ " forms.
-    is_list_item = (
-        tail.startswith(("- ", "* ", "+ "))
-        or tail in {"-", "*", "+"}
-        or re.match(r"^\d+[\.)](\s|$)", tail) is not None
-    )
-    if is_list_item:
-        marker_match = re.match(r"^(?:[-*+]|\d+[\.)])\s*(.*)$", tail)
-        body = (marker_match.group(1) if marker_match else "").strip()
-        if not body:
-            return False
-        return body[-1] in ".!?。！？;；"
-    terminal = tail[-1]
-    if terminal in ".!?。！？;；:：,，、":
-        return terminal not in ":：,，、"
-    if terminal in ")]}）】》」』”’\"'`":
-        return True
-    category = unicodedata.category(terminal)
-    if category.startswith("P"):
-        return True
-    if len(lines) == 1 and len(stripped) < 160:
-        return True
-    return False
-
 
 def _wall_time_final_synthesis_prompt(*, remaining_seconds: float) -> str:
     remaining = max(0, int(remaining_seconds))
@@ -2550,17 +1441,6 @@ def _format_timeout_evidence_snippet(snippet: str) -> str:
     return f"{tool_name}: {'; '.join(parts)}"
 
 
-def _messages_response_text(response: MessagesResponse) -> str:
-    parts: list[str] = []
-    for block in response.content:
-        if not isinstance(block, dict) or block.get("type") != "text":
-            continue
-        text = str(block.get("text") or "").strip()
-        if text:
-            parts.append(text)
-    return "\n\n".join(parts).strip()
-
-
 # ---------------------------------------------------------------------------
 # Loop
 # ---------------------------------------------------------------------------
@@ -2593,127 +1473,7 @@ class WorkspaceNativeAgentLoop:
         """Bind the caller-owned turn budget through provider wire retries."""
 
         with attempt_budget_scope(attempt_budget):
-            return self.gateway.call_messages(**kwargs)
-
-    def _synthesize_team_run_final_answer(
-        self,
-        *,
-        user_message: str | list[dict[str, Any]],
-        team_results: list[dict[str, Any]],
-        deadline: float | None = None,
-        remaining_seconds: float | None = None,
-        usage: LoopUsage | None = None,
-        iteration: int = 0,
-        attempt_budget: AttemptBudget | None = None,
-    ) -> str:
-        prompt = _build_team_run_final_synthesis_prompt(
-            user_message=user_message,
-            team_results=team_results,
-        )
-        response = self._call_messages_with_attempt_budget(
-            attempt_budget=attempt_budget,
-            task=self.config.task,
-            caller=self.config.caller,
-            system=_TEAM_RUN_FINAL_SYNTHESIS_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-            tools=[],
-            # Floor, not cap: reasoning providers spend hidden thinking
-            # tokens from the same completion budget, so the loop's
-            # per-iteration max_tokens (e.g. 4096) truncates the report
-            # mid-sentence (finish=length) and forces the bounded fallback.
-            max_tokens=max(
-                int(self.config.max_tokens or 0),
-                _TEAM_RUN_FINAL_SYNTHESIS_MAX_TOKENS,
-            ),
-            temperature=0.0,
-            tier=self.config.tier,
-            reasoning_effort="none",
-            reasoning_summary=None,
-            model_provider=self.config.model_provider,
-            model_id=self.config.model_id,
-            deadline=deadline,
-            metadata={
-                "session_id": self.config.session_id,
-                "turn_id": self.config.turn_id,
-                "iteration": 0,
-                "context_scope": "team_final_synthesis",
-                "team_run_id": _first_team_run_id(team_results),
-                "text_only_final_attempt": True,
-                "llm_attempt": 1,
-                "messages_sent_count": 1,
-                "tools_sent_count": 0,
-                "safety_retry_active": False,
-                "remaining_wall_seconds": remaining_seconds,
-            },
-        )
-        if usage is not None:
-            usage.record_response(
-                response,
-                iteration=iteration,
-                context_scope="team_final_synthesis",
-            )
-        text = _messages_response_text(response)
-        if response.stop_reason == "max_tokens":
-            _LOG.warning(
-                "team_run compact final synthesis hit the token limit; "
-                "falling back to bounded evidence report"
-            )
-            return ""
-        if not _team_final_text_appears_complete(text):
-            _LOG.warning(
-                "team_run compact final synthesis looked incomplete; "
-                "falling back to bounded evidence report"
-            )
-            return ""
-        return text
-
-    def _team_final_text_or_fallback(
-        self,
-        *,
-        user_message: str | list[dict[str, Any]],
-        team_results: list[dict[str, Any]],
-        deadline: float | None,
-        remaining_seconds: float | None,
-        usage: LoopUsage | None = None,
-        iteration: int = 0,
-        attempt_budget: AttemptBudget | None = None,
-    ) -> tuple[str, str]:
-        """Return one bounded team report without duplicating recovery paths."""
-
-        if attempt_budget is not None and not attempt_budget.claim(
-            "team_final_synthesis"
-        ):
-            return (
-                _build_team_run_bounded_fallback(
-                    user_message=user_message,
-                    team_results=team_results,
-                ),
-                "team_result_attempt_budget_exhausted",
-            )
-        try:
-            text = self._synthesize_team_run_final_answer(
-                user_message=user_message,
-                team_results=team_results,
-                deadline=deadline,
-                remaining_seconds=remaining_seconds,
-                usage=usage,
-                iteration=iteration,
-                attempt_budget=attempt_budget,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _LOG.warning("team result synthesis failed: %s", exc)
-            text = ""
-        if text:
-            return text, "team_result_compact_final_synthesis"
-        return (
-            _build_team_run_bounded_fallback(
-                user_message=user_message,
-                team_results=team_results,
-            ),
-            "team_result_bounded_fallback",
-        )
-
-    # ------------------------------------------------------------------ run
+            return self.gateway.call_messages(**self.config.model_options(), **kwargs)
 
     def run(
         self,
@@ -2737,7 +1497,7 @@ class WorkspaceNativeAgentLoop:
         """
 
         if completion_gate is None:
-            return self._run_legacy(
+            return self._run_turn(
                 system=system,
                 user_message=user_message,
                 prior_messages=(None if checkpoint is not None else prior_messages),
@@ -2766,7 +1526,7 @@ class WorkspaceNativeAgentLoop:
             )
 
         def _execute(_feedback: str) -> LoopOutcome:
-            return self._run_legacy(
+            return self._run_turn(
                 system=system,
                 user_message=user_message,
                 prior_messages=prior_messages,
@@ -2793,7 +1553,7 @@ class WorkspaceNativeAgentLoop:
                     or "stateful_continuation_unavailable",
                     feedback=feedback,
                 )
-            return self._run_legacy(
+            return self._run_turn(
                 system=system,
                 user_message=user_message,
                 prior_messages=None,
@@ -2807,36 +1567,20 @@ class WorkspaceNativeAgentLoop:
             )
 
         def _snapshot(outcome: LoopOutcome, round_index: int) -> TurnSnapshot:
-            tool_results: list[Any] = []
-            for message in outcome.transcript:
-                if not isinstance(message, dict):
-                    continue
-                content = message.get("content")
-                if not isinstance(content, list):
-                    continue
-                tool_results.extend(
-                    block for block in content
-                    if isinstance(block, dict) and block.get("type") == "tool_result"
-                )
-            return TurnSnapshot(
-                iteration=round_index,
-                transcript=tuple(outcome.transcript),
-                tool_results=tuple(tool_results),
-                output=outcome.final_text,
-                stop_reason=outcome.stop_reason,
-                usage={
-                    "llm_calls": outcome.llm_calls,
-                    "input_tokens": outcome.input_tokens_total,
-                    "output_tokens": outcome.output_tokens_total,
-                    "tool_calls": outcome.tool_calls,
-                },
-                metadata={
-                    "runtime": "root",
-                    "turn_id": turn_id or self.config.turn_id or "",
-                    "aborted": outcome.aborted,
-                    "abort_reason": outcome.abort_reason,
-                },
+            from dataclasses import replace
+            snapshot = outcome.snapshot(
+                round_index, turn_id=turn_id or self.config.turn_id or "",
             )
+            return replace(snapshot, metadata={
+                **snapshot.metadata,
+                "host_block_reason": outcome.completion_reason
+                if outcome.completion_status == "blocked" else "",
+            })
+
+        def _gate(snapshot: TurnSnapshot) -> GateDecision:
+            if reason := snapshot.metadata.get("host_block_reason"):
+                return GateDecision.blocked(str(reason))
+            return evaluate_completion_gate(completion_gate, snapshot)
 
         max_rounds = min(
             max(1, int(getattr(completion_gate, "max_rounds", 2) or 2)),
@@ -2849,7 +1593,7 @@ class WorkspaceNativeAgentLoop:
                 max_wall_seconds=self.config.max_wall_seconds,
                 cancel=cancel_token,
             ),
-            completion_gate,
+            _gate,
             execute=_execute,
             snapshot=_snapshot,
             continue_from=_continue_from,
@@ -2857,7 +1601,7 @@ class WorkspaceNativeAgentLoop:
         outcome = result.value
         if outcome is None:
             # The adapter can stop before the first round when cancellation
-            # was already requested. Do not re-enter the legacy runner: even
+            # was already requested. Do not re-enter the provider loop: even
             # its cancellation path emits events and builds a final summary.
             outcome = LoopOutcome(
                 transcript=[],
@@ -2891,7 +1635,7 @@ class WorkspaceNativeAgentLoop:
                 outcome.transition_reason = "completion_gate_blocked"
         return outcome
 
-    def _run_legacy(
+    def _run_turn(
         self,
         *,
         system: str,
@@ -2923,124 +1667,27 @@ class WorkspaceNativeAgentLoop:
         on the next round without losing tool work already done.
         """
 
-        explicit_turn_id = (
-            str(turn_id or "").strip()
-            or str(self.config.turn_id or "").strip()
+        state = LoopRunState.begin(
+            config=self.config,
+            user_message=user_message,
+            original_user_text=_stringify_user_message(user_message),
+            now=time.time(),
+            turn_id=turn_id,
+            prior_messages=prior_messages,
+            checkpoint=checkpoint,
+            continuation_feedback=continuation_feedback,
+            max_wall_seconds=max_wall_seconds,
         )
-        checkpoint_value: TurnCheckpoint | None = None
-        if checkpoint is not None:
-            checkpoint_value = (
-                checkpoint
-                if isinstance(checkpoint, TurnCheckpoint)
-                else TurnCheckpoint.from_dict(checkpoint)
-            )
-        requested_turn_id = (
-            explicit_turn_id
-            or (checkpoint_value.turn_id if checkpoint_value is not None else "")
-            or uuid.uuid4().hex[:12]
-        )
-        effective_wall_seconds = (
-            self.config.max_wall_seconds
-            if max_wall_seconds is None
-            else max(0.0, float(max_wall_seconds))
-        )
-        fresh_deadline: Optional[float] = (
-            (time.time() + float(effective_wall_seconds))
-            if effective_wall_seconds and effective_wall_seconds > 0
-            else time.time() if max_wall_seconds is not None else None
-        )
-        fresh_original_user_text = _stringify_user_message(user_message)
-        if checkpoint is None:
-            state = LoopRunState.new(
-                turn_id=requested_turn_id,
-                message_id=uuid.uuid4().hex[:12],
-                deadline_epoch=fresh_deadline,
-                original_user_text=fresh_original_user_text,
-                context_window=int(self.config.model_context_window or 0),
-                attempt_limit=int(
-                    self.config.max_extra_llm_attempts_per_turn
-                ),
-            )
-        else:
-            assert checkpoint_value is not None
-            if not checkpoint_value.resumable:
-                raise ContinuationUnavailable(
-                    checkpoint_value.resume_block_reason
-                    or "stateful_continuation_unavailable",
-                    feedback=continuation_feedback,
-                )
-            state = LoopRunState.from_checkpoint(checkpoint_value)
-            if (
-                explicit_turn_id
-                and state.turn_id
-                and explicit_turn_id != state.turn_id
-            ):
-                raise ValueError(
-                    "turn checkpoint mismatch: "
-                    f"requested={explicit_turn_id!r} checkpoint={state.turn_id!r}"
-                )
-            state.turn_id = state.turn_id or requested_turn_id
-            state.message_id = state.message_id or uuid.uuid4().hex[:12]
-            state.attempt_budget.constrain(
-                int(self.config.max_extra_llm_attempts_per_turn)
-            )
-
         turn_id = state.turn_id
-        message_id = state.message_id
         deadline = state.deadline_epoch
-        seq = state.seq
-        blocks = state.blocks
-        max_total_calls = (
-            int(self.config.max_total_tool_calls)
-            if self.config.max_total_tool_calls is not None
-            else int(self.config.max_iterations) * 4
-        )
+        transcript = state.transcript
+        max_total_calls = self.config.tool_call_limit
 
         def emit(role: str, payload: dict[str, Any]) -> None:
-            nonlocal seq
-            seq += 1
-            env = BlockEnvelope(
-                seq=seq,
-                turn_id=turn_id,
-                message_id=message_id,
-                role=role,
-                block=payload,
-            )
-            blocks.append(env)
-            if self.event_sink is not None:
-                try:
-                    self.event_sink(env)
-                except Exception:
-                    _LOG.exception("event_sink failed")
+            state.emit(role, payload, sink=self.event_sink)
 
-        transcript = state.transcript
-        if checkpoint is None:
-            # Replay prior user/assistant exchanges from earlier turns of the
-            # same chat session, then append the new user request exactly once.
-            if prior_messages:
-                for prior in prior_messages:
-                    if not isinstance(prior, dict):
-                        continue
-                    role = prior.get("role")
-                    content = prior.get("content")
-                    if role not in ("user", "assistant"):
-                        continue
-                    if isinstance(content, str) and content.strip():
-                        transcript.append({"role": role, "content": content})
-                    elif isinstance(content, list) and content:
-                        transcript.append({"role": role, "content": list(content)})
-            if isinstance(user_message, str):
-                transcript.append({"role": "user", "content": user_message})
-            else:
-                transcript.append({"role": "user", "content": list(user_message)})
-        else:
-            continuation_message = state.prepare_continuation(
-                continuation_feedback
-            )
-            emit(
-                "user",
-                TextBlock(text=continuation_message).as_dict(),
-            )
+        if checkpoint is not None:
+            emit("user", TextBlock(text=transcript[-1]["content"]).as_dict())
 
         provider_tools = self._render_tools(tool_filter)
         provider_tool_names = {
@@ -3058,11 +1705,7 @@ class WorkspaceNativeAgentLoop:
         transition_reason = state.transition_reason
         final_text = state.final_text
         aborted_reason = state.aborted_reason
-        tool_result_by_fingerprint = state.tool_result_by_fingerprint
         completed_tool_results = state.completed_tool_results
-        recent_tool_fingerprints = state.recent_tool_fingerprints
-        deduped_counts_by_fingerprint = state.deduped_counts_by_fingerprint
-        recovery_required_args_by_tool = state.recovery_required_args_by_tool
         attempted_tool_names = state.attempted_tool_names
         successful_tool_names = state.successful_tool_names
         required_next_tool_names = state.required_next_tool_names
@@ -3093,9 +1736,7 @@ class WorkspaceNativeAgentLoop:
             state.last_tool_batch_had_semantic_success
         )
         last_optional_tool_gap_notes = state.last_optional_tool_gap_notes
-        original_user_text = (
-            state.original_user_text or fresh_original_user_text
-        )
+        original_user_text = state.original_user_text
         recent_text_lengths = state.recent_text_lengths
         diminishing_returns_triggered = state.diminishing_returns_triggered
         usage = state.usage
@@ -3107,17 +1748,20 @@ class WorkspaceNativeAgentLoop:
             1,
             int(self.config.repeated_tool_stop_after or 2),
         )
+        def stop_for_cancel() -> bool:
+            nonlocal aborted_reason, stop_reason, transition_reason
+            if cancel_token is None or not cancel_token.is_set:
+                return False
+            aborted_reason = f"cancelled:{cancel_token.reason or 'operator_interrupt'}"
+            stop_reason = transition_reason = "cancelled"
+            return True
+
         while iterations < self.config.max_iterations:
             iterations += 1
             # Cooperative cancel: lets HTTP/SDK callers stop a runaway
             # turn between iterations. We can't kill the in-flight
             # gateway call, but no further round-trip starts.
-            if cancel_token is not None and cancel_token.is_set:
-                aborted_reason = (
-                    f"cancelled:{cancel_token.reason or 'operator_interrupt'}"
-                )
-                stop_reason = "cancelled"
-                transition_reason = "cancelled"
+            if stop_for_cancel():
                 break
             # Re-render after mcp_describe promotes a lazy MCP namespace.
             # provider_tools is rendered once before the loop, so without
@@ -3167,11 +1811,6 @@ class WorkspaceNativeAgentLoop:
                 aborted_reason = "timeout"
                 stop_reason = "timeout"
                 transition_reason = "timeout"
-                break
-            if max_total_calls is not None and total_tool_calls >= max_total_calls:
-                aborted_reason = "max_tool_calls"
-                stop_reason = "max_tool_calls"
-                transition_reason = "max_tool_calls"
                 break
             if diminishing_returns_triggered:
                 aborted_reason = "diminishing_returns"
@@ -3258,11 +1897,12 @@ class WorkspaceNativeAgentLoop:
                     })
                     transition_reason = transition_reason or "required_artifact_contract"
 
-            tools_for_iteration = provider_tools
+            tool_budget_exhausted = max_total_calls is not None and total_tool_calls >= max_total_calls
+            tools_for_iteration = [] if tool_budget_exhausted else provider_tools
             messages_for_iteration = transcript
             system_for_iteration = system
             tool_choice_for_iteration: dict[str, Any] | None = None
-            text_only_final_attempt = False
+            text_only_final_attempt = tool_budget_exhausted
             pending_required_for_iteration = _pending_required_tool_names(
                 required_next_tool_names,
                 successful_tool_names,
@@ -3270,19 +1910,12 @@ class WorkspaceNativeAgentLoop:
             pending_required_action_tools = {
                 name for name in pending_required_for_iteration if name
             }
-            if pending_required_action_tools and not text_only_final_attempt:
+            if pending_required_action_tools and not tool_budget_exhausted:
                 required_action_tools_for_iteration = _filter_provider_tools_by_names(
                     provider_tools,
                     pending_required_action_tools,
                 )
                 if required_action_tools_for_iteration:
-                    required_action_tools_for_iteration = (
-                        _compact_provider_tools_for_safety_retry(
-                            required_action_tools_for_iteration,
-                            required_only=True,
-                            recovery_required_args=recovery_required_args_by_tool,
-                        )
-                    )
                     tools_for_iteration = required_action_tools_for_iteration
                     forced_required_tools = tuple(
                         sorted(
@@ -3305,38 +1938,13 @@ class WorkspaceNativeAgentLoop:
                 and has_tool_result_evidence
             ):
                 remaining = deadline - time.time()
+                # The caller owns the reserve; zero disables early synthesis.
                 threshold = max(
-                    1.0,
-                    float(self.config.wall_time_final_synthesis_seconds or 0.0),
+                    0.0, float(self.config.wall_time_final_synthesis_seconds)
                 )
-                payload_chars = _transcript_char_size(transcript)
-                if payload_chars >= _LARGE_FINAL_SYNTHESIS_PAYLOAD_CHARS:
-                    threshold = max(
-                        threshold,
-                        _LARGE_PAYLOAD_FINAL_SYNTHESIS_SECONDS,
-                    )
-                if successful_tool_names:
-                    threshold = max(
-                        threshold,
-                        _TOOL_EVIDENCE_FINAL_SYNTHESIS_SECONDS,
-                    )
-                    if total_tool_calls >= _HIGH_VOLUME_TOOL_EVIDENCE_CALLS:
-                        threshold = max(
-                            threshold,
-                            _HIGH_VOLUME_TOOL_EVIDENCE_FINAL_SYNTHESIS_SECONDS,
-                        )
-                if (
-                    payload_chars < _LARGE_FINAL_SYNTHESIS_PAYLOAD_CHARS
-                    and not successful_tool_names
-                ):
-                    threshold = min(
-                        threshold,
-                        _NO_SUBSTANTIVE_EVIDENCE_FINAL_SYNTHESIS_SECONDS,
-                    )
                 required_action_has_min_window = (
                     bool(pending_required_action_tools)
-                    and remaining
-                    > _required_action_min_wall_seconds()
+                    and remaining > _required_action_min_wall_seconds(self.config)
                 )
                 if 0 < remaining <= threshold:
                     if required_action_has_min_window:
@@ -3403,6 +2011,8 @@ class WorkspaceNativeAgentLoop:
             llm_base = max(0.0, float(self.config.llm_retry_base_delay))
             llm_cap = max(llm_base, float(self.config.llm_retry_max_delay))
             while True:
+                if stop_for_cancel():
+                    break
                 if (
                     (text_only_final_attempt or last_transient_error is not None)
                     and deadline is not None
@@ -3471,7 +2081,7 @@ class WorkspaceNativeAgentLoop:
                     ):
                         remaining_for_call = deadline - time.time()
                         reserve = min(
-                            _FINAL_SYNTHESIS_RETRY_RESERVE_SECONDS,
+                            max(0.0, float(self.config.wall_time_final_synthesis_seconds)),
                             max(0.0, remaining_for_call / 2.0),
                         )
                         capped = deadline - reserve
@@ -3503,42 +2113,12 @@ class WorkspaceNativeAgentLoop:
                         )
                         or narrowed_required_tool_surface
                     )
-                    effective_max_tokens = self.config.max_tokens
-                    effective_temperature = self.config.temperature
-                    effective_reasoning_effort = self.config.reasoning_effort
-                    effective_reasoning_summary = self.config.reasoning_summary
-                    if required_tool_call_mode:
-                        # A narrowed required-action request is a deterministic
-                        # tool emission step, not a fresh reasoning turn.
-                        # Disabling provider thinking keeps MiniMax-compatible
-                        # tool calls from burning the whole wall-clock budget.
-                        effective_temperature = 0.0
-                        effective_reasoning_effort = "none"
-                        effective_reasoning_summary = None
-                        effective_max_tokens = max(
-                            1,
-                            int(self.config.max_tokens or 1),
-                        )
-                        if safety_retry_messages is not None:
-                            effective_max_tokens = min(
-                                effective_max_tokens,
-                                _COMPACT_REQUIRED_ACTION_MAX_TOKENS,
-                            )
                     response = self._call_messages_with_attempt_budget(
                         attempt_budget=attempt_budget,
-                        task=self.config.task,
-                        caller=self.config.caller,
                         system=system_for_iteration,
                         messages=safety_retry_messages or messages_for_iteration,
                         tools=tools_for_iteration,
                         tool_choice=tool_choice_for_iteration,
-                        max_tokens=effective_max_tokens,
-                        temperature=effective_temperature,
-                        tier=self.config.tier,
-                        reasoning_effort=effective_reasoning_effort,
-                        reasoning_summary=effective_reasoning_summary,
-                        model_provider=self.config.model_provider,
-                        model_id=self.config.model_id,
                         deadline=request_deadline,
                         metadata={
                             "session_id": self.config.session_id,
@@ -3562,11 +2142,9 @@ class WorkspaceNativeAgentLoop:
                             ),
                             "tools_sent_count": len(tools_for_iteration),
                             "required_tool_call_mode": required_tool_call_mode,
-                            "effective_max_tokens": effective_max_tokens,
-                            "effective_temperature": effective_temperature,
-                            "effective_reasoning_effort": (
-                                effective_reasoning_effort
-                            ),
+                            "effective_max_tokens": self.config.max_tokens,
+                            "effective_temperature": self.config.temperature,
+                            "effective_reasoning_effort": self.config.reasoning_effort,
                             "remaining_wall_seconds": (
                                 max(0.0, deadline - time.time())
                                 if deadline is not None
@@ -3576,6 +2154,8 @@ class WorkspaceNativeAgentLoop:
                     )
                     break
                 except Exception as exc:  # noqa: BLE001 — bounded by guard below
+                    if stop_for_cancel():
+                        break
                     if total_tool_calls == 0 and _is_llm_safety_rejection(exc):
                         final_text = _build_llm_initial_safety_rejection_text(
                             original_user_text=original_user_text,
@@ -3614,12 +2194,6 @@ class WorkspaceNativeAgentLoop:
                                 "content": retry_prompt,
                             }]
                             system_for_iteration = _COMPACT_REQUIRED_TOOL_SYSTEM
-                            compact_tools = _compact_provider_tools_for_safety_retry(
-                                tools_for_iteration,
-                                required_only=True,
-                            )
-                            if compact_tools:
-                                tools_for_iteration = compact_tools
                             transition_reason = "llm_safety_required_tool_retry"
                             emit(
                                 "assistant",
@@ -3628,7 +2202,7 @@ class WorkspaceNativeAgentLoop:
                                         "upstream safety rejected "
                                         "the full required-tool transcript; "
                                         "retrying the required native tool once "
-                                        "with compact context and compact schema."
+                                        "with compact context and its original schema."
                                     ),
                                 ).as_dict(),
                             )
@@ -3656,8 +2230,7 @@ class WorkspaceNativeAgentLoop:
                         not in transient_required_tool_retry_keys
                         and safety_retry_messages is None
                         and _required_action_retry_window_available(
-                            deadline,
-                            pending_required_action_tools,
+                            deadline, pending_required_action_tools, self.config,
                         )
                     )
                     if can_retry_required_tool_after_transient:
@@ -3678,12 +2251,6 @@ class WorkspaceNativeAgentLoop:
                                 "content": retry_prompt,
                             }]
                             system_for_iteration = _COMPACT_REQUIRED_TOOL_SYSTEM
-                            compact_tools = _compact_provider_tools_for_safety_retry(
-                                tools_for_iteration,
-                                required_only=True,
-                            )
-                            if compact_tools:
-                                tools_for_iteration = compact_tools
                             transition_reason = "transient_required_tool_retry"
                             emit(
                                 "assistant",
@@ -3692,7 +2259,7 @@ class WorkspaceNativeAgentLoop:
                                         "upstream provider timed out "
                                         "on the full required-tool transcript; "
                                         "retrying the required native tool once "
-                                        "with compact context and compact schema."
+                                        "with compact context and its original schema."
                                     ),
                                 ).as_dict(),
                             )
@@ -3891,7 +2458,7 @@ class WorkspaceNativeAgentLoop:
                     ):
                         remaining = deadline - time.time()
                         late_transient_threshold = (
-                            _required_action_min_wall_seconds()
+                            _required_action_min_wall_seconds(self.config)
                             if pending_required_action_tools
                             else _MIN_TEXT_ONLY_PROVIDER_WINDOW_SECONDS
                         )
@@ -4142,16 +2709,13 @@ class WorkspaceNativeAgentLoop:
                         "assistant",
                         ThinkingBlock(text="\n".join(_diag_lines)).as_dict(),
                     )
-                    # Cooperative cancel during the sleep so a user-
-                    # initiated abort doesn't have to wait the full
-                    # backoff. We poll every 250ms.
-                    waited = 0.0
-                    while waited < delay:
-                        if cancel_token is not None and cancel_token.is_set:
-                            raise
-                        step = min(0.25, delay - waited)
-                        time.sleep(step)
-                        waited += step
+                    if delay > 0:
+                        if cancel_token is not None:
+                            cancel_token.wait(delay)
+                        else:
+                            time.sleep(delay)
+            if response is None and stop_reason == "cancelled":
+                break
             assert response is not None  # for type-checkers
             # One recorder owns usage, model attribution, cost and context
             # pressure across the main call and every text-only side path.
@@ -4160,6 +2724,8 @@ class WorkspaceNativeAgentLoop:
                 iteration=iterations,
                 context_scope="agent_loop",
             )
+            if stop_for_cancel():
+                break
             stop_reason = response.stop_reason
             assistant_blocks = list(response.content)
             allowed_iteration_tool_names = {
@@ -4238,8 +2804,8 @@ class WorkspaceNativeAgentLoop:
                     for tool_use in tool_uses
                     if not _tool_use_is_read_only(tool_use, self.registry)
                 }
-                late_required_min_wall_seconds = (
-                    _required_action_min_wall_seconds()
+                late_required_min_wall_seconds = _required_action_min_wall_seconds(
+                    self.config
                 )
                 late_required_action_has_min_window = (
                     bool(late_action_tool_names)
@@ -4352,8 +2918,6 @@ class WorkspaceNativeAgentLoop:
                         try:
                             compact_response = self._call_messages_with_attempt_budget(
                                 attempt_budget=attempt_budget,
-                                task=self.config.task,
-                                caller=self.config.caller,
                                 system=_COMPACT_FINAL_SYNTHESIS_SYSTEM,
                                 messages=[{
                                     "role": "user",
@@ -4361,13 +2925,6 @@ class WorkspaceNativeAgentLoop:
                                 }],
                                 tools=[],
                                 tool_choice=None,
-                                max_tokens=self.config.max_tokens,
-                                temperature=self.config.temperature,
-                                tier=self.config.tier,
-                                reasoning_effort=self.config.reasoning_effort,
-                                reasoning_summary=self.config.reasoning_summary,
-                                model_provider=self.config.model_provider,
-                                model_id=self.config.model_id,
                                 deadline=deadline,
                                 metadata={
                                     "session_id": self.config.session_id,
@@ -4777,8 +3334,7 @@ class WorkspaceNativeAgentLoop:
                     and interrupted_required_tools not in interrupted_required_tool_retry_keys
                     and iterations < self.config.max_iterations
                     and _required_action_retry_window_available(
-                        deadline,
-                        set(interrupted_required_tools),
+                        deadline, set(interrupted_required_tools), self.config,
                     )
                 ):
                     retry_prompt = _build_compact_required_tool_retry_prompt(
@@ -4846,19 +3402,11 @@ class WorkspaceNativeAgentLoop:
                     ),
                 ),
             )
-            batch_state = ToolBatchState(
-                allowed_tool_names=allowed_iteration_tool_names,
-                provider_tool_names=provider_tool_names,
-                required_next_tool_names=required_next_tool_names,
-                attempted_tool_names=attempted_tool_names,
-                successful_tool_names=successful_tool_names,
-                completed_tool_results=completed_tool_results,
-                tool_result_by_fingerprint=tool_result_by_fingerprint,
-                recent_tool_fingerprints=recent_tool_fingerprints,
-                deduped_counts_by_fingerprint=deduped_counts_by_fingerprint,
-                checkpointed_fingerprints=state.checkpointed_fingerprints,
-                total_tool_calls=total_tool_calls,
-                error_count=error_count,
+            state.total_tool_calls = total_tool_calls
+            state.error_count = error_count
+            policy = ToolBatchPolicy(
+                allowed_tool_names=frozenset(allowed_iteration_tool_names),
+                provider_tool_names=frozenset(provider_tool_names),
                 max_total_calls=max_total_calls,
                 repeated_tool_window=repeated_tool_window,
                 repeated_tool_threshold=repeated_tool_threshold,
@@ -4867,10 +3415,10 @@ class WorkspaceNativeAgentLoop:
             batch_effects = ToolBatchPhase(
                 orchestrator=self.orchestrator,
                 registry=self.registry,
-            ).run(calls, state=batch_state)
+            ).run(calls, state=state, policy=policy)
             batch = batch_effects.batch
-            total_tool_calls = batch_state.total_tool_calls
-            error_count = batch_state.error_count
+            total_tool_calls = state.total_tool_calls
+            error_count = state.error_count
             repeated_loop_abort = batch_effects.repeated_loop_abort
             last_tool_batch_had_semantic_success = bool(
                 batch_effects.semantic_success_names
@@ -4905,14 +3453,13 @@ class WorkspaceNativeAgentLoop:
                 "role": "user",
                 "content": list(projection.transcript_blocks),
             })
-            for name, values in _recovery_required_arguments_by_tool(
-                batch.results
-            ).items():
-                current = list(recovery_required_args_by_tool.get(name, ()))
-                for value in values:
-                    if value not in current:
-                        current.append(value)
-                recovery_required_args_by_tool[name] = tuple(current)
+            if stop_for_cancel():
+                break
+            # Persist every result before pausing; no finalizer may hide approval.
+            if first_approval_pause(batch.results) is not None:
+                stop_reason = APPROVAL_PENDING_REASON
+                transition_reason = APPROVAL_PENDING_REASON
+                break
 
             # Rejected-only provider calls are now fully observable: their
             # assistant tool_use blocks and structured permission_denied
@@ -4974,151 +3521,6 @@ class WorkspaceNativeAgentLoop:
                 stop_reason = "end_turn"
                 transition_reason = "protected_scope_rejected"
                 break
-            team_results = [
-                data
-                for data in (
-                    _team_result_data(r)
-                    for r in batch.results
-                )
-                if data is not None
-            ]
-            if team_results:
-                pending_required_after_team = _pending_required_tool_names(
-                    required_next_tool_names,
-                    successful_tool_names,
-                )
-                next_required_after_team = _next_required_artifact_tool_names(
-                    required_artifacts=self.config.required_artifacts,
-                    provider_tool_names=provider_tool_names,
-                    successful_tool_names=successful_tool_names,
-                    # Compatibility keyword: this set records attempted calls.
-                    completed_tool_names=attempted_tool_names,
-                )
-                pending_required_after_team = tuple(
-                    dict.fromkeys(
-                        (
-                            *pending_required_after_team,
-                            *next_required_after_team,
-                        )
-                    )
-                )
-                if (
-                    pending_required_after_team
-                    and iterations < self.config.max_iterations
-                ):
-                    required_next_tool_names.update(pending_required_after_team)
-                    transcript.append({
-                        "role": "user",
-                        "content": _required_artifact_retry_prompt(
-                            pending_required_after_team,
-                            self.config.required_artifacts,
-                        ),
-                    })
-                    transition_reason = "required_artifact_after_team_retry"
-                    final_text = ""
-                    continue
-                degraded_results = [
-                    data for data in team_results if _team_result_should_finalize(data)
-                ]
-                if degraded_results:
-                    usable_degraded_results = [
-                        data
-                        for data in degraded_results
-                        if _team_result_has_usable_output(data)
-                    ]
-                    if usable_degraded_results:
-                        remaining_after_team = (
-                            deadline - time.time()
-                            if deadline is not None
-                            else None
-                        )
-                        final_text, transition_reason = self._team_final_text_or_fallback(
-                            user_message=user_message,
-                            team_results=degraded_results,
-                            deadline=deadline,
-                            remaining_seconds=remaining_after_team,
-                            usage=usage,
-                            iteration=iterations,
-                            attempt_budget=attempt_budget,
-                        )
-                    else:
-                        final_text = _build_team_run_bounded_fallback(
-                            user_message=user_message,
-                            team_results=degraded_results,
-                        )
-                        transition_reason = "team_result_bounded_fallback"
-                    transcript.append({
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": final_text}],
-                    })
-                    emit("assistant", TextBlock(text=final_text).as_dict())
-                    stop_reason = "end_turn"
-                    break
-                usable_completed_results = [
-                    data
-                    for data in team_results
-                    if _team_result_has_usable_output(data)
-                ]
-                if usable_completed_results:
-                    remaining_after_team = (
-                        deadline - time.time()
-                        if deadline is not None
-                        else None
-                    )
-                    final_text, transition_reason = self._team_final_text_or_fallback(
-                        user_message=user_message,
-                        team_results=usable_completed_results,
-                        deadline=deadline,
-                        remaining_seconds=remaining_after_team,
-                        usage=usage,
-                        iteration=iterations,
-                        attempt_budget=attempt_budget,
-                    )
-                    transcript.append({
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": final_text}],
-                    })
-                    emit("assistant", TextBlock(text=final_text).as_dict())
-                    stop_reason = "end_turn"
-                    break
-                if deadline is not None:
-                    remaining_after_team = deadline - time.time()
-                    team_final_threshold = max(
-                        float(self.config.wall_time_final_synthesis_seconds or 0.0),
-                        _TEAM_RUN_FINAL_SYNTHESIS_SECONDS,
-                    )
-                    if 0 < remaining_after_team <= team_final_threshold:
-                        final_text, transition_reason = self._team_final_text_or_fallback(
-                            user_message=user_message,
-                            team_results=team_results,
-                            deadline=deadline,
-                            remaining_seconds=remaining_after_team,
-                            usage=usage,
-                            iteration=iterations,
-                            attempt_budget=attempt_budget,
-                        )
-                        transcript.append({
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": final_text}],
-                        })
-                        emit("assistant", TextBlock(text=final_text).as_dict())
-                        stop_reason = "end_turn"
-                        break
-                transition_reason = "team_result_observed"
-                continue
-
-            # If any call in this batch landed on a permission-pending
-            # gate, stop the turn here. The dashboard now shows an
-            # actionable approval card for each pending call, and the
-            # model can't make progress until the operator decides;
-            # letting the loop continue would just have the model pick
-            # a different action and bury the card under fresh blocks.
-            # The next turn (after the operator approves/rejects) picks
-            # up from the persisted approval state.
-            if first_approval_pause(batch.results) is not None:
-                stop_reason = APPROVAL_PENDING_REASON
-                transition_reason = APPROVAL_PENDING_REASON
-                break
 
             # Once tool_uses were emitted AND tool_results fed back, always
             # give the model another round to consume them. Some OpenAI-compat
@@ -5139,8 +3541,10 @@ class WorkspaceNativeAgentLoop:
         # don't count as aborts.
         last_msg = transcript[-1] if transcript else {}
         ended_after_tool_result = _message_has_tool_result(last_msg)
+        waiting_for_approval = stop_reason == APPROVAL_PENDING_REASON
         was_aborted = bool(aborted_reason) or (
-            iterations >= self.config.max_iterations
+            not waiting_for_approval
+            and iterations >= self.config.max_iterations
             and (stop_reason in {"tool_use", "tool_calls"} or ended_after_tool_result)
         )
         if was_aborted and not aborted_reason:
@@ -5178,6 +3582,7 @@ class WorkspaceNativeAgentLoop:
         if (
             missing_required_artifact_tools_at_return
             and not was_aborted
+            and not waiting_for_approval
             and artifact_gap_may_replace_final
         ):
             final_text = _required_artifact_missing_final_text(
@@ -5194,6 +3599,7 @@ class WorkspaceNativeAgentLoop:
             not final_text.strip()
             and completed_tool_results
             and not was_aborted
+            and not waiting_for_approval
             and not missing_required_artifact_tools_at_return
         ):
             final_text = _build_tool_evidence_final_text(
@@ -5232,38 +3638,12 @@ class WorkspaceNativeAgentLoop:
             if iterations >= self.config.max_iterations
             else "end_turn"
         )
-        resume_block_reason = ""
-        if was_aborted:
-            resume_block_reason = aborted_reason or effective_stop_reason or "aborted"
-        elif effective_stop_reason == APPROVAL_PENDING_REASON:
-            resume_block_reason = APPROVAL_PENDING_REASON
-        elif iterations >= self.config.max_iterations:
-            resume_block_reason = "max_iterations"
-        elif deadline is not None and time.time() >= deadline:
-            resume_block_reason = "runtime_wall_time_exceeded"
-
-        state.seq = seq
+        # Mutable ledgers and emitted events already belong to state; only
+        # rebound transcript/scalars need synchronization at this boundary.
         state.transcript = transcript
-        state.blocks = blocks
         state.iterations = iterations
         state.total_tool_calls = total_tool_calls
         state.error_count = error_count
-        state.tool_result_by_fingerprint = tool_result_by_fingerprint
-        state.completed_tool_results = completed_tool_results
-        state.recent_tool_fingerprints = recent_tool_fingerprints
-        state.deduped_counts_by_fingerprint = deduped_counts_by_fingerprint
-        state.recovery_required_args_by_tool = recovery_required_args_by_tool
-        state.attempted_tool_names = attempted_tool_names
-        state.successful_tool_names = successful_tool_names
-        state.required_next_tool_names = required_next_tool_names
-        state.next_action_nudges = next_action_nudges
-        state.required_artifact_announcements = required_artifact_announcements
-        state.interrupted_required_tool_retry_keys = (
-            interrupted_required_tool_retry_keys
-        )
-        state.transient_required_tool_retry_keys = (
-            transient_required_tool_retry_keys
-        )
         state.truncated_no_tool_retry_used = truncated_no_tool_retry_used
         state.wall_time_final_synthesis_used = wall_time_final_synthesis_used
         state.llm_safety_final_synthesis_retry_used = (
@@ -5281,38 +3661,20 @@ class WorkspaceNativeAgentLoop:
             last_tool_batch_had_semantic_success
         )
         state.last_optional_tool_gap_notes = last_optional_tool_gap_notes
-        state.original_user_text = original_user_text
-        state.recent_text_lengths = recent_text_lengths
         state.diminishing_returns_triggered = diminishing_returns_triggered
-        state.usage = usage
         state.steer_message_count = steer_message_count
         state.stop_reason = effective_stop_reason
         state.transition_reason = transition_reason
         state.final_text = final_text
         state.aborted_reason = aborted_reason
-        turn_checkpoint = state.to_checkpoint(
-            resumable=not bool(resume_block_reason),
-            resume_block_reason=resume_block_reason,
-        )
-
-        return LoopOutcome(
-            transcript=transcript,
-            iterations=iterations,
-            stop_reason=effective_stop_reason,
-            transition_reason=transition_reason,
-            final_text=final_text,
-            tool_calls=total_tool_calls,
-            error_count=error_count,
-            aborted=was_aborted,
-            abort_reason=aborted_reason,
-            blocks=blocks,
-            steer_messages=steer_message_count,
-            extra_llm_attempts=attempt_budget.used,
-            extra_llm_attempt_limit=attempt_budget.limit,
-            extra_llm_attempts_by_reason=dict(attempt_budget.by_reason),
-            checkpoint=turn_checkpoint,
-            **usage.outcome_kwargs(),
-        )
+        outcome = state.outcome(config=self.config, aborted=was_aborted, now=time.time())
+        if was_aborted or waiting_for_approval or missing_required_artifact_tools_at_return:
+            outcome.completion_status = "blocked"
+            outcome.completion_reason = (
+                aborted_reason if was_aborted else APPROVAL_PENDING_REASON
+                if waiting_for_approval else "required_artifact_missing"
+            )
+        return outcome
 
     # -------------------------------------------------------------- helpers
 

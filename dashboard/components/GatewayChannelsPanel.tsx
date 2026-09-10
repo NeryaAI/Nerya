@@ -29,17 +29,18 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
 import { Advanced, Card, Pill } from "./Page";
+import { TermTip } from "./TermTip";
 import { SwitchControl } from "./SwitchControl";
 import { Select as PortalSelect } from "./Select";
 import { Select } from "./Select";
-import { CheckIcon, RefreshIcon, SettingsIcon, SparkIcon } from "./icons";
+import { CheckIcon, RefreshIcon, SearchIcon, SettingsIcon, SparkIcon } from "./icons";
 import { clientApi } from "../lib/clientApi";
 import type {
   GatewayChannelConfig,
   GatewayPlatformSpec,
   GatewayUpsertRequest,
 } from "../lib/clientApi";
-import { toast } from "../lib/dialogs";
+import { confirm, toast } from "../lib/dialogs";
 import {
   emptyGatewayDraft,
   gatewayCsvList,
@@ -53,7 +54,7 @@ function Row({
   desc,
   children,
 }: {
-  label: string;
+  label: ReactNode;
   desc?: string;
   children: ReactNode;
 }) {
@@ -73,7 +74,7 @@ function Field({
   hint,
   children,
 }: {
-  label: string;
+  label: ReactNode;
   hint?: ReactNode;
   children: ReactNode;
 }) {
@@ -88,6 +89,41 @@ function Field({
   );
 }
 
+/** Map raw backend support levels to plain-language labels. The raw
+ *  value stays available as the title tooltip for operators who want
+ *  the exact term. */
+function supportLabel(level: string | undefined, t: (k: string) => string): string {
+  switch (level) {
+    case "tested":
+      return t("supportTested");
+    case "send_only":
+      return t("supportSendOnly");
+    case "full_duplex":
+      return t("supportFullDuplex");
+    case "experimental":
+      return t("supportExperimental");
+    default:
+      return level || "";
+  }
+}
+
+// Raw channel mode -> settings.gatewayCard.* translation key. Unknown
+// modes fall back to the raw string.
+const CHANNEL_MODE_KEYS: Record<string, string> = {
+  polling: "polling",
+  webhook: "webhookMode",
+  send_only: "modeSendOnly",
+};
+
+function enumLabel(
+  map: Record<string, string>,
+  value: string,
+  t: (key: string) => string,
+): string {
+  const key = map[value] ?? map[value.toLowerCase()];
+  return key ? t(key) : value;
+}
+
 export function GatewayChannelsPanel() {
   const t = useTranslations("settings.gatewayCard");
   const tCommon = useTranslations("common");
@@ -96,10 +132,12 @@ export function GatewayChannelsPanel() {
   const [channels, setChannels] = useState<GatewayChannelConfig[]>([]);
   const [draft, setDraft] = useState<GatewayDraft>(() => emptyGatewayDraft());
   const [busy, setBusy] = useState("");
-  const [testText, setTestText] = useState("Nerya gateway test message.");
+  const [testText, setTestText] = useState(() => t("testMessageDefault"));
   const [result, setResult] = useState<string | null>(null);
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
+  const [resultTone, setResultTone] = useState<"ok" | "error">("ok");
+  const [revealedSecrets, setRevealedSecrets] = useState<Record<string, boolean>>({});
 
   const platformMap = useMemo(() => {
     const map = new Map<string, GatewayPlatformSpec>();
@@ -156,7 +194,7 @@ export function GatewayChannelsPanel() {
   const load = useCallback(async () => {
     try {
       const cfg = await clientApi.gatewayConfig();
-      if (!cfg.ok) throw new Error(cfg.error || "cannot load gateway config");
+      if (!cfg.ok) throw new Error(cfg.error || t("errorLoadFailed"));
       applyConfig(cfg);
     } catch (e) {
       toast({
@@ -166,6 +204,7 @@ export function GatewayChannelsPanel() {
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applyConfig]);
 
   useEffect(() => {
@@ -267,7 +306,7 @@ export function GatewayChannelsPanel() {
     setResult(null);
     try {
       const res = await clientApi.gatewayConfigUpsert(buildUpsertPayload());
-      if (!res.ok) throw new Error(res.error || "gateway save failed");
+      if (!res.ok) throw new Error(res.error || t("errorSaveFailed"));
       if (res.config) applyConfig(res.config);
       if (res.channel) {
         setDraft(gatewayDraftFromChannel(res.channel, platformMap.get(res.channel.kind)));
@@ -287,11 +326,18 @@ export function GatewayChannelsPanel() {
 
   async function remove() {
     if (!draft.channel.trim()) return;
+    const confirmed = await confirm({
+      tone: "danger",
+      okLabel: tCommon("delete"),
+      cancelLabel: tCommon("cancel"),
+      message: `${t("channelLabel")}: ${draft.channel.trim().toLowerCase()}`,
+    });
+    if (!confirmed) return;
     setBusy("delete");
     setResult(null);
     try {
       const res = await clientApi.gatewayConfigDelete(draft.channel.trim().toLowerCase());
-      if (!res.ok) throw new Error(res.error || "gateway delete failed");
+      if (!res.ok) throw new Error(res.error || t("errorDeleteFailed"));
       if (res.config) applyConfig(res.config);
       setDraft(emptyGatewayDraft(draft.kind));
       toast({ tone: "ok", message: t("deleted") });
@@ -312,11 +358,11 @@ export function GatewayChannelsPanel() {
     try {
       const res = await clientApi.gatewayConfigTest({
         channel: draft.channel.trim().toLowerCase(),
-        text: testText.trim() || "Nerya gateway test message.",
+        text: testText.trim() || t("testMessageDefault"),
         mode: "agent",
       });
       const note = res.delivery?.delivery_note ? String(res.delivery.delivery_note) : "";
-      if (!res.ok) throw new Error(res.detail || res.error || note || "gateway test failed");
+      if (!res.ok) throw new Error(res.detail || res.error || note || t("errorTestFailed"));
       const turnId = res.agent?.turn_id || "";
       const reply = res.reply_text ? String(res.reply_text).slice(0, 220) : "";
       const summary = turnId
@@ -325,11 +371,13 @@ export function GatewayChannelsPanel() {
       // Keep the test summary visible inline (it can be long, like a full
       // agent reply) AND toast the success so the operator sees the win
       // without scrolling back to the form.
+      setResultTone("ok");
       setResult(summary);
       toast({ tone: "ok", message: t("testDelivered") });
       await load();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      setResultTone("error");
       setResult(msg);
       toast({ tone: "error", message: msg });
     } finally {
@@ -358,8 +406,27 @@ export function GatewayChannelsPanel() {
       }
     >
       <div className="space-y-3">
+        {/* Plain-language orientation for first-time operators: what a
+            "channel" is, collapsed by default so returning operators
+            see the config immediately. */}
+        <Advanced title={t("introTitle")} storageKey="nerya.gateway.intro-open">
+          <p className="text-[12px] leading-relaxed text-ink-400">{t("introBody")}</p>
+        </Advanced>
+
         <div className="embedded-list-scroll-sm rounded-lg border border-brand-500/10 bg-ink-950/35">
-          {channels.length ? (
+          {loading && !channels.length ? (
+            // First load: skeleton rows so the panel doesn't flash a
+            // misleading "empty" state before the inventory arrives.
+            [0, 1, 2].map((row) => (
+              <div
+                key={row}
+                className="border-b border-brand-500/10 px-3 py-2 last:border-b-0"
+              >
+                <div className="skeleton h-3 w-1/3" />
+                <div className="skeleton mt-1.5 h-2.5 w-1/4" />
+              </div>
+            ))
+          ) : channels.length ? (
             channels.map((c) => (
               <button
                 key={c.channel}
@@ -375,7 +442,7 @@ export function GatewayChannelsPanel() {
                 <span className="min-w-0">
                   <span className="block truncate font-mono text-ink-100">{c.channel}</span>
                   <span className="text-[10px] text-ink-500">
-                    {c.title} · {c.mode}
+                    {c.title} · {enumLabel(CHANNEL_MODE_KEYS, c.mode, t)}
                   </span>
                 </span>
                 <span className="flex shrink-0 gap-1">
@@ -393,7 +460,11 @@ export function GatewayChannelsPanel() {
         <div className="grid grid-cols-1 gap-3">
           <Field
             label={t("platformLabel")}
-            hint={selectedPlatform?.support_level || "gateway"}
+            hint={
+              selectedPlatform?.support_level
+                ? supportLabel(selectedPlatform.support_level, t)
+                : undefined
+            }
           >
             <PortalSelect
               value={draft.kind}
@@ -532,8 +603,11 @@ export function GatewayChannelsPanel() {
                 <div className="min-w-0">
                   <div className="text-[12px] text-ink-100">
                     {selectedPlatform.title}
-                    <span className="ml-2 text-[11px] text-ink-500 font-medium">
-                      {selectedPlatform.support_level}
+                    <span
+                      className="ml-2 text-[11px] text-ink-500 font-medium"
+                      title={selectedPlatform.support_level}
+                    >
+                      {supportLabel(selectedPlatform.support_level, t)}
                     </span>
                   </div>
                   {selectedPlatform.notes ? (
@@ -596,28 +670,65 @@ export function GatewayChannelsPanel() {
               }
               return (
                 <div key={field.key} className="space-y-1">
-                  <Field
-                    label={`${field.label} · ${t("vaultRefSuffix")}`}
-                    hint={t("vaultRefHint")}
-                  >
-                    <input
-                      className="input-dark font-mono text-xs"
-                      value={refValue}
-                      onChange={(e) => setSecretRef(field.key, e.target.value)}
-                      placeholder={`vault://gateway_${draft.kind}_${field.key}`}
-                    />
-                  </Field>
+                  {/* Vault ref input only matters when this channel already
+                      stores a secret reference; collapse it when empty so a
+                      brand-new channel isn't greeted with two inputs. */}
+                  {refValue ? (
+                    <Field
+                      label={
+                        <>
+                          {field.label} · {t("vaultRefSuffix")}
+                          <TermTip term="vaultRef" />
+                        </>
+                      }
+                      hint={t("vaultRefHint")}
+                    >
+                      <input
+                        className="input-dark font-mono text-xs"
+                        value={refValue}
+                        onChange={(e) => setSecretRef(field.key, e.target.value)}
+                        placeholder={`vault://gateway_${draft.kind}_${field.key}`}
+                      />
+                    </Field>
+                  ) : null}
                   <Field
                     label={`${t("newPrefix")} ${field.label}`}
                     hint={`${reqHint} · ${t("secretHint")}`}
                   >
-                    <input
-                      className="input-dark font-mono text-xs"
-                      type={field.kind === "secret" ? "password" : "text"}
-                      value={plainValue}
-                      onChange={(e) => setSecret(field.key, e.target.value)}
-                      placeholder={refValue ? t("unchangedSecret") : field.placeholder || ""}
-                    />
+                    <div className="relative">
+                      <input
+                        className={`input-dark font-mono text-xs${
+                          field.kind === "secret" ? " pr-9" : ""
+                        }`}
+                        type={
+                          field.kind === "secret" && !revealedSecrets[field.key]
+                            ? "password"
+                            : "text"
+                        }
+                        value={plainValue}
+                        onChange={(e) => setSecret(field.key, e.target.value)}
+                        placeholder={refValue ? t("unchangedSecret") : field.placeholder || ""}
+                      />
+                      {field.kind === "secret" ? (
+                        <button
+                          type="button"
+                          className="absolute inset-y-0 right-1 my-auto flex h-6 w-6 items-center justify-center rounded-md text-ink-400 transition-colors hover:text-ink-100"
+                          title={
+                            revealedSecrets[field.key]
+                              ? t("hideSecret")
+                              : t("showSecret")
+                          }
+                          onClick={() =>
+                            setRevealedSecrets((cur) => ({
+                              ...cur,
+                              [field.key]: !cur[field.key],
+                            }))
+                          }
+                        >
+                          <SearchIcon size={14} />
+                        </button>
+                      ) : null}
+                    </div>
                   </Field>
                   {field.description ? (
                     <div className="text-[10px] text-ink-500">{field.description}</div>
@@ -643,6 +754,10 @@ export function GatewayChannelsPanel() {
                       { value: "webhook", label: t("webhookMode") },
                     ]}
                   />
+                  <span className="mt-1 flex items-center gap-2">
+                    <TermTip term="polling">{t("polling")}</TermTip>
+                    <TermTip term="webhook">{t("webhookMode")}</TermTip>
+                  </span>
                 </Field>
                 <Row label={t("polling")} desc={t("pollingDesc")}>
                   <SwitchControl
@@ -668,7 +783,7 @@ export function GatewayChannelsPanel() {
                     placeholder={t("usernamePlaceholder")}
                   />
                 </Field>
-                <Field label={t("timeout")} hint="sec">
+                <Field label={t("timeout")} hint={t("timeoutUnit")}>
                   <input
                     className="input-dark font-mono text-xs"
                     value={draft.timeout_s}
@@ -689,7 +804,13 @@ export function GatewayChannelsPanel() {
           </Field>
 
           {result ? (
-            <div className="rounded-md border border-brand-500/10 bg-ink-950/35 px-3 py-2 text-[11px] text-ink-300">
+            <div
+              className={`rounded-md border px-3 py-2 text-[11px] ${
+                resultTone === "ok"
+                  ? "border-ok/30 bg-ok/10 text-ok"
+                  : "border-danger/30 bg-danger/10 text-danger"
+              }`}
+            >
               {result}
             </div>
           ) : null}

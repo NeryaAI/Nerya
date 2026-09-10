@@ -1,59 +1,45 @@
-"""Reflection writes durable findings through the canonical runtime."""
-
+"""Reflection collects evidence; durable learning requires a separate justified write."""
 from __future__ import annotations
+
+import hashlib
+import json
 
 import pytest
 
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
-
+from nerya.evolution.reflection_engine import run_reflection
+from nerya.memory.runtime import MemoryRuntime
 
 pytestmark = pytest.mark.smoke
 
 
-def test_reflection_global_summary_uses_runtime_activity_and_recall(tmp_path):
-    from nerya.evolution.reflection_engine import run_reflection
-    from nerya.memory.activity import MemoryActivityLog
-    from nerya.memory.runtime import MemoryRuntime
-
-    config = Config(paths=WorkspacePaths(root=tmp_path), data={})
-
-    result = run_reflection(config.paths, strategy_ids=[], config=config)
-
-    assert result["ok"] is True
-    hits = MemoryRuntime(config).recall("Reflection scan errors", limit=5)
-    assert any("Reflection scan" in hit.content for hit in hits)
-    events = MemoryActivityLog(config=config).tail(limit=10)
-    assert any(
-        event["kind"] == "write_ok" and event["source"] == "reflection:global"
-        for event in events
-    )
+def test_reflection_snapshot_is_reproducible_without_automatic_memory(tmp_path):
+    config = Config(paths=WorkspacePaths(tmp_path), data={})
+    first = run_reflection(config.paths, strategy_ids=[], config=config)
+    second = run_reflection(config.paths, strategy_ids=[], config=config)
+    assert first["ok"] and not first["has_evidence"]
+    assert first["evidence_sha256"] == second["evidence_sha256"]
+    blob = (tmp_path / first["snapshot_ref"].removeprefix("file:")).read_bytes()
+    assert hashlib.sha256(blob).hexdigest() == first["evidence_sha256"]
+    assert json.loads(blob)["strategies"] == {}
+    assert MemoryRuntime(config).recall("Reflection scan errors") == []
 
 
-def test_reflection_rejects_nonexistent_explicit_strategy_ids(tmp_path):
-    from nerya.evolution.reflection_engine import run_reflection
-
-    config = Config(paths=WorkspacePaths(root=tmp_path), data={})
-
-    result = run_reflection(
-        config.paths,
-        strategy_ids=["does-not-exist"],
-        config=config,
-    )
-
+@pytest.mark.parametrize("strategy_id", ["does-not-exist", "../escape", "/tmp"])
+def test_reflection_rejects_invalid_strategy_without_creating_it(tmp_path, strategy_id):
+    config = Config(paths=WorkspacePaths(tmp_path), data={})
+    result = run_reflection(config.paths, strategy_ids=[strategy_id], config=config)
     assert result["strategies"] == {}
-    assert not (tmp_path / "strategies" / "does-not-exist").exists()
+    assert result["invalid_strategy_ids"] == [strategy_id]
+    assert not result["ok"]
+    assert not config.paths.strategies.exists()
 
 
-def test_reflection_reports_a_blocked_canonical_write(tmp_path):
-    from nerya.evolution.reflection_engine import run_reflection
-
-    config = Config(
-        paths=WorkspacePaths(root=tmp_path),
-        data={"memory": {"write_rules": {"learning": {"enabled": False}}}},
-    )
-
+def test_disabling_learning_does_not_prevent_observation_collection(tmp_path):
+    config = Config(paths=WorkspacePaths(tmp_path), data={
+        "memory": {"write_rules": {"learning": {"enabled": False}}},
+    })
     result = run_reflection(config.paths, strategy_ids=[], config=config)
-
-    assert result["ok"] is False
-    assert result["write_error"] == "disabled"
+    assert result["ok"]
+    assert not config.paths.memory.exists()

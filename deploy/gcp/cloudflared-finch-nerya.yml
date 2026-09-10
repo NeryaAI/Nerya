@@ -1,0 +1,14 @@
+# Dedicated Cloudflare Tunnel for finch-nerya.rickopc.com.
+# Credentials are installed separately on the VM and are never committed.
+tunnel: c0fdca1a-59de-47ce-8a23-b77b5cc309fd
+credentials-file: /etc/cloudflared/c0fdca1a-59de-47ce-8a23-b77b5cc309fd.json
+protocol: http2
+
+ingress:
+  - hostname: finch-nerya-admin.rickopc.com
+    service: http://127.0.0.1:18380
+  - hostname: dashboard.finch-nerya.rickopc.com
+    service: http://127.0.0.1:18380
+  - hostname: finch-nerya.rickopc.com
+    service: http://127.0.0.1:18317
+  - service: http_status:404

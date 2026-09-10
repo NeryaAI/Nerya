@@ -1,69 +1,76 @@
 "use client";
 
 import { usePathname } from "next/navigation";
+import { useEffect, useState, type ReactNode } from "react";
+import { useTranslations } from "next-intl";
+import * as Dialog from "@radix-ui/react-dialog";
 import { AuthGate } from "./AuthGate";
 import { PageTransition } from "./PageTransition";
 import { CodexSidebar } from "./shell/CodexSidebar";
 import { SettingsSidebar } from "./shell/SettingsSidebar";
 import { ShellNotifications } from "./shell/ShellNotifications";
 import { CommandPaletteProvider } from "./shell/CommandPalette";
+import { PanelLeftIcon, XIcon } from "./icons";
 
-// Settings surfaces take over the left rail with the Codex-style
-// settings navigation (SettingsSidebar). These are `/settings` plus the
-// standalone "More" pages that are really settings sections rendered via
-// SettingsWorkspace `forceSection` (and the Gateway ops page).
-const SETTINGS_SURFACES = [
-  "/settings",
-  "/memory",
-  "/web-search",
-  "/browsers",
-  "/env-vault",
-  "/gateway",
-];
+const SETTINGS_SURFACES = ["/settings", "/memory", "/web-search", "/browsers", "/env-vault", "/gateway"];
 
-export function AppShell({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-  const isLogin = pathname === "/login";
-  const isEmbeddedSurface = pathname?.startsWith("/browser-session/embed");
+export function AppShell({ children }: { children: ReactNode }) {
+  const pathname = usePathname() || "/";
+  const t = useTranslations("ui");
+  const [mobile, setMobile] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 767px)");
+    const sync = () => { setMobile(query.matches); if (!query.matches) setNavigationOpen(false); };
+    sync();
+    query.addEventListener("change", sync);
+    const close = () => setNavigationOpen(false);
+    window.addEventListener("hashchange", close);
+    return () => { query.removeEventListener("change", sync); window.removeEventListener("hashchange", close); };
+  }, []);
+  useEffect(() => { setNavigationOpen(false); }, [pathname]);
 
-  if (isLogin || isEmbeddedSurface) {
-    return <>{children}</>;
-  }
-
-  // Full-bleed surfaces own the whole viewport (no page padding, no
-  // max-width clamp): the chat workspace and the Codex-style command home.
-  const isFullBleed =
-    pathname === "/" || pathname === "/chat" || pathname?.startsWith("/chat/");
-
-  const isSettingsSurface = SETTINGS_SURFACES.some(
-    (p) => pathname === p || pathname?.startsWith(`${p}/`),
-  );
-  const pageFrameClass = isSettingsSurface
-    ? "mx-auto w-full max-w-[1120px] px-5 pb-10 pt-1 lg:px-8"
-    : // 1360px keeps tables readable on ultrawide monitors — at 1500px the
-      // 6-column strategy/portfolio tables spread so far apart the eye has
-      // to jump between columns.
-      "mx-auto w-full max-w-[1360px] px-4 pb-12 pt-2 lg:px-8";
-
+  if (pathname === "/login" || pathname.startsWith("/browser-session/embed")) return <>{children}</>;
+  const isSettingsSurface = SETTINGS_SURFACES.some((href) => pathname === href || pathname.startsWith(`${href}/`));
+  const fullBleed = pathname === "/" || pathname === "/chat" || pathname.startsWith("/chat/");
+  const frame = isSettingsSurface
+    ? "mx-auto w-full max-w-[1120px] px-4 pb-10 pt-1 lg:px-8"
+    : "mx-auto w-full max-w-[1360px] px-4 pb-12 pt-2 lg:px-8";
   return (
     <AuthGate>
       <CommandPaletteProvider>
-        <div className={`nerya-app-shell ${isSettingsSurface ? "nerya-settings-shell" : ""} flex h-screen min-h-0 overflow-hidden`}>
-          {isSettingsSurface ? <SettingsSidebar /> : <CodexSidebar />}
-          <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        <a href="#main-content" className="ui-skip-link" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>{t("skipToContent")}</a>
+        <div className={`nerya-app-shell ${isSettingsSurface ? "nerya-settings-shell" : ""} flex min-h-0 overflow-hidden`}>
+          {!mobile ? <div className="ui-desktop-navigation hidden shrink-0 md:block">{isSettingsSurface ? <SettingsSidebar /> : <CodexSidebar />}</div> : null}
+          <main id="main-content" tabIndex={-1} className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
             <div className="grid-bg pointer-events-none absolute inset-0 opacity-[0.06]" />
-            {/* Top-right shell chrome: notifications live here (Codex
-                keeps them out of the rail). */}
-            <div className="relative z-30 flex h-12 shrink-0 items-center justify-end gap-2 px-3">
-              <ShellNotifications />
+            <div className="relative z-30 flex h-12 shrink-0 items-center gap-2 px-3">
+              <div className="md:hidden">
+                <Dialog.Root open={navigationOpen} onOpenChange={setNavigationOpen}>
+                  <Dialog.Trigger asChild>
+                    <button type="button" className="ui-icon-button" aria-label={t("openNavigation")}><PanelLeftIcon size={20} /></button>
+                  </Dialog.Trigger>
+                  <Dialog.Portal>
+                    <Dialog.Overlay className="ui-modal-overlay ui-drawer-overlay" />
+                    <Dialog.Content className="ui-navigation-drawer" aria-describedby={undefined}>
+                      <div className="flex shrink-0 items-center justify-between border-b border-[color:var(--line)] px-4 py-2">
+                        <Dialog.Title className="text-sm font-semibold">{t("navigation")}</Dialog.Title>
+                        <Dialog.Close className="ui-icon-button" aria-label={t("closeNavigation")}><XIcon size={18} /></Dialog.Close>
+                      </div>
+                      <div className="min-h-0 flex-1" onClick={(event) => {
+                        if (event.target instanceof Element && event.target.closest("a, [data-navigation-action], [data-settings-section]")) setNavigationOpen(false);
+                      }}>
+                        {isSettingsSurface ? <SettingsSidebar /> : <CodexSidebar inDrawer />}
+                      </div>
+                    </Dialog.Content>
+                  </Dialog.Portal>
+                </Dialog.Root>
+              </div>
+              <div className="ml-auto"><ShellNotifications /></div>
             </div>
-            {isFullBleed ? (
-              <div className="relative flex min-h-0 flex-1 flex-col">{children}</div>
-            ) : (
-              <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto">
-                <div className={pageFrameClass}>
-                  <PageTransition>{children}</PageTransition>
-                </div>
+            {fullBleed ? <div className="relative flex min-h-0 flex-1 flex-col">{children}</div> : (
+              <div className="relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
+                <div className={frame}><PageTransition>{children}</PageTransition></div>
               </div>
             )}
           </main>

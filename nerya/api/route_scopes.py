@@ -134,6 +134,8 @@ _RULES: tuple[RouteRule, ...] = (
 
     # agent / sessions / streaming
     RouteRule("POST", "/agent/run_turn", "write:chat", ""),
+    RouteRule("POST", "/agent/run_turn_internal", "write:chat",
+              "dashboard server-side internal lane; public research gate is not applied"),
     RouteRule("POST", "/agent/attachments/upload", "write:chat", ""),
     RouteRule("POST", "/agent/trace", "read:sessions", ""),
     RouteRule("POST", "/agent/explain", "read:sessions", ""),
@@ -427,6 +429,12 @@ _RULES: tuple[RouteRule, ...] = (
         "trade:live",
         "wallet swap always requests a live provider side effect",
     ),
+    # Read-only balance aggregation across configured wallet accounts;
+    # without this rule remote dashboards with scoped tokens fell into
+    # the ``admin:ops`` default on every routine portfolio fetch.
+    RouteRule(None, "/wallet/portfolio", "read:runtime", ""),
+    RouteRule("POST", "/wallet/uninstall", "write:config",
+              "removes an installed wallet skill package"),
 
     # exchanges
     RouteRule(None, "/exchanges/providers", "read:runtime", ""),

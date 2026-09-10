@@ -110,8 +110,11 @@ class FakeCcxtClient:
         self.calls.append(("fetch_open_orders", (symbol,), {}))
         return list(self._responses["fetch_open_orders"])
 
-    def fetch_my_trades(self, symbol=None, params=None):
-        self.calls.append(("fetch_my_trades", (symbol,), dict(params or {})))
+    def fetch_my_trades(self, symbol=None, since=None, limit=None, params=None):
+        # F10: ccxt's ``since``/``limit`` are real kwargs now, not params.
+        self.calls.append(
+            ("fetch_my_trades", (symbol, since, limit), dict(params or {}))
+        )
         return list(self._responses["fetch_my_trades"])
 
     def price_to_precision(self, symbol, price):

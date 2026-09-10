@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,16 @@ from ..core.errors import SecretAccessDenied, SecretNotFoundError
 from ..core.redaction import fingerprint, preview
 from ..core.time import now_iso
 from . import encryption
+
+log = logging.getLogger(__name__)
+
+# Published-in-source fallback used only so dev/test workspaces without a
+# configured passphrase keep working. Live trading paths independently
+# refuse to run without NERYA_VAULT_PASSPHRASE (see trading/submit.py),
+# so this default only ever protects at-rest credential storage — which
+# is why falling back to it is loud, never silent.
+_DEFAULT_PASSPHRASE = "nerya-default-passphrase"
+_default_pp_warned = False
 
 
 @dataclass
@@ -39,13 +50,28 @@ class SecretMeta:
 class SecretVault:
     path: Path
     passphrase: str
+    #: Set when the on-disk vault existed but could not be decrypted /
+    #: parsed. Empty vault + non-empty load_error means "unreadable",
+    #: never "nothing stored".
+    load_error: str = field(default="", init=False)
     _cache: dict[str, str] = field(default_factory=dict, init=False)
     _meta: dict[str, SecretMeta] = field(default_factory=dict, init=False)
     _loaded: bool = field(default=False, init=False)
 
     @classmethod
     def open(cls, workspace_vault_file: Path, passphrase: str | None = None) -> "SecretVault":
-        pp = passphrase or os.environ.get("NERYA_VAULT_PASSPHRASE") or "nerya-default-passphrase"
+        global _default_pp_warned
+        pp = passphrase or os.environ.get("NERYA_VAULT_PASSPHRASE") or ""
+        if not pp:
+            pp = _DEFAULT_PASSPHRASE
+            if not _default_pp_warned:
+                _default_pp_warned = True
+                log.warning(
+                    "SecretVault: NERYA_VAULT_PASSPHRASE is not set — falling "
+                    "back to the built-in default passphrase. At-rest "
+                    "encryption is NOT protection until you set a real "
+                    "passphrase (live trading is blocked without one)."
+                )
         v = cls(path=Path(workspace_vault_file), passphrase=pp)
         v._load()
         return v
@@ -62,7 +88,18 @@ class SecretVault:
             env = encryption.Envelope.from_dict(json.loads(self.path.read_bytes()))
             raw = encryption.unseal(env, self.passphrase)
             doc = json.loads(raw.decode("utf-8"))
-        except Exception:
+        except Exception as exc:
+            # A vault that exists but cannot be read (wrong passphrase,
+            # corrupt/truncated file) must not silently masquerade as an
+            # empty vault: every later resolve() would look like "not
+            # configured" instead of "vault unreadable".
+            self.load_error = f"{type(exc).__name__}: {exc}"
+            log.error(
+                "SecretVault at %s could not be loaded (%s) — treating as "
+                "empty. Secrets stored in it are NOT gone; fix the "
+                "passphrase or restore the file.",
+                self.path, self.load_error,
+            )
             return
         for item in doc.get("secrets", []):
             name = item["name"]
@@ -96,6 +133,16 @@ class SecretVault:
     # ---------- public API ----------
     def put(self, *, name: str, value: str, kind: str, scope: list[str],
             owner: str = "runtime") -> SecretMeta:
+        if self.load_error and self.path.exists():
+            # The on-disk vault exists but could not be decrypted. _flush()
+            # rewrites the file from the in-memory cache only, so storing
+            # anything now would silently DESTROY every credential already
+            # in the vault. Fail loudly instead.
+            raise SecretAccessDenied(
+                f"vault at {self.path} is unreadable ({self.load_error}); "
+                "refusing to overwrite it. Fix NERYA_VAULT_PASSPHRASE or "
+                "restore/resolve the file before storing new secrets."
+            )
         self._cache[name] = value
         meta = SecretMeta(
             name=name, kind=kind, scope=scope, owner=owner,

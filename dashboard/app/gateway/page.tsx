@@ -62,30 +62,51 @@ function eventTone(ev: GatewayLiveEvent): "ok" | "warn" | "danger" | "brand" {
   return "warn";
 }
 
-function eventSummary(ev: GatewayLiveEvent): string {
+// Raw event kind -> gatewayPage.* translation key. Unknown kinds fall
+// back to the raw string.
+const EVENT_KIND_KEYS: Record<string, string> = {
+  error: "kindError",
+  heartbeat: "kindHeartbeat",
+  outbound: "kindOutbound",
+  inbound: "kindInbound",
+  info: "kindInfo",
+};
+
+function enumLabel(
+  map: Record<string, string>,
+  value: string,
+  t: (key: string) => string,
+): string {
+  const key = map[value] ?? map[value.toLowerCase()];
+  return key ? t(key) : value;
+}
+
+function eventSummary(ev: GatewayLiveEvent, t: (key: string) => string): string {
   if (ev.kind === "error") {
     const parts: string[] = [];
     if (ev.reason) parts.push(ev.reason);
     if (ev.detail) parts.push(ev.detail);
     if (ev.hint) parts.push(`→ ${ev.hint}`);
-    return parts.join(" · ") || "error";
+    return parts.join(" · ") || t("eventError");
   }
   if (ev.kind === "heartbeat") {
     return ev.status === "ok"
-      ? "polling alive"
-      : ev.note || ev.status || "heartbeat";
+      ? t("eventPollingAlive")
+      : ev.note || ev.status || t("kindHeartbeat");
   }
   if (ev.kind === "info") {
     const parts: string[] = [];
     if (ev.reason) parts.push(ev.reason);
     if (ev.note) parts.push(ev.note);
-    return parts.join(" · ") || "info";
+    return parts.join(" · ") || t("eventInfo");
   }
   if (ev.text) return ev.text;
   if (ev.phase) return ev.phase;
-  if (typeof ev.command === "string" && ev.command) return `command ${ev.command}`;
-  if (ev.kind === "outbound") return "agent reply";
-  if (ev.kind === "inbound") return "user message";
+  if (typeof ev.command === "string" && ev.command) {
+    return `${t("eventCommand")} ${ev.command}`;
+  }
+  if (ev.kind === "outbound") return t("eventAgentReply");
+  if (ev.kind === "inbound") return t("eventUserMessage");
   return ev.kind;
 }
 
@@ -192,10 +213,8 @@ export default function GatewayPage() {
       }`;
       const es = new EventSource(url);
       eventSourceRef.current = es;
-      let openedOk = false;
       es.onopen = () => {
         if (cancelled) return;
-        openedOk = true;
         setTransport("sse");
         setLiveError(null);
       };
@@ -220,9 +239,11 @@ export default function GatewayPage() {
         if (cancelled) return;
         es.close();
         eventSourceRef.current = null;
-        if (!openedOk) {
-          startPolling();
-        }
+        // Degrade on ANY stream error, not just a failed first connect:
+        // a mid-stream drop used to leave the Pill stuck on "live · SSE"
+        // while the feed froze. Falling back to the existing polling loop
+        // keeps events flowing and shows the true transport state.
+        startPolling();
       };
       return () => {
         cancelled = true;
@@ -351,7 +372,9 @@ export default function GatewayPage() {
                       <span className="font-mono text-[10px] text-ink-500">
                         {formatTime(ev.ts_ms)}
                       </span>
-                      <Pill tone={eventTone(ev)}>{ev.kind}</Pill>
+                      <Pill tone={eventTone(ev)}>
+                        {enumLabel(EVENT_KIND_KEYS, ev.kind, t)}
+                      </Pill>
                       <span className="font-mono text-[10px] text-ink-400">
                         {ev.platform}/{ev.channel}
                       </span>
@@ -361,7 +384,7 @@ export default function GatewayPage() {
                         </span>
                       ) : null}
                       <span className="min-w-0 flex-1 truncate text-ink-200">
-                        {eventSummary(ev)}
+                        {eventSummary(ev, t)}
                       </span>
                     </div>
                     {ev.kind === "error" && ev.hint ? (

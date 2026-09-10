@@ -16,11 +16,13 @@ import {
   type StrategyRecord,
   type WalletBinding,
 } from "../../lib/clientApi";
+import { confirm as confirmDialog, toast } from "../../lib/dialogs";
 import {
-  confirm as confirmDialog,
-  prompt as promptDialog,
-} from "../../lib/dialogs";
+  strategyStatusLabel,
+  useStrategyLifecycle,
+} from "../../lib/useStrategyLifecycle";
 import type { StrategyCard as StrategyScorecard } from "../../lib/api";
+import { ModePill } from "../../components/ModePill";
 import {
   Advanced,
   Card,
@@ -106,9 +108,12 @@ export default function StrategiesPage() {
   const [filter, setFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [createBusy, setCreateBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // Pause / delete / rename share the lifecycle hook with the detail
+  // page; the local busy state only tracks the create form.
+  const lifecycle = useStrategyLifecycle({ onRefresh: load });
+  const busy = lifecycle.busy ?? (createBusy ? "create" : null);
 
   async function load() {
     setLoading(true);
@@ -192,9 +197,8 @@ export default function StrategiesPage() {
         if (!proceed) return;
       }
     }
-    setBusy("create");
+    setCreateBusy(true);
     setError(null);
-    setNotice(null);
     try {
       const out = await clientApi.strategyCreate({
         strategy_id: draft.strategy_id.trim().toLowerCase(),
@@ -210,175 +214,20 @@ export default function StrategiesPage() {
         main_prompt: draft.main_prompt.trim() || undefined,
       });
       if (!out.ok) throw new Error(JSON.stringify(out));
-      let notice = `${t("createdPrefix")} ${out.strategy_id}. ${t("createdSuffix")}`;
+      let message = `${t("createdPrefix")} ${out.strategy_id}. ${t("createdSuffix")}`;
       if (out.warning && out.warning.code === "account_already_bound") {
-        notice += ` · ${t("createdAccountSharedSuffix", {
+        message += ` · ${t("createdAccountSharedSuffix", {
           count: out.warning.strategies?.length ?? 0,
         })}`;
       }
-      setNotice(notice);
+      toast({ message, tone: "ok" });
       setDraft(EMPTY_DRAFT);
       setShowCreate(false);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(null);
-    }
-  }
-
-  async function renameStrategy(strategy: StrategyRecord) {
-    const nextTitle = await promptDialog({
-      title: t("editName"),
-      message: t("renamePrompt", { id: strategy.id }),
-      defaultValue: strategy.title || strategy.id,
-      placeholder: t("fieldTitle"),
-      okLabel: tCommon("save"),
-    });
-    if (nextTitle === null) return;
-    const trimmed = nextTitle.trim();
-    if (!trimmed) {
-      setError(t("nameRequired"));
-      return;
-    }
-    if (trimmed === (strategy.title || strategy.id)) return;
-    setBusy(`rename:${strategy.id}`);
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await clientApi.strategyUpdate(strategy.id, {
-        title: trimmed,
-        reason: "dashboard_rename_strategy",
-      });
-      if (!res.ok) throw new Error("strategy_rename_failed");
-      setNotice(t("nameUpdated", { id: strategy.id, title: trimmed }));
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function deleteStrategy(strategy: StrategyRecord, force = false) {
-    const ok = await confirmDialog({
-      message: force
-        ? t("forceDeleteConfirm", { id: strategy.id })
-        : t("deleteConfirm", { id: strategy.id }),
-      tone: "danger",
-      okLabel: force ? t("forceDelete") : tCommon("delete"),
-    });
-    if (!ok) return;
-    setBusy(`delete:${strategy.id}`);
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await clientApi.strategyDelete({
-        strategy_id: strategy.id,
-        force,
-      });
-      if (!res.ok) {
-        if (res.state && !force) {
-          const closeFirst = res.state.open_positions > 0
-            ? await confirmDialog({
-                title: t("cannotDeleteTitle"),
-                message: t("cannotDelete", {
-                  positions: res.state.open_positions,
-                  executors: res.state.active_executors,
-                  orders: res.state.active_orders,
-                }),
-                okLabel: t("closePositions"),
-                cancelLabel: t("pauseInstead"),
-                tone: "warning",
-              })
-            : false;
-          if (closeFirst) {
-            await closeStrategyPositions(strategy);
-          } else {
-            await pauseStrategy(strategy);
-          }
-          return;
-        }
-        throw new Error(res.error || "strategy_delete_failed");
-      }
-      setNotice(t("deletedInfo", { id: strategy.id }));
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function closeStrategyPositions(strategy: StrategyRecord) {
-    setBusy(`close:${strategy.id}`);
-    setError(null);
-    setNotice(null);
-    try {
-      const preview = await clientApi.strategyClosePositions({
-        strategy_id: strategy.id,
-        dry_run: true,
-      });
-      if (!preview.ok) throw new Error(preview.error || "strategy_close_preview_failed");
-      if (preview.count <= 0) {
-        setNotice(t("noPositionsToClose", { id: strategy.id }));
-        await load();
-        return;
-      }
-      const ok = await confirmDialog({
-        title: t("closePositionsTitle"),
-        message: t("closePositionsConfirm", {
-          id: strategy.id,
-          count: preview.count,
-          notional: preview.positions
-            .reduce((sum, row) => sum + (Number(row.notional_usd) || 0), 0)
-            .toFixed(2),
-        }),
-        okLabel: t("closePositions"),
-        tone: "warning",
-      });
-      if (!ok) return;
-      const res = await clientApi.strategyClosePositions({
-        strategy_id: strategy.id,
-        operator: "dashboard",
-        reason: "strategy_delete_prepare",
-      });
-      if (!res.ok) throw new Error(res.error || "strategy_close_positions_failed");
-      setNotice(t("closeSubmitted", {
-        id: strategy.id,
-        count: res.submitted?.length ?? res.count,
-      }));
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function pauseStrategy(strategy: StrategyRecord) {
-    if (strategy.status === "paused") {
-      setNotice(t("pausedInfo", { id: strategy.id }));
-      return;
-    }
-    const ok = await confirmDialog({
-      message: t("pauseConfirm", { id: strategy.id }),
-      okLabel: t("pauseStrategy"),
-      tone: "warning",
-    });
-    if (!ok) return;
-    setBusy(`pause:${strategy.id}`);
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await clientApi.strategySetStatus(strategy.id, "paused", "dashboard_pause");
-      if (!res.ok) throw new Error("strategy_pause_failed");
-      setNotice(t("pausedInfo", { id: strategy.id }));
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
+      setCreateBusy(false);
     }
   }
 
@@ -426,29 +275,51 @@ export default function StrategiesPage() {
     return sum;
   }, [strategies, strategyScorecards]);
 
+  // Aggregate PnL provenance: if any scorecard trades live money the
+  // sum must read as LIVE even when paper strategies are mixed in.
+  const totalPnlMode = useMemo(() => {
+    const modes = strategies
+      .map((s) => pnlModeFromScorecard(strategyScorecards[s.id]))
+      .filter(Boolean);
+    if (modes.includes("live")) return "live" as const;
+    if (modes.includes("paper")) return "paper" as const;
+    return undefined;
+  }, [strategies, strategyScorecards]);
+  const totalPnlMixed = useMemo(() => {
+    const modes = new Set(
+      strategies
+        .map((s) => pnlModeFromScorecard(strategyScorecards[s.id]))
+        .filter(Boolean),
+    );
+    return modes.size > 1;
+  }, [strategies, strategyScorecards]);
+
   return (
     <div>
       <PageHeader
         title={t("title")}
         description={t("description")}
         actions={
-          <button
-            onClick={() => void load()}
-            disabled={loading}
-            className="btn btn-ghost cursor-pointer text-xs"
-          >
-            {loading ? tCommon("refreshing") : tCommon("refresh")}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCreate((v) => !v)}
+              className="btn btn-primary cursor-pointer text-xs"
+            >
+              {t("newStrategy")}
+            </button>
+            <button
+              onClick={() => void load()}
+              disabled={loading}
+              className="btn btn-ghost cursor-pointer text-xs"
+            >
+              {loading ? tCommon("refreshing") : tCommon("refresh")}
+            </button>
+          </div>
         }
       />
       <SectionTabs section="strategy" />
       <PageBody>
         {error && <ErrorBanner error={error} />}
-        {notice && (
-          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-200">
-            {notice}
-          </div>
-        )}
 
         <div className="flex flex-wrap items-end gap-x-8 gap-y-3 px-1">
           <Kpi inline label={t("kpiTotal")} value={String(strategies.length)} />
@@ -467,109 +338,121 @@ export default function StrategiesPage() {
           <Kpi
             inline
             label={t("kpiTotalPnl")}
-            value={formatSignedUsd(totalPnlSum)}
+            value={
+              <span className="inline-flex flex-wrap items-center gap-2">
+                {formatSignedUsd(totalPnlSum)}
+                {totalPnlMode ? <ModePill mode={totalPnlMode} /> : null}
+              </span>
+            }
             tone={totalPnlSum > 0 ? "ok" : totalPnlSum < 0 ? "danger" : "neutral"}
+            delta={totalPnlMixed ? t("kpiTotalPnlMixed") : undefined}
           />
         </div>
 
-        <Advanced
-          title={t("createAdvancedTitle")}
-          description={t("createAdvancedHint")}
-          open={showCreate}
-          onToggle={(next) => setShowCreate(next)}
-        >
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-            <Field label={t("fieldStrategyId")}>
-              <input
-                value={draft.strategy_id}
-                onChange={(e) => setDraft({ ...draft, strategy_id: e.target.value })}
-                className="input-dark font-mono"
-                placeholder="eth_mean_reversion"
-              />
-            </Field>
-            <Field label={t("fieldTitle")}>
-              <input
-                value={draft.title}
-                onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-                className="input-dark"
-                placeholder="ETH mean reversion"
-              />
-            </Field>
-            <Field label={t("fieldAccount")}>
-              <AccountSelect
-                value={draft.account_id}
-                accounts={accounts}
-                discovery={discovery}
-                onChange={(account_id) => setDraft({ ...draft, account_id })}
-              />
-            </Field>
-            <Field label={t("fieldWallet")}>
-              <WalletSelect
-                value={draft.wallet_id}
-                bindings={walletBindings}
-                discovery={discovery}
-                onChange={(wallet_id) => setDraft({ ...draft, wallet_id })}
-              />
-            </Field>
-            <Field label={t("fieldMarkets")}>
-              <input
-                value={draft.markets}
-                onChange={(e) => setDraft({ ...draft, markets: e.target.value })}
-                className="input-dark font-mono"
-                placeholder="binance:BTCUSDT"
-              />
-            </Field>
-            <Field label={t("fieldTriggerKinds")}>
-              <input
-                value={draft.trigger_kinds}
-                onChange={(e) => setDraft({ ...draft, trigger_kinds: e.target.value })}
-                className="input-dark font-mono"
-              />
-            </Field>
-            <Field label={t("fieldSubagents")}>
-              <input
-                value={draft.subagents}
-                onChange={(e) => setDraft({ ...draft, subagents: e.target.value })}
-                className="input-dark font-mono"
-              />
-            </Field>
-            <Field label={t("fieldDriver")}>
-              <Select<DraftForm["driver"]>
-                value={draft.driver}
-                onChange={(value) => setDraft({ ...draft, driver: value })}
-                options={[
-                  { value: "prompt", label: "prompt" },
-                  { value: "script", label: "script" },
-                ]}
-                size="sm"
-                ariaLabel={t("fieldDriver")}
-              />
-            </Field>
-            <Field label={t("fieldDescription")} full>
-              <textarea
-                value={draft.description}
-                onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-                className="input-dark h-16"
-              />
-            </Field>
-            <Field label={t("fieldMainPrompt")} full>
-              <textarea
-                value={draft.main_prompt}
-                onChange={(e) => setDraft({ ...draft, main_prompt: e.target.value })}
-                className="input-dark font-mono h-28"
-              />
-            </Field>
-          </div>
-          <div className="mt-3 flex justify-end">
-            <button
-              onClick={() => void createStrategy()}
-              disabled={busy !== null || !draft.strategy_id || !draft.account_id || !draft.markets}
-              className="btn btn-primary cursor-pointer"
+        {showCreate ? (
+          <Card title={t("createStrategy")} description={t("createStrategyDesc")}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <Field label={t("fieldTitle")}>
+                <input
+                  value={draft.title}
+                  onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+                  className="input-dark"
+                  placeholder="ETH mean reversion"
+                />
+              </Field>
+              <Field label={t("fieldStrategyId")}>
+                <input
+                  value={draft.strategy_id}
+                  onChange={(e) => setDraft({ ...draft, strategy_id: e.target.value })}
+                  className="input-dark font-mono"
+                  placeholder="eth_mean_reversion"
+                />
+              </Field>
+              <Field label={t("fieldAccount")}>
+                <AccountSelect
+                  value={draft.account_id}
+                  accounts={accounts}
+                  discovery={discovery}
+                  onChange={(account_id) => setDraft({ ...draft, account_id })}
+                />
+              </Field>
+              <Field label={t("fieldMarkets")}>
+                <input
+                  value={draft.markets}
+                  onChange={(e) => setDraft({ ...draft, markets: e.target.value })}
+                  className="input-dark font-mono"
+                  placeholder={t("fieldMarketsPlaceholder")}
+                />
+              </Field>
+            </div>
+            <Advanced
+              title={t("createAdvancedGroupTitle")}
+              description={t("createAdvancedHint")}
             >
-              {busy === "create" ? t("creating") : t("createStrategyBtn")}
-            </button>
-          </div>
-        </Advanced>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                <Field label={t("fieldWallet")}>
+                  <WalletSelect
+                    value={draft.wallet_id}
+                    bindings={walletBindings}
+                    discovery={discovery}
+                    onChange={(wallet_id) => setDraft({ ...draft, wallet_id })}
+                  />
+                </Field>
+                <Field label={t("fieldTriggerKinds")}>
+                  <input
+                    value={draft.trigger_kinds}
+                    onChange={(e) => setDraft({ ...draft, trigger_kinds: e.target.value })}
+                    className="input-dark font-mono"
+                    placeholder={t("fieldTriggerKindsPlaceholder")}
+                  />
+                </Field>
+                <Field label={t("fieldSubagents")}>
+                  <input
+                    value={draft.subagents}
+                    onChange={(e) => setDraft({ ...draft, subagents: e.target.value })}
+                    className="input-dark font-mono"
+                    placeholder={t("fieldSubagentsPlaceholder")}
+                  />
+                </Field>
+                <Field label={t("fieldDriver")}>
+                  <Select<DraftForm["driver"]>
+                    value={draft.driver}
+                    onChange={(value) => setDraft({ ...draft, driver: value })}
+                    options={[
+                      { value: "prompt", label: "prompt" },
+                      { value: "script", label: "script" },
+                    ]}
+                    size="sm"
+                    ariaLabel={t("fieldDriver")}
+                  />
+                </Field>
+                <Field label={t("fieldDescription")} full>
+                  <textarea
+                    value={draft.description}
+                    onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+                    className="input-dark h-16"
+                  />
+                </Field>
+                <Field label={t("fieldMainPrompt")} full>
+                  <textarea
+                    value={draft.main_prompt}
+                    onChange={(e) => setDraft({ ...draft, main_prompt: e.target.value })}
+                    className="input-dark font-mono h-28"
+                  />
+                </Field>
+              </div>
+            </Advanced>
+            <div className="mt-3 flex justify-end">
+              <button
+                onClick={() => void createStrategy()}
+                disabled={busy !== null || !draft.strategy_id || !draft.account_id || !draft.markets}
+                className="btn btn-primary cursor-pointer"
+              >
+                {createBusy ? t("creating") : t("createStrategyBtn")}
+              </button>
+            </div>
+          </Card>
+        ) : null}
 
         {pendingStrategyProposals.length > 0 ? (
           <Card
@@ -588,8 +471,12 @@ export default function StrategiesPage() {
                   onDeleted={async () => {
                     await load();
                   }}
-                  onError={setError}
-                  onNotice={setNotice}
+                  onError={(msg) => {
+                    if (msg) toast({ message: msg, tone: "error" });
+                  }}
+                  onNotice={(msg) => {
+                    if (msg) toast({ message: msg, tone: "ok" });
+                  }}
                 />
               ))}
             </div>
@@ -615,7 +502,7 @@ export default function StrategiesPage() {
                     { value: "all", label: t("allStatuses") },
                     ...Object.entries(counts).map(([k, v]) => ({
                       value: k,
-                      label: `${k} (${v})`,
+                      label: `${strategyStatusLabel(t, k)} (${v})`,
                     })),
                   ]}
                   size="sm"
@@ -625,7 +512,18 @@ export default function StrategiesPage() {
             </div>
           }
         >
-          {filtered.length === 0 ? (
+          {loading && strategies.length === 0 ? (
+            // First-paint skeleton — avoids flashing the "no strategies"
+            // empty state while the six load calls are in flight.
+            <div
+              className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(360px,1fr))]"
+              aria-hidden="true"
+            >
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="skeleton h-[230px] rounded-xl" />
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
             <Empty
               title={strategies.length === 0 ? t("noStrategiesTitle") : t("noMatchTitle")}
               subtitle={
@@ -642,9 +540,9 @@ export default function StrategiesPage() {
                   strategy={strategy}
                   scorecard={strategyScorecards[strategy.id]}
                   busy={busy}
-                  onRename={renameStrategy}
-                  onDelete={deleteStrategy}
-                  onPause={pauseStrategy}
+                  onRename={lifecycle.rename}
+                  onDelete={lifecycle.remove}
+                  onPause={lifecycle.pause}
                 />
               ))}
             </div>
@@ -663,6 +561,16 @@ function statusTone(status: string): "ok" | "warn" | "danger" | "brand" | "neutr
   return "neutral";
 }
 
+/** Trading-mode for a PnL number, from the scorecard's own flags. */
+function pnlModeFromScorecard(
+  scorecard: StrategyScorecard | undefined,
+): "paper" | "live" | undefined {
+  if (!scorecard) return undefined;
+  if (scorecard.paper_trading_enabled) return "paper";
+  if (scorecard.live_trading_enabled) return "live";
+  return undefined;
+}
+
 function StrategyCard({
   strategy,
   scorecard,
@@ -675,7 +583,7 @@ function StrategyCard({
   scorecard?: StrategyScorecard;
   busy: string | null;
   onRename: (strategy: StrategyRecord) => Promise<void>;
-  onDelete: (strategy: StrategyRecord, force?: boolean) => Promise<void>;
+  onDelete: (strategy: StrategyRecord) => Promise<void>;
   onPause: (strategy: StrategyRecord) => Promise<void>;
 }) {
   const t = useTranslations("strategies");
@@ -686,10 +594,13 @@ function StrategyCard({
       ? (finiteNumber(scorecard?.realized_pnl_usd) ?? 0) +
         (finiteNumber(scorecard?.unrealized_pnl_usd) ?? 0)
       : undefined);
+  // PnL provenance (compliance): the paper/live pill travels with the
+  // number so a big green figure can never be mistaken for real-money
+  // profit without its source label.
+  const pnlMode = pnlModeFromScorecard(scorecard);
   const renaming = busy === `rename:${strategy.id}`;
   const deleting = busy === `delete:${strategy.id}`;
   const pausing = busy === `pause:${strategy.id}`;
-  const closing = busy === `close:${strategy.id}`;
   const canPause = !["paused", "archived", "draft", "static_review", "backtested"].includes(
     strategy.status,
   );
@@ -719,14 +630,17 @@ function StrategyCard({
             {strategy.id}
           </div>
         </div>
-        <StatusDot tone={tone} label={strategy.status} />
+        <StatusDot tone={tone} label={strategyStatusLabel(t, strategy.status)} />
       </div>
       <div className="relative flex items-baseline justify-between gap-3">
         <div className="rounded-full border border-[color:var(--line)] bg-white/[0.03] px-2.5 py-1 text-[11px] text-[color:var(--text-muted)]">
           {strategy.mode || "–"} · {strategy.account_id || "–"}
         </div>
-        <div className={`text-[22px] font-semibold tabular-nums ${pnlClassName(totalPnl)}`}>
-          {formatSignedUsd(totalPnl)}
+        <div className="flex items-center gap-1.5">
+          {pnlMode ? <ModePill mode={pnlMode} /> : null}
+          <div className={`text-[22px] font-semibold tabular-nums ${pnlClassName(totalPnl)}`}>
+            {formatSignedUsd(totalPnl)}
+          </div>
         </div>
       </div>
       <div className="relative truncate font-mono text-[12px] text-[color:var(--text-muted)]">
@@ -779,7 +693,7 @@ function StrategyCard({
           className="btn btn-ghost cursor-pointer text-rose-500 text-[12px] py-0.5 px-1.5"
         >
           <TrashIcon size={13} />
-          {closing ? <span className="ml-1">{t("closingPositions")}</span> : deleting ? <span className="ml-1">{t("deleting")}</span> : null}
+          {deleting ? <span className="ml-1">{t("deleting")}</span> : null}
         </button>
       </div>
     </div>

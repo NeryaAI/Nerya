@@ -14,8 +14,8 @@ from typing import Any
 _EXPORTS = {
     "AgentKernel": ".kernel",
     "AgentTurnResult": ".kernel",
-    "LoopConfig": ".loop",
-    "LoopOutcome": ".loop",
+    "LoopConfig": ".loop_contracts",
+    "LoopOutcome": ".loop_contracts",
     "WorkspaceNativeAgentLoop": ".loop",
     "BlockEnvelope": ".transcript_blocks",
     "ExecutionStateItem": ".execution_state",
@@ -28,7 +28,6 @@ _EXPORTS = {
     "compact_transcript": ".transcript_compact",
     "validate_transcript": ".transcript_compact",
     "AgentRuntime": ".runtime",
-    "SharedAgentRuntime": ".runtime",
     "CompletionGate": ".runtime",
     "GateDecision": ".runtime",
     "GateStatus": ".runtime",

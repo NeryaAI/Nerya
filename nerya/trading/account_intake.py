@@ -590,17 +590,24 @@ def submit_intake(
     payload.setdefault("kind", intake.account_kind)
     payload.setdefault("venue", intake.venue)
     # Force paper mode for venues that cannot place orders (data_source
-    # providers, the ``yahoo`` connector, …). Operators can still flip
-    # to live by editing the row later, but the agent-driven flow
-    # should never silently create a "live" account against a venue
-    # that has no order-placement support.
+    # providers, the ``yahoo`` connector, wallet-only venues such as
+    # ``byreal`` whose trading connector does not exist yet). Operators
+    # can still flip to live by editing the row later, but the
+    # agent-driven flow should never silently create a "live" account
+    # against a venue that has no order-placement support. An unknown
+    # venue must default to NOT placeable — wallet-provider intakes
+    # (chain kind) land here with venue names the trading registry does
+    # not know, and defaulting them to True created accounts that only
+    # failed at order time (E4).
     if not payload.get("mode"):
         try:
             spec = get_registry().find(intake.venue)
         except Exception:
             spec = None
-        place_order = (spec.supports.get("place_order") if spec else True)
-        if intake.account_kind == "data_source" or place_order is False:
+        place_order = (
+            bool(spec.supports.get("place_order")) if spec is not None else False
+        )
+        if intake.account_kind == "data_source" or not place_order:
             payload["mode"] = "paper"
     if credential_refs:
         existing_creds = payload.get("credentials")

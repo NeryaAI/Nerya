@@ -15,12 +15,15 @@ from .config import BacktestConfig, MockSurfaceCfg
 class BacktestUnsupportedSurfaceError(RuntimeError):
     """Raised when a live-only surface is used during backtest."""
 
-    def __init__(self, surface: str) -> None:
-        super().__init__(
-            f"ctx.{surface} is unsupported in OHLCV backtests; gate this call on "
-            "ctx.runmode == 'backtest' or set mock_surfaces."
-            f"{surface}.mode = 'stub'/'replay'"
-        )
+    def __init__(self, surface: str, *, detail: str | None = None) -> None:
+        if detail:
+            super().__init__(f"ctx.{surface} is unsupported in OHLCV backtests: {detail}")
+        else:
+            super().__init__(
+                f"ctx.{surface} is unsupported in OHLCV backtests; gate this call on "
+                "ctx.runmode == 'backtest' or set mock_surfaces."
+                f"{surface}.mode = 'stub'/'replay'"
+            )
 
 
 @dataclass
@@ -28,6 +31,7 @@ class MockMarket:
     market: str
     bars_by_market: dict[str, list[dict[str, Any]]]
     timeframe_bars_by_market: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
+    primary_timeframe: str = "1m"
 
     def candles(
         self,
@@ -49,10 +53,41 @@ class MockMarket:
             limit=count or limit,
             symbol=symbol,
         )
-        rows = self.timeframe_bars_by_market.get(market, {}).get(timeframe)
+        # Timeframe keys and lookups are normalised to lowercase so a
+        # strategy asking for ``"15M"`` against ``"15m"``-keyed bars (or
+        # vice versa) finds its data instead of silently falling back to
+        # the primary bars.
+        wanted = str(timeframe or "").strip().lower()
+        by_tf = {
+            str(key or "").strip().lower(): rows
+            for key, rows in (self.timeframe_bars_by_market.get(market, {}) or {}).items()
+        }
+        rows = by_tf.get(wanted)
+        if rows is None and self._is_foreign_timeframe(wanted):
+            # Silent substitution would make a "15m" indicator compute on
+            # the primary bars — validated/promoted behaviour would then
+            # diverge from live, which computes on real 15m bars. Fail loudly.
+            raise BacktestUnsupportedSurfaceError(
+                f"market.candles timeframe={timeframe!r}",
+                detail=(
+                    f"no {timeframe} bars were provided for this replay "
+                    f"(primary timeframe {self.primary_timeframe!r}); pass "
+                    f"timeframe_candles_by_market or request the primary timeframe"
+                ),
+            )
         if rows is None:
             rows = self.bars_by_market.get(market, [])
         return list(rows)[-int(limit):]
+
+    def _is_foreign_timeframe(self, timeframe: str) -> bool:
+        """True when ``timeframe`` is neither the primary nor provided."""
+
+        wanted = str(timeframe or "").strip().lower()
+        primary = str(self.primary_timeframe or "").strip().lower()
+        if not wanted or wanted == primary:
+            return False
+        provided = self.timeframe_bars_by_market.get(self.market, {})
+        return not any(str(tf or "").strip().lower() == wanted for tf in provided)
 
     def _normalise_candle_args(
         self,
@@ -250,6 +285,11 @@ class MockMarket:
 class MockTrading:
     pending_orders: list[dict[str, Any]]
     strategy_id: str
+    # Backing state (the engine's position/NAV mirror) and the current
+    # bar close, used to build a paper-equivalent fill estimate for the
+    # terminal envelope.
+    state: Any = None
+    mark_price: float = 0.0
 
     def submit_intent(self, **payload: Any) -> dict[str, Any]:
         if len(payload) == 1 and isinstance(next(iter(payload.values())), dict):
@@ -265,16 +305,101 @@ class MockTrading:
             "order_type": payload.get("order_type", "market"),
             "reason": payload.get("reason") or payload.get("reasoning") or payload.get("reasoning_ref") or "",
             "confidence": payload.get("confidence"),
+            "plan_action": payload.get("plan_action")
+            or (payload.get("meta") or {}).get("plan_action", ""),
             "raw": dict(payload),
         }
         self.pending_orders.append(record)
-        return {
+        return self._paper_envelope(record)
+
+    # ------------------------------------------------------------------
+    # Paper-equivalent terminal envelope
+    # ------------------------------------------------------------------
+
+    def _paper_envelope(self, record: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        """Return the terminal envelope for a backtest order.
+
+        Since the C5/E5 fix the compat adapters treat **only** a
+        ``filled`` status as executed (a ``submitted`` ack never
+        registers a position), and the live paper pipeline answers
+        ``submit_intent`` with a terminal ``filled`` envelope carrying
+        the executor's ``order`` summary. The mock must answer with the
+        same shape or imported Freqtrade/VNpy strategies would never
+        track a position in replay (every trade would degenerate into
+        an engine forced_close). The ``order`` summary mirrors
+        ``submit.py``'s paper path: ``order_id`` / ``filled_size`` /
+        ``avg_price`` estimated from the current bar close and the
+        engine's position mirror.
+
+        The envelope is an optimistic paper-shaped ack: the engine's
+        :func:`settle` stays authoritative for accounting (cash,
+        max-open-trades and shorting gates can still reject the order
+        when it is booked at the next bar's open).
+        """
+
+        price = float(self.mark_price or 0.0)
+        qty = self._estimate_filled_size(record, price)
+        order_id = f"bto_{uuid.uuid4().hex[:12]}"
+        envelope: dict[str, Any] = {
             "ok": True,
-            "status": "submitted",
-            "intent_id": intent_id,
+            "status": "filled",
+            "intent_id": record.get("intent_id"),
             "intent": dict(record),
+            "order_id": order_id,
+            "order": {
+                "order_id": order_id,
+                "intent_id": record.get("intent_id"),
+                "status": "filled",
+                "filled_size": qty,
+                "avg_price": price,
+                "notional_usd": qty * price,
+            },
             "risk_decision": {"ok": True, "mode": "backtest"},
         }
+        envelope.update(extra)
+        return envelope
+
+    def _estimate_filled_size(self, record: dict[str, Any], price: float) -> float:
+        """Estimate the base size the engine's settle is about to book."""
+
+        action = str(record.get("plan_action") or "").lower()
+        market = str(record.get("market") or "")
+        book_signed = self._book_qty(market)
+        book_qty = abs(book_signed)
+        side = str(record.get("side") or "buy").lower()
+        if action in {"close_position", "close", "exit"} or record.get("close_all"):
+            return book_qty
+        if action in {"reduce_position", "reduce"}:
+            pct = max(0.0, min(1.0, float(record.get("reduce_pct") or 1.0)))
+            return book_qty * pct
+        if not action and book_qty > 0.0 and (side == "sell") == (book_signed > 0.0):
+            # Legacy bare submit_intent exit: the side opposes the held
+            # book, so settle flattens the whole position.
+            return book_qty
+        size = float(record.get("size") or 0.0)
+        unit = str(record.get("size_unit") or "usd").lower()
+        if unit in {"base", "qty", "quantity"}:
+            return max(size, 0.0)
+        if unit in {"pct_nav", "pct", "percent", "nav_pct", "percent_nav", "equity_pct"}:
+            pct = size / 100.0 if size > 1.0 else max(0.0, size)
+            nav = float((self._nav() or {}).get("equity") or (self._nav() or {}).get("cash") or 0.0)
+            return (nav * pct) / price if price > 0.0 else 0.0
+        return size / price if price > 0.0 else 0.0
+
+    def _nav(self) -> dict[str, float]:
+        raw = self.state.get("__portfolio_nav__") if self.state is not None else None
+        return raw if isinstance(raw, dict) else {}
+
+    def _book_qty(self, market: str) -> float:
+        if self.state is None:
+            return 0.0
+        pos = self.state.get(f"position:{market}")
+        if not isinstance(pos, dict):
+            return 0.0
+        try:
+            return float(pos.get("qty") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def open_position(
         self,
@@ -353,15 +478,11 @@ class MockTrading:
         }
         self.pending_orders.append(record)
         bracket_id = f"bkt_{uuid.uuid4().hex[:10]}" if record["protection"] else None
-        return {
-            "ok": True,
-            "status": "submitted",
-            "intent_id": intent_id,
-            "intent": dict(record),
-            "bracket_id": bracket_id,
-            "protection": record["protection"],
-            "risk_decision": {"ok": True, "mode": "backtest"},
-        }
+        return self._paper_envelope(
+            record,
+            bracket_id=bracket_id,
+            protection=record["protection"],
+        )
 
     def close_position(
         self,
@@ -408,13 +529,7 @@ class MockTrading:
             },
         }
         self.pending_orders.append(record)
-        return {
-            "ok": True,
-            "status": "submitted",
-            "intent_id": intent_id,
-            "intent": dict(record),
-            "risk_decision": {"ok": True, "mode": "backtest"},
-        }
+        return self._paper_envelope(record)
 
     def reduce_position(
         self,
@@ -447,13 +562,7 @@ class MockTrading:
             "raw": {"method": "reduce_position", "side": position_side, "reduce_pct": pct, **extra},
         }
         self.pending_orders.append(record)
-        return {
-            "ok": True,
-            "status": "submitted",
-            "intent_id": intent_id,
-            "intent": dict(record),
-            "risk_decision": {"ok": True, "mode": "backtest"},
-        }
+        return self._paper_envelope(record)
 
 
 @dataclass
@@ -751,8 +860,18 @@ class MockCtx:
     result: Any = field(default_factory=lambda: _result_builder())
 
     def __post_init__(self) -> None:
-        self.market = MockMarket(self.market_name, self.bars_by_market, self.timeframe_bars_by_market)
-        self.trading = MockTrading(self.pending_orders, self.strategy_id)
+        self.market = MockMarket(
+            self.market_name,
+            self.bars_by_market,
+            self.timeframe_bars_by_market,
+            primary_timeframe=str(getattr(self.config_obj, "tf", "1m") or "1m"),
+        )
+        self.trading = MockTrading(
+            self.pending_orders,
+            self.strategy_id,
+            state=self.state,
+            mark_price=float(self.current_bar.get("close", 0.0) or 0.0),
+        )
         self.audit = MockAudit(self.audit_sink)
         self.clock = MockClock(int(self.current_bar.get("ts", 0)))
         self.dedupe = MockDedupe()

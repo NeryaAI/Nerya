@@ -1,140 +1,38 @@
-from __future__ import annotations
-
-import json
-from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+"""Native children share the root loop's provider attempt accounting."""
+from dataclasses import replace
 
 import pytest
 
-from nerya.core.config import Config
 from nerya.core.errors import LLMError
-from nerya.core.paths import WorkspacePaths
-from nerya.llm.gateway import LLMCall
-from nerya.subagents.registry import SubAgentExecutionPolicy, SubAgentSpec
-from nerya.subagents.runtime import (
-    EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE,
-    SubAgentLLMError,
-    SubAgentRuntime,
-)
-
+from test_subagent_native_runtime import Gateway, final, runtime, spec, run
 
 pytestmark = pytest.mark.smoke
 
 
-class _TransientLegacyGateway:
-    def __init__(self, *, always_fail: bool = False) -> None:
-        self.always_fail = always_fail
-        self.calls = 0
-
-    def call(self, **kwargs: Any) -> LLMCall:
-        self.calls += 1
-        if self.always_fail or self.calls == 1:
-            raise LLMError("openai messages api error (503): unavailable")
-        parsed = {"done": True, "summary": "evidence collected"}
-        return LLMCall(
-            tier=str(kwargs.get("tier") or "light"),
-            task=str(kwargs.get("task") or "subagent_analysis"),
-            caller=str(kwargs.get("caller") or "subagent:budget_child"),
-            tokens=7,
-            usd=0.01,
-            raw=json.dumps(parsed),
-            parsed=parsed,
-            provider="fixture",
-            model="fixture",
-        )
+@pytest.mark.parametrize("extra_attempts", [0, 1])
+def test_transient_retry_obeys_shared_child_budget(tmp_path, extra_attempts):
+    gateway = Gateway(LLMError("provider temporarily unavailable (503)"), final("recovered"))
+    rt = runtime(tmp_path, gateway)
+    rt.config.data["agent"]["subagents"] = {"max_extra_llm_attempts_per_run": extra_attempts}
+    child = spec(tmp_path, max_skill_calls=0)
+    child.execution_policy.llm_max_attempts = 3
+    if not extra_attempts:
+        with pytest.raises(LLMError, match="temporarily unavailable"):
+            run(rt, child)
+        assert len(gateway.calls) == 1
+    else:
+        result = run(rt, child)
+        assert len(gateway.calls) == 2
+        assert result["metrics"]["attempt_budget"]["used"] == 1
+        assert result["output"]["summary"] == "recovered"
+        assert result["completion_status"] == "complete"
 
 
-class _EmptyRegistry:
-    def list(self) -> list[Any]:
-        return []
-
-
-def _runtime(
-    tmp_path: Path,
-    gateway: _TransientLegacyGateway,
-    *,
-    extra_attempts: int,
-) -> SubAgentRuntime:
-    return SubAgentRuntime(
-        config=Config(
-            paths=WorkspacePaths(root=tmp_path),
-            data={
-                "agent": {
-                    "subagents": {
-                        "max_extra_llm_attempts_per_run": extra_attempts,
-                    }
-                }
-            },
-        ),
-        skills=SimpleNamespace(registry=_EmptyRegistry()),  # type: ignore[arg-type]
-        llm=gateway,  # type: ignore[arg-type]
-    )
-
-
-def _spec(tmp_path: Path) -> SubAgentSpec:
-    return SubAgentSpec(
-        name="budget_child",
-        prompt_path=tmp_path / "budget_child.agent.md",
-        prompt="Return a structured final answer.",
-        tier="light",
-        execution_policy=SubAgentExecutionPolicy(
-            max_iterations=1,
-            max_skill_calls=0,
-            max_wall_seconds=30.0,
-            llm_max_attempts=5,
-            runtime="legacy",
-        ),
-    )
-
-
-def test_legacy_subagent_transient_retry_consumes_one_shared_attempt(
-    tmp_path: Path,
-) -> None:
-    gateway = _TransientLegacyGateway()
-    runtime = _runtime(tmp_path, gateway, extra_attempts=1)
-
-    result = runtime.run(
-        _spec(tmp_path),
-        trigger_event_id="trigger-1",
-        payload={"task": "collect evidence"},
-        session_id="session-1",
-        turn_id="turn-1",
-        context_scope=EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE,
-        runtime_mode="legacy",
-    )
-
-    assert gateway.calls == 2
-    assert result["output"]["summary"] == "evidence collected"
-    assert result["metrics"]["attempt_budget"] == {
-        "limit": 1,
-        "used": 1,
-        "remaining": 0,
-        "by_reason": {"transient_retry": 1},
-        "denied": 0,
-    }
-    assert [
-        step["kind"]
-        for step in result["steps"]
-        if step["kind"] == "think_retry"
-    ] == ["think_retry"]
-
-
-def test_legacy_subagent_zero_attempt_budget_never_retries(
-    tmp_path: Path,
-) -> None:
-    gateway = _TransientLegacyGateway(always_fail=True)
-    runtime = _runtime(tmp_path, gateway, extra_attempts=0)
-
-    with pytest.raises(SubAgentLLMError, match="failed before producing output"):
-        runtime.run(
-            _spec(tmp_path),
-            trigger_event_id="trigger-1",
-            payload={"task": "collect evidence"},
-            session_id="session-1",
-            turn_id="turn-1",
-            context_scope=EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE,
-            runtime_mode="legacy",
-        )
-
-    assert gateway.calls == 1
+def test_child_usage_records_all_native_calls_and_no_hidden_synthesis(tmp_path):
+    from test_subagent_native_runtime import call, descriptor
+    gateway = Gateway(call(), replace(final(), usd_cost=0.25))
+    result = run(runtime(tmp_path, gateway, [descriptor()]), spec(tmp_path))
+    assert len(gateway.calls) == len(result["model_calls"]) == 2
+    assert result["tokens"] == sum(row["tokens"] for row in result["model_calls"])
+    assert result["usd"] == pytest.approx(0.25)
+    assert all(row["context_scope"] == "agent_loop" for row in result["model_calls"])

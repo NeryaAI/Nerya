@@ -363,10 +363,12 @@ def test_poller_applies_late_fills_to_position_book(tmp_path):
     assert cached[0].state == "filled"
 
 
-def test_poller_handles_get_order_errors_via_not_found_streak(tmp_path):
-    """Connector errors should not crash the loop — instead the
-    poller increments ``not_found_streak`` so the order eventually
-    flips to ``lost``.
+def test_poller_does_not_mark_lost_on_transport_errors(tmp_path):
+    """B7 fix (updates the old expectation that any ``get_order`` error
+    advanced the not-found streak): connector errors must not crash the
+    loop, but transport-level failures are NOT venue not-found evidence —
+    the order must stay active with a zero streak so a flaky connection
+    can't mark a live order ``lost``.
     """
     cfg, stub = _live_config(tmp_path)
     engine = _build_engine(cfg, stub)
@@ -387,15 +389,45 @@ def test_poller_handles_get_order_errors_via_not_found_streak(tmp_path):
             raise RuntimeError("rate_limited")
 
     err_stub = _ErrConn()
-    for _ in range(5):  # exceed LOST_ORDER_NOT_FOUND_THRESHOLD (4)
+    for _ in range(6):  # well past LOST_ORDER_NOT_FOUND_THRESHOLD (4)
         out = poll_active_live_orders(
             cfg,
             connector_factory=lambda _aid, _cfg: err_stub,
         )
-        if out.scanned == 0:
-            # The order already flipped to ``lost`` — the loop is done.
-            break
+        assert out.scanned == 1
         assert out.errors == 1
+        assert out.not_found == 0
+
+    tracker = OrderTracker(cfg.paths)
+    assert tracker.lost_orders(account_id="live_main") == []
+    active = tracker.active_orders(account_id="live_main")
+    assert len(active) == 1
+    assert active[0].not_found_streak == 0
+
+
+def test_poller_still_marks_lost_on_definitive_not_found(tmp_path):
+    """A *definitive* venue 'order not found' still advances the strike
+    counter toward ``lost`` (4 consecutive strikes).
+    """
+    cfg, stub = _live_config(tmp_path)
+    engine = _build_engine(cfg, stub)
+    stub.queue_ack(OrderAck(
+        order_id="venue-gone", client_order_id="cli-gone",
+        status="new", market="mock:BTC/USDT", side="buy",
+        size=0.2, filled=0.0,
+    ))
+    _execute_unchecked_legacy_live_for_tracker_test(engine, _intent())
+
+    class _NotFoundConn(_StubConnector):
+        def get_order(self, *, market, order_id):
+            raise RuntimeError("OrderNotFound: order not found")
+
+    not_found_stub = _NotFoundConn()
+    for _ in range(4):
+        out = poll_active_live_orders(
+            cfg,
+            connector_factory=lambda _aid, _cfg: not_found_stub,
+        )
 
     tracker = OrderTracker(cfg.paths)
     lost = tracker.lost_orders(account_id="live_main")

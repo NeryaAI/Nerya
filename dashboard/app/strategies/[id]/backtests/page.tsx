@@ -77,15 +77,22 @@ export default function StrategyBacktestsPage({
                 </thead>
                 <tbody>
                   {runs.map((run) => (
-                    <tr key={run.ts} className="border-t border-brand-500/10">
+                    <tr
+                      key={run.ts}
+                      className="border-t border-brand-500/10 transition-colors hover:bg-brand-500/[0.06]"
+                    >
                       <td className="py-2 pr-3 font-mono">
                         <Link className="text-brand-300 hover:text-brand-200" href={`/strategies/${encodeURIComponent(strategyId)}/backtests/${encodeURIComponent(run.ts)}`}>
                           {run.ts}
                         </Link>
                       </td>
                       <td className="py-2 pr-3"><Verdict value={run.verdict} t={t} /></td>
-                      <td className="py-2 pr-3 text-right font-mono">{fmt(run.total_return_pct)}%</td>
-                      <td className="py-2 pr-3 text-right font-mono">{fmt(run.max_dd_pct)}%</td>
+                      <td className={`py-2 pr-3 text-right font-mono ${pctClassName(run.total_return_pct)}`}>
+                        {fmt(run.total_return_pct)}%
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono text-warn">
+                        {ddCell(run.max_dd_pct)}
+                      </td>
                       <td className="py-2 pr-3 text-right font-mono">{fmt(run.sharpe_ratio)}</td>
                       <td className="py-2 pr-3 text-ink-300">
                         {run.start_utc} {"->"} {run.end_utc}
@@ -108,5 +115,20 @@ function Verdict({ value, t }: { value?: string; t: ReturnType<typeof useTransla
 }
 
 function fmt(value: unknown): string {
-  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "null";
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "–";
+}
+
+/** Return cells get the shared positive/negative semantics (accent / danger). */
+function pctClassName(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value === 0) {
+    return "text-[color:var(--text-muted)]";
+  }
+  return value > 0 ? "text-accent-400" : "text-danger";
+}
+
+/** Drawdown is a risk magnitude — always shown as a negative percent. */
+function ddCell(value: unknown): string {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n === 0) return n === 0 ? "0.00%" : "–";
+  return `-${Math.abs(n).toFixed(2)}%`;
 }

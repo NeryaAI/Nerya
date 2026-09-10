@@ -60,8 +60,29 @@ function statusPill(
   }
 }
 
+// Raw status -> accountsPage.* translation key. Unknown statuses fall
+// back to the raw string. Account mode stays untranslated on purpose:
+// PAPER/LIVE are trading terms operators scan for in either locale
+// (see ModePill.tsx).
+const ACCOUNT_STATUS_KEYS: Record<string, string> = {
+  active: "statusActive",
+  read_only: "statusReadOnly",
+  disabled: "statusDisabled",
+  quarantined: "statusQuarantined",
+};
+
+function enumLabel(
+  map: Record<string, string>,
+  value: string,
+  t: (key: string) => string,
+): string {
+  const key = map[value] ?? map[value.toLowerCase()];
+  return key ? t(key) : value;
+}
+
 export default function AccountsPage() {
   const t = useTranslations("accounts");
+  const tEnum = useTranslations("accountsPage");
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -225,7 +246,7 @@ export default function AccountsPage() {
             </button>
             <button
               onClick={() => setShowAdd((s) => !s)}
-              className="btn-ghost text-xs"
+              className="btn-primary text-xs"
             >
               {showAdd ? t("closeForm") : t("addAccount")}
             </button>
@@ -332,10 +353,10 @@ export default function AccountsPage() {
                     <th>{t("colVenue")}</th>
                     <th>{t("colWallet")}</th>
                     <th>{t("colCurrency")}</th>
-                    <th>{t("colTotal")}</th>
-                    <th>{t("colReserved")}</th>
-                    <th>{t("colPositions")}</th>
-                    <th>{t("colExecutors")}</th>
+                    <th className="text-right">{t("colTotal")}</th>
+                    <th className="text-right">{t("colReserved")}</th>
+                    <th className="text-right">{t("colPositions")}</th>
+                    <th className="text-right">{t("colExecutors")}</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -356,7 +377,9 @@ export default function AccountsPage() {
                           <Pill tone={modePill(p.mode)}>{p.mode}</Pill>
                         </td>
                         <td>
-                          <Pill tone={statusPill(p.status)}>{p.status}</Pill>
+                          <Pill tone={statusPill(p.status)}>
+                            {enumLabel(ACCOUNT_STATUS_KEYS, p.status, tEnum)}
+                          </Pill>
                         </td>
                         <td className="font-mono">{p.venue}</td>
                         <td className="font-mono text-ink-400">
@@ -365,16 +388,22 @@ export default function AccountsPage() {
                         <td className="font-mono text-ink-300">
                           {p.base_currency || "USDT"}
                         </td>
-                        <td>{money(acc.snapshot?.total_usd, p.base_currency)}</td>
+                        <td className="text-right font-mono tabular-nums">
+                          {money(acc.snapshot?.total_usd, p.base_currency)}
+                        </td>
                         <td
-                          className={
+                          className={`text-right font-mono tabular-nums ${
                             acc.reserved_usd > 0 ? "text-warn" : ""
-                          }
+                          }`}
                         >
                           {money(acc.reserved_usd, p.base_currency)}
                         </td>
-                        <td>{acc.open_position_count}</td>
-                        <td>{acc.active_executors.length}</td>
+                        <td className="text-right font-mono tabular-nums">
+                          {acc.open_position_count}
+                        </td>
+                        <td className="text-right font-mono tabular-nums">
+                          {acc.active_executors.length}
+                        </td>
                         {/* Row actions (incl. the destructive quarantine)
                             reveal on hover/focus so nine rows don't render
                             27 permanent buttons. */}

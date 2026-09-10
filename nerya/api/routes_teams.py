@@ -21,10 +21,13 @@ from ..teams.orchestrator import TeamOrchestrator
 
 
 def _list_templates(client, _payload):  # noqa: ARG001
+    paths = getattr(getattr(client, "config", None), "paths", None)
     return {
         "ok": True,
-        "templates": list_templates(),
-        "ids": list(BUILTIN_TEMPLATES.keys()),
+        "templates": list_templates(paths),
+        "ids": [
+            t["id"] for t in list_templates(paths)
+        ],
     }
 
 

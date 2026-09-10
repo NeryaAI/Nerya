@@ -22,6 +22,17 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+def is_cancelled(token: object | None) -> bool:
+    """One fail-closed cancellation predicate for root, child and tool runtimes."""
+    if token is None:
+        return False
+    try:
+        flag = getattr(token, "is_set", False)
+        return bool(flag() if callable(flag) else flag)
+    except Exception:
+        return True
+
+
 @dataclass
 class CancelToken:
     """Cooperative cancellation flag.
@@ -70,6 +81,18 @@ class CancelToken:
                 self.reason = "deadline_exceeded"
             return True
         return False
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Wait for cancellation without polling, bounded by this token's deadline."""
+        if self.is_set:
+            return True
+        if timeout is not None:
+            timeout = max(0.0, float(timeout))
+        if self.deadline_s is not None:
+            remaining = max(0.0, float(self.deadline_s) - time.time())
+            timeout = remaining if timeout is None else min(timeout, remaining)
+        self._flag.wait(timeout)
+        return self.is_set
 
     def raise_if_cancelled(self) -> None:
         if self.is_set:

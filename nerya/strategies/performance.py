@@ -804,7 +804,11 @@ def _summarise_trades(
     current_win_streak = current_loss_streak = 0
     max_win_streak = max_loss_streak = 0
     for row in pnls:
-        amt = _coerce_float(_get_nested(row, "pnl", "realized_usd"))
+        # The D6 fill mirror writes ``realized_pnl_usd`` (order_tracker's
+        # realized-PnL lines); older ledger rows used ``realized_usd``.
+        amt = _coerce_float(_get_nested(row, "pnl", "realized_pnl_usd"))
+        if amt is None:
+            amt = _coerce_float(_get_nested(row, "pnl", "realized_usd"))
         if amt is None:
             amt = _coerce_float(_get_nested(row, "pnl", "pnl_usd"))
         if amt is None:

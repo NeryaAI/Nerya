@@ -394,7 +394,7 @@ class _WideBatchGateway:
         )
 
 
-def test_default_tool_call_budget_is_four_per_iteration() -> None:
+def test_no_hidden_tool_budget_is_inferred_from_iteration_count() -> None:
     gateway = _WideBatchGateway()
     loop = _make_loop(
         gateway,
@@ -404,10 +404,9 @@ def test_default_tool_call_budget_is_four_per_iteration() -> None:
     outcome = loop.run(system="system", user_message="keep reading")
 
     assert outcome.aborted
-    assert outcome.stop_reason == "max_tool_calls"
-    assert outcome.abort_reason == "max_tool_calls"
-    assert outcome.tool_calls == 40
-    assert gateway.calls == 8
+    assert outcome.abort_reason == "max_iterations"
+    assert outcome.tool_calls == 50
+    assert gateway.calls == 10
 
 
 # ---------------------------------------------------------------------------

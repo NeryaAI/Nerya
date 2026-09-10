@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, ErrorBanner, Pill } from "./Page";
+import { TermTip } from "./TermTip";
 import { SwitchControl } from "./SwitchControl";
 import { clientApi } from "../lib/clientApi";
 import type { RuntimeFlag } from "../lib/operatorTypes";
@@ -108,7 +109,12 @@ export function RuntimeFlagsPanel() {
 
   return (
     <Card
-      title={t("title")}
+      title={
+        <span className="inline-flex items-center gap-2">
+          {t("title")}
+          <TermTip term="capabilityGate" />
+        </span>
+      }
       description={t("description")}
       actions={
         <div className="flex items-center gap-2">

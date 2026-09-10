@@ -50,11 +50,11 @@ def routes():
         )
 
     def scenario(client, payload):
-        ov = ScenarioOverrides(**{
-            k: payload[k]
-            for k in ScenarioOverrides.__dataclass_fields__
-            if k in payload
-        })
+        try:
+            ov = ScenarioOverrides(**{key: value for key, value in payload.items()
+                                      if key not in {"strategy_id", "session_id"}})
+        except (TypeError, ValueError) as exc:
+            return {"_status": 400, "error": str(exc)}
         return scenario_replay(
             client.config.paths,
             payload["strategy_id"], payload["session_id"],

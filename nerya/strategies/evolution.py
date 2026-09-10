@@ -64,6 +64,7 @@ import json
 import logging
 import math
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Optional
@@ -81,6 +82,7 @@ from ..evolution.observation_summary import (
     POST_APPLY_NEGATIVE_STATUSES,
 )
 from ..evolution import assets as evolution_assets
+from ..evolution.optimizer_feedback import selected_optimizer_candidate
 from ..evolution.patch_proposal import (
     Proposal,
     create_proposal,
@@ -372,7 +374,7 @@ class StrategyEvolutionRunner:
         )
         optimizer_report: dict[str, Any] = {}
         if optimizer_selection:
-            output = optimizer_selection["selected_output"]
+            output = optimizer_selection["selected_output"] or {}
             optimizer_report = optimizer_selection["report"]
             envelope = dict(envelope)
             envelope["raw_output"] = raw_output
@@ -398,7 +400,7 @@ class StrategyEvolutionRunner:
             dry_run=dry_run,
         )
 
-        accepted, dropped, warnings = _filter_changes(output, cfg)
+        accepted, dropped, warnings = _filter_changes(output, cfg, pkg=pkg)
         validation_plan = build_validation_plan(
             _validation_plan_input(output),
             source="strategy_evolution",
@@ -512,7 +514,10 @@ class StrategyEvolutionRunner:
         elif accepted and dry_run:
             warnings.append("dry_run: proposal not created")
 
-        if not accepted and not dropped:
+        if optimizer_report.get("selection_status") == "no_eligible_candidate":
+            status = "hold"
+            reason = "no eligible tuning candidate; inspect optimizer_report for validation blockers"
+        elif not accepted and not dropped:
             status = "hold"
             reason = "tuner returned no proposed_changes"
         elif not accepted:
@@ -562,7 +567,7 @@ class StrategyEvolutionRunner:
         from ..subagents.dispatcher import SubAgentDispatcher
         from ..subagents.runtime import EXPLICIT_PAYLOAD_ONLY_CONTEXT_SCOPE
         from ..subagents.strategy_registry import build_strategy_tuner_spec
-        dispatcher = SubAgentDispatcher(config=self.config, skills=self.skills)
+        dispatcher = SubAgentDispatcher.for_workspace(self.config, self.skills)
         tuner_spec = build_strategy_tuner_spec(
             pkg,
             package_context=snapshot.package_context,
@@ -1440,7 +1445,7 @@ def _optimizer_outcome_feedback(
         report = _read_optimizer_report_for_proposal(proposal.path)
         if not report:
             continue
-        selected = _selected_optimizer_candidate(report)
+        selected = selected_optimizer_candidate(report)
         if not selected:
             continue
         run_count += 1
@@ -1874,23 +1879,6 @@ def _read_optimizer_report_for_proposal(proposal_path: Any) -> dict[str, Any] | 
     return report if isinstance(report, dict) and report else None
 
 
-def _selected_optimizer_candidate(report: dict[str, Any]) -> dict[str, Any] | None:
-    candidates = [
-        row for row in report.get("candidates", [])
-        if isinstance(row, dict)
-    ]
-    if not candidates:
-        return None
-    selected_id = str(report.get("selected_candidate_id") or "")
-    selected_index = _maybe_int(report.get("selected_index"))
-    for idx, candidate in enumerate(candidates):
-        if selected_id and str(candidate.get("candidate_id") or "") == selected_id:
-            return candidate
-        if selected_index is not None and idx == selected_index:
-            return candidate
-    return candidates[0]
-
-
 def _post_apply_observations_by_proposal(paths: WorkspacePaths) -> dict[str, list[dict[str, Any]]]:
     rows: dict[str, list[dict[str, Any]]] = {}
     for row in jsonl.read_all(paths.journal("evolution")):
@@ -2127,13 +2115,6 @@ def _feedback_token(value: Any) -> str:
     )[:96]
 
 
-def _maybe_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _select_tuning_candidate(
     output: dict[str, Any],
     cfg: StrategyTuningConfig,
@@ -2160,6 +2141,11 @@ def _select_tuning_candidate(
     ]
     if not evaluations:
         return None
+    identity_counts = Counter(candidate["candidate_id"] for candidate in candidates)
+    for row in evaluations:
+        if identity_counts[row["candidate_id"]] > 1:
+            row["status"] = "invalid"
+            row["blocked_reasons"].append("duplicate_candidate_id")
     if paths is not None and run_id:
         evaluations = _apply_candidate_validation_previews(
             paths=paths,
@@ -2172,9 +2158,11 @@ def _select_tuning_candidate(
             run_id=run_id,
             evaluations=evaluations,
         )
+    eligible = [row for row in evaluations if _candidate_selection_eligible(row)]
     selected = max(
-        evaluations,
+        eligible,
         key=lambda row: (float(row.get("score") or 0.0), -int(row.get("index") or 0)),
+        default=None,
     )
     if paths is not None and run_id and create_asset_candidates:
         _attach_candidate_preview_asset_candidates(
@@ -2182,7 +2170,7 @@ def _select_tuning_candidate(
             pkg=pkg,
             run_id=run_id,
             evaluations=evaluations,
-            selected_candidate_id=str(selected.get("candidate_id") or ""),
+            selected_candidate_id=str(selected["candidate_id"]) if selected is not None else "",
             selected_assets=selected_assets or {},
         )
     report = {
@@ -2190,23 +2178,39 @@ def _select_tuning_candidate(
         "candidate_count": len(candidates),
         "evaluated_count": len(evaluations),
         "truncated": len(candidates) > _MAX_TUNING_CANDIDATES,
-        "selected_candidate_id": selected.get("candidate_id"),
-        "selected_index": selected.get("index"),
-        "selected_score": selected.get("score"),
+        "eligible_count": len(eligible),
+        "selection_status": "selected" if selected is not None else "no_eligible_candidate",
+        "selected_candidate_id": selected.get("candidate_id") if selected is not None else None,
+        "selected_index": selected.get("index") if selected is not None else None,
+        "selected_score": selected.get("score") if selected is not None else None,
         "outcome_feedback": _optimizer_feedback_report(frozen_feedback),
         "validation_preview": _optimizer_validation_preview_summary(evaluations),
         "backtest_preview": _optimizer_backtest_preview_summary(evaluations),
         "selection_reason": (
-            "selected highest deterministic local score from materialization, "
-            "validation strength, bounded candidate static/backtest previews, "
-            "risk, evidence, and expected-effect signals from this tuning run"
+            "Selected highest local heuristic score only among eligible candidates. "
+            "Failed or blocked candidates are never eligible. A selection is not "
+            "promotion approval or proof of investment quality; deferred validation still applies."
+            if selected is not None else
+            "No eligible candidate; preserve every evaluation and do not create a strategy proposal."
         ),
         "candidates": [_candidate_report(row) for row in evaluations],
     }
     return {
-        "selected_output": dict(selected.get("output") or {}),
+        "selected_output": dict(selected["output"]) if selected is not None else None,
         "report": report,
     }
+
+
+def _candidate_selection_eligible(row: dict[str, Any]) -> bool:
+    """Hard validation failures cannot be offset by advisory scoring."""
+    if (row.get("status") != "materialized" or row.get("blocked_reasons")
+            or row.get("unmaterialized_changes") or not row.get("materialized_files")):
+        return False
+    for key in ("validation_preview", "backtest_preview"):
+        preview = row.get(key) or {}
+        if preview.get("status") in {"failed", "blocked", "error"} or preview.get("blocked_reasons"):
+            return False
+    return math.isfinite(float(row.get("score") or 0.0))
 
 
 def _candidate_outputs(output: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2258,7 +2262,7 @@ def _evaluate_tuning_candidate(
     index: int,
     outcome_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    accepted, dropped, warnings = _filter_changes(output, cfg)
+    accepted, dropped, warnings = _filter_changes(output, cfg, pkg=pkg)
     plan = build_validation_plan(
         _validation_plan_input(output),
         source="strategy_evolution_candidate",
@@ -3239,6 +3243,7 @@ def _candidate_report(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "candidate_id": row.get("candidate_id"),
         "index": row.get("index"),
+        "selection_eligible": _candidate_selection_eligible(row),
         "score": row.get("score"),
         "status": row.get("status"),
         "summary": str((row.get("output") or {}).get("summary") or "")[:240],
@@ -3324,6 +3329,8 @@ def _optimizer_metadata(report: dict[str, Any] | None) -> dict[str, Any]:
         "version": report.get("version"),
         "candidate_count": report.get("candidate_count"),
         "evaluated_count": report.get("evaluated_count"),
+        "eligible_count": report.get("eligible_count"),
+        "selection_status": report.get("selection_status"),
         "selected_candidate_id": report.get("selected_candidate_id"),
         "selected_index": report.get("selected_index"),
         "selected_score": report.get("selected_score"),
@@ -3338,6 +3345,8 @@ def _optimizer_metadata(report: dict[str, Any] | None) -> dict[str, Any]:
 def _filter_changes(
     output: dict[str, Any],
     cfg: StrategyTuningConfig,
+    *,
+    pkg: StrategyPackage | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     raw_changes = (
         output.get("proposed_changes")
@@ -3366,6 +3375,19 @@ def _filter_changes(
         ):
             dropped.append({"entry": entry, "reason": "not_in_allowed_targets"})
             continue
+        # Prompt-only guardrails stay prompt-side on purpose:
+        # ``require_backtest`` / ``require_shadow_run`` are enforced by
+        # telling the tuner about them and via the generated validation
+        # plan, not re-checked here. The position-size guardrail below
+        # is the one that is (and must be) mechanically enforced.
+        guardrail_reason = _position_size_guardrail_drop(
+            entry,
+            pkg,
+            getattr(cfg.guardrails, "max_position_size_change_pct", 0.0),
+        )
+        if guardrail_reason:
+            dropped.append({"entry": entry, "reason": guardrail_reason})
+            continue
         accepted.append(dict(entry))
         if len(accepted) >= int(cfg.guardrails.max_patch_files or 5):
             warnings.append(
@@ -3373,6 +3395,84 @@ def _filter_changes(
             )
             break
     return accepted, dropped, warnings
+
+
+_SIZING_GUARDRAIL_KEYS: tuple[str, ...] = (
+    "max_single_order_usd",
+    "max_position_size_usd",
+    "max_total_exposure_usd",
+    "max_daily_notional_usd",
+)
+
+
+def _sizing_values_from_strategy_yaml(text: str) -> dict[str, float]:
+    """Extract sizing-related limits from a strategy.yml document."""
+
+    try:
+        doc = yaml_io.loads(text, default=None)
+    except Exception:
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    mappings: list[dict[str, Any]] = [doc]
+    policy = doc.get("policy")
+    if isinstance(policy, dict):
+        mappings.append(policy)
+    values: dict[str, float] = {}
+    for mapping in mappings:
+        for key in _SIZING_GUARDRAIL_KEYS:
+            raw = mapping.get(key)
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                values[key] = float(raw)
+    return values
+
+
+def _position_size_guardrail_drop(
+    entry: dict[str, Any],
+    pkg: StrategyPackage | None,
+    max_change_pct: float,
+) -> str | None:
+    """Drop reason when a strategy.yml change grows sizing beyond the bound.
+
+    Enforces the ``tuning.guardrails.max_position_size_change_pct``
+    guardrail that used to be prompt-only: any of the sizing limits
+    (``max_single_order_usd``, ``max_position_size_usd``,
+    ``max_total_exposure_usd``, ``max_daily_notional_usd``) growing
+    more than the pct bound between the current and the proposed
+    strategy.yml drops the change. A limit with no positive baseline
+    on the old side (missing or 0) has no growth to bound, so it is
+    skipped rather than dropped.
+    """
+
+    if pkg is None or not (max_change_pct and float(max_change_pct) > 0):
+        return None
+    target = str(entry.get("file") or entry.get("target") or "")
+    if PurePosixPath(target.replace("\\", "/")).name not in {"strategy.yml", "strategy.yaml"}:
+        return None
+    new_text, content_reason = _materialized_change_content(entry)
+    if content_reason or not new_text:
+        return None
+    old_path = pkg.root / "strategy.yml"
+    if not old_path.exists():
+        return None
+    try:
+        old_text = old_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    old_values = _sizing_values_from_strategy_yaml(old_text)
+    new_values = _sizing_values_from_strategy_yaml(new_text)
+    for key in _SIZING_GUARDRAIL_KEYS:
+        old = old_values.get(key)
+        new = new_values.get(key)
+        if old is None or new is None or old <= 0:
+            continue
+        bound = old * (1.0 + float(max_change_pct) / 100.0)
+        if new > bound:
+            return (
+                f"position_size_guardrail: {key} {old:g} -> {new:g} grows beyond "
+                f"max_position_size_change_pct={float(max_change_pct):g}%"
+            )
+    return None
 
 
 def _materialize_strategy_tuning_after_files(

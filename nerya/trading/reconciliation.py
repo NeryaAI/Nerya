@@ -514,7 +514,7 @@ def reconcile_account(
     local_open = {p.market: p for p in book.open_positions(account_id=account_id)}
     summary["local_open_positions"] = len(local_open)
 
-    exchange_positions = _fetch_exchange_positions(config, profile)
+    exchange_positions, covered_markets = _fetch_exchange_positions(config, profile)
     summary["exchange_open_positions"] = len(exchange_positions)
     seen_markets: set[str] = set()
     for ex_pos in exchange_positions:
@@ -540,6 +540,13 @@ def reconcile_account(
                     "position_id": local.position_id,
                 })
     for market, local in local_open.items():
+        # B9: only report ``external_closed`` when the venue query
+        # provably covered this market (spot fallback lists are built
+        # from the same venue profile; a venue-wide derivatives query
+        # reports ``None``). A failed / partial query must never claim
+        # the exchange closed a local position.
+        if covered_markets is not None and market not in covered_markets:
+            continue
         if market not in seen_markets:
             # Local thinks we hold something the exchange doesn't.
             issues.append({
@@ -603,7 +610,7 @@ def _classify_account_severity(issues: list[dict[str, Any]]) -> ReconcileSeverit
     return severity
 
 
-def _fetch_exchange_positions(config: Config, profile) -> list[dict[str, Any]]:
+def _fetch_exchange_positions(config: Config, profile) -> tuple[list[dict[str, Any]], set[str] | None]:
     """Pull open positions from the exchange.
 
     For spot CEX this is derived from ``get_balances``: a non-zero
@@ -611,9 +618,18 @@ def _fetch_exchange_positions(config: Config, profile) -> list[dict[str, Any]]:
     position. For derivatives venues the connector's ``fetch_positions``
     returns :class:`ContractPosition` rows whose ``size_base`` already
     folds in ``contractSize``.
+
+    Returns ``(positions, covered_markets)``. ``covered_markets`` is
+    ``None`` when the venue query is venue-wide (derivatives
+    ``fetch_positions``) and a set of market ids when only specific
+    spot markets were inspected — built with the *same normalization as
+    the local position book* (lowercase venue, asset+base as-is) so the
+    diff in :func:`reconcile_account` compares like with like (B9). An
+    empty set means the query failed or covered nothing, in which case
+    no ``external_closed`` conclusion may be drawn.
     """
     if not profile.reads_real_balances:
-        return []
+        return [], set()
     try:
         from ..connectors import ConnectorRegistry
         registry = ConnectorRegistry(workspace=config.paths.root)
@@ -635,7 +651,7 @@ def _fetch_exchange_positions(config: Config, profile) -> list[dict[str, Any]]:
                         "market": str(market or ""),
                         "size_base": float(size_base or 0.0),
                     })
-                return out
+                return out, None
             except Exception:
                 pass
         # Spot fallback — surface non-zero base assets so the
@@ -643,18 +659,23 @@ def _fetch_exchange_positions(config: Config, profile) -> list[dict[str, Any]]:
         balances = conn.get_balances()
     except Exception as exc:  # pragma: no cover
         log.warning("reconcile_account: cannot fetch exchange positions for %s: %s", profile.id, exc)
-        return []
+        return [], set()
     out = []
+    covered: set[str] = set()
     for bal in balances or []:
         asset = (getattr(bal, "asset", "") or "").upper()
-        total = float(getattr(bal, "total", 0) or 0)
         if asset in ("USDT", "USDC", "USD", "BUSD", "FDUSD", "TUSD", "DAI"):
             continue
+        # B9: build the market id exactly the way the local position
+        # book keys them — lowercase venue, asset+base unchanged —
+        # instead of ``BYBIT:ETHUSDT`` vs the book's ``bybit:ETHUSDT``.
+        market = f"{profile.venue.lower()}:{asset}{profile.base_currency}"
+        covered.add(market)
+        total = float(getattr(bal, "total", 0) or 0)
         if total <= 0:
             continue
-        market = f"{profile.venue.upper()}:{asset}{profile.base_currency.upper()}"
         out.append({"market": market, "size_base": total})
-    return out
+    return out, covered
 
 
 def _fetch_exchange_open_orders(config: Config, profile) -> list[dict[str, Any]]:

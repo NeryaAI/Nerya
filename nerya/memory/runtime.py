@@ -2,32 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import hashlib
-import json
-import re
 import time
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Iterable
 
-from ..core import jsonl
 from ..core.config import Config
 from .activity import MemoryActivityEvent, MemoryActivityLog
 from .content_scanner import scan_memory_content
 from .context_fence import build_memory_context_block, sanitize_context
-from .notebook import MemoryNotebook
-from .projection import GENERATED_PROJECTION_MARKER, MemoryProjection
+from .notebook import load_notebook
+from .projection import MemoryProjection
 from .store import MemoryRecord, MemoryScopeError, MemoryStore
 from .write_rules import (
     NOTEBOOK_CATEGORIES,
     NOTEBOOK_TARGET_BY_CATEGORY,
     load_write_rules,
 )
-
-
-_MARKDOWN_SECTION_RE = re.compile(r"^##[ \t]+(?P<title>.+?)[ \t]*$", re.MULTILINE)
-_METADATA_TOKEN_RE = re.compile(r"`([^`]+)`")
 
 
 @dataclass(frozen=True)
@@ -61,19 +52,13 @@ class MemoryRuntime:
     ) -> None:
         self.config = config
         self.actor_id = self._required_actor_id(actor_id)
-        self._legacy_owner_actor = self._required_actor_id(
-            str(config.get("memory.legacy_owner_actor", "default") or "default")
-        )
         self.session_id = self._clean_id(session_id, "session_id")
         self.strategy_id = self._clean_id(strategy_id, "strategy_id")
         self._external_provider = self._build_external_provider()
         self.activity = MemoryActivityLog(config=config)
         self.store = MemoryStore(config.paths.db)
-        self._import_legacy_index()
-        self._import_legacy_markdown()
         self._projection = MemoryProjection(config, self.store)
-        self._notebook = MemoryNotebook(config.paths.memory / "notebook")
-        self._notebook.load()
+        self._notebook = load_notebook(config, actor_id=self.actor_id)
         blocks = self._notebook.snapshot_blocks()
         self._stable_snapshot = "\n\n".join(
             block for block in blocks.values() if block
@@ -360,28 +345,35 @@ class MemoryRuntime:
             return MemoryContext()
         hits = tuple(self.recall(query, limit=limit))
         external = self._external_recall(query, limit=limit)
-        dynamic_raw = "\n\n".join(
-            part
-            for part in (
-                self._render_hits(hits),
-                self._render_external(external),
-            )
-            if part
-        )
-
-        if self._stable_snapshot:
-            stable_budget = int(budget * 0.6)
-            stable = self._fenced_with_budget(self._stable_snapshot, stable_budget)
-            dynamic_budget = budget - len(stable)
-        else:
-            stable, dynamic_budget = "", budget
-
-        dynamic = self._fenced_with_budget(dynamic_raw, dynamic_budget)
+        stable_raw = self._stable_snapshot
+        if stable_raw and len(build_memory_context_block(sanitize_context(stable_raw))) > budget:
+            stable_raw = "Curated notebook omitted: its complete contents exceed this call's memory context budget."
+        stable = self._fenced_with_budget(stable_raw, budget)
+        remaining = budget - len(stable)
+        selected: list[MemoryRecord] = []
+        sources: list[str] = []
+        parts: list[str] = []
+        # Pack whole evidence blocks before considering a partial preview.
+        for record, chunk in [*((hit, None) for hit in hits), *((None, item) for item in external)]:
+            raw = self._render_hits((record,)) if record is not None else self._render_external((chunk,))
+            candidate = sanitize_context("\n\n".join([*parts, raw])).strip()
+            if len(build_memory_context_block(candidate)) > remaining:
+                continue
+            parts.append(raw)
+            if record is not None:
+                selected.append(record)
+            else:
+                sources.append(chunk.source)
+        dynamic = self._fenced_with_budget("\n\n".join(parts), remaining)
+        if not dynamic and hits:
+            # An oversized single result still exposes its identity and source;
+            # it cannot crowd out any complete result that would have fitted.
+            dynamic = self._fenced_with_budget(self._render_hits(hits[:1]), remaining)
+            if dynamic:
+                selected.append(hits[0])
         return MemoryContext(
-            stable=stable,
-            dynamic=dynamic,
-            recalled=hits,
-            external_sources=tuple(chunk.source for chunk in external),
+            stable=stable, dynamic=dynamic,
+            recalled=tuple(selected), external_sources=tuple(sources),
         )
 
     def forget(
@@ -691,259 +683,6 @@ class MemoryRuntime:
                 raise MemoryScopeError("session memory requires an active session")
             return "session", self.session_id, self.strategy_id, self.session_id
         raise MemoryScopeError(f"unknown memory scope: {scope!r}")
-
-    def _import_legacy_index(self) -> None:
-        if self.actor_id != self._legacy_owner_actor:
-            return
-        legacy_source = "memory/index.jsonl"
-        if not self.store.begin_legacy_import(
-            actor_id=self.actor_id,
-            legacy_source=legacy_source,
-        ):
-            return
-        rows = jsonl.read_all(self.config.paths.memory_index)
-        if any(isinstance(row, dict) and row.get("memory_id") for row in rows):
-            self.store.complete_legacy_import(
-                actor_id=self.actor_id,
-                legacy_source=legacy_source,
-            )
-            return
-        known_categories = set(load_write_rules(self.config))
-        rows.sort(key=lambda row: str(row.get("ts") or ""), reverse=True)
-        for row in rows:
-            if not isinstance(row, dict) or bool(row.get("superseded")):
-                continue
-            content = str(row.get("value") or "").strip()
-            if not content or scan_memory_content(content):
-                continue
-            scope = str(row.get("scope") or "").strip().lower()
-            strategy_id = str(row.get("strategy_id") or "").strip()
-            if scope == "global":
-                scope_id = ""
-                strategy_id = ""
-            elif scope == "strategy" and strategy_id:
-                try:
-                    strategy_id = self._clean_id(strategy_id, "strategy_id")
-                except MemoryScopeError:
-                    continue
-                scope_id = strategy_id
-            else:
-                continue
-            tags = [str(tag).strip().lower() for tag in row.get("tags") or []]
-            category = next(
-                (tag for tag in tags if tag in known_categories),
-                self._legacy_category(str(row.get("file") or "")),
-            )
-            canonical = json.dumps(row, sort_keys=True, ensure_ascii=False)
-            legacy_ref = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-            self.store.import_legacy_record(
-                actor_id=self.actor_id,
-                scope=scope,
-                scope_id=scope_id,
-                strategy_id=strategy_id,
-                category=category,
-                content=content,
-                stable_key=str(row.get("key") or "").strip(),
-                title="",
-                tags=tags,
-                source_turn_id=str(row.get("source_turn") or "").strip(),
-                target_file=str(row.get("file") or "").strip(),
-                created_at=self._legacy_timestamp(str(row.get("ts") or "")),
-                legacy_source=legacy_source,
-                legacy_ref=legacy_ref,
-            )
-        self.store.complete_legacy_import(
-            actor_id=self.actor_id,
-            legacy_source=legacy_source,
-        )
-
-    def _import_legacy_markdown(self) -> None:
-        if self.actor_id != self._legacy_owner_actor:
-            return
-        sources: list[tuple[Path, str, str, str]] = [
-            (self.config.paths.memory / "global.md", "global", "", "learning"),
-            (self.config.paths.memory / "mistakes.md", "global", "", "error"),
-            (
-                self.config.paths.memory / "market_regimes.md",
-                "global",
-                "",
-                "learning",
-            ),
-            (
-                self.config.paths.memory / "skill_learnings.md",
-                "global",
-                "",
-                "learning",
-            ),
-            (self.config.paths.memory / "decisions.md", "global", "", "decision"),
-            (self.config.paths.memory / "signals.md", "global", "", "signal"),
-        ]
-        rules = load_write_rules(self.config)
-        root = self.config.paths.root.resolve()
-        for category, rule in rules.items():
-            if category in NOTEBOOK_CATEGORIES:
-                continue
-            for target in rule.target_files:
-                path = (root / str(target or "")).resolve()
-                try:
-                    path.relative_to(root)
-                except ValueError:
-                    continue
-                sources.append((path, "global", "", category))
-        if self.strategy_id:
-            sources.append(
-                (
-                    self.config.paths.strategies / self.strategy_id / "learnings.md",
-                    "strategy",
-                    self.strategy_id,
-                    "learning",
-                )
-            )
-        known_categories = set(rules)
-        seen_sources: set[str] = set()
-        prepared_sources: list[tuple[Path, str, str, str, str]] = []
-        for raw_path, scope, scope_id, fallback_category in sources:
-            path = raw_path
-            try:
-                source = str(path.resolve().relative_to(root))
-            except ValueError:
-                continue
-            if source in seen_sources:
-                continue
-            seen_sources.add(source)
-            prepared_sources.append((path, source, scope, scope_id, fallback_category))
-        pending_sources = self.store.begin_legacy_imports(
-            actor_id=self.actor_id,
-            legacy_sources=(item[1] for item in prepared_sources),
-        )
-        for path, source, scope, scope_id, fallback_category in prepared_sources:
-            if source not in pending_sources:
-                continue
-            if not path.exists():
-                self.store.complete_legacy_import(
-                    actor_id=self.actor_id,
-                    legacy_source=source,
-                )
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if (
-                GENERATED_PROJECTION_MARKER in text[:1000]
-                or "<!-- Generated from nerya.db;" in text[:1000]
-            ):
-                self.store.complete_legacy_import(
-                    actor_id=self.actor_id,
-                    legacy_source=source,
-                )
-                continue
-            matches = list(_MARKDOWN_SECTION_RE.finditer(text))
-            preamble_end = matches[0].start() if matches else len(text)
-            preamble = text[:preamble_end].strip()
-            preamble_lines = preamble.splitlines()
-            if preamble_lines and preamble_lines[0].lstrip().startswith("# "):
-                preamble_lines = preamble_lines[1:]
-            preamble_body = "\n".join(preamble_lines).strip()
-            if preamble_body and not scan_memory_content(preamble_body):
-                preamble_ref = hashlib.sha256(
-                    f"{source}\npreamble\n{preamble}".encode("utf-8")
-                ).hexdigest()
-                try:
-                    created_at = path.stat().st_mtime
-                except OSError:
-                    created_at = 0.0
-                self.store.import_legacy_record(
-                    actor_id=self.actor_id,
-                    scope=scope,
-                    scope_id=scope_id,
-                    strategy_id=scope_id if scope == "strategy" else "",
-                    category=fallback_category,
-                    content=preamble_body,
-                    stable_key="",
-                    title="legacy preamble",
-                    tags=[fallback_category, "legacy"],
-                    source_turn_id="",
-                    target_file=source,
-                    created_at=created_at,
-                    legacy_source=source,
-                    legacy_ref=preamble_ref,
-                )
-            for index, match in enumerate(matches):
-                end = (
-                    matches[index + 1].start()
-                    if index + 1 < len(matches)
-                    else len(text)
-                )
-                section = text[match.start() : end].strip()
-                title = match.group("title").strip()
-                body = text[match.end() : end].strip()
-                if not body:
-                    continue
-                created_at = self._legacy_timestamp(title)
-                stable_key = ""
-                category = fallback_category
-                if created_at <= 0:
-                    lines = body.splitlines()
-                    tokens = _METADATA_TOKEN_RE.findall(lines[0]) if lines else []
-                    token_timestamp = self._legacy_timestamp(tokens[0]) if tokens else 0
-                    if token_timestamp > 0:
-                        created_at = token_timestamp
-                        candidate = tokens[1].strip().lower() if len(tokens) > 1 else ""
-                        if candidate in known_categories:
-                            category = candidate
-                        stable_key = next(
-                            (
-                                token.split("=", 1)[1].strip()
-                                for token in tokens[2:]
-                                if token.startswith("key=")
-                            ),
-                            "",
-                        )
-                        body = "\n".join(lines[1:]).strip()
-                if not body or scan_memory_content(body):
-                    continue
-                legacy_ref = hashlib.sha256(
-                    f"{source}\n{section}".encode("utf-8")
-                ).hexdigest()
-                self.store.import_legacy_record(
-                    actor_id=self.actor_id,
-                    scope=scope,
-                    scope_id=scope_id,
-                    strategy_id=scope_id if scope == "strategy" else "",
-                    category=category,
-                    content=body,
-                    stable_key=stable_key,
-                    title="" if self._legacy_timestamp(title) > 0 else title,
-                    tags=[category],
-                    source_turn_id="",
-                    target_file=source,
-                    created_at=created_at,
-                    legacy_source=source,
-                    legacy_ref=legacy_ref,
-                )
-            self.store.complete_legacy_import(
-                actor_id=self.actor_id,
-                legacy_source=source,
-            )
-
-    @staticmethod
-    def _legacy_category(target_file: str) -> str:
-        name = str(target_file or "").lower()
-        if name.endswith("mistakes.md"):
-            return "error"
-        if name.endswith("decisions.md"):
-            return "decision"
-        if name.endswith("signals.md"):
-            return "signal"
-        return "learning"
-
-    @staticmethod
-    def _legacy_timestamp(raw: str) -> float:
-        try:
-            return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-        except (TypeError, ValueError):
-            return 0.0
 
     @staticmethod
     def _required_id(value: str, name: str) -> str:

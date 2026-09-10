@@ -170,13 +170,13 @@ function SideRow({
 
   if (href) {
     return (
-      <Link href={href} className={cls} title={collapsed ? label : undefined}>
+      <Link href={href} className={cls} title={collapsed ? label : undefined} aria-label={label} aria-current={active ? "page" : undefined}>
         {inner}
       </Link>
     );
   }
   return (
-    <button type="button" onClick={onClick} className={cls} title={collapsed ? label : undefined}>
+    <button type="button" onClick={onClick} className={cls} title={collapsed ? label : undefined} aria-label={label} data-navigation-action>
       {inner}
     </button>
   );
@@ -190,7 +190,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function CodexSidebar() {
+export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
   const pathname = usePathname() || "/";
   const t = useTranslations("sidebar");
   const tNav = useTranslations("nav");
@@ -283,7 +283,7 @@ export function CodexSidebar() {
     return out;
   }, [nav.data]);
 
-  const railCollapsed = collapsed || isNarrow;
+  const railCollapsed = !inDrawer && (collapsed || isNarrow);
   const width = railCollapsed ? (isNarrow ? "w-14" : "w-[68px]") : "w-64";
 
   return (
@@ -303,7 +303,7 @@ export function CodexSidebar() {
             </span>
           ) : null}
         </Link>
-        {!railCollapsed ? (
+        {!railCollapsed && !inDrawer ? (
           <button
             type="button"
             onClick={() => setCollapsed(true)}
@@ -328,7 +328,7 @@ export function CodexSidebar() {
         </button>
       ) : null}
 
-      <nav className="flex min-h-0 flex-1 flex-col gap-3 px-2 pb-2">
+      <nav aria-label={t("brandName")} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2 pb-2">
         {/* Codex-minimal core: just the daily drivers. Overview leads (it is
             the strategies/positions cockpit), then chat + search, then the
             two destinations that share their tabbed sections: Agents
@@ -368,6 +368,7 @@ export function CodexSidebar() {
               <button
                 type="button"
                 onClick={() => setAdvancedOpen((v) => !v)}
+                aria-expanded={advancedOpen}
                 className="group sidebar-item sidebar-item-idle w-full"
               >
                 <ChevronDownIcon
@@ -436,7 +437,7 @@ export function CodexSidebar() {
                               e.stopPropagation();
                               void removeChat(c.id);
                             }}
-                            className="ml-1 shrink-0 rounded p-1 text-[color:var(--text-muted)] opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
+                            className="ml-1 shrink-0 rounded p-1 text-[color:var(--text-muted)] opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100 group-focus-within:opacity-100"
                             title={tCommon("delete")}
                             aria-label={tCommon("delete")}
                           >

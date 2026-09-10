@@ -202,18 +202,29 @@ class MT5Connector(CEXConnectorBase):
             raise RuntimeError(
                 f"MT5 order_send returned None: {mt5.last_error()!r}"
             )
+        # F8: retcode vocabulary must match what the executor/OrderTracker
+        # understand. 10008 TRADE_RETCODE_PLACED means the order was
+        # accepted and is resting (pending) — mapping it to "rejected"
+        # made the executor treat a live pending order as dead.
+        retcode = int(getattr(result, "retcode", 0))
+        if retcode == int(getattr(mt5, "TRADE_RETCODE_DONE", 10009)):
+            status = "filled"
+        elif retcode == int(getattr(mt5, "TRADE_RETCODE_DONE_PARTIAL", 10010)):
+            status = "partial"
+        elif retcode == int(getattr(mt5, "TRADE_RETCODE_PLACED", 10008)):
+            status = "new"
+        else:
+            status = "rejected"
         return OrderAck(
             order_id=str(getattr(result, "order", "")),
             client_order_id=str(client_order_id or ""),
-            status=("filled" if getattr(result, "retcode", 0)
-                    in (getattr(mt5, "TRADE_RETCODE_DONE", 10009),)
-                    else "rejected"),
+            status=status,
             market=market, side=side,
             price=float(getattr(result, "price", 0.0)),
             size=float(size),
             filled=float(getattr(result, "volume", 0.0)),
             avg_price=float(getattr(result, "price", 0.0)),
-            raw={"retcode": int(getattr(result, "retcode", 0))},
+            raw={"retcode": retcode},
         )
 
 

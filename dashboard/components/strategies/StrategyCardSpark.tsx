@@ -131,18 +131,20 @@ export function StrategyCardSpark({ strategyId }: { strategyId: string }) {
   const lo = Math.min(...all);
   const hi = Math.max(...all);
   const up = (mini.returnPct ?? 0) >= 0;
-  const stroke = up ? "#34d399" : "#fb7185";
-  const fill = up ? "rgba(52,211,153,0.14)" : "rgba(251,113,133,0.14)";
+  // Token palette: ok (#10d993) / danger (#ef4560) — the same green/red
+  // the rest of the console uses, instead of ad-hoc emerald/rose hex.
+  const stroke = up ? "#10d993" : "#ef4560";
+  const fill = up ? "rgba(16,217,147,0.14)" : "rgba(239,69,96,0.14)";
   const sp = polyline(mini.spark, lo, hi, W, H);
   const bp = mini.bench.length ? polyline(mini.bench, lo, hi, W, H) : "";
   const area = sp ? `2,${H - 2} ${sp} ${W - 2},${H - 2}` : "";
   const v = (mini.verdict || "").toUpperCase();
   const vtone =
     v === "PASS"
-      ? "text-emerald-400 border-emerald-400/40 bg-emerald-400/10"
+      ? "text-accent-300 border-accent-500/40 bg-accent-500/10"
       : v === "FAIL"
-        ? "text-rose-400 border-rose-400/40 bg-rose-400/10"
-        : "text-amber-400 border-amber-400/40 bg-amber-400/10";
+        ? "text-danger border-danger/40 bg-danger/10"
+        : "text-warn border-warn/40 bg-warn/10";
 
   return (
     <div className="relative">
@@ -156,7 +158,7 @@ export function StrategyCardSpark({ strategyId }: { strategyId: string }) {
       <div className="mt-1 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] text-[color:var(--text-muted)]">{t("backtestReturn")}</span>
-          <span className={`text-[15px] font-semibold tabular-nums ${up ? "text-emerald-400" : "text-rose-400"}`}>
+          <span className={`text-[15px] font-semibold tabular-nums ${up ? "text-accent-400" : "text-danger"}`}>
             {mini.returnPct != null ? `${up ? "+" : ""}${mini.returnPct.toFixed(1)}%` : "–"}
           </span>
           {v ? <span className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${vtone}`}>{v}</span> : null}

@@ -1,9 +1,18 @@
 "use client";
 
+import {
+  cloneElement,
+  isValidElement,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { Components } from "react-markdown";
+import { useTranslations } from "next-intl";
+import { CopyIcon } from "../icons";
+import { toast } from "../../lib/dialogs";
 
 /**
  * Shared markdown renderer for the chat surface.
@@ -95,36 +104,101 @@ const components: Components = {
       {children}
     </td>
   ),
-  code(props) {
-    const { className, children, ...rest } = props as {
-      className?: string;
-      children?: React.ReactNode;
-      inline?: boolean;
-    };
-    const inline = (props as { inline?: boolean }).inline;
-    if (inline) {
-      return (
-        <code className="px-1 py-0.5 rounded bg-ink-800/70 text-brand-200 font-mono text-[12px]">
-          {children}
-        </code>
-      );
-    }
+  // react-markdown v10 removed the legacy ``props.inline`` flag, so the
+  // old inline branch here was dead and inline snippets rendered
+  // unstyled. Inline ``code`` never carries a ``language-*`` class;
+  // block code is always wrapped by ``pre`` (CodeBlock below), which
+  // re-styles its nested ``<code>`` element — so this renderer can
+  // safely apply the inline chip style unconditionally.
+  code({ className, children, node, ...rest }) {
+    void node;
     return (
-      <code className={`${className ?? ""} font-mono text-[12px]`} {...rest}>
+      <code
+        className={`px-1 py-0.5 rounded bg-ink-800/70 text-brand-200 font-mono text-[12px] ${className ?? ""}`}
+        {...rest}
+      >
         {children}
       </code>
     );
   },
-  pre: ({ children }) => (
-    <pre className="bg-ink-900/70 border border-ink-700/60 rounded-md p-3 overflow-x-auto my-2 text-[12px] leading-relaxed">
-      {children}
-    </pre>
-  ),
+  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
   strong: ({ children }) => (
     <strong className="font-semibold text-ink-50">{children}</strong>
   ),
   em: ({ children }) => <em className="italic text-ink-100">{children}</em>,
 };
+
+/** Flatten a rendered code element back to raw text (for copy-to-clipboard). */
+function extractText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(extractText).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return extractText(node.props.children);
+  }
+  return "";
+}
+
+/**
+ * Block-code shell — keeps the original ``pre`` styling and adds a slim
+ * header with the fence language plus a copy button (feedback via the
+ * shared toast).
+ */
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const tChat = useTranslations("chat");
+  const tCommon = useTranslations("common");
+  const child = (Array.isArray(children) ? children[0] : children) as
+    | ReactElement<{ className?: string; children?: ReactNode }>
+    | undefined;
+  const fenceClass =
+    child && isValidElement(child)
+      ? String(child.props.className ?? "")
+      : "";
+  const language = /language-([\w+#.-]+)/.exec(fenceClass)?.[1] ?? "";
+  const raw = child && isValidElement(child)
+    ? extractText(child.props.children).replace(/\n$/, "")
+    : "";
+
+  async function copyCode() {
+    if (!raw) return;
+    try {
+      await navigator.clipboard.writeText(raw);
+      toast({ tone: "ok", message: tChat("copied") });
+    } catch {
+      // Clipboard unavailable (insecure context / denied) — the visitor
+      // can still select the block manually.
+    }
+  }
+
+  // The ``code`` renderer above applies the inline chip style to every
+  // ``<code>``; inside a block we swap it for the plain block styling
+  // (syntax-highlight spans inside are untouched).
+  const code = isValidElement(child)
+    ? cloneElement(child, { className: "font-mono text-[12px]" })
+    : children;
+
+  return (
+    <div className="my-2 overflow-hidden rounded-md border border-ink-700/60 bg-ink-900/70">
+      <div className="flex items-center justify-between border-b border-ink-700/40 px-3 py-1">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-ink-400">
+          {language || "code"}
+        </span>
+        <button
+          type="button"
+          onClick={() => void copyCode()}
+          aria-label={tCommon("copy")}
+          title={tCommon("copy")}
+          className="inline-flex cursor-pointer items-center rounded p-1 text-ink-400 transition-colors hover:bg-white/5 hover:text-ink-100"
+        >
+          <CopyIcon size={12} />
+        </button>
+      </div>
+      <pre className="overflow-x-auto p-3 text-[12px] leading-relaxed">
+        {code}
+      </pre>
+    </div>
+  );
+}
 
 export function Markdown({
   children,

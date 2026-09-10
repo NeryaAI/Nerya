@@ -11,12 +11,9 @@ from nerya.agent.kernel import (
 from nerya.agent.loop import (
     LoopConfig,
     WorkspaceNativeAgentLoop,
-    _build_team_run_bounded_fallback,
     _format_timeout_evidence_snippet,
     _next_required_artifact_tool_names,
     _success_tool_result_markers,
-    _team_result_data,
-    _team_final_data_coverage,
     _wrap_external_content,
 )
 from nerya.llm.messages import MessagesResponse
@@ -26,6 +23,7 @@ from nerya.tools.permissions import PermissionContext, PermissionEngine, Permiss
 from nerya.tools.registry import ToolRegistry
 from nerya.tools.result_contracts import (
     TEAM_REPORT_RESULT_PROTOCOL,
+    team_report_data as _team_result_data,
     result_counts_as_success,
 )
 from nerya.tools.types import (
@@ -525,7 +523,10 @@ def test_mixed_offered_and_unoffered_calls_preserve_result_pairing() -> None:
     assert "permission_denied" in str(hidden_result["content"])
 
 
-def test_team_final_synthesis_is_included_in_usage_telemetry() -> None:
+@pytest.mark.parametrize("cancel_during_summary", [False, True])
+def test_team_final_synthesis_is_included_in_usage_telemetry(monkeypatch, cancel_during_summary) -> None:
+    from nerya.harness.cancellation import CancelToken
+    token = CancelToken()
     final_report = "Verified team evidence supports a bounded conclusion."
     gateway = _Gateway(
         MessagesResponse(
@@ -565,10 +566,19 @@ def test_team_final_synthesis_is_included_in_usage_telemetry() -> None:
             semantic_success=True,
         )
 
+    normal_call = gateway.call_messages
+    def call_messages(**kwargs):
+        response = normal_call(**kwargs)
+        if cancel_during_summary and len(gateway.calls) == 2:
+            token.cancel("stop_during_team_summary")
+        return response
+    monkeypatch.setattr(gateway, "call_messages", call_messages)
     loop = _loop(gateway, [_descriptor("team_run", team_handler)], max_iterations=2)
-    outcome = loop.run(system="system", user_message="run the team")
+    outcome = loop.run(system="system", user_message="run the team", cancel_token=token)
 
-    assert outcome.final_text == final_report
+    assert outcome.stop_reason == ("cancelled" if cancel_during_summary else "end_turn")
+    assert outcome.aborted is cancel_during_summary
+    assert (outcome.final_text == final_report) is not cancel_during_summary
     assert outcome.llm_calls == 2
     assert outcome.input_tokens_total == 40
     assert outcome.output_tokens_total == 10
@@ -577,42 +587,33 @@ def test_team_final_synthesis_is_included_in_usage_telemetry() -> None:
     assert outcome.model == "fake-summary"
     assert [call["context_scope"] for call in outcome.model_calls] == [
         "agent_loop",
-        "team_final_synthesis",
+        "agent_loop",
     ]
+    assert gateway.calls[1]["metadata"]["turn_id"] == outcome.checkpoint.turn_id
+    assert gateway.calls[1]["metadata"]["turn_id"] == gateway.calls[0]["metadata"]["turn_id"]
+    assert gateway.calls[1]["metadata"]["iteration"] == 2
 
 
-def test_team_fallback_keeps_business_fields_and_drops_internal_fields() -> None:
-    text = _build_team_run_bounded_fallback(
-        user_message="summarize the run",
-        team_results=[
-            {
-                "status": "completed_with_failures",
-                "team_run_id": "internal-run",
-                "results": [
-                    {
-                        "subagent": "analyst",
-                        "output": {
-                            "summary": "verified finding",
-                            "task_id": "internal-task",
-                            "raw": {"debug": "omit"},
-                        },
-                    }
-                ],
-                "failures": [{"subagent": "critic", "error": "team_run timeout after 10s"}],
-            }
-        ],
+def test_team_evidence_is_preserved_for_the_next_model_turn() -> None:
+    payload = {
+        "team_run_id": "run-evidence", "status": "completed_with_failures",
+        "results": [{"subagent": "analyst", "output": {
+            "summary": "verified finding", "task_id": "actual-task",
+            "data_coverage": {"has_data": True, "missing": ["second source"]},
+        }}], "failures": [{"subagent": "critic", "error": "source unavailable"}],
+    }
+    gateway = _Gateway(
+        _response(_tool_use("team_run"), stop_reason="tool_use"),
+        _response({"type": "text", "text": "Partial evidence; source unavailable."}),
     )
-    assert "verified finding" in text
-    assert "internal-task" not in text
-    assert "internal-run" not in text
-    assert "one team member did not complete" in text
-
-
-def test_team_coverage_only_accepts_explicit_data_coverage() -> None:
-    assert _team_final_data_coverage({"has_data": True}) == {}
-    assert _team_final_data_coverage(
-        {"data_coverage": {"has_data": True, "has_gap": False, "count": 3}}
-    ) == {"has_data": True, "has_gap": False}
+    outcome = _loop(gateway, [_descriptor("team_run", lambda call: _json_result(call, payload))]).run(
+        system="system", user_message="review evidence",
+    )
+    delivered = str(gateway.calls[1]["messages"])
+    for value in ("verified finding", "actual-task", "second source", "source unavailable"):
+        assert value in delivered
+    assert outcome.final_text == "Partial evidence; source unavailable."
+    assert len(gateway.calls) == 2
 
 
 def test_tool_trace_projection_keeps_payload_and_result() -> None:
@@ -632,3 +633,255 @@ def test_tool_trace_projection_keeps_payload_and_result() -> None:
     assert actions[0]["payload"] == {}
     assert trace[0]["action"] == "alpha"
     assert trace[0]["result"] == "result"
+
+
+@pytest.mark.parametrize("phase", ["required_tool", "team_summary"])
+def test_loop_preserves_caller_model_settings_in_special_phases(phase) -> None:
+    settings = {
+        "max_tokens": 256,
+        "temperature": 0.4,
+        "reasoning_effort": "high",
+        "reasoning_summary": "detailed",
+    }
+    gateway = _Gateway(_response({"type": "text", "text": "Verified evidence."}))
+    loop = _loop(
+        gateway,
+        [_descriptor("alpha", lambda call: _json_result(call, {"ok": True}))],
+        max_iterations=1,
+        required_artifacts=({"kind": "tool_result", "tool": "alpha"},),
+        **settings,
+    )
+    if phase == "required_tool":
+        loop.run(system="system", user_message="run alpha")
+        assert gateway.calls[0]["tool_choice"] == {"type": "tool", "name": "alpha"}
+    else:
+        gateway.responses = [
+            _response(_tool_use("team_run"), stop_reason="tool_use"),
+            _response({"type": "text", "text": "Verified team evidence."}),
+        ]
+        loop = _loop(gateway, [_descriptor("team_run", lambda call: _json_result(call, {
+            "team_run_id": "team-settings", "status": "completed", "results": [],
+        }))], max_iterations=2, **settings)
+        loop.run(system="system", user_message="use team evidence")
+        assert {key: gateway.calls[1][key] for key in settings} == settings
+    assert {key: gateway.calls[0][key] for key in settings} == settings
+
+
+@pytest.mark.parametrize(
+    ("reserve", "wall_seconds", "expect_synthesis"),
+    [(30.0, 100.0, False), (0.0, 10.0, False), (180.0, 150.0, True)],
+)
+def test_final_synthesis_uses_configured_reserve(
+    monkeypatch, reserve, wall_seconds, expect_synthesis,
+) -> None:
+    from types import SimpleNamespace
+    from nerya.agent import loop as loop_module
+
+    from nerya.tools import orchestrator as orchestrator_module
+    clock = SimpleNamespace(time=lambda: 1_000.0, sleep=lambda _: None)
+    monkeypatch.setattr(loop_module, "time", clock)
+    monkeypatch.setattr(orchestrator_module, "time", clock)
+    gateway = _Gateway(
+        _response(_tool_use("alpha"), stop_reason="tool_use"),
+        _response({"type": "text", "text": "Verified evidence."}),
+    )
+    loop = _loop(
+        gateway,
+        [_descriptor("alpha", lambda call: _json_result(call, {"ok": True, "value": 7}))],
+        max_wall_seconds=wall_seconds,
+        wall_time_final_synthesis_seconds=reserve,
+    )
+    outcome = loop.run(system="system", user_message="collect evidence")
+
+    assert not outcome.aborted
+    assert len(gateway.calls) == 2
+    assert (gateway.calls[1]["tools"] == []) is expect_synthesis
+    assert gateway.calls[1]["metadata"]["text_only_final_attempt"] is expect_synthesis
+    expected_deadline = 1_000.0 + wall_seconds
+    if not expect_synthesis:
+        expected_deadline -= min(reserve, wall_seconds / 2)
+    assert gateway.calls[1]["deadline"] == expected_deadline
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_required_tool_keeps_canonical_schema_and_short_budget_recovery(monkeypatch, retry):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from nerya.agent import loop as loop_module
+    from nerya.core.errors import LLMError
+
+    from nerya.tools import orchestrator as orchestrator_module
+    clock = SimpleNamespace(time=lambda: 1_000.0, sleep=lambda _: None)
+    monkeypatch.setattr(loop_module, "time", clock)
+    monkeypatch.setattr(orchestrator_module, "time", clock)
+    descriptor = _descriptor("alpha", lambda call: _json_result(call, {"ok": True}))
+    descriptor.input_schema.update({
+        "$defs": {"payload": {"type": "string", "const": "x" * 300}},
+        "properties": {
+            "choice": {"enum": list(range(50))},
+            "optional": {"$ref": "#/$defs/payload"},
+        },
+        "required": ["choice"],
+        "dependentRequired": {"choice": ["optional"]},
+        "additionalProperties": False,
+    })
+    expected = deepcopy(descriptor.to_provider_tool())
+    gateway = _Gateway(
+        _response(_tool_use("alpha", choice=49, optional="x" * 300), stop_reason="tool_use"),
+        _response({"type": "text", "text": "Verified evidence."}),
+    )
+    normal_call = gateway.call_messages
+
+    def call_messages(**kwargs):
+        if retry and not gateway.calls:
+            gateway.calls.append(kwargs)
+            raise LLMError("provider timed out")
+        return normal_call(**kwargs)
+
+    monkeypatch.setattr(gateway, "call_messages", call_messages)
+    loop = _loop(
+        gateway, [descriptor], max_iterations=2,
+        required_artifacts=({"kind": "tool_result", "tool": "alpha"},),
+        max_wall_seconds=10.0, wall_time_final_synthesis_seconds=0.0,
+        action_tool_wall_reserve_seconds=0.0, llm_retry_attempts=1,
+    )
+    outcome = loop.run(system="system", user_message="run alpha")
+
+    assert outcome.final_text == "Verified evidence."
+    assert outcome.tool_calls == 1
+    assert outcome.error_count == 0
+    assert gateway.calls[0]["tools"] == [expected]
+    if retry:
+        assert gateway.calls[1]["tools"] == [expected]
+        assert outcome.extra_llm_attempts_by_reason == {"transient_required_tool_retry": 1}
+    assert descriptor.to_provider_tool() == expected
+
+
+@pytest.mark.parametrize("text", [
+    "| Metric | Value |\n| --- | --- |\n| Result | Verified |",
+    "Evidence\n" + "A verified observation without artificial punctuation " * 5,
+    "Findings\n- Verified first finding\n- Verified second finding",
+])
+def test_final_output_does_not_guess_completion_from_prose_style(text):
+    gateway = _Gateway(_response({"type": "text", "text": text}))
+    outcome = _loop(gateway, []).run(system="system", user_message="report evidence")
+    assert outcome.final_text == text
+    assert len(gateway.calls) == 1
+
+
+@pytest.mark.parametrize("max_iterations", [1, 3])
+def test_approval_pause_outranks_team_finalization_in_the_same_batch(max_iterations):
+    from nerya.tools.approval_contracts import APPROVAL_PENDING_REASON
+    from nerya.tools.types import ToolError, ToolErrorKind
+
+    def team_handler(call):
+        return ToolResult.from_json(
+            tool_use_id=call.id, name=call.name,
+            data={
+                "ok": True, "status": "completed", "team_run_id": "team-with-pause",
+                "roles_succeeded": ["analyst"],
+                "results": [{"subagent": "analyst", "output": {"summary": "verified"}}],
+            },
+            semantic_success=True,
+        )
+
+    def approval_handler(call):
+        return ToolResult.from_error(
+            tool_use_id=call.id, name=call.name,
+            error=ToolError(kind=ToolErrorKind.PERMISSION_PENDING, message="await operator"),
+        )
+
+    gateway = _Gateway(
+        _response(
+            _tool_use("team_run", call_id="team-1"),
+            _tool_use("approval_probe", call_id="approval-1"),
+            stop_reason="tool_use",
+        ),
+        _response({"type": "text", "text": "Must not synthesize over a pending approval."}),
+    )
+    loop = _loop(gateway, [
+        _descriptor("team_run", team_handler),
+        _descriptor("approval_probe", approval_handler),
+    ], max_iterations=max_iterations)
+    outcome = loop.run(system="system", user_message="review and request approval")
+
+    assert outcome.stop_reason == APPROVAL_PENDING_REASON
+    assert outcome.transition_reason == APPROVAL_PENDING_REASON
+    assert len(gateway.calls) == 1
+    assert outcome.checkpoint is not None
+    assert not outcome.checkpoint.resumable
+    assert outcome.checkpoint.resume_block_reason == APPROVAL_PENDING_REASON
+    result_ids = {
+        block["tool_use_id"]
+        for message in outcome.transcript
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if block.get("type") == "tool_result"
+    }
+    assert result_ids == {"team-1", "approval-1"}
+    assert not outcome.aborted
+    assert not outcome.final_text
+
+
+def test_required_artifact_waits_for_approval_instead_of_finalizing_a_gap():
+    from nerya.tools.approval_contracts import APPROVAL_PENDING_REASON
+    from nerya.tools.types import ToolError, ToolErrorKind
+
+    def handler(call):
+        return ToolResult.from_error(
+            tool_use_id=call.id, name=call.name,
+            error=ToolError(kind=ToolErrorKind.PERMISSION_PENDING, message="await operator"),
+        )
+
+    gateway = _Gateway(_response(_tool_use("alpha"), stop_reason="tool_use"))
+    loop = _loop(
+        gateway, [_descriptor("alpha", handler)], max_iterations=1,
+        required_artifacts=({"kind": "tool_result", "tool": "alpha"},),
+    )
+    outcome = loop.run(system="system", user_message="request approval")
+
+    assert outcome.stop_reason == APPROVAL_PENDING_REASON
+    assert outcome.transition_reason == APPROVAL_PENDING_REASON
+    assert not outcome.aborted
+    assert not outcome.final_text
+    assert outcome.checkpoint.resume_block_reason == APPROVAL_PENDING_REASON
+    assert len(gateway.calls) == 1
+
+
+@pytest.mark.parametrize("phase", ["provider_error", "provider_response", "tool_result"])
+def test_cancel_at_each_execution_boundary_stops_new_work(monkeypatch, phase):
+    from nerya.core.errors import LLMError
+    from nerya.harness.cancellation import CancelToken
+
+    token = CancelToken()
+    executed = []
+    gateway = _Gateway(MessagesResponse(
+        content=[_tool_use("alpha")], stop_reason="tool_use",
+        usage={"input_tokens": 10, "output_tokens": 2},
+    ))
+    normal_call = gateway.call_messages
+
+    def call_messages(**kwargs):
+        if phase == "provider_error":
+            gateway.calls.append(kwargs)
+            token.cancel("operator_stop")
+            raise LLMError("provider timed out")
+        response = normal_call(**kwargs)
+        if phase == "provider_response":
+            token.cancel("operator_stop")
+        return response
+
+    def handler(call):
+        executed.append(call.id)
+        token.cancel("operator_stop")
+        return _json_result(call, {"ok": True, "value": 7})
+
+    monkeypatch.setattr(gateway, "call_messages", call_messages)
+    loop = _loop(gateway, [_descriptor("alpha", handler)], llm_retry_base_delay=0.0)
+    outcome = loop.run(system="system", user_message="inspect", cancel_token=token)
+
+    assert outcome.stop_reason == "cancelled"
+    assert outcome.aborted
+    assert len(gateway.calls) == 1
+    assert len(executed) == (1 if phase == "tool_result" else 0)
+    assert outcome.input_tokens_total == (0 if phase == "provider_error" else 10)

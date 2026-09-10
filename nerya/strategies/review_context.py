@@ -58,6 +58,8 @@ class _RowScope:
     strategy_id: str
     package_hash: str
     execution_mode: str
+    cutoff: datetime
+    anchor: datetime
     run_ids: frozenset[str]
     session_ids: frozenset[str]
 
@@ -106,6 +108,8 @@ def build_strategy_review_context(
         strategy_id=package.strategy_id,
         package_hash=package.content_hash,
         execution_mode=policy.execution_mode,
+        cutoff=run_scope.cutoff,
+        anchor=run_scope.anchor,
         run_ids=frozenset(selected_run_ids),
         session_ids=frozenset(selected_session_ids),
     )
@@ -220,6 +224,14 @@ def _filter_review_rows(
         if row_session_ids and not row_session_ids.issubset(scope.session_ids):
             excluded["unselected_session_id"] += 1
             continue
+        raw_times = _identity_values(row, "ts") | _identity_values(row, "observed_at")
+        observed_times = [_parse_time(value) for value in raw_times]
+        if not observed_times or any(value is None for value in observed_times):
+            excluded["invalid_timestamp"] += 1
+            continue
+        if any(value < scope.cutoff or value > scope.anchor for value in observed_times):
+            excluded["max_age"] += 1
+            continue
         included.append(row)
     return included, excluded
 
@@ -227,7 +239,10 @@ def _filter_review_rows(
 def _identity_values(row: dict[str, Any], key: str) -> set[str]:
     values: set[str] = set()
     _add_identity_value(values, row.get(key))
-    for block_name in ("identity", "provenance", "metadata", "metrics", "decision"):
+    for block_name in (
+        "identity", "provenance", "metadata", "metrics", "decision",
+        "fill", "pnl", "risk_decision", "intent", "order", "event",
+    ):
         block = row.get(block_name)
         if isinstance(block, dict):
             _add_identity_value(values, block.get(key))

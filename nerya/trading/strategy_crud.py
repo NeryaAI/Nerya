@@ -47,6 +47,7 @@ from ..core.errors import TradingError
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
 from ..strategies.scheduler_bridge import remove_strategy_schedules
+from .accounts import get_account_profile
 from .strategies import (
     Strategy,
     list_strategies as _list_strategies,
@@ -218,6 +219,82 @@ class CreateRequest:
     main_prompt: str = ""
 
 
+_STRUCTURAL_PATCH_FIELDS = frozenset({"account_id", "wallet_id", "markets", "mode"})
+_LIVE_EDIT_STATUSES = frozenset({"canary", "live"})
+
+
+def _require_editable_status(
+    s: Strategy,
+    action: str,
+    *,
+    force: bool = False,
+    paths: WorkspacePaths | None = None,
+) -> None:
+    """Block in-flight structural edits on canary/live strategies (B10).
+
+    RiskGate re-reads ``strategy.yml`` / ``limits.yml`` from disk on every
+    intent, so an edit can land between signal generation and order
+    submission — a canary/live strategy must not change account bindings,
+    markets, risk limits, prompts or code while it is trading. Operators
+    pause the strategy first, or pass ``force=True`` (the override is
+    journalled so the drift is auditable).
+    """
+    status = str(getattr(s, "status", "") or "")
+    if status not in _LIVE_EDIT_STATUSES:
+        return
+    if not force:
+        raise TradingError(
+            f"strategy {s.id!r} is {status}; refuse to {action} mid-flight — "
+            "pause the strategy first (set_status paused) or pass force=True"
+        )
+    if paths is not None:
+        try:
+            from ..core import jsonl
+
+            jsonl.append(paths.journal("operator"), {
+                "kind": "strategy.forced_edit",
+                "ts": now_iso(),
+                "strategy_id": s.id,
+                "status": status,
+                "action": action,
+            })
+        except Exception:
+            pass
+
+
+def _ensure_account_tradable(paths: WorkspacePaths, account_id: str) -> None:
+    """Refuse binding a real-money account that has no trading connector.
+
+    Some venues exist only as wallet providers / data venues (today:
+    ``byreal``) — ``build_connector`` fails for them, and without this
+    check the failure surfaces only at order time, after Risk Gate and
+    BudgetChecker have approved and reserved capital (E4). Wallet swap
+    flows are unaffected; this only blocks the exchange-trading binding.
+    Paper accounts keep working so strategies can rehearse against
+    not-yet-wired venues.
+    """
+    try:
+        profile = get_account_profile(paths, account_id)
+    except Exception:
+        return
+    if not bool(getattr(profile, "is_real_money", False)):
+        return
+    venue = str(getattr(profile, "venue", "") or "")
+    try:
+        from ..connectors.provider_spec import get_registry
+
+        spec = get_registry().find(venue)
+    except Exception:
+        spec = None
+    if spec is not None and bool((spec.supports or {}).get("place_order")):
+        return
+    raise TradingError(
+        f"account {account_id!r} (venue {venue!r}) has no trading connector; "
+        "real-money strategies cannot bind it. Use the wallet swap flow for "
+        "on-chain execution, or bind a paper account."
+    )
+
+
 def create(paths: WorkspacePaths, req: CreateRequest) -> dict[str, Any]:
     sid = (req.strategy_id or "").strip().lower()
     if not _ID_RE.match(sid):
@@ -227,6 +304,8 @@ def create(paths: WorkspacePaths, req: CreateRequest) -> dict[str, Any]:
         )
     if req.status not in STATES:
         raise TradingError(f"invalid status: {req.status!r}")
+    if req.account_id:
+        _ensure_account_tradable(paths, str(req.account_id))
     root = paths.strategy(sid)
     if root.exists() and (root / "strategy.yml").exists():
         raise TradingError(f"strategy already exists: {sid}")
@@ -411,12 +490,24 @@ def update(
     *,
     patch: dict[str, Any],
     reason: str = "dashboard_update",
+    force: bool = False,
 ) -> dict[str, Any]:
     s = _load_strategy(paths, strategy_id)
     yml = _read_yaml(s.path / "strategy.yml")
     if not isinstance(yml, dict):
         yml = {}
     changed: list[str] = []
+
+    # Structural edits on a canary/live strategy drift the version the
+    # RiskGate re-reads per intent — gate them behind force (B10).
+    structural_attempted = (
+        bool(_STRUCTURAL_PATCH_FIELDS & set(patch))
+        or isinstance(patch.get("config"), dict)
+        or isinstance(patch.get("limits"), dict)
+        or isinstance(patch.get("prompts"), dict)
+    )
+    if structural_attempted:
+        _require_editable_status(s, "update", force=force, paths=paths)
 
     for field in _PATCHABLE_FIELDS:
         if field not in patch:
@@ -527,9 +618,12 @@ def set_status(
 def bind_wallet(
     paths: WorkspacePaths,
     strategy_id: str,
-    wallet_id: Optional[str],
+    wallet_id: str | None,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     s = _load_strategy(paths, strategy_id)
+    _require_editable_status(s, "bind_wallet", force=force, paths=paths)
     yml = _read_yaml(s.path / "strategy.yml")
     if not isinstance(yml, dict):
         yml = {}
@@ -548,8 +642,12 @@ def bind_account(
     paths: WorkspacePaths,
     strategy_id: str,
     account_id: str,
+    *,
+    force: bool = False,
 ) -> dict[str, Any]:
     s = _load_strategy(paths, strategy_id)
+    _require_editable_status(s, "bind_account", force=force, paths=paths)
+    _ensure_account_tradable(paths, str(account_id))
     yml = _read_yaml(s.path / "strategy.yml")
     if not isinstance(yml, dict):
         yml = {}
@@ -732,6 +830,7 @@ def write_file(
     rel_path: str,
     content: str,
     reason: str = "dashboard_write_file",
+    force: bool = False,
 ) -> dict[str, Any]:
     """Write ``content`` to ``strategies/<id>/<rel_path>``.
 
@@ -753,6 +852,7 @@ def write_file(
         )
 
     s = _load_strategy(paths, strategy_id)
+    _require_editable_status(s, "write_file", force=force, paths=paths)
     target = (s.path / rel).resolve()
     root_resolved = s.path.resolve()
     try:

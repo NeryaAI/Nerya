@@ -214,6 +214,82 @@ STRATEGY_VALIDATE_SCHEMA: dict[str, Any] = {
 }
 
 
+STRATEGY_IMPORT_EXTERNAL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "sources": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Absolute or workspace-relative path(s) to the strategy "
+                ".py file(s), or a single directory containing them."
+            ),
+        },
+        "strategy_id": {
+            "type": "string",
+            "description": (
+                "Package id (snake_case). Defaults to the strategy class "
+                "name slugified."
+            ),
+        },
+        "framework": {
+            "type": "string",
+            "enum": ["auto", "freqtrade", "vnpy"],
+            "description": (
+                "Foreign quant framework the source was written for. "
+                "'auto' AST-scans the source; default 'auto'."
+            ),
+        },
+        "title": {"type": "string"},
+        "markets": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Nerya market ids to trade (e.g. PAPER:BTCUSDT). Defaults "
+                "to PAPER:BTCUSDT with a warning when omitted."
+            ),
+        },
+        "accounts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Execution accounts; defaults to [paper_main].",
+        },
+        "timeframe": {
+            "type": "string",
+            "description": (
+                "Candle timeframe override (5m / 1h / ...). Defaults to "
+                "the strategy's own declared timeframe."
+            ),
+        },
+        "settings": {
+            "type": "object",
+            "description": (
+                "Strategy parameters (vnpy settings dict / freqtrade "
+                "hyperopt parameter overrides), e.g. {\"fast_window\": 8}."
+            ),
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["paper", "shadow", "live"],
+            "default": "paper",
+        },
+        "stake_amount": {
+            "type": "number",
+            "description": (
+                "Per-entry notional in USD for freqtrade-style sizing; "
+                "0 falls back to policy default_order_usd."
+            ),
+        },
+        "overwrite": {
+            "type": "boolean",
+            "default": False,
+            "description": "Replace an existing package with the same id.",
+        },
+    },
+    "required": ["sources"],
+}
+
+
 STRATEGY_DELETE_PROPOSAL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -1755,6 +1831,58 @@ def strategy_validate_handler(call: ToolCall, *, config: Config) -> ToolResult:
         )
     return ToolResult.from_json(
         tool_use_id=call.id, name=call.name, data=validation.asdict()
+    )
+
+
+def strategy_import_external_handler(call: ToolCall, *, config: Config) -> ToolResult:
+    """Import a Freqtrade / VNpy strategy source as a Nerya package.
+
+    The agent-facing entry to
+    :func:`nerya.strategies.compat.importer.import_external_strategy`:
+    upload (or point at) a strategy file and get back a promoted-ready
+    package whose manifest, entrypoint and settings the agent can then
+    validate / backtest / schedule like any other strategy.
+    """
+
+    args = call.arguments or {}
+    sources = args.get("sources") or []
+    if isinstance(sources, str):
+        sources = [sources]
+    if not sources:
+        return _usage_error(call, "sources (strategy file path or directory) is required")
+
+    settings = args.get("settings")
+    if settings is not None and not isinstance(settings, dict):
+        return _usage_error(call, "settings must be a JSON object")
+
+    # Imported lazy: the compat layer pulls in the validator, which the
+    # native-tools package already depends on elsewhere — keep this
+    # module's import surface unchanged.
+    from ...strategies.compat.importer import import_external_strategy
+
+    try:
+        result = import_external_strategy(
+            config,
+            [str(s) for s in sources],
+            strategy_id=(args.get("strategy_id") or "").strip() or None,
+            framework=str(args.get("framework") or "auto"),
+            title=(args.get("title") or "").strip() or None,
+            markets=[str(m) for m in (args.get("markets") or [])] or None,
+            accounts=[str(a) for a in (args.get("accounts") or [])] or None,
+            timeframe=(args.get("timeframe") or "").strip() or None,
+            settings=settings,
+            mode=str(args.get("mode") or "paper"),
+            stake_amount=float(args.get("stake_amount") or 0.0),
+            overwrite=bool(args.get("overwrite", False)),
+        )
+    except NeryaError as exc:
+        return _usage_error(call, str(exc))
+    except Exception as exc:
+        return _execution_error(
+            call, f"import failed: {type(exc).__name__}: {exc}"
+        )
+    return ToolResult.from_json(
+        tool_use_id=call.id, name=call.name, data=result.asdict()
     )
 
 

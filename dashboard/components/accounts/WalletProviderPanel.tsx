@@ -317,21 +317,41 @@ export function WalletProviderPanel({
     result: unknown,
     warning: unknown,
   ): string | null {
+    const warningText = (row: Record<string, unknown>): string => {
+      const code = typeof row.error === "string" && row.error
+        ? row.error
+        : "account_create_failed";
+      const detail = typeof row.detail === "string" ? row.detail : "";
+      return t("accountFailed", { code, detail });
+    };
     if (result && typeof result === "object") {
       const row = result as Record<string, unknown>;
+      // A failed account upsert arrives as {ok: false, error, detail?}
+      // with no account_id. Check ok===false *before* the !id early
+      // return so the failure surfaces instead of a silent success.
+      if (row.ok === false) {
+        return warningText(row);
+      }
       const id = typeof row.account_id === "string" ? row.account_id : "";
       const mode = typeof row.mode === "string" ? row.mode : "";
       const created = Boolean(row.created);
       if (!id) return null;
-      return created
+      const base = created
         ? t("accountCreated", { id, mode })
         : t("accountLinked", { id, mode });
+      // Live→paper demotion keys have no dedicated translation key;
+      // append them as a plain string so the operator still sees why
+      // the requested mode was downgraded.
+      const demotedFrom = typeof row.demoted_from === "string" ? row.demoted_from : "";
+      const demoteReason = typeof row.demote_reason === "string" ? row.demote_reason : "";
+      if (demotedFrom || demoteReason) {
+        const reasonSuffix = demoteReason ? ` (${demoteReason})` : "";
+        return `${base} · account demoted from ${demotedFrom || "?"} to ${mode}${reasonSuffix}`;
+      }
+      return base;
     }
     if (warning && typeof warning === "object") {
-      const w = warning as Record<string, unknown>;
-      const code = typeof w.error === "string" ? w.error : "account_create_failed";
-      const detail = typeof w.detail === "string" ? w.detail : "";
-      return t("accountFailed", { code, detail });
+      return warningText(warning as Record<string, unknown>);
     }
     return null;
   }

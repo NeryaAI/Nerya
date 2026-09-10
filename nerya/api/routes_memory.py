@@ -227,11 +227,8 @@ def routes():
 
     # ----------------------------------------------- curated notebook
     def _notebook_for(client):
-        # Lazy import — ``MemoryWriter`` pulls in ``MemoryIndex`` which
-        # we do not want to drag into module-load time.
-        from ..memory.writer import default_notebook
-
-        return default_notebook(client.config)
+        from ..memory.notebook import load_notebook
+        return load_notebook(client.config)
 
     def notebook_list(client, _payload):
         nb = _notebook_for(client)
@@ -318,10 +315,9 @@ def routes():
                 )
         except Exception:  # noqa: BLE001 — activity log must never break notebook
             pass
-        # Auto-ingest a research-vault row when the operator/agent saves a
-        # notebook entry via this API. Mirrors the MemoryWriter path so
-        # *All* durable notebook writes feed the evidence vault. Honors
-        # ``runtime.evidence_vault`` and never raises.
+        # This API can also ingest successful notebook saves into the
+        # evidence vault. Honors ``runtime.evidence_vault``; ingestion failure
+        # must not undo or misreport the completed notebook write.
         try:
             if res.ok and action in ("add", "replace"):
                 import hashlib as _hashlib

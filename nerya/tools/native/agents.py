@@ -22,11 +22,10 @@ that crashes the agent loop.
 from __future__ import annotations
 
 import json
-import re
+import math
 import time
 import uuid
 from pathlib import Path
-from threading import Lock
 from typing import Any
 
 from ...core.config import Config
@@ -127,22 +126,12 @@ def _build_inline_role_spec(
         prompt_str or skills_list or tier_str or provider_str or model_str or policy_dict
     ):
         return None
-    paths = getattr(config, "paths", None)
-    if paths is None:
-        return None
-    try:
-        return build_inline_spec(
-            paths,
-            name=name,
-            prompt=prompt_str or None,
-            allowed_skills=skills_list or None,
-            tier=tier_str or None,
-            provider=provider_str or None,
-            model=model_str or None,
-            execution_policy=policy_dict or None,
-        )
-    except Exception:
-        return None
+    return build_inline_spec(
+        config.paths, name=name, prompt=prompt_str or None,
+        allowed_skills=skills_list if allowed_skills is not None else None,
+        tier=tier_str or None, provider=provider_str or None,
+        model=model_str or None, execution_policy=policy_dict or None,
+    )
 
 
 def _publish_team_event(kind: str, **payload: Any) -> None:
@@ -338,19 +327,6 @@ def _public_team_failure_line(row: dict[str, Any]) -> str:
     return f"### {role}\n{detail}"
 
 
-_TEAM_RUN_TURN_CACHE_MAX = 128
-_TEAM_RUN_TURN_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
-_TEAM_RUN_TURN_CACHE_ORDER: list[tuple[str, str]] = []
-_TEAM_RUN_TURN_CACHE_LOCK = Lock()
-_TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS = 120.0
-_TEAM_RUN_PARENT_MIN_FINAL_RESERVE_SECONDS = 30.0
-_TEAM_RUN_PARENT_RESERVE_SLACK_SECONDS = 15.0
-# Even a shallow single-wave team needs enough wall time for multiple rounds
-# of public-data research plus a synthesis round per member. Three equity
-# roles can each spend several provider calls before they have a conclusion;
-# a smaller model-authored timeout silently cancels the whole team. Lift such
-# a timeout to this floor unless the operator carried a hard deadline.
-_TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS = 300.0
 _OUTPUT_LANGUAGE_KEYS = (
     "output_language",
     "target_language",
@@ -368,97 +344,6 @@ _ROLE_WORKING_LANGUAGE_KEYS = (
     "language",
     "locale",
 )
-
-
-def _json_clone(value: Any) -> Any:
-    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
-
-
-def _team_run_turn_key(call: ToolCall, args: dict[str, Any]) -> tuple[str, str]:
-    session_key = (
-        args.get("session_id")
-        or _call_meta(call, "session_id")
-        or args.get("trigger_event_id")
-        or _call_meta(call, "trigger_event_id")
-        or "no-session"
-    )
-    turn_key = (
-        call.turn_id
-        or args.get("turn_id")
-        or _call_meta(call, "turn_id")
-        or args.get("trigger_event_id")
-        or _call_meta(call, "trigger_event_id")
-        or call.id
-    )
-    return (str(session_key), str(turn_key))
-
-
-def _allow_additional_team_run(call: ToolCall, args: dict[str, Any]) -> bool:
-    return (
-        args.get("allow_additional_team_run") is True
-        and _call_meta(call, "allow_additional_team_run") is True
-    )
-
-
-def _get_cached_team_run_summary(key: tuple[str, str]) -> dict[str, Any] | None:
-    with _TEAM_RUN_TURN_CACHE_LOCK:
-        cached = _TEAM_RUN_TURN_CACHE.get(key)
-        if cached is None:
-            return None
-        return _json_clone(cached)
-
-
-def cached_team_run_summary_for_call(
-    call: ToolCall,
-    args: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    return _get_cached_team_run_summary(_team_run_turn_key(call, args or {}))
-
-
-def _remember_team_run_summary(
-    key: tuple[str, str],
-    summary: dict[str, Any],
-) -> None:
-    with _TEAM_RUN_TURN_CACHE_LOCK:
-        if key not in _TEAM_RUN_TURN_CACHE:
-            _TEAM_RUN_TURN_CACHE_ORDER.append(key)
-        _TEAM_RUN_TURN_CACHE[key] = _json_clone(summary)
-        while len(_TEAM_RUN_TURN_CACHE_ORDER) > _TEAM_RUN_TURN_CACHE_MAX:
-            old_key = _TEAM_RUN_TURN_CACHE_ORDER.pop(0)
-            _TEAM_RUN_TURN_CACHE.pop(old_key, None)
-
-
-def _duplicate_team_run_summary(
-    cached: dict[str, Any],
-    *,
-    requested_team_run_id: str,
-    task: str,
-    role_names: list[str],
-) -> dict[str, Any]:
-    duplicate = _json_clone(cached)
-    duplicate["duplicate_suppressed"] = True
-    duplicate["duplicate_status"] = "duplicate_suppressed"
-    duplicate["duplicate_of_team_run_id"] = cached.get("team_run_id")
-    duplicate["duplicate_request_team_run_id"] = requested_team_run_id
-    duplicate["duplicate_request_task"] = task
-    duplicate["duplicate_request_roles"] = list(role_names)
-    output_language = str(
-        cached.get("output_language") or "the original user prompt language"
-    )
-    duplicate["next_action"] = (
-        "A team_run already completed in this same turn. Use the cached "
-        "team_run results to write the complete requested answer now. For "
-        "research-report tasks, include the full report in this reply; do "
-        "not ask whether the user wants details. Write the user-visible final "
-        f"answer in the original user prompt language ({output_language}), "
-        "translating team member outputs, headings, labels, and "
-        "natural-language field names as needed while preserving proper "
-        "nouns, tickers, source "
-        "names, code identifiers, and URLs. team_run_id is not an async task_id; "
-        "do not call task_get, task_output, task_list, or run team_run again "
-        "for this turn."
-    )
-    return duplicate
 
 
 def _compact_text(value: Any, *, limit: int = 8000) -> str:
@@ -540,259 +425,45 @@ def _resolve_team_analysis_language(
     return output_language
 
 
-def _parse_duration_seconds(value: Any, *, allow_bare_number: bool = False) -> float | None:
-    if isinstance(value, (int, float)):
-        seconds = float(value)
-        return seconds if seconds > 0 else None
-    text = str(value or "").strip().lower()
-    if not text:
-        return None
-    if allow_bare_number:
-        try:
-            seconds = float(text)
-            return seconds if seconds > 0 else None
-        except Exception:
-            pass
-    match = re.search(
-        r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>s|sec|secs|second|seconds|秒|m|min|mins|minute|minutes|分钟)\b",
-        text,
-    )
-    if not match:
-        return None
-    seconds = float(match.group("value"))
-    unit = match.group("unit")
-    if unit in {"m", "min", "mins", "minute", "minutes", "分钟"}:
-        seconds *= 60.0
-    return seconds if seconds > 0 else None
-
-
-def _positive_float(value: Any) -> float | None:
-    if value is None:
-        return None
+def _seconds(value: Any, name: str) -> float:
     try:
         parsed = float(value)
-    except Exception:
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _nonnegative_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return max(0.0, float(value))
-    except (TypeError, ValueError):
-        return None
+        if not math.isfinite(parsed) or parsed < 0:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be finite and non-negative") from exc
+    return parsed
 
 
 def _parent_remaining_wall_seconds(call: ToolCall) -> float | None:
-    """Return the parent turn budget left at tool execution time."""
-
-    # Zero is meaningful here: the parent has already spent its budget and
-    # the child must fail closed instead of falling back to its own default.
-    remaining = _nonnegative_float(_call_meta(call, "remaining_wall_seconds"))
-    deadline = _positive_float(_call_meta(call, "turn_deadline_epoch"))
+    remaining = _call_meta(call, "remaining_wall_seconds")
+    deadline = _call_meta(call, "turn_deadline_epoch")
+    bounds = []
+    if remaining is not None:
+        bounds.append(_seconds(remaining, "remaining_wall_seconds"))
     if deadline is not None:
-        remaining_from_deadline = max(0.0, deadline - time.time())
-        if remaining is None:
-            return remaining_from_deadline
-        return min(remaining, remaining_from_deadline)
-    return remaining
+        bounds.append(max(0.0, _seconds(deadline, "turn_deadline_epoch") - time.time()))
+    return min(bounds) if bounds else None
 
 
-def _parent_final_reserve_seconds(call: ToolCall | None) -> float:
-    if call is None:
-        return _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS
-    for key in ("wall_time_final_synthesis_seconds",):
-        parsed = _positive_float(_call_meta(call, key))
-        if parsed is not None:
-            return max(_TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS, parsed)
-    return _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS
-
-
-def _apply_parent_wall_budget_cap(
-    timeout_s: float,
-    *,
-    parent_remaining_wall_seconds: float | None,
-    parent_final_reserve_seconds: float,
-    structural_floor_seconds: float = 0.0,
-) -> float:
-    if parent_remaining_wall_seconds is None:
-        return timeout_s
-    reserve = max(0.0, parent_final_reserve_seconds)
-    if structural_floor_seconds > 0:
-        reserve = min(reserve, _TEAM_RUN_PARENT_MIN_FINAL_RESERVE_SECONDS)
-    if (
-        structural_floor_seconds > 0
-        and parent_remaining_wall_seconds
-        >= timeout_s + reserve - _TEAM_RUN_PARENT_RESERVE_SLACK_SECONDS
-    ):
-        return timeout_s
-    cap = parent_remaining_wall_seconds - reserve
-    if cap <= 0:
-        return min(timeout_s, 1.0)
-    return min(timeout_s, cap)
-
-
-def _has_operator_team_time_budget(
-    *,
-    args: dict[str, Any],
-    shared_payload: dict[str, Any],
-) -> bool:
-    """Whether the team call carries an explicit non-tool timeout constraint.
-
-    ``timeout_s`` / ``max_wall_seconds`` are tool execution controls. They can
-    be model-authored and should not, by themselves, shrink a deep team below
-    the structural timeout floor. Separate deadline/time_budget fields indicate
-    the operator or planner is carrying an actual time constraint.
-    """
-
-    for source in (shared_payload, args):
-        for key in ("deadline", "timeout", "time_budget", "time_budget_s"):
-            if _parse_duration_seconds(
-                source.get(key),
-                allow_bare_number=(key.endswith("_s")),
-            ) is not None:
-                return True
-    return False
+def _parent_final_reserve_seconds(call: ToolCall) -> float:
+    value = _call_meta(call, "wall_time_final_synthesis_seconds")
+    return _seconds(value, "wall_time_final_synthesis_seconds") if value is not None else 0.0
 
 
 def _effective_team_timeout_seconds(
-    *,
-    args: dict[str, Any],
-    shared_payload: dict[str, Any],
-    config: Config,
+    *, args: dict[str, Any], config: Config,
     parent_remaining_wall_seconds: float | None = None,
-    parent_final_reserve_seconds: float = _TEAM_RUN_PARENT_FINAL_RESERVE_SECONDS,
+    parent_final_reserve_seconds: float = 0.0,
 ) -> float:
-    explicit_candidates: list[float] = []
-    for key in ("timeout_s", "max_wall_seconds"):
-        parsed = _parse_duration_seconds(args.get(key), allow_bare_number=True)
-        if parsed is not None:
-            explicit_candidates.append(parsed)
-    if explicit_candidates:
-        timeout = max(30.0, min(explicit_candidates))
-        auto_floor = _team_timeout_floor_seconds(args)
-        has_operator_budget = _has_operator_team_time_budget(
-            args=args,
-            shared_payload=shared_payload,
-        )
-        if auto_floor > timeout and not has_operator_budget:
-            timeout = auto_floor
-        # A model-authored ``timeout_s`` is a hint, not a hard deadline. Single
-        # wave teams have no structural floor, so a too-small value (e.g. 60s)
-        # starves research members that need ~90s+ and yields an empty
-        # "timeout" team. Lift it to the shallow-research floor unless the
-        # operator carried an explicit hard time budget (which always wins).
-        if (
-            _TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS > timeout
-            and not has_operator_budget
-        ):
-            timeout = _TEAM_RUN_SHALLOW_RESEARCH_FLOOR_SECONDS
-        return _apply_parent_wall_budget_cap(
-            timeout,
-            parent_remaining_wall_seconds=parent_remaining_wall_seconds,
-            parent_final_reserve_seconds=parent_final_reserve_seconds,
-            structural_floor_seconds=auto_floor,
-        )
-
-    candidates: list[float] = []
-    for key in (
-        "deadline",
-        "timeout",
-        "timeout_s",
-        "max_wall_seconds",
-        "time_budget",
-        "time_budget_s",
-    ):
-        parsed = _parse_duration_seconds(shared_payload.get(key), allow_bare_number=False)
-        if parsed is not None:
-            candidates.append(parsed)
-    auto_floor = _team_timeout_floor_seconds(args)
-    if not candidates:
-        configured = _config_get(config, "agent.team_run.timeout_s", 300)
-        parsed = _parse_duration_seconds(configured, allow_bare_number=True)
-        if parsed is not None:
-            candidates.append(parsed)
-    if not candidates:
-        candidates.append(300.0)
-    timeout = max(30.0, max(auto_floor, min(candidates)))
-    max_timeout = _parse_duration_seconds(
-        _config_get(config, "agent.team_run.max_timeout_s", 900),
-        allow_bare_number=True,
-    )
-    timeout = min(timeout, max_timeout or 900.0)
-    return _apply_parent_wall_budget_cap(
-        timeout,
-        parent_remaining_wall_seconds=parent_remaining_wall_seconds,
-        parent_final_reserve_seconds=parent_final_reserve_seconds,
-        structural_floor_seconds=auto_floor,
-    )
-
-
-def _team_timeout_floor_seconds(args: dict[str, Any]) -> float:
-    roles = _coerce_roles_arg(args.get("roles"), args=args)
-    role_count = len(roles) if isinstance(roles, list) else 0
-    if role_count <= 0:
-        return 0.0
-    try:
-        workers = max(1, int(args.get("max_parallel") or 4))
-    except (TypeError, ValueError):
-        workers = 4
-    workers = max(1, min(workers, role_count))
-    waves = max(1, (role_count + workers - 1) // workers)
-    template = str(args.get("team_template") or "").strip()
-    role_names = {
-        str(role.get("name") or "").strip()
-        for role in roles
-        if isinstance(role, dict)
-    }
-    curated_deep_team = _is_curated_deep_team(
-        template=template,
-        role_names=role_names,
-    )
-    if waves <= 1 and not curated_deep_team:
-        return 0.0
-    # Each wave can spend one tool round plus one synthesis round on the
-    # provider; add reserve for slow public sources and queueing.
-    floor = 120 + waves * 240
-    if curated_deep_team:
-        floor = max(floor, 600, waves * 360)
-    return float(floor)
-
-
-def _is_curated_deep_team(*, template: str, role_names: set[str]) -> bool:
-    if template not in {
-        "market_analysis_team",
-        "investment_committee_team",
-        "strategy_design_team",
-    }:
-        return False
-    deep_role_names = {
-        "fundamentals_analyst",
-        "technical_analyst",
-        "sentiment_analyst",
-        "valuation_analyst",
-        "sec_analyst",
-        "investor_perspective",
-        "bull_researcher",
-        "bear_researcher",
-        "risk_critic",
-        "research_manager",
-        "research_editor",
-        "market_analyst",
-        "execution_planner",
-        "strategy_reviewer",
-        "plan_lane",
-    }
-    return bool(role_names & deep_role_names)
-
-
-def _config_get(config: Config, key: str, default: Any = None) -> Any:
-    getter = getattr(config, "get", None)
-    if not callable(getter):
-        return default
-    return getter(key, default)
+    timeout = args.get("timeout_s")
+    if timeout is None:
+        timeout = config.get("agent.team_run.timeout_s", 300.0)
+    bounds = [_seconds(timeout, "timeout_s"),
+              _seconds(config.get("agent.team_run.max_timeout_s", 900.0), "max_timeout_s")]
+    if parent_remaining_wall_seconds is not None:
+        bounds.append(max(0.0, parent_remaining_wall_seconds - parent_final_reserve_seconds))
+    return min(bounds)
 
 
 def _positive_int(value: Any) -> int | None:
@@ -803,11 +474,13 @@ def _positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _team_template_parallel_limit(team_template: str) -> int | None:
+def _team_template_parallel_limit(
+    team_template: str, paths: Any = None
+) -> int | None:
     template_id = str(team_template or "").strip()
     if not template_id:
         return None
-    template = get_template(template_id)
+    template = get_template(template_id, paths)
     if template is None:
         return None
     return _positive_int(getattr(template, "max_parallel", None))
@@ -823,11 +496,13 @@ def _effective_team_workers(
     if role_count <= 0:
         return 1
     requested = _positive_int(args.get("max_parallel"))
-    template_limit = _team_template_parallel_limit(team_template)
-    configured_limit = _positive_int(_config_get(config, "agent.team_run.max_parallel"))
+    template_limit = _team_template_parallel_limit(
+        team_template, getattr(config, "paths", None)
+    )
+    configured_limit = _positive_int(config.get("agent.team_run.max_parallel"))
     if configured_limit is None:
         configured_limit = _positive_int(
-            _config_get(config, "agent.subagents.max_parallel"),
+            config.get("agent.subagents.max_parallel"),
         )
     if configured_limit is None:
         configured_limit = 4
@@ -1134,98 +809,6 @@ def _team_assignment_prompt(
     return redact_text("\n".join(lines))
 
 
-def _coerce_roles_arg(raw_roles: Any, *, args: dict[str, Any] | None = None) -> list[Any]:
-    roles: list[Any] = []
-    if isinstance(raw_roles, list):
-        roles.extend(raw_roles)
-    elif isinstance(raw_roles, str) and raw_roles.strip():
-        try:
-            parsed = json.loads(raw_roles)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            roles.extend(parsed)
-        elif isinstance(parsed, dict) and isinstance(parsed.get("roles"), list):
-            roles.extend(parsed["roles"])
-            roles.extend(_collect_role_payloads(parsed.get("role_payloads")))
-    if isinstance(args, dict):
-        roles.extend(_collect_role_payloads(args.get("role_payloads")))
-        roles.extend(_collect_provider_wrapped_roles(args.get("item")))
-        roles.extend(_collect_provider_wrapped_roles(args.get("items")))
-        raw_args = _coerce_raw_args(args.get("_raw") or args.get("raw"))
-        if raw_args:
-            roles.extend(_coerce_roles_arg(raw_args.get("roles"), args=raw_args))
-    return roles
-
-
-def _coerce_raw_args(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            parsed = json.loads(value)
-        except Exception:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
-def _collect_role_payloads(value: Any) -> list[dict[str, Any]]:
-    roles: list[dict[str, Any]] = []
-    if isinstance(value, list):
-        for item in value:
-            if isinstance(item, dict) and item.get("name"):
-                roles.append(item)
-            else:
-                roles.extend(_collect_role_payloads(item))
-        return roles
-    if not isinstance(value, dict):
-        return roles
-    for raw_name, raw_payload in value.items():
-        name = str(raw_name or "").strip()
-        if not name:
-            continue
-        if isinstance(raw_payload, dict) and isinstance(raw_payload.get("payload"), dict):
-            role = dict(raw_payload)
-            role["name"] = str(role.get("name") or name).strip()
-            roles.append(role)
-        elif isinstance(raw_payload, dict):
-            roles.append({"name": name, "payload": dict(raw_payload)})
-        else:
-            roles.append({"name": name, "payload": {"value": raw_payload}})
-    return roles
-
-
-def _collect_provider_wrapped_roles(value: Any) -> list[dict[str, Any]]:
-    collected: list[dict[str, Any]] = []
-    if isinstance(value, list):
-        for item in value:
-            collected.extend(_collect_provider_wrapped_roles(item))
-        return collected
-    if not isinstance(value, dict):
-        return collected
-
-    name = value.get("name")
-    if isinstance(name, str) and name.strip():
-        role: dict[str, Any] = {"name": name.strip()}
-        payload = value.get("payload")
-        if isinstance(payload, dict):
-            role["payload"] = dict(payload)
-        instructions = value.get("instructions")
-        if isinstance(instructions, str) and instructions.strip():
-            role["instructions"] = instructions.strip()
-        collected.append(role)
-
-    collected.extend(_collect_role_payloads(value.get("role_payloads")))
-    raw_args = _coerce_raw_args(value.get("_raw") or value.get("raw"))
-    if raw_args:
-        collected.extend(_coerce_roles_arg(raw_args.get("roles"), args=raw_args))
-
-    for key in ("item", "items", "roles"):
-        collected.extend(_collect_provider_wrapped_roles(value.get(key)))
-    return collected
-
-
 SUBAGENT_LIST_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},
@@ -1398,48 +981,9 @@ def subagent_run_handler(
         model=args.get("model"),
         execution_policy=args.get("execution_policy"),
     )
-    cached_team = _get_cached_team_run_summary(_team_run_turn_key(call, args))
-    if cached_team is not None and cached_team.get("ok") is True:
-        _publish_team_event(
-            "team.subagent_duplicate",
-            call_id=call.id,
-            tool_call_id=call.id,
-            turn_id=call.turn_id,
-            session_id=session_id,
-            strategy_id=strategy_id,
-            trigger_event_id=trigger_event_id,
-            subagent=name,
-            duplicate_of_team_run_id=cached_team.get("team_run_id"),
-            status="team_already_completed",
-            ok=True,
-        )
-        return ToolResult.from_json(
-            tool_use_id=call.id,
-            name=call.name,
-            data={
-                "ok": True,
-                "status": "team_already_completed",
-                "subagent": name,
-                "skipped": True,
-                "duplicate_of_team_run_id": cached_team.get("team_run_id"),
-                "team_summary": cached_team,
-                "next_action": (
-                    "A successful team_run already completed in this same "
-                    "turn. Use the cached team results to synthesize the "
-                    "final answer now in the original user prompt language "
-                    f"({cached_team.get('output_language') or 'the original user prompt language'}); "
-                    "translate headings, labels, and natural-language field names; "
-                    "do not launch more subagents for this turn."
-                ),
-            },
-        )
-
-    dispatcher_kwargs = {"config": config, "skills": skills}
-    if tool_registry is not None:
-        dispatcher_kwargs["tool_registry"] = tool_registry
-    if executor is not None:
-        dispatcher_kwargs["executor"] = executor
-    dispatcher = SubAgentDispatcher(**dispatcher_kwargs)
+    dispatcher = SubAgentDispatcher(
+        config=config, skills=skills, tool_registry=tool_registry, executor=executor,
+    )
     try:
         dispatch_kwargs: dict[str, Any] = {
             "trigger_event_id": trigger_event_id,
@@ -1754,12 +1298,9 @@ def research_run_handler(
     )
     parent_remaining_wall_seconds = _parent_remaining_wall_seconds(call)
 
-    dispatcher_kwargs = {"config": config, "skills": skills}
-    if tool_registry is not None:
-        dispatcher_kwargs["tool_registry"] = tool_registry
-    if executor is not None:
-        dispatcher_kwargs["executor"] = executor
-    dispatcher = SubAgentDispatcher(**dispatcher_kwargs)
+    dispatcher = SubAgentDispatcher(
+        config=config, skills=skills, tool_registry=tool_registry, executor=executor,
+    )
 
     try:
         dispatch_kwargs: dict[str, Any] = {
@@ -1985,23 +1526,8 @@ TEAM_RUN_SCHEMA: dict[str, Any] = {
         },
         "max_parallel": {"type": "integer", "minimum": 1},
         "timeout_s": {
-            "type": "number",
-            "minimum": 30,
-            "description": (
-                "Hard wall-clock budget for the whole team_run. Pending "
-                "members are returned as timeout failures instead of "
-                "blocking the parent turn forever. Keep this at 30 seconds "
-                "or higher; for quick user deadlines, make role instructions "
-                "concise rather than setting an unrealistically low timeout."
-            ),
-        },
-        "allow_additional_team_run": {
-            "type": "boolean",
-            "description": (
-                "Internal escape hatch for orchestrators that intentionally "
-                "need more than one independent team_run in the same turn. "
-                "Ignored unless tool metadata also permits it."
-            ),
+            "type": "number", "minimum": 0,
+            "description": "Team execution budget in seconds; zero expires immediately. Parent and configured limits still apply.",
         },
         "strategy_id": {"type": "string"},
         "session_id": {"type": "string"},
@@ -2098,7 +1624,7 @@ def team_run_handler(
     if not task:
         return _schema_error(call, "task is required (one-line shared mission)")
 
-    raw_roles = _coerce_roles_arg(args.get("roles"), args=args)
+    raw_roles = args.get("roles")
     if not isinstance(raw_roles, list) or not raw_roles:
         return _schema_error(
             call,
@@ -2140,8 +1666,6 @@ def team_run_handler(
         delegation_depth = max(0, int(_call_meta(call, "delegation_depth") or 0))
     except (TypeError, ValueError):
         delegation_depth = 0
-    guard_key = _team_run_turn_key(call, args)
-    allow_additional_team_run = _allow_additional_team_run(call, args)
     role_names: list[str] = []
     role_payloads: dict[str, dict[str, Any]] = {}
     role_assignment_prompts: dict[str, str] = {}
@@ -2194,42 +1718,9 @@ def team_run_handler(
             analysis_language=analysis_language,
         )
 
-    if not allow_additional_team_run:
-        cached_summary = _get_cached_team_run_summary(guard_key)
-        if cached_summary is not None:
-            duplicate_summary = _duplicate_team_run_summary(
-                cached_summary,
-                requested_team_run_id=team_run_id,
-                task=task,
-                role_names=role_names,
-            )
-            _publish_team_event(
-                "team.duplicate",
-                call_id=call.id,
-                tool_call_id=call.id,
-                turn_id=call.turn_id,
-                team_run_id=team_run_id,
-                duplicate_of_team_run_id=cached_summary.get("team_run_id"),
-                session_id=session_id,
-                strategy_id=strategy_id,
-                trigger_event_id=trigger_event_id,
-                task=task,
-                roles=role_names,
-                status="already_completed",
-                ok=bool(cached_summary.get("ok")),
-            )
-            return ToolResult.from_json(
-                tool_use_id=call.id,
-                name=call.name,
-                data=duplicate_summary,
-            )
-
-    dispatcher_kwargs = {"config": config, "skills": skills}
-    if tool_registry is not None:
-        dispatcher_kwargs["tool_registry"] = tool_registry
-    if executor is not None:
-        dispatcher_kwargs["executor"] = executor
-    dispatcher = SubAgentDispatcher(**dispatcher_kwargs)
+    dispatcher = SubAgentDispatcher(
+        config=config, skills=skills, tool_registry=tool_registry, executor=executor,
+    )
 
     workers = _effective_team_workers(
         args=args,
@@ -2242,14 +1733,9 @@ def team_run_handler(
     timeout_args["team_template"] = team_template
     parent_remaining_wall_seconds = _parent_remaining_wall_seconds(call)
     parent_final_reserve_seconds = _parent_final_reserve_seconds(call)
-    uncapped_team_timeout_s = _effective_team_timeout_seconds(
-        args=timeout_args,
-        shared_payload=shared_payload,
-        config=config,
-    )
+    uncapped_team_timeout_s = _effective_team_timeout_seconds(args=timeout_args, config=config)
     team_timeout_s = _effective_team_timeout_seconds(
         args=timeout_args,
-        shared_payload=shared_payload,
         config=config,
         parent_remaining_wall_seconds=parent_remaining_wall_seconds,
         parent_final_reserve_seconds=parent_final_reserve_seconds,
@@ -2477,32 +1963,10 @@ def team_run_handler(
         else "completed_with_failures"
     )
     next_action = (
-        "team_run is synchronous and already finished. Write the complete "
-        "requested answer from results now. For research-report tasks, "
-        "include the full report in this reply; do not ask whether the user "
-        "wants details. Write the user-visible final answer in the original "
-        f"user prompt language ({output_language}), translating team member "
-        "outputs as needed. Translate headings, labels, and natural-language "
-        "field names too "
-        "while preserving proper nouns, tickers, source names, code "
-        "identifiers, and URLs. team_run_id is not an async task_id; do not "
-        "call task_get, task_output, task_list, or run team_run again for "
-        "the same task unless you used an async subagent tool."
+        "This synchronous team call has returned. Use its evidence to decide "
+        "the next permitted action required by the task; verify execution outcomes "
+        "before declaring success. Report unresolved evidence gaps explicitly."
     )
-    if failures:
-        next_action = (
-            "team_run is synchronous and already finished with failed or "
-            "degraded members. Retry only the missing required analysis or "
-            "state the evidence gap, then write the best possible report in "
-            "this reply in the original user prompt language "
-            f"({output_language}). Do not ask whether the user wants details. "
-            "Translate team member outputs, headings, labels, and "
-            "natural-language field names as needed while preserving proper "
-            "nouns, tickers, source names, code identifiers, and URLs. "
-            "team_run_id is not an async task_id; "
-            "do not call task_get, task_output, task_list, or rerun the whole "
-            "team."
-        )
     summary = {
         "ok": not failures,
         "status": status,
@@ -2521,8 +1985,8 @@ def team_run_handler(
         "timeout_capped_by_parent": timeout_capped_by_parent,
         "parent_remaining_wall_seconds": parent_remaining_wall_seconds,
         "parent_final_reserve_seconds": parent_final_reserve_seconds,
-        "tokens_total": sum(int(r.get("tokens") or 0) for r in results),
-        "usd_total": round(sum(float(r.get("usd") or 0.0) for r in results), 4),
+        "tokens_total": sum(int(r.get("tokens") or 0) for r in [*results, *failures]),
+        "usd_total": sum(float(r.get("usd") or 0.0) for r in [*results, *failures]),
         "results": compact_results,
         "failures": compact_failures,
         "aggregated": compact_aggregated,
@@ -2629,8 +2093,6 @@ def team_run_handler(
                 pending_approval_request
             )
         return pending_result
-    if not allow_additional_team_run:
-        _remember_team_run_summary(guard_key, summary)
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
@@ -2772,7 +2234,6 @@ __all__ = [
     "SUBAGENT_LIST_SCHEMA",
     "SUBAGENT_RUN_SCHEMA",
     "TEAM_RUN_SCHEMA",
-    "cached_team_run_summary_for_call",
     "research_run_handler",
     "role_delete_handler",
     "role_get_handler",

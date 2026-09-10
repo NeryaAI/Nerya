@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from ...core.errors import IntentValidationError
 from ..order_intents import (
     OrderCandidate,
     ProtectionRule,
@@ -26,10 +28,19 @@ from ..order_intents import (
     TrailingStopSpec,
 )
 from ..position_book import PositionBook
-from ..protection_store import ProtectionStore, evaluate
+from ..protection_store import (
+    ProtectionStore,
+    evaluate,
+    validate_supported_specs,
+)
 from .base import Executor, ExecutorConfig
 
 log = logging.getLogger(__name__)
+
+
+# B8(c): a soft trigger evaluated against a mark older than this is
+# acting on frozen data — skip and journal instead.
+_STALE_MARK_MAX_AGE_S = 120.0
 
 
 @dataclass
@@ -49,6 +60,17 @@ class PositionProtectionExecutor(Executor):
         # ``high_water_mark`` lives on the run for trailing stops so
         # state survives crash/restart.
         self.run.result_json.setdefault("high_water_mark", None)
+        # B8(b): fail loud at executor start on spec types the runtime
+        # never fires (pnl_usd / r_multiple) instead of silently leaving
+        # the position unprotected.
+        cfg_rule = _rule_from_config(self.run.config_json or {})
+        if cfg_rule is not None:
+            try:
+                validate_supported_specs(cfg_rule)
+            except IntentValidationError as exc:
+                self.transition("rejected", close_type="failed")
+                self.store_result({"reason": f"unsupported_protection_spec:{exc}"})
+                return
         self.transition("ready")
 
     def step(self) -> bool:
@@ -82,10 +104,35 @@ class PositionProtectionExecutor(Executor):
         # Mark price source. Prefer a live connector mark; fall back to
         # the position's stored mark, then entry price. A stale mark is
         # dangerous for a soft stop-loss so we try the venue first.
-        current_price = self._live_mark_price(rule) or position.mark_price or position.avg_entry_price
-        if current_price <= 0:
-            self.transition("working")
-            return False
+        live_mark = self._live_mark_price(rule)
+        if live_mark > 0:
+            current_price = live_mark
+        else:
+            fallback_price = float(
+                position.mark_price or position.avg_entry_price or 0.0
+            )
+            if fallback_price <= 0:
+                self.transition("working")
+                return False
+            # B8(c): bound mark staleness. The position row's updated_at
+            # only advances on fills / mark refreshes — a fallback older
+            # than the bound means we'd evaluate the stop on frozen data
+            # forever. Skip this tick and journal a degraded note.
+            # (``opened_at`` is deliberately excluded: a fresh position
+            # open says nothing about how fresh its *mark* is.)
+            mark_age_s = time.time() - float(position.updated_at or 0.0)
+            if mark_age_s > _STALE_MARK_MAX_AGE_S:
+                note = {
+                    "reason": "stale_mark_skipped",
+                    "mark_age_s": round(mark_age_s, 3),
+                    "max_age_s": _STALE_MARK_MAX_AGE_S,
+                    "mark_price": fallback_price,
+                }
+                self.store_result(note)
+                self._journal_degraded(note)
+                self.transition("working")
+                return False
+            current_price = fallback_price
 
         prior_high = self.run.result_json.get("high_water_mark")
         new_high = _update_high_water(rule.side, current_price, prior_high)
@@ -103,6 +150,17 @@ class PositionProtectionExecutor(Executor):
         if not trigger.fired:
             self.transition("working")
             return False
+
+        # B8(a): remember which partial level fired so the flattener
+        # monitor can re-arm the rule for the remaining position size
+        # instead of disarming everything after one partial exit.
+        if trigger.kind == "partial_exit":
+            self.store_result({
+                "pending_partial": {
+                    "trigger_pct": float(trigger.trigger_pct or 0.0),
+                    "close_pct": float(trigger.close_pct or 0.0),
+                },
+            })
 
         # Trigger fired — persist a child market-order executor before its
         # first venue call. Paper orders usually finish in this tick; live
@@ -214,6 +272,8 @@ class PositionProtectionExecutor(Executor):
             trigger_kind = str(
                 (self.run.result_json or {}).get("trigger_kind") or ""
             )
+            if trigger_kind == "partial_exit":
+                return self._rearm_after_partial_exit(store, rule)
             store.set_status(
                 rule.protection_id,
                 "triggered",
@@ -235,6 +295,83 @@ class PositionProtectionExecutor(Executor):
 
         self.transition("working")
         return False
+
+    def _rearm_after_partial_exit(
+        self,
+        store: ProtectionStore,
+        rule: ProtectionRule,
+    ) -> bool:
+        """B8(a): a completed partial exit must not disarm the position.
+
+        Marks the fired level as executed, and — while position size
+        remains and the rule still has live components — re-arms the
+        rule so SL/TP/trailing/next partial keep protecting the rest.
+        Only when nothing remains (position flat or no live components
+        left) does the rule trigger as before.
+        """
+        result = dict(self.run.result_json or {})
+        pending = dict(result.get("pending_partial") or {})
+        executed = list(result.get("partial_exits_executed") or [])
+        if pending:
+            executed.append(pending)
+        self.store_result({
+            "partial_exits_executed": executed,
+            "pending_partial": None,
+            "flatten_executor_id": None,
+        })
+
+        book = PositionBook(self.paths)
+        position = book.get_by_id(self.run.position_id or "")
+        remaining = abs(float(position.size_base or 0.0)) if position is not None else 0.0
+
+        # Drop the executed level from the rule so ``evaluate`` cannot
+        # refire it against the remaining size.
+        trigger_pct = float(pending.get("trigger_pct") or 0.0)
+        if trigger_pct > 0:
+            rule.partial_exits = [
+                p for p in (rule.partial_exits or [])
+                if abs(float(p.trigger_pct) - trigger_pct) > 1e-9
+            ]
+        has_live_components = bool(
+            rule.partial_exits
+            or rule.stop_loss is not None
+            or rule.take_profit is not None
+            or rule.trailing_stop is not None
+            or rule.time_limit_sec
+        )
+        if remaining <= 1e-12 or not has_live_components:
+            store.set_status(
+                rule.protection_id,
+                "triggered",
+                triggered_kind="partial_exit",
+            )
+            self.transition("done", close_type=_trigger_to_close_type("partial_exit"))
+            return True
+
+        rule.status = "armed"
+        store.upsert(rule)
+        self.store_result({
+            "reason": "partial_exit_rearmed",
+            "remaining_size_base": remaining,
+        })
+        self.transition("working")
+        return False
+
+    def _journal_degraded(self, note: dict[str, Any]) -> None:
+        """Best-effort degraded-mode note into the protection journal."""
+        try:
+            from ...core import jsonl
+            from ...core.time import now_iso
+
+            jsonl.append(self.paths.journal("protection"), {
+                "kind": "protection_degraded",
+                "ts": now_iso(),
+                "position_id": self.run.position_id,
+                "protection_id": self.run.protection_id,
+                **note,
+            })
+        except Exception:  # pragma: no cover - journaling is best effort
+            log.exception("failed to journal protection degraded note")
 
     def _live_mark_price(self, rule) -> float:
         """Best-effort live mark from the venue.

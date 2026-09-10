@@ -11,7 +11,10 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
-from typing import Any, Iterable, Mapping
+import logging
+import math
+import uuid
+from typing import Any, Callable, Iterable, Mapping
 
 from ..llm.attempt_budget import AttemptBudget, DEFAULT_EXTRA_ATTEMPT_LIMIT
 from ..llm.messages import MessagesResponse
@@ -24,6 +27,11 @@ from ..tools.types import (
     ToolResultPart,
 )
 from .transcript_blocks import BlockEnvelope
+from .loop_contracts import LoopConfig, LoopOutcome
+from .runtime import ContinuationUnavailable
+from ..tools.approval_contracts import APPROVAL_PENDING_REASON
+
+_LOG = logging.getLogger(__name__)
 
 
 def provider_tool_name(tool: Any) -> str:
@@ -631,6 +639,110 @@ class LoopRunState:
             original_user_text=original_user_text,
             usage=LoopUsage(context_window=max(0, int(context_window or 0))),
             attempt_budget=AttemptBudget(limit=attempt_limit),
+        )
+
+    @classmethod
+    def begin(
+        cls,
+        *,
+        config: LoopConfig,
+        user_message: str | list[dict[str, Any]],
+        original_user_text: str,
+        now: float,
+        turn_id: str | None = None,
+        prior_messages: list[dict[str, Any]] | None = None,
+        checkpoint: TurnCheckpoint | Mapping[str, Any] | None = None,
+        continuation_feedback: str = "",
+        max_wall_seconds: float | None = None,
+    ) -> "LoopRunState":
+        """Create or resume one turn. New limits can tighten, never extend, a checkpoint."""
+        explicit_id = str(turn_id or "").strip() or str(config.turn_id or "").strip()
+        budget = config.max_wall_seconds if max_wall_seconds is None else max_wall_seconds
+        if budget is not None and (not math.isfinite(float(budget)) or float(budget) < 0):
+            raise ValueError("max_wall_seconds must be finite and non-negative, or None")
+        deadline = None if budget is None else now + float(budget)
+        if checkpoint is None:
+            state = cls.new(
+                turn_id=explicit_id or uuid.uuid4().hex[:12],
+                message_id=uuid.uuid4().hex[:12],
+                deadline_epoch=deadline,
+                original_user_text=original_user_text,
+                context_window=int(config.model_context_window or 0),
+                attempt_limit=int(config.max_extra_llm_attempts_per_turn),
+            )
+            for prior in prior_messages or []:
+                if not isinstance(prior, dict) or prior.get("role") not in {"user", "assistant"}:
+                    continue
+                content = prior.get("content")
+                if (isinstance(content, str) and content.strip()) or (isinstance(content, list) and content):
+                    state.transcript.append({"role": prior["role"], "content": deepcopy(content)})
+            state.transcript.append({"role": "user", "content": deepcopy(user_message)})
+            return state
+
+        cp = checkpoint if isinstance(checkpoint, TurnCheckpoint) else TurnCheckpoint.from_dict(checkpoint)
+        if not cp.resumable:
+            raise ContinuationUnavailable(
+                cp.resume_block_reason or "stateful_continuation_unavailable",
+                feedback=continuation_feedback,
+            )
+        if explicit_id and cp.turn_id and explicit_id != cp.turn_id:
+            raise ValueError(f"turn checkpoint mismatch: requested={explicit_id!r} checkpoint={cp.turn_id!r}")
+        state = cls.from_checkpoint(cp)
+        state.turn_id = state.turn_id or explicit_id or uuid.uuid4().hex[:12]
+        state.message_id = state.message_id or uuid.uuid4().hex[:12]
+        if deadline is not None:
+            state.deadline_epoch = min(state.deadline_epoch, deadline) if state.deadline_epoch is not None else deadline
+        state.attempt_budget.constrain(int(config.max_extra_llm_attempts_per_turn))
+        state.original_user_text = state.original_user_text or original_user_text
+        state.prepare_continuation(continuation_feedback)
+        return state
+
+    def emit(
+        self, role: str, payload: dict[str, Any], *,
+        sink: Callable[[BlockEnvelope], None] | None = None,
+    ) -> None:
+        """The state owns sequence numbers, including events after continuation."""
+        self.seq += 1
+        envelope = BlockEnvelope(
+            seq=self.seq, turn_id=self.turn_id, message_id=self.message_id,
+            role=role, block=payload,
+        )
+        self.blocks.append(envelope)
+        if sink is not None:
+            try:
+                sink(envelope)
+            except Exception:
+                _LOG.exception("event_sink failed")
+
+    def outcome(self, *, config: LoopConfig, aborted: bool, now: float) -> LoopOutcome:
+        """Project a terminal state once, with unchanged usage and replay protection."""
+        if aborted:
+            blocked = self.aborted_reason or self.stop_reason or "aborted"
+        elif self.stop_reason == APPROVAL_PENDING_REASON:
+            blocked = APPROVAL_PENDING_REASON
+        elif self.iterations >= config.max_iterations:
+            blocked = "max_iterations"
+        elif self.deadline_epoch is not None and now >= self.deadline_epoch:
+            blocked = "runtime_wall_time_exceeded"
+        else:
+            blocked = ""
+        return LoopOutcome(
+            transcript=self.transcript,
+            iterations=self.iterations,
+            stop_reason=self.stop_reason,
+            transition_reason=self.transition_reason,
+            final_text=self.final_text,
+            tool_calls=self.total_tool_calls,
+            error_count=self.error_count,
+            aborted=aborted,
+            abort_reason=self.aborted_reason,
+            blocks=self.blocks,
+            steer_messages=self.steer_message_count,
+            extra_llm_attempts=self.attempt_budget.used,
+            extra_llm_attempt_limit=self.attempt_budget.limit,
+            extra_llm_attempts_by_reason=dict(self.attempt_budget.by_reason),
+            checkpoint=self.to_checkpoint(resumable=not blocked, resume_block_reason=blocked),
+            **self.usage.outcome_kwargs(),
         )
 
     @classmethod

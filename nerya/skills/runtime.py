@@ -17,7 +17,6 @@ from ..core.ids import skill_call_id
 from ..core.time import now_iso
 from .flow import run_flow
 from .registry import SkillRegistry, SkillEntry
-from .permissions import manifest_permissions
 from .schema import SkillSchemaError, validate_payload
 
 
@@ -217,7 +216,7 @@ class SkillRuntime:
         # context, persist the original to ``state/tool_results/`` and
         # replace the in-memory result with a reference card. Skills can
         # opt out by declaring ``no_overflow_spool`` in their tags; the
-        # threshold is governed by ``agent.harness.result_overflow_threshold_bytes``
+        # threshold is governed by ``agent.native.result_overflow_threshold_bytes``
         # (set to 0 to disable globally).
         result, overflow_ref = _maybe_spool_oversized(
             result,
@@ -298,12 +297,10 @@ def _caller_kind(caller: str) -> str:
 # --------------------------------------------------------- result overflow
 def _result_overflow_threshold(config: Config) -> int:
     """Return the configured threshold in bytes (0 disables spooling)."""
-    try:
-        harness_cfg = (config.data or {}).get("agent", {}).get("harness", {}) or {}
-        threshold = int(harness_cfg.get("result_overflow_threshold_bytes", 65_536))
-    except Exception:
-        threshold = 65_536
-    return max(0, threshold)
+    threshold = int(config.get("agent.native.result_overflow_threshold_bytes", 65_536))
+    if threshold < 0:
+        raise ValueError("result_overflow_threshold_bytes must be non-negative")
+    return threshold
 
 
 def _maybe_spool_oversized(

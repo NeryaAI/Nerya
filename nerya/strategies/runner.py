@@ -37,6 +37,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import logging
+import os
 import sys
 import threading
 import time
@@ -44,6 +45,7 @@ import traceback
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from ..core import jsonl
@@ -109,6 +111,39 @@ def _metadata_from_return(raw: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _pop_strategy_package_modules(root: Path, before: frozenset[str]) -> None:
+    """Drop ``sys.modules`` entries newly created inside ``root``.
+
+    Package-local helper imports (``import helpers``) cache bare names
+    in the global module table. If left there, the *second* strategy
+    shipping ``helpers.py`` would silently receive the first strategy's
+    cached module (cross-wired indicators, wrong signals), and a
+    validator smoke import would keep a module alive pointing into a
+    deleted temp dir. We diff the module table around the exec and pop
+    every new module whose file resolves inside the strategy package
+    root. Well-behaved single-file packages add nothing, so their
+    behaviour is unchanged.
+    """
+
+    try:
+        root_resolved = root.resolve()
+    except OSError:  # pragma: no cover — defensive
+        return
+    for name in list(sys.modules):
+        if name in before:
+            continue
+        module = sys.modules.get(name)
+        origin = getattr(getattr(module, "__spec__", None), "origin", None)
+        origin = origin or getattr(module, "__file__", None)
+        if not origin:
+            continue
+        try:
+            if Path(origin).resolve().is_relative_to(root_resolved):
+                sys.modules.pop(name, None)
+        except OSError:  # pragma: no cover — defensive
+            continue
+
+
 class StrategyTimeoutError(StrategyRuntimeError):
     """Raised when a strategy's ``run`` exceeds ``policy.max_run_seconds``."""
 
@@ -146,8 +181,16 @@ def _run_with_timeout(
     fn: Callable[[], Any],
     *,
     seconds: float,
+    on_timeout: Optional[Callable[[], None]] = None,
 ) -> Any:
-    """Run ``fn`` in a worker thread with a wall-clock deadline."""
+    """Run ``fn`` in a worker thread with a wall-clock deadline.
+
+    CPython cannot hard-kill a thread, so on timeout the worker keeps
+    running. ``on_timeout`` runs *before* the raise so callers can arm
+    their fail-closed flags (see :class:`StrategyRunDeadline`) — the
+    zombie thread then refuses any late money-moving or state-write
+    side effects instead of completing them.
+    """
 
     if seconds <= 0:
         return fn()
@@ -164,10 +207,79 @@ def _run_with_timeout(
     t.start()
     t.join(timeout=float(seconds))
     if t.is_alive():
+        if on_timeout is not None:
+            try:
+                on_timeout()
+            except Exception:  # pragma: no cover — flag must never mask the raise
+                _LOG.exception("timeout flag callback failed")
         raise StrategyTimeoutError(f"strategy exceeded max_run_seconds={seconds}")
     if "exc" in box:
         raise box["exc"]
     return box.get("result")
+
+
+# ---------------------------------------------------------------------------
+# Per-strategy tick lock (cross-process)
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _strategy_tick_lock(path: Path) -> Iterator[bool]:
+    """Try to acquire the per-strategy cross-process tick lock.
+
+    Same ``fcntl``/``msvcrt`` non-blocking pattern as the cron
+    scheduler's workspace lock. Cron beats, POST ``/ticks``, native-tool
+    runs and SDK calls can all target the same strategy concurrently;
+    the cron lock only serialises cron beats, so without this guard
+    concurrent ticks of one strategy raced on ``state/state.json`` and
+    produced duplicate intents. The lock file lives in the strategy's
+    state dir, so every entry path shares one lock per strategy — cron
+    and manual ticks exclude each other.
+
+    Yields ``True`` when acquired, ``False`` when another tick (in this
+    or another process) holds the lock.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = path.open("a+b")
+    acquired = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
+            except OSError:
+                fh.close()
+                yield False
+                return
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                fh.close()
+                yield False
+                return
+        yield True
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                fh.close()
 
 
 # ---------------------------------------------------------------------------
@@ -273,48 +385,18 @@ class StrategyRunner:
         started_at = now_iso()
         t0 = time.monotonic()
 
-        kill = StrategyKillSwitch(self.config.paths, strategy_id).get()
-        if kill.asserted:
-            return self._finalize_record(
-                package=package,
-                run_id=rid,
-                session_id=sid,
-                started_at=started_at,
-                t0=t0,
-                inputs=StrategyRunInputs(
-                    mode=mode,
-                    package_hash=package.content_hash,
-                    trigger_event_id=trigger_event_id,
-                    trigger_payload=dict(trigger_payload or {}),
-                    operator=operator,
-                    note=note,
-                ),
-                result=StrategyResult.hold(
-                    reason=f"kill_switch: {kill.reason}",
-                    metadata={"kill_switch": kill.asdict()},
-                ),
-                audit_events=[],
-                error=None,
-                llm_calls=0,
-                subagent_calls=0,
-            )
-
-        # Load-time static gate. The promotion pipeline already runs the
-        # full validator, but the runner is the last line of defence: a
-        # package whose code trips a static *blocker* (forbidden import,
-        # dangerous builtin, env access) shares this interpreter with the
-        # vault and the connector registry, so live mode refuses to
-        # execute it at all. Paper/shadow log a warning so operators can
-        # fix the package before promotion.
-        static_blockers = self._static_scan_blockers(package)
-        if static_blockers:
-            enforce = mode == "live" or bool(
-                self.config.get("trading.strategy_static_check.enforce_all_modes", False)
-            )
-            if enforce:
-                summary = "; ".join(
-                    f"{b.get('code')}@{b.get('where')}" for b in static_blockers[:5]
-                )
+        # Per-strategy cross-process tick lock (same fcntl/msvcrt pattern
+        # as the cron scheduler's workspace lock). Cron ticks, POST
+        # /ticks, native-tool runs and SDK calls can all target the same
+        # strategy concurrently; the cron lock only serialises cron
+        # beats, so without this guard concurrent ticks raced on
+        # state/state.json and produced duplicate intents. The lock file
+        # lives in the strategy's state dir, so every entry path — cron
+        # and manual — shares ONE lock per strategy. Non-blocking: a
+        # concurrent tick returns a ``tick_in_progress`` skip record
+        # instead of queueing behind the running one.
+        with _strategy_tick_lock(package.state_dir / "tick.lock") as tick_acquired:
+            if not tick_acquired:
                 return self._finalize_record(
                     package=package,
                     run_id=rid,
@@ -329,108 +411,177 @@ class StrategyRunner:
                         operator=operator,
                         note=note,
                     ),
-                    result=StrategyResult.error(
-                        message=f"static check blockers: {summary}",
-                        kind="strategy_static_check_failed",
-                        metadata={"static_blockers": static_blockers},
+                    result=StrategyResult.hold(
+                        reason=(
+                            f"tick_in_progress: another tick of {strategy_id} "
+                            f"is still running; this tick was skipped, not queued"
+                        ),
+                        metadata={"tick_in_progress": True},
                     ),
                     audit_events=[],
-                    error={
-                        "kind": "strategy_static_check_failed",
-                        "message": summary,
-                        "blockers": static_blockers,
-                    },
+                    error=None,
                     llm_calls=0,
                     subagent_calls=0,
                 )
-            _LOG.warning(
-                "strategy %s has %d static blocker(s) (mode=%s, not enforced): %s",
-                strategy_id,
-                len(static_blockers),
-                mode,
-                "; ".join(str(b.get("code")) for b in static_blockers[:5]),
+
+            kill = StrategyKillSwitch(self.config.paths, strategy_id).get()
+            if kill.asserted:
+                return self._finalize_record(
+                    package=package,
+                    run_id=rid,
+                    session_id=sid,
+                    started_at=started_at,
+                    t0=t0,
+                    inputs=StrategyRunInputs(
+                        mode=mode,
+                        package_hash=package.content_hash,
+                        trigger_event_id=trigger_event_id,
+                        trigger_payload=dict(trigger_payload or {}),
+                        operator=operator,
+                        note=note,
+                    ),
+                    result=StrategyResult.hold(
+                        reason=f"kill_switch: {kill.reason}",
+                        metadata={"kill_switch": kill.asdict()},
+                    ),
+                    audit_events=[],
+                    error=None,
+                    llm_calls=0,
+                    subagent_calls=0,
+                )
+
+            # Load-time static gate. The promotion pipeline already runs the
+            # full validator, but the runner is the last line of defence: a
+            # package whose code trips a static *blocker* (forbidden import,
+            # dangerous builtin, env access) shares this interpreter with the
+            # vault and the connector registry, so live mode refuses to
+            # execute it at all. Paper/shadow log a warning so operators can
+            # fix the package before promotion.
+            static_blockers = self._static_scan_blockers(package)
+            if static_blockers:
+                enforce = mode == "live" or bool(
+                    self.config.get("trading.strategy_static_check.enforce_all_modes", False)
+                )
+                if enforce:
+                    summary = "; ".join(
+                        f"{b.get('code')}@{b.get('where')}" for b in static_blockers[:5]
+                    )
+                    return self._finalize_record(
+                        package=package,
+                        run_id=rid,
+                        session_id=sid,
+                        started_at=started_at,
+                        t0=t0,
+                        inputs=StrategyRunInputs(
+                            mode=mode,
+                            package_hash=package.content_hash,
+                            trigger_event_id=trigger_event_id,
+                            trigger_payload=dict(trigger_payload or {}),
+                            operator=operator,
+                            note=note,
+                        ),
+                        result=StrategyResult.error(
+                            message=f"static check blockers: {summary}",
+                            kind="strategy_static_check_failed",
+                            metadata={"static_blockers": static_blockers},
+                        ),
+                        audit_events=[],
+                        error={
+                            "kind": "strategy_static_check_failed",
+                            "message": summary,
+                            "blockers": static_blockers,
+                        },
+                        llm_calls=0,
+                        subagent_calls=0,
+                    )
+                _LOG.warning(
+                    "strategy %s has %d static blocker(s) (mode=%s, not enforced): %s",
+                    strategy_id,
+                    len(static_blockers),
+                    mode,
+                    "; ".join(str(b.get("code")) for b in static_blockers[:5]),
+                )
+
+            ctx = build_strategy_context(
+                config=self.config,
+                package=package,
+                skills=self.skills,
+                run_id=rid,
+                session_id=sid,
+                news_fetchers=self.news_fetchers,
+                clock=clock,
+                connector_registry=self.connector_registry,
+                tool_registry=self.tool_registry,
+                executor=self.executor,
+                trigger_payload=trigger_payload,
+                trigger_event_id=trigger_event_id,
+                execution_mode=mode,
             )
 
-        ctx = build_strategy_context(
-            config=self.config,
-            package=package,
-            skills=self.skills,
-            run_id=rid,
-            session_id=sid,
-            news_fetchers=self.news_fetchers,
-            clock=clock,
-            connector_registry=self.connector_registry,
-            tool_registry=self.tool_registry,
-            executor=self.executor,
-            trigger_payload=trigger_payload,
-            trigger_event_id=trigger_event_id,
-            execution_mode=mode,
-        )
-
-        ctx.audit.log(
-            "tick.start",
-            {
-                "trigger_event_id": trigger_event_id,
-                "mode": mode,
-                "package_hash": package.content_hash,
-                "operator": operator,
-                "note": note,
-            },
-        )
-
-        result, error = self._invoke_entrypoint(
-            package=package,
-            ctx=ctx,
-            max_run_seconds=manifest.policy.max_run_seconds,
-        )
-
-        # In ``shadow`` mode, demote any submitted intent to a
-        # bookkeeping result. The trading kernel itself doesn't know
-        # about strategy modes — the runner is the only place we can
-        # enforce "shadow runs don't fill orders".
-        if mode == "shadow" and result.status == StrategyResultStatus.SUBMITTED:
             ctx.audit.log(
-                "shadow.demoted",
-                {"original_intent": dict(result.intent or {})},
-            )
-            result = StrategyResult.ok(
-                reason="shadow mode — intent recorded but not executed",
-                metadata={
-                    "shadow": True,
-                    "original_intent": dict(result.intent or {}),
-                    "original_status": result.status.value,
+                "tick.start",
+                {
+                    "trigger_event_id": trigger_event_id,
+                    "mode": mode,
+                    "package_hash": package.content_hash,
+                    "operator": operator,
+                    "note": note,
                 },
             )
 
-        ctx.audit.log(
-            "tick.end",
-            {
-                "status": result.status.value,
-                "llm_calls": ctx.llm.calls_made,
-            },
-            level="error" if error is not None else "info",
-        )
+            result, error = self._invoke_entrypoint(
+                package=package,
+                ctx=ctx,
+                max_run_seconds=manifest.policy.max_run_seconds,
+            )
 
-        return self._finalize_record(
-            package=package,
-            run_id=rid,
-            session_id=sid,
-            started_at=started_at,
-            t0=t0,
-            inputs=StrategyRunInputs(
-                mode=mode,
-                package_hash=package.content_hash,
-                trigger_event_id=trigger_event_id,
-                trigger_payload=dict(trigger_payload or {}),
-                operator=operator,
-                note=note,
-            ),
-            result=result,
-            audit_events=ctx.audit.events(),
-            error=error,
-            llm_calls=ctx.llm.calls_made,
-            subagent_calls=self._count_subagent_calls(ctx.audit.events()),
-        )
+            # In ``shadow`` mode, demote any submitted intent to a
+            # bookkeeping result. The trading kernel itself doesn't know
+            # about strategy modes — the runner is the only place we can
+            # enforce "shadow runs don't fill orders".
+            if mode == "shadow" and result.status == StrategyResultStatus.SUBMITTED:
+                ctx.audit.log(
+                    "shadow.demoted",
+                    {"original_intent": dict(result.intent or {})},
+                )
+                result = StrategyResult.ok(
+                    reason="shadow mode — intent recorded but not executed",
+                    metadata={
+                        "shadow": True,
+                        "original_intent": dict(result.intent or {}),
+                        "original_status": result.status.value,
+                    },
+                )
+
+            ctx.audit.log(
+                "tick.end",
+                {
+                    "status": result.status.value,
+                    "llm_calls": ctx.llm.calls_made,
+                },
+                level="error" if error is not None else "info",
+            )
+
+            return self._finalize_record(
+                package=package,
+                run_id=rid,
+                session_id=sid,
+                started_at=started_at,
+                t0=t0,
+                inputs=StrategyRunInputs(
+                    mode=mode,
+                    package_hash=package.content_hash,
+                    trigger_event_id=trigger_event_id,
+                    trigger_payload=dict(trigger_payload or {}),
+                    operator=operator,
+                    note=note,
+                ),
+                result=result,
+                audit_events=ctx.audit.events(),
+                error=error,
+                llm_calls=ctx.llm.calls_made,
+                subagent_calls=self._count_subagent_calls(ctx.audit.events()),
+            )
 
     # ------------------------------------------------------------------
     # Internals
@@ -507,9 +658,23 @@ class StrategyRunner:
         def _call() -> Any:
             return entry(ctx)
 
+        def _arm_deadline() -> None:
+            # Arm the fail-closed flag BEFORE we surface the timeout so
+            # the (unkillable) zombie worker refuses late orders and
+            # state writes. Runs twice on the timeout path — once from
+            # _run_with_timeout pre-raise, once here (idempotent).
+            deadline = getattr(ctx, "run_deadline", None)
+            if deadline is not None:
+                deadline.trigger(f"max_run_seconds={max_run_seconds}")
+
         try:
-            raw = _run_with_timeout(_call, seconds=float(max_run_seconds or 0))
+            raw = _run_with_timeout(
+                _call,
+                seconds=float(max_run_seconds or 0),
+                on_timeout=_arm_deadline,
+            )
         except StrategyTimeoutError as exc:
+            _arm_deadline()
             ctx.audit.log("entrypoint.timeout", {"error": str(exc)}, level="error")
             return (
                 StrategyResult.error(
@@ -672,6 +837,7 @@ class StrategyRunner:
         if sys_path_inserted:
             sys.path.insert(0, added_path)
         sys.modules[module_name] = module
+        modules_before = frozenset(sys.modules)
         try:
             spec.loader.exec_module(module)
         finally:
@@ -682,6 +848,10 @@ class StrategyRunner:
                     pass
             # Drop cache entry — next run rebuilds with the new content.
             sys.modules.pop(module_name, None)
+            # Also drop package-local helper modules (``import helpers``)
+            # the exec pulled in, so two strategies never share one
+            # cached ``helpers`` module.
+            _pop_strategy_package_modules(package.root, modules_before)
 
         entry = getattr(module, manifest.entrypoint_func, None)
         if entry is None:
@@ -770,12 +940,10 @@ class StrategyRunner:
     def _count_subagent_calls(events: list[dict[str, Any]]) -> int:
         """Count subagent invocations recorded in the audit log."""
 
-        # Strategies invoke subagents through ctx.subagents which the
-        # dispatcher writes into the global agent journal. We don't
-        # have a direct counter on the facade, so we fall back to
-        # parsing the strategy audit log if the strategy code logged
-        # explicit ``subagent.run`` events. Otherwise return 0; the
-        # global journal is the authoritative count.
+        # ctx.subagents emits one ``strategy.subagent.run`` audit event
+        # per dispatch (payload: name / duration_ms / ok), so counting
+        # those rows reflects this run's invocations. The global agent
+        # journal remains the authoritative spend record.
         return sum(1 for e in events if e.get("kind") == "strategy.subagent.run")
 
     def _mirror_history(self, record: StrategyRunRecord) -> None:

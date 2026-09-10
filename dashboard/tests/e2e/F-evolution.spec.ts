@@ -5,28 +5,28 @@
 import { test, expect } from "./fixtures";
 
 test.describe("F — Self-evolution", () => {
-  test("F1 — reflect produces learning_update proposal, no mutation", async ({
+  test("F1 — reflect collects evidence without inventing a learning proposal", async ({
     api,
   }) => {
     const before = await api.get<{ proposals: { id: string }[] }>(
       "/evolution/proposals?kind=learning_update&limit=20",
     );
     const beforeIds = new Set((before.proposals ?? []).map((p) => p.id));
-    await api.post("/evolution/reflect", { window_days: 7 });
+    const result = await api.post<{
+      proposal: null;
+      reflection: { ok: boolean; evidence_sha256: string; snapshot_ref: string };
+    }>("/evolution/reflect", {});
+    expect(result.proposal).toBeNull();
+    expect(result.reflection.ok).toBe(true);
+    expect(result.reflection.evidence_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.reflection.snapshot_ref).toMatch(/^file:evolution\/reflections\//);
     const after = await api.get<{ proposals: { id: string }[] }>(
       "/evolution/proposals?kind=learning_update&limit=20",
     );
     const newOnes = (after.proposals ?? []).filter(
       (p) => !beforeIds.has(p.id),
     );
-    expect(newOnes.length).toBeGreaterThan(0);
-    // Every new proposal must be pending_review (not auto-applied)
-    for (const p of newOnes) {
-      const detail = await api.get<{ proposal: { state?: string } }>(
-        `/evolution/proposals/${p.id}`,
-      );
-      expect(detail.proposal?.state ?? "").toMatch(/pending|draft|review/);
-    }
+    expect(newOnes).toHaveLength(0);
   });
 
   test("F4 — skill scaffolding lands in pending, never live", async ({

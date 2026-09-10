@@ -1,38 +1,15 @@
-"""scenario replay for historical sessions.
+"""Descriptive historical filtering, not a counterfactual execution simulator.
 
-Session replay (``nerya.workspace.replay``) answers:
-
-    "what actually happened?"
-
-Scenario replay answers:
-
-    "what would have happened if the knobs had been different?"
-
-This module is intentionally a *counterfactual projection* — it does
-not re-execute connectors or re-run the LLM. It walks the ledger rows
-already captured by the session writer and applies pure-Python
-re-evaluation rules to show how many intents would have passed under
-alternative thresholds, limits, or execution parameters. The output
-is a structured ``ScenarioReport`` so the operator-facing surface can
-render diffs without reading raw journals.
-
-Scope guardrails:
-
-* Inputs are pure data: no network, no filesystem mutation.
-* Overrides must be explicit (``risk_limits``, ``confidence_threshold``,
-  ``slippage_bps_cap`` …); there is no silent defaulting.
-* Truth envelope fields (``source``, ``mode``, ``note``) are carried
-  forward so the operator knows this is counterfactual analysis, not
-  a new real run.
+Changing risk limits or removing fills changes future exposure and available
+liquidity. Ledger filtering cannot estimate that counterfactual profit.
 """
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ..core.paths import WorkspacePaths
-from . import store
+from .attribution import _number, attribute_session
 
 
 @dataclass
@@ -41,16 +18,22 @@ class ScenarioOverrides:
     slippage_bps_cap: float | None = None
     latency_ms_cap: float | None = None
     daily_loss_cap_usd: float | None = None
-    min_fill_score: float | None = None
+
+    def __post_init__(self) -> None:
+        for name, raw in asdict(self).items():
+            if raw is None:
+                continue
+            value = _number(raw)
+            if value is None:
+                raise ValueError(f"{name} must be finite")
+            if name == "confidence_threshold" and not 0 <= value <= 1:
+                raise ValueError("confidence_threshold must be between zero and one")
+            if name in {"latency_ms_cap", "daily_loss_cap_usd"} and value < 0:
+                raise ValueError(f"{name} must be non-negative")
+            setattr(self, name, value)
 
     def asdict(self) -> dict[str, Any]:
-        return {
-            "confidence_threshold": self.confidence_threshold,
-            "slippage_bps_cap": self.slippage_bps_cap,
-            "latency_ms_cap": self.latency_ms_cap,
-            "daily_loss_cap_usd": self.daily_loss_cap_usd,
-            "min_fill_score": self.min_fill_score,
-        }
+        return asdict(self)
 
 
 @dataclass
@@ -63,198 +46,63 @@ class ScenarioReport:
     deltas: dict[str, Any] = field(default_factory=dict)
     dropped: list[dict[str, Any]] = field(default_factory=list)
     note: str = (
-        "Counterfactual projection only; connector/LLM calls were NOT replayed."
+        "Historical row filtering only. Missing measurements cannot pass a filter. "
+        "No counterfactual trading, latency, risk-limit execution or market simulation was run; "
+        "filtered counts do not establish achievable profit or an improved strategy."
     )
 
     def asdict(self) -> dict[str, Any]:
-        return {
-            "strategy_id": self.strategy_id,
-            "session_id": self.session_id,
-            "overrides": self.overrides.asdict(),
-            "baseline": dict(self.baseline),
-            "projection": dict(self.projection),
-            "deltas": dict(self.deltas),
-            "dropped": list(self.dropped),
-            "note": self.note,
-        }
+        return asdict(self)
 
 
-def _scoped(paths: WorkspacePaths, sid: str, session_id: str,
-            ledger: str) -> list[dict[str, Any]]:
-    return [r for r in store.read_ledger(paths, sid, ledger)
-            if r.get("session_id") == session_id]
-
-
-def _fnum(row: dict[str, Any], *keys: str) -> float | None:
-    for k in keys:
-        if k in row and row[k] is not None:
-            try:
-                return float(row[k])
-            except (TypeError, ValueError):
-                pass
-        nested = row.get("fill") or row.get("intent") or row.get("pnl") or {}
-        if isinstance(nested, dict) and k in nested and nested[k] is not None:
-            try:
-                return float(nested[k])
-            except (TypeError, ValueError):
-                pass
-    return None
-
-
-def scenario_replay(paths: WorkspacePaths, strategy_id: str, session_id: str,
-                    *, overrides: ScenarioOverrides | dict[str, Any] | None = None,
-                    ) -> ScenarioReport:
-    """Project alternative outcomes for one historical session.
-
-    The function works in three steps:
-
-    1. Load the session's intents, risk decisions, fills and pnl rows.
-    2. Compute the *baseline* counts and PnL from those rows.
-    3. Apply each non-``None`` override in turn. Rows that no longer
-       satisfy the override are moved to :attr:`ScenarioReport.dropped`
-       with a human-readable reason.
-    """
+def scenario_replay(paths: WorkspacePaths, strategy_id: str, session_id: str, *,
+                    overrides: ScenarioOverrides | dict[str, Any] | None = None) -> ScenarioReport:
     if overrides is None:
-        ov = ScenarioOverrides()
+        policy = ScenarioOverrides()
     elif isinstance(overrides, dict):
-        ov = ScenarioOverrides(**{k: overrides.get(k)
-                                  for k in ScenarioOverrides.__dataclass_fields__})
+        policy = ScenarioOverrides(**overrides)  # Unknown/retired knobs are errors, not ignored.
+    elif isinstance(overrides, ScenarioOverrides):
+        policy = overrides
     else:
-        ov = overrides
-
-    intents = _scoped(paths, strategy_id, session_id, "intents")
-    risks   = _scoped(paths, strategy_id, session_id, "risk")
-    fills   = _scoped(paths, strategy_id, session_id, "fills")
-    pnls    = _scoped(paths, strategy_id, session_id, "pnl")
-
-    def _pnl(rows):
-        return sum(float((r.get("pnl") or {}).get(
-            "realized_usd", (r.get("pnl") or {}).get("realized_pnl_usd", 0.0)) or 0.0)
-                   for r in rows)
-
+        raise TypeError("overrides must be a mapping or ScenarioOverrides")
+    bundle = attribute_session(paths, strategy_id, session_id)
+    intents, fills, risks = (bundle.evidence[name] for name in ("intents", "fills", "risk"))
     baseline = {
-        "intents": len(intents),
-        "risk_rejects": sum(1 for r in risks
-                            if (r.get("risk_decision") or {}).get("decision") == "reject"
-                            or r.get("decision") == "reject"),
-        "fills": len(fills),
-        "pnl_usd": round(_pnl(pnls), 4),
+        "intents": len(intents), "fills": len(fills), "pnl_usd": bundle.pnl_usd,
+        "risk_rejects": sum((row.get("risk_decision") or {}).get("decision") == "reject" for row in risks),
     }
+    dropped = []
 
-    dropped: list[dict[str, Any]] = []
-
-    kept_intents = intents
-    if ov.confidence_threshold is not None:
-        next_kept = []
-        for i in kept_intents:
-            conf = (i.get("confidence")
-                    or (i.get("intent") or {}).get("confidence"))
-            try:
-                c = float(conf) if conf is not None else 0.0
-            except (TypeError, ValueError):
-                c = 0.0
-            if c >= ov.confidence_threshold:
-                next_kept.append(i)
+    def select(rows: list[dict[str, Any]], kind: str, key: str, limit: float | None,
+               *, minimum: bool = False) -> list[dict[str, Any]]:
+        if limit is None:
+            return rows
+        kept = []
+        for row in rows:
+            nested = row.get(kind) if isinstance(row.get(kind), dict) else {}
+            value = _number(row.get(key, nested.get(key)))
+            if value is not None and (value >= limit if minimum else value <= limit):
+                kept.append(row)
             else:
                 dropped.append({
-                    "kind": "intent",
-                    "reason": "confidence_below_override",
-                    "override": ov.confidence_threshold,
-                    "observed": c,
-                    "ts": i.get("ts"),
+                    "kind": kind, "reason": f"missing_{key}" if value is None else f"{key}_outside_override",
+                    "override": limit, "observed": value, "ts": row.get("ts"),
                 })
-        kept_intents = next_kept
+        return kept
 
-    kept_fills = fills
-    if ov.slippage_bps_cap is not None:
-        nxt = []
-        for f in kept_fills:
-            s = _fnum(f, "slippage_bps") or 0.0
-            if s <= ov.slippage_bps_cap:
-                nxt.append(f)
-            else:
-                dropped.append({
-                    "kind": "fill",
-                    "reason": "slippage_above_cap",
-                    "override": ov.slippage_bps_cap,
-                    "observed": s,
-                    "ts": f.get("ts"),
-                })
-        kept_fills = nxt
-    if ov.latency_ms_cap is not None:
-        nxt = []
-        for f in kept_fills:
-            l = _fnum(f, "latency_ms") or 0.0
-            if l <= ov.latency_ms_cap:
-                nxt.append(f)
-            else:
-                dropped.append({
-                    "kind": "fill",
-                    "reason": "latency_above_cap",
-                    "override": ov.latency_ms_cap,
-                    "observed": l,
-                    "ts": f.get("ts"),
-                })
-        kept_fills = nxt
-    if ov.min_fill_score is not None:
-        nxt = []
-        for f in kept_fills:
-            s = _fnum(f, "slippage_bps") or 0.0
-            l = _fnum(f, "latency_ms") or 0.0
-            score = max(0.0,
-                        1.0 - min(s / 100.0, 1.0) * 0.6
-                        - min(l / 5000.0, 1.0) * 0.4)
-            if score >= ov.min_fill_score:
-                nxt.append(f)
-            else:
-                dropped.append({
-                    "kind": "fill",
-                    "reason": "fill_score_below_override",
-                    "override": ov.min_fill_score,
-                    "observed": round(score, 3),
-                    "ts": f.get("ts"),
-                })
-        kept_fills = nxt
-
-    kept_fill_oids = {
-        (f.get("order_id") or (f.get("fill") or {}).get("order_id"))
-        for f in kept_fills
-    }
-    projected_pnls = [
-        p for p in pnls
-        if (p.get("order_id") or (p.get("pnl") or {}).get("order_id")) in kept_fill_oids
-    ] if kept_fill_oids else pnls
-
-    projected_pnl = round(_pnl(projected_pnls), 4)
-
-    if ov.daily_loss_cap_usd is not None and projected_pnl < -abs(ov.daily_loss_cap_usd):
-        dropped.append({
-            "kind": "session",
-            "reason": "daily_loss_cap_hit",
-            "override": ov.daily_loss_cap_usd,
-            "observed": projected_pnl,
-        })
-        projected_pnl = -abs(ov.daily_loss_cap_usd)
-
+    kept_intents = select(intents, "intent", "confidence", policy.confidence_threshold, minimum=True)
+    kept_fills = select(fills, "fill", "slippage_bps", policy.slippage_bps_cap)
+    kept_fills = select(kept_fills, "fill", "latency_ms", policy.latency_ms_cap)
+    changed = any(value is not None for value in policy.asdict().values())
     projection = {
-        "intents": len(kept_intents),
-        "fills": len(kept_fills),
-        "pnl_usd": projected_pnl,
-    }
-    deltas = {
-        "intents": projection["intents"] - baseline["intents"],
-        "fills": projection["fills"] - baseline["fills"],
-        "pnl_usd": round(projection["pnl_usd"] - baseline["pnl_usd"], 4),
+        "status": "counterfactual_not_simulated" if changed else "historical_baseline",
+        "intents": len(kept_intents), "fills": len(kept_fills),
+        "pnl_usd": None if changed else bundle.pnl_usd,
+        "risk_replay_required": policy.daily_loss_cap_usd is not None,
     }
     return ScenarioReport(
-        strategy_id=strategy_id,
-        session_id=session_id,
-        overrides=ov,
-        baseline=baseline,
-        projection=projection,
-        deltas=deltas,
+        strategy_id, session_id, policy, baseline=baseline, projection=projection,
+        deltas={"intents": len(kept_intents) - len(intents), "fills": len(kept_fills) - len(fills),
+                "pnl_usd": None if changed or bundle.pnl_usd is None else 0.0},
         dropped=dropped,
     )
-
-
-__all__ = ["ScenarioOverrides", "ScenarioReport", "scenario_replay"]

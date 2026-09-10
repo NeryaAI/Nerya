@@ -1058,6 +1058,7 @@ def _optimizer_report_digest(audit: dict[str, Any]) -> dict[str, Any] | None:
         {
             "candidate_id": row.get("candidate_id"),
             "index": row.get("index"),
+            "selection_eligible": row.get("selection_eligible"),
             "score": row.get("score"),
             "status": row.get("status"),
             "summary": row.get("summary"),
@@ -1089,6 +1090,8 @@ def _optimizer_report_digest(audit: dict[str, Any]) -> dict[str, Any] | None:
         "version": report.get("version"),
         "candidate_count": report.get("candidate_count"),
         "evaluated_count": report.get("evaluated_count"),
+        "eligible_count": report.get("eligible_count"),
+        "selection_status": report.get("selection_status"),
         "truncated": bool(report.get("truncated")),
         "selected_candidate_id": report.get("selected_candidate_id"),
         "selected_index": report.get("selected_index"),

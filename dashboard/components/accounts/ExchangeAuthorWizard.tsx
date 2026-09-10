@@ -189,7 +189,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                 value={venueId}
                 onChange={(e) => setVenueId(e.target.value.toLowerCase())}
                 placeholder={mode === "ccxt" ? "kraken" : "my_dex"}
-                className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 font-mono text-ink-100"
+                className="input-dark font-mono"
               />
             </Field>
             <Field label={t("labelField")}>
@@ -197,7 +197,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
                 placeholder="Kraken Spot"
-                className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100"
+                className="input-dark"
               />
             </Field>
           </div>
@@ -237,7 +237,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                     value={installHint}
                     onChange={(e) => setInstallHint(e.target.value)}
                     placeholder="pip install foo"
-                    className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+                    className="input-dark font-mono"
                   />
                 </Field>
               </div>
@@ -247,7 +247,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
                     placeholder="https://api.example.com"
-                    className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+                    className="input-dark font-mono"
                   />
                 </Field>
                 <Field label={t("docsUrlLabel")}>
@@ -255,7 +255,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
                     value={docsUrl}
                     onChange={(e) => setDocsUrl(e.target.value)}
                     placeholder="https://docs.example.com"
-                    className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+                    className="input-dark font-mono"
                   />
                 </Field>
               </div>
@@ -274,7 +274,7 @@ export function ExchangeAuthorWizard({ onApproved }: { onApproved?: (venueId: st
               onChange={(e) => setNotes(e.target.value)}
               rows={2}
               placeholder={t("notesPlaceholder")}
-              className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
+              className="input-dark"
             />
           </Field>
 

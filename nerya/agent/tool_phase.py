@@ -18,12 +18,20 @@ runtimes.
 from __future__ import annotations
 
 import json
+import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from ..core.redaction import redact_text
 from ..tools.orchestrator import BatchResult, ToolOrchestrator
+from ..tools.execution_contracts import (
+    execution_unknown_result as _execution_unknown_result,
+    is_read_only_tool as _tool_name_is_read_only,
+    pair_executed_results as _pair_executed_results,
+)
 from ..tools.registry import ToolRegistry
+from .loop_state import LoopRunState
 from ..tools.result_contracts import (
     compacted_kept_data,
     parse_json_text,
@@ -31,7 +39,6 @@ from ..tools.result_contracts import (
     tool_json_data,
 )
 from ..tools.types import (
-    RiskLevel,
     ToolCall,
     ToolError,
     ToolErrorKind,
@@ -40,7 +47,7 @@ from ..tools.types import (
 
 
 ToolArgumentsForName = Callable[[str], dict[str, Any]]
-
+_LOG = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ToolCallBuildContext:
@@ -60,26 +67,20 @@ class ToolCallBuildContext:
     contract_arguments_for_tool: ToolArgumentsForName | None = None
 
 
-@dataclass
-class ToolBatchState:
-    """Mutable turn ledger consumed and updated by :class:`ToolBatchPhase`."""
+@dataclass(frozen=True)
+class ToolBatchPolicy:
+    """Per-iteration capability/budget snapshot, separate from the one turn ledger."""
 
-    allowed_tool_names: set[str]
-    provider_tool_names: set[str]
-    required_next_tool_names: set[str]
-    attempted_tool_names: set[str]
-    successful_tool_names: set[str]
-    completed_tool_results: list[ToolResult]
-    tool_result_by_fingerprint: dict[str, ToolResult]
-    recent_tool_fingerprints: list[str]
-    deduped_counts_by_fingerprint: dict[str, int]
-    checkpointed_fingerprints: set[str] = field(default_factory=set)
-    total_tool_calls: int = 0
-    error_count: int = 0
+    allowed_tool_names: frozenset[str]
+    provider_tool_names: frozenset[str]
     max_total_calls: int | None = None
     repeated_tool_window: int = 5
     repeated_tool_threshold: int = 3
     repeated_tool_stop_after: int = 2
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "allowed_tool_names", frozenset(self.allowed_tool_names))
+        object.__setattr__(self, "provider_tool_names", frozenset(self.provider_tool_names))
 
 
 @dataclass(frozen=True)
@@ -373,15 +374,6 @@ def _unadvertised_result(
     )
 
 
-def _tool_name_is_read_only(name: str, registry: ToolRegistry) -> bool:
-    descriptor = registry.find(name)
-    return bool(
-        descriptor is not None
-        and descriptor.read_only
-        and descriptor.risk == RiskLevel.READ
-    )
-
-
 class ToolBatchPhase:
     """Execute one provider-emitted batch and update the supplied turn ledger."""
 
@@ -398,42 +390,47 @@ class ToolBatchPhase:
         self,
         calls: list[ToolCall],
         *,
-        state: ToolBatchState,
+        state: LoopRunState,
+        policy: ToolBatchPolicy,
     ) -> ToolBatchEffects:
-        for call in calls:
-            if call.name:
-                state.attempted_tool_names.add(call.name)
-
+        # Identity is a protocol precondition, not a recoverable execution guess.
+        id_counts = Counter(call.id for call in calls)
+        if any(not call_id or count != 1 for call_id, count in id_counts.items()):
+            raise ValueError("tool call ids must be non-empty and unique within a batch")
+        required_before_batch = set(state.required_next_tool_names)
+        state.attempted_tool_names.update(call.name for call in calls if call.name)
         prepared_results: list[ToolResult | None] = [None] * len(calls)
         executable_calls: list[ToolCall] = []
         executable_indices: list[int] = []
+        pending_writes: dict[str, int] = {}
+        duplicate_writes: dict[int, int] = {}
         repeated_loop_abort = False
         batch_budget_calls = 0
 
         for index, call in enumerate(calls):
             if (
-                state.max_total_calls is not None
+                policy.max_total_calls is not None
                 and state.total_tool_calls + batch_budget_calls
-                >= state.max_total_calls
+                >= policy.max_total_calls
             ):
                 prepared_results[index] = _budget_result(
                     call,
-                    limit=state.max_total_calls,
+                    limit=policy.max_total_calls,
                     used=state.total_tool_calls + batch_budget_calls,
                 )
                 continue
             batch_budget_calls += 1
-            if call.name not in state.allowed_tool_names:
+            if call.name not in policy.allowed_tool_names:
                 prepared_results[index] = _unadvertised_result(
                     call,
-                    allowed_tool_names=state.allowed_tool_names,
+                    allowed_tool_names=policy.allowed_tool_names,
                 )
                 continue
             fingerprint = tool_call_fingerprint(call)
             prior_result = state.tool_result_by_fingerprint.get(fingerprint)
             repeat_count = (
                 state.recent_tool_fingerprints[
-                    -max(1, state.repeated_tool_window):
+                    -max(1, policy.repeated_tool_window):
                 ].count(fingerprint)
                 + 1
             )
@@ -443,7 +440,7 @@ class ToolBatchPhase:
             )
             if prior_result is not None and (
                 checkpoint_replay_is_unsafe
-                or repeat_count >= max(2, state.repeated_tool_threshold)
+                or repeat_count >= max(2, policy.repeated_tool_threshold)
             ):
                 prepared_results[index] = deduped_tool_loop_result(
                     call,
@@ -454,19 +451,41 @@ class ToolBatchPhase:
                     state.deduped_counts_by_fingerprint.get(fingerprint, 0) + 1
                 )
                 state.deduped_counts_by_fingerprint[fingerprint] = deduped_count
-                if deduped_count >= max(1, state.repeated_tool_stop_after):
+                if deduped_count >= max(1, policy.repeated_tool_stop_after):
                     repeated_loop_abort = True
                 continue
+            if not _tool_name_is_read_only(call.name, self.registry):
+                if fingerprint in pending_writes:
+                    duplicate_writes[index] = pending_writes[fingerprint]
+                    continue
+                pending_writes[fingerprint] = index
             executable_calls.append(call)
             executable_indices.append(index)
 
-        executed_batch = (
-            self.orchestrator.run_batch(executable_calls)
-            if executable_calls
-            else BatchResult()
-        )
-        for index, result in zip(executable_indices, executed_batch.results):
+        try:
+            executed_batch = (
+                self.orchestrator.run_batch(executable_calls)
+                if executable_calls else BatchResult()
+            )
+            paired_results = _pair_executed_results(executable_calls, executed_batch.results)
+        except Exception:
+            _LOG.exception("tool executor failed after dispatch; effects may be incomplete")
+            executed_batch = BatchResult()
+            paired_results = [
+                _execution_unknown_result(call, "executor raised after dispatch")
+                for call in executable_calls
+            ]
+        for index, result in zip(executable_indices, paired_results):
             prepared_results[index] = result
+            if result.error and result.error.detail.get("execution_state") == "unknown":
+                state.checkpointed_fingerprints.add(tool_call_fingerprint(calls[index]))
+        for index, first_index in duplicate_writes.items():
+            prior = prepared_results[first_index]
+            assert prior is not None
+            prepared_results[index] = deduped_tool_loop_result(
+                calls[index], prior, repeat_count=2,
+            )
+        assert all(result is not None for result in prepared_results)
         batch_results = [result for result in prepared_results if result is not None]
         batch = BatchResult(
             results=batch_results,
@@ -480,7 +499,7 @@ class ToolBatchPhase:
         state.completed_tool_results.extend(batch.results)
         required_next_from_results = extract_next_required_tools(
             batch.results,
-            provider_tool_names=state.provider_tool_names,
+            provider_tool_names=policy.provider_tool_names,
         )
         state.required_next_tool_names.update(required_next_from_results)
         self_required_next_tools = {
@@ -504,6 +523,10 @@ class ToolBatchPhase:
         completed_required_action_names: set[str] = set()
 
         for call, result in zip(calls, batch.results):
+            is_deduped = bool(result.error and result.error.kind == ToolErrorKind.DEDUPED)
+            if result.name and result.is_error and not is_deduped:
+                state.successful_tool_names.discard(result.name)
+                semantic_success_names.discard(result.name)
             if result.name and not result.is_error:
                 semantic_success = result_counts_as_success(result)
                 if result.name in self_required_next_tools or not semantic_success:
@@ -520,16 +543,17 @@ class ToolBatchPhase:
 
             fingerprint = tool_call_fingerprint(call)
             state.recent_tool_fingerprints.append(fingerprint)
-            max_recent = max(max(1, state.repeated_tool_window) * 3, 12)
+            max_recent = max(1, policy.repeated_tool_window)
             if len(state.recent_tool_fingerprints) > max_recent:
                 del state.recent_tool_fingerprints[:-max_recent]
-            if not (
-                result.is_error
-                and result.error is not None
-                and result.error.kind == ToolErrorKind.DEDUPED
-            ):
+            if not is_deduped:
                 state.tool_result_by_fingerprint[fingerprint] = result
 
+        semantic_success_names.intersection_update(state.successful_tool_names)
+        completed_required_action_names.intersection_update(state.successful_tool_names)
+        state.required_next_tool_names.update(
+            (required_before_batch | required_next_from_results) - state.successful_tool_names
+        )
         if completed_required_action_names:
             for pending_name in list(state.required_next_tool_names):
                 if _tool_name_is_read_only(pending_name, self.registry):
@@ -551,7 +575,7 @@ class ToolBatchPhase:
 __all__ = [
     "ToolBatchEffects",
     "ToolBatchPhase",
-    "ToolBatchState",
+    "ToolBatchPolicy",
     "ToolCallBuildContext",
     "build_tool_calls",
     "deduped_tool_loop_result",

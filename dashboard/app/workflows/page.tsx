@@ -9,11 +9,12 @@ import {
   Empty,
   ErrorBanner,
   Json,
-  Kpi,
   PageBody,
   PageHeader,
   Pill,
 } from "../../components/Page";
+import { Select } from "../../components/Select";
+import { SwitchControl } from "../../components/SwitchControl";
 import { SectionTabs } from "../../components/SectionTabs";
 import {
   PauseIcon,
@@ -30,7 +31,12 @@ import {
   formatTsShort,
 } from "../../lib/format";
 import { clientApi } from "../../lib/clientApi";
-import type { TriggerRoute, TriggerSchedule } from "../../lib/clientApi";
+import type {
+  TriggerDeliveryTarget,
+  TriggerRoute,
+  TriggerSchedule,
+} from "../../lib/clientApi";
+import { useCadenceHint } from "../../lib/useStrategyLifecycle";
 
 type ScheduleKind = "agent" | "script" | "trigger";
 type CadenceKind = "cron" | "interval";
@@ -61,6 +67,9 @@ type ScheduleDraft = {
   deliveryPlatform: string;
   deliveryChannel: string;
   deliveryUrl: string;
+  /** Targets beyond the first, kept verbatim as a JSON array so an
+      edit-save cycle never silently drops them (P0 data-loss fix). */
+  extraDeliveryJson: string;
   ttlSeconds: string;
 };
 
@@ -90,6 +99,7 @@ function blankDraft(): ScheduleDraft {
     deliveryPlatform: "telegram",
     deliveryChannel: "telegram",
     deliveryUrl: "",
+    extraDeliveryJson: "",
     ttlSeconds: "",
   };
 }
@@ -169,10 +179,20 @@ function statusTone(schedule: TriggerSchedule): "ok" | "brand" | "warn" {
   return schedule.last_fired_ts ? "ok" : "warn";
 }
 
+/** Single source of truth for status colors: list dots and detail pills
+ * both derive from statusTone() so one state never renders two colors.
+ * Token classes only (bg-ok / bg-warn), no raw emerald/amber. */
+const STATUS_DOT_CLASS: Record<"ok" | "brand" | "warn", string> = {
+  ok: "bg-ok",
+  brand: "bg-brand-300",
+  warn: "bg-warn",
+};
+
 function buildDraftFromSchedule(schedule: TriggerSchedule): ScheduleDraft {
   const kind = scheduleKind(schedule);
   const payload = schedule.payload || {};
-  const firstDelivery = (schedule.delivery_targets || [])[0] || null;
+  const allTargets = schedule.delivery_targets || [];
+  const firstDelivery = allTargets[0] || null;
   const deliveryKind = firstDelivery
     ? String(firstDelivery.kind || "none") === "webhook"
       ? "webhook"
@@ -216,6 +236,8 @@ function buildDraftFromSchedule(schedule: TriggerSchedule): ScheduleDraft {
     deliveryPlatform: String(firstDelivery?.platform || firstDelivery?.channel || "telegram"),
     deliveryChannel: String(firstDelivery?.channel || firstDelivery?.platform || "telegram"),
     deliveryUrl: String(firstDelivery?.url || ""),
+    extraDeliveryJson:
+      allTargets.length > 1 ? JSON.stringify(allTargets.slice(1), null, 2) : "",
     ttlSeconds: schedule.session_ttl_seconds == null ? "" : String(schedule.session_ttl_seconds),
   };
 }
@@ -307,18 +329,56 @@ function buildSchedulePayload(draft: ScheduleDraft): TriggerSchedule {
 }
 
 function buildDeliveryTargets(draft: ScheduleDraft): NonNullable<TriggerSchedule["delivery_targets"]> {
-  if (draft.deliveryKind === "none") return [];
+  const extras = parseDeliveryExtras(draft.extraDeliveryJson);
+  const primary: TriggerDeliveryTarget[] = [];
   if (draft.deliveryKind === "webhook") {
     const url = draft.deliveryUrl.trim();
     if (!url) throw new Error("webhook URL is required");
-    return [{ kind: "webhook", url }];
-  }
-  if (draft.deliveryKind === "messages") {
+    primary.push({ kind: "webhook", url });
+  } else if (draft.deliveryKind === "messages") {
     const channel = draft.deliveryChannel.trim() || "ops";
-    return [{ kind: "messages", channel }];
+    primary.push({ kind: "messages", channel });
+  } else if (draft.deliveryKind === "gateway") {
+    const platform = draft.deliveryPlatform.trim() || draft.deliveryChannel.trim() || "telegram";
+    primary.push({ kind: "gateway", platform, channel: draft.deliveryChannel.trim() || platform });
   }
-  const platform = draft.deliveryPlatform.trim() || draft.deliveryChannel.trim() || "telegram";
-  return [{ kind: "gateway", platform, channel: draft.deliveryChannel.trim() || platform }];
+  // Primary target first, then every pre-existing target carried through
+  // untouched — an edit never shrinks the target list behind the user's back.
+  return [...primary, ...extras];
+}
+
+function parseDeliveryExtras(text: string): TriggerDeliveryTarget[] {
+  const raw = text.trim();
+  if (!raw) return [];
+  const value = JSON.parse(raw) as unknown;
+  if (!Array.isArray(value)) {
+    throw new Error("extra delivery targets must be a JSON array");
+  }
+  return value as TriggerDeliveryTarget[];
+}
+
+/** Translated inline error for the extra-delivery-targets JSON field. */
+function deliveryExtrasError(text: string, t: Translate): string | null {
+  const raw = text.trim();
+  if (!raw) return null;
+  try {
+    if (!Array.isArray(JSON.parse(raw))) return t("errDeliveryExtraArray");
+    return null;
+  } catch {
+    return t("errJsonInvalid");
+  }
+}
+
+/** Translated inline error for a JSON textarea; empty input is valid. */
+function jsonFieldError(text: string, t: Translate): string | null {
+  const raw = text.trim();
+  if (!raw) return null;
+  try {
+    JSON.parse(raw);
+    return null;
+  } catch {
+    return t("errJsonInvalid");
+  }
 }
 
 export default function WorkflowsPage() {
@@ -527,13 +587,13 @@ export default function WorkflowsPage() {
     }
   }
 
-  const filters: { id: ScheduleFilter; label: string }[] = [
-    { id: "all", label: t("filterAll") },
-    { id: "agent", label: t("kindAgent") },
-    { id: "script", label: t("kindScript") },
-    { id: "trigger", label: t("kindTrigger") },
-    { id: "active", label: t("active") },
-    { id: "paused", label: t("paused") },
+  const filters: { id: ScheduleFilter; label: string; count: number }[] = [
+    { id: "all", label: t("filterAll"), count: counts.total },
+    { id: "agent", label: t("kindAgent"), count: counts.agent },
+    { id: "script", label: t("kindScript"), count: counts.script },
+    { id: "trigger", label: t("kindTrigger"), count: counts.trigger },
+    { id: "active", label: t("active"), count: counts.active },
+    { id: "paused", label: t("paused"), count: counts.paused },
   ];
 
   return (
@@ -575,14 +635,6 @@ export default function WorkflowsPage() {
         />
         <SectionTabs section="strategy" />
 
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-          <Kpi inline label={t("kpiTotal")} value={counts.total} />
-          <Kpi inline label={t("kpiActive")} value={counts.active} tone="ok" />
-          <Kpi inline label={t("kpiAgent")} value={counts.agent} tone="brand" />
-          <Kpi inline label={t("kpiScript")} value={counts.script} tone="warn" />
-          <Kpi inline label={t("kpiRoutes")} value={routes.length} />
-        </div>
-
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(360px,0.95fr)_minmax(0,1.35fr)]">
           <Card
             title={t("schedulesTitle")}
@@ -610,6 +662,7 @@ export default function WorkflowsPage() {
                   <button
                     key={item.id}
                     type="button"
+                    aria-pressed={filter === item.id}
                     onClick={() => setFilter(item.id)}
                     className={[
                       "rounded-md border px-2.5 py-1 text-[12px] transition",
@@ -619,13 +672,18 @@ export default function WorkflowsPage() {
                     ].join(" ")}
                   >
                     {item.label}
+                    <span className="ml-1 tabular-nums text-ink-500">{item.count}</span>
                   </button>
                 ))}
               </div>
             </div>
 
             {loading && !rows.length ? (
-              <div className="p-4 text-[12px] text-ink-500">{t("loadingEllipsis")}</div>
+              <div className="space-y-2 p-3">
+                {[0, 1, 2, 3].map((i) => (
+                  <div key={i} className="skeleton h-10" />
+                ))}
+              </div>
             ) : filteredRows.length === 0 ? (
               <Empty label={t("noSchedules")} />
             ) : (
@@ -677,11 +735,15 @@ export default function WorkflowsPage() {
 
             <Card
               title={t("routesTitle")}
-              description={t("routesDesc")}
+              description={`${t("routesDesc")} · ${t("routesCount", { count: routes.length })}`}
               padded={false}
             >
               {loading && routes.length === 0 ? (
-                <div className="p-4 text-[12px] text-ink-500">{t("loadingEllipsis")}</div>
+                <div className="space-y-2 p-3">
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="skeleton h-9" />
+                  ))}
+                </div>
               ) : routes.length === 0 ? (
                 <Empty label={t("noRoutes")} />
               ) : (
@@ -727,6 +789,8 @@ function ScheduleListItem({
   const paused = isPaused(schedule);
   const kind = scheduleKind(schedule);
   const cadenceLabel = useCadenceLabel();
+  const tone = statusTone(schedule);
+  const nextRun = formatTsShort(schedule.next_due_at ?? undefined);
   const t = useTranslations("workflows");
   return (
     <li
@@ -737,15 +801,11 @@ function ScheduleListItem({
     >
       <button type="button" onClick={onSelect} className="block w-full min-w-0 text-left">
         <div className="flex min-w-0 items-center gap-2">
-          <span
-            className={`h-2 w-2 shrink-0 rounded-full ${
-              paused ? "bg-ink-500" : kind === "script" ? "bg-amber-400" : kind === "agent" ? "bg-brand-300" : "bg-emerald-400"
-            }`}
-          />
+          <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT_CLASS[tone]}`} />
           <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">
             {titleFor(schedule)}
           </span>
-          <Pill tone={paused ? "brand" : "ok"}>{paused ? t("paused") : t("active")}</Pill>
+          <Pill tone={tone}>{paused ? t("paused") : t("active")}</Pill>
         </div>
         <div className="mt-1 flex min-w-0 items-center gap-2 text-[10.5px] text-ink-500">
           <span className="font-mono truncate">{schedule.id}</span>
@@ -753,6 +813,12 @@ function ScheduleListItem({
           <span className="shrink-0">{cadenceLabel(schedule)}</span>
           <span>·</span>
           <span className="shrink-0">{kind}</span>
+          {nextRun !== "–" ? (
+            <>
+              <span>·</span>
+              <span className="shrink-0">{nextRun}</span>
+            </>
+          ) : null}
         </div>
       </button>
       <div className="mt-2 flex items-center gap-1">
@@ -838,7 +904,7 @@ function ScheduleDetail({
           </button>
           <button
             type="button"
-            className="btn-ghost text-xs text-rose-300"
+            className="btn-ghost text-xs text-danger"
             disabled={busy === `delete:${schedule.id}`}
             onClick={onDelete}
           >
@@ -853,6 +919,7 @@ function ScheduleDetail({
         <Metric label={t("metricCadence")} value={cadenceLabel(schedule)} />
         <Metric label={t("metricTimezone")} value={schedule.timezone || "-"} mono />
         <Metric label={t("metricLastRun")} value={formatTsShort(schedule.last_fired_ts ?? undefined)} />
+        <Metric label={t("metricNextRun")} value={formatTsShort(schedule.next_due_at ?? undefined)} />
         <Metric label={t("metricTarget")} value={schedule.target || "-"} mono />
         <Metric label={t("metricDelivery")} value={deliverySummary(schedule)} mono />
         <Metric label={t("metricSession")} value={schedule.session_mode || "-"} mono />
@@ -903,6 +970,41 @@ function ScheduleEditor({
   onSave: () => void;
 }) {
   const patch = (next: Partial<ScheduleDraft>) => onChange({ ...draft, ...next });
+  const cadenceHint = useCadenceHint();
+
+  // Live, per-field validation — errors render under their input instead
+  // of only surfacing as a save-time toast (Save still re-validates).
+  const cronError =
+    draft.cadence === "cron" && !draft.cron.trim() ? t("errCronRequired") : null;
+  const intervalSeconds = Number(draft.everySeconds);
+  const intervalError =
+    draft.cadence === "interval" && (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0)
+      ? t("errIntervalInvalid")
+      : null;
+  // Human cadence preview from the shared useCadenceHint hook.
+  const cadencePreview =
+    draft.cadence === "cron"
+      ? cadenceHint(draft.cron.trim() || null, null)
+      : cadenceHint(null, Number.isFinite(intervalSeconds) && intervalSeconds > 0 ? intervalSeconds : null);
+  // describeCron returns null both for invalid input and for valid but
+  // uncovered shapes (day-of-week lists etc.); only 5-field-shaped input
+  // counts as "valid but undescribed", anything else gets a warning.
+  const cronUnparseable =
+    draft.cadence === "cron" &&
+    !cronError &&
+    !cadencePreview &&
+    draft.cron.trim().split(/\s+/).length !== 5
+      ? t("errCronUnparseable")
+      : null;
+  const extraDeliveryError = deliveryExtrasError(draft.extraDeliveryJson, t);
+  const extraDeliveryCount = (() => {
+    try {
+      return parseDeliveryExtras(draft.extraDeliveryJson).length;
+    } catch {
+      return 0;
+    }
+  })();
+
   return (
     <Card
       title={mode === "create" ? t("createTitle") : t("editTitle")}
@@ -966,16 +1068,21 @@ function ScheduleEditor({
             />
           </Field>
           <Field label={t("fieldCadence")}>
-            <select
-              className="input-dark text-xs"
+            <Select<CadenceKind>
               value={draft.cadence}
-              onChange={(e) => patch({ cadence: e.target.value as CadenceKind })}
-            >
-              <option value="cron">{t("cadenceCron")}</option>
-              <option value="interval">{t("cadenceInterval")}</option>
-            </select>
+              onChange={(value) => patch({ cadence: value })}
+              options={[
+                { value: "cron", label: t("cadenceCron") },
+                { value: "interval", label: t("cadenceInterval") },
+              ]}
+              size="sm"
+              ariaLabel={t("fieldCadence")}
+            />
           </Field>
-          <Field label={draft.cadence === "cron" ? t("fieldCron") : t("fieldEverySeconds")}>
+          <Field
+            label={draft.cadence === "cron" ? t("fieldCron") : t("fieldEverySeconds")}
+            error={cronError ?? intervalError ?? cronUnparseable}
+          >
             <input
               className="input-dark font-mono text-xs"
               value={draft.cadence === "cron" ? draft.cron : draft.everySeconds}
@@ -985,6 +1092,9 @@ function ScheduleEditor({
                   : patch({ everySeconds: e.target.value })
               }
             />
+            {cadencePreview ? (
+              <span className="mt-1 block text-[11px] text-ink-400">{cadencePreview}</span>
+            ) : null}
           </Field>
           <Field label={t("fieldTimezone")}>
             <input
@@ -1009,7 +1119,10 @@ function ScheduleEditor({
           <ScriptFields draft={draft} patch={patch} t={t} />
         ) : null}
         {draft.sessionKind === "trigger" ? (
-          <Field label={t("fieldPayload")}>
+          <Field
+            label={t("fieldPayload")}
+            error={jsonFieldError(draft.triggerPayloadJson, t)}
+          >
             <textarea
               className="input-dark min-h-[160px] w-full font-mono text-xs"
               value={draft.triggerPayloadJson}
@@ -1020,16 +1133,18 @@ function ScheduleEditor({
 
         <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
           <Field label={t("fieldDeliveryKind")}>
-            <select
-              className="input-dark text-xs"
+            <Select<DeliveryKind>
               value={draft.deliveryKind}
-              onChange={(e) => patch({ deliveryKind: e.target.value as DeliveryKind })}
-            >
-              <option value="none">{t("deliveryNone")}</option>
-              <option value="gateway">{t("deliveryGateway")}</option>
-              <option value="messages">{t("deliveryMessages")}</option>
-              <option value="webhook">{t("deliveryWebhook")}</option>
-            </select>
+              onChange={(value) => patch({ deliveryKind: value })}
+              options={[
+                { value: "none", label: t("deliveryNone") },
+                { value: "gateway", label: t("deliveryGateway") },
+                { value: "messages", label: t("deliveryMessages") },
+                { value: "webhook", label: t("deliveryWebhook") },
+              ]}
+              size="sm"
+              ariaLabel={t("fieldDeliveryKind")}
+            />
           </Field>
           {draft.deliveryKind === "gateway" ? (
             <Field label={t("fieldDeliveryPlatform")}>
@@ -1060,14 +1175,49 @@ function ScheduleEditor({
           ) : null}
         </div>
 
-        <label className="flex items-center gap-2 text-[12px] text-ink-300">
-          <input
-            type="checkbox"
+        {/* Targets beyond the first one, loaded verbatim from the schedule
+            and written back untouched — editing must never drop them. */}
+        <Field
+          label={t("fieldDeliveryExtra")}
+          error={extraDeliveryError}
+        >
+          <textarea
+            className="input-dark min-h-[72px] w-full font-mono text-xs"
+            value={draft.extraDeliveryJson}
+            placeholder="[]"
+            onChange={(e) => patch({ extraDeliveryJson: e.target.value })}
+          />
+          {extraDeliveryError ? null : extraDeliveryCount > 0 ? (
+            <span className="mt-1 block text-[11px] text-ink-500">
+              {t("deliveryExtraCount", { count: extraDeliveryCount })}
+            </span>
+          ) : null}
+        </Field>
+
+        <Advanced title={t("advancedTitle")} defaultOpen={false}>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <Field label={t("fieldTtl")}>
+              <input
+                type="number"
+                min={0}
+                className="input-dark font-mono text-xs"
+                value={draft.ttlSeconds}
+                placeholder="86400"
+                onChange={(e) => patch({ ttlSeconds: e.target.value })}
+              />
+            </Field>
+          </div>
+        </Advanced>
+
+        <div className="flex items-center gap-2 text-[12px] text-ink-300">
+          <SwitchControl
             checked={draft.enabled}
-            onChange={(e) => patch({ enabled: e.target.checked })}
+            onCheckedChange={(checked) => patch({ enabled: checked })}
+            label={t("fieldEnabled")}
+            size="sm"
           />
           {t("fieldEnabled")}
-        </label>
+        </div>
       </div>
     </Card>
   );
@@ -1086,15 +1236,17 @@ function AgentFields({
     <div className="space-y-3">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <Field label={t("fieldSessionMode")}>
-          <select
-            className="input-dark text-xs"
+          <Select<ScheduleDraft["sessionMode"]>
             value={draft.sessionMode}
-            onChange={(e) => patch({ sessionMode: e.target.value as ScheduleDraft["sessionMode"] })}
-          >
-            <option value="ephemeral">{t("sessionEphemeral")}</option>
-            <option value="reuse">{t("sessionReuse")}</option>
-            <option value="fanout">{t("sessionFanout")}</option>
-          </select>
+            onChange={(value) => patch({ sessionMode: value })}
+            options={[
+              { value: "ephemeral", label: t("sessionEphemeral") },
+              { value: "reuse", label: t("sessionReuse") },
+              { value: "fanout", label: t("sessionFanout") },
+            ]}
+            size="sm"
+            ariaLabel={t("fieldSessionMode")}
+          />
         </Field>
         {draft.sessionMode === "reuse" ? (
           <Field label={t("fieldSessionId")}>
@@ -1138,7 +1290,10 @@ function AgentFields({
           />
         </Field>
       </div>
-      <Field label={t("fieldPayloadExtra")}>
+      <Field
+        label={t("fieldPayloadExtra")}
+        error={jsonFieldError(draft.triggerPayloadJson, t)}
+      >
         <textarea
           className="input-dark min-h-[120px] w-full font-mono text-xs"
           value={draft.triggerPayloadJson}
@@ -1167,7 +1322,7 @@ function ScriptFields({
           onChange={(e) => patch({ scriptId: e.target.value })}
         />
       </Field>
-      <Field label={t("scriptArgs")}>
+      <Field label={t("scriptArgs")} error={jsonFieldError(draft.scriptArgsJson, t)}>
         <textarea
           className="input-dark min-h-[120px] w-full font-mono text-xs"
           value={draft.scriptArgsJson}
@@ -1184,7 +1339,7 @@ function RouteListItem({ route, t }: { route: TriggerRoute; t: Translate }) {
   return (
     <li className="border-b border-brand-500/5 px-3 py-2.5 last:border-b-0">
       <div className="flex min-w-0 items-center gap-2">
-        <span className={`h-2 w-2 rounded-full ${route.paused ? "bg-ink-500" : "bg-emerald-500"}`} />
+        <span className={`h-2 w-2 shrink-0 rounded-full ${route.paused ? "bg-ink-500" : "bg-ok"}`} />
         <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">
           {route.title || route.id}
         </span>
@@ -1199,11 +1354,20 @@ function RouteListItem({ route, t }: { route: TriggerRoute; t: Translate }) {
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({
+  label,
+  error,
+  children,
+}: {
+  label: string;
+  error?: string | null;
+  children: ReactNode;
+}) {
   return (
     <label className="block min-w-0 text-[12px] text-ink-400">
       <span className="mb-1 block text-ink-300">{label}</span>
       {children}
+      {error ? <span className="mt-1 block text-[11px] text-danger">{error}</span> : null}
     </label>
   );
 }

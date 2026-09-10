@@ -1,0 +1,19 @@
+[Unit]
+Description=Cloudflare Tunnel for finch-nerya.rickopc.com
+After=network-online.target nerya.service
+Wants=network-online.target
+Requires=nerya.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate --config /etc/cloudflared/finch-nerya.yml tunnel run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/cloudflared
+
+[Install]
+WantedBy=multi-user.target

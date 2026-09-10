@@ -85,7 +85,7 @@ function Cell({ value }: { value: unknown }) {
   }
   if (typeof value === "boolean") {
     return (
-      <span className={value ? "text-emerald-300" : "text-rose-300"}>
+      <span className={value ? "text-accent-300" : "text-danger"}>
         {value ? "true" : "false"}
       </span>
     );

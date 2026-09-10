@@ -37,9 +37,11 @@ export function SummaryCards({
 }
 
 function toneClass(tone: string): string {
-  if (tone === "positive") return "text-emerald-500";
-  if (tone === "negative") return "text-rose-500";
-  if (tone === "warning") return "text-amber-500";
+  // Token colors (ok/danger/warn) instead of raw emerald/rose/amber so
+  // the "positive/negative" language matches the rest of the console.
+  if (tone === "positive") return "text-ok";
+  if (tone === "negative") return "text-danger";
+  if (tone === "warning") return "text-warn";
   return "text-[color:var(--text-base)]";
 }
 

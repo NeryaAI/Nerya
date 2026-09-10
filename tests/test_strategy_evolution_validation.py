@@ -23,7 +23,6 @@ from nerya.evolution.validation_plan import (
     run_validation_plan,
     write_validation_plan,
 )
-from nerya.llm.gateway import LLMCall
 from nerya.strategies.package import load_package
 from nerya.strategies.evolution import (
     StrategyEvolutionRunner,
@@ -1985,36 +1984,18 @@ def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatc
         registry = FakeRegistry()
 
     class FakeLLM:
-        def call(self, **kwargs):  # noqa: ANN201
-            assert "Tune alpha with small patches only." in kwargs["prompt"]
-            assert "prefer fewer false positives" in kwargs["prompt"]
-            assert "Strategy tuning materialization contract" in kwargs["prompt"]
-            assert "after_content" in kwargs["prompt"]
-            assert "config_after" in kwargs["prompt"]
-            assert "materializable_output_contract" in kwargs["prompt"]
-            return LLMCall(
-                tier="high",
-                task=kwargs["task"],
-                caller=kwargs["caller"],
-                tokens=17,
-                usd=0.001,
-                raw=(
-                    '{"summary":"tighten signal filter",'
-                    '"proposed_changes":[{"file":"main.py","kind":"code_patch","rationale":"reduce noise"}],'
-                    '"validation_plan":["manual_review"],'
-                    '"done":true}'
-                ),
-                parsed={
-                    "summary": "tighten signal filter",
-                    "proposed_changes": [
-                        {"file": "main.py", "kind": "code_patch", "rationale": "reduce noise"}
-                    ],
-                    "validation_plan": ["manual_review"],
-                    "done": True,
-                },
-                provider="fake",
-                model="fake-model",
-            )
+        def call_messages(self, **kwargs):
+            from nerya.llm.messages import MessagesResponse
+            prompt = str(kwargs["messages"])
+            for expected in ("Tune alpha with small patches only.", "prefer fewer false positives",
+                "Strategy tuning materialization contract", "after_content", "config_after", "materializable_output_contract"):
+                assert expected in prompt
+            return MessagesResponse(content=[{"type": "text", "text": json.dumps({
+                "summary": "tighten signal filter",
+                "proposed_changes": [{"file": "main.py", "kind": "code_patch", "rationale": "reduce noise"}],
+                "validation_plan": ["manual_review"], "done": True,
+            })}], stop_reason="end_turn", usage={"input_tokens": 10, "output_tokens": 7},
+                usd_cost=0.001, provider="fake", model="fake-model")
 
     original_runtime_run = SubAgentRuntime.run
 
@@ -2024,6 +2005,7 @@ def test_strategy_tuning_persists_prompt_audit_and_timeline(tmp_path, monkeypatc
             skills=self.skills,
             llm=FakeLLM(),
             tool_registry=self.tool_registry,
+            tool_executor=self.tool_executor,
         )
         return original_runtime_run(runtime, spec, **kwargs)
 

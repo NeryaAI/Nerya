@@ -224,7 +224,7 @@ export function StrategyTuningCard({
           <button
             onClick={() => void runNow(false)}
             disabled={busy !== null}
-            className="bg-brand-500/80 hover:bg-brand-500 text-white text-xs rounded px-3 py-1.5"
+            className="btn btn-primary text-xs"
           >
             {busy === "tuning:run" ? t("running") : t("runTuner")}
           </button>
@@ -320,7 +320,7 @@ export function StrategyTuningCard({
             <button
               onClick={() => void generateProposal()}
               disabled={busy !== null}
-              className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-50 text-white text-xs rounded px-3 py-1.5"
+              className="btn btn-primary text-xs"
             >
               {busy === "tuning:generate" ? t("submitting") : t("submitProposal")}
             </button>

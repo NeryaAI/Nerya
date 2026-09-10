@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +33,7 @@ GENERATED_PROJECTION_MARKER = (
 
 
 class MemoryProjection:
-    """Rebuild JSONL and Markdown compatibility files from SQLite."""
+    """Rebuild owned human-readable Markdown from SQLite, never import it."""
 
     def __init__(self, config: Config, store: MemoryStore) -> None:
         self.config = config
@@ -42,7 +41,7 @@ class MemoryProjection:
 
     def sync(self, *, actor_id: str) -> bool:
         owner_actor = str(
-            self.config.get("memory.legacy_owner_actor", "default") or "default"
+            self.config.get("memory.projection_actor", "default") or "default"
         ).strip()
         if not owner_actor or actor_id != owner_actor:
             return False
@@ -50,36 +49,8 @@ class MemoryProjection:
         with _file_lock(lock_path):
             records = self.store.projection_records(actor_id=actor_id)
             active = [record for record in records if record.status == "active"]
-            self._write_jsonl(active)
             self._write_markdown(records, active)
         return True
-
-    def _write_jsonl(self, records: list[MemoryRecord]) -> None:
-        rows = []
-        for record in records:
-            if record.scope == "session" or record.category.startswith("notebook_"):
-                continue
-            targets = self._targets(record)
-            rows.append(
-                {
-                    "ts": _iso(record.created_at),
-                    "actor_id": record.actor_id,
-                    "scope": record.scope,
-                    "file": targets[0] if targets else "",
-                    "strategy_id": record.strategy_id,
-                    "key": record.stable_key,
-                    "value": record.content,
-                    "tags": list(record.tags),
-                    "source_turn": record.source_turn_id,
-                    "superseded": False,
-                    "memory_id": record.memory_id,
-                    "category": record.category,
-                }
-            )
-        text = "".join(
-            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows
-        )
-        atomic_write_text(self.config.paths.memory_index, text)
 
     def _write_markdown(
         self,
@@ -96,6 +67,10 @@ class MemoryProjection:
             path = self._safe_path(target)
             if path is None:
                 continue
+            if path.exists():
+                existing = path.read_text(encoding="utf-8")
+                if existing.strip() and GENERATED_PROJECTION_MARKER not in existing[:1000]:
+                    raise FileExistsError(f"refusing to replace unmanaged memory file: {target}")
             blocks = [
                 "# Nerya memory projection\n",
                 f"{GENERATED_PROJECTION_MARKER}\n",

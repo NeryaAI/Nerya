@@ -31,10 +31,12 @@
  */
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 
 import {
+  Advanced,
   Card,
   Empty,
   ErrorBanner,
@@ -44,14 +46,20 @@ import {
   Pill,
 } from "../../../components/Page";
 import { EditIcon, PauseIcon, TrashIcon } from "../../../components/icons";
+import { ModePill } from "../../../components/ModePill";
 import {
   clientApi,
   type StrategyDetail,
 } from "../../../lib/clientApi";
 import {
   confirm as confirmDialog,
-  prompt as promptDialog,
+  toast,
 } from "../../../lib/dialogs";
+import {
+  strategyStatusLabel,
+  useCadenceHint,
+  useStrategyLifecycle,
+} from "../../../lib/useStrategyLifecycle";
 import type {
   StrategyRunRecord,
   StrategyTuningStatusEnvelope,
@@ -120,11 +128,31 @@ export default function StrategyDetailPage({
   );
   const [files, setFiles] = useState<FilesEnvelope | null>(null);
   const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [activeTab, setActiveTab] =
     useState<StrategyDetailTab>("overview");
+  // Dirty tracking for the Files & Prompts editors — leaving the tab
+  // (or the page) with unsaved edits asks for confirmation.
+  const [promptsDirty, setPromptsDirty] = useState(false);
+  const [packageFilesDirty, setPackageFilesDirty] = useState(false);
+  const filesDirty = promptsDirty || packageFilesDirty;
+  // Cards (status bar / schedules / tuning) share the busy channel the
+  // header used to own; the lifecycle hook carries its own busy state.
+  const [cardBusy, setCardBusy] = useState<string | null>(null);
+  const router = useRouter();
+  const lifecycle = useStrategyLifecycle({ onRefresh: refresh });
+  const busy = lifecycle.busy ?? cardBusy;
+  const busyOn = useCallback(
+    (action: string) =>
+      typeof lifecycle.busy === "string" &&
+      (lifecycle.busy === action || lifecycle.busy.startsWith(`${action}:`)),
+    [lifecycle.busy],
+  );
+  // Success feedback is toast-based (the old violet notice bar kept the
+  // confirmation far away from the action that triggered it).
+  const notifyOk = useCallback((msg: string | null) => {
+    if (msg) toast({ message: msg, tone: "ok" });
+  }, []);
 
   async function refresh() {
     setLoading(true);
@@ -175,169 +203,19 @@ export default function StrategyDetailPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategyId]);
 
-  async function renameStrategy() {
-    if (!detail) return;
-    const nextTitle = await promptDialog({
-      title: tStrategies("editName"),
-      message: tStrategies("renamePrompt", { id: detail.strategy.id }),
-      defaultValue: detail.strategy.title || detail.strategy.id,
-      placeholder: tStrategies("fieldTitle"),
-      okLabel: tCommon("save"),
-    });
-    if (nextTitle === null) return;
-    const trimmed = nextTitle.trim();
-    if (!trimmed) {
-      setError(tStrategies("nameRequired"));
-      return;
-    }
-    if (trimmed === (detail.strategy.title || detail.strategy.id)) return;
-    setBusy("rename");
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await clientApi.strategyUpdate(detail.strategy.id, {
-        title: trimmed,
-        reason: "dashboard_rename_strategy",
-      });
-      if (!res.ok) throw new Error("strategy_rename_failed");
-      setNotice(tStrategies("nameUpdated", {
-        id: detail.strategy.id,
-        title: trimmed,
-      }));
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function deleteStrategy(force = false) {
-    if (!detail) return;
-    const ok = await confirmDialog({
-      message: force
-        ? tStrategies("forceDeleteConfirm", { id: detail.strategy.id })
-        : tStrategies("deleteConfirm", { id: detail.strategy.id }),
-      tone: "danger",
-      okLabel: force ? tStrategies("forceDelete") : tCommon("delete"),
-    });
-    if (!ok) return;
-    setBusy("delete");
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await clientApi.strategyDelete({
-        strategy_id: detail.strategy.id,
-        force,
-      });
-      if (!res.ok) {
-        if (res.state && !force) {
-          const closeFirst = res.state.open_positions > 0
-            ? await confirmDialog({
-                title: tStrategies("cannotDeleteTitle"),
-                message: tStrategies("cannotDelete", {
-                  positions: res.state.open_positions,
-                  executors: res.state.active_executors,
-                  orders: res.state.active_orders,
-                }),
-                okLabel: tStrategies("closePositions"),
-                cancelLabel: tStrategies("pauseInstead"),
-                tone: "warning",
-              })
-            : false;
-          if (closeFirst) {
-            await closeStrategyPositions();
-          } else {
-            await pauseStrategy();
-          }
-          return;
-        }
-        throw new Error(res.error || "strategy_delete_failed");
-      }
-      window.location.href = "/strategies";
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function closeStrategyPositions() {
-    if (!detail) return;
-    setBusy("close");
-    setError(null);
-    setNotice(null);
-    try {
-      const preview = await clientApi.strategyClosePositions({
-        strategy_id: detail.strategy.id,
-        dry_run: true,
-      });
-      if (!preview.ok) throw new Error(preview.error || "strategy_close_preview_failed");
-      if (preview.count <= 0) {
-        setNotice(tStrategies("noPositionsToClose", { id: detail.strategy.id }));
-        await refresh();
-        return;
-      }
+  // Leaving the Files & Prompts tab with unsaved edits confirms first —
+  // same contract as the browser-level beforeunload guard in the editors.
+  async function handleTabChange(next: StrategyDetailTab) {
+    if (activeTab === "files" && next !== "files" && filesDirty) {
       const ok = await confirmDialog({
-        title: tStrategies("closePositionsTitle"),
-        message: tStrategies("closePositionsConfirm", {
-          id: detail.strategy.id,
-          count: preview.count,
-          notional: preview.positions
-            .reduce((sum, row) => sum + (Number(row.notional_usd) || 0), 0)
-            .toFixed(2),
-        }),
-        okLabel: tStrategies("closePositions"),
+        title: tStrategies("unsavedLeaveTitle"),
+        message: tStrategies("unsavedLeaveMessage"),
+        okLabel: tStrategies("unsavedLeaveConfirm"),
         tone: "warning",
       });
       if (!ok) return;
-      const res = await clientApi.strategyClosePositions({
-        strategy_id: detail.strategy.id,
-        operator: "dashboard",
-        reason: "strategy_delete_prepare",
-      });
-      if (!res.ok) throw new Error(res.error || "strategy_close_positions_failed");
-      setNotice(tStrategies("closeSubmitted", {
-        id: detail.strategy.id,
-        count: res.submitted?.length ?? res.count,
-      }));
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
     }
-  }
-
-  async function pauseStrategy() {
-    if (!detail) return;
-    if (detail.strategy.status === "paused") {
-      setNotice(tStrategies("pausedInfo", { id: detail.strategy.id }));
-      return;
-    }
-    const ok = await confirmDialog({
-      message: tStrategies("pauseConfirm", { id: detail.strategy.id }),
-      okLabel: tStrategies("pauseStrategy"),
-      tone: "warning",
-    });
-    if (!ok) return;
-    setBusy("pause");
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await clientApi.strategySetStatus(
-        detail.strategy.id,
-        "paused",
-        "dashboard_pause",
-      );
-      if (!res.ok) throw new Error("strategy_pause_failed");
-      setNotice(tStrategies("pausedInfo", { id: detail.strategy.id }));
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
+    setActiveTab(next);
   }
 
   const pnl = useMemo(() => summarisePnl(workspace), [workspace]);
@@ -382,48 +260,31 @@ export default function StrategyDetailPage({
             >
               {t("allStrategies")}
             </Link>
+            {/* Backtests is the primary next step after editing
+                (write → backtest → promotion evidence), so it gets the
+                primary button instead of sitting next to Delete. */}
             <Link
               href={`/strategies/${encodeURIComponent(strategyId)}/backtests`}
-              className="btn-ghost text-xs"
+              className="btn btn-primary text-xs"
             >
-              Backtests
+              {t("backtestsLink")}
             </Link>
             <button
               onClick={() => void refresh()}
-              disabled={loading}
+              disabled={loading || busy !== null}
               className="btn-ghost text-xs"
             >
               {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
             <button
-              onClick={() => void renameStrategy()}
+              onClick={() => {
+                if (detail) void lifecycle.rename(detail.strategy);
+              }}
               disabled={!detail || busy !== null}
               className="btn-ghost text-xs"
             >
               <EditIcon size={13} />
-              {busy === "rename" ? tStrategies("renaming") : tStrategies("editName")}
-            </button>
-            {detail && !["paused", "archived", "draft", "static_review", "backtested"].includes(detail.strategy.status) ? (
-              <button
-                onClick={() => void pauseStrategy()}
-                disabled={!detail || busy !== null}
-                className="btn-ghost text-xs text-amber-200"
-              >
-                <PauseIcon size={13} />
-                {busy === "pause" ? tStrategies("pausing") : tStrategies("pauseStrategy")}
-              </button>
-            ) : null}
-            <button
-              onClick={() => void deleteStrategy()}
-              disabled={!detail || busy !== null}
-              className="btn-ghost text-xs text-rose-300"
-            >
-              <TrashIcon size={13} />
-              {busy === "close"
-                ? tStrategies("closingPositions")
-                : busy === "delete"
-                  ? tStrategies("deleting")
-                  : tCommon("delete")}
+              {busyOn("rename") ? tStrategies("renaming") : tStrategies("editName")}
             </button>
           </div>
         }
@@ -433,11 +294,6 @@ export default function StrategyDetailPage({
           a second tab bar above the workspace tabs doubled the navigation. */}
       <PageBody>
         {error && <ErrorBanner error={error} />}
-        {notice && (
-          <div className="rounded-lg border border-accent-500/30 bg-accent-500/10 px-4 py-2 text-sm text-accent-300">
-            {notice}
-          </div>
-        )}
 
         {!detail ? (
           <Card title={t("strategyTitle", { id: strategyId })}>
@@ -453,7 +309,7 @@ export default function StrategyDetailPage({
           <>
             <StrategyDetailTabBar
               active={activeTab}
-              onChange={setActiveTab}
+              onChange={handleTabChange}
               counts={{
                 runs: workspace?.runs?.count ?? (lastRun ? 1 : 0),
                 ledgers: Object.keys(workspace?.history?.ledgers ?? {}).length,
@@ -471,15 +327,33 @@ export default function StrategyDetailPage({
 
                 <StrategyDefinitionCard detail={detail} />
 
+                {workspace && !workspace.ok ? (
+                  // The runtime workspace envelope failed — surface it
+                  // instead of silently rendering an empty overview.
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warn/30 bg-warn/10 px-4 py-2.5 text-[13px] text-warn">
+                    <span className="min-w-0 break-words">
+                      {t("workspaceLoadFailed")}
+                      {workspace.error ? `: ${workspace.error}` : ""}
+                    </span>
+                    <button
+                      onClick={() => void refresh()}
+                      disabled={loading}
+                      className="btn btn-ghost shrink-0 text-xs"
+                    >
+                      {loading ? tCommon("refreshing") : tCommon("refresh")}
+                    </button>
+                  </div>
+                ) : null}
+
                 {workspace?.ok && (
                   <StrategyStatusBar
                     envelope={workspace}
                     busy={busy}
                     disabled={loading}
-                    onSetBusy={setBusy}
+                    onSetBusy={setCardBusy}
                     onRefresh={refresh}
                     onError={setError}
-                    onNotice={setNotice}
+                    onNotice={notifyOk}
                   />
                 )}
 
@@ -493,7 +367,7 @@ export default function StrategyDetailPage({
                       ] as string | undefined
                     }
                     onError={setError}
-                    onNotice={setNotice}
+                    onNotice={notifyOk}
                     onRefresh={refresh}
                   />
 
@@ -502,7 +376,7 @@ export default function StrategyDetailPage({
                     currentAccountId={detail?.strategy?.account_id ?? null}
                     currentWalletId={detail?.strategy?.wallet_id ?? null}
                     onError={setError}
-                    onNotice={setNotice}
+                    onNotice={notifyOk}
                     onRefresh={refresh}
                   />
                 </div>
@@ -512,7 +386,10 @@ export default function StrategyDetailPage({
             ) : null}
 
             {activeTab === "performance" ? (
-              <StrategyPerformanceCard strategyId={strategyId} />
+              <StrategyPerformanceCard
+                strategyId={strategyId}
+                mode={detail.strategy.mode}
+              />
             ) : null}
 
             {activeTab === "agent_sessions" ? (
@@ -529,19 +406,19 @@ export default function StrategyDetailPage({
                     strategyId={strategyId}
                     status={workspace?.schedules ?? null}
                     busy={busy}
-                    onSetBusy={setBusy}
+                    onSetBusy={setCardBusy}
                     onRefresh={refresh}
                     onError={setError}
-                    onNotice={setNotice}
+                    onNotice={notifyOk}
                   />
                   <StrategyTuningCard
                     strategyId={strategyId}
                     tuning={tuning}
                     busy={busy}
-                    onSetBusy={setBusy}
+                    onSetBusy={setCardBusy}
                     onRefresh={refresh}
                     onError={setError}
-                    onNotice={setNotice}
+                    onNotice={notifyOk}
                   />
                 </div>
 
@@ -571,7 +448,8 @@ export default function StrategyDetailPage({
                     await refresh();
                   }}
                   onError={setError}
-                  onNotice={setNotice}
+                  onNotice={notifyOk}
+                  onDirtyChange={setPromptsDirty}
                 />
 
                 <StrategyFilesCard
@@ -581,7 +459,8 @@ export default function StrategyDetailPage({
                     await refresh();
                   }}
                   onError={setError}
-                  onNotice={setNotice}
+                  onNotice={notifyOk}
+                  onDirtyChange={setPackageFilesDirty}
                 />
               </div>
             ) : null}
@@ -600,9 +479,42 @@ export default function StrategyDetailPage({
                   await refresh();
                 }}
                 onError={setError}
-                onNotice={setNotice}
+                onNotice={notifyOk}
               />
             ) : null}
+
+            {/* Destructive actions live in a secondary fold instead of
+                sharing the header row with navigation — one more click,
+                but no more "delete next to refresh". */}
+            <Advanced title={t("dangerZone")} description={t("dangerZoneDesc")}>
+              <div className="flex flex-wrap items-center gap-2">
+                {detail &&
+                !["paused", "archived", "draft", "static_review", "backtested"].includes(
+                  detail.strategy.status,
+                ) ? (
+                  <button
+                    onClick={() => void lifecycle.pause(detail.strategy)}
+                    disabled={busy !== null}
+                    className="btn btn-ghost text-xs text-warn"
+                  >
+                    <PauseIcon size={13} />
+                    {busyOn("pause") ? tStrategies("pausing") : tStrategies("pauseStrategy")}
+                  </button>
+                ) : null}
+                <button
+                  onClick={() => void lifecycle.remove(detail.strategy)}
+                  disabled={busy !== null}
+                  className="btn btn-ghost text-xs text-danger"
+                >
+                  <TrashIcon size={13} />
+                  {busyOn("close")
+                    ? tStrategies("closingPositions")
+                    : busyOn("delete")
+                      ? tStrategies("deleting")
+                      : tCommon("delete")}
+                </button>
+              </div>
+            </Advanced>
           </>
         )}
       </PageBody>
@@ -691,6 +603,7 @@ function DefinitionBlock({
   label: string;
   values: string[];
 }) {
+  const t = useTranslations("strategyDetail");
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
       <div className="text-[11px] text-ink-500 font-medium">
@@ -704,7 +617,7 @@ function DefinitionBlock({
             </Pill>
           ))
         ) : (
-          <span className="text-[12px] text-ink-500">not configured</span>
+          <span className="text-[12px] text-ink-500">{t("notConfigured")}</span>
         )}
       </div>
     </div>
@@ -758,13 +671,17 @@ function KpiRow({
   lastRun: StrategyRunRecord | null;
 }) {
   const t = useTranslations("strategyDetail");
+  const tStrategies = useTranslations("strategies");
+  const cadenceHint = useCadenceHint();
   const trading = workspace?.schedules?.trading;
   const tuning = workspace?.schedules?.tuning;
+  const tradingHint = cadenceHint(trading?.cron, trading?.every_seconds);
+  const tuningHint = cadenceHint(tuning?.cron, tuning?.every_seconds);
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
       <Kpi
         label={t("kpiStatus")}
-        value={detail.strategy.status}
+        value={strategyStatusLabel(tStrategies, detail.strategy.status)}
         tone={
           detail.strategy.status === "live"
             ? "ok"
@@ -783,11 +700,14 @@ function KpiRow({
       <Kpi
         label={t("kpiRealisedPnl")}
         value={
-          pnl.realised_usd === 0
-            ? "$0.00"
-            : `${pnl.realised_usd >= 0 ? "+" : ""}$${pnl.realised_usd.toFixed(
-                2,
-              )}`
+          <span className="inline-flex flex-wrap items-center gap-2">
+            {pnl.realised_usd === 0
+              ? "$0.00"
+              : `${pnl.realised_usd >= 0 ? "+" : ""}$${pnl.realised_usd.toFixed(2)}`}
+            {/* PnL provenance (compliance): label the execution mode
+                this number was realized under. */}
+            <ModePill mode={detail.strategy.mode} />
+          </span>
         }
         tone={
           pnl.realised_usd > 0
@@ -802,25 +722,29 @@ function KpiRow({
         label={t("kpiTradingCron")}
         value={
           trading
-            ? trading.cron
-              ? trading.cron
-              : trading.every_seconds
+            ? tradingHint ??
+              trading.cron ??
+              (trading.every_seconds
                 ? t("everySeconds", { seconds: trading.every_seconds })
-                : t("installed")
+                : t("installed"))
             : t("notInstalled")
         }
         tone={trading?.enabled ? "ok" : "warn"}
-        delta={trading?.target ?? "–"}
+        delta={
+          trading
+            ? `${trading.cron && tradingHint ? `cron: ${trading.cron} · ` : ""}${trading.target ?? "–"}`
+            : "–"
+        }
       />
       <Kpi
         label={t("kpiReflectionCron")}
         value={
           tuning
-            ? tuning.cron
-              ? tuning.cron
-              : tuning.every_seconds
+            ? tuningHint ??
+              tuning.cron ??
+              (tuning.every_seconds
                 ? t("everySeconds", { seconds: tuning.every_seconds })
-                : t("installed")
+                : t("installed"))
             : t("notInstalled")
         }
         tone={tuning?.enabled ? "ok" : "warn"}
@@ -848,6 +772,7 @@ function SubagentPromptsCard({
   onAfterSave,
   onError,
   onNotice,
+  onDirtyChange,
 }: {
   strategyId: string;
   listed: string[];
@@ -856,6 +781,7 @@ function SubagentPromptsCard({
   onAfterSave: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string | null) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const t = useTranslations("strategyDetail");
   const tCommon = useTranslations("common");
@@ -882,13 +808,41 @@ function SubagentPromptsCard({
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
   useEffect(() => {
-    setEdits(initial);
+    // Merge server content into local edits, but never clobber a key the
+    // operator has modified (unsaved draft). A background refresh — e.g.
+    // after saving a different file — must not silently drop those edits;
+    // keys that were just saved match the server content and refresh
+    // normally.
+    setEdits((prev) => {
+      const next: Record<string, string> = {};
+      for (const [k, serverRaw] of Object.entries(initial)) {
+        const server = serverRaw ?? "";
+        const local = prev[k];
+        next[k] = local !== undefined && local !== server ? local : server;
+      }
+      return next;
+    });
   }, [initial]);
 
   const dirty = useMemo(() => {
     const keys = new Set([...Object.keys(initial), ...Object.keys(edits)]);
     return Array.from(keys).filter((k) => (initial[k] ?? "") !== (edits[k] ?? ""));
   }, [initial, edits]);
+
+  // Unsaved-edit guards: the page's tab switch confirm and a
+  // browser-level beforeunload both key off this flag.
+  useEffect(() => {
+    onDirtyChange?.(dirty.length > 0);
+  }, [dirty.length, onDirtyChange]);
+  useEffect(() => {
+    if (dirty.length === 0) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty.length]);
 
   async function save(rel: string) {
     setBusyKey(rel);
@@ -946,7 +900,8 @@ function SubagentPromptsCard({
                   <button
                     onClick={() => void save(rel)}
                     disabled={busyKey !== null || !isDirty}
-                    className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-40 text-white text-xs rounded px-3 py-1.5"
+                    title={t("saveShortcutHint")}
+                    className={`text-xs cursor-pointer ${isDirty ? "btn btn-primary" : "btn btn-ghost"}`}
                   >
                     {busyKey === rel ? tCommon("saving") : tCommon("save")}
                   </button>
@@ -956,6 +911,12 @@ function SubagentPromptsCard({
                   onChange={(e) =>
                     setEdits((prev) => ({ ...prev, [rel]: e.target.value }))
                   }
+                  onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+                      e.preventDefault();
+                      if (isDirty && busyKey === null) void save(rel);
+                    }
+                  }}
                   className="input-dark font-mono w-full text-xs"
                   rows={Math.min(20, Math.max(8, body.split("\n").length + 2))}
                   placeholder={
@@ -983,12 +944,14 @@ function StrategyFilesCard({
   onAfterSave,
   onError,
   onNotice,
+  onDirtyChange,
 }: {
   strategyId: string;
   files: PackageFile[];
   onAfterSave: () => Promise<void>;
   onError: (msg: string | null) => void;
   onNotice: (msg: string | null) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const t = useTranslations("strategyDetail");
   const filtered = useMemo(
@@ -1016,11 +979,20 @@ function StrategyFilesCard({
   }, [filtered, activePath]);
 
   useEffect(() => {
-    const next: Record<string, string> = {};
-    for (const f of filtered) {
-      next[f.rel_path] = f.content ?? "";
-    }
-    setDrafts(next);
+    // Merge server content into local drafts, but never clobber a key the
+    // operator has modified (unsaved draft). A background refresh — e.g.
+    // after saving a different file — must not silently drop those edits;
+    // keys that were just saved match the server content and refresh
+    // normally.
+    setDrafts((prev) => {
+      const next: Record<string, string> = {};
+      for (const f of filtered) {
+        const server = f.content ?? "";
+        const local = prev[f.rel_path];
+        next[f.rel_path] = local !== undefined && local !== server ? local : server;
+      }
+      return next;
+    });
   }, [filtered]);
 
   const active = useMemo(
@@ -1030,6 +1002,21 @@ function StrategyFilesCard({
   const draftBody = activePath ? (drafts[activePath] ?? "") : "";
   const original = active?.content ?? "";
   const dirty = activePath ? draftBody !== original : false;
+
+  // Unsaved-edit guards: the page's tab switch confirm and a
+  // browser-level beforeunload both key off this flag.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    if (!dirty) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirty]);
 
   async function save() {
     if (!activePath) return;
@@ -1060,7 +1047,8 @@ function StrategyFilesCard({
           <button
             onClick={() => void save()}
             disabled={!dirty || busyKey !== null}
-            className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-40 text-white text-xs rounded px-3 py-1.5"
+            title={t("saveShortcutHint")}
+            className={`text-xs cursor-pointer ${dirty ? "btn btn-primary" : "btn btn-ghost"}`}
           >
             {busyKey === activePath ? t("savingFile") : t("saveFile")}
           </button>
@@ -1115,6 +1103,12 @@ function StrategyFilesCard({
                     [active.rel_path]: e.target.value,
                   }))
                 }
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+                    e.preventDefault();
+                    if (dirty && busyKey === null) void save();
+                  }
+                }}
                 className="input-dark font-mono w-full text-xs"
                 rows={26}
                 spellCheck={false}
@@ -1207,7 +1201,7 @@ function ManifestEditorCard({
         <button
           onClick={() => void save()}
           disabled={busy !== null}
-          className="bg-brand-500/80 hover:bg-brand-500 disabled:opacity-40 text-white text-xs rounded px-3 py-1.5 cursor-pointer"
+          className="btn btn-primary text-xs cursor-pointer"
         >
           {busy === "save" ? tCommon("saving") : tCommon("save")}
         </button>

@@ -9,7 +9,7 @@ they never replace it.
 Composition (so we don't grow yet another god-class):
 
 * :class:`MemoryNotebook` for the bounded curated stores.
-* :class:`MemoryWriter` for rule-driven captures + the activity log.
+* :class:`MemoryRuntime` for scoped, rule-driven captures.
 * ``memsearch_index`` for vector recall (when enabled by the operator).
 
 Each delegate already knows how to do its own thing safely; the
@@ -24,7 +24,7 @@ from typing import Any
 
 from ..core.config import Config
 from . import memsearch_index
-from .notebook import MemoryNotebook, NotebookResult, VALID_TARGETS
+from .notebook import MemoryNotebook, NotebookResult, VALID_TARGETS, load_notebook
 from .provider import (
     MemoryProvider,
     MemoryProviderInfo,
@@ -32,7 +32,7 @@ from .provider import (
     MemoryToolDef,
     MemoryToolResult,
 )
-from .writer import MemoryWriter, default_notebook
+from .runtime import MemoryRuntime
 
 
 __all__ = ["BuiltinMemoryProvider"]
@@ -62,7 +62,7 @@ class BuiltinMemoryProvider(MemoryProvider):
     config: Config
     info: MemoryProviderInfo = field(default=_BUILTIN_INFO, init=False)
     _notebook: MemoryNotebook | None = field(default=None, init=False, repr=False)
-    _writer: MemoryWriter | None = field(default=None, init=False, repr=False)
+    _memory: MemoryRuntime | None = field(default=None, init=False, repr=False)
     _system_prompt_snapshot: str = field(default="", init=False, repr=False)
 
     # ------------------------------------------------------------- lifecycle
@@ -81,15 +81,12 @@ class BuiltinMemoryProvider(MemoryProvider):
         uses the memory tool mid-turn.
         """
 
-        nb = default_notebook(self.config)
+        nb = load_notebook(self.config)
         self._notebook = nb
-        # The notebook's load() already runs inside default_notebook().
         snap = nb.snapshot_blocks()
         joined = "\n\n".join(part for part in snap.values() if part)
         self._system_prompt_snapshot = joined.strip()
-        # Lazy-construct the writer so MemoryIndex doesn't load until
-        # the first capture / hook fires.
-        self._writer = MemoryWriter(self.config)
+        self._memory = MemoryRuntime(self.config)
 
     def shutdown(self) -> None:
         # Nothing to release; the notebook flushes on every write.
@@ -258,10 +255,10 @@ class BuiltinMemoryProvider(MemoryProvider):
         # /memory/write_rules.
         if not summary:
             return
-        if self._writer is None:
+        if self._memory is None:
             return
         try:
-            self._writer.capture(
+            self._memory.remember(
                 category="session_summary",
                 content=summary,
                 title="session summary",

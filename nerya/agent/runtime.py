@@ -9,6 +9,7 @@ not know about strategies, teams, wallets, or trading.
 from __future__ import annotations
 
 import time
+from ..harness.cancellation import is_cancelled as _cancelled
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, Generic, Mapping, Protocol, TypeVar
@@ -229,16 +230,6 @@ def evaluate_completion_gate(
         )
 
 
-def _cancelled(cancel: Any) -> bool:
-    if cancel is None:
-        return False
-    try:
-        value = getattr(cancel, "is_set", False)
-        return bool(value() if callable(value) else value)
-    except Exception:
-        return True
-
-
 class AgentRuntime(Generic[T]):
     """Shared round adapter used by root and child compatibility wrappers.
 
@@ -265,58 +256,51 @@ class AgentRuntime(Generic[T]):
         snapshots: list[TurnSnapshot] = []
         feedback = ""
         value: T | None = None
-        for round_index in range(request.max_rounds):
+
+        def finish(decision: GateDecision, rounds: int) -> RuntimeResult[T]:
+            return RuntimeResult(
+                value=value,
+                decision=decision,
+                rounds=rounds,
+                snapshots=tuple(snapshots),
+            )
+
+        def host_stop_reason() -> str:
             if _cancelled(request.cancel):
-                return RuntimeResult(
-                    value=value,
-                    decision=GateDecision.blocked("cancelled"),
-                    rounds=round_index,
-                    snapshots=tuple(snapshots),
-                )
+                return "cancelled"
             if (
                 request.max_wall_seconds is not None
                 and self._clock() - started >= request.max_wall_seconds
             ):
-                return RuntimeResult(
-                    value=value,
-                    decision=GateDecision.blocked("runtime_wall_time_exceeded"),
-                    rounds=round_index,
-                    snapshots=tuple(snapshots),
-                )
+                return "runtime_wall_time_exceeded"
+            return ""
+
+        for round_index in range(request.max_rounds):
+            if reason := host_stop_reason():
+                return finish(GateDecision.blocked(reason), round_index)
             if round_index == 0:
                 value = execute(feedback)
             else:
                 if value is None or continue_from is None:
-                    return RuntimeResult(
-                        value=value,
-                        decision=GateDecision.blocked(
-                            "stateful_continuation_required",
-                            feedback=feedback,
+                    return finish(
+                        GateDecision.blocked(
+                            "stateful_continuation_required", feedback=feedback,
                         ),
-                        rounds=round_index,
-                        snapshots=tuple(snapshots),
+                        round_index,
                     )
                 try:
                     value = continue_from(value, feedback)
                 except ContinuationUnavailable as exc:
-                    return RuntimeResult(
-                        value=value,
-                        decision=GateDecision.blocked(
-                            exc.reason,
-                            feedback=exc.feedback or feedback,
-                        ),
-                        rounds=round_index,
-                        snapshots=tuple(snapshots),
+                    return finish(
+                        GateDecision.blocked(exc.reason, feedback=exc.feedback or feedback),
+                        round_index,
                     )
                 except Exception as exc:
-                    return RuntimeResult(
-                        value=value,
-                        decision=GateDecision.blocked(
-                            "continuation_error",
-                            feedback=f"{type(exc).__name__}: {exc}",
+                    return finish(
+                        GateDecision.blocked(
+                            "continuation_error", feedback=f"{type(exc).__name__}: {exc}",
                         ),
-                        rounds=round_index,
-                        snapshots=tuple(snapshots),
+                        round_index,
                     )
             try:
                 current = (
@@ -325,96 +309,39 @@ class AgentRuntime(Generic[T]):
                     else TurnSnapshot(iteration=round_index, output=value)
                 )
             except Exception as exc:
-                return RuntimeResult(
-                    value=value,
-                    decision=GateDecision.blocked(
-                        "snapshot_error",
-                        feedback=f"{type(exc).__name__}: {exc}",
+                return finish(
+                    GateDecision.blocked(
+                        "snapshot_error", feedback=f"{type(exc).__name__}: {exc}",
                     ),
-                    rounds=round_index + 1,
-                    snapshots=tuple(snapshots),
+                    round_index + 1,
                 )
             if current.iteration != round_index:
                 current = replace(current, iteration=round_index)
             snapshots.append(current)
-            # Host-owned cancellation and time limits outrank a late model
-            # completion decision from the gate.
-            if _cancelled(request.cancel):
-                return RuntimeResult(
-                    value=value,
-                    decision=GateDecision.blocked("cancelled"),
-                    rounds=round_index + 1,
-                    snapshots=tuple(snapshots),
-                )
-            if (
-                request.max_wall_seconds is not None
-                and self._clock() - started >= request.max_wall_seconds
-            ):
-                return RuntimeResult(
-                    value=value,
-                    decision=GateDecision.blocked("runtime_wall_time_exceeded"),
-                    rounds=round_index + 1,
-                    snapshots=tuple(snapshots),
-                )
+            # Host limits outrank both a late engine result and a late gate decision.
+            if reason := host_stop_reason():
+                return finish(GateDecision.blocked(reason), round_index + 1)
             decision = evaluate_completion_gate(gate, current)
-            if _cancelled(request.cancel):
-                return RuntimeResult(
-                    value=value,
-                    decision=GateDecision.blocked("cancelled"),
-                    rounds=round_index + 1,
-                    snapshots=tuple(snapshots),
-                )
-            if (
-                request.max_wall_seconds is not None
-                and self._clock() - started >= request.max_wall_seconds
-            ):
-                return RuntimeResult(
-                    value=value,
-                    decision=GateDecision.blocked("runtime_wall_time_exceeded"),
-                    rounds=round_index + 1,
-                    snapshots=tuple(snapshots),
-                )
+            if reason := host_stop_reason():
+                return finish(GateDecision.blocked(reason), round_index + 1)
             if decision.status != GateStatus.CONTINUE.value:
-                return RuntimeResult(
-                    value=value,
-                    decision=decision,
-                    rounds=round_index + 1,
-                    snapshots=tuple(snapshots),
-                )
+                return finish(decision, round_index + 1)
             if continue_from is None:
-                # Never restart a legacy engine from its original input. A
-                # continuation callback is the explicit proof that the caller
-                # owns a checkpoint and side-effect journal.
-                return RuntimeResult(
-                    value=value,
-                    decision=GateDecision.blocked(
-                        "stateful_continuation_required",
-                        feedback=decision.feedback,
+                # Never replay the original input without checkpoint ownership.
+                return finish(
+                    GateDecision.blocked(
+                        "stateful_continuation_required", feedback=decision.feedback,
                     ),
-                    rounds=round_index + 1,
-                    snapshots=tuple(snapshots),
+                    round_index + 1,
                 )
             feedback = decision.feedback
-        return RuntimeResult(
-            value=value,
-            decision=GateDecision.blocked("completion_gate_round_budget_exhausted"),
-            rounds=len(snapshots),
-            snapshots=tuple(snapshots),
+        return finish(
+            GateDecision.blocked("completion_gate_round_budget_exhausted"),
+            len(snapshots),
         )
-
-    # Explicit name for legacy wrappers; keeps migration call sites readable.
-    run_legacy = run
-
-
-# Names used by the architecture note and by early migration callers.
-RunRequest = RuntimeRequest
-TurnOutcome = RuntimeResult
-SharedAgentRuntime = AgentRuntime
-
 
 __all__ = [
     "AgentRuntime",
-    "SharedAgentRuntime",
     "CompletionGate",
     "CompletionGateLike",
     "ContinuationUnavailable",
@@ -422,9 +349,7 @@ __all__ = [
     "GateStatus",
     "TurnSnapshot",
     "RuntimeRequest",
-    "RunRequest",
     "RuntimeResult",
-    "TurnOutcome",
     "evaluate_completion_gate",
     "normalize_gate_decision",
 ]

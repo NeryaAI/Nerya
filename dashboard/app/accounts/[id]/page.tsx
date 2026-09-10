@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import {
@@ -16,8 +17,9 @@ import {
 } from "../../../components/Page";
 import { SectionTabs } from "../../../components/SectionTabs";
 import { AccountEquityCurveCard } from "../../../components/accounts/AccountEquityCurveCard";
+import { AddAccountForm } from "../../../components/accounts/AddAccountForm";
 import { clientApi } from "../../../lib/clientApi";
-import { alert as alertDialog, confirm as confirmDialog, prompt as promptDialog } from "../../../lib/dialogs";
+import { alert as alertDialog, confirm as confirmDialog, prompt as promptDialog, toast } from "../../../lib/dialogs";
 import type {
   AccountSummary,
   ControlPlaneOrder,
@@ -61,6 +63,34 @@ function statusPill(
     default:
       return "neutral";
   }
+}
+
+// Raw enums -> accountsPage.* translation keys. Unknown values fall back
+// to the raw string. Account mode stays untranslated on purpose: PAPER/
+// LIVE are trading terms operators scan for in either locale (ModePill).
+const ACCOUNT_STATUS_KEYS: Record<string, string> = {
+  active: "statusActive",
+  read_only: "statusReadOnly",
+  disabled: "statusDisabled",
+  quarantined: "statusQuarantined",
+};
+
+const ACCOUNT_KIND_KEYS: Record<string, string> = {
+  cex: "kindCex",
+  dex: "kindDex",
+  broker: "kindBroker",
+  chain: "kindChain",
+  data_source: "kindDataSource",
+  prediction_market: "kindPredictionMarket",
+};
+
+function enumLabel(
+  map: Record<string, string>,
+  value: string,
+  t: (key: string) => string,
+): string {
+  const key = map[value] ?? map[value.toLowerCase()];
+  return key ? t(key) : value;
 }
 
 function severityTone(
@@ -302,8 +332,12 @@ export default function AccountDetailPage({
   params: { id: string };
 }) {
   const t = useTranslations("accountDetail");
+  const tCommon = useTranslations("common");
+  const tEnum = useTranslations("accountsPage");
+  const router = useRouter();
   const accountId = decodeURIComponent(params.id);
   const [summary, setSummary] = useState<AccountSummary | null>(null);
+  const [showEdit, setShowEdit] = useState(false);
   const [orders, setOrders] = useState<ControlPlaneOrder[]>([]);
   const [reports, setReports] = useState<ReconciliationReport[]>([]);
   const [headers, setHeaders] = useState<AuthHeader[]>([]);
@@ -554,6 +588,8 @@ export default function AccountDetailPage({
         ? t("forceDeleteConfirm", { id: accountId })
         : t("deleteConfirm", { id: accountId }),
       tone: "danger",
+      okLabel: t("delete"),
+      cancelLabel: tCommon("cancel"),
     });
     if (!ok) return;
     setBusy("delete");
@@ -576,7 +612,7 @@ export default function AccountDetailPage({
           throw new Error(res.detail || res.error || "delete_failed");
         }
       } else {
-        window.location.href = "/portfolio";
+        router.push("/accounts");
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -606,7 +642,12 @@ export default function AccountDetailPage({
         title={t("accountPrefix", { id: accountId })}
         description={
           profile
-            ? t("profileOn", { mode: profile.mode.toUpperCase(), venue: profile.venue, kind: profile.kind, wallet: profile.wallet_id || "–" })
+            ? t("profileOn", {
+                mode: profile.mode.toUpperCase(),
+                venue: profile.venue,
+                kind: enumLabel(ACCOUNT_KIND_KEYS, profile.kind, tEnum),
+                wallet: profile.wallet_id || "–",
+              })
             : t("accountDetail")
         }
         actions={
@@ -614,6 +655,13 @@ export default function AccountDetailPage({
             <Link href="/portfolio" className="btn-ghost text-xs">
               {t("portfolio")}
             </Link>
+            <button
+              onClick={() => setShowEdit(true)}
+              disabled={showEdit || !profile}
+              className="btn-ghost text-xs"
+            >
+              {tCommon("edit")}
+            </button>
             <button
               onClick={runReconcile}
               disabled={busy === "reconcile"}
@@ -634,13 +682,26 @@ export default function AccountDetailPage({
       <SectionTabs section="trading" />
       <PageBody>
         {error && <ErrorBanner error={error} />}
-        {!profile ? (
+        {showEdit && profile ? (
+          <AddAccountForm
+            initial={profile}
+            onCancel={() => setShowEdit(false)}
+            onProposed={() => setShowEdit(false)}
+            onSaved={(account) => {
+              setShowEdit(false);
+              setSummary(account);
+              toast({ tone: "ok", message: tCommon("saved") });
+            }}
+          />
+        ) : !profile ? (
           <Empty label={t("notFound")} />
         ) : (
           <>
             <div className="flex items-center gap-3 flex-wrap">
               <Pill tone={modePill(profile.mode)}>{profile.mode}</Pill>
-              <Pill tone={statusPill(profile.status)}>{profile.status}</Pill>
+              <Pill tone={statusPill(profile.status)}>
+                {enumLabel(ACCOUNT_STATUS_KEYS, profile.status, tEnum)}
+              </Pill>
               {profile.live_trading_enabled ? (
                 <Pill tone="warn">{t("liveTradingEnabled")}</Pill>
               ) : (
@@ -648,7 +709,9 @@ export default function AccountDetailPage({
               )}
               {profile.kind ? (
                 <span className="text-xs text-ink-300 font-mono">
-                  kind={profile.kind}
+                  {tEnum("kindChip", {
+                    value: enumLabel(ACCOUNT_KIND_KEYS, profile.kind, tEnum),
+                  })}
                 </span>
               ) : null}
               <span className="ml-auto flex items-center gap-2">
@@ -695,6 +758,12 @@ export default function AccountDetailPage({
                     {busy === "reset_paper" ? t("resetting") : t("resetPaper")}
                   </button>
                 ) : null}
+                {/* Destructive: keep visually separated from the
+                    status-toggle group via a divider. */}
+                <span
+                  className="mx-1 h-5 w-px bg-danger/40"
+                  aria-hidden="true"
+                />
                 <button
                   onClick={() => deleteAccount(false)}
                   disabled={busy === "delete"}
@@ -856,14 +925,14 @@ export default function AccountDetailPage({
               )}
               <div className="mt-3 flex flex-col gap-2 md:flex-row md:items-center">
                 <input
-                  className="input text-xs font-mono md:w-48"
+                  className="input-dark text-xs font-mono md:w-48"
                   placeholder={t("headerKeyPlaceholder")}
                   value={newHeaderKey}
                   onChange={(e) => setNewHeaderKey(e.target.value)}
                   disabled={busy === "headers"}
                 />
                 <input
-                  className="input text-xs font-mono flex-1"
+                  className="input-dark text-xs font-mono flex-1"
                   placeholder={t("headerValuePlaceholder")}
                   value={newHeaderValue}
                   onChange={(e) => setNewHeaderValue(e.target.value)}
@@ -1046,9 +1115,9 @@ export default function AccountDetailPage({
                         <th>{t("colState")}</th>
                         <th>{t("colMarket")}</th>
                         <th>{t("colSide")}</th>
-                        <th>{t("colSize")}</th>
-                        <th>{t("colFilled")}</th>
-                        <th>{t("colAvg")}</th>
+                        <th className="text-right">{t("colSize")}</th>
+                        <th className="text-right">{t("colFilled")}</th>
+                        <th className="text-right">{t("colAvg")}</th>
                         <th>{t("colStrategy")}</th>
                         <th>{t("colCreated")}</th>
                       </tr>
@@ -1059,9 +1128,15 @@ export default function AccountDetailPage({
                           <td>{o.state}</td>
                           <td className="font-mono">{o.market}</td>
                           <td>{o.side}</td>
-                          <td>{o.size_base}</td>
-                          <td>{o.filled_size}</td>
-                          <td>{o.avg_price ?? "–"}</td>
+                          <td className="text-right font-mono tabular-nums">
+                            {o.size_base}
+                          </td>
+                          <td className="text-right font-mono tabular-nums">
+                            {o.filled_size}
+                          </td>
+                          <td className="text-right font-mono tabular-nums">
+                            {o.avg_price ?? "–"}
+                          </td>
                           <td className="font-mono text-ink-400">
                             {o.strategy_id || "–"}
                           </td>

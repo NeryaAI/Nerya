@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from ..core.errors import TradingError
@@ -54,6 +55,18 @@ _SEL = {
 
 
 # =============================================================== helpers
+def _to_base_units(amount: float | int | str, decimals: int) -> int:
+    """Convert a human-readable amount to integer base units (F11).
+
+    Float math (``int(amount * 10 ** decimals)``) truncated against the
+    approved/frozen amounts for values like ``8.1`` (8.1 * 1e18 →
+    8099999999999999488 via float). ``Decimal(str(x))`` is exact for
+    the decimal literals callers actually pass and keeps int inputs
+    bit-identical.
+    """
+    return int(Decimal(str(amount)) * (10 ** Decimal(int(decimals))))
+
+
 def _pad_addr(addr: str) -> str:
     a = addr.lower().removeprefix("0x").rjust(64, "0")
     return a
@@ -107,15 +120,10 @@ class BSCNative(EVMNative):
     default_slippage_bps: int = 50
 
     # ---------------------------------------------------------- reads
-    def get_erc20_balance(self, token: str, address: str, *, decimals: int | None = None) -> float:
-        data = _SEL["balanceOf"] + _pad_addr(address)
-        res = self._rpc("eth_call", [{"to": token, "data": data}, "latest"])
-        if not res or res == "0x":
-            return 0.0
-        raw = int(res, 16)
-        if decimals is None:
-            decimals = self.get_erc20_decimals(token)
-        return raw / (10 ** decimals)
+    # get_erc20_balance / get_erc20_decimals are inherited from EVMNative,
+    # which resolves decimals on-chain (raising on failure) — the previous
+    # local overrides silently assumed 18 decimals on parse failure and
+    # mis-scaled 6-decimal tokens (USDC/USDT) by 1e12.
 
     def get_erc20_allowance(self, token: str, owner: str, spender: str,
                              *, decimals: int | None = None) -> float:
@@ -127,15 +135,6 @@ class BSCNative(EVMNative):
         if decimals is None:
             decimals = self.get_erc20_decimals(token)
         return raw / (10 ** decimals)
-
-    def get_erc20_decimals(self, token: str) -> int:
-        res = self._rpc("eth_call", [{"to": token, "data": _SEL["decimals"]}, "latest"])
-        if not res or res == "0x":
-            return 18
-        try:
-            return int(res, 16)
-        except Exception:
-            return 18
 
     def get_erc20_symbol(self, token: str) -> str:
         res = self._rpc("eth_call", [{"to": token, "data": _SEL["symbol"]}, "latest"])
@@ -181,10 +180,12 @@ class BSCNative(EVMNative):
         dec_in = self.get_erc20_decimals(token_in)
         dec_out = self.get_erc20_decimals(token_out)
         p = list(path) if path else self._default_path(token_in, token_out)
-        amount_in_wei = int(amount_in * (10 ** dec_in))
+        amount_in_wei = _to_base_units(amount_in, dec_in)
         amounts = self.get_amounts_out(amount_in_wei, p)
         amount_out_wei = amounts[-1] if amounts else 0
-        amount_out_min_wei = int(amount_out_wei * (10_000 - slippage_bps) / 10_000)
+        # Integer math end-to-end: float division here previously shaved
+        # low digits off amountOutMin (the value that protects the swap).
+        amount_out_min_wei = amount_out_wei * (10_000 - slippage_bps) // 10_000
         amount_out = amount_out_wei / (10 ** dec_out)
         amount_out_min = amount_out_min_wei / (10 ** dec_out)
         mid = (amount_out / amount_in) if amount_in else 0.0
@@ -222,6 +223,7 @@ class BSCNative(EVMNative):
         signer_private_key: str,
         gas_price_gwei: float | None = None,
         gas_limit: int | None = None,
+        confirm: bool = True,
     ) -> dict[str, Any]:
         """Submit an ERC-20 ``approve`` tx. Returns ``{tx_hash, nonce, ...}``."""
         self._check_live()
@@ -233,6 +235,7 @@ class BSCNative(EVMNative):
             signer_private_key=signer_private_key,
             gas_price_gwei=gas_price_gwei,
             gas_limit=gas_limit,
+            confirm=confirm,
         )
 
     def swap(
@@ -242,6 +245,7 @@ class BSCNative(EVMNative):
         token_out: str,
         amount_in: float,
         amount_out_min: float | None = None,
+        amount_out_min_wei: int | None = None,
         slippage_bps: int | None = None,
         path: list[str] | None = None,
         recipient: str,
@@ -249,6 +253,7 @@ class BSCNative(EVMNative):
         signer_private_key: str,
         gas_price_gwei: float | None = None,
         gas_limit: int | None = None,
+        confirm: bool = True,
     ) -> dict[str, Any]:
         """Execute a PancakeSwap v2 swap through the router.
 
@@ -263,11 +268,13 @@ class BSCNative(EVMNative):
             slippage_bps=slippage_bps, path=path,
         )
         amount_in_wei = quote["amount_in_wei"]
-        if amount_out_min is None:
-            amount_out_min_wei = quote["amount_out_min_wei"]
-        else:
+        if amount_out_min_wei is not None:
+            pass  # caller-supplied exact wei floor — highest precedence
+        elif amount_out_min is not None:
             dec_out = self.get_erc20_decimals(token_out)
-            amount_out_min_wei = int(amount_out_min * (10 ** dec_out))
+            amount_out_min_wei = _to_base_units(amount_out_min, dec_out)
+        else:
+            amount_out_min_wei = quote["amount_out_min_wei"]
         deadline = int(time.time()) + int(deadline_seconds)
         p = quote["path"]
 
@@ -307,6 +314,7 @@ class BSCNative(EVMNative):
             signer_private_key=signer_private_key,
             gas_price_gwei=gas_price_gwei,
             gas_limit=gas_limit,
+            confirm=confirm,
         )
         out["quote"] = quote
         out["recipient"] = recipient
@@ -343,22 +351,26 @@ class BSCNative(EVMNative):
         signer_private_key: str,
         gas_price_gwei: float | None,
         gas_limit: int | None,
+        confirm: bool = True,
     ) -> dict[str, Any]:
-        """Sign a legacy (type-0) transaction with EIP-155 and broadcast."""
+        """Sign a legacy (type-0) transaction with EIP-155 and broadcast.
+
+        Verifies ``eth_chainId`` against the configured ``chain_id``
+        before signing, and (by default) waits for the receipt so the
+        caller learns about on-chain reverts instead of mistaking a
+        broadcast for a settled swap.
+        """
         try:
             from eth_account import Account  # type: ignore
-            from eth_account._utils.legacy_transactions import encode_transaction
-            from eth_account._utils.legacy_transactions import serializable_unsigned_transaction_from_dict
         except Exception as exc:  # pragma: no cover - eth_account missing
             raise TradingError(
                 f"bsc swap requires `eth_account` python package: {exc}"
             ) from exc
 
+        self._verify_chain_id()
         from_addr = Account.from_key(signer_private_key).address
         nonce = self.get_nonce(from_addr)
-        gp_gwei = gas_price_gwei if gas_price_gwei is not None else (
-            self.get_gas_price_gwei() or self.default_gas_price_gwei
-        )
+        gp_gwei = self.gas_price_or_fallback(gas_price_gwei)
         gas_price_wei = int(gp_gwei * 1e9)
         tx = {
             "to": to,
@@ -381,7 +393,7 @@ class BSCNative(EVMNative):
         tx_hash = self._rpc("eth_sendRawTransaction", [raw_hex])
         if not tx_hash:
             raise TradingError("bsc eth_sendRawTransaction returned empty result")
-        return {
+        out = {
             "tx_hash": tx_hash,
             "from": from_addr,
             "to": to,
@@ -391,7 +403,13 @@ class BSCNative(EVMNative):
             "gas_limit": int(gas_limit or self.default_gas_limit),
             "chain": self.chain,
             "chain_id": self.chain_id,
+            "confirmed": False,
         }
+        if confirm:
+            receipt = self.wait_for_receipt(tx_hash)
+            out["confirmed"] = True
+            out["status"] = receipt.get("status")
+        return out
 
 
 def _decode_string(hex_str: str) -> str:

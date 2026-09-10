@@ -37,6 +37,31 @@ from .order_intents import (
 # ---------------------------------------------------------------------------
 
 
+# B8(b): spec types the soft/hard runtime never fires (the evaluators
+# delegate them "upstream" and nothing upstream implements them).
+# Strategies carrying them were silently unprotected — reject at rule
+# validation so they fail loud at submit, not silently at runtime.
+_UNSUPPORTED_SPEC_TYPES = ("pnl_usd", "r_multiple")
+
+
+def validate_supported_specs(rule: ProtectionRule) -> None:
+    """Reject ``pnl_usd`` / ``r_multiple`` stop/take specs.
+
+    These types silently never fire in :func:`evaluate` — a rule that
+    only declared them would leave the position unprotected forever.
+    """
+    unsupported: list[str] = []
+    if rule.stop_loss is not None and rule.stop_loss.type in _UNSUPPORTED_SPEC_TYPES:
+        unsupported.append(f"stop_loss.type={rule.stop_loss.type}")
+    if rule.take_profit is not None and rule.take_profit.type in _UNSUPPORTED_SPEC_TYPES:
+        unsupported.append(f"take_profit.type={rule.take_profit.type}")
+    if unsupported:
+        raise IntentValidationError(
+            "unsupported protection spec type(s) — they would never fire at runtime: "
+            + ", ".join(unsupported)
+        )
+
+
 class ProtectionStore:
     def __init__(self, paths: WorkspacePaths):
         self.paths = paths
@@ -50,6 +75,7 @@ class ProtectionStore:
     def upsert(self, rule: ProtectionRule) -> ProtectionRule:
         if not rule.position_id:
             raise IntentValidationError("ProtectionRule requires position_id before persistence")
+        validate_supported_specs(rule)
         con = self._con_lazy()
         rule.updated_at = _now_iso()
         con.execute(
@@ -163,6 +189,9 @@ class ProtectionTrigger:
     kind: Literal["take_profit", "stop_loss", "trailing_stop", "time_limit", "partial_exit", ""]
     close_pct: float = 1.0
     reason: str = ""
+    # Only set for ``partial_exit`` — the pnl_pct level that fired, so
+    # the executor can re-arm the rule for the remaining position (B8a).
+    trigger_pct: float = 0.0
 
     @classmethod
     def none(cls) -> "ProtectionTrigger":
@@ -241,6 +270,7 @@ def evaluate(
             return ProtectionTrigger(
                 fired=True, kind="partial_exit", close_pct=partial.close_pct,
                 reason=f"partial_exit:trigger={partial.trigger_pct}:close={partial.close_pct}",
+                trigger_pct=float(partial.trigger_pct),
             )
 
     return ProtectionTrigger.none()
@@ -374,4 +404,5 @@ __all__ = [
     "ProtectionStore",
     "ProtectionTrigger",
     "evaluate",
+    "validate_supported_specs",
 ]

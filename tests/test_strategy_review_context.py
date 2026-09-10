@@ -25,10 +25,7 @@ from nerya.strategies.review_context import (
     build_strategy_review_context,
 )
 from nerya.strategies.state import StrategyRunRecord, StrategyRunStore
-from nerya.llm.gateway import LLMCall
 from nerya.sdk.strategy_api import StrategyTuningAPI
-from nerya.subagents.registry import SubAgentSpec
-from nerya.subagents.runtime import SubAgentRuntime
 from nerya.subagents.strategy_registry import StrategySubAgentRegistry
 from nerya.tools.native.strategy_runtime import strategy_tuning_run_handler
 from nerya.tools.types import ToolCall
@@ -175,6 +172,51 @@ def test_strategy_review_uses_only_frozen_active_run_evidence(tmp_path):
         "strategy_id": 1,
     }
     assert snapshot.evidence_scope["excluded_ledger_counts"]["pnl"]["unattributed"] == 1
+
+
+@pytest.mark.parametrize("timestamp", [
+    (_NOW + timedelta(hours=1)).isoformat(),
+    (_NOW - timedelta(hours=25)).isoformat(),
+    None, "invalid",
+])
+def test_selected_run_cannot_smuggle_out_of_window_ledger_evidence(tmp_path, timestamp):
+    paths = WorkspacePaths(tmp_path)
+    package = _seed_package(paths)
+    try:
+        set_clock(lambda: _NOW)
+        _seed_evidence(paths, package_hash=package.content_hash, run_id="run-valid",
+                       session_id="session-valid", age_hours=1, pnl_usd=7)
+        jsonl.append(paths.strategy_history("alpha") / "pnl.jsonl", {
+            "run_id": "run-valid", "session_id": "session-valid", "ts": timestamp,
+            "pnl": {"realized_usd": 999999},
+        }, stamp=False)
+        snapshot = build_strategy_review_context(paths, package, policy=StrategyReviewPolicy(max_age_hours=24))
+    finally:
+        reset_clock()
+    assert snapshot.trade_metrics["pnl_total_usd"] == 7
+    assert sum(snapshot.evidence_scope["excluded_ledger_counts"]["pnl"].values()) == 1
+
+
+@pytest.mark.parametrize("identity", [
+    {"mode": "live"}, {"strategy_id": "other"}, {"package_hash": "old"},
+    {"run_id": "foreign-run"}, {"session_id": "foreign-session"},
+])
+def test_nested_ledger_identity_cannot_bypass_review_scope(tmp_path, identity):
+    paths = WorkspacePaths(tmp_path)
+    package = _seed_package(paths)
+    try:
+        set_clock(lambda: _NOW)
+        _seed_evidence(paths, package_hash=package.content_hash, run_id="run-valid",
+                       session_id="session-valid", age_hours=1, pnl_usd=7)
+        jsonl.append(paths.strategy_history("alpha") / "pnl.jsonl", {
+            "run_id": "run-valid", "session_id": "session-valid", "ts": _NOW.isoformat(),
+            "pnl": {"realized_usd": 999999, **identity},
+        }, stamp=False)
+        snapshot = build_strategy_review_context(paths, package, policy=StrategyReviewPolicy())
+    finally:
+        reset_clock()
+    assert snapshot.trade_metrics["pnl_total_usd"] == 7
+    assert sum(snapshot.evidence_scope["excluded_ledger_counts"]["pnl"].values()) == 1
 
 
 def test_explicit_run_and_session_ids_only_narrow_the_review_scope(tmp_path):
@@ -408,71 +450,27 @@ def test_sdk_and_native_tuning_run_forward_explicit_evidence_scope(
     assert calls[1]["evidence_session_ids"] == ("session_b", "session_c")
 
 
-def test_explicit_payload_only_context_cannot_read_session_memory(
-    tmp_path,
-):
+def test_explicit_payload_only_context_cannot_read_session_memory(tmp_path):
+    from test_subagent_native_runtime import Gateway, final, runtime, spec
     sentinel = "ordinary-session-memory-must-not-appear"
-
-    class FakeSkillRegistry:
-        def list(self):  # noqa: ANN201
-            raise AssertionError(f"{sentinel}: skill registry")
-
-    class FakeSkills:
-        registry = FakeSkillRegistry()
-
-    class FakeToolRegistry:
-        def list_tools(self):  # noqa: ANN201
-            raise AssertionError(f"{sentinel}: native tool registry")
-
-    captured: dict[str, object] = {}
-
-    class FakeLLM:
-        def call(self, **kwargs):  # noqa: ANN201
-            captured["prompt"] = kwargs["prompt"]
-            captured["metadata"] = kwargs["metadata"]
-            return LLMCall(
-                tier="medium",
-                task=kwargs["task"],
-                caller=kwargs["caller"],
-                tokens=1,
-                usd=0.0,
-                raw='{"analysis":"hold","proposed_changes":[],"done":true}',
-                parsed={
-                    "analysis": "hold",
-                    "proposed_changes": [],
-                    "done": True,
-                },
-                provider="fake",
-                model="fake",
-            )
-
-    runtime = SubAgentRuntime(
-        config=Config(paths=WorkspacePaths(tmp_path), data={}),
-        skills=FakeSkills(),
-        llm=FakeLLM(),
-        tool_registry=FakeToolRegistry(),
-    )
-    result = runtime.run(
-        SubAgentSpec(
-            name="strategy_tuner",
-            prompt_path=tmp_path / "strategy_tuner.agent.md",
-            prompt="Use only the frozen strategy evidence.",
-            allowed_skills=["memory_search"],
-        ),
-        trigger_event_id=None,
+    class ForbiddenRegistry:
+        def list(self):
+            raise AssertionError(f"{sentinel}: skills")
+        def list_tools(self):
+            raise AssertionError(f"{sentinel}: tools")
+    gateway = Gateway(final("hold", analysis="hold", proposed_changes=[]))
+    rt = runtime(tmp_path, gateway)
+    rt.skills = SimpleNamespace(registry=ForbiddenRegistry())
+    rt.tool_registry = ForbiddenRegistry()
+    result = rt.run(spec(tmp_path), trigger_event_id=None,
         payload={"strategy_id": "alpha", "performance": {"runs_considered": 1}},
-        strategy_id="alpha",
-        session_id="tune_isolated",
-        context_scope="explicit_payload_only",
-    )
-
+        strategy_id="alpha", session_id="tune_isolated", context_scope="explicit_payload_only")
     assert result["audit"]["context_scope"] == "explicit_payload_only"
-    assert result["audit"]["callable_skills"] == []
-    assert result["audit"]["native_tools"] == []
+    assert result["audit"]["callable_skills"] == result["audit"]["native_tools"] == []
     assert result["audit"]["context_chars"] == 0
-    assert captured["metadata"]["context_scope"] == "explicit_payload_only"
-    assert sentinel not in captured["prompt"]
-    assert "memory_recall" not in captured["prompt"]
+    assert gateway.calls[0]["tools"] == []
+    assert sentinel not in str(gateway.calls[0]["messages"])
+    assert "memory_recall" not in str(gateway.calls[0]["messages"])
 
 
 def test_tuner_dispatch_always_requests_explicit_payload_only_context(
@@ -854,8 +852,10 @@ def test_strategy_tuner_never_falls_back_to_the_global_prompt(tmp_path):
         strategy_id="alpha",
     ).get("strategy_tuner")
 
+    from nerya.workspace.prompt_bundles import load_bundle
     assert "GLOBAL SESSION-DERIVED" not in spec.prompt
-    assert "per-strategy self-evolution" in spec.prompt
+    assert spec.prompt == load_bundle().subagents["strategy_tuner"]
+    assert "proposed_changes" in spec.prompt
 
 
 def test_tuner_dispatch_uses_the_frozen_strategy_local_prompt(tmp_path, monkeypatch):
@@ -944,5 +944,7 @@ def test_strategy_tuner_prompt_path_cannot_escape_the_package(tmp_path):
         strategy_id="alpha",
     ).get("strategy_tuner")
 
+    from nerya.workspace.prompt_bundles import load_bundle
     assert "ESCAPED GLOBAL" not in spec.prompt
-    assert "per-strategy self-evolution" in spec.prompt
+    assert spec.prompt == load_bundle().subagents["strategy_tuner"]
+    assert "validation_plan" in spec.prompt

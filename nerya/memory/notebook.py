@@ -51,6 +51,7 @@ and manual edits stay predictable across sessions.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import tempfile
@@ -59,7 +60,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from ..core.config import Config
 from .content_scanner import scan_memory_content
+
+
+def load_notebook(config: Config, *, actor_id: str = "default") -> "MemoryNotebook":
+    """Open only this actor's curated notebook; actor names never become paths."""
+    actor = str(actor_id).strip()
+    if not actor:
+        raise ValueError("actor_id must be non-empty")
+    root = config.paths.memory / "notebook"
+    if actor != "default":
+        root = root / "actors" / hashlib.sha256(actor.encode("utf-8")).hexdigest()
+    notebook = MemoryNotebook(root)
+    notebook.load()
+    return notebook
 
 
 _LOG = logging.getLogger(__name__)

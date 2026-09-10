@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..errors import WalletPolicyDenied
+from ..errors import WalletPolicyDenied, WalletQuoteError
 from ..protocol import (
     WalletBalance,
     WalletCapabilities,
@@ -66,10 +66,11 @@ class BinanceAgenticWallet(WalletProvider):
     label: str = "Binance Agentic Wallet (binance-web3 skill)"
     skill_path: str = ""
     entry: str = "dist/index.js"
-    repo: str = (
-        "https://github.com/binance/binance-skills-hub "
-        "# subdir: skills/binance-web3/binance-agentic-wallet"
-    )
+    # Clean clone URL on purpose — a `# subdir:` comment inside the URL
+    # produced an invalid `git clone` in the install hint. The monorepo
+    # location of the skill is tracked separately in ``subdir``.
+    repo: str = "https://github.com/binance/binance-skills-hub"
+    subdir: str = "skills/binance-web3/binance-agentic-wallet"
     config: dict[str, Any] = field(default_factory=dict)
 
     def _ref(self) -> NodeSkillRef:
@@ -81,9 +82,16 @@ class BinanceAgenticWallet(WalletProvider):
     def readiness(self) -> WalletReadiness:
         ref = self._ref()
         ok, missing = ref.skill_ready()
+        install_hint = ""
+        if not ok:
+            install_hint = (
+                f"{ref.install_hint()} The agentic-wallet skill lives in "
+                f"the monorepo subdir `{self.subdir}` — point "
+                f"`wallet.binance_agentic.skill_path` at that directory."
+            )
         return WalletReadiness(
             provider=self.id, ready=ok, missing=missing,
-            install_hint=ref.install_hint() if not ok else "",
+            install_hint=install_hint,
             reason="" if ok else "binance-agentic-wallet skill not installed.",
         )
 
@@ -174,7 +182,20 @@ class BinanceAgenticWallet(WalletProvider):
             "chain": chain, "token_in": token_in, "token_out": token_out,
             "amount_in": float(amount_in), "slippage_bps": slippage_bps, **kw,
         })
-        expected = float(doc.get("expected_out") or 0.0)
+        raw_expected = doc.get("expected_out")
+        try:
+            expected = float(raw_expected)
+        except (TypeError, ValueError) as exc:
+            # Never return a silent expected_out=0 quote: the approval
+            # flow would freeze a meaningless floor.
+            raise WalletQuoteError(
+                f"binance_agentic quote has no parseable expected_out "
+                f"(raw={raw_expected!r}): {doc}"
+            ) from exc
+        if expected <= 0:
+            raise WalletQuoteError(
+                f"binance_agentic quote is degenerate (expected_out={expected}): {doc}"
+            )
         return WalletQuote(
             provider=self.id, chain=chain,
             token_in=token_in, token_out=token_out,
@@ -203,9 +224,11 @@ class BinanceAgenticWallet(WalletProvider):
             "amount_in": float(amount_in), "slippage_bps": slippage_bps,
             "receiver": receiver or "", **kw,
         })
+        # Default ok=False: a skill doc that omits "ok" must never be
+        # reported as a successful transaction.
         return WalletSwapResult(
             provider=self.id, chain=chain,
-            ok=bool(doc.get("ok", True)),
+            ok=bool(doc.get("ok", False)),
             tx_hash=str(doc.get("tx_hash") or ""),
             amount_in=float(amount_in),
             amount_out=float(doc.get("amount_out") or 0.0),

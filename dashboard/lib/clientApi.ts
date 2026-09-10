@@ -101,6 +101,13 @@ type ReadCacheEntry = {
 };
 
 const readCache = new Map<string, ReadCacheEntry>();
+let readCacheRevision = 0;
+
+/** User-requested refreshes and successful writes must not reuse pre-write data. */
+export function invalidateReadCache(): void {
+  readCacheRevision += 1;
+  readCache.clear();
+}
 
 const READONLY_POST_PATHS = new Set([
   "/accounts/list",
@@ -109,6 +116,7 @@ const READONLY_POST_PATHS = new Set([
   "/evolution/proposals",
   "/market/candles",
   "/messages/list",
+  "/memory/activity",
   "/orders/list",
   "/portfolio/equity_curve",
   "/accounts/equity_curve",
@@ -152,22 +160,20 @@ async function cachedRead<T>(
   const key = `${method}:${path}:${stableBody(body)}`;
   const now = Date.now();
   const existing = readCache.get(key);
-  if (existing && existing.expiresAt > now) {
-    if (existing.promise) return existing.promise as Promise<T>;
-    if (existing.settled) return existing.value as T;
-  }
+  if (existing?.promise) return existing.promise as Promise<T>;
+  if (existing && existing.expiresAt > now && existing.settled) return existing.value as T;
 
+  const revision = readCacheRevision;
   const promise = load()
     .then((value) => {
-      readCache.set(key, {
-        expiresAt: Date.now() + READ_CACHE_TTL_MS,
-        value,
-        settled: true,
-      });
+      // A slow pre-refresh request must not replace the fresh cache entry.
+      if (revision === readCacheRevision && readCache.get(key)?.promise === promise) {
+        readCache.set(key, { expiresAt: Date.now() + READ_CACHE_TTL_MS, value, settled: true });
+      }
       return value;
     })
     .catch((error) => {
-      readCache.delete(key);
+      if (readCache.get(key)?.promise === promise) readCache.delete(key);
       throw error;
     });
   readCache.set(key, {
@@ -189,6 +195,7 @@ async function post<T>(path: string, body: unknown = {}): Promise<T> {
     handleAuthFailure(res.status);
     throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
   }
+  if (!READONLY_POST_PATHS.has(path)) invalidateReadCache();
   return (await res.json()) as T;
 }
 
@@ -208,7 +215,7 @@ async function get<T>(path: string): Promise<T> {
 }
 
 /** Generic helper for callers that need method + body flexibility
- *  (the chat surface, ad-hoc pages that talk to /agent/run_turn etc.).
+ *  (the chat surface, ad-hoc pages that talk to agent turn routes).
  *
  *  Superseded all historical imports from ``lib/client.ts`` — keep the
  *  signature stable so existing call sites keep compiling.
@@ -254,6 +261,9 @@ export async function callApi<T = unknown>(
         parts.push(body.trim());
       }
       throw new Error(parts.join(" | "));
+    }
+    if (method !== "GET" && method !== "HEAD" && !(method === "POST" && READONLY_POST_PATHS.has(normalizedPath))) {
+      invalidateReadCache();
     }
     return body as T;
   };
@@ -4197,7 +4207,7 @@ export const clientApi = {
     strategy_id?: string;
     session_id?: string;
     [key: string]: unknown;
-  }) => post<AgentRunTurnResult>("/agent/run_turn", body),
+  }) => post<AgentRunTurnResult>("/agent/run_turn_internal", body),
   strategyHistory: (strategy_id: string, limit = 50) =>
     post<{ events: StrategyHistoryEvent[] }>("/strategy/history", { strategy_id, limit }),
   strategyReview: (body: { strategy_id: string; session_id: string; stage?: string }) =>

@@ -85,8 +85,7 @@
       "preload_skills": ["research", "finance-creators.kobeissi"]
     },
     "web_researcher": {
-      "extends": "web_collector",
-      "runtime": "native"
+      "extends": "web_collector"
     }
   }
 }

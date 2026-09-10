@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, Empty } from "../Page";
 import { Select } from "../Select";
+import { SearchIcon } from "../icons";
 import { clientApi } from "../../lib/clientApi";
 import type {
   AccountCredentialField,
@@ -133,6 +134,14 @@ export function AddAccountForm({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [balanceNotice, setBalanceNotice] = useState<string | null>(null);
+  // Whether the last balance test succeeded, so the result block can be
+  // coloured ok/danger instead of rendering as neutral log text.
+  const [balanceOk, setBalanceOk] = useState<boolean | null>(null);
+  // Per-slot reveal state for password-type credential inputs
+  // (same pattern as GatewayChannelsPanel's revealedSecrets).
+  const [revealedSecrets, setRevealedSecrets] = useState<
+    Record<number, boolean>
+  >({});
   // Operators can stage the change as a
   // proposal that another approver clicks through. Defaults to
   // "Save now" for the legacy direct-write behaviour.
@@ -321,6 +330,7 @@ export function AddAccountForm({
     setBalanceBusy(true);
     setError(null);
     setBalanceNotice(null);
+    setBalanceOk(null);
     try {
       const res = await clientApi.accountsTestBalance({
         id: id.trim() || undefined,
@@ -346,12 +356,14 @@ export function AddAccountForm({
         health,
         nav: nav.toFixed(2),
       }));
+      setBalanceOk(true);
     } catch (e) {
       setBalanceNotice(
         t("balanceTestFailed", {
           detail: e instanceof Error ? e.message : String(e),
         }),
       );
+      setBalanceOk(false);
     } finally {
       setBalanceBusy(false);
     }
@@ -414,7 +426,7 @@ export function AddAccountForm({
               onChange={(e) => setId(e.target.value)}
               disabled={editing}
               placeholder="bn-live-spot"
-              className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+              className="input-dark font-mono"
             />
           </Field>
           <Field label={t("fieldVenue")}>
@@ -464,7 +476,7 @@ export function AddAccountForm({
                 onChange={(e) =>
                   setBaseCurrency(e.target.value.toUpperCase())
                 }
-                className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+                className="input-dark font-mono"
                 placeholder="USDT / USDC / CNY / JPY / HKD …"
                 title={t("baseCurrencyTitle")}
               />
@@ -486,7 +498,7 @@ export function AddAccountForm({
                 value={subaccount}
                 onChange={(e) => setSubaccount(e.target.value)}
                 placeholder={t("optional")}
-                className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+                className="input-dark font-mono"
               />
             </Field>
           </div>
@@ -503,7 +515,7 @@ export function AddAccountForm({
                   type="number"
                   value={initialBalance}
                   onChange={(e) => setInitialBalance(Number(e.target.value))}
-                  className="w-full bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+                  className="input-dark font-mono"
                 />
               </Field>
             )}
@@ -611,7 +623,7 @@ export function AddAccountForm({
                         [k]: Number(e.target.value),
                       }))
                     }
-                    className="w-32 bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 text-right"
+                    className="input-dark max-w-[8rem] text-right"
                   />
                 </label>
               ))}
@@ -653,7 +665,11 @@ export function AddAccountForm({
               />
             ) : (
               <div className="space-y-1.5">
-                {credentialSlots.map((slot, idx) => (
+                {credentialSlots.map((slot, idx) => {
+                  const passwordType =
+                    slot.sensitive !== false &&
+                    !slot.value.startsWith("vault://");
+                  return (
                   <div key={`${slot.field}-${idx}`} className="space-y-1 rounded border border-brand-500/10 bg-ink-950/20 p-2 text-xs">
                     {slot.description ? (
                       <div className="text-[11px] text-ink-500">{slot.description}</div>
@@ -666,27 +682,46 @@ export function AddAccountForm({
                         updateCredentialSlot(idx, { field: e.target.value })
                       }
                       readOnly={Boolean(slot.label)}
-                      className="w-1/3 bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-100 font-mono"
+                      className="input-dark max-w-[33.333%] font-mono"
                     />
-                    <input
-                      value={slot.value}
-                      onChange={(e) =>
-                        updateCredentialSlot(idx, { value: e.target.value })
-                      }
-                      type={
-                        slot.sensitive !== false && !slot.value.startsWith("vault://")
-                          ? "password"
-                          : slot.kind === "url"
-                          ? "url"
-                          : "text"
-                      }
-                      list={slot.sensitive !== false ? "account-vault-ref-suggestions" : undefined}
-                      placeholder={
-                        slot.placeholder ||
-                        (slot.sensitive === false ? t("publicConfigValue") : t("pastApiOrVault"))
-                      }
-                      className="flex-1 bg-ink-900 border border-brand-500/20 rounded px-2 py-1 text-ink-200"
-                    />
+                    <div className="relative flex-1">
+                      <input
+                        value={slot.value}
+                        onChange={(e) =>
+                          updateCredentialSlot(idx, { value: e.target.value })
+                        }
+                        type={
+                          passwordType && !revealedSecrets[idx]
+                            ? "password"
+                            : slot.kind === "url"
+                            ? "url"
+                            : "text"
+                        }
+                        list={slot.sensitive !== false ? "account-vault-ref-suggestions" : undefined}
+                        placeholder={
+                          slot.placeholder ||
+                          (slot.sensitive === false ? t("publicConfigValue") : t("pastApiOrVault"))
+                        }
+                        className={`input-dark${
+                          passwordType ? " pr-9" : ""
+                        }`}
+                      />
+                      {passwordType ? (
+                        <button
+                          type="button"
+                          className="absolute inset-y-0 right-1 my-auto flex h-6 w-6 items-center justify-center rounded-md text-ink-400 transition-colors hover:text-ink-100"
+                          title={revealedSecrets[idx] ? "hide" : "show"}
+                          onClick={() =>
+                            setRevealedSecrets((cur) => ({
+                              ...cur,
+                              [idx]: !cur[idx],
+                            }))
+                          }
+                        >
+                          <SearchIcon size={14} />
+                        </button>
+                      ) : null}
+                    </div>
                     <button
                       onClick={() => removeCredentialSlot(idx)}
                       disabled={slot.required}
@@ -697,7 +732,8 @@ export function AddAccountForm({
                     </button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
                 <datalist id="account-vault-ref-suggestions">
                   {vaultRefs.map((ref) => (
                     <option key={ref.name} value={ref.ref}>
@@ -723,7 +759,17 @@ export function AddAccountForm({
         <div className="mt-3 text-accent-300 text-xs">{notice}</div>
       ) : null}
       {balanceNotice ? (
-        <div className="mt-3 text-ink-300 text-xs font-mono">{balanceNotice}</div>
+        <div
+          className={`mt-3 rounded border px-2.5 py-1.5 text-xs font-mono ${
+            balanceOk === true
+              ? "border-ok/30 bg-ok/10 text-ok"
+              : balanceOk === false
+              ? "border-danger/30 bg-danger/10 text-danger"
+              : "border-brand-500/20 bg-ink-900 text-ink-300"
+          }`}
+        >
+          {balanceNotice}
+        </div>
       ) : null}
     </Card>
   );

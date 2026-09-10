@@ -133,7 +133,7 @@ export type EvolutionOptimizerFeedbackExample = {
   strategy_id?: string | null;
   state?: string;
   selected_candidate_id?: string | null;
-  selected_score?: number;
+  selected_score?: number | null;
   candidate_status?: string | null;
   feedback_sample_count?: number;
   [key: string]: unknown;
@@ -373,6 +373,7 @@ export type EvolutionProcessRun = {
 export type EvolutionOptimizerCandidate = {
   candidate_id?: string | null;
   index?: number;
+  selection_eligible?: boolean | null;
   score?: number;
   status?: string;
   summary?: string;
@@ -423,9 +424,11 @@ export type EvolutionOptimizerReport = {
   candidate_count?: number;
   evaluated_count?: number;
   truncated?: boolean;
+  eligible_count?: number | null;
+  selection_status?: "selected" | "no_eligible_candidate" | null;
   selected_candidate_id?: string | null;
-  selected_index?: number;
-  selected_score?: number;
+  selected_index?: number | null;
+  selected_score?: number | null;
   selection_reason?: string;
   outcome_feedback?: {
     version?: string;

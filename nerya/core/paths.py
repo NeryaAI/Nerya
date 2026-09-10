@@ -79,10 +79,8 @@ class WorkspacePaths:
     def strategy_learnings(self) -> Path: return self.memory / "strategy_learnings"
     @property
     def memory_index(self) -> Path:
-        # Long-term structured fact index (JSONL). Lives next to the
-        # whitelisted markdown notes so backup/export tooling already
-        # picks it up; one record per appended fact, see
-        # ``nerya.agent.memory_index.MemoryIndex``.
+        # Historical artifact location for backup and preservation checks.
+        # The canonical memory runtime neither imports nor generates this file.
         return self.memory / "index.jsonl"
 
     # agents / subagents
@@ -90,6 +88,14 @@ class WorkspacePaths:
     def agents(self) -> Path: return self.root / "agents"
     @property
     def subagents(self) -> Path: return self.root / "subagents"
+
+    # plugins (nerya.harness.loader) / team templates (nerya.teams)
+    @property
+    def plugins(self) -> Path: return self.root / "plugins"
+    @property
+    def teams_dir(self) -> Path: return self.root / "teams"
+    @property
+    def team_templates(self) -> Path: return self.teams_dir / "templates"
 
     # skills
     @property

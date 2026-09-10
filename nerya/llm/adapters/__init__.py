@@ -15,6 +15,12 @@ Adding a new provider is then a single file that imports from
 ``_base`` — no giant diff against ``providers.py`` required.
 """
 
+from __future__ import annotations
+
+import logging
+import threading
+from typing import Any, Callable
+
 from ._base import (
     ModelInfo,
     ProviderCallable,
@@ -76,7 +82,90 @@ def builtin_providers(transport: Transport | None = None) -> dict[str, ProviderC
         elif entry.api_mode == "chat_completions":
             out[entry.id] = compat
     out["compat"] = compat
+    # Operator/workspace-contributed providers (see register_custom_provider)
+    # are merged last so they can fill catalogue gaps but never shadow the
+    # adapters explicitly wired above.
+    for name, factory in list(_custom_provider_factories()):
+        try:
+            out[name] = _invoke_factory(factory, t)
+        except Exception:  # a broken contributor must not break the router
+            _ADAPTERS_LOG.warning("custom provider %r factory failed", name,
+                                  exc_info=True)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Contribution port (the "Provider" role of the LLM capability seam)
+# ---------------------------------------------------------------------------
+
+_CUSTOM_PROVIDERS: dict[str, Any] = {}
+_CUSTOM_LOCK = threading.Lock()
+_ADAPTERS_LOG = logging.getLogger("nerya.llm.adapters")
+
+
+def _custom_provider_factories() -> list[tuple[str, Any]]:
+    with _CUSTOM_LOCK:
+        return sorted(_CUSTOM_PROVIDERS.items())
+
+
+def _invoke_factory(factory: Any, transport: Transport | None) -> ProviderCallable:
+    """Call ``factory`` with the shared transport, tolerating 0-arg factories."""
+
+    import inspect
+
+    try:
+        takes_args = bool(inspect.signature(factory).parameters)
+    except (TypeError, ValueError):
+        takes_args = True
+    return factory(transport) if takes_args else factory()
+
+
+def register_custom_provider(
+    name: str,
+    factory: Any,
+    *,
+    replace: bool = False,
+) -> Callable[[], None]:
+    """Contribute an LLM provider resolvable by ``llm.tiers.<t>.provider``.
+
+    ``factory`` is called as ``factory(transport)`` (zero-argument
+    factories are accepted) and must return a
+    :data:`ProviderCallable`. Registration takes effect for every
+    ``ModelRouter`` / gateway constructed afterwards — the table is
+    merged by :func:`builtin_providers` on each call.
+
+    Returns a disposer that removes the contribution (the same
+    registration-as-effect contract as ``nerya.harness.extensions``).
+
+    This is the seam workspace plugins use via
+    ``PluginContext.register_llm_provider``; before it existed, adding
+    a provider meant editing the hardcoded map in
+    ``builtin_providers``.
+    """
+
+    if not isinstance(name, str) or not name:
+        raise ValueError("provider name must be a non-empty string")
+    if not callable(factory):
+        raise TypeError("provider factory must be callable")
+    with _CUSTOM_LOCK:
+        if name in _CUSTOM_PROVIDERS and not replace:
+            raise ValueError(
+                f"custom provider {name!r} already registered "
+                "(pass replace=True to overwrite)"
+            )
+        _CUSTOM_PROVIDERS[name] = factory
+
+    def _dispose() -> None:
+        with _CUSTOM_LOCK:
+            _CUSTOM_PROVIDERS.pop(name, None)
+
+    return _dispose
+
+
+def custom_providers() -> dict[str, Any]:
+    """Snapshot of the currently registered custom provider factories."""
+
+    return dict(_custom_provider_factories())
 
 
 __all__ = [
@@ -94,4 +183,6 @@ __all__ = [
     "GoogleCodeAssistAdapter",
     "DEFAULT_BASE_URLS",
     "builtin_providers",
+    "register_custom_provider",
+    "custom_providers",
 ]

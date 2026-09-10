@@ -30,7 +30,12 @@ from ..core.ids import approval_id
 from ..core.time import now_iso
 from ..db.repositories import ApprovalRepository
 from ..db.sqlite import connect
-from .errors import WalletDependencyError, WalletPolicyDenied
+from .errors import (
+    WalletDependencyError,
+    WalletPolicyDenied,
+    WalletQuoteError,
+    WalletTransportError,
+)
 from .registry import build_provider, list_configured_providers
 
 log = logging.getLogger(__name__)
@@ -45,6 +50,12 @@ def _meaningful_wallet_cfg(cfg: Mapping[str, Any]) -> bool:
             "dist/index.js",
             "scripts/bitget-wallet-agent-api.py",
         }:
+            continue
+        if key == "chains":
+            # Shipped by DEFAULT_CONFIG (deep-merged into every config),
+            # so its presence does not mean the operator configured a
+            # legacy block here; customized chain lists belong in
+            # wallet.providers.<id> bindings.
             continue
         return True
     return False
@@ -150,6 +161,7 @@ def request_approval(
 ) -> dict[str, Any]:
     """Persist and broadcast one frozen wallet swap approval."""
 
+    _validate_quote(quote)
     expires_s = max(1.0, float(config.get("approvals.expire_seconds", 600)))
     aid = approval_id()
     created_at = time.time()
@@ -233,12 +245,36 @@ def _float(value: object) -> float:
     return number if math.isfinite(number) else 0.0
 
 
+def _validate_quote(quote: Mapping[str, Any]) -> None:
+    """Refuse to freeze an approval around a meaningless quote.
+
+    Providers that fail to parse an aggregator/CLI response previously
+    produced ``expected_out=0, min_out=0`` — and because the pre-trade
+    floor check skips zero floors, such a quote approved a swap with NO
+    slippage protection at all.
+    """
+    expected_out = _float(quote.get("expected_out"))
+    min_out = _float(quote.get("min_out"))
+    if expected_out <= 0:
+        raise ValueError(
+            "quote has no positive expected_out — refusing to freeze an "
+            f"approval around it (got expected_out={quote.get('expected_out')!r})"
+        )
+    if min_out <= 0 or min_out > expected_out:
+        raise ValueError(
+            "quote min_out must be positive and not exceed expected_out — "
+            f"refusing to freeze an approval (min_out={min_out!r}, "
+            f"expected_out={expected_out!r})"
+        )
+
+
 def execute_frozen_swap(
     config: Config,
     *,
     request: Mapping[str, Any],
     approved_quote: Mapping[str, Any],
     approval_id_value: str,
+    expires_at: float | None = None,
 ) -> dict[str, Any]:
     """Execute a claimed swap after revalidating all live controls."""
 
@@ -250,6 +286,16 @@ def execute_frozen_swap(
         }
     if config.kill_switch():
         return {"ok": False, "error": "kill_switch_enabled"}
+    if expires_at is not None and time.time() > float(expires_at):
+        # The approval window is part of what the operator signed off on:
+        # executing long after expiry would trade against stale prices.
+        return {
+            "ok": False,
+            "error": "approval_expired",
+            "approval_id": approval_id_value,
+            "expires_at": float(expires_at),
+            "reason": "request a fresh quote and approval",
+        }
 
     frozen = normalize_swap_request(config, request)
     provider = _provider(config, frozen)
@@ -262,7 +308,17 @@ def execute_frozen_swap(
     ).to_dict()
     approved_min_out = _float(approved_quote.get("min_out"))
     current_expected_out = _float(current_quote.get("expected_out"))
-    if approved_min_out > 0 and current_expected_out < approved_min_out:
+    if approved_min_out <= 0:
+        # Defense in depth on top of _validate_quote at request time:
+        # a zero floor means no slippage protection was ever approved.
+        return {
+            "ok": False,
+            "error": "approval_quote_floor_missing",
+            "approval_id": approval_id_value,
+            "approved_min_out": approved_min_out,
+            "reason": "the approved quote carried no enforceable min_out floor",
+        }
+    if current_expected_out < approved_min_out:
         return {
             "ok": False,
             "error": "quote_moved_requires_reapproval",
@@ -454,6 +510,7 @@ def resume_approved(config: Config, aid: str) -> dict[str, Any]:
             request=dict(record.get("wallet_swap") or {}),
             approved_quote=dict(record.get("quote") or {}),
             approval_id_value=aid,
+            expires_at=record.get("expires_at"),
         )
     except (WalletDependencyError, WalletPolicyDenied) as exc:
         response = {
@@ -463,6 +520,20 @@ def resume_approved(config: Config, aid: str) -> dict[str, Any]:
                 if isinstance(exc, WalletDependencyError)
                 else "policy_denied"
             ),
+            "reason": str(exc),
+        }
+    except WalletTransportError as exc:
+        # Provider backend outage (HTTP/RPC/CLI), not an operator-policy
+        # block — classify it honestly for the approval UI.
+        response = {
+            "ok": False,
+            "error": "provider_transport_error",
+            "reason": str(exc),
+        }
+    except WalletQuoteError as exc:
+        response = {
+            "ok": False,
+            "error": "quote_unavailable",
             "reason": str(exc),
         }
     except Exception as exc:  # pragma: no cover - provider failure boundary

@@ -31,7 +31,12 @@ from typing import Callable, Iterable, Optional
 
 from ..agent.error_recovery import RecoveryAction, classify_for_recovery, policy_for_kind
 from .executor import NativeToolExecutor
-from .registry import ToolNotFoundError, ToolRegistry
+from .registry import ToolRegistry
+from ..harness.cancellation import CancelToken
+from .execution_contracts import (
+    dispatch_stop_reason, execution_unknown_result, is_read_only_tool,
+    pair_executed_results, skipped_before_dispatch,
+)
 from .types import ContextModifier, ToolCall, ToolResult
 
 
@@ -107,62 +112,12 @@ class ToolOrchestrator:
         results: list[Optional[ToolResult]] = [None] * len(ordered)
         auto_retry_total = 0
 
-        def _run_with_retry(call: ToolCall) -> tuple[ToolResult, int]:
-            """Execute ``call``; auto-retry transient failures with backoff.
-
-            Returns ``(result, retries_consumed)``. The caller only sees
-            the *final* result — interim failures are discarded so the
-            transcript never carries duplicated tool_result blocks for
-            the same tool_use_id.
-            """
-
-            attempt = 0
-            retries_consumed = 0
-            while True:
-                try:
-                    r = self.executor.execute(call)
-                except Exception:
-                    _LOG.exception("tool crashed: %s", call.name)
-                    return (
-                        ToolResult(
-                            tool_use_id=call.id,
-                            name=call.name,
-                            is_error=True,
-                            content=[],
-                        ),
-                        retries_consumed,
-                    )
-                if not r.is_error or not self.auto_retry_transient:
-                    return r, retries_consumed
-                err = r.error
-                if err is None:
-                    return r, retries_consumed
-                verdict = classify_for_recovery(
-                    error_kind=err.kind.value if err.kind else None,
-                    error_message=err.message,
-                )
-                policy = policy_for_kind(verdict.category)
-                if (
-                    policy.action != RecoveryAction.AUTO_RETRY
-                    or attempt >= policy.max_retries
-                ):
-                    return r, retries_consumed
-                attempt += 1
-                retries_consumed += 1
-                wait_s = policy.backoff_for_attempt(attempt)
-                _LOG.info(
-                    "auto-retry %s (attempt %d/%d) — category=%s wait=%.2fs",
-                    call.name, attempt, policy.max_retries, verdict.category, wait_s,
-                )
-                if wait_s > 0:
-                    time.sleep(wait_s)
-
         # ----- read-only batch (parallel) ---------------------------------
         if ro_indices:
             workers = min(self.max_parallel, len(ro_indices))
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tool-ro") as pool:
                 fut_to_idx = {
-                    pool.submit(_run_with_retry, ordered[i]): i for i in ro_indices
+                    pool.submit(self._execute_with_retry, ordered[i]): i for i in ro_indices
                 }
                 for fut in as_completed(fut_to_idx):
                     idx = fut_to_idx[fut]
@@ -171,26 +126,16 @@ class ToolOrchestrator:
                         auto_retry_total += retries_consumed
                     except Exception:
                         _LOG.exception("RO tool crashed in batch: %s", ordered[idx].name)
-                        results[idx] = ToolResult(
-                            tool_use_id=ordered[idx].id,
-                            name=ordered[idx].name,
-                            is_error=True,
-                            content=[],
-                        )
+                        results[idx] = execution_unknown_result(ordered[idx], "parallel dispatch failed")
 
         # ----- mutating batch (serial, original order) --------------------
         for idx in mutating_indices:
             try:
-                results[idx], retries_consumed = _run_with_retry(ordered[idx])
+                results[idx], retries_consumed = self._execute_with_retry(ordered[idx])
                 auto_retry_total += retries_consumed
             except Exception:
                 _LOG.exception("mutating tool crashed: %s", ordered[idx].name)
-                results[idx] = ToolResult(
-                    tool_use_id=ordered[idx].id,
-                    name=ordered[idx].name,
-                    is_error=True,
-                    content=[],
-                )
+                results[idx] = execution_unknown_result(ordered[idx], "serial dispatch failed")
 
         # ----- aggregate + replay modifiers in input order ----------------
         finalised: list[ToolResult] = []
@@ -219,14 +164,54 @@ class ToolOrchestrator:
             auto_retries=auto_retry_total,
         )
 
-    # ------------------------------------------------------------------ utils
+    def _execute_with_retry(self, call: ToolCall) -> tuple[ToolResult, int]:
+        """Retry observations, never silently replay an effect with an uncertain outcome."""
+        retries = 0
+        previous: ToolResult | None = None
+        while True:
+            if reason := dispatch_stop_reason(call, now=time.time()):
+                return previous or skipped_before_dispatch(call, reason), retries
+            if previous is not None:
+                retries += 1
+            try:
+                raw = self.executor.execute(call)
+                result = pair_executed_results([call], [raw])[0]
+            except Exception:
+                _LOG.exception("tool crashed: %s", call.name)
+                return execution_unknown_result(call, "executor raised after dispatch"), retries
+            error = result.error
+            if (
+                not result.is_error or not self.auto_retry_transient
+                or error is None or error.retryable is False
+                or not is_read_only_tool(call.name, self.registry)
+            ):
+                return result, retries
+            verdict = classify_for_recovery(
+                error_kind=error.kind.value, error_message=error.message,
+            )
+            policy = policy_for_kind(verdict.category)
+            if policy.action != RecoveryAction.AUTO_RETRY or retries >= policy.max_retries:
+                return result, retries
+            if dispatch_stop_reason(call, now=time.time()):
+                return result, retries
+            delay = policy.backoff_for_attempt(retries + 1)
+            deadline = call.metadata.get("turn_deadline_epoch")
+            if deadline is not None and time.time() + delay >= float(deadline):
+                return result, retries
+            previous = result
+            if delay > 0:
+                token = call.metadata.get("cancel_token")
+                if isinstance(token, CancelToken):
+                    token.wait(delay)
+                else:
+                    time.sleep(delay)
 
     def _is_read_only(self, call: ToolCall) -> bool:
-        try:
-            d = self.registry.get(call.name)
-        except ToolNotFoundError:
-            return False
-        return bool(d.read_only and d.is_concurrency_safe)
+        descriptor = self.registry.find(call.name)
+        return bool(
+            descriptor and descriptor.is_concurrency_safe
+            and is_read_only_tool(call.name, self.registry)
+        )
 
 
 __all__ = [

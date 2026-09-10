@@ -1372,6 +1372,11 @@ def _smoke_test_import(package: StrategyPackage) -> list[StrategyValidationIssue
     sys_path_inserted = added_path not in sys.path
     if sys_path_inserted:
         sys.path.insert(0, added_path)
+    # Imported lazily: the runner only pulls the validator in lazily
+    # itself, so a module-level import here would risk an import cycle.
+    from .runner import _pop_strategy_package_modules
+
+    modules_before = frozenset(sys.modules)
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
@@ -1386,6 +1391,11 @@ def _smoke_test_import(package: StrategyPackage) -> list[StrategyValidationIssue
         return issues
     finally:
         sys.modules.pop(module_name, None)
+        # Drop package-local helper modules (``import helpers``) the
+        # smoke exec pulled in — the temp package dir may be deleted
+        # right after validation, and a cached module pointing into it
+        # must never leak into a later strategy's imports.
+        _pop_strategy_package_modules(package.root, modules_before)
         if sys_path_inserted:
             try:
                 sys.path.remove(added_path)

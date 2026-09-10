@@ -198,6 +198,17 @@ function ChartPanel({
   );
 }
 
+// Chart colors resolve to the console's design tokens instead of
+// ad-hoc hex greens/reds: ok/accent mint for positive series, danger
+// for negative/risk series, fluid cyan for neutral/benchmark lines,
+// brand violet for indicator lines.
+const CHART_OK = "#10d993"; // --ok / accent-500
+const CHART_DANGER = "#ef4560"; // --err / danger
+const CHART_FLUID = "#22d3ee"; // --fluid
+const CHART_BRAND = "#a78bfa"; // brand-400
+const CHART_WARN = "#f5a524"; // --warn
+const CHART_MAGENTA = "#f472b6"; // magenta-400
+
 function renderSeries(api: IChartApi, panel: BacktestPanel) {
   let markerHost: { setMarkers(markers: never[]): void } | null = null;
   const markers: Array<Record<string, unknown>> = [];
@@ -207,11 +218,11 @@ function renderSeries(api: IChartApi, panel: BacktestPanel) {
     if (!data.length) continue;
     if (series.kind === "candles") {
       const s = api.addCandlestickSeries({
-        upColor: "#22c55e",
-        downColor: "#ef4444",
+        upColor: CHART_OK,
+        downColor: CHART_DANGER,
         borderVisible: false,
-        wickUpColor: "#22c55e",
-        wickDownColor: "#ef4444",
+        wickUpColor: CHART_OK,
+        wickDownColor: CHART_DANGER,
       });
       s.setData(data as never);
       markerHost = s as unknown as { setMarkers(markers: never[]): void };
@@ -359,24 +370,24 @@ function formatSeriesName(series: BacktestSeries): string {
 
 function colorForSeries(panel: BacktestPanel, series: BacktestSeries, index: number): string {
   const text = `${panel.id} ${panel.title} ${series.name ?? ""} ${series.kind}`.toLowerCase();
-  if (/benchmark|bench|b&h|buy.*hold/.test(text)) return "#38bdf8";
-  if (/drawdown|missed/.test(text)) return "#ef4444";
-  if (/rsi/.test(text)) return "#a78bfa";
-  if (/equity|nav|capital/.test(text)) return "#22c55e";
-  const palette = ["#22c55e", "#38bdf8", "#a78bfa", "#f59e0b", "#f472b6"];
+  if (/benchmark|bench|b&h|buy.*hold/.test(text)) return CHART_FLUID;
+  if (/drawdown|missed/.test(text)) return CHART_DANGER;
+  if (/rsi/.test(text)) return CHART_BRAND;
+  if (/equity|nav|capital/.test(text)) return CHART_OK;
+  const palette = [CHART_OK, CHART_FLUID, CHART_BRAND, CHART_WARN, CHART_MAGENTA];
   return palette[index % palette.length];
 }
 
 function areaTopColor(panel: BacktestPanel, series: BacktestSeries): string {
   const text = `${panel.id} ${panel.title} ${series.name ?? ""}`.toLowerCase();
-  if (/drawdown|missed/.test(text)) return "rgba(239,68,68,.22)";
-  return "rgba(34,197,94,.18)";
+  if (/drawdown|missed/.test(text)) return "rgba(239,69,96,.22)";
+  return "rgba(16,217,147,.18)";
 }
 
 function areaBottomColor(panel: BacktestPanel, series: BacktestSeries): string {
   const text = `${panel.id} ${panel.title} ${series.name ?? ""}`.toLowerCase();
-  if (/drawdown|missed/.test(text)) return "rgba(239,68,68,.02)";
-  return "rgba(34,197,94,.02)";
+  if (/drawdown|missed/.test(text)) return "rgba(239,69,96,.02)";
+  return "rgba(16,217,147,.02)";
 }
 
 function firstNumericFromRows(

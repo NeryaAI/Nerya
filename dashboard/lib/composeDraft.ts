@@ -1,34 +1,53 @@
 "use client";
 
-/**
- * Cross-route compose draft.
- *
- * The Codex-style command home owns the primary composer. When another
- * surface (the ⌘K palette, a sidebar action, a suggestion link) wants to
- * pre-fill that composer it stashes the text here and routes to the home,
- * which drains the draft on mount. sessionStorage keeps it tab-scoped and
- * survives the client-side navigation without leaking into the next visit.
- */
+import type { ChatAttachment } from "./chat";
 
-const KEY = "nerya.compose.draft.v1";
+const LEGACY_KEY = "nerya.compose.draft.v1";
+const KEY = "nerya.compose.draft.v2";
+export type ComposeDraft = { text: string; attachments: ChatAttachment[]; autoSend: boolean };
+let fallback: ComposeDraft | null = null;
 
-export function setComposeDraft(text: string): void {
+/** Attachments are already uploaded: persist references, never megabytes of base64. */
+export function setComposeDraftPayload(draft: ComposeDraft): void {
   if (typeof window === "undefined") return;
+  const attachments = draft.attachments.map(({ data_url: _data, text: _text, ...metadata }) => metadata);
+  fallback = { ...draft, attachments };
   try {
-    if (text) window.sessionStorage.setItem(KEY, text);
-    else window.sessionStorage.removeItem(KEY);
-  } catch {
-    /* ignore private-mode / quota errors */
-  }
+    window.sessionStorage.removeItem(LEGACY_KEY);
+    window.sessionStorage.setItem(KEY, JSON.stringify(fallback));
+  } catch { /* The in-memory handoff still works when storage is blocked. */ }
 }
 
-export function takeComposeDraft(): string {
-  if (typeof window === "undefined") return "";
+export function takeComposeDraftPayload(): ComposeDraft | null {
+  if (typeof window === "undefined") return null;
+  let draft = fallback;
+  fallback = null;
   try {
-    const value = window.sessionStorage.getItem(KEY) || "";
-    if (value) window.sessionStorage.removeItem(KEY);
-    return value;
-  } catch {
-    return "";
-  }
+    const raw = window.sessionStorage.getItem(KEY);
+    const legacy = window.sessionStorage.getItem(LEGACY_KEY);
+    window.sessionStorage.removeItem(KEY);
+    window.sessionStorage.removeItem(LEGACY_KEY);
+    if (!draft && raw) {
+      const value: unknown = JSON.parse(raw);
+      if (value && typeof value === "object" && "text" in value && typeof value.text === "string") {
+        const saved = value as Partial<ComposeDraft>;
+        draft = {
+          text: value.text,
+          autoSend: saved.autoSend === true,
+          attachments: Array.isArray(saved.attachments) ? saved.attachments.filter((item) =>
+            item && typeof item.id === "string" && typeof item.name === "string" && typeof item.artifact_uri === "string",
+          ) : [],
+        };
+      }
+    } else if (!draft && legacy) draft = { text: legacy, attachments: [], autoSend: true };
+  } catch { /* Return the memory copy, if available. */ }
+  return draft;
+}
+
+/** Compatibility for command palette and older text-only callers. */
+export function setComposeDraft(text: string): void {
+  setComposeDraftPayload({ text, attachments: [], autoSend: true });
+}
+export function takeComposeDraft(): string {
+  return takeComposeDraftPayload()?.text ?? "";
 }

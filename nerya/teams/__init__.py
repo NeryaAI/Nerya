@@ -24,6 +24,9 @@ from .templates import (
     BUILTIN_TEMPLATES,
     get_template,
     list_templates,
+    load_workspace_templates,
+    reload_workspace_templates,
+    template_from_dict,
 )
 from .orchestrator import TeamOrchestrator
 from .aggregator import TeamAggregator
@@ -44,6 +47,9 @@ __all__ = [
     "BUILTIN_TEMPLATES",
     "get_template",
     "list_templates",
+    "load_workspace_templates",
+    "reload_workspace_templates",
+    "template_from_dict",
     "TeamOrchestrator",
     "TeamAggregator",
 ]

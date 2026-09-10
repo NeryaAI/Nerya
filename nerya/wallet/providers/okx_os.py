@@ -20,7 +20,13 @@ import shutil
 import subprocess
 from typing import Any
 
-from ..errors import WalletDependencyError, WalletPolicyDenied
+from ..errors import (
+    WalletDependencyError,
+    WalletError,
+    WalletPolicyDenied,
+    WalletQuoteError,
+    WalletTransportError,
+)
 from ..protocol import (
     WalletBalance,
     WalletCapabilities,
@@ -35,7 +41,11 @@ from ..protocol import (
 _CAPABILITIES = WalletCapabilities(
     balance=WalletCapability(
         supported=True, status="real",
-        note="GET /api/v5/wallet/asset/total-value-by-address.",
+        note=(
+            "Per-token: GET /api/v5/wallet/asset/token-balances. "
+            "Portfolio USD value (token usd/total): GET "
+            "/api/v5/wallet/asset/total-value-by-address."
+        ),
     ),
     quote=WalletCapability(
         supported=True, status="real",
@@ -67,7 +77,12 @@ _BASE_URL = "https://www.okx.com"
 _QUOTE_PATH = "/api/v5/dex/aggregator/quote"
 _SWAP_PATH = "/api/v5/dex/aggregator/swap"
 _BALANCE_PATH = "/api/v5/wallet/asset/total-value-by-address"
+_TOKEN_BALANCES_PATH = "/api/v5/wallet/asset/token-balances"
 _MARKET_CANDLES_PATH = "/api/v6/dex/market/candles"
+
+# Tokens named "" / "usd" / "total" are portfolio-value requests, not
+# per-token balance lookups.
+_PORTFOLIO_TOKENS = ("", "usd", "total")
 
 
 _CHAIN_IDS = {
@@ -161,12 +176,12 @@ class OkxOsWallet(WalletProvider):
                 errors="replace",
             )
         except subprocess.TimeoutExpired as exc:
-            raise WalletPolicyDenied(
+            raise WalletTransportError(
                 f"onchainos {' '.join(args)} timed out after {timeout_s}s"
             ) from exc
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
-            raise WalletPolicyDenied(
+            raise WalletTransportError(
                 f"onchainos {' '.join(args)} exited {proc.returncode}: {err[:512]}"
             )
         parsed = self._extract_json(proc.stdout or "")
@@ -212,7 +227,10 @@ class OkxOsWallet(WalletProvider):
             headers=headers, timeout=20.0,
         )
         if status >= 400:
-            raise WalletPolicyDenied(
+            # Transport/operational failure, not a policy block: the
+            # approval flow classifies these separately from
+            # WalletPolicyDenied.
+            raise WalletTransportError(
                 f"OKX OS {path} returned {status}: {doc}"
             )
         return doc if isinstance(doc, dict) else {"raw": doc}
@@ -310,9 +328,8 @@ class OkxOsWallet(WalletProvider):
         if not token_s:
             raise WalletPolicyDenied("OKX OS market candles require token")
         if not self._have_creds():
-            r = self.readiness()
-            if not r.ready:
-                raise WalletDependencyError(self.id, r.missing, r.install_hint)
+            # Readiness was already checked above; fall straight through
+            # to the OnchainOS CLI transport.
             return self._cli_token_klines(
                 chain=chain,
                 token=token_s,
@@ -365,24 +382,135 @@ class OkxOsWallet(WalletProvider):
         return out
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _token_rows(doc: dict[str, Any]) -> list[dict[str, Any]]:
+        """Flatten a token-balances response into a list of token rows.
+
+        Handles both the documented ``data[0].tokenAssets`` nesting and a
+        flat ``data`` list, depending on API version.
+        """
+        data = doc.get("data")
+        if isinstance(data, dict):
+            data = data.get("tokenAssets") or data.get("list") or []
+        rows: list[Any] = data if isinstance(data, list) else []
+        flat: list[dict[str, Any]] = []
+        for entry in rows:
+            if not isinstance(entry, dict):
+                continue
+            nested = entry.get("tokenAssets")
+            if isinstance(nested, list):
+                flat.extend(r for r in nested if isinstance(r, dict))
+            elif (
+                "tokenSymbol" in entry
+                or "symbol" in entry
+                or "balance" in entry
+            ):
+                flat.append(entry)
+        return flat
+
+    def _match_token_row(
+        self, doc: dict[str, Any], token_s: str,
+    ) -> dict[str, Any] | None:
+        needle = token_s.lower()
+        for row in self._token_rows(doc):
+            sym = str(row.get("tokenSymbol") or row.get("symbol") or "").lower()
+            contract = str(
+                row.get("tokenContractAddress")
+                or row.get("contractAddress")
+                or row.get("address")
+                or ""
+            ).lower()
+            if needle and needle in (sym, contract):
+                return row
+        return None
+
     def get_balance(
         self, *, chain: str, address: str, token: str, **kw: Any,
     ) -> WalletBalance:
         r = self.readiness()
         if not r.ready:
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
-        doc = self._signed_get(_BALANCE_PATH, {
-            "address": address, "chains": str(self._chain_index(chain)),
-        })
-        total = 0.0
-        try:
-            total = float((doc.get("data") or [{}])[0].get("totalValue") or 0.0)
-        except Exception:
+        token_s = str(token or "").strip()
+        if token_s.lower() in _PORTFOLIO_TOKENS:
+            # Genuine portfolio-value request: keep the total-value
+            # endpoint, but label the result honestly as USD / token=""
+            # instead of echoing the requested token.
+            doc = self._signed_get(_BALANCE_PATH, {
+                "address": address, "chains": str(self._chain_index(chain)),
+            })
             total = 0.0
+            try:
+                total = float((doc.get("data") or [{}])[0].get("totalValue") or 0.0)
+            except Exception:
+                total = 0.0
+            return WalletBalance(
+                provider=self.id, chain=chain, address=address, token="",
+                balance=total, symbol="USD", decimals=2,
+            )
+        if not address:
+            raise WalletPolicyDenied(
+                "OKX OS per-token balance requires a wallet address for the "
+                f"token-balances lookup (token={token_s!r})"
+            )
+        doc = self._signed_get(_TOKEN_BALANCES_PATH, {
+            "address": address,
+            "chainIndex": str(self._chain_index(chain)),
+        })
+        row = self._match_token_row(doc, token_s)
+        if row is None:
+            raise WalletError(
+                f"OKX OS: token {token_s!r} not found in token balances for "
+                f"{address} on chain {chain!r}"
+            )
+        symbol = str(row.get("tokenSymbol") or row.get("symbol") or token_s)
+        try:
+            decimals = int(row.get("decimals") or 0)
+        except (TypeError, ValueError):
+            decimals = 0
+        balance: float | None = None
+        for key in ("uiAmount", "ui_amount", "uiAmountString"):
+            if row.get(key) is None:
+                continue
+            try:
+                balance = float(row[key])
+                break
+            except (TypeError, ValueError):
+                continue
+        if balance is None:
+            # The token-balances endpoint reports `balance` in raw base
+            # units; convert with the row's own decimals.
+            try:
+                raw = float(row.get("balance") or row.get("amount") or 0.0)
+            except (TypeError, ValueError):
+                raw = 0.0
+            balance = raw / (10 ** max(decimals, 0))
         return WalletBalance(
-            provider=self.id, chain=chain, address=address, token=token,
-            balance=total, symbol="USD", decimals=2,
+            provider=self.id, chain=chain, address=address, token=token_s,
+            balance=balance, symbol=symbol, decimals=decimals,
         )
+
+    @staticmethod
+    def _decimals_kw(kw: dict[str, Any], name: str) -> tuple[int, bool]:
+        """Parse a ``decimals_in`` / ``decimals_out`` kwarg.
+
+        Returns ``(value, assumed)``. When the caller omits the kwarg the
+        EVM default of 18 is applied and ``assumed`` is True so callers
+        can surface the assumption via ``extra["decimals_assumed"]``.
+        Explicit ``0`` is honoured (the previous ``or 18`` silently
+        turned 0-decimal tokens into 18-decimal ones).
+        """
+        raw = kw.get(name)
+        if raw is None:
+            return 18, True
+        try:
+            val = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise WalletError(
+                f"OKX OS: {name} must be an integer, got {raw!r}"
+            ) from exc
+        if val < 0:
+            raise WalletError(f"OKX OS: {name} must be >= 0, got {val}")
+        return val, False
 
     def quote(
         self, *, chain: str, token_in: str, token_out: str,
@@ -391,15 +519,32 @@ class OkxOsWallet(WalletProvider):
         r = self.readiness()
         if not r.ready:
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
+        dec_in, dec_in_assumed = self._decimals_kw(kw, "decimals_in")
+        dec_out, dec_out_assumed = self._decimals_kw(kw, "decimals_out")
         doc = self._signed_get(_QUOTE_PATH, {
             "chainId": self._chain_index(chain),
             "fromTokenAddress": token_in,
             "toTokenAddress": token_out,
-            "amount": str(int(float(amount_in) * 10 ** int(kw.get("decimals_in") or 18))),
+            "amount": str(int(float(amount_in) * 10 ** dec_in)),
             "slippage": str(slippage_bps / 10_000),
         })
         data = (doc.get("data") or [{}])[0]
-        expected = float(data.get("toTokenAmount") or 0) / 10 ** int(kw.get("decimals_out") or 18)
+        try:
+            expected = float(data.get("toTokenAmount") or 0) / 10 ** dec_out
+        except (TypeError, ValueError):
+            expected = 0.0
+        if not expected > 0:
+            # An unparseable or zero-output quote must never freeze an
+            # approval with a meaningless floor.
+            raise WalletQuoteError(
+                f"OKX OS quote returned no positive output amount for "
+                f"{token_in} -> {token_out}: {str(data)[:256]}"
+            )
+        extra: dict[str, Any] = {"raw": data}
+        if dec_in_assumed or dec_out_assumed:
+            # No on-chain decimals lookup here by design; tell downstream
+            # that 18 was assumed rather than fetched.
+            extra["decimals_assumed"] = 18
         return WalletQuote(
             provider=self.id, chain=chain,
             token_in=token_in, token_out=token_out,
@@ -407,7 +552,7 @@ class OkxOsWallet(WalletProvider):
             expected_out=expected,
             min_out=expected * (1.0 - slippage_bps / 10_000),
             slippage_bps=slippage_bps,
-            extra={"raw": data},
+            extra=extra,
         )
 
     def swap(
@@ -426,25 +571,52 @@ class OkxOsWallet(WalletProvider):
             raise WalletDependencyError(self.id, r.missing, r.install_hint)
         if not receiver:
             raise WalletPolicyDenied("OKX OS swap requires a receiver address")
+        dec_in, _ = self._decimals_kw(kw, "decimals_in")
+        dec_out, dec_out_assumed = self._decimals_kw(kw, "decimals_out")
         doc = self._signed_get(_SWAP_PATH, {
             "chainId": self._chain_index(chain),
             "fromTokenAddress": token_in,
             "toTokenAddress": token_out,
-            "amount": str(int(float(amount_in) * 10 ** int(kw.get("decimals_in") or 18))),
+            "amount": str(int(float(amount_in) * 10 ** dec_in)),
             "slippage": str(slippage_bps / 10_000),
             "userWalletAddress": receiver,
         })
         data = (doc.get("data") or [{}])[0]
         tx = data.get("tx") or {}
+        # Only a real broadcast produces a tx hash. The aggregator's `tx`
+        # object (data/to/gasPrice) is unsigned calldata, not a receipt —
+        # never report ok=True for it.
+        tx_hash = str(data.get("tx_hash") or tx.get("hash") or "")
+        amount_out = float(data.get("toTokenAmount") or 0) / 10 ** dec_out
+        extra: dict[str, Any] = {
+            "unsigned_tx": tx,
+            "raw": data,
+            "note": "quote/swap assembled but not broadcast — requires a signer",
+        }
+        if dec_out_assumed:
+            extra["decimals_assumed"] = 18
+        min_out_requested = kw.get("min_out")
+        if min_out_requested is not None:
+            try:
+                extra["min_out_requested"] = float(min_out_requested)
+            except (TypeError, ValueError):
+                pass
+        # The OKX aggregator swap endpoint expresses only `slippage`; it
+        # has no minOut parameter. Record the approved floor and compute
+        # the honest expected floor from the returned quote instead of
+        # pretending the API enforced it.
+        extra["amount_out_min"] = amount_out * (1.0 - slippage_bps / 10_000)
         return WalletSwapResult(
             provider=self.id, chain=chain,
-            ok=bool(data),
-            tx_hash=tx.get("hash") or "",
+            ok=bool(tx_hash),
+            tx_hash=tx_hash,
             amount_in=float(amount_in),
-            amount_out=float(data.get("toTokenAmount") or 0)
-                       / 10 ** int(kw.get("decimals_out") or 18),
-            extra={"tx_unsigned": tx, "raw": data,
-                    "note": "OKX OS returns an unsigned tx; broadcast via "
-                            "connectors.evm_native.send_raw_transaction once "
-                            "the signer policy approves it."},
+            amount_out=amount_out,
+            reason=(
+                "" if tx_hash
+                else "unsigned tx only — OKX OS returned no broadcast hash; "
+                     "an approved signer must broadcast via "
+                     "connectors.evm_native.send_raw_transaction"
+            ),
+            extra=extra,
         )

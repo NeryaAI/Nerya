@@ -20,7 +20,6 @@ from ..strategies.agent_task_mode import (
     AGENT_TASK_TARGET,
     agent_task_requested,
     agent_team_roles,
-    legacy_agent_team_strategy,
 )
 from ..strategies.context import build_strategy_context
 from ..strategies.package import StrategyPackage, load_package
@@ -301,8 +300,6 @@ class StrategyAgentTaskExecutor:
         if callable(fn):
             raw = self._call_task_builder(package, fn, ctx)
             return StrategyAgentTask.from_value(raw)
-        if legacy_agent_team_strategy(package.manifest):
-            return self._default_agent_team_task(package, event, ctx)
         fn = getattr(module, package.manifest.entrypoint_func, None)
         if not callable(fn):
             raise AttributeError(
@@ -352,159 +349,6 @@ class StrategyAgentTaskExecutor:
                     pass
             sys.modules.pop(module_name, None)
         return module
-
-    def _default_agent_team_task(
-        self,
-        package: StrategyPackage,
-        event: TriggerEvent,
-        ctx: Any,
-    ) -> StrategyAgentTask:
-        manifest = package.manifest
-        payload = dict(event.payload or {})
-        market = str(
-            payload.get("market")
-            or (manifest.markets[0] if manifest.markets else "")
-        )
-        timeframe = str(
-            payload.get("timeframe")
-            or payload.get("interval")
-            or "1d"
-        )
-        account_id = str(
-            payload.get("account_id")
-            or (manifest.accounts[0] if manifest.accounts else "")
-        )
-        roles = agent_team_roles(manifest)
-        snapshot = self._technical_snapshot(ctx, market=market, timeframe=timeframe)
-        team_roles = [
-            {
-                "name": role,
-                "instructions": self._role_task(role, market),
-            }
-            for role in roles
-        ]
-        prompt = "\n".join([
-            f"Strategy Agent Team task for `{manifest.strategy_id}`.",
-            "",
-            "Do not decide from the trigger JSON alone. First inspect the",
-            "available roles with `role_list` when needed, then call",
-            "`team_run` with a real JSON roles array and the shared task below.",
-            "For `team_run`, pass arguments.roles as the array itself; never",
-            "wrap the roles array in a JSON string.",
-            "",
-            "Shared task:",
-            f"- Market: {market or '<manifest market>'}",
-            f"- Account: {account_id or '<manifest account>'}",
-            f"- Timeframe: {timeframe}",
-            "- Analyze technical trend/momentum/volume, fundamentals, macro",
-            "  context, recent news/sentiment, and risk/position constraints.",
-            "- Produce a team memo, then decide one action: buy, sell/reduce,",
-            "  or hold.",
-            "- If the team recommends buy or sell/reduce, call `risk_check`",
-            "  before `trade_intent_submit`. Keep size inside policy limits",
-            "  and use paper/shadow mode unless the runtime explicitly enables",
-            "  live trading.",
-            "- If confidence is below the strategy min confidence, hold.",
-            "",
-            "Suggested team_run roles JSON:",
-            json.dumps(team_roles, ensure_ascii=False, indent=2, default=str),
-            "",
-            "Strategy policy:",
-            json.dumps(manifest.policy.asdict(), ensure_ascii=False, indent=2, default=str),
-            "",
-            "Latest technical snapshot gathered by the strategy facade:",
-            json.dumps(snapshot, ensure_ascii=False, indent=2, default=str),
-            "",
-            "Trigger payload:",
-            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-            "",
-            "Final response contract:",
-            json.dumps(
-                {
-                    "decision": "buy|sell|reduce|hold",
-                    "confidence": 0.0,
-                    "team_run_id": "<id from team_run>",
-                    "market": market,
-                    "account_id": account_id,
-                    "technical": "summary",
-                    "fundamental": "summary",
-                    "macro_news": "summary",
-                    "risk": "summary",
-                    "action_taken": "none|risk_check|trade_intent_submit",
-                    "reasoning": ["short evidence-backed bullets"],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        ])
-        return StrategyAgentTask.dispatch(
-            prompt=prompt,
-            session_key={"market": market, "timeframe": timeframe},
-            metadata={
-                "market": market,
-                "timeframe": timeframe,
-                "account_id": account_id,
-                "roles": roles,
-                "execution_mode": "agent_team_fallback",
-                "trigger_event_id": event.event_id,
-            },
-            attached_skills=[
-                "team",
-                "trading",
-                "market_research",
-                "research",
-                "market_data_routing",
-            ],
-            reason="legacy team strategy routed through AgentKernel/team_run",
-        )
-
-    @staticmethod
-    def _role_task(role: str, market: str) -> str:
-        role_key = role.lower()
-        if "technical" in role_key or "quant" in role_key:
-            return f"Analyze price action, indicators, trend, volume, and levels for {market}."
-        if "fundamental" in role_key or "valuation" in role_key:
-            return f"Analyze business fundamentals, valuation, earnings, and moat for {market}."
-        if "macro" in role_key:
-            return f"Analyze macro, rates, sector, and risk regime implications for {market}."
-        if "news" in role_key or "sentiment" in role_key:
-            return (
-                f"Analyze recent news, filings, sentiment, and event risk for {market}. "
-                "If a dedicated news skill is unavailable, use research or websearch; "
-                "do not stop at a missing optional skill."
-            )
-        if "risk" in role_key or "critic" in role_key:
-            return f"Challenge the trade, size, invalidation, and downside risks for {market}."
-        return f"Contribute an evidence-backed investment view for {market}."
-
-    @staticmethod
-    def _technical_snapshot(ctx: Any, *, market: str, timeframe: str) -> dict[str, Any]:
-        snapshot: dict[str, Any] = {"market": market, "timeframe": timeframe}
-        if not market:
-            return snapshot
-        try:
-            snapshot["features"] = ctx.market.features(
-                market,
-                timeframe=timeframe,
-                lookback=160,
-            )
-        except Exception as exc:
-            snapshot["features_error"] = f"{type(exc).__name__}: {exc}"
-        try:
-            candles = ctx.market.candles(
-                market,
-                timeframe=timeframe,
-                limit=40,
-            )
-            snapshot["candles_count"] = len(candles)
-            snapshot["recent_candles"] = list(candles[-12:])
-        except Exception as exc:
-            snapshot["candles_error"] = f"{type(exc).__name__}: {exc}"
-        try:
-            snapshot["ticker"] = ctx.market.ticker(market)
-        except Exception as exc:
-            snapshot["ticker_error"] = f"{type(exc).__name__}: {exc}"
-        return snapshot
 
     def _run_required_team(
         self,
@@ -622,13 +466,7 @@ class StrategyAgentTaskExecutor:
 
     @staticmethod
     def _is_agent_team_task(task: StrategyAgentTask) -> bool:
-        meta = dict(task.metadata or {})
-        mode = str(meta.get("execution_mode") or "").strip().lower()
-        if mode in {"agent_team", "agent_team_fallback"}:
-            return True
-        if meta.get("roles") and "team_run" in (task.prompt or ""):
-            return True
-        return False
+        return (task.metadata or {}).get("execution_mode") == "agent_team"
 
     def _team_role_entries(
         self,
@@ -649,19 +487,11 @@ class StrategyAgentTaskExecutor:
 
     @staticmethod
     def _role_task_for_markets(role: str, markets: list[str]) -> str:
-        role_key = role.lower()
         universe = ", ".join(markets) or "<markets>"
-        if "technical" in role_key or "quant" in role_key:
-            return f"Rank technical trend, indicators, momentum, volume, and levels across: {universe}."
-        if "fundamental" in role_key or "valuation" in role_key:
-            return f"Compare fundamentals, valuation, earnings, and moat across: {universe}."
-        if "macro" in role_key:
-            return f"Analyze macro, rates, sector, and risk regime implications for the basket: {universe}."
-        if "news" in role_key or "sentiment" in role_key:
-            return f"Analyze recent live news, filings, sentiment, and event risk for the basket: {universe}."
-        if "risk" in role_key or "critic" in role_key:
-            return f"Challenge selected candidate, sizing, invalidation, concentration, and downside risks for: {universe}."
-        return f"Contribute an evidence-backed basket view for: {universe}."
+        return (
+            f"Apply the assigned role {role!r} to the task and markets: {universe}. "
+            "Use the role's instructions and collected evidence; distinguish facts from uncertainty."
+        )
 
     def _team_context_payload(
         self,

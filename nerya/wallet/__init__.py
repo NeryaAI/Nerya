@@ -7,6 +7,7 @@ operator chose without Nerya auto-installing any of their dependencies.
 Supported backends (all optional, all lazy-loaded):
 
 * ``self_custody`` — goat-sdk / eth_account / solders based local signing.
+* ``metamask``     — MetaMask-compatible BIP-44 agent account (seed in vault).
 * ``okx_os``       — OKX On-Chain OS (https://web3.okx.com) REST API.
 * ``bitget``       — bitget-wallet-skill (Node/TS skill invoked via subprocess).
 * ``binance_agentic`` — binance-web3/binance-agentic-wallet skill (Node/TS).
@@ -22,6 +23,8 @@ from .errors import (
     WalletDependencyError,
     WalletPolicyDenied,
     WalletProviderNotFound,
+    WalletQuoteError,
+    WalletTransportError,
 )
 from .protocol import (
     CAPABILITY_STATUS,
@@ -46,6 +49,7 @@ from .registry import (
     resolve_active,
     resolve_for_account,
     resolve_for_strategy,
+    resolve_provider_name,
 )
 
 __all__ = [
@@ -55,6 +59,8 @@ __all__ = [
     "WalletDependencyError",
     "WalletPolicyDenied",
     "WalletProviderNotFound",
+    "WalletQuoteError",
+    "WalletTransportError",
     "WalletProvider",
     "WalletReadiness",
     "WalletCapability",
@@ -73,4 +79,5 @@ __all__ = [
     "resolve_active",
     "resolve_for_account",
     "resolve_for_strategy",
+    "resolve_provider_name",
 ]

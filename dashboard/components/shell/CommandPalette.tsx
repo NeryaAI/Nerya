@@ -12,12 +12,14 @@
  */
 
 import { useRouter } from "next/navigation";
+import * as Dialog from "@radix-ui/react-dialog";
 import { useTranslations } from "next-intl";
 import {
   createContext,
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -72,6 +74,7 @@ export function CommandPaletteProvider({
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
+      if (event.isComposing || document.querySelector('[role="dialog"]:not([data-command-palette])')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setOpen((v) => !v);
@@ -106,6 +109,7 @@ function CommandPalette() {
   const { open, setOpen } = useCommandPalette();
   const router = useRouter();
   const t = useTranslations("commandPalette");
+  const tUi = useTranslations("ui");
   const tNav = useTranslations("sidebar");
   const [query, setQuery] = useState("");
   const [strategies, setStrategies] = useState<StrategyCard[]>([]);
@@ -113,6 +117,8 @@ function CommandPalette() {
   const [activeIdx, setActiveIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const listId = useId();
 
   // Reset transient state + focus the field every time the palette opens.
   useEffect(() => {
@@ -120,7 +126,6 @@ function CommandPalette() {
     setQuery("");
     setActiveIdx(0);
     setThreads(loadThreads().slice(0, 8));
-    const handle = window.setTimeout(() => inputRef.current?.focus(), 20);
     let cancelled = false;
     clientApi
       .strategyList()
@@ -132,7 +137,6 @@ function CommandPalette() {
       });
     return () => {
       cancelled = true;
-      window.clearTimeout(handle);
     };
   }, [open]);
 
@@ -190,7 +194,7 @@ function CommandPalette() {
         label: th.title || t("untitledChat"),
         group: t("recent"),
         icon: ChatIcon,
-        onSelect: () => go(`/chat/${th.id}`),
+        onSelect: () => go(`/chat/${encodeURIComponent(th.id)}`),
       })),
     [threads, go, t],
   );
@@ -249,9 +253,18 @@ function CommandPalette() {
     return order.map((group) => ({ group, items: map.get(group)! }));
   }, [filtered]);
 
+  useEffect(() => {
+    setActiveIdx((index) => Math.max(0, Math.min(index, filtered.length - 1)));
+  }, [filtered.length]);
+
+  useEffect(() => {
+    if (open) listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [activeIdx, open, filtered.length]);
+
   if (!open) return null;
 
   function onKeyDown(event: React.KeyboardEvent) {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key === "Escape") {
       event.preventDefault();
       setOpen(false);
@@ -259,7 +272,7 @@ function CommandPalette() {
     }
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setActiveIdx((i) => Math.min(i + 1, filtered.length - 1));
+      setActiveIdx((i) => Math.max(0, Math.min(i + 1, filtered.length - 1)));
       return;
     }
     if (event.key === "ArrowUp") {
@@ -276,31 +289,41 @@ function CommandPalette() {
   let runningIndex = -1;
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-start justify-center px-4 pt-[12vh]"
-      role="dialog"
-      aria-modal="true"
-      onMouseDown={() => setOpen(false)}
-    >
-      <div className="absolute inset-0 bg-black/45 backdrop-blur-sm" aria-hidden />
-      <div
-        className="cmdk-panel relative w-full max-w-xl overflow-hidden"
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={onKeyDown}
+    <Dialog.Root open={open} onOpenChange={setOpen}>
+      <Dialog.Portal>
+      <Dialog.Overlay className="ui-modal-overlay" />
+      <Dialog.Content
+        data-command-palette=""
+        className="ui-dialog ui-command-palette"
+        aria-describedby={undefined}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          returnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          inputRef.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => { event.preventDefault(); if (returnFocus.current?.isConnected) returnFocus.current.focus(); }}
       >
+        <Dialog.Title className="sr-only">{t("placeholder")}</Dialog.Title>
         <div className="flex items-center gap-2.5 border-b px-4 py-3" style={{ borderColor: "var(--line)" }}>
           <SearchIcon size={18} className="shrink-0 text-[color:var(--text-muted)]" />
           <input
             ref={inputRef}
+            role="combobox"
+            aria-label={t("placeholder")}
+            aria-autocomplete="list"
+            aria-expanded={open}
+            aria-controls={listId}
+            aria-activedescendant={filtered[activeIdx] ? `${listId}-${activeIdx}` : undefined}
+            onKeyDown={onKeyDown}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("placeholder")}
             className="w-full bg-transparent text-[15px] text-[color:var(--text-base)] placeholder:text-[color:var(--text-muted)] focus:outline-none"
           />
-          <kbd className="cmdk-kbd">ESC</kbd>
+          <Dialog.Close className="ui-icon-button text-xs" aria-label={tUi("close")}>ESC</Dialog.Close>
         </div>
 
-        <div ref={listRef} className="embedded-scroll max-h-[56vh] py-2">
+        <div ref={listRef} id={listId} role="listbox" aria-label={t("jumpTo")} className="embedded-scroll max-h-[60dvh] py-2">
           {filtered.length === 0 ? (
             <div className="px-4 py-10 text-center text-[13px] text-[color:var(--text-muted)]">
               {t("noResults")}
@@ -313,13 +336,19 @@ function CommandPalette() {
                 </div>
                 {items.map((item) => {
                   runningIndex += 1;
-                  const active = runningIndex === activeIdx;
+                  const index = runningIndex;
+                  const active = index === activeIdx;
                   const Icon = item.icon;
                   return (
                     <button
                       key={item.id}
                       type="button"
-                      onMouseEnter={() => setActiveIdx(runningIndex)}
+                      id={`${listId}-${index}`}
+                      role="option"
+                      aria-selected={active}
+                      tabIndex={-1}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onMouseEnter={() => setActiveIdx(index)}
                       onClick={() => item.onSelect()}
                       className={`flex w-full items-center gap-3 px-4 py-2 text-left text-[13px] transition-colors ${
                         active
@@ -341,7 +370,8 @@ function CommandPalette() {
             ))
           )}
         </div>
-      </div>
-    </div>
+      </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

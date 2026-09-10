@@ -5,18 +5,45 @@ quorum/required-artifact gates. The market/research templates are adapted
 from the public research runtime swarm presets and multi-analyst research analyst /
 researcher / risk-manager chain, while keeping Nerya as the runtime of
 record.
+
+Operators extend the catalogue without touching Python via
+``<workspace>/teams/templates/*.yml`` — the same file-driven pattern as
+``subagents/*.agent.md`` and ``hooks/<phase>.py``. The YAML shape is
+exactly :meth:`TeamTemplate.asdict` output::
+
+    id: overnight_watch_team
+    description: Watch funding rates overnight and escalate anomalies.
+    lead: watch-lead
+    members:
+      - {name: watch-lead, role: research_manager, subagent_name: technical_analyst, tier: medium}
+    tasks:
+      - {id: t-watch, owner: watch-lead, subagent_name: technical_analyst, subject: Poll funding and alert}
+    gates:
+      - {id: required_tasks_t_watch, kind: required_tasks, detail: {tasks: [t-watch]}}
+    max_rounds: 1
+    max_parallel: 2
+
+Workspace templates may not shadow builtin ids — collisions are
+skipped with a warning (fail-closed, same stance as tool/connector
+registration).
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import logging
+import threading
+from pathlib import Path
+from typing import Any, Optional
 
+from ..core import yaml_io
 from .models import (
     TeamGateSpec,
     TeamMemberSpec,
     TeamTaskSpec,
     TeamTemplate,
 )
+
+log = logging.getLogger("nerya.teams.templates")
 
 
 # ----------------------------------------------------------- gate helpers
@@ -493,16 +520,215 @@ BUILTIN_TEMPLATES: dict[str, TeamTemplate] = {
 }
 
 
-def get_template(template_id: str) -> Optional[TeamTemplate]:
-    return BUILTIN_TEMPLATES.get(template_id)
+# --------------------------------------------------------- workspace templates
 
 
-def list_templates() -> list[dict[str, str]]:
-    return [
+def workspace_templates_dir(paths: Any) -> Path:
+    """``<workspace>/teams/templates/`` — operator-authored team YAML."""
+
+    return Path(getattr(paths, "root", paths)) / "teams" / "templates"
+
+
+_WS_CACHE: dict[Path, tuple[float, "TeamTemplate | None", str]] = {}
+_WS_CACHE_LOCK = threading.Lock()
+
+
+def template_from_dict(data: dict[str, Any]) -> TeamTemplate:
+    """Validate and build a :class:`TeamTemplate` from its dict form.
+
+    Accepts the exact shape :meth:`TeamTemplate.asdict` produces so a
+    YAML file can be seeded by dumping an existing template. Raises
+    ``ValueError`` describing the first problem found.
+    """
+
+    if not isinstance(data, dict):
+        raise ValueError("template must be a mapping")
+    template_id = data.get("id")
+    if not isinstance(template_id, str) or not template_id:
+        raise ValueError("template.id must be a non-empty string")
+    for field in ("description", "lead"):
+        if not isinstance(data.get(field), str) or not data[field]:
+            raise ValueError(f"template.{field} must be a non-empty string")
+
+    members: list[TeamMemberSpec] = []
+    raw_members = data.get("members") or []
+    if not isinstance(raw_members, list):
+        raise ValueError("template.members must be a list")
+    for i, m in enumerate(raw_members):
+        if not isinstance(m, dict):
+            raise ValueError(f"members[{i}] must be a mapping")
+        for field in ("name", "role", "subagent_name"):
+            if not isinstance(m.get(field), str) or not m[field]:
+                raise ValueError(f"members[{i}].{field} must be a non-empty string")
+        members.append(
+            TeamMemberSpec(
+                name=m["name"],
+                role=m["role"],
+                subagent_name=m["subagent_name"],
+                required=bool(m.get("required", True)),
+                allowed_skills=list(m.get("allowed_skills", []) or []),
+                tier=str(m.get("tier", "medium")),
+                description=str(m.get("description", "")),
+                provider=str(m.get("provider", "")),
+                model=str(m.get("model", "")),
+                execution_policy=dict(m.get("execution_policy", {}) or {}),
+            )
+        )
+
+    tasks: list[TeamTaskSpec] = []
+    raw_tasks = data.get("tasks") or []
+    if not isinstance(raw_tasks, list):
+        raise ValueError("template.tasks must be a list")
+    for i, t in enumerate(raw_tasks):
+        if not isinstance(t, dict):
+            raise ValueError(f"tasks[{i}] must be a mapping")
+        for field in ("id", "owner", "subagent_name", "subject"):
+            if not isinstance(t.get(field), str) or not t[field]:
+                raise ValueError(f"tasks[{i}].{field} must be a non-empty string")
+        tasks.append(
+            TeamTaskSpec(
+                id=t["id"],
+                owner=t["owner"],
+                subagent_name=t["subagent_name"],
+                subject=t["subject"],
+                description=str(t.get("description", "")),
+                depends_on=list(t.get("depends_on", []) or []),
+                required=bool(t.get("required", True)),
+                output_kinds=list(t.get("output_kinds", []) or []),
+            )
+        )
+
+    gates: list[TeamGateSpec] = []
+    raw_gates = data.get("gates") or []
+    if not isinstance(raw_gates, list):
+        raise ValueError("template.gates must be a list")
+    for i, g in enumerate(raw_gates):
+        if not isinstance(g, dict):
+            raise ValueError(f"gates[{i}] must be a mapping")
+        gates.append(
+            TeamGateSpec(
+                id=str(g.get("id", f"gate_{i}")),
+                kind=str(g.get("kind", "")),
+                detail=dict(g.get("detail", {}) or {}),
+            )
+        )
+
+    def _int_field(name: str, default: int) -> int:
+        value = data.get(name, default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"template.{name} must be an integer") from None
+
+    return TeamTemplate(
+        id=template_id,
+        description=data["description"],
+        lead=data["lead"],
+        members=members,
+        tasks=tasks,
+        gates=gates,
+        max_rounds=_int_field("max_rounds", 2),
+        max_parallel=_int_field("max_parallel", 3),
+        output_schema=dict(data.get("output_schema", {}) or {}),
+    )
+
+
+def load_workspace_templates(
+    paths: Any, *, reread: bool = False
+) -> tuple[dict[str, TeamTemplate], list[str]]:
+    """Load ``teams/templates/*.yml`` with an mtime cache.
+
+    Returns ``(templates, errors)``. Builtin-id collisions and parse
+    failures are reported in ``errors`` and skipped — one bad file
+    never hides the rest.
+    """
+
+    directory = workspace_templates_dir(paths)
+    if not directory.is_dir():
+        return {}, []
+
+    result: dict[str, TeamTemplate] = {}
+    errors: list[str] = []
+    for file in sorted(directory.glob("*.yml")) + sorted(directory.glob("*.yaml")):
+        try:
+            mtime = file.stat().st_mtime
+        except OSError:
+            continue
+        with _WS_CACHE_LOCK:
+            cached = _WS_CACHE.get(file)
+        if cached is not None and not reread and cached[0] == mtime:
+            template, error = cached[1], cached[2]
+        else:
+            error = ""
+            template = None
+            try:
+                data = yaml_io.load(file, default=None)
+                template = template_from_dict(data or {})
+            except Exception as exc:
+                error = f"{file.name}: {exc}"
+            with _WS_CACHE_LOCK:
+                _WS_CACHE[file] = (mtime, template, error)
+
+        if error:
+            errors.append(error)
+            continue
+        if template is None:
+            continue
+        if template.id in BUILTIN_TEMPLATES:
+            errors.append(
+                f"{file.name}: id {template.id!r} collides with a builtin template"
+            )
+            continue
+        if template.id in result:
+            errors.append(f"{file.name}: duplicate template id {template.id!r}")
+            continue
+        result[template.id] = template
+    for err in errors:
+        log.warning("workspace team template skipped: %s", err)
+    return result, errors
+
+
+def reload_workspace_templates() -> None:
+    """Drop the mtime cache so the next read re-parses every file."""
+
+    with _WS_CACHE_LOCK:
+        _WS_CACHE.clear()
+
+
+def get_template(template_id: str, paths: Any = None) -> Optional[TeamTemplate]:
+    tpl = BUILTIN_TEMPLATES.get(template_id)
+    if tpl is not None:
+        return tpl
+    if paths is None:
+        return None
+    templates, _ = load_workspace_templates(paths)
+    return templates.get(template_id)
+
+
+def list_templates(paths: Any = None) -> list[dict[str, str]]:
+    out = [
         {"id": tpl.id, "description": tpl.description, "lead": tpl.lead,
-         "members": len(tpl.members), "tasks": len(tpl.tasks)}
+         "members": len(tpl.members), "tasks": len(tpl.tasks),
+         "source": "builtin"}
         for tpl in BUILTIN_TEMPLATES.values()
     ]
+    if paths is not None:
+        workspace, _ = load_workspace_templates(paths)
+        out.extend(
+            {"id": tpl.id, "description": tpl.description, "lead": tpl.lead,
+             "members": len(tpl.members), "tasks": len(tpl.tasks),
+             "source": "workspace"}
+            for tpl in sorted(workspace.values(), key=lambda t: t.id)
+        )
+    return out
 
 
-__all__ = ["BUILTIN_TEMPLATES", "get_template", "list_templates"]
+__all__ = [
+    "BUILTIN_TEMPLATES",
+    "get_template",
+    "list_templates",
+    "load_workspace_templates",
+    "reload_workspace_templates",
+    "template_from_dict",
+    "workspace_templates_dir",
+]

@@ -1,0 +1,86 @@
+# GCP deployment profile for finch-nerya.rickopc.com.
+# Secrets are intentionally resolved from the VM's encrypted SecretVault;
+# this file contains no API key or bearer token.
+runtime:
+  live_trading_enabled: false
+  paper_trading_enabled: true
+  kill_switch: false
+  mock_mode: false
+  intent_gate:
+    enabled: true
+    fail_closed: true
+  auth:
+    mode: token
+    # The actual API token is injected via NERYA_API_TOKEN in nerya.env.
+    tokens: []
+
+llm:
+  default_tier: medium
+  intent_tier: light
+  context_log_mode: summary
+  providers:
+    compat:
+      base_url: https://api.tokenrouter.com/v1
+      provider_key_ref: vault://llm_tokenrouter
+      kind: chat_completions
+  tiers:
+    light:
+      provider: compat
+      model: deepseek/deepseek-v4-flash-0731
+      max_tokens: 2048
+      temperature: 0.1
+      timeout_s: 45
+      reasoning_effort: none
+      allowed_tasks:
+        - classify
+        - intent_classification
+        - trigger_triage
+        - extract_json
+        - news_filtering
+        - compress
+        - auto_session_title
+        - subagent_analysis
+      allowed_classes:
+        - classification
+        - structured_extraction
+        - content_compression
+    medium:
+      provider: compat
+      model: deepseek/deepseek-v4-pro-0813
+      max_tokens: 8192
+      temperature: 0.2
+      timeout_s: 120
+      reasoning_effort: low
+      allowed_tasks:
+        - normal_agent_loop
+        - subagent_analysis
+        - strategy_review
+        - trade_explanation
+      allowed_classes:
+        - agent_loop
+        - subagent_reasoning
+        - strategy_review
+    high:
+      provider: compat
+      model: deepseek/deepseek-v4-pro-0813
+      max_tokens: 32768
+      temperature: 0.2
+      timeout_s: 300
+      reasoning_effort: high
+      reasoning_summary: detailed
+      allowed_tasks:
+        - script_generation
+        - skill_generation
+        - complex_signal_analysis
+        - large_loss_postmortem
+        - strategy_evolution
+      allowed_classes:
+        - proposal_generation
+        - complex_reasoning
+
+api:
+  host: 127.0.0.1
+  port: 18317
+dashboard:
+  host: 127.0.0.1
+  port: 18380

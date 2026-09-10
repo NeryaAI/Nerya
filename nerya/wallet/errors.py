@@ -36,3 +36,22 @@ class WalletPolicyDenied(WalletError):
 
 class WalletProviderNotFound(WalletError):
     """Operator asked for a wallet provider name that does not exist."""
+
+
+class WalletTransportError(WalletError):
+    """A provider backend transport failure (HTTP 5xx, RPC error, timeout,
+    subprocess crash).
+
+    Deliberately distinct from :class:`WalletPolicyDenied`: a transport
+    failure is transient/operational and must not be reported to the
+    operator as "policy denied" — approval resume and HTTP routes use
+    this to classify honest provider outages.
+    """
+
+
+class WalletQuoteError(WalletError):
+    """A quote could not be parsed or is degenerate (no positive output).
+
+    Raised instead of silently returning ``expected_out=0`` so the
+    approval flow can refuse to freeze a meaningless floor.
+    """

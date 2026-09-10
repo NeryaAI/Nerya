@@ -510,18 +510,11 @@ def routes():
         return {"_status": 400, "error": reason, **result}
 
     def reflect(client, payload):
-        """POST /evolution/reflect — run a reflection tick and return the
-        ranked proposal seeds with evidence attached."""
+        """Collect frozen evidence for review, not a canned learning proposal."""
         return evolve(client.config)
 
     def rank(client, payload):
-        """POST /evolution/rank — rank open proposals using attribution.
-
-        consume the evidence surfaces (reflection
-        findings and paper/live divergence) to score every open
-        proposal on severity, freshness, and scope. Optionally writes
-        a snapshot to ``workspace/evolution/ranking.json`` for UIs.
-        """
+        """Order proposals by explicit evidence availability, not investment quality."""
         payload = payload or {}
         strategy_id = payload.get("strategy_id")
         states = payload.get("states")
@@ -529,7 +522,7 @@ def routes():
         ranked = rank_proposals(
             client.config.paths,
             strategy_id=strategy_id,
-            states=tuple(states) if states else ("draft", "proposed"),
+            states=tuple(states) if states else ("draft", "pending_review"),
         )
         out: dict = {
             "strategy_id": strategy_id,
@@ -549,21 +542,7 @@ def routes():
         if not sid:
             return {"error": "strategy_id required"}
         bundle = build_evidence(client.config.paths, sid)
-        return {
-            "strategy_id": bundle.strategy_id,
-            "severity": bundle.severity(),
-            "signals": bundle.signals(),
-            "divergence": bundle.divergence,
-            "counts": {
-                "losses": len(bundle.losses),
-                "bad_triggers": len(bundle.bad_triggers),
-                "high_slippage": len(bundle.high_slippage),
-                "stale_data": len(bundle.stale_data),
-                "subagent_disagreement": len(bundle.subagent_disagreement),
-                "overtrading": len(bundle.overtrading),
-                "missed_opportunity": len(bundle.missed_opportunity),
-            },
-        }
+        return bundle.asdict()
 
     def evidence_resolve(client, payload):
         """POST /evolution/evidence/resolve — turn evidence ref tokens into

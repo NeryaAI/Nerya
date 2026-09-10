@@ -70,9 +70,14 @@ def settle(
         # ``order_side`` already encodes the executor leg: long entry -> buy,
         # short entry -> sell, and close_position emits the inverse leg.
         raw_side = order_side
-        base_price = float((next_bar if is_exit and next_bar else bar).get("open" if next_bar else "close", bar.get("open", 0.0)))
-        if not is_exit:
-            base_price = float(bar.get("open", bar.get("close", 0.0)))
+        # Both legs fill at the *next* bar's open: adapters signal off the
+        # current bar's close, so filling entries at that same bar's open
+        # was lookahead. At data end (no next bar) market entries and
+        # forced closes fall back to the signal bar's close.
+        if next_bar is not None:
+            base_price = float(next_bar.get("open", next_bar.get("close", 0.0)))
+        else:
+            base_price = float(bar.get("close", bar.get("open", 0.0)))
         forced_close = bool(is_exit and next_bar is None)
         fill_price = apply_slippage(base_price, raw_side, slip_bps)
         size = float(order.get("size") or 0.0)

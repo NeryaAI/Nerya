@@ -289,6 +289,50 @@ class StrategyAPI:
             "files": list(result.files.keys()),
         }
 
+    def import_external(
+        self,
+        sources: Any,
+        *,
+        strategy_id: Optional[str] = None,
+        framework: str = "auto",
+        title: Optional[str] = None,
+        description: str = "",
+        markets: Optional[list[str]] = None,
+        accounts: Optional[list[str]] = None,
+        timeframe: Optional[str] = None,
+        settings: Optional[dict[str, Any]] = None,
+        mode: str = "paper",
+        stake_amount: float = 0.0,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Import a Freqtrade / VNpy strategy source as a Nerya package.
+
+        Wraps
+        :func:`nerya.strategies.compat.importer.import_external_strategy`.
+        The result includes the standard validator verdict for the
+        generated package so callers (CLI, dashboard, agent tool) can
+        surface blockers immediately.
+        """
+
+        from ..strategies.compat.importer import import_external_strategy
+
+        result = import_external_strategy(
+            self.config,
+            sources,
+            strategy_id=strategy_id,
+            framework=framework,
+            title=title,
+            description=description,
+            markets=markets,
+            accounts=accounts,
+            timeframe=timeframe,
+            settings=settings,
+            mode=mode,
+            stake_amount=stake_amount,
+            overwrite=overwrite,
+        )
+        return result.asdict()
+
     def validate(
         self,
         strategy_id: Optional[str] = None,

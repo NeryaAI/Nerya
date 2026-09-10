@@ -108,11 +108,17 @@ def load_strategy(paths: WorkspacePaths, strategy_id: str) -> Strategy:
     sid = str(s.get("id") or s.get("strategy_id") or strategy_id)
     title = str(s.get("title") or sid)
     # ``status`` (legacy lifecycle) vs ``mode`` (new package schema:
-    # ``paper`` / ``live``). Map ``mode`` onto a lifecycle bucket so
-    # downstream gates still see a recognisable value.
+    # ``paper`` / ``shadow`` / ``live``). Map ``mode`` onto a lifecycle
+    # bucket so downstream gates still see a recognisable value. Shadow
+    # must map to ``shadow`` (not ``paper``) or RiskGate's shadow_only
+    # branch and the shadow journal never engage for imported packages.
     status = str(
         s.get("status")
-        or {"paper": "paper", "live": "live"}.get(str(s.get("mode") or "").lower(), "paper")
+        or {
+            "paper": "paper",
+            "shadow": "shadow",
+            "live": "live",
+        }.get(str(s.get("mode") or "").lower(), "paper")
     )
     account_id = str(
         s.get("account_id")

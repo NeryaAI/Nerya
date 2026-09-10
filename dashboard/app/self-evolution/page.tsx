@@ -16,6 +16,7 @@ import {
   XIcon,
 } from "../../components/icons";
 import { clientApi } from "../../lib/clientApi";
+import { confirm as confirmDialog, prompt as promptDialog, toast } from "../../lib/dialogs";
 import type {
   EvolutionActionGates,
   EvolutionAsset,
@@ -82,6 +83,26 @@ type ReplayDigestKind = "subagent_payload" | "subagent_output" | "validation_pla
 const TAB_IDS: Tab[] = ["timeline", "proposals", "inbox", "assets"];
 const CANDIDATE_FILTERS: CandidateFilter[] = ["all", "ready", "blocked", "positive", "negative"];
 const HISTORY_PAGE_SIZE = 10;
+const OPEN_PROPOSAL_STATES = ["draft", "pending_review", "proposed", "approved"];
+
+function isOpenProposalState(state: string) {
+  return OPEN_PROPOSAL_STATES.includes(state);
+}
+
+/**
+ * Right-side drawers: minimal Escape-to-close. Full focus-trap drawers
+ * are a later consolidation (see ui-review A5/B5).
+ */
+function useEscapeToClose(active: boolean, onClose: () => void) {
+  useEffect(() => {
+    if (!active) return;
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [active, onClose]);
+}
 
 function toneForStatus(status?: string): "neutral" | "ok" | "warn" | "danger" | "brand" {
   const s = String(status || "").toLowerCase();
@@ -101,14 +122,19 @@ function stageTone(stage?: string): "neutral" | "ok" | "warn" | "danger" | "bran
 
 export default function SelfEvolutionPage() {
   const t = useTranslations("selfEvolution");
-  const [tab, setTab] = useState<Tab>("timeline");
+  const tCommon = useTranslations("common");
+  // Land on the work queue (inbox) instead of the history stream; a valid
+  // ?tab= query param wins over the default (restored after mount so SSR
+  // and hydration stay in sync).
+  const [tab, setTab] = useState<Tab>("inbox");
   const [envelope, setEnvelope] = useState<EvolutionTimelineEnvelope | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [strategy, setStrategy] = useState("");
-  const [busy, setBusy] = useState("");
+  // "load" (not "") so the first frame treats the initial fetch as loading
+  // and renders skeletons instead of flashing an empty inbox card.
+  const [busy, setBusy] = useState("load");
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [dreamEnabled, setDreamEnabled] = useState(false);
   const [dreamTime, setDreamTime] = useState("03:00");
   const [dreamTimezone, setDreamTimezone] = useState("Asia/Shanghai");
@@ -149,6 +175,22 @@ export default function SelfEvolutionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Restore ?tab= from the URL after mount, then keep it in sync so the
+  // active tab is shareable/linkable (replaceState — no history spam).
+  useEffect(() => {
+    const param = new URLSearchParams(window.location.search).get("tab");
+    if (param && TAB_IDS.includes(param as Tab)) {
+      setTab((current) => (current === param ? current : (param as Tab)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", tab);
+    window.history.replaceState(null, "", url.toString());
+  }, [tab]);
+
   useEffect(() => {
     const schedule = envelope?.config.periodic_reflection;
     if (!schedule) return;
@@ -167,11 +209,11 @@ export default function SelfEvolutionPage() {
   const candidates = envelope?.raw.candidates ?? [];
   const optimizerFeedback = envelope?.raw.optimizer_feedback;
   const proposals = envelope?.raw.proposals ?? [];
+  // First load: no data has landed yet — every tab renders skeletons
+  // instead of misleading empty states.
+  const initialLoading = !envelope && busy === "load";
   const openProposals = useMemo(
-    () =>
-      proposals.filter((p) =>
-        ["draft", "pending_review", "proposed", "approved"].includes(String(p.state || "")),
-      ),
+    () => proposals.filter((p) => isOpenProposalState(String(p.state || ""))),
     [proposals],
   );
   const selected = timeline.find((item) => item.id === selectedId) ?? timeline[0] ?? null;
@@ -181,7 +223,7 @@ export default function SelfEvolutionPage() {
     setError(null);
     try {
       const out = await clientApi.evolutionReflect();
-      setNotice(t("reflectionCompleted", { result: String(out.count ?? out.proposals ?? t("done")) }));
+      toast({ tone: "ok", message: t("reflectionCompleted", { result: String(out.count ?? out.proposals ?? t("done")) }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -200,7 +242,7 @@ export default function SelfEvolutionPage() {
         timezone: dreamTimezone,
       });
       if (!out.ok) throw new Error(JSON.stringify(out));
-      setNotice(t("dreamSaved"));
+      toast({ tone: "ok", message: t("dreamSaved") });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -215,7 +257,7 @@ export default function SelfEvolutionPage() {
     try {
       const out = await clientApi.evolutionReflectionRunNow();
       const result = (out.result || {}) as Record<string, unknown>;
-      setNotice(t("dreamRunResult", { status: String(result.status || out.ok || t("done")) }));
+      toast({ tone: "ok", message: t("dreamRunResult", { status: String(result.status || out.ok || t("done")) }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -239,7 +281,7 @@ export default function SelfEvolutionPage() {
         operator: "dashboard",
         note: "self-evolution dashboard dry-run",
       });
-      setNotice(t("tuningResult", { sid, status: out.ok ? t("completed") : t("blockedWord") }));
+      toast({ tone: "ok", message: t("tuningResult", { sid, status: out.ok ? t("completed") : t("blockedWord") }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -254,7 +296,7 @@ export default function SelfEvolutionPage() {
     try {
       const out = await clientApi.evolutionAssetPromote(candidateId);
       if (!out.ok) throw new Error(JSON.stringify(out));
-      setNotice(t("promoted", { id: candidateId }));
+      toast({ tone: "ok", message: t("promoted", { id: candidateId }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -269,7 +311,7 @@ export default function SelfEvolutionPage() {
     try {
       const out = await clientApi.evolutionAssetReject(candidateId, "rejected from dashboard");
       if (!out.ok) throw new Error(JSON.stringify(out));
-      setNotice(t("rejected", { id: candidateId }));
+      toast({ tone: "ok", message: t("rejected", { id: candidateId }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -287,11 +329,12 @@ export default function SelfEvolutionPage() {
         dry_run: dryRun,
       });
       const status = String(out.status || (out.ok ? t("readyWord") : t("blockedWord")));
-      setNotice(
-        dryRun
+      toast({
+        tone: "ok",
+        message: dryRun
           ? t("validationPlanCheckResult", { id: proposalId, status: out.ok ? t("readyWord") : t("blockedWord") })
           : t("validationRunResult", { id: proposalId, status }),
-      );
+      });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -306,7 +349,7 @@ export default function SelfEvolutionPage() {
     try {
       const out = await clientApi.proposalApprove(proposalId);
       if (out.error) throw new Error(String(out.error));
-      setNotice(t("proposalApproved", { id: proposalId }));
+      toast({ tone: "ok", message: t("proposalApproved", { id: proposalId }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -316,14 +359,20 @@ export default function SelfEvolutionPage() {
   }
 
   async function rejectProposal(proposalId: string) {
-    const note = window.prompt(t("rejectProposalPrompt", { id: proposalId }), "rejected from dashboard");
+    const note = await promptDialog({
+      title: t("rejectProposal"),
+      message: t("rejectProposalPrompt", { id: proposalId }),
+      defaultValue: "rejected from dashboard",
+      okLabel: tCommon("confirm"),
+      cancelLabel: tCommon("cancel"),
+    });
     if (note === null) return;
     setBusy(proposalId);
     setError(null);
     try {
       const out = await clientApi.proposalReject(proposalId, note);
       if (out.error) throw new Error(String(out.error));
-      setNotice(t("proposalRejected", { id: proposalId }));
+      toast({ tone: "ok", message: t("proposalRejected", { id: proposalId }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -341,7 +390,7 @@ export default function SelfEvolutionPage() {
         const reason = String(out.reason || out.error || t("applyFailed"));
         throw new Error(reason);
       }
-      setNotice(t("proposalApplied", { id: proposalId }));
+      toast({ tone: "ok", message: t("proposalApplied", { id: proposalId }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -351,7 +400,14 @@ export default function SelfEvolutionPage() {
   }
 
   async function rollbackProposal(proposalId: string) {
-    if (!window.confirm(t("rollbackProposalConfirm", { id: proposalId }))) return;
+    const confirmed = await confirmDialog({
+      title: t("rollbackProposal"),
+      message: t("rollbackProposalConfirm", { id: proposalId }),
+      okLabel: tCommon("confirm"),
+      cancelLabel: tCommon("cancel"),
+      tone: "danger",
+    });
+    if (!confirmed) return;
     setBusy(proposalId);
     setError(null);
     try {
@@ -360,7 +416,7 @@ export default function SelfEvolutionPage() {
         const reason = String(out.reason || out.error || t("rollbackFailed"));
         throw new Error(reason);
       }
-      setNotice(t("proposalRolledBack", { id: proposalId }));
+      toast({ tone: "ok", message: t("proposalRolledBack", { id: proposalId }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -370,7 +426,13 @@ export default function SelfEvolutionPage() {
   }
 
   async function recordPostApplyObservation(proposalId: string, status: "healthy" | "regressed") {
-    const summary = window.prompt(t("postApplyObservationPrompt", { status }), "");
+    const summary = await promptDialog({
+      title: status === "healthy" ? t("recordHealthy") : t("recordRegression"),
+      message: t("postApplyObservationPrompt", { status }),
+      defaultValue: "",
+      okLabel: tCommon("confirm"),
+      cancelLabel: tCommon("cancel"),
+    });
     if (summary === null) return;
     setBusy(proposalId);
     setError(null);
@@ -387,7 +449,7 @@ export default function SelfEvolutionPage() {
         const reason = String(out.reason || out.error || t("postApplyObservationFailed"));
         throw new Error(reason);
       }
-      setNotice(t("postApplyObservationRecorded", { id: proposalId, status }));
+      toast({ tone: "ok", message: t("postApplyObservationRecorded", { id: proposalId, status }) });
       await load(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -437,51 +499,68 @@ export default function SelfEvolutionPage() {
       />
       <PageBody>
         {error ? <ErrorBanner error={error} /> : null}
-        {notice ? (
-          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-200">
-            {notice}
-          </div>
-        ) : null}
 
-        <div className="overflow-x-auto border-b border-brand-500/10">
+        <div className="overflow-x-auto border-b border-brand-500/10" role="tablist" aria-label={t("title")}>
           {TAB_IDS.map((id) => {
             const labelKey = id === "inbox" ? "tabInbox" : id === "timeline" ? "tabHistory" : id === "assets" ? "tabAssets" : "tabProposals";
+            const active = tab === id;
             return (
               <button
                 key={id}
+                role="tab"
+                aria-selected={active}
                 className={[
-                  "px-3 py-2 text-[12px]",
-                  tab === id ? "border-b border-brand-300 text-white" : "text-ink-400",
+                  "relative shrink-0 px-3 py-2 text-[12px] font-medium transition-colors",
+                  active ? "text-white" : "text-ink-400 hover:text-ink-100",
                 ].join(" ")}
                 onClick={() => setTab(id)}
               >
                 {t(labelKey)}
+                {active ? (
+                  <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-brand-400" />
+                ) : null}
               </button>
             );
           })}
         </div>
 
+        <Filters
+          strategy={strategy}
+          query={query}
+          busy={busy}
+          onStrategy={setStrategy}
+          onQuery={setQuery}
+          onFilter={() => void load(false)}
+          onTuning={runTuningDryRun}
+        />
+
         {tab === "inbox" ? (
-          <EvolutionInboxPanel
-            inbox={inbox}
-            timeline={timeline}
-            busy={busy}
-            onOpenItem={(itemId) => {
-              setSelectedId(itemId);
-              setTab("timeline");
-            }}
-            onOpenProposals={() => setTab("proposals")}
-            onValidate={validateProposal}
-            onApprove={approveProposal}
-            onReject={rejectProposal}
-            onApply={applyProposal}
-            onRollback={rollbackProposal}
-            onPostApplyObservation={recordPostApplyObservation}
-          />
+          initialLoading ? (
+            <PanelSkeleton />
+          ) : (
+            <EvolutionInboxPanel
+              inbox={inbox}
+              timeline={timeline}
+              busy={busy}
+              onOpenItem={(itemId) => {
+                setSelectedId(itemId);
+                setTab("timeline");
+              }}
+              onOpenProposals={() => setTab("proposals")}
+              onValidate={validateProposal}
+              onApprove={approveProposal}
+              onReject={rejectProposal}
+              onApply={applyProposal}
+              onRollback={rollbackProposal}
+              onPostApplyObservation={recordPostApplyObservation}
+            />
+          )
         ) : null}
 
         {tab === "timeline" ? (
-          timeline.length ? (
+          initialLoading ? (
+            <PanelSkeleton />
+          ) : timeline.length ? (
             <TimelineConsole
               items={timeline}
               selected={selected}
@@ -502,44 +581,36 @@ export default function SelfEvolutionPage() {
         ) : null}
 
         {tab === "assets" ? (
-          <AssetsPanel
-            assets={assets}
-            candidates={candidates}
-            optimizerFeedback={optimizerFeedback}
-            busy={busy}
-            onEvidenceRef={openEvidence}
-            onPromote={promote}
-            onReject={reject}
-          />
+          initialLoading ? (
+            <PanelSkeleton />
+          ) : (
+            <AssetsPanel
+              assets={assets}
+              candidates={candidates}
+              optimizerFeedback={optimizerFeedback}
+              busy={busy}
+              onEvidenceRef={openEvidence}
+              onPromote={promote}
+              onReject={reject}
+            />
+          )
         ) : null}
 
         {tab === "proposals" ? (
-          <ProposalsPanel
-            proposals={openProposals}
-            busy={busy}
-            onValidate={validateProposal}
-            onApprove={approveProposal}
-            onReject={rejectProposal}
-            onApply={applyProposal}
-            onEvidenceRef={openEvidence}
-          />
+          initialLoading ? (
+            <PanelSkeleton />
+          ) : (
+            <ProposalsPanel
+              proposals={openProposals}
+              busy={busy}
+              onValidate={validateProposal}
+              onApprove={approveProposal}
+              onReject={rejectProposal}
+              onApply={applyProposal}
+              onEvidenceRef={openEvidence}
+            />
+          )
         ) : null}
-
-        <Advanced
-          title={t("replayControlsTitle")}
-          description={t("replayControlsHint")}
-          storageKey="nerya.evolution.advanced.controls"
-        >
-          <Filters
-            strategy={strategy}
-            query={query}
-            busy={busy}
-            onStrategy={setStrategy}
-            onQuery={setQuery}
-            onFilter={() => void load(false)}
-            onTuning={runTuningDryRun}
-          />
-        </Advanced>
 
         <Advanced
           title={t("dreamPanelTitle")}
@@ -589,14 +660,14 @@ function Filters({
   const t = useTranslations("selfEvolution");
   const hasStrategy = Boolean(strategy.trim());
   return (
-    <div className="grid gap-3 border-b border-brand-500/10 pb-4 lg:grid-cols-[minmax(180px,260px)_1fr_auto] lg:items-end">
-      <div>
+    <div className="flex flex-wrap items-end gap-3 rounded-lg border border-brand-500/10 bg-ink-950/30 px-3 py-2.5">
+      <div className="min-w-[180px]">
         <label className="block text-[12px] text-ink-400">
           {t("strategy")}
           <input
             value={strategy}
             onChange={(e) => onStrategy(e.target.value)}
-            className="input-dark mt-1 font-mono"
+            className="input-dark mt-1 w-full font-mono"
             placeholder={t("strategyPlaceholder")}
           />
         </label>
@@ -612,16 +683,16 @@ function Filters({
           </button>
         ) : null}
       </div>
-      <label className="text-[12px] text-ink-400">
+      <label className="min-w-[220px] flex-1 text-[12px] text-ink-400">
         {t("searchLabel")}
         <input
           value={query}
           onChange={(e) => onQuery(e.target.value)}
-          className="input-dark mt-1"
+          className="input-dark mt-1 w-full"
           placeholder={t("searchPlaceholder")}
         />
       </label>
-      <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
+      <div className="flex flex-wrap gap-2">
         <button className="btn btn-ghost" onClick={onFilter} disabled={Boolean(busy)}>
           <SearchIcon size={14} />
           {t("filter")}
@@ -724,6 +795,23 @@ function DreamReflectionPanel({
       </div>
       </div>
     </details>
+  );
+}
+
+function PanelSkeleton({ rows = 4 }: { rows?: number }) {
+  return (
+    <section
+      className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-4"
+      aria-hidden
+      data-testid="evolution-panel-skeleton"
+    >
+      <div className="skeleton h-4 w-40" />
+      <div className="mt-4 space-y-2.5">
+        {Array.from({ length: rows }).map((_, index) => (
+          <div key={index} className="skeleton h-12 w-full" />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1012,6 +1100,106 @@ function ReplaySnippetGrid({ snippets }: { snippets: ReplaySnippet[] }) {
   );
 }
 
+/**
+ * Shared proposal lifecycle buttons (validate → approve → apply → reject →
+ * observe → rollback). Single source for all three call sites: inbox entry
+ * rows, timeline applied-detail, and the proposal detail panel. Renders a
+ * fragment of buttons; the caller supplies the layout wrapper.
+ */
+function ProposalActions({
+  proposalId,
+  busy = false,
+  compact = false,
+  showValidate = false,
+  showApprove = false,
+  showApply = false,
+  applyDisabled = false,
+  showReject = false,
+  showObserve = false,
+  showRollback = false,
+  onValidate,
+  onApprove,
+  onReject,
+  onApply,
+  onRollback,
+  onPostApplyObservation,
+}: {
+  proposalId: string;
+  busy?: boolean;
+  /** Inbox-row sizing: full-width on mobile, compact paddings. */
+  compact?: boolean;
+  showValidate?: boolean;
+  showApprove?: boolean;
+  showApply?: boolean;
+  applyDisabled?: boolean;
+  showReject?: boolean;
+  showObserve?: boolean;
+  showRollback?: boolean;
+  onValidate?: (id: string, dryRun?: boolean) => Promise<void>;
+  onApprove?: (id: string) => Promise<void>;
+  onReject?: (id: string) => Promise<void>;
+  onApply?: (id: string) => Promise<void>;
+  onRollback?: (proposalId: string) => Promise<void>;
+  onPostApplyObservation?: (proposalId: string, status: "healthy" | "regressed") => Promise<void>;
+}) {
+  const t = useTranslations("selfEvolution");
+  if (!proposalId) return null;
+  const iconSize = compact ? 13 : 14;
+  const sizeClass = compact ? "px-3 py-1.5 text-[12px] w-full sm:w-auto" : "";
+  return (
+    <>
+      {showValidate && onValidate ? (
+        <>
+          <button className={`btn btn-ghost ${sizeClass}`} disabled={busy} onClick={() => void onValidate(proposalId, true)}>
+            <ShieldCheckIcon size={iconSize} />
+            {t("checkPlan")}
+          </button>
+          <button className={`btn btn-primary ${sizeClass}`} disabled={busy} onClick={() => void onValidate(proposalId, false)}>
+            <ShieldCheckIcon size={iconSize} />
+            {busy ? t("validating") : t("runValidation")}
+          </button>
+        </>
+      ) : null}
+      {showApprove && onApprove ? (
+        <button className={`btn btn-ghost ${sizeClass}`} disabled={busy} onClick={() => void onApprove(proposalId)}>
+          <CheckIcon size={iconSize} />
+          {busy ? t("approving") : t("approveProposal")}
+        </button>
+      ) : null}
+      {showApply && onApply ? (
+        <button className={`btn btn-primary ${sizeClass}`} disabled={busy || applyDisabled} onClick={() => void onApply(proposalId)}>
+          <CheckIcon size={iconSize} />
+          {busy ? t("applying") : t("applyProposal")}
+        </button>
+      ) : null}
+      {showReject && onReject ? (
+        <button className={`btn btn-ghost ${sizeClass}`} disabled={busy} onClick={() => void onReject(proposalId)}>
+          <XIcon size={iconSize} />
+          {busy ? t("rejecting") : t("rejectProposal")}
+        </button>
+      ) : null}
+      {showObserve && onPostApplyObservation ? (
+        <>
+          <button className={`btn btn-ghost ${sizeClass}`} disabled={busy} onClick={() => void onPostApplyObservation(proposalId, "healthy")}>
+            <CheckIcon size={iconSize} />
+            {t("recordHealthy")}
+          </button>
+          <button className={`btn btn-ghost ${sizeClass}`} disabled={busy} onClick={() => void onPostApplyObservation(proposalId, "regressed")}>
+            <XIcon size={iconSize} />
+            {t("recordRegression")}
+          </button>
+        </>
+      ) : null}
+      {showRollback && onRollback ? (
+        <button className={`btn btn-primary ${sizeClass}`} disabled={busy} onClick={() => void onRollback(proposalId)}>
+          <XIcon size={iconSize} />
+          {busy ? t("rollingBack") : t("rollbackProposal")}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
 function InboxEntryActions({
   groupId,
   item,
@@ -1047,7 +1235,7 @@ function InboxEntryActions({
   const replay = inboxReplayCue(item, t("exactModelMissing"));
   if (!proposalId && !replay) return null;
   const isBusy = busy === proposalId;
-  const openState = ["draft", "pending_review", "proposed", "approved"].includes(status);
+  const openState = isOpenProposalState(status);
   const applied = status === "applied";
   return (
     <div className="mt-3 flex max-w-full flex-col gap-2 border-t border-brand-500/10 pt-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
@@ -1066,58 +1254,23 @@ function InboxEntryActions({
         </button>
       ) : <span />}
       <div className="flex max-w-full flex-wrap justify-start gap-2 sm:justify-end">
-        {proposalId && groupId === "needs_validation" ? (
-          <>
-            <button className="btn btn-ghost px-3 py-1.5 text-[12px] w-full sm:w-auto" disabled={isBusy} onClick={() => void onValidate(proposalId, true)}>
-              <ShieldCheckIcon size={13} />
-              {t("checkPlan")}
-            </button>
-            <button className="btn btn-primary px-3 py-1.5 text-[12px] w-full sm:w-auto" disabled={isBusy} onClick={() => void onValidate(proposalId, false)}>
-              <ShieldCheckIcon size={13} />
-              {isBusy ? t("validating") : t("runValidation")}
-            </button>
-          </>
-        ) : null}
-        {proposalId && (groupId === "needs_approval" || status === "approved") ? (
-          <>
-            {status !== "approved" ? (
-              <button className="btn btn-ghost px-3 py-1.5 text-[12px] w-full sm:w-auto" disabled={isBusy} onClick={() => void onApprove(proposalId)}>
-                <CheckIcon size={13} />
-                {isBusy ? t("approving") : t("approveProposal")}
-              </button>
-            ) : null}
-            {status === "approved" ? (
-              <button className="btn btn-primary px-3 py-1.5 text-[12px] w-full sm:w-auto" disabled={isBusy} onClick={() => void onApply(proposalId)}>
-                <CheckIcon size={13} />
-                {isBusy ? t("applying") : t("applyProposal")}
-              </button>
-            ) : null}
-          </>
-        ) : null}
-        {proposalId && groupId === "monitoring" && applied ? (
-          <>
-            <button className="btn btn-ghost px-3 py-1.5 text-[12px] w-full sm:w-auto" disabled={isBusy} onClick={() => void onPostApplyObservation(proposalId, "healthy")}>
-              <CheckIcon size={13} />
-              {t("recordHealthy")}
-            </button>
-            <button className="btn btn-ghost px-3 py-1.5 text-[12px] w-full sm:w-auto" disabled={isBusy} onClick={() => void onPostApplyObservation(proposalId, "regressed")}>
-              <XIcon size={13} />
-              {t("recordRegression")}
-            </button>
-          </>
-        ) : null}
-        {proposalId && groupId === "negative_learning" && applied ? (
-          <button className="btn btn-primary px-3 py-1.5 text-[12px] w-full sm:w-auto" disabled={isBusy} onClick={() => void onRollback(proposalId)}>
-            <XIcon size={13} />
-            {isBusy ? t("rollingBack") : t("rollbackProposal")}
-          </button>
-        ) : null}
-        {proposalId && openState ? (
-          <button className="btn btn-ghost px-3 py-1.5 text-[12px] w-full sm:w-auto" disabled={isBusy} onClick={() => void onReject(proposalId)}>
-            <XIcon size={13} />
-            {isBusy ? t("rejecting") : t("rejectProposal")}
-          </button>
-        ) : null}
+        <ProposalActions
+          proposalId={proposalId}
+          busy={isBusy}
+          compact
+          showValidate={groupId === "needs_validation"}
+          showApprove={groupId === "needs_approval" && status !== "approved"}
+          showApply={status === "approved"}
+          showReject={openState}
+          showObserve={groupId === "monitoring" && applied}
+          showRollback={groupId === "negative_learning" && applied}
+          onValidate={onValidate}
+          onApprove={onApprove}
+          onReject={onReject}
+          onApply={onApply}
+          onRollback={onRollback}
+          onPostApplyObservation={onPostApplyObservation}
+        />
       </div>
     </div>
   );
@@ -1212,8 +1365,15 @@ function TimelineHistoryDrawer({
   onClose: () => void;
 }) {
   const t = useTranslations("selfEvolution");
+  useEscapeToClose(true, onClose);
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm" data-testid="timeline-history-drawer">
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("historyTitle", { count: items.length })}
+      data-testid="timeline-history-drawer"
+    >
       <button
         type="button"
         className="absolute inset-0 cursor-default"
@@ -1226,7 +1386,6 @@ function TimelineHistoryDrawer({
           selectedId={selectedId}
           onSelect={onSelect}
           onClose={onClose}
-          variant="drawer"
         />
       </aside>
     </div>
@@ -1238,13 +1397,11 @@ function TimelineHistoryPanel({
   selectedId,
   onSelect,
   onClose,
-  variant = "card",
 }: {
   items: EvolutionTimelineItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onClose?: () => void;
-  variant?: "card" | "drawer";
 }) {
   const t = useTranslations("selfEvolution");
   const [page, setPage] = useState(1);
@@ -1267,14 +1424,10 @@ function TimelineHistoryPanel({
 
   return (
     <section
-      className={
-        variant === "drawer"
-          ? "flex h-full min-w-0 flex-col overflow-hidden"
-          : "card card-hover min-w-0 overflow-hidden xl:flex xl:h-full xl:min-h-0 xl:flex-col xl:self-stretch"
-      }
+      className="flex h-full min-w-0 flex-col overflow-hidden"
       data-testid="timeline-history-panel"
     >
-      <div className={variant === "drawer" ? "flex items-start justify-between gap-3 border-b border-brand-500/10 px-5 py-4" : "card-head"}>
+      <div className="flex items-start justify-between gap-3 border-b border-brand-500/10 px-5 py-4">
         <div className="min-w-0">
           <h3 className="card-title break-words">{t("historyTitle", { count: items.length })}</h3>
           <p className="card-subtle mt-1 break-words">{t("historyDesc")}</p>
@@ -1428,30 +1581,14 @@ function TimelineDetail({
               <Pill tone="ok">{t("applied")}</Pill>
             </div>
             <div className="mt-3 flex flex-wrap justify-end gap-2">
-              <button
-                className="btn btn-ghost"
-                disabled={busy === proposalId}
-                onClick={() => void onPostApplyObservation(proposalId, "healthy")}
-              >
-                <CheckIcon size={14} />
-                {t("recordHealthy")}
-              </button>
-              <button
-                className="btn btn-ghost"
-                disabled={busy === proposalId}
-                onClick={() => void onPostApplyObservation(proposalId, "regressed")}
-              >
-                <XIcon size={14} />
-                {t("recordRegression")}
-              </button>
-              <button
-                className="btn btn-primary"
-                disabled={busy === proposalId}
-                onClick={() => void onRollback(proposalId)}
-              >
-                <XIcon size={14} />
-                {busy === proposalId ? t("rollingBack") : t("rollbackProposal")}
-              </button>
+              <ProposalActions
+                proposalId={proposalId}
+                busy={busy === proposalId}
+                showObserve
+                showRollback
+                onRollback={onRollback}
+                onPostApplyObservation={onPostApplyObservation}
+              />
             </div>
           </section>
         ) : null}
@@ -1644,9 +1781,9 @@ function AgentRunReplayPanel({
         missingLabel={labels.stepMissing}
       />
       {!stepState.change ? (
-        <div className="mt-2 flex flex-wrap items-start gap-2 rounded-md border border-amber-300/20 bg-amber-300/10 px-2.5 py-2 text-[12px] text-amber-100">
+        <div className="mt-2 flex flex-wrap items-start gap-2 rounded-md border border-warn/20 bg-warn/10 px-2.5 py-2 text-[12px] text-warn">
           <Pill tone="warn">{labels.recommendationOnly}</Pill>
-          <span className="min-w-0 flex-1 break-words text-amber-100/85">{labels.recommendationOnlyDesc}</span>
+          <span className="min-w-0 flex-1 break-words text-warn/85">{labels.recommendationOnlyDesc}</span>
         </div>
       ) : null}
       <ol className="mt-4 space-y-3">
@@ -1761,13 +1898,13 @@ function ReplayStepStrip({
             className={[
               "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px]",
               present
-                ? "border-emerald-400/25 bg-emerald-400/10 text-emerald-100"
+                ? "border-ok/25 bg-ok/10 text-ok"
                 : "border-ink-700/70 bg-ink-950/40 text-ink-500",
             ].join(" ")}
           >
             {step.label}
             {!compact ? (
-              <span className={present ? "text-emerald-100/70" : "text-ink-500/80"}>
+              <span className={present ? "text-ok/70" : "text-ink-500/80"}>
                 {present ? (recordedLabel || t("stepRecorded")) : (missingLabel || t("stepMissing"))}
               </span>
             ) : null}
@@ -2095,7 +2232,7 @@ function ValidationPlanDigest({ raw }: { raw: string }) {
 
   return (
     <div className="mt-2 space-y-2">
-      <div className="rounded-md border border-amber-300/20 bg-ink-950/55 p-2.5">
+      <div className="rounded-md border border-warn/20 bg-ink-950/55 p-2.5">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] font-medium text-ink-500">{t("validationPlanSummary")}</span>
           {status ? <Pill tone={toneForStatus(status)}>{status}</Pill> : null}
@@ -2687,11 +2824,18 @@ function EvidenceDrawer({
   onClose: () => void;
 }) {
   const t = useTranslations("selfEvolution");
+  const open = Boolean(state);
+  useEscapeToClose(open, onClose);
   if (!state) return null;
   const item = state.item ?? null;
   const artifacts = item?.artifacts ?? [];
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm">
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("evidenceDrawerTitle")}
+    >
       <button
         type="button"
         className="absolute inset-0 cursor-default"
@@ -3546,14 +3690,21 @@ function CandidateOptimizerPanel({
   const t = useTranslations("selfEvolution");
   if (!report || !Array.isArray(report.candidates) || !report.candidates.length) return null;
   const candidates = report.candidates.slice(0, 8);
-  const selectedId = String(report.selected_candidate_id || "");
-  const selectedIndex = finiteNumber(report.selected_index);
+  const selectedId = report.selected_candidate_id;
+  const matches = typeof selectedId === "string" && selectedId.trim()
+    ? report.candidates.filter((candidate) => candidate.candidate_id === selectedId)
+    : [];
+  const match = matches.length === 1 ? matches[0] : undefined;
+  const indexMatches = report.selected_index == null || (
+    typeof report.selected_index === "number" && Number.isInteger(report.selected_index)
+    && report.selected_index >= 0 && match !== undefined
+    && report.selected_index === (match.index ?? report.candidates.indexOf(match))
+  );
+  const selected = match && match.selection_eligible !== false && indexMatches
+    && (report.selection_status == null || report.selection_status === "selected")
+    ? match : undefined;
   const feedback = report.outcome_feedback ?? {};
   const feedbackSamples = finiteNumber(feedback.sample_count);
-  const selected = candidates.find((candidate, index) => (
-    String(candidate.candidate_id || "") === selectedId
-    || (selectedIndex !== null && index === selectedIndex)
-  ));
   return (
     <section className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-3" data-testid="candidate-optimizer-panel">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -3576,6 +3727,12 @@ function CandidateOptimizerPanel({
       <CandidateValidationPreviewSummary preview={report.validation_preview} />
       <CandidateBacktestPreviewSummary preview={report.backtest_preview} />
 
+      {!selected ? (
+        <p className="mt-3 text-[12px] text-ink-400" data-testid="optimizer-no-selection">
+          {report.selection_status === "no_eligible_candidate"
+            ? t("optimizerNoEligible") : t("optimizerSelectionUnresolved")}
+        </p>
+      ) : null}
       {selected ? (
         <div className="mt-3 rounded-md border border-accent-500/20 bg-accent-500/[0.06] p-2.5">
           <div className="flex flex-wrap items-center gap-2">
@@ -3607,10 +3764,7 @@ function CandidateOptimizerPanel({
             <CandidateOptimizerRow
               key={`${candidate.candidate_id ?? index}:${index}`}
               candidate={candidate}
-              selected={
-                String(candidate.candidate_id || "") === selectedId
-                || (selectedIndex !== null && index === selectedIndex)
-              }
+              selected={candidate === selected}
               onEvidenceRef={onEvidenceRef}
             />
           ))}
@@ -5072,6 +5226,7 @@ function CandidateDetailDrawer({
   onReject: (id: string) => Promise<void>;
 }) {
   const t = useTranslations("selfEvolution");
+  useEscapeToClose(Boolean(row), onClose);
   if (!row) return null;
   const {
     candidate,
@@ -5090,7 +5245,13 @@ function CandidateDetailDrawer({
   const outcomeScore = finiteNumber(payload.outcome_score);
   const blockers = uniqueStrings([...candidate.blocked_reasons, ...gateBlockers]);
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm" data-testid="candidate-detail-drawer">
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={candidate.id}
+      data-testid="candidate-detail-drawer"
+    >
       <button
         type="button"
         className="absolute inset-0 cursor-default"
@@ -5788,8 +5949,15 @@ function ProposalDetailDrawer({
   onApply?: () => Promise<void>;
 }) {
   const t = useTranslations("selfEvolution");
+  useEscapeToClose(true, onClose);
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm" data-testid="proposal-detail-drawer">
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("proposalDetail")}
+      data-testid="proposal-detail-drawer"
+    >
       <button
         type="button"
         className="absolute inset-0 cursor-default"
@@ -5890,8 +6058,8 @@ function ProposalDetailPanel({
   const evidence = Array.isArray(detail.evidence_refs) ? detail.evidence_refs.map(String) : [];
   const changes = detail.file_changes ?? [];
   const state = String(detail.state || "");
-  const canApprove = ["draft", "pending_review", "proposed"].includes(state);
-  const canReject = ["draft", "pending_review", "proposed", "approved"].includes(state);
+  const canApprove = isOpenProposalState(state) && state !== "approved";
+  const canReject = isOpenProposalState(state);
   const canApply = state === "approved" && Boolean(detail.action_gates?.can_apply);
   const content = (
     <div className="space-y-4 text-sm">
@@ -5929,32 +6097,19 @@ function ProposalDetailPanel({
       />
       {onValidate ? (
         <div className="flex flex-wrap justify-end gap-2">
-          <button className="btn btn-ghost" disabled={busy} onClick={() => void onValidate(true)}>
-            <ShieldCheckIcon size={14} />
-            {t("checkPlan")}
-          </button>
-          <button className="btn btn-primary" disabled={busy} onClick={() => void onValidate(false)}>
-            <ShieldCheckIcon size={14} />
-            {busy ? t("validating") : t("runValidation")}
-          </button>
-          {canApprove && onApprove ? (
-            <button className="btn btn-ghost" disabled={busy} onClick={() => void onApprove()}>
-              <CheckIcon size={14} />
-              {busy ? t("approving") : t("approveProposal")}
-            </button>
-          ) : null}
-          {canReject && onReject ? (
-            <button className="btn btn-ghost" disabled={busy} onClick={() => void onReject()}>
-              <XIcon size={14} />
-              {busy ? t("rejecting") : t("rejectProposal")}
-            </button>
-          ) : null}
-          {state === "approved" && onApply ? (
-            <button className="btn btn-primary" disabled={busy || !canApply} onClick={() => void onApply()}>
-              <CheckIcon size={14} />
-              {busy ? t("applying") : t("applyProposal")}
-            </button>
-          ) : null}
+          <ProposalActions
+            proposalId={detail.id}
+            busy={Boolean(busy)}
+            showValidate
+            showApprove={canApprove && Boolean(onApprove)}
+            showReject={canReject && Boolean(onReject)}
+            showApply={state === "approved" && Boolean(onApply)}
+            applyDisabled={!canApply}
+            onValidate={(_id, dryRun) => onValidate(dryRun !== false)}
+            onApprove={onApprove ? () => onApprove() : undefined}
+            onReject={onReject ? () => onReject() : undefined}
+            onApply={onApply ? () => onApply() : undefined}
+          />
         </div>
       ) : null}
       <SupportingEvidenceStack
@@ -6129,6 +6284,32 @@ function BacktestRunMini({
   );
 }
 
+function diffLineClass(line: string) {
+  if (line.startsWith("@@") || line.startsWith("diff --git") || line.startsWith("---") || line.startsWith("+++")) {
+    return "text-ink-500";
+  }
+  if (line.startsWith("+")) return "bg-ok/10 text-ok";
+  if (line.startsWith("-")) return "bg-danger/10 text-danger";
+  return "text-ink-200";
+}
+
+/**
+ * Unified-diff viewer: colors each line by its prefix (+ → ok, - → danger,
+ * @@/file headers → muted). The diff is the core approval evidence.
+ */
+function DiffView({ diff }: { diff: string }) {
+  const lines = diff.split("\n");
+  return (
+    <pre className="embedded-scroll mt-2 max-h-80 whitespace-pre-wrap break-words rounded-md border border-ink-700/70 bg-ink-950/70 p-2 text-[11px] leading-relaxed">
+      {lines.map((line, index) => (
+        <span key={index} className={`block font-mono ${diffLineClass(line)}`}>
+          {line || " "}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
 function ProposalFileChangePreview({ change }: { change: EvolutionProposalFileChange }) {
   const t = useTranslations("selfEvolution");
   const diff = String(change.diff || "");
@@ -6141,11 +6322,7 @@ function ProposalFileChangePreview({ change }: { change: EvolutionProposalFileCh
         <span className="break-all font-mono text-[12px] text-ink-100">{change.path}</span>
         {change.before_truncated || change.after_truncated ? <Pill tone="warn">{t("truncated")}</Pill> : null}
       </div>
-      {diff ? (
-        <pre className="embedded-scroll mt-2 max-h-80 whitespace-pre-wrap break-words rounded-md border border-ink-700/70 bg-ink-950/70 p-2 text-[11px] leading-relaxed text-ink-200">
-          {diff}
-        </pre>
-      ) : null}
+      {diff ? <DiffView diff={diff} /> : null}
       <details className="mt-2">
         <summary className="cursor-pointer text-[12px] text-ink-400">{t("beforeAfter")}</summary>
         <div className="mt-2 grid gap-2 lg:grid-cols-2">

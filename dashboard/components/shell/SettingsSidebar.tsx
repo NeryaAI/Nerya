@@ -46,6 +46,7 @@ import {
   ShieldCheckIcon,
   SparkIcon,
   WrenchIcon,
+  XIcon,
 } from "../icons";
 
 type IconComp = ComponentType<SVGProps<SVGSVGElement> & { size?: number }>;
@@ -70,12 +71,14 @@ function Row({
   active,
   href,
   onClick,
+  id,
 }: {
   icon: IconComp;
   label: string;
   active?: boolean;
   href?: string;
   onClick?: () => void;
+  id?: string;
 }) {
   const cls = [
     "group sidebar-item w-full",
@@ -92,13 +95,13 @@ function Row({
   );
   if (href) {
     return (
-      <Link href={href} className={cls}>
+      <Link href={href} className={cls} aria-current={active ? "page" : undefined}>
         {inner}
       </Link>
     );
   }
   return (
-    <button type="button" onClick={onClick} className={cls}>
+    <button id={id} type="button" onClick={onClick} className={cls} aria-current={active ? "page" : undefined} data-settings-section>
       {inner}
     </button>
   );
@@ -109,6 +112,7 @@ export function SettingsSidebar() {
   const router = useRouter();
   const tNav = useTranslations("settingsNav");
   const tTabs = useTranslations("settings.tabs");
+  const tUi = useTranslations("ui");
   const [hash, setHash] = useState(DEFAULT_HASH);
   const [query, setQuery] = useState("");
 
@@ -118,8 +122,10 @@ export function SettingsSidebar() {
   // row highlights. SettingsWorkspace owns the same hash; we just mirror
   // it here for selection state.
   useEffect(() => {
-    const read = () =>
-      setHash(window.location.hash.replace(/^#/, "") || DEFAULT_HASH);
+    const read = () => {
+      const next = window.location.hash.replace(/^#/, "");
+      setHash(["models", "access", "runtime", "capabilityGates", "interface"].includes(next) ? next : DEFAULT_HASH);
+    };
     read();
     window.addEventListener("hashchange", read);
     return () => window.removeEventListener("hashchange", read);
@@ -189,18 +195,22 @@ export function SettingsSidebar() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={tNav("searchPlaceholder")}
-            className="w-full bg-transparent text-[13px] text-[color:var(--text-base)] placeholder:text-[color:var(--text-muted)] focus:outline-none"
+            aria-label={tNav("searchPlaceholder")}
+            className="min-w-0 flex-1 bg-transparent text-[13px] text-[color:var(--text-base)] placeholder:text-[color:var(--text-muted)] focus:outline-none"
           />
+          {query ? <button type="button" className="ui-icon-button" aria-label={tUi("clearSearch")} onClick={() => setQuery("")}><XIcon size={14} /></button> : null}
         </div>
       </div>
 
-      <nav className="flex-1 space-y-3 overflow-y-auto px-2 pb-2">
+      <nav aria-label={tNav("title")} className="flex-1 space-y-3 overflow-y-auto px-2 pb-2">
+        {!generalShown.length && !integrationsShown.length ? <p role="status" className="px-3 py-4 text-sm text-[color:var(--text-muted)]">{tUi("noSettingsResults")}</p> : null}
         {generalShown.length ? (
           <div className="space-y-0.5">
             <SectionLabel>{tNav("groupGeneral")}</SectionLabel>
             {generalShown.map((item) => (
               <Row
                 key={item.key}
+                id={`settings-tab-${item.key}`}
                 icon={item.icon}
                 label={item.label}
                 active={onSettings && hash === item.key}

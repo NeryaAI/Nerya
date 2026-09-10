@@ -60,7 +60,7 @@ export function ShellNotifications() {
       {count > 0 ? (
         // Cap the badge at "9+" — a three-digit red counter reads as a
         // permanent alarm and adds anxiety without adding information.
-        <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-medium leading-none text-white">
+        <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-danger px-1 text-[10px] font-medium leading-none text-white">
           {count > 9 ? "9+" : count}
         </span>
       ) : null}

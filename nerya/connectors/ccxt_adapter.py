@@ -132,6 +132,12 @@ class CcxtConnector(CEXConnectorBase):
     live: bool = False
     options: dict[str, Any] = field(default_factory=dict)
     timeout_ms: int = 15_000
+    # E3/C3: set by the provider factory for perp/linear venue specs
+    # (bybit_perpetual, binance_perpetual, …). Bare BASE/QUOTE symbols
+    # then resolve to the linear swap contract (BASE/QUOTE:QUOTE) so
+    # perp accounts price and place on derivatives instead of silently
+    # trading spot (which would skip leverage/reduceOnly/brackets).
+    prefer_perpetual: bool = False
     _client: Any = None
 
     def __post_init__(self) -> None:
@@ -175,13 +181,24 @@ class CcxtConnector(CEXConnectorBase):
         """Lazily-loaded ccxt ``markets`` map (per-symbol precision, contract
         size, lot limits). Cached for the connector's lifetime so every
         ``place_order`` / ``fetch_*`` call can precision-round without an
-        extra round-trip."""
+        extra round-trip.
+
+        A failed load is NEVER cached (F2): caching ``{}`` made every
+        symbol look spot-like for the rest of the process, silently
+        dropping reduceOnly / bracket params — a protection flatten
+        would have opened an opposite position instead of closing.
+        """
         cache = getattr(self, "_markets", None)
         if cache is None:
             try:
                 cache = self.client.load_markets()
-            except Exception:
-                cache = {}
+            except Exception as exc:
+                raise TradingError(
+                    f"{self.venue} markets_unavailable — load_markets "
+                    f"failed: {exc}"
+                ) from exc
+            if not isinstance(cache, dict):
+                cache = dict(cache or {})
             self._markets = cache
         return cache
 
@@ -197,32 +214,65 @@ class CcxtConnector(CEXConnectorBase):
         except Exception:
             return 1.0
 
-    def _precision_amount(self, sym: str) -> int:
-        mkt = self.markets.get(sym) or {}
-        return int(mkt.get("precision", {}).get("amount") or 8) if mkt else 8
-
-    def _round_amount(self, sym: str, size: float) -> float:
-        """Round an order amount down without exceeding the approved size."""
-        mkt = self.markets.get(sym) or {}
-        lim = mkt.get("limits", {}).get("amount", {}) if isinstance(mkt, dict) else {}
+    def _round_amount(self, sym: str, size: float, price: float | None = None) -> float:
+        """Round an order amount down without exceeding the approved size,
+        then enforce the venue's minimum order value (limits.cost.min)."""
         amount = float(size)
         if amount <= 0:
             raise TradingError(f"{self.venue} order amount must be positive")
-        # Step size (lot) — round down so we never over-send.
-        step = lim.get("step") if isinstance(lim, dict) else None
+        # Prefer ccxt's amount_to_precision: it covers precision.amount /
+        # decimalPlaces / lot step in one shot for every venue — including
+        # ones like Bybit that leave limits.amount.step unset (F6). Fall
+        # back to the raw step logic when the venue adapter can't round.
         try:
-            if step:
-                amount = (amount // float(step)) * float(step)
+            amount = float(self.client.amount_to_precision(sym, amount))
         except Exception:
-            pass
+            mkt = self.markets.get(sym) or {}
+            lim = mkt.get("limits", {}).get("amount", {}) if isinstance(mkt, dict) else {}
+            step = lim.get("step") if isinstance(lim, dict) else None
+            try:
+                if step:
+                    amount = (amount // float(step)) * float(step)
+            except Exception:
+                pass
+        mkt = self.markets.get(sym) or {}
+        limits = mkt.get("limits", {}) if isinstance(mkt, dict) else {}
+        amt_lim = limits.get("amount", {}) if isinstance(limits, dict) else {}
         try:
-            min_amt = float(lim.get("min") or 0.0) if isinstance(lim, dict) else 0.0
+            min_amt = float(amt_lim.get("min") or 0.0) if isinstance(amt_lim, dict) else 0.0
         except Exception:
             min_amt = 0.0
         if min_amt > 0 and amount < min_amt:
             raise TradingError(
                 f"{self.venue} order amount {amount:g} is below the "
                 f"exchange minimum {min_amt:g} for {sym}"
+            )
+        # Minimum notional (F6): venues reject sub-min order value with a
+        # cryptic upstream error — refuse here where the message is clear.
+        # R2C1: ``amount`` arrives in ccxt *contracts* (place_order already
+        # divided the base size by contractSize), so the order value is
+        # amount * contractSize * price — for contractSize=1 venues (spot,
+        # linear USDT swaps) that is identical to the old amount * price.
+        try:
+            cost_lim = limits.get("cost", {}) if isinstance(limits, dict) else {}
+            min_cost = float(cost_lim.get("min") or 0.0) if isinstance(cost_lim, dict) else 0.0
+        except Exception:
+            min_cost = 0.0
+        try:
+            contract_size = float(mkt.get("contractSize") or 1.0)
+        except Exception:
+            contract_size = 1.0
+        if contract_size <= 0:
+            contract_size = 1.0
+        if (
+            min_cost > 0
+            and price is not None
+            and amount * contract_size * float(price) < min_cost
+        ):
+            raise TradingError(
+                f"min_notional: {self.venue} order {amount:g} {sym} "
+                f"(x{contract_size:g} contract) @ {float(price):g} is "
+                f"below the exchange minimum notional {min_cost:g}"
             )
         if amount <= 0:
             raise TradingError(
@@ -246,6 +296,57 @@ class CcxtConnector(CEXConnectorBase):
         except Exception:
             return str(float(price))
 
+    @staticmethod
+    def _is_no_change(exc: Exception) -> bool:
+        """True when ccxt reports 'value already set' (F3).
+
+        Bybit answers 110043 'leverage not modified' / 110026 'margin
+        mode already set' when the requested value is already active —
+        ccxt 4.5.x surfaces those as ``NoChange`` (a BadRequest
+        subclass). That is success, not a failure.
+        """
+        try:
+            from ccxt.base.errors import NoChange  # type: ignore
+        except Exception:
+            return False
+        return isinstance(exc, NoChange)
+
+    @staticmethod
+    def _is_ambiguous_exc(exc: Exception) -> bool:
+        """True when a create_order failure leaves the venue outcome
+        unknown (F4): timeout / network drop after a request that may
+        have been accepted. Raw socket timeouts and resets surface as
+        OSError subclasses.
+        """
+        try:
+            from ccxt.base.errors import (  # type: ignore
+                ExchangeNotAvailable, NetworkError, RequestTimeout,
+            )
+        except Exception:
+            pass
+        else:
+            if isinstance(exc, (RequestTimeout, NetworkError,
+                                ExchangeNotAvailable)):
+                return True
+        return isinstance(exc, (OSError, TimeoutError))
+
+    @staticmethod
+    def _is_not_found_exc(exc: Exception) -> bool:
+        """True when ccxt classified the failure as 'no such order' (R3T3).
+
+        ccxt maps venue-specific codes (e.g. Bybit retCode 10001 "order
+        not exists or too late...") onto ``OrderNotFound``. Wrapping the
+        exception into ``TradingError`` used to erase that class, so the
+        poller's 4-strike ``lost`` machinery never fired on the target
+        venue — the flag carries the classification through instead of
+        relying on message substrings.
+        """
+        try:
+            from ccxt.base.errors import OrderNotFound  # type: ignore
+        except Exception:
+            return False
+        return isinstance(exc, OrderNotFound)
+
     def _ensure_leverage_and_margin(
         self,
         sym: str,
@@ -260,28 +361,85 @@ class CcxtConnector(CEXConnectorBase):
             try:
                 self.client.set_leverage(int(float(leverage)), sym)
             except Exception as exc:
-                raise TradingError(
-                    f"{self.venue} failed to set leverage for {sym}: {exc}"
-                ) from exc
+                if self._is_no_change(exc):
+                    pass  # requested leverage already active
+                else:
+                    raise TradingError(
+                        f"{self.venue} failed to set leverage for {sym}: {exc}"
+                    ) from exc
         if margin_mode and str(margin_mode).lower() in ("isolated", "cross"):
             try:
                 self.client.set_margin_mode(str(margin_mode).lower(), sym)
             except Exception as exc:
-                raise TradingError(
-                    f"{self.venue} failed to set margin mode for {sym}: {exc}"
-                ) from exc
+                if self._is_no_change(exc):
+                    pass  # requested margin mode already active
+                else:
+                    raise TradingError(
+                        f"{self.venue} failed to set margin mode for {sym}: {exc}"
+                    ) from exc
 
     # --------------------------------------------------------- helpers
     def _normalise_symbol(self, market: str) -> str:
-        tail = market.split(":", 1)[-1]
-        if "/" in tail:
-            return tail.upper()
-        # crude USDT/USD/BUSD split
-        s = tail.upper().replace("-", "")
-        for q in ("USDT", "USDC", "BUSD", "USD", "USDS"):
-            if s.endswith(q) and len(s) > len(q):
-                return f"{s[:-len(q)]}/{q}"
-        return tail.upper()
+        """Normalise a market id to ccxt's unified symbol.
+
+        Handled shapes:
+
+        * ``BTCUSDT`` / ``btcusdt`` / ``BYBIT:SOLUSDT`` → ``BTC/USDT``
+        * ``SOL/USDT:USDT`` / ``BYBIT:SOL/USDT:USDT`` → kept verbatim —
+          an explicit contract suffix means linear swap on any adapter
+        * ``BYBIT_PERPETUAL:SOLUSDT`` (the format Nerya tooling emits)
+          → ``SOL/USDT:USDT`` — the derivatives prefix forces the
+          linear reading even on a spot-capable connector
+
+        On a perp-preferred connector (:attr:`prefer_perpetual`), bare
+        ``BASE/QUOTE`` resolves to the swap contract so derivatives
+        params keep applying instead of silently trading spot (E3/C3).
+        The settlement currency follows the quote (R2C2): USDT/USDC
+        pairs are linear (``ETHUSDT`` → ``ETH/USDT:USDT``) while
+        USD-quoted pairs are the inverse / coin-margined family with
+        the base as settle (``BTCUSD`` → ``BTC/USD:BTC``).
+        """
+        raw = str(market or "").strip()
+        if not raw:
+            return raw
+        # Split an optional VENUE: prefix, but never inside a slash
+        # symbol: "SOL/USDT:USDT" is a unified contract symbol, not
+        # venue "SOL/USDT" + tail "USDT".
+        head = ""
+        body = raw
+        if ":" in raw:
+            cand_head, cand_body = raw.split(":", 1)
+            if "/" not in cand_head:
+                head, body = cand_head, cand_body
+        force_perp = False
+        if head:
+            h = head.upper()
+            force_perp = "PERP" in h or "SWAP" in h or "FUTURE" in h
+        if "/" in body and ":" in body:
+            # Explicit unified contract symbol — already unambiguous;
+            # keep verbatim so linear stays linear.
+            return body.upper()
+        if "/" in body:
+            sym = body.upper()
+        else:
+            # crude USDT/USD/BUSD split
+            s = body.upper().replace("-", "")
+            sym = body.upper()
+            for q in ("USDT", "USDC", "BUSD", "USD", "USDS"):
+                if s.endswith(q) and len(s) > len(q):
+                    sym = f"{s[:-len(q)]}/{q}"
+                    break
+        if (force_perp or self.prefer_perpetual) and "/" in sym and ":" not in sym:
+            base, quote = sym.split("/", 1)
+            # R2C2: pick the settlement currency from the quote. USD-quoted
+            # pairs are the coin-margined / inverse family — bybit's
+            # inverse unified symbol is BTC/USD:BTC (settle = base), and
+            # the old BTC/USD:USD mapping hit BadSymbol at the venue.
+            # USDT/USDC-quoted pairs stay linear (settle = quote).
+            q = quote.upper()
+            settle = base.upper() if q == "USD" else q
+            sym = f"{base}/{quote}:{settle}"
+        return sym
 
     def _check_live_and_keys(self) -> None:
         if not self.live:
@@ -576,9 +734,21 @@ class CcxtConnector(CEXConnectorBase):
         take_profit: float | None = None,
         trigger_price: float | None = None,
         extra_params: dict[str, Any] | None = None,
+        reference_price: float | None = None,
     ) -> OrderAck:
         self._check_live_and_keys()
         sym = self._normalise_symbol(market)
+        # F2: fail closed when instrument metadata can't be loaded —
+        # an empty markets map would silently drop reduceOnly /
+        # positionSide / bracket params and contract-size conversion.
+        markets = self.markets
+        if not markets:
+            raise TradingError(
+                f"{self.venue} markets_unavailable — refusing to place "
+                f"{market}: load_markets returned no instruments, so "
+                f"derivatives detection and precision rounding would "
+                f"silently degrade"
+            )
         is_deriv = self._is_derivatives(sym)
 
         # Pre-trade derivative setup (leverage / margin mode). Idempotent.
@@ -593,15 +763,39 @@ class CcxtConnector(CEXConnectorBase):
         if is_deriv and contract_size and contract_size != 1.0:
             # ccxt amounts for swaps are in *contracts*; convert from base.
             amount = amount / float(contract_size or 1.0)
-        amount = self._round_amount(sym, amount)
         px = self._round_price(sym, price)
+        # R3T6: market orders have no order price, which used to skip the
+        # min-notional guard entirely and let sub-min orders die at the
+        # venue with a cryptic upstream error. Fall back to the caller's
+        # reference mark (candidate meta) for the *cost check only* — it
+        # is never sent to the venue.
+        cost_ref = px
+        if cost_ref is None and reference_price is not None:
+            try:
+                ref = float(reference_price)
+            except Exception:
+                ref = 0.0
+            if ref > 0:
+                cost_ref = ref
+        amount = self._round_amount(sym, amount, price=cost_ref)
 
         # Build the ccxt params dict.
         params: dict[str, Any] = {}
         if client_order_id:
             params["clientOrderId"] = client_order_id
         if time_in_force and order_type.lower() == "limit":
-            params["timeInForce"] = time_in_force
+            # E8: ccxt expects uppercase TIF codes; post_only is a
+            # separate flag, not a timeInForce value.
+            tif = str(time_in_force).strip()
+            tif_l = tif.lower()
+            if tif_l == "post_only":
+                params["postOnly"] = True
+            elif tif_l in ("gtc", "ioc", "fok"):
+                params["timeInForce"] = tif_l.upper()
+            else:
+                # Unknown values pass through unchanged — the venue may
+                # understand exchange-specific codes (e.g. "GTX", "DAY").
+                params["timeInForce"] = tif
         if is_deriv:
             if reduce_only:
                 params["reduceOnly"] = True
@@ -628,7 +822,16 @@ class CcxtConnector(CEXConnectorBase):
                 None if px is None else float(px), params,
             )
         except Exception as exc:
-            raise TradingError(f"{self.venue} place_order failed: {exc}") from exc
+            # F4: transport-level failures leave the venue outcome
+            # unknown — flag them so the executor keeps the order
+            # tracked + pollable instead of marking it rejected (which
+            # would invite a duplicate re-place). Definitive rejects
+            # (BadRequest / InsufficientFunds / PermissionDenied) stay
+            # unambiguous.
+            raise TradingError(
+                f"{self.venue} place_order failed: {exc}",
+                ambiguous=self._is_ambiguous_exc(exc),
+            ) from exc
 
         fee_usd, fee_breakdown = self._extract_fee_usd(
             raw, market=market, avg_price=float(raw.get("average") or 0) or None,
@@ -655,7 +858,12 @@ class CcxtConnector(CEXConnectorBase):
         try:
             raw = self.client.cancel_order(order_id, sym)
         except Exception as exc:
-            raise TradingError(f"{self.venue} cancel_order failed: {exc}") from exc
+            # R3T3: preserve ccxt's definitive not-found classification so
+            # callers can tell "order gone" from transport noise.
+            raise TradingError(
+                f"{self.venue} cancel_order failed: {exc}",
+                not_found=self._is_not_found_exc(exc),
+            ) from exc
         return OrderAck(
             order_id=str(raw.get("id") or order_id),
             client_order_id=str(raw.get("clientOrderId") or ""),
@@ -670,7 +878,14 @@ class CcxtConnector(CEXConnectorBase):
         try:
             raw = self.client.fetch_order(order_id, sym)
         except Exception as exc:
-            raise TradingError(f"{self.venue} fetch_order failed: {exc}") from exc
+            # R3T3: preserve ccxt's definitive not-found classification
+            # (OrderNotFound) on the raised TradingError so the order
+            # poller's 4-strike ``lost`` machinery works on ccxt venues
+            # instead of dying on a flattened message string.
+            raise TradingError(
+                f"{self.venue} fetch_order failed: {exc}",
+                not_found=self._is_not_found_exc(exc),
+            ) from exc
         avg = float(raw.get("average") or 0) or None
         fee_usd, fee_breakdown = self._extract_fee_usd(
             raw, market=market, avg_price=avg,
@@ -750,6 +965,40 @@ class CcxtConnector(CEXConnectorBase):
             raise TradingError(f"{self.venue} fetch_open_orders failed: {exc}") from exc
         return [_raw_order_to_ack(self, r) for r in raw_orders or []]
 
+    def fetch_closed_orders(
+        self,
+        *,
+        symbols: list[str] | None = None,
+        since_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[OrderAck]:
+        """Recently closed orders (R3T4).
+
+        The ``place_unknown`` adoption path scans closed orders for
+        instantly-filled market orders that never rested in open orders.
+        No connector implemented this before, so that adoption source was
+        dead on every venue. Zero-argument calls (how the adoption loop
+        invokes it) fall back to the most recent ``limit`` closed orders
+        across all symbols.
+        """
+        self._check_live_and_keys()
+        since = int(since_ms) if since_ms is not None else None
+        try:
+            if symbols:
+                raw_orders: list[dict[str, Any]] = []
+                for s in symbols:
+                    sym = self._normalise_symbol(s) if ":" in str(s) or "/" not in str(s) else s
+                    raw_orders.extend(
+                        self.client.fetch_closed_orders(sym, since=since, limit=int(limit)),
+                    )
+            else:
+                raw_orders = self.client.fetch_closed_orders(
+                    None, since=since, limit=int(limit),
+                )
+        except Exception as exc:
+            raise TradingError(f"{self.venue} fetch_closed_orders failed: {exc}") from exc
+        return [_raw_order_to_ack(self, r) for r in raw_orders or []]
+
     def fetch_my_trades(
         self,
         *,
@@ -760,8 +1009,14 @@ class CcxtConnector(CEXConnectorBase):
         self._check_live_and_keys()
         sym = self._normalise_symbol(market) if market else None
         try:
+            # F10: ``since`` is fetch_my_trades' second positional/keyword
+            # arg — passing it inside ``params`` is ignored by ccxt, which
+            # made fill backfill fetch the wrong window.
             raw_trades = self.client.fetch_my_trades(
-                sym, params={"since": since_ms, "limit": limit} if since_ms else {"limit": limit}
+                sym,
+                since=int(since_ms) if since_ms is not None else None,
+                limit=int(limit),
+                params={},
             )
         except Exception as exc:
             raise TradingError(f"{self.venue} fetch_my_trades failed: {exc}") from exc

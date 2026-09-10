@@ -92,7 +92,12 @@ def load_turn_state(paths: WorkspacePaths, turn_id: str) -> TurnRecoveryState:
     ]
     if not rows:
         raise KeyError(f"no turn step records for turn_id={turn_id!r}")
-    rows.sort(key=lambda r: int(r.get("index") or 0))
+    return _state_from_rows(rows, turn_id)
+
+
+def _state_from_rows(rows: list[dict[str, Any]], turn_id: str) -> TurnRecoveryState:
+    """Reconstruct one turn from an already-read journal snapshot."""
+    rows = sorted(rows, key=lambda r: int(r.get("index") or 0))
 
     closed = any(r.get("step_kind") == "close" for r in rows)
     last = rows[-1]
@@ -156,11 +161,8 @@ def list_open_turns(paths: WorkspacePaths) -> list[TurnRecoveryState]:
             continue
         seen.setdefault(str(tid), []).append(row)
     out: list[TurnRecoveryState] = []
-    for tid in seen:
-        try:
-            state = load_turn_state(paths, tid)
-        except KeyError:
-            continue
+    for tid, rows in seen.items():
+        state = _state_from_rows(rows, tid)
         if state.is_resumable():
             out.append(state)
     return out

@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { useTranslations } from "next-intl";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Advanced,
   Card,
   Empty,
   ErrorBanner,
   Json,
+  Kpi,
   PageBody,
   PageHeader,
   Pill,
@@ -17,26 +18,80 @@ import { SectionTabs } from "../../components/SectionTabs";
 import { PlusIcon, SendIcon, WrenchIcon, XIcon } from "../../components/icons";
 import { clientApi } from "../../lib/clientApi";
 import { authHeaders } from "../../lib/auth";
-import { formatTime } from "../../lib/format";
+import { formatTsShort } from "../../lib/format";
+import { confirm as confirmDialog, toast } from "../../lib/dialogs";
 import type {
   AgentTaskArtifactsEnvelope,
   AgentTaskRow,
   AgentTaskStatus,
   AgentTaskTimelineEnvelope,
   AgentTasksEnvelope,
-  EnvelopeSeverity,
 } from "../../lib/operatorTypes";
 
-const STATUS_TONE: Record<AgentTaskStatus, "ok" | "warn" | "danger" | "brand"> = {
+/**
+ * Shorten a long id to its first 8 characters for dense list meta rows.
+ * The full value stays available via the title tooltip.
+ */
+function shortId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+const STATUS_TONE: Record<
+  Exclude<AgentTaskStatus, "in_progress">,
+  "ok" | "danger" | "neutral"
+> = {
   done: "ok",
-  in_progress: "warn",
   failed: "danger",
-  empty: "brand",
+  empty: "neutral",
 };
+
+// Raw status -> tasksPage.* translation key. Unknown statuses fall back
+// to the raw string so a new backend enum value never crashes the UI.
+const STATUS_LABEL_KEYS: Record<string, string> = {
+  in_progress: "statusInProgress",
+  done: "statusDone",
+  failed: "statusFailed",
+  empty: "statusEmpty",
+};
+
+function enumLabel(
+  map: Record<string, string>,
+  value: string,
+  t: (key: string) => string,
+): string {
+  const key = map[value] ?? map[value.toLowerCase()];
+  return key ? t(key) : value;
+}
+
+/**
+ * Status badge with the console-wide "running = fluid cyan" semantics:
+ * in_progress renders in fluid cyan (thinking/streaming accent) instead
+ * of warn amber; everything else uses the standard Pill tones.
+ */
+function StatusPill({
+  status,
+  label,
+}: {
+  status: AgentTaskStatus;
+  label: string;
+}) {
+  if (status === "in_progress") {
+    return (
+      <span className="pill border-fluid-400/30 bg-fluid-400/10 text-fluid-400">
+        {label}
+      </span>
+    );
+  }
+  return <Pill tone={STATUS_TONE[status]}>{label}</Pill>;
+}
 
 export default function AgentTasksPage() {
   const t = useTranslations("tasks");
   const tCommon = useTranslations("common");
+  const tStatus = useTranslations("tasksPage");
+  // Reused copy: the chat namespace already carries the "task cancelled"
+  // notice, so cancel feedback needs no new strings.
+  const tChat = useTranslations("chat");
   const STATUS_FILTERS: { id: AgentTaskStatus | "all"; label: string }[] = [
     { id: "all", label: t("filterAll") },
     { id: "in_progress", label: t("filterInProgress") },
@@ -54,7 +109,10 @@ export default function AgentTasksPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [taskPrompt, setTaskPrompt] = useState("");
-  const [info, setInfo] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  // Tracks which task the currently shown timeline/artifacts belong to, so
+  // stale detail is dropped on switch without blanking on background polls.
+  const loadedDetailId = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -87,26 +145,39 @@ export default function AgentTasksPage() {
     [tasks, selectedId],
   );
 
-  // Pull timeline + artifacts whenever the selection changes.
+  // Pull timeline + artifacts whenever the selection changes. Detail is
+  // cleared up front when switching tasks so the previous task's timeline
+  // and artifacts never render under the new task's title, and fetch
+  // failures surface as an error state instead of a permanent "loading…".
   useEffect(() => {
     if (!selected) {
+      loadedDetailId.current = null;
       setTimeline(null);
       setArtifacts(null);
+      setDetailError(null);
       return;
+    }
+    const taskId = selected.id;
+    const switching = loadedDetailId.current !== taskId;
+    loadedDetailId.current = taskId;
+    if (switching) {
+      setTimeline(null);
+      setArtifacts(null);
+      setDetailError(null);
     }
     let cancelled = false;
     async function load() {
       try {
         const [tl, ar] = await Promise.all([
-          clientApi.agentTaskTimeline(selected!.id),
-          clientApi.agentTaskArtifacts(selected!.id),
+          clientApi.agentTaskTimeline(taskId),
+          clientApi.agentTaskArtifacts(taskId),
         ]);
         if (cancelled) return;
         setTimeline(tl);
         setArtifacts(ar);
       } catch (e) {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
+        setDetailError(e instanceof Error ? e.message : String(e));
       }
     }
     load();
@@ -116,12 +187,22 @@ export default function AgentTasksPage() {
   }, [selected]);
 
   async function cancelTask(task: AgentTaskRow) {
+    const ok = await confirmDialog({
+      title: tCommon("confirm"),
+      message: `${tCommon("cancel")} · ${task.title}`,
+      okLabel: tCommon("confirm"),
+      cancelLabel: tCommon("cancel"),
+      tone: "warning",
+    });
+    if (!ok) return;
     setBusy(task.id);
     try {
+      // clientApi post() throws on non-2xx, so res.ok is enforced here.
       await clientApi.agentTaskCancel(task.id, "operator_cancel");
+      toast({ tone: "ok", message: tChat("cancelNotice") });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      toast({ tone: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(null);
     }
@@ -132,11 +213,17 @@ export default function AgentTasksPage() {
     try {
       const result = await clientApi.agentTaskResume(task.id);
       if (result.primary_action?.method === "POST" && result.primary_action.href) {
-        await fetch(`/api/proxy${result.primary_action.href}`, {
+        // Raw fetch does NOT throw on non-2xx: check res.ok explicitly so a
+        // failed primary-action request surfaces as an error instead of a
+        // fake "resumed" success.
+        const res = await fetch(`/api/proxy${result.primary_action.href}`, {
           method: "POST",
           headers: authHeaders({ "content-type": "application/json" }),
           body: JSON.stringify(result.primary_action.body || {}),
         });
+        if (!res.ok) {
+          throw new Error(`resume failed: HTTP ${res.status}`);
+        }
       }
       await load();
     } catch (e) {
@@ -169,7 +256,10 @@ export default function AgentTasksPage() {
       setCreating(false);
       setTaskPrompt("");
       setSelectedId(sessionId);
-      setInfo(t("createdInfo", { sessionId, turnSuffix: result.turn_id ? ` · turn ${String(result.turn_id)}` : "" }));
+      toast({
+        tone: "default",
+        message: t("createdInfo", { sessionId, turnSuffix: result.turn_id ? ` · turn ${String(result.turn_id)}` : "" }),
+      });
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -183,6 +273,13 @@ export default function AgentTasksPage() {
     failed: 0,
     done: 0,
     empty: 0,
+  };
+
+  const countForFilter = (id: AgentTaskStatus | "all"): number => {
+    if (id === "all") {
+      return counts.in_progress + counts.failed + counts.done + counts.empty;
+    }
+    return counts[id];
   };
 
   return (
@@ -232,12 +329,6 @@ export default function AgentTasksPage() {
           {t("taskExplainer")}
         </div>
 
-        {info ? (
-          <div className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">
-            {info}
-          </div>
-        ) : null}
-
         <div className="flex flex-wrap items-center gap-2 border-b border-brand-500/10 pb-3">
           {STATUS_FILTERS.map((opt) => (
             <button
@@ -249,7 +340,7 @@ export default function AgentTasksPage() {
                   : "text-ink-400 border-transparent hover:text-ink-200 hover:border-brand-500/20"
               }`}
             >
-              {opt.label}
+              {opt.label} · {countForFilter(opt.id)}
             </button>
           ))}
         </div>
@@ -258,7 +349,13 @@ export default function AgentTasksPage() {
           <Card
             title={t("tasksCount", { count: tasks.length })}
             description={
-              filter === "all" ? t("allSessions") : t("filterLabel", { filter })
+              filter === "all"
+                ? t("allSessions")
+                : t("filterLabel", {
+                    filter:
+                      STATUS_FILTERS.find((o) => o.id === filter)?.label ??
+                      filter,
+                  })
             }
             padded={false}
           >
@@ -279,27 +376,31 @@ export default function AgentTasksPage() {
                     }`}
                   >
                     <div className="flex items-center gap-2">
-                      <span
-                        className={`w-2 h-2 rounded-full ${dotForSeverity(task.severity)}`}
+                      {/* Single status indicator: the status Pill replaces the
+                          old severity dot + Pill double-encoding. */}
+                      <StatusPill
+                        status={task.status}
+                        label={enumLabel(STATUS_LABEL_KEYS, task.status, tStatus)}
                       />
-                      <Pill tone={STATUS_TONE[task.status]}>
-                        {task.status.replace("_", " ")}
-                      </Pill>
                       <span className="text-[12px] text-ink-100 truncate flex-1">
                         {task.title}
                       </span>
                     </div>
                     <div className="text-[10.5px] text-ink-500 mt-1 flex items-center gap-2">
-                      <span className="font-mono">{task.id}</span>
+                      <span className="font-mono" title={task.id}>
+                        {shortId(task.id)}
+                      </span>
                       <span>·</span>
                       <span>{t("turnCount", { count: task.turn_count })}</span>
                       {task.strategy_id ? (
                         <>
                           <span>·</span>
-                          <span className="font-mono">{task.strategy_id}</span>
+                          <span className="font-mono" title={task.strategy_id}>
+                            {shortId(task.strategy_id)}
+                          </span>
                         </>
                       ) : null}
-                      <span className="ml-auto">{formatTime(task.updated_at)}</span>
+                      <span className="ml-auto">{formatTsShort(task.updated_at)}</span>
                     </div>
                   </li>
                 ))}
@@ -315,14 +416,15 @@ export default function AgentTasksPage() {
                   description={t("taskId", { id: selected.id })}
                   actions={
                     <div className="flex items-center gap-2">
-                      <Pill tone={STATUS_TONE[selected.status]}>
-                        {selected.status.replace("_", " ")}
-                      </Pill>
+                      <StatusPill
+                        status={selected.status}
+                        label={enumLabel(STATUS_LABEL_KEYS, selected.status, tStatus)}
+                      />
                       {selected.status === "in_progress" ? (
                         <button
                           disabled={busy === selected.id}
                           onClick={() => cancelTask(selected)}
-                          className="text-[11px] px-2 py-0.5 rounded-md border border-rose-500/40 text-rose-200 hover:bg-rose-500/10 disabled:opacity-50"
+                          className="btn-ghost text-[11px] py-0.5 text-danger disabled:opacity-50"
                         >
                           {tCommon("cancel")}
                         </button>
@@ -331,7 +433,7 @@ export default function AgentTasksPage() {
                         <button
                           disabled={busy === selected.id}
                           onClick={() => resumeTask(selected)}
-                          className="text-[11px] px-2 py-0.5 rounded-md border border-amber-400/40 text-amber-200 hover:bg-amber-400/10 disabled:opacity-50"
+                          className="btn-ghost text-[11px] py-0.5 text-warn disabled:opacity-50"
                         >
                           {t("resume")}
                         </button>
@@ -347,33 +449,50 @@ export default function AgentTasksPage() {
                     </div>
                   }
                 >
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
-                    <Stat
-                      label={t("statStrategy")}
-                      value={selected.strategy_id || "–"}
-                      mono
-                    />
-                    <Stat label={t("statTurns")} value={selected.turn_count} />
-                    <Stat
-                      label={t("statSkills")}
-                      value={selected.skills_invoked.slice(0, 3).join(", ") || "–"}
-                    />
-                    <Stat
-                      label={t("statLastAction")}
-                      value={selected.last_action || "–"}
-                      mono
-                    />
-                    <Stat label={t("statCreated")} value={formatTime(selected.created_at)} />
-                    <Stat label={t("statUpdated")} value={formatTime(selected.updated_at)} />
-                    <Stat
-                      label={t("statActiveTurns")}
-                      value={selected.active_turn_ids.length}
-                    />
-                    <Stat
+                  {/* Overview collapsed to the 4 most operationally relevant
+                      numbers as inline Kpis; the long-tail fields (strategy,
+                      skills, created, active turns) live in Advanced. */}
+                  <div className="grid grid-cols-2 gap-x-8 gap-y-4 md:grid-cols-4">
+                    <Kpi inline label={t("statTurns")} value={selected.turn_count} />
+                    <Kpi
+                      inline
                       label={t("statFailedTurns")}
                       value={selected.failed_turn_ids.length}
+                      tone={selected.failed_turn_ids.length > 0 ? "danger" : "neutral"}
+                    />
+                    <Kpi
+                      inline
+                      label={t("statLastAction")}
+                      value={
+                        <span className="font-mono text-[13px]">
+                          {selected.last_action || "–"}
+                        </span>
+                      }
+                    />
+                    <Kpi
+                      inline
+                      label={t("statUpdated")}
+                      value={formatTsShort(selected.updated_at)}
                     />
                   </div>
+                  <Advanced title={t("detailMore")} storageKey="nerya.tasks.advanced.detail">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
+                      <Stat
+                        label={t("statStrategy")}
+                        value={selected.strategy_id || "–"}
+                        mono
+                      />
+                      <Stat
+                        label={t("statSkills")}
+                        value={selected.skills_invoked.slice(0, 3).join(", ") || "–"}
+                      />
+                      <Stat label={t("statCreated")} value={formatTsShort(selected.created_at)} />
+                      <Stat
+                        label={t("statActiveTurns")}
+                        value={selected.active_turn_ids.length}
+                      />
+                    </div>
+                  </Advanced>
                 </Card>
 
                 <Card
@@ -388,7 +507,9 @@ export default function AgentTasksPage() {
                       : t("loadingLower")
                   }
                 >
-                  {artifacts ? (
+                  {!artifacts && detailError ? (
+                    <div className="text-[12px] text-danger">{detailError}</div>
+                  ) : artifacts ? (
                     <div className="space-y-3 text-[12px]">
                       {artifacts.data.artifacts.files.length > 0 ? (
                         <ArtifactGroup label={t("artifactFiles")} rows={artifacts.data.artifacts.files.map((f) => `${f.action} · ${f.path}`)} />
@@ -445,15 +566,20 @@ export default function AgentTasksPage() {
                       : t("loadingLower")
                   }
                 >
-                  {timeline ? (
+                  {!timeline && detailError ? (
+                    <div className="text-[12px] text-danger">{detailError}</div>
+                  ) : timeline ? (
                     <ol className="embedded-list-scroll-lg space-y-1">
-                      {timeline.data.events.slice(-200).map((ev, i) => (
+                      {/* Newest event first: the operator cares about what the
+                          task just did, not how it started. Kept to the last
+                          200 events as before. */}
+                      {[...timeline.data.events.slice(-200)].reverse().map((ev, i) => (
                         <li
                           key={i}
                           className="text-[11px] font-mono text-ink-200 flex gap-2"
                         >
                           <span className="text-ink-500 w-32 shrink-0">
-                            {formatTime(ev.ts || "")}
+                            {formatTsShort(ev.ts || "")}
                           </span>
                           <span className="text-brand-300 w-32 shrink-0">
                             {ev.surface}
@@ -629,10 +755,4 @@ function summarizeArtifactResult(value: unknown): string {
     return keys.length > 3 ? `${head} · +${keys.length - 3} more` : head;
   }
   return String(value);
-}
-
-function dotForSeverity(severity: EnvelopeSeverity) {
-  if (severity === "danger") return "bg-rose-500";
-  if (severity === "warn") return "bg-amber-400";
-  return "bg-brand-400";
 }

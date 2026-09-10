@@ -2,10 +2,18 @@
 
 Config precedence:
   CLI flag > env var > workspace nerya.yml > built-in defaults.
+
+Typos in ``nerya.yml`` used to disappear silently into
+:meth:`Config.get` defaults. :func:`load_config` now warns on unknown
+top-level keys and unknown ``agent.*`` sub-keys the operator actually
+wrote (silence with ``NERYA_CONFIG_QUIET=1``) — the first step toward
+a fully schema-validated config catalogue; see
+``docs/extensibility-upgrade.md``.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -15,7 +23,17 @@ from typing import Any
 from . import yaml_io
 from .paths import WorkspacePaths, resolve_workspace
 
+log = logging.getLogger("nerya.core.config")
+
 DEFAULT_CONFIG: dict[str, Any] = {
+    # Workspace plugins (nerya.harness.loader). Same trust model as
+    # hooks/ and providers/: enabled by default, opt-out here, and a
+    # broken plugin is journaled to journals/plugins.jsonl — never fatal.
+    "plugins": {
+        "enabled": True,
+        # Directory names under <workspace>/plugins/ to skip.
+        "disabled": [],
+    },
     "runtime": {
         "live_trading_enabled": False,
         "paper_trading_enabled": True,
@@ -25,6 +43,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # production runtime must surface degraded envelopes instead of
         # silently fabricating results. See :mod:`nerya.core.truth`.
         "mock_mode": False,
+        "intent_gate": {"enabled": False, "fail_closed": True},
     },
     "network": {
         "proxy": {
@@ -77,7 +96,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "temperature": 0.1,
                 "timeout_s": 30,
                 "allowed_tasks": [
-                    "news_filtering", "compress", "classify",
+                    "news_filtering", "compress", "classify", "intent_classification",
                     "trigger_triage", "extract_json",
                     "auto_session_title",
                     # Cheap subagent lanes (web_researcher, sentiment_analyst,
@@ -201,12 +220,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "agent": {
-        "harness": {
-            "max_tool_calls": 16,
+        "native": {
+            "max_iterations": 48,
+            "max_total_tool_calls": 16,
             "max_wall_seconds": 120.0,
-            "max_tokens": 200_000,
-            "tool_timeout_s": 30.0,
-            "max_retries": 1,
             "result_overflow_threshold_bytes": 65_536,
         },
         # operator-mode preset.  Picks the coarse policy
@@ -418,6 +435,45 @@ def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _warn_unknown_keys(user: dict[str, Any]) -> None:
+    """Warn on operator-written keys the runtime would silently ignore.
+
+    Only keys present in the *user* config are checked (not the merged
+    tree), so defaults drifting from ``DEFAULT_CONFIG`` never spam the
+    log. Coverage is deliberately narrow for this first pass — top
+    level plus ``agent.*`` — because those are where a typo costs the
+    most (a misspelled top-level section silently disables a whole
+    subsystem). Deep schema validation is tracked in
+    ``docs/extensibility-upgrade.md``.
+    """
+
+    if os.environ.get("NERYA_CONFIG_QUIET", "").lower() in ("1", "true", "yes"):
+        return
+    if not isinstance(user, dict) or not user:
+        return
+    try:
+        for key in sorted(user):
+            if key not in DEFAULT_CONFIG:
+                log.warning(
+                    "nerya.yml: unknown top-level key %r (typo? this key is "
+                    "ignored; set NERYA_CONFIG_QUIET=1 to silence)",
+                    key,
+                )
+        agent_user = user.get("agent")
+        agent_known = DEFAULT_CONFIG.get("agent", {})
+        if isinstance(agent_user, dict) and isinstance(agent_known, dict):
+            for key in sorted(agent_user):
+                if key not in agent_known:
+                    log.warning(
+                        "nerya.yml: unknown agent.%s key (typo? this key is "
+                        "ignored; set NERYA_CONFIG_QUIET=1 to silence)",
+                        key,
+                    )
+    except Exception:
+        # Config warnings must never break config loading.
+        log.debug("unknown-key check failed", exc_info=True)
+
+
 def load_config(
     workspace: Path | str | None = None,
     *,
@@ -432,6 +488,7 @@ def load_config(
     paths = resolve_workspace(workspace, profile=profile)
     user = yaml_io.load(paths.config, default={}) or {}
     merged = _merge(DEFAULT_CONFIG, user)
+    _warn_unknown_keys(user)
     # env overrides
     if os.environ.get("NERYA_LIVE_TRADING", "").lower() in ("true", "1", "yes"):
         merged.setdefault("runtime", {})["live_trading_enabled"] = True

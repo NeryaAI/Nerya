@@ -23,6 +23,16 @@ Resume contract:
 * The approval row is atomically claimed in SQLite before execution and
   moved to a terminal resume state afterward. Duplicate callbacks never
   reach the connector, including across processes.
+* The resume passes the approval's own ``risk_reasons`` back into the
+  kernel, so a re-escalation is auto-satisfied ONLY for reasons the
+  operator actually signed off on (a reason that appeared afterwards —
+  reconciliation drift, a tightened threshold — opens a fresh card).
+* Expired approvals never resume: once ``expires_at`` has passed the
+  record is flipped to ``expired`` and the resume is refused.
+* The frozen market snapshot's ``age_s`` is recomputed from the capture
+  timestamp at resume time, so the Risk Gate stale-data guard judges the
+  TRUE age of the prices the order would execute against, not the age
+  frozen at escalation.
 """
 
 from __future__ import annotations
@@ -86,7 +96,32 @@ def resume_approved(config: Config, approval_id: str) -> dict[str, Any]:
             "error": "frozen_plan_missing",
             "approval_id": approval_id,
         }
-    snapshot = record.get("frozen_market_snapshot") or None
+    # Expired approvals never resume. ``require()`` stamps ``expires_at``
+    # on the escalation record; records without one (legacy rows) keep
+    # the historical behavior rather than failing closed on a missing
+    # field they never carried.
+    expires_at = _approval_expiry(record)
+    if expires_at is not None and _now() > expires_at:
+        _mark_expired(config, approval_id)
+        _journal_resume(
+            config, approval_id, record.get("intent_id"),
+            ok=False, error="approval_expired",
+        )
+        return {
+            "ok": False,
+            "error": "approval_expired",
+            "approval_id": approval_id,
+            "expires_at": expires_at,
+        }
+    # Thread the operator's signoff back into the kernel: the approved
+    # decision's exact reasons, so ``submit_trade_plan`` auto-satisfies a
+    # re-escalation only when every current reason was part of what the
+    # operator approved (B3).
+    resume_approval = {
+        "risk_reasons": _approval_risk_reasons(record),
+        "expires_at": expires_at,
+    }
+    snapshot = _refresh_snapshot_age(record.get("frozen_market_snapshot") or None)
 
     try:
         claimed, persisted = _claim_resume(config, approval_id)
@@ -135,6 +170,7 @@ def resume_approved(config: Config, approval_id: str) -> dict[str, Any]:
     try:
         response = submit_trade_plan(
             config, plan, market_snapshot=snapshot, resume=True,
+            resume_approval=resume_approval,
         )
     except Exception as exc:  # pragma: no cover - defensive
         log.exception("approval resume failed for %s", approval_id)
@@ -226,6 +262,94 @@ _resume_subscriber_registered = False
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _now() -> float:
+    import time
+
+    return time.time()
+
+
+def _approval_expiry(record: dict[str, Any]) -> float | None:
+    """Best-effort ``expires_at`` (epoch seconds) from an approval record.
+
+    The full escalation row written by ``ApprovalGate.require`` carries a
+    float epoch ``expires_at``. Slim ack rows and legacy records may not
+    have one — those return ``None`` and skip the expiry check.
+    """
+    raw = record.get("expires_at")
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _approval_risk_reasons(record: dict[str, Any]) -> list[str]:
+    """The decision reasons the operator signed off on."""
+    reasons = record.get("risk_reasons")
+    if not reasons and isinstance(record.get("risk"), dict):
+        reasons = record["risk"].get("reasons")
+    if isinstance(reasons, list):
+        return [str(r) for r in reasons]
+    return []
+
+
+def _mark_expired(config: Config, approval_id: str) -> None:
+    """Flip an expired approval to a terminal ``expired`` state (best effort).
+
+    R2B10: this used to call ``ApprovalGate.reject(aid, "expired")``,
+    which left the DB state showing ``rejected`` — dashboards then
+    displayed approvals the operator never declined as rejections. The
+    gate now owns an explicit ``expired`` terminal write.
+    """
+    try:
+        from .approval import ApprovalGate
+
+        ApprovalGate(config).mark_expired(approval_id)
+    except Exception:
+        log.exception("failed to mark approval %s expired", approval_id)
+
+
+def _refresh_snapshot_age(snapshot: Any) -> Any:
+    """Recompute the frozen market snapshot's ``age_s`` at resume time.
+
+    ``ApprovalGate.require`` freezes ``age_s`` at escalation time, so the
+    Risk Gate's ``stale_market_data`` guard would judge the snapshot by
+    its age THEN — a stale price looks fresh forever. Derive the true age
+    from the capture timestamp when one is reachable (envelope ``ts`` /
+    ``fetched_at``, or the snapshot's own fields); epoch ms (>1e12) is
+    normalized to seconds. Without any timestamp the frozen value is kept
+    as-is (best effort — no invented staleness).
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    ts: float | None = None
+    envelope = snapshot.get("_envelope")
+    candidates: list[Any] = []
+    if isinstance(envelope, dict):
+        candidates.extend((envelope.get("ts"), envelope.get("fetched_at")))
+    candidates.extend((snapshot.get("ts"), snapshot.get("fetched_at")))
+    for raw in candidates:
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 1e12:  # epoch ms
+            value /= 1000.0
+        if value > 1e9:  # plausible epoch seconds
+            ts = value
+            break
+    refreshed = dict(snapshot)
+    if ts is not None:
+        refreshed["age_s"] = max(0, int(_now() - ts))
+    return refreshed
 
 
 def _approval_payload(row: dict[str, Any] | None) -> dict[str, Any]:
@@ -342,6 +466,10 @@ def _load_approved_record(config: Config, approval_id: str) -> dict[str, Any] | 
             if payload:
                 payload.setdefault("approval_id", approval_id)
                 payload.setdefault("state", row.get("state"))
+                # The DB row carries the authoritative expiry; the JSON
+                # payload written by auto-approve does not.
+                if payload.get("expires_at") is None and row.get("expires_at"):
+                    payload["expires_at"] = row.get("expires_at")
                 return payload
     except Exception:
         pass

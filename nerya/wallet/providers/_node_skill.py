@@ -55,7 +55,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..errors import WalletDependencyError, WalletPolicyDenied
+from ..errors import (
+    WalletDependencyError,
+    WalletPolicyDenied,
+    WalletTransportError,
+)
 
 
 @dataclass
@@ -128,12 +132,12 @@ class NodeSkillRef:
                 "install node: https://nodejs.org/",
             ) from exc
         except subprocess.TimeoutExpired as exc:
-            raise WalletPolicyDenied(
+            raise WalletTransportError(
                 f"{self.id} skill timed out after {timeout_s}s"
             ) from exc
         if r.returncode != 0:
             stderr = (r.stderr or b"").decode("utf-8", "replace").strip()
-            raise WalletPolicyDenied(
+            raise WalletTransportError(
                 f"{self.id} skill exited with code {r.returncode}: {stderr[:512]}"
             )
         stdout = (r.stdout or b"").decode("utf-8", "replace").strip()
@@ -142,7 +146,7 @@ class NodeSkillRef:
         try:
             doc = json.loads(stdout.splitlines()[-1])
         except Exception as exc:
-            raise WalletPolicyDenied(
+            raise WalletTransportError(
                 f"{self.id} skill returned invalid JSON: {stdout[:256]}"
             ) from exc
         if isinstance(doc, dict):

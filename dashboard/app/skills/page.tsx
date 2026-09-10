@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
 import {
   Advanced,
@@ -16,11 +16,11 @@ import {
   CheckIcon,
   EditIcon,
   PlusIcon,
+  RefreshIcon,
   SearchIcon,
-  SkillsIcon,
-  WrenchIcon,
   XIcon,
 } from "../../components/icons";
+import { confirm, toast } from "../../lib/dialogs";
 import {
   clientApi,
   type SkillDetail,
@@ -28,7 +28,7 @@ import {
   type SkillSummary,
 } from "../../lib/clientApi";
 
-type FilterMode = "all" | "workspace" | "builtin" | "installed" | "editable";
+type FilterMode = "all" | "workspace" | "builtin" | "installed";
 
 function asText(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -42,6 +42,16 @@ function sourceTone(source?: string): "neutral" | "ok" | "brand" | "warn" {
   if (source === "builtin") return "brand";
   if (source === "external" || source === "user_home") return "warn";
   return "neutral";
+}
+
+function sourceAvatarClass(source?: string): string {
+  if ((source || "").startsWith("workspace")) {
+    return "border-fluid-500/30 bg-fluid-500/10 text-fluid-300";
+  }
+  if (source === "builtin") {
+    return "border-brand-500/15 bg-brand-500/10 text-brand-200";
+  }
+  return "border-brand-500/10 bg-ink-950/30 text-ink-300";
 }
 
 function sourceLabel(source: string | undefined, t: (key: string) => string): string {
@@ -124,8 +134,8 @@ function FilterButton({
       onClick={onClick}
       className={`rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
         active
-          ? "border-brand-400/50 bg-brand-500/15 text-white"
-          : "border-brand-500/10 bg-ink-950/30 text-ink-400 hover:border-brand-500/25 hover:text-white"
+          ? "border-brand-400/50 bg-brand-500/15 text-[color:var(--text-base)]"
+          : "border-brand-500/10 bg-ink-950/30 text-ink-400 hover:border-brand-500/25 hover:text-[color:var(--text-base)]"
       }`}
     >
       {children}
@@ -145,7 +155,7 @@ function Metric({
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-950/30 p-2.5">
       <div className="text-[11px] text-ink-500 font-medium">{label}</div>
-      <div className="mt-1 text-[15px] font-semibold text-white">{value}</div>
+      <div className="mt-1 text-[15px] font-semibold text-[color:var(--text-base)]">{value}</div>
       {detail ? <div className="mt-0.5 text-[11px] text-ink-500">{detail}</div> : null}
     </div>
   );
@@ -194,31 +204,40 @@ export default function SkillsPage() {
   const [subdir, setSubdir] = useState("");
   const [gitRef, setGitRef] = useState("");
   const [advancedInstall, setAdvancedInstall] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [installOpen, setInstallOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
   const [createBody, setCreateBody] = useState("");
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [promoting, setPromoting] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
+  const detailSeqRef = useRef(0);
 
   async function loadDetail(skillId: string) {
+    const seq = ++detailSeqRef.current;
     setDetailLoading(true);
     try {
       const res = await clientApi.skillDetail(skillId);
+      if (seq !== detailSeqRef.current) return; // a newer request superseded this one
       if (!res.ok || !res.skill) {
         throw new Error(res.error || t("errSkillDetailUnavailable"));
       }
       setDetail(res.skill);
       setDraft(res.skill.skill_md || "");
     } catch (e) {
+      if (seq !== detailSeqRef.current) return;
       setDetail(null);
       setDraft("");
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setDetailLoading(false);
+      if (seq === detailSeqRef.current) {
+        setDetailLoading(false);
+      }
     }
   }
 
@@ -236,17 +255,33 @@ export default function SkillsPage() {
       setInstalled(installedRes.installed || []);
       setLockStatus(statusRes || null);
       setLockEntries(inspectRes.entries || []);
-      const next = focus && rows.some((skill) => skill.id === focus)
+      const desired = focus && rows.some((skill) => skill.id === focus)
         ? focus
         : selected && rows.some((skill) => skill.id === selected)
         ? selected
         : rows[0]?.id || null;
+      // Implicit selection changes (install/promote focus) must clear the
+      // same dirty guard as explicit list clicks — otherwise refresh(nextId)
+      // after an install would silently clobber an unsaved SKILL.md draft.
+      // If the operator cancels, stay on the current selection and reload it.
+      let next = desired;
+      let switchCancelled = false;
+      if (next !== selected && next !== null && selected !== null) {
+        if (!(await confirmDiscardDraft())) {
+          next = selected;
+          switchCancelled = true;
+        }
+      }
       setSelected(next);
-      if (next) {
-        await loadDetail(next);
-      } else {
+      if (!next) {
         setDetail(null);
         setDraft("");
+      } else if (next === selected && !switchCancelled) {
+        // Selection unchanged (and no cancelled switch) so the [selected]
+        // effect won't refire; reload once explicitly (guarded by
+        // detailSeqRef). After a cancelled switch the local draft is the
+        // operator's chosen state — loadDetail would clobber it.
+        await loadDetail(next);
       }
       setError(null);
     } catch (e) {
@@ -298,8 +333,7 @@ export default function SkillsPage() {
         filterMode === "all" ||
         (filterMode === "workspace" && source.startsWith("workspace")) ||
         (filterMode === "builtin" && (source === "builtin" || !source)) ||
-        (filterMode === "installed" && installed) ||
-        (filterMode === "editable" && source.startsWith("workspace"));
+        (filterMode === "installed" && installed);
       if (!modeMatch) return false;
       if (!needle) return true;
       const haystack = [
@@ -324,9 +358,27 @@ export default function SkillsPage() {
   const drift = lockStatus?.drift as Record<string, unknown> | undefined;
   const installPreview = useMemo(() => parseGithubInstallSource(source), [source]);
 
+  // Shared dirty guard for explicit list clicks and the implicit selection
+  // changes performed by refresh(focus) after install/promote.
+  async function confirmDiscardDraft(): Promise<boolean> {
+    if (!dirty) return true;
+    return confirm({
+      tone: "warning",
+      message: t("discardDraftConfirm"),
+      okLabel: tCommon("confirm"),
+      cancelLabel: tCommon("cancel"),
+    });
+  }
+
+  async function selectSkill(nextId: string) {
+    if (nextId === selected) return;
+    if (!(await confirmDiscardDraft())) return;
+    setSelected(nextId);
+  }
+
   async function saveSkill() {
     if (!detail || !detail.editable || !dirty) return;
-    setBusy(true);
+    setSaving(true);
     try {
       const res = await clientApi.skillUpdate({
         skill_id: detail.id,
@@ -336,14 +388,14 @@ export default function SkillsPage() {
       if (!res.ok || !res.skill) {
         throw new Error(res.detail || res.error || t("errSkillUpdateFailed"));
       }
-      setInfo(t("savedInfo", { id: detail.id }));
+      toast({ tone: "ok", message: t("savedInfo", { id: detail.id }) });
       setDetail(res.skill);
       setDraft(res.skill.skill_md || "");
       await refresh(detail.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   }
 
@@ -352,7 +404,7 @@ export default function SkillsPage() {
       setError(t("errNameRequired"));
       return;
     }
-    setBusy(true);
+    setCreating(true);
     try {
       const res = await clientApi.skillCreate({
         name: createName.trim(),
@@ -362,8 +414,8 @@ export default function SkillsPage() {
       if (!res.ok || !res.skill) {
         throw new Error(res.detail || res.error || t("errSkillCreateFailed"));
       }
-      setInfo(t("createdInfo", { id: res.skill.id }));
-      setCreating(false);
+      toast({ tone: "ok", message: t("createdInfo", { id: res.skill.id }) });
+      setCreateOpen(false);
       setCreateName("");
       setCreateDescription("");
       setCreateBody("");
@@ -371,7 +423,7 @@ export default function SkillsPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setCreating(false);
     }
   }
 
@@ -380,7 +432,7 @@ export default function SkillsPage() {
       setError(t("errSourceRequired"));
       return;
     }
-    setBusy(true);
+    setInstalling(true);
     try {
       const res = await clientApi.skillsInstall({
         source: source.trim(),
@@ -389,7 +441,7 @@ export default function SkillsPage() {
         git_ref: advancedInstall ? gitRef.trim() || undefined : undefined,
       });
       const nextId = asText(res.skill_id || res.id || source);
-      setInfo(t("installRequested", { id: nextId }));
+      toast({ tone: "ok", message: t("installRequested", { id: nextId }) });
       setSource("");
       setSubdir("");
       setGitRef("");
@@ -398,20 +450,20 @@ export default function SkillsPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setInstalling(false);
     }
   }
 
   async function promoteSkill(skillId: string) {
-    setBusy(true);
+    setPromoting(true);
     try {
       await clientApi.skillsPromote(skillId);
-      setInfo(t("promotedInfo", { id: skillId }));
+      toast({ tone: "ok", message: t("promotedInfo", { id: skillId }) });
       await refresh(skillId);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setPromoting(false);
     }
   }
 
@@ -426,7 +478,7 @@ export default function SkillsPage() {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => setCreating(true)}
+              onClick={() => setCreateOpen(true)}
             >
               <PlusIcon size={14} />
               {t("createSkill")}
@@ -437,7 +489,7 @@ export default function SkillsPage() {
               onClick={() => void refresh(selected)}
               disabled={loading}
             >
-              <WrenchIcon size={14} />
+              <RefreshIcon size={14} />
               {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
           </div>
@@ -446,11 +498,6 @@ export default function SkillsPage() {
       <SectionTabs section="runtime" />
 
       {error ? <ErrorBanner error={error} /> : null}
-      {info ? (
-        <div className="rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 text-[12px] text-emerald-200">
-          {info}
-        </div>
-      ) : null}
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Metric label={t("metricLoaded")} value={skills.length} detail={t("metricLoadedDetail")} />
@@ -461,7 +508,21 @@ export default function SkillsPage() {
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-[340px_minmax(0,1fr)_320px]">
         <div className="min-w-0">
-        <Card title={t("playbooksCount", { count: skills.length })} description={t("playbooksDesc")}>
+        <Card
+          title={t("playbooksCount", { count: skills.length })}
+          description={t("playbooksDesc")}
+          actions={
+            <button
+              type="button"
+              className="btn btn-ghost"
+              aria-pressed={installOpen}
+              onClick={() => setInstallOpen((open) => !open)}
+            >
+              <PlusIcon size={14} />
+              {t("install")}
+            </button>
+          }
+        >
           <div className="relative mb-3">
             <SearchIcon size={15} className="absolute left-2.5 top-2.5 text-ink-500" />
             <input
@@ -484,11 +545,87 @@ export default function SkillsPage() {
             <FilterButton active={filterMode === "installed"} onClick={() => setFilterMode("installed")}>
               {t("filterInstalled")}
             </FilterButton>
-            <FilterButton active={filterMode === "editable"} onClick={() => setFilterMode("editable")}>
-              {t("filterEditable")}
-            </FilterButton>
           </div>
-          {filtered.length ? (
+          {installOpen ? (
+            <div className="mb-3 rounded-lg border border-brand-500/10 bg-ink-950/30 p-3">
+              <label className="mb-3 block text-[12px] text-ink-300">
+                {t("sourceUrlLabel")}
+                <input
+                  className="input-dark mt-1"
+                  value={source}
+                  onChange={(e) => setSource(e.target.value)}
+                  placeholder="https://github.com/org/repo/tree/main/skills/name"
+                />
+              </label>
+              {installPreview ? (
+                <div className="mb-3 rounded-lg border border-brand-500/10 bg-ink-950/40 p-3 text-[11px] text-ink-300">
+                  <div className="text-[11px] text-ink-500 font-medium">{t("detectedGithubSource")}</div>
+                  <div className="mt-1 break-all font-mono text-ink-100">{installPreview.repo}</div>
+                  <div className="mt-2 grid grid-cols-1 gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[11px] text-ink-500 font-medium">{t("refLabel")}</div>
+                      <div className="truncate font-mono text-ink-200">{installPreview.ref || t("defaultRef")}</div>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[11px] text-ink-500 font-medium">{t("folderLabel")}</div>
+                      <div className="break-all font-mono text-ink-200">{installPreview.subdir || t("repoRoot")}</div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              <details
+                className="rounded-lg border border-brand-500/10 bg-ink-950/30"
+                open={advancedInstall}
+                onToggle={(e) => setAdvancedInstall(e.currentTarget.open)}
+              >
+                <summary className="cursor-pointer px-3 py-2 text-[12px] text-ink-300">
+                  {t("advancedOverrides")}
+                </summary>
+                <div className="grid grid-cols-1 gap-2 border-t border-brand-500/10 p-3">
+                  <label className="text-[12px] text-ink-300">
+                    {t("subdirLabel")}
+                    <input
+                      className="input-dark mt-1"
+                      value={subdir}
+                      onChange={(e) => setSubdir(e.target.value)}
+                      placeholder={installPreview?.subdir || t("optional")}
+                    />
+                  </label>
+                  <label className="text-[12px] text-ink-300">
+                    {t("gitRefLabel")}
+                    <input
+                      className="input-dark mt-1"
+                      value={gitRef}
+                      onChange={(e) => setGitRef(e.target.value)}
+                      placeholder={installPreview?.ref || t("optional")}
+                    />
+                  </label>
+                </div>
+              </details>
+              <button
+                type="button"
+                className="btn btn-primary mt-3 w-full justify-center"
+                onClick={installSkill}
+                disabled={installing || !source.trim()}
+              >
+                <PlusIcon size={14} />
+                {installing ? t("working") : t("install")}
+              </button>
+            </div>
+          ) : null}
+          {loading && !skills.length ? (
+            <div className="min-h-[320px] space-y-1 pr-1">
+              {[0, 1, 2, 3].map((row) => (
+                <div
+                  key={row}
+                  className="rounded-lg border border-brand-500/10 bg-ink-950/30 px-3 py-2.5"
+                >
+                  <div className="skeleton h-3 w-1/3" />
+                  <div className="skeleton mt-2 h-2.5 w-2/3" />
+                </div>
+              ))}
+            </div>
+          ) : filtered.length ? (
             <div className="embedded-scroll max-h-[calc(100vh-310px)] min-h-[320px] space-y-1 pr-1">
               {filtered.map((skill) => {
                 const active = selected === skill.id;
@@ -496,7 +633,7 @@ export default function SkillsPage() {
                   <button
                     key={skill.id}
                     type="button"
-                    onClick={() => setSelected(skill.id)}
+                    onClick={() => void selectSkill(skill.id)}
                     className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
                       active
                         ? "border-brand-400/60 bg-brand-500/10"
@@ -504,8 +641,10 @@ export default function SkillsPage() {
                     }`}
                   >
                     <div className="flex items-start gap-2.5">
-                      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-brand-500/15 bg-brand-500/10 text-brand-200">
-                        <SkillsIcon size={15} />
+                      <span
+                        className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-[13px] font-semibold uppercase ${sourceAvatarClass(skill.source)}`}
+                      >
+                        {(skill.title || skill.id).charAt(0)}
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-mono text-[12px] text-ink-100">
@@ -516,9 +655,6 @@ export default function SkillsPage() {
                         </span>
                       </span>
                       <Pill tone={sourceTone(skill.source)}>{sourceLabel(skill.source, t)}</Pill>
-                    </div>
-                    <div className="mt-2 truncate font-mono text-[10px] text-ink-500">
-                      {skill.path || t("runtimeRegistry")}
                     </div>
                   </button>
                 );
@@ -583,10 +719,10 @@ export default function SkillsPage() {
                       type="button"
                       className="btn btn-primary"
                       onClick={() => void saveSkill()}
-                      disabled={busy || !dirty}
+                      disabled={saving || !dirty}
                     >
                       <EditIcon size={14} />
-                      {busy ? tCommon("saving") : dirty ? tCommon("save") : t("saved")}
+                      {saving ? tCommon("saving") : dirty ? tCommon("save") : t("saved")}
                     </button>
                   ) : null}
                 </div>
@@ -620,76 +756,6 @@ export default function SkillsPage() {
         </div>
 
         <div className="min-w-0 space-y-5">
-          <Advanced
-            title={t("addFromRepo")}
-            description={t("addFromRepoDesc")}
-            storageKey="nerya.skills.advanced.addFromRepo"
-          >
-            <label className="mb-3 block text-[12px] text-ink-300">
-              {t("sourceUrlLabel")}
-              <input
-                className="input-dark mt-1"
-                value={source}
-                onChange={(e) => setSource(e.target.value)}
-                placeholder="https://github.com/org/repo/tree/main/skills/name"
-              />
-            </label>
-            {installPreview ? (
-              <div className="mb-3 rounded-lg border border-brand-500/10 bg-ink-950/40 p-3 text-[11px] text-ink-300">
-                <div className="text-[11px] text-ink-500 font-medium">{t("detectedGithubSource")}</div>
-                <div className="mt-1 break-all font-mono text-ink-100">{installPreview.repo}</div>
-                <div className="mt-2 grid grid-cols-1 gap-2">
-                  <div className="min-w-0">
-                    <div className="text-[11px] text-ink-500 font-medium">{t("refLabel")}</div>
-                    <div className="truncate font-mono text-ink-200">{installPreview.ref || t("defaultRef")}</div>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[11px] text-ink-500 font-medium">{t("folderLabel")}</div>
-                    <div className="break-all font-mono text-ink-200">{installPreview.subdir || t("repoRoot")}</div>
-                  </div>
-                </div>
-              </div>
-            ) : null}
-            <details
-              className="rounded-lg border border-brand-500/10 bg-ink-950/30"
-              open={advancedInstall}
-              onToggle={(e) => setAdvancedInstall(e.currentTarget.open)}
-            >
-              <summary className="cursor-pointer px-3 py-2 text-[12px] text-ink-300">
-                {t("advancedOverrides")}
-              </summary>
-              <div className="grid grid-cols-1 gap-2 border-t border-brand-500/10 p-3">
-                <label className="text-[12px] text-ink-300">
-                  {t("subdirLabel")}
-                  <input
-                    className="input-dark mt-1"
-                    value={subdir}
-                    onChange={(e) => setSubdir(e.target.value)}
-                    placeholder={installPreview?.subdir || t("optional")}
-                  />
-                </label>
-                <label className="text-[12px] text-ink-300">
-                  {t("gitRefLabel")}
-                  <input
-                    className="input-dark mt-1"
-                    value={gitRef}
-                    onChange={(e) => setGitRef(e.target.value)}
-                    placeholder={installPreview?.ref || t("optional")}
-                  />
-                </label>
-              </div>
-            </details>
-            <button
-              type="button"
-              className="btn btn-primary mt-3 w-full justify-center"
-              onClick={installSkill}
-              disabled={busy || !source.trim()}
-            >
-              <PlusIcon size={14} />
-              {busy ? t("working") : t("install")}
-            </button>
-          </Advanced>
-
           {pendingInstalled.length > 0 ? (
             <Card title={t("stagedInstallsCount", { count: pendingInstalled.length })} description={t("stagedInstallsDesc")}>
               <div className="embedded-list-scroll-sm space-y-2">
@@ -709,7 +775,7 @@ export default function SkillsPage() {
                           type="button"
                           className="btn btn-ghost mt-2"
                           onClick={() => promoteSkill(id)}
-                          disabled={busy}
+                          disabled={promoting}
                         >
                           <CheckIcon size={14} />
                           {t("promote")}
@@ -757,11 +823,11 @@ export default function SkillsPage() {
         </div>
       </div>
 
-      {creating ? (
+      {createOpen ? (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 backdrop-blur-sm"
           onClick={(e) => {
-            if (e.target === e.currentTarget) setCreating(false);
+            if (e.target === e.currentTarget) setCreateOpen(false);
           }}
         >
           <div className="embedded-scroll max-h-[88vh] w-[760px] max-w-full rounded-xl border border-brand-500/20 bg-bg-card shadow-glow">
@@ -777,7 +843,7 @@ export default function SkillsPage() {
               <button
                 type="button"
                 className="icon-btn h-8 w-8 shrink-0"
-                onClick={() => setCreating(false)}
+                onClick={() => setCreateOpen(false)}
                 aria-label={tCommon("close")}
               >
                 <XIcon size={15} />
@@ -819,8 +885,8 @@ export default function SkillsPage() {
                 <button
                   type="button"
                   className="btn btn-ghost"
-                  onClick={() => setCreating(false)}
-                  disabled={busy}
+                  onClick={() => setCreateOpen(false)}
+                  disabled={creating}
                 >
                   <XIcon size={14} />
                   {tCommon("cancel")}
@@ -829,10 +895,10 @@ export default function SkillsPage() {
                   type="button"
                   className="btn btn-primary"
                   onClick={() => void createSkill()}
-                  disabled={busy || !createName.trim()}
+                  disabled={creating || !createName.trim()}
                 >
                   <CheckIcon size={14} />
-                  {busy ? t("creating") : t("create")}
+                  {creating ? t("creating") : t("create")}
                 </button>
               </div>
             </div>

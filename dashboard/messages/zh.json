@@ -1,4 +1,66 @@
 {
+  "ui": {
+    "attachmentLimits": "最多添加 8 个文件，单个文件不超过 8 MB，总大小不超过 20 MB。",
+    "modelOptions": "模型选项",
+    "modelNoMatches": "没有匹配的模型，请尝试其他关键词。",
+    "resetPreferences": "重置界面偏好？",
+    "resetPreferencesDescription": "恢复此浏览器的主题、语言和图表偏好，不会修改服务端配置。",
+    "confirm": "确认操作",
+    "cancel": "取消",
+    "apply": "应用",
+    "notice": "提示",
+    "enterValue": "输入内容",
+    "dismiss": "关闭通知",
+    "close": "关闭",
+    "navigation": "导航",
+    "openNavigation": "打开导航",
+    "closeNavigation": "关闭导航",
+    "skipToContent": "跳转到主要内容",
+    "noOptions": "暂无可选项",
+    "noSettingsResults": "没有匹配的设置",
+    "clearSearch": "清除搜索",
+    "retry": "重试",
+    "loading": "正在加载设置…",
+    "loadFailed": "设置加载失败，已保存的配置没有改变。",
+    "advancedRouting": "高级模型路由",
+    "advancedRoutingDescription": "按任务档位配置模型和备用路由。折叠此区域不会更改已有配置。",
+    "discardChanges": "放弃尚未保存的修改？",
+    "discardChangesDescription": "刷新会重新加载已保存的模型配置，并放弃当前尚未保存的修改。"
+  },
+  "terms": {
+    "vaultRef": {
+      "label": "Vault 引用",
+      "explain": "Nerya 安全保存 API 密钥的方式：密钥本身加密存放在本地保险库中，配置里只保留一个 vault:// 地址。配置时直接粘贴明文密钥即可，Nerya 会自动转换。"
+    },
+    "fetchModels": {
+      "label": "拉取模型",
+      "explain": "向你选择的服务商请求当前密钥可用的模型清单。粘贴密钥后先点这里，再勾选要让 Nerya 使用的模型。"
+    },
+    "tier": {
+      "label": "模型档位",
+      "explain": "决定“哪种活交给哪个模型”的槽位。重度分析用高档位，日常回复用中档位，轻量查询用低档位，意图识别负责理解消息属于哪类任务。同一个模型可以同时担任多个档位。"
+    },
+    "apiShape": {
+      "label": "接口类型",
+      "explain": "服务商 API 的“方言”。多数服务商兼容 OpenAI 格式，Anthropic 有自己的格式。一般保持自动检测即可，连接测试失败时再手动选择。"
+    },
+    "webhook": {
+      "label": "Webhook",
+      "explain": "一个由平台主动调用、把消息实时推送给 Nerya 的 URL。另一种方式是轮询：Nerya 每隔几秒主动查询新消息。"
+    },
+    "polling": {
+      "label": "轮询",
+      "explain": "Nerya 定时向平台查询新消息，而不是被动等待推送。无需公网地址、随处可用，代价是消耗少量查询配额。"
+    },
+    "capabilityGate": {
+      "label": "能力开关",
+      "explain": "针对整个功能域（交易、浏览器、网络等）的硬开关。关闭时，无论其他配置多完整，该功能都不会运行。"
+    },
+    "tunnel": {
+      "label": "隧道",
+      "explain": "一条安全通道，让运行在本机的 Nerya 能被外部网络访问，聊天平台才能把消息送达。"
+    }
+  },
   "common": {
     "refresh": "刷新",
     "loading": "加载中...",
@@ -24,7 +86,8 @@
     "create": "创建",
     "approve": "批准",
     "reject": "拒绝",
-    "stats": "统计"
+    "stats": "统计",
+    "retry": "重试"
   },
   "sidebar": {
     "brandName": "Nerya",
@@ -142,7 +205,7 @@
   },
   "settings": {
     "title": "设置",
-    "description": "运行时模型路由、提供商接入、内存索引及本地仪表盘偏好设置。",
+    "description": "模型服务商、访问控制、网络与界面偏好设置。",
     "tabs": {
       "ariaLabel": "设置模块",
       "models": "模型",
@@ -177,7 +240,14 @@
     },
     "providerCard": {
       "title": "提供商与模型库",
-      "description": "选择服务商，将密钥保存为 vault 引用，拉取模型列表，再导入 Nerya 可调用的模型 ID。",
+      "description": "三步接入模型服务商：粘贴 API 密钥、拉取模型清单、勾选要用的模型。密钥会自动加密保存。",
+      "introTitle": "模型接入怎么做",
+      "introStep1": "接入服务商",
+      "introStep1Desc": "选择一家（OpenAI、Anthropic 等），粘贴它的 API 密钥。",
+      "introStep2": "拉取模型清单",
+      "introStep2Desc": "获取当前密钥可用的模型，勾选需要的。",
+      "introStep3": "在下方分配档位",
+      "introStep3Desc": "决定重度分析、日常回复、轻量查询各用哪个模型。",
       "providerLabel": "提供商",
       "providerHint": "可输入任意提供商 ID，或从目录中选择。",
       "providerPlaceholder": "openai、anthropic、my-ollama……",
@@ -239,11 +309,16 @@
         "error": "失败"
       },
       "advancedTitle": "连接选项与手动添加",
-      "advancedDesc": "常见服务商的接口地址会自动填好，只有自建服务或手动补充模型 ID 时才需要展开。"
+      "advancedDesc": "常见服务商的接口地址会自动填好，只有自建服务或手动补充模型 ID 时才需要展开。",
+      "providerRequired": "请先填写 Provider。",
+      "selectAtLeastOne": "请至少选择一个发现的模型再导入。",
+      "discovered": "已从 {provider} 发现 {count} 个模型，请选择要导入的项。",
+      "manualQueued": "已将 {id} 加入导入队列，点击「导入所选」即可保存。",
+      "imported": "已为 {provider} 导入 {count} 个模型，可在下方分配中绑定到 tier。"
     },
     "modelCard": {
       "title": "模型分配",
-      "description": "为高、中、低及意图识别任务分配已导入的提供商和模型组合。各档位继承提供商配置中的密钥。",
+      "description": "决定“哪种活交给哪个模型”：重度分析、日常回复、轻量查询、意图识别。服务商密钥会自动继承，无需重复填写。",
       "catalogModels": "{count} 个模型",
       "unsaved": "未保存",
       "defaultLabel": "默认",
@@ -294,11 +369,19 @@
         "extra_high": "超高（xhigh）",
         "xhigh": "超高（xhigh）",
         "max": "最大"
-      }
+      },
+      "savedToWorkspace": "模型 provider 与分配已保存到工作区 nerya.yml。",
+      "catalogRefreshed": "模型目录已刷新。"
     },
     "gatewayCard": {
       "title": "网关通道",
-      "description": "配置 Telegram、Discord、Slack、飞书、企业微信、钉钉、Webhook 等网关通道。明文访问凭证会自动转成 vault 引用。",
+      "description": "让 Nerya 出现在你的聊天软件里：选择平台、粘贴机器人令牌、保存，然后发一条测试消息。令牌会自动加密保存。",
+      "introTitle": "通道是什么",
+      "introBody": "一个通道把一个聊天平台接入 Nerya。在平台侧创建机器人，把令牌粘贴到这里，Nerya 就能在聊天里向你推送交易通知、发起审批、回答问题。",
+      "supportTested": "已验证",
+      "supportSendOnly": "仅发送",
+      "supportFullDuplex": "双向消息",
+      "supportExperimental": "实验性",
       "configuredCount": "{count} 个可用",
       "empty": "还没有配置网关通道。",
       "ready": "可用",
@@ -366,7 +449,16 @@
       "deleted": "网关通道已删除。",
       "testDelivered": "网关测试已送达。",
       "agentTestDelivered": "已通过真实智能体完成网关测试。",
-      "runtimeStatus": "运行时已识别到 {count} 个已配置的网关通道。"
+      "runtimeStatus": "运行时已识别到 {count} 个已配置的网关通道。",
+      "testMessageDefault": "Nerya 网关测试消息。",
+      "showSecret": "显示",
+      "hideSecret": "隐藏",
+      "timeoutUnit": "秒",
+      "modeSendOnly": "仅发送",
+      "errorLoadFailed": "无法加载网关配置",
+      "errorSaveFailed": "网关配置保存失败",
+      "errorDeleteFailed": "网关通道删除失败",
+      "errorTestFailed": "网关测试失败"
     },
     "tunnelCard": {
       "title": "远程访问穿透",
@@ -587,7 +679,19 @@
       "agentmemoryEnabled": "已启用 agentmemory 外部记忆。",
       "agentmemoryDisabled": "已禁用 agentmemory 外部记忆。",
       "subtabEvidence": "证据库",
-      "subtabProfile": "偏好档案"
+      "subtabProfile": "偏好档案",
+      "milvusStoreHint": "Milvus 存储（保持默认即使用本地文件向量库）。",
+      "milvusUriLabel": "Milvus URI",
+      "milvusCollectionLabel": "Collection（集合）",
+      "milvusTokenLabel": "Milvus token",
+      "milvusTokenStored": "token 已保存",
+      "milvusTokenOptional": "可选",
+      "milvusTokenUnchanged": "••••••••（保持不变）",
+      "saveEmbedding": "保存 embedding 设置",
+      "embeddingSaved": "记忆向量 embedding 设置已保存。",
+      "memsearchInstalled": "memsearch 依赖已安装。",
+      "agentmemoryInstalled": "agentmemory 依赖已安装。",
+      "indexRebuilt": "记忆向量索引已重建。"
     },
     "displayCard": {
       "title": "仪表盘显示",
@@ -626,7 +730,8 @@
       "themeDark": "暗色",
       "language": "语言",
       "languageDesc": "本浏览器的界面语言。"
-    }
+    },
+    "openAdvanced": "打开高级运行时开关"
   },
   "login": {
     "headline": "远程访问需要验证",
@@ -680,8 +785,8 @@
     "send": "发送",
     "addAttachment": "添加附件",
     "removeAttachment": "移除附件",
-    "uploadingAttachment": "正在读取附件...",
-    "uploadFailed": "无法读取所选文件。",
+    "uploadingAttachment": "正在准备并上传附件…",
+    "uploadFailed": "附件上传失败。请重新选择文件重试，或关闭此提示后不带该附件发送。",
     "attachmentNotReady": "此对话视图尚未接入附件上传。",
     "cancelTurn": "取消当前请求（仅客户端，后端可能仍在处理）",
     "planLabel": "方案：{value}",
@@ -768,7 +873,13 @@
     "starterMacroNewsBody": "汇总近期热门经济新闻并输出结构化摘要。",
     "starterMacroNewsPrompt": "帮我获取热门经济新闻并总结",
     "yoloHint": "自动批准本对话的全部工具调用，不再弹出审批卡片。交易仍会经过风控闸。",
-    "cancelNotice": "已取消当前任务。中断请求已发送；如后台工具仍在收尾，可在日志中确认最终状态。"
+    "cancelNotice": "已取消当前任务。中断请求已发送；如后台工具仍在收尾，可在日志中确认最终状态。",
+    "loadingChat": "聊天加载中…",
+    "loadingConversation": "对话加载中…",
+    "sessionNotFound": "未找到会话",
+    "transcriptLoadFailed": "对话加载失败",
+    "sessionNotFoundBody": "会话 <code>{sessionId}</code> 在本地不可用，后端也没有对应的对话记录。",
+    "startNewChat": "开始新对话"
   },
   "chatChartPanel": {
     "title": "智能体图表",
@@ -918,7 +1029,21 @@
     "liveDisabled": "实盘已禁用",
     "running": "运行中...",
     "reconcile": "对账",
-    "inspect": "查看"
+    "inspect": "查看",
+    "range24H": "24H",
+    "range7D": "7D",
+    "range30D": "30D",
+    "sevInfo": "信息",
+    "sevWarning": "警告",
+    "sevActionRequired": "需要处理",
+    "sevTradingHalted": "交易已停止",
+    "healthOk": "正常",
+    "healthDegraded": "降级",
+    "healthStale": "过期",
+    "modeCanary": "灰度",
+    "modeShadow": "影子",
+    "retry": "重试",
+    "loadFailed": "资产摘要加载失败"
   },
   "strategies": {
     "title": "策略",
@@ -954,8 +1079,18 @@
     "strategiesDesc": "点击任意卡片打开其专属工作区。",
     "filterPlaceholder": "按 ID / 标题 / 市场过滤...",
     "allStatuses": "所有状态",
+    "status": {
+      "draft": "草稿",
+      "paper": "纸面",
+      "canary": "灰度",
+      "live": "实盘",
+      "paused": "已暂停",
+      "archived": "已归档",
+      "static_review": "静态审查",
+      "backtested": "已回测"
+    },
     "noStrategiesTitle": "暂无策略",
-    "noStrategiesSubtitle": "在上方创建一个，或让对话代理帮你生成。",
+    "noStrategiesSubtitle": "点击右上角「+ 新建策略」，或让对话代理帮你生成。",
     "noMatchTitle": "没有匹配的结果",
     "noMatchSubtitle": "清除过滤条件以查看全部策略。",
     "untitledStrategy": "未命名策略",
@@ -1009,7 +1144,17 @@
     "kpiPending": "待审批",
     "kpiTotalPnl": "总盈亏",
     "createAdvancedTitle": "新建策略",
-    "createAdvancedHint": "展开后填写策略 ID、市场、提示词与子代理"
+    "createAdvancedHint": "可选：钱包、触发类型、子代理、驱动方式与提示词内容。",
+    "createAdvancedGroupTitle": "高级字段",
+    "fieldMarketsPlaceholder": "binance:BTCUSDT, bybit:ETHUSDT",
+    "fieldTriggerKindsPlaceholder": "price.breakout, indicator.rsi_divergence",
+    "fieldSubagentsPlaceholder": "market_analyst, risk_critic",
+    "kpiTotalPnlMixed": "纸面与实盘账户混合",
+    "deleteWithPositionsConfirm": "策略 {id} 还有 {count} 个持仓（名义金额 ${notional}）。确认后将先平仓，再删除策略。",
+    "closeAndDelete": "平仓并删除",
+    "unsavedLeaveTitle": "有未保存的修改",
+    "unsavedLeaveMessage": "文件与提示词还有未保存的修改。确定离开并丢弃吗？",
+    "unsavedLeaveConfirm": "丢弃并离开"
   },
   "strategyProposal": {
     "approveAdd": "批准并添加",
@@ -1112,7 +1257,13 @@
         "label": "原始配置",
         "description": "清单与配置的兜底编辑器"
       }
-    }
+    },
+    "backtestsLink": "回测",
+    "dangerZone": "危险操作",
+    "dangerZoneDesc": "暂停会停止新的运行（持仓保留）。删除会移除策略包；如有持仓会先平仓。",
+    "workspaceLoadFailed": "运行时工作区加载失败",
+    "notConfigured": "未配置",
+    "saveShortcutHint": "保存（⌘/Ctrl+S）"
   },
   "strategyBacktests": {
     "title": "回测",
@@ -1160,12 +1311,51 @@
     "title": "无头浏览器",
     "description": "在同一工作台上安装浏览器引擎并驱动交互式会话。",
     "tabEngines": "引擎",
-    "tabSession": "会话"
+    "tabSession": "会话",
+    "openEngines": "前往安装引擎",
+    "closeSessionTitle": "关闭会话",
+    "closeSessionConfirm": "确定关闭浏览器会话 {sid} 吗？该会话中未保存的页面将丢失。"
   },
   "envVaultPage": {
     "eyebrow": "操作者",
     "title": "环境变量与 Vault",
-    "description": "加密的运行时环境变量和 vault:// 引用，可在 provider、账户、MCP、网关之间复用。"
+    "description": "加密的运行时环境变量和 vault:// 引用，可在 provider、账户、MCP、网关之间复用。",
+    "envCard": {
+      "title": "运行时环境变量",
+      "description": "加密后注入 run_shell、skill 脚本子进程和 stdio MCP 服务器的环境变量。",
+      "configuredCount": "{count} 个已配置",
+      "empty": "尚未配置任何运行时环境变量。",
+      "nameLabel": "变量名",
+      "nameHint": "大写 shell 环境变量名；保存的值会加密",
+      "valueLabel": "值",
+      "valueHint": "保存后不再回显",
+      "save": "保存环境变量",
+      "footnote": "这些变量仅在进程启动时从 SecretVault 解析。Agent 只能看到名称和引用，看不到明文值。",
+      "saved": "{name} 已保存到加密运行时环境。",
+      "removed": "{name} 已从运行时环境移除。",
+      "deleteTitle": "移除运行时环境变量",
+      "deleteMessage": "确定从加密运行时环境移除 {name} 吗？子进程下次启动后将不再收到该变量。"
+    },
+    "vaultCard": {
+      "title": "SecretVault 引用",
+      "description": "管理可复用的 vault:// 引用，供 provider、账户、MCP 配置、网关令牌和运行时环境使用。",
+      "refsCount": "{count} 条引用",
+      "empty": "SecretVault 为空。",
+      "previewLabel": "预览",
+      "shaLabel": "sha",
+      "nameLabel": "Vault 名称",
+      "nameHint": "小写字母 a-z0-9_-。",
+      "kindLabel": "类型",
+      "scopesLabel": "作用域",
+      "scopesHint": "逗号分隔",
+      "valueLabel": "值",
+      "valueHint": "加密存储；绝不回显",
+      "save": "保存 vault 引用",
+      "saved": "{name} 已保存到 SecretVault。",
+      "removed": "{name} 已从 SecretVault 移除。",
+      "deleteTitle": "删除 vault 密钥",
+      "deleteMessage": "确定从 SecretVault 删除 {name} 吗？仍指向该 vault:// 引用的配置之后将无法解析。"
+    }
   },
   "gatewayPage": {
     "eyebrow": "运营",
@@ -1198,7 +1388,18 @@
     "diagnose": "自检",
     "diagnoseRunning": "自检中…",
     "gotchaTitle": "重要提示：chat_id 配置不一致是最常见的不回复原因",
-    "gotchaBody": "Telegram：通过 @userinfobot 拿到的是你私聊的 chat_id；群聊的 chat_id 是负数，请在群里调用 @userinfobot 才能获取。chat_id 留空表示接受所有会话。微信公众号 / 飞书 / 企业微信 / 钉钉：在对应的开放平台后台配置好接收方（飞书/企业微信用 App ID + Secret，钉钉用群机器人 Webhook）。保存后请在 /gateway → 实时状态 中观察一次测试消息：所有被丢弃的更新都会在这里给出提示。"
+    "gotchaBody": "Telegram：通过 @userinfobot 拿到的是你私聊的 chat_id；群聊的 chat_id 是负数，请在群里调用 @userinfobot 才能获取。chat_id 留空表示接受所有会话。微信公众号 / 飞书 / 企业微信 / 钉钉：在对应的开放平台后台配置好接收方（飞书/企业微信用 App ID + Secret，钉钉用群机器人 Webhook）。保存后请在 /gateway → 实时状态 中观察一次测试消息：所有被丢弃的更新都会在这里给出提示。",
+    "eventPollingAlive": "轮询正常",
+    "eventAgentReply": "智能体回复",
+    "eventUserMessage": "用户消息",
+    "eventCommand": "命令",
+    "eventError": "错误",
+    "eventInfo": "信息",
+    "kindError": "错误",
+    "kindHeartbeat": "心跳",
+    "kindOutbound": "发出",
+    "kindInbound": "接收",
+    "kindInfo": "信息"
   },
   "inbox": {
     "eyebrow": "",
@@ -1234,7 +1435,19 @@
     "rawPayload": "原始数据",
     "selectItem": "请选择项目",
     "selectItemHint": "在左侧选择一个消息以查看详情并执行操作。",
-    "resolveFailed": "处理失败"
+    "resolveFailed": "处理失败",
+    "severityInfo": "提示",
+    "severityWarn": "警告",
+    "severityDanger": "危险",
+    "statusOk": "正常",
+    "statusPending": "待处理",
+    "statusPendingReview": "待复审",
+    "statusOpen": "进行中",
+    "statusResolved": "已解决",
+    "statusApplied": "已应用",
+    "statusRejected": "已拒绝",
+    "statusBlocked": "已阻断",
+    "statusFailed": "失败"
   },
   "tasks": {
     "eyebrow": "Agent 工作区",
@@ -1289,33 +1502,41 @@
     "starting": "启动中...",
     "startTask": "启动任务",
     "taskPromptRequired": "任务提示词不能为空",
-    "createdInfo": "已创建 {sessionId}{turnSuffix}"
+    "createdInfo": "已创建 {sessionId}{turnSuffix}",
+    "detailMore": "更多信息"
+  },
+  "tasksPage": {
+    "statusInProgress": "进行中",
+    "statusDone": "已完成",
+    "statusFailed": "失败",
+    "statusEmpty": "空"
   },
   "agentsPage": {
     "eyebrow": "Agent 库",
     "title": "Agent",
-    "description": "子 Agent 与人格提示词库，供策略和 team_run 复用。",
+    "description": "Agent 提示词库，供策略和 team_run 复用。",
     "newAgent": "新建 Agent",
-    "personasCount": "人格 ({count})",
+    "personasCount": "Agent ({count})",
     "personasCountsDesc": "{workspace} 个工作区 · {defaults} 个默认",
     "searchPlaceholder": "搜索 Agent 或技能",
     "noAgentsYet": "暂无 Agent",
     "noAgentsYetHint": "点击\"+ 新建 Agent\"进行创建。",
     "noMatchingAgents": "未找到匹配的 Agent",
     "noMatchingAgentsHint": "请尝试其他搜索词。",
+    "loadFailedTitle": "Agent 列表加载失败",
+    "loadFailedHint": "请检查网关连接后重试。",
+    "retry": "重试",
     "skillsCount": "{count} 个技能",
     "pickAgent": "请选择 Agent",
-    "pickAgentHint": "在左侧选择一个人格进行查看或编辑。",
+    "pickAgentHint": "在左侧选择一个 Agent 进行查看或编辑。",
     "detailDescription": "{source} · 档位 {tier} · {count} 个预加载技能",
     "sourceDefault": "默认",
+    "sourceDefaultProfile": "默认（别名）",
     "sourceWorkspace": "工作区",
     "tierHigh": "高",
     "tierMedium": "中等",
     "tierLight": "轻量",
-    "tierIntent": "意图",
-    "noSelection": "未选择",
-    "noSelectionHint": "请从列表中选择 Agent。",
-    "createPersona": "创建人格",
+    "createPersona": "创建 Agent",
     "createPersonaPath": "持久化至 <code>workspace/subagents/&lt;name&gt;.agent.md</code>。",
     "nameLabel": "名称",
     "llmTier": "LLM 档位",
@@ -1324,21 +1545,28 @@
     "promptBodyShort": "提示词正文",
     "create": "创建",
     "saveAsOverride": "保存为工作区覆盖",
-    "roleNotFound": "未找到角色",
+    "roleNotFound": "未找到该 Agent",
     "saveFailed": "保存失败",
     "deleteFailed": "删除失败",
     "savedInfo": "已保存 {name}",
     "deletedInfo": "已删除 {name}",
     "createdInfo": "已创建 {name}",
-    "deleteConfirm": "确认从工作区删除人格 \"{name}\"？将改用默认后备（如有）。",
+    "deleteConfirm": "确认从工作区删除 Agent \"{name}\"？将改用默认后备（如有）。",
+    "discardDraftConfirm": "当前有未保存的修改，切换 Agent 将丢弃这些修改。确定要切换吗？",
     "nameValidation": "名称必须匹配 [A-Za-z0-9_]+",
     "noSkillsLoaded": "暂无技能。",
+    "skillsLoadFailed": "技能列表加载失败，技能选择器可能不完整。",
     "noSkillsSelected": "未选择技能",
     "clear": "清除",
     "add": "添加",
     "searchSkillsPlaceholder": "搜索技能",
     "noSkillsMatch": "没有匹配的技能。",
-    "selectedShown": "已选 {selected} · 显示 {shown}"
+    "selectedShown": "已选 {selected} · 显示 {shown}",
+    "advancedTitle": "后端字段",
+    "advProvider": "提供商",
+    "advModel": "模型",
+    "advLockedTier": "锁定档位",
+    "advPromptExcerpt": "提示词摘录"
   },
   "home": {
     "greetingMorning": "早上好",
@@ -1361,7 +1589,7 @@
     "tradesTitle": "最近成交",
     "totalEquity": "总权益",
     "accountCount": "{count} 个账户",
-    "realizedPnl": "今日盈亏",
+    "realizedPnl": "累计已实现盈亏",
     "strategiesCount": "{count} 个策略",
     "symbolDelta": "{symbol} 变化",
     "winRate": "胜率",
@@ -1374,7 +1602,7 @@
     "noVenues": "暂无交易所",
     "refresh": "刷新",
     "equityCurve": "权益曲线",
-    "equityPoints": "来自 PnL 日志的 {count} 个数据点",
+    "equityPoints": "最近 {count} 个权益数据点",
     "equity": "权益",
     "portfolioAllocation": "资产配置",
     "noHoldings": "暂无持仓。",
@@ -1512,6 +1740,7 @@
     "lineageGraphOther": "其他",
     "lineageGraphDetails": "链路详情",
     "lineageGraphDetailsDesc": "节点与连接",
+    "loading": "加载中...",
     "candidateOptimizer": "候选优化器",
     "candidateOptimizerDesc": "本地评分在创建提案前选择一个调参候选。",
     "optimizerCandidates": "{count} 个候选",
@@ -1520,7 +1749,9 @@
     "optimizerFeedbackDelta": "反馈 {delta}",
     "optimizerTruncated": "已截断",
     "optimizerSelected": "已选择",
-    "optimizerScore": "分数 {score}",
+    "optimizerNoEligible": "没有符合条件的候选，未创建策略提案。请查看已记录的阻塞原因。",
+    "optimizerSelectionUnresolved": "未记录明确且一致的候选选择，请先核查证据。",
+    "optimizerScore": "启发式分数 {score}",
     "optimizerValidation": "验证",
     "optimizerValidationPreview": "验证预览",
     "optimizerBacktestPreview": "回测预览",
@@ -1679,6 +1910,7 @@
     "validationPlanDebugDesc": "原始验证 JSON，默认折叠供排障使用。",
     "steps": "步骤",
     "required": "必需",
+    "manual": "手动",
     "commands": "命令",
     "noTriggerExplanation": "未记录触发说明。",
     "evidence": "证据",
@@ -1979,11 +2211,26 @@
     "walletPanelTitle": "链上钱包提供商",
     "walletPanelDesc": "安装链上钱包 provider 并绑定账户。仅链上交易场景需要展开。"
   },
+  "accountsPage": {
+    "statusActive": "活跃",
+    "statusReadOnly": "只读",
+    "statusDisabled": "已禁用",
+    "statusQuarantined": "已隔离",
+    "kindChip": "类型：{value}",
+    "kindCex": "中心化交易所",
+    "kindDex": "去中心化交易所",
+    "kindBroker": "券商",
+    "kindChain": "公链",
+    "kindDataSource": "数据源",
+    "kindPredictionMarket": "预测市场"
+  },
   "financialDatasets": {
     "title": "Financial Datasets API",
     "description": "用于 equity_research / dcf_valuation / sec_filings 技能的 API key。支持多 key 轮换：用逗号分隔多个 key，遇到额度或鉴权错误时自动 failover。",
     "keysReady": "{count} key 就绪",
-    "keysReadyPlural": "{count} keys 就绪"
+    "keysReadyPlural": "{count} keys 就绪",
+    "keysSaved": "Financial Datasets API key 已保存。",
+    "keysCleared": "已清除 Financial Datasets key（{store}）。"
   },
   "networkProxy": {
     "title": "网络代理",
@@ -2025,7 +2272,8 @@
     "apiKeysHint": "多个密钥用逗号分隔；留空则保持现有配置",
     "apiKeysSave": "保存密钥",
     "clearLower": "清除",
-    "docsFinancialDatasets": "Financial Datasets API 文档 ↗"
+    "docsFinancialDatasets": "Financial Datasets API 文档 ↗",
+    "saved": "网络代理设置已保存并应用到运行时。"
   },
   "walletSetup": {
     "title": "链上钱包提供商",
@@ -2742,6 +2990,54 @@
     "detailRowTerminal": "终止",
     "detailRowAge": "时长"
   },
+  "ordersPage": {
+    "statusOpen": "挂单中",
+    "statusSubmitted": "已提交",
+    "statusPartiallyFilled": "部分成交",
+    "statusFilled": "已成交",
+    "statusCanceled": "已撤销",
+    "statusRejected": "已拒绝",
+    "statusExpired": "已过期",
+    "statusLost": "已丢失",
+    "sideBuy": "买入",
+    "sideSell": "卖出",
+    "typeLimit": "限价",
+    "typeMarket": "市价",
+    "sideType": "方向 · 类型",
+    "sizeFilled": "数量 / 成交",
+    "executorCreated": "已创建",
+    "executorReserving": "预留资金中",
+    "executorReady": "已就绪",
+    "executorSubmitted": "已提交",
+    "executorWorking": "执行中",
+    "executorClosing": "平仓中",
+    "executorCanceling": "撤销中",
+    "executorCanceled": "已撤销",
+    "executorDone": "已完成",
+    "executorFailed": "已失败",
+    "executorRejected": "已拒绝",
+    "kindMarketOrder": "市价单",
+    "kindLimitOrder": "限价单",
+    "kindLimitChaser": "限价追单",
+    "kindTwap": "TWAP",
+    "kindPositionProtection": "仓位保护",
+    "kindRebalance": "再平衡"
+  },
+  "incidentsPage": {
+    "severityInfo": "信息",
+    "severityWarning": "警告",
+    "severityActionRequired": "需要处理",
+    "severityTradingHalted": "交易暂停",
+    "kindReconcileDrift": "对账漂移",
+    "kindLostOrder": "丢单",
+    "kindAuthError": "认证错误",
+    "kindMaxLossBreach": "最大亏损突破",
+    "kindSnapshotUnhealthy": "快照异常",
+    "filterAll": "全部",
+    "runReconcile": "立即对账",
+    "reconcileDone": "对账已完成",
+    "viewOrders": "查看订单"
+  },
   "incidents": {
     "title": "事件中心",
     "description": "处理漂移、丢失订单、过期快照、认证失败等异常。",
@@ -2781,6 +3077,7 @@
     "eyebrow": "技能手册",
     "title": "技能",
     "description": "浏览 SKILL.md 手册、文件夹资源、工作区安装以及可编辑的工作区技能。",
+    "discardDraftConfirm": "当前有未保存的修改，切换技能将丢弃这些修改。确定要切换吗？",
     "createSkill": "创建技能",
     "metricLoaded": "已加载",
     "metricLoadedDetail": "运行时可见",
@@ -2926,7 +3223,11 @@
     "fieldDeliveryPlatform": "平台",
     "fieldDeliveryChannel": "频道",
     "fieldDeliveryUrl": "Webhook URL",
+    "fieldDeliveryExtra": "其余投递目标（JSON 数组）",
+    "deliveryExtraCount": "保存时将一并保留 {count} 个目标",
     "fieldEnabled": "启用",
+    "advancedTitle": "高级",
+    "fieldTtl": "会话 TTL（秒）",
     "cadenceCron": "Cron",
     "cadenceInterval": "间隔",
     "sessionEphemeral": "每次新会话",
@@ -2944,6 +3245,7 @@
     "metricCadence": "节奏",
     "metricTimezone": "时区",
     "metricLastRun": "最近运行",
+    "metricNextRun": "下次运行",
     "metricTarget": "目标",
     "metricDelivery": "投递",
     "metricSession": "会话",
@@ -2958,7 +3260,12 @@
     "runFailed": "{id} 触发失败",
     "tickResult": "本轮触发 {count} 个任务",
     "runStrategyTitle": "立即运行策略调度",
-    "runStrategyConfirm": "{id} 是策略相关调度，立即运行可能进入交易风控链路。确认继续？"
+    "runStrategyConfirm": "{id} 是策略相关调度，立即运行可能进入交易风控链路。确认继续？",
+    "errCronRequired": "Cron 表达式不能为空",
+    "errIntervalInvalid": "间隔必须是正数（秒）",
+    "errCronUnparseable": "无法解析该 Cron 表达式",
+    "errJsonInvalid": "JSON 格式无效",
+    "errDeliveryExtraArray": "必须是投递目标组成的 JSON 数组"
   },
   "browserEmbed": {
     "ariaLabel": "交互式浏览器视口",
@@ -3285,7 +3592,13 @@
     "engineOverridePlaceholder": "exa | tavily | searxng | …",
     "probing": "探测中…",
     "defaultsAdvancedTitle": "区域、安全与存储",
-    "otherEnginesTitle": "其他引擎（{count}）"
+    "otherEnginesTitle": "其他引擎（{count}）",
+    "keysCleared": "已清除 {engine} 的 API key。",
+    "searxngDeployed": "SearXNG 已部署于 {url}。",
+    "searxngStopped": "SearXNG 容器已停止。",
+    "searxngRemoved": "SearXNG 容器已移除。",
+    "removeConfirmTitle": "移除 SearXNG 容器",
+    "removeConfirmMessage": "移除本地 SearXNG Docker 容器及其数据？之后可重新部署。"
   },
   "settingsBrowsers": {
     "cardTitle": "无头浏览器引擎",
@@ -3325,7 +3638,10 @@
     "engineOverridePlaceholder": "camofox | cloakbrowser | lightpanda | obscura",
     "probe": "探测",
     "probing": "探测中…",
-    "rowDetailsToggle": "详情"
+    "rowDetailsToggle": "详情",
+    "selectedToast": "已选择 {name}。",
+    "installedToast": "已安装 {name}{version}。",
+    "uninstalledToast": "已卸载 {name}。"
   },
   "memoryEvidence": {
     "title": "交易证据库",
@@ -3396,7 +3712,7 @@
   },
   "runtimeFlags": {
     "title": "运行时能力开关",
-    "description": "控制当前工作区是否暴露能力目录、数据同步状态、证据库和审查队列等运行时模块。关闭后相关路由会返回 blocked，仪表盘也会自动隐藏对应卡片。",
+    "description": "整个功能域（如证据库、审查队列）的总开关。关掉某个开关，对应功能就会从 Nerya 中消失，重新打开即恢复。",
     "statusSummary": "{enabled} / {total} 已启用",
     "enabledStatus": "已启用",
     "disabledStatus": "已关闭",
@@ -3474,6 +3790,7 @@
     "readyToStart": "配置完成：Nerya 已就绪。",
     "blockingRemaining": "仍有 {count} 项必配项未完成。可随时在 CLI 中重新运行 {command}。",
     "rerunHint": "随时重新运行：",
+    "readinessTitle": "就绪检查",
     "steps": {
       "password": "密码",
       "passwordDesc": "为从其他设备访问设置密码。默认不设密码，仅允许本机访问。",
@@ -3665,7 +3982,9 @@
     "runDone": "{action}完成。",
     "loadFailed": "无法读取 Workspace 同步状态。",
     "saveFailed": "无法保存 Workspace 同步配置。",
-    "runFailed": "Workspace 同步失败。"
+    "runFailed": "Workspace 同步失败。",
+    "forcePushConfirmTitle": "强制推送将覆盖远端",
+    "forcePushConfirmMessage": "以「冲突时强制覆盖」推送会用本地工作区内容替换远端文件。确认继续？"
   },
   "settingsNav": {
     "title": "设置",

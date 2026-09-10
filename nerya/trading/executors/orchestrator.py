@@ -202,6 +202,29 @@ class ExecutorOrchestrator:
         return executor
 
     # -- driving ---------------------------------------------------------------
+    def _release_reservations_best_effort(self, run: ExecutorRun) -> None:
+        """Release a failed run's capital reservations (R2B7).
+
+        A generic exception from ``step()``/``prepare()`` used to fail the
+        run WITHOUT releasing its reservation, leaking blocked budget
+        until TTL expiry. Best-effort: the release is guarded (only
+        active reservations move, see CapitalReservationStore) and must
+        never mask the original failure.
+        """
+        if not run.reservation_ids:
+            return
+        try:
+            from ..capital import CapitalReservationStore
+
+            store = CapitalReservationStore(self.paths)
+            for rid in run.reservation_ids:
+                store.release(rid)
+        except Exception:
+            log.exception(
+                "reservation release failed for executor %s",
+                run.executor_id,
+            )
+
     def step_executor(self, executor: Executor) -> bool:
         """Drive a single tick of one executor. Returns True if terminal."""
         try:
@@ -217,6 +240,7 @@ class ExecutorOrchestrator:
             executor.run.retries += 1
             executor.transition("failed", close_type="failed")
             executor.store_result({"error": str(exc)})
+            self._release_reservations_best_effort(executor.run)
             terminal = True
         finally:
             self._persist(executor.run)

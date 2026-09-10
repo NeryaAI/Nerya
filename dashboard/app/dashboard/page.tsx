@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
 import {
+  Advanced,
   Card,
   ErrorBanner,
   Kpi,
@@ -13,10 +14,11 @@ import {
   StatusDot,
 } from "../../components/Page";
 import { SetupReadinessCard } from "../../components/SetupReadinessCard";
+import { ModePill } from "../../components/ModePill";
 import { Sparkline } from "../../components/Sparkline";
 import { CandleChart } from "../../components/CandleChart";
 import { Select } from "../../components/Select";
-import { clientApi } from "../../lib/clientApi";
+import { clientApi, invalidateReadCache } from "../../lib/clientApi";
 import type {
   Candle,
   EquityPoint,
@@ -51,7 +53,6 @@ const INTERVAL_OPTIONS: { key: string; label: string }[] = [
 
 export default function DashboardOverview() {
   const t = useTranslations("home");
-  const tHero = useTranslations("operatorHero");
   const [settings, patchSettings] = useUiSettings();
   const [currentAccountId, setCurrentAccountId] = useCurrentAccountId();
 
@@ -71,58 +72,76 @@ export default function DashboardOverview() {
   const [candles, setCandles] = useState<Candle[]>([]);
   const [candleLoading, setCandleLoading] = useState(false);
   const [candleError, setCandleError] = useState<string | null>(null);
+  // Local draft for the symbol input — committing to settings.kline.symbol
+  // (which the candle effect depends on) refetches K-lines, so we only
+  // commit on Enter/blur instead of on every keystroke.
+  const [symbolDraft, setSymbolDraft] = useState(settings.kline.symbol);
 
   const [error, setError] = useState<string | null>(null);
+  // First load gate: skeletons render until the initial loadCore round
+  // lands; background 30s refreshes never flip it back (no flicker).
+  const [coreLoaded, setCoreLoaded] = useState(false);
+  // Single-flight guard for the 11-endpoint polling round: if the previous
+  // round is still in flight, skip this tick instead of stacking slow
+  // requests on top of each other.
+  const coreInFlight = useRef(false);
+  const candleSequence = useRef(0);
 
   const loadCore = useCallback(async () => {
-    // Fire health() in parallel with the 11 data fetches
-    // instead of awaiting it serially. Previously every dashboard render
-    // blocked all data behind /health (~150-300ms locally, more in dev),
-    // and a single health failure aborted the entire load. Now data
-    // streams in regardless, and the online dot just reflects whether
-    // /health came back ok.
-    const safe = async <T,>(p: Promise<T>, fallback: T): Promise<T> => {
-      try { return await p; } catch { return fallback; }
-    };
+    if (coreInFlight.current) return;
+    coreInFlight.current = true;
+    try {
+      // Fire health() in parallel with the 11 data fetches
+      // instead of awaiting it serially. Previously every dashboard render
+      // blocked all data behind /health (~150-300ms locally, more in dev),
+      // and a single health failure aborted the entire load. Now data
+      // streams in regardless, and the online dot just reflects whether
+      // /health came back ok.
+      const safe = async <T,>(p: Promise<T>, fallback: T): Promise<T> => {
+        try { return await p; } catch { return fallback; }
+      };
 
-    const healthP = clientApi
-      .health()
-      .then(() => true)
-      .catch((e) => {
-        setError(e instanceof Error ? e.message : String(e));
-        return false;
-      });
+      const healthP = clientApi
+        .health()
+        .then(() => ({ online: true, error: null as string | null }))
+        .catch((error: unknown) => ({ online: false, error: error instanceof Error ? error.message : String(error) }));
 
-    const [healthOk, ws, pr, msg, ps, pp, st, rt, ec, vn, accList, ov] = await Promise.all([
-      healthP,
-      safe(clientApi.workspace(), null),
-      safe(fetch("/api/proxy/evolution/proposals", { method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: "{}" }).then((r) => r.json()), { proposals: [] }),
-      safe(fetch("/api/proxy/messages/list", { method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ limit: 30 }) }).then((r) => r.json()), { messages: [] }),
-      safe(clientApi.portfolioSummary(), null),
-      safe(clientApi.portfolioPnl(), null),
-      safe(clientApi.strategyList(), { strategies: [] }),
-      safe(clientApi.recentTrades(20), { trades: [] }),
-      safe(clientApi.portfolioEquityCurve(120), { points: [], equity_usd: 0 }),
-      safe(clientApi.marketVenues(), { venues: [] }),
-      safe(clientApi.accountsList(), { accounts: [] as AccountSummary[], ts: 0 }),
-      safe<OperatorOverviewEnvelope | null>(clientApi.operatorOverview(), null),
-    ]);
+      const [healthOk, ws, pr, msg, ps, pp, st, rt, ec, vn, accList, ov] = await Promise.all([
+        healthP,
+        safe(clientApi.workspace(), null),
+        safe(fetch("/api/proxy/evolution/proposals", { method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: "{}" }).then((r) => r.json()), { proposals: [] }),
+        safe(fetch("/api/proxy/messages/list", { method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ limit: 30 }) }).then((r) => r.json()), { messages: [] }),
+        safe(clientApi.portfolioSummary(), null),
+        safe(clientApi.portfolioPnl(), null),
+        safe(clientApi.strategyList(), { strategies: [] }),
+        safe(clientApi.recentTrades(20), { trades: [] }),
+        safe(clientApi.portfolioEquityCurve(120), { points: [], equity_usd: 0 }),
+        safe(clientApi.marketVenues(), { venues: [] }),
+        safe(clientApi.accountsList(), { accounts: [] as AccountSummary[], ts: 0 }),
+        safe<OperatorOverviewEnvelope | null>(clientApi.operatorOverview(), null),
+      ]);
 
-    setApiOnline(healthOk);
-    setWorkspace(ws);
-    setProposals((pr as { proposals: Proposal[] })?.proposals || []);
-    setMessages((msg as { messages: Message[] })?.messages || []);
-    setSummary(ps as PortfolioSummary | null);
-    setPortfolioPnl(pp as PortfolioPnl | null);
-    setStrategies(((st as { strategies: StrategyCard[] })?.strategies) || []);
-    setRecentTrades(((rt as { trades: RecentTrade[] })?.trades) || []);
-    setEquity(((ec as { points: EquityPoint[] })?.points) || []);
-    setVenues((((vn as { venues: { name: string; label: string }[] })?.venues) || []).map((v) => ({ name: v.name, label: v.label })));
-    setAccounts(((accList as { accounts?: AccountSummary[] })?.accounts) || []);
-    setOverview(ov);
+      setApiOnline(healthOk.online);
+      setError(healthOk.error);
+      setWorkspace(ws);
+      setProposals((pr as { proposals: Proposal[] })?.proposals || []);
+      setMessages((msg as { messages: Message[] })?.messages || []);
+      setSummary(ps as PortfolioSummary | null);
+      setPortfolioPnl(pp as PortfolioPnl | null);
+      setStrategies(((st as { strategies: StrategyCard[] })?.strategies) || []);
+      setRecentTrades(((rt as { trades: RecentTrade[] })?.trades) || []);
+      setEquity(((ec as { points: EquityPoint[] })?.points) || []);
+      setVenues((((vn as { venues: { name: string; label: string }[] })?.venues) || []).map((v) => ({ name: v.name, label: v.label })));
+      setAccounts(((accList as { accounts?: AccountSummary[] })?.accounts) || []);
+      setOverview(ov);
+      setCoreLoaded(true);
+    } finally {
+      coreInFlight.current = false;
+    }
   }, []);
 
   const loadCandles = useCallback(async () => {
+    const sequence = ++candleSequence.current;
     setCandleLoading(true);
     setCandleError(null);
     try {
@@ -132,18 +151,38 @@ export default function DashboardOverview() {
         interval: settings.kline.interval,
         count: settings.kline.count,
       });
+      if (sequence !== candleSequence.current) return;
       setCandles(body.candles || []);
       if (body.error) setCandleError(body.error);
     } catch (e) {
+      if (sequence !== candleSequence.current) return;
       setCandleError(e instanceof Error ? e.message : String(e));
       setCandles([]);
     } finally {
-      setCandleLoading(false);
+      if (sequence === candleSequence.current) setCandleLoading(false);
     }
   }, [settings.kline.venue, settings.kline.symbol, settings.kline.interval, settings.kline.count]);
 
   useEffect(() => { loadCore(); }, [loadCore]);
-  useEffect(() => { loadCandles(); }, [loadCandles]);
+  useEffect(() => {
+    void loadCandles();
+    return () => { candleSequence.current += 1; };
+  }, [loadCandles]);
+
+  // Keep the draft in sync when the committed symbol changes elsewhere
+  // (settings hydration, another surface patching kline settings).
+  useEffect(() => {
+    setSymbolDraft(settings.kline.symbol);
+  }, [settings.kline.symbol]);
+
+  function commitSymbol() {
+    const next = symbolDraft.trim().toUpperCase();
+    if (next && next !== settings.kline.symbol) {
+      patchSettings({ kline: { ...settings.kline, symbol: next } });
+    } else {
+      setSymbolDraft(settings.kline.symbol);
+    }
+  }
 
   useEffect(() => {
     if (!settings.refreshSeconds) return;
@@ -187,6 +226,17 @@ export default function DashboardOverview() {
     return equity.map((p) => p.equity_usd);
   }, [equity]);
 
+  // Range delta for the equity curve corner badge — the curve overlays the
+  // first→last change instead of repeating the headline equity number that
+  // already sits in the KPI row above.
+  const curveDelta = useMemo(() => {
+    if (equitySeries.length < 2) return null;
+    const first = equitySeries[0];
+    const last = equitySeries[equitySeries.length - 1];
+    if (!Number.isFinite(first) || !Number.isFinite(last) || first === 0) return null;
+    return { pct: ((last - first) / Math.abs(first)) * 100, up: last >= first };
+  }, [equitySeries]);
+
   const mode = workspace ? (workspace.live_trading_enabled ? "live" : "paper") : "–";
   const killed = !!workspace?.kill_switch;
 
@@ -226,9 +276,11 @@ export default function DashboardOverview() {
       requires_action: true,
     });
   }
-  for (const p of proposals.slice(0, 4)) {
+  for (const [idx, p] of proposals.slice(0, 4).entries()) {
     derivedAttention.push({
-      id: `proposal:${p.id || p.kind || Math.random()}`,
+      // Stable key: id/kind when present, else the loop index — never
+      // Math.random(), which would remount the row on every render.
+      id: `proposal:${p.id || p.kind || idx}`,
       type: "proposal",
       severity: "warn",
       title: t("proposalPending", { label: p.summary || p.kind || p.id || "–" }),
@@ -237,10 +289,10 @@ export default function DashboardOverview() {
       requires_action: true,
     });
   }
-  for (const m of messages.slice(0, 4)) {
+  for (const [idx, m] of messages.slice(0, 4).entries()) {
     if (!m.text) continue;
     derivedAttention.push({
-      id: `msg:${m.id || m.ts || Math.random()}`,
+      id: `msg:${m.id || m.ts || idx}`,
       type: "message",
       severity: m.severity === "error" || m.severity === "warn" ? "warn" : "info",
       title: m.text.slice(0, 80),
@@ -249,10 +301,24 @@ export default function DashboardOverview() {
       requires_action: false,
     });
   }
+  // Merge overview + derived attention, rank by severity (danger → warn →
+  // info) BEFORE trimming to 6: without the rank, a chatty overview can
+  // slice away the danger-level kill-switch reminder entirely. Sort is
+  // stable, so original order is preserved within a severity tier.
+  const SEVERITY_RANK: Record<AttentionItem["severity"], number> = {
+    danger: 0,
+    warn: 1,
+    info: 2,
+  };
   const attentionList: AttentionItem[] = [
     ...attentionFromOverview,
     ...derivedAttention,
-  ].slice(0, 6);
+  ]
+    .sort(
+      (a, b) =>
+        (SEVERITY_RANK[a.severity] ?? 2) - (SEVERITY_RANK[b.severity] ?? 2),
+    )
+    .slice(0, 6);
 
   const pendingCount = attentionList.filter((a) => a.requires_action).length;
 
@@ -274,7 +340,7 @@ export default function DashboardOverview() {
 
   return (
     <div>
-      {error && <ErrorBanner error={error} />}
+      {error && <ErrorBanner error={error} onRetry={() => { invalidateReadCache(); void loadCore(); }} />}
 
       <PageBody>
         {/* Section 1 — Overview / greeting / KPIs / quick actions.
@@ -282,7 +348,7 @@ export default function DashboardOverview() {
             Marker is the heading typography itself (no decorative rail). */}
         <section className="min-w-0">
           <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2">
-            <h1 className="text-[20px] leading-[1.25] font-medium tracking-tight text-[color:var(--text-base)]">
+            <h1 className="text-[19px] leading-[1.25] font-medium tracking-tight text-[color:var(--text-base)]">
               {t(greetingKey)}, {operatorName}.
             </h1>
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[color:var(--text-muted)]">
@@ -292,7 +358,21 @@ export default function DashboardOverview() {
                 label={apiOnline ? t("statusOnline") : t("statusOffline")}
               />
               <span>·</span>
-              <span className={killed ? "text-rose-500" : mode === "live" ? "text-amber-500" : ""}>
+              {/* Mode / kill-switch state is actionable, so it links to the
+                  surface where the operator can act on it: /portfolio for
+                  the trading mode, /incidents for the kill switch. */}
+              <Link
+                href={killed ? "/incidents" : "/portfolio"}
+                className={`hover:underline ${
+                  killed
+                    ? "text-danger"
+                    : mode === "live"
+                    ? // live matches the console-wide ModePill semantics
+                      // (live = danger red), not warn amber.
+                      "text-danger"
+                    : "text-[color:var(--text-muted)]"
+                }`}
+              >
                 {killed
                   ? t("killEngaged")
                   : mode === "live"
@@ -300,7 +380,7 @@ export default function DashboardOverview() {
                   : mode === "paper"
                   ? t("modePaper")
                   : t("modeUnknown")}
-              </span>
+              </Link>
               <span>·</span>
               <Link
                 href="/inbox"
@@ -313,12 +393,13 @@ export default function DashboardOverview() {
             </div>
           </div>
 
-          {/* 3 inline KPIs */}
+          {/* 3 inline KPIs — skeleton until the first loadCore round lands,
+              so "$0.00 / 0 / 0" never masquerades as real data. */}
           <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-x-8 gap-y-4">
             <Kpi
               inline
               label={t("totalEquity")}
-              value={fmtMoney(totalEquity)}
+              value={coreLoaded ? fmtMoney(totalEquity) : <Skel className="h-6 w-32" />}
               delta={
                 summary
                   ? t("accountCount", { count: summary.accounts.length })
@@ -328,14 +409,18 @@ export default function DashboardOverview() {
             <Kpi
               inline
               label={t("realizedPnl")}
-              value={fmtSigned(totalRealizedPnl)}
-              tone={totalRealizedPnl >= 0 ? "ok" : "danger"}
+              value={coreLoaded ? fmtSigned(totalRealizedPnl) : <Skel className="h-6 w-24" />}
+              tone={coreLoaded ? (totalRealizedPnl >= 0 ? "ok" : "danger") : "neutral"}
               delta={t("strategiesCount", { count: strategies.length })}
             />
             <Kpi
               inline
               label={t("activeStrategies")}
-              value={`${activeStrategiesCount} / ${strategies.length || 0}`}
+              value={
+                coreLoaded
+                  ? `${activeStrategiesCount} / ${strategies.length || 0}`
+                  : <Skel className="h-6 w-16" />
+              }
               delta={t("openPositions") + " · " + openPositionList.length}
             />
           </div>
@@ -369,330 +454,11 @@ export default function DashboardOverview() {
           </div>
         </section>
 
-        {/* Setup checklist — auto-hides when everything is ok. */}
-        <SetupReadinessCard collapsed />
-
-        {/* Agent-authored, read-only widgets from ui/workspace.yml. */}
-        <WorkspaceUiHome />
-
-        {/* Section 2 — Strategies (cockpit focus: status + P&L + win-rate
-            for every registered strategy, at a glance). */}
-        <Card
-          title={t("activeStrategiesTitle")}
-          actions={
-            <Link
-              href="/strategies"
-              className="text-[12px] text-brand-300 hover:text-brand-200"
-            >
-              {t("viewAll")}
-            </Link>
-          }
-        >
-          {strategies.length === 0 ? (
-            <div className="text-[13px] text-[color:var(--text-muted)] py-3">
-              {t("noStrategies")}
-            </div>
-          ) : (
-            <div className="embedded-table-scroll max-h-80">
-              <table className="table table-compact">
-                <thead>
-                  <tr>
-                    <th>{t("strategyCol")}</th>
-                    <th>{t("statusCol")}</th>
-                    <th>{t("marketCol")}</th>
-                    <th>{t("pnlCol")}</th>
-                    <th>{t("winRateCol")}</th>
-                    <th>{t("openPositions")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {strategies.slice(0, 8).map((s) => {
-                    const pnl = Number(s.total_pnl_usd || 0);
-                    const markets = (s.markets || []).filter(Boolean);
-                    return (
-                      <tr key={s.id}>
-                        <td className="min-w-0">
-                          <Link
-                            href={`/strategies/${encodeURIComponent(s.id)}`}
-                            className="block max-w-[220px] truncate text-[12.5px] text-[color:var(--text-base)] hover:text-brand-200"
-                            title={s.title || s.id}
-                          >
-                            {s.title || s.id}
-                          </Link>
-                        </td>
-                        <td>
-                          <Pill tone={strategyPillTone(s.status)}>{s.status || "–"}</Pill>
-                        </td>
-                        <td className="font-mono text-[12px] text-ink-300">
-                          {markets.length
-                            ? markets.slice(0, 2).join(", ") + (markets.length > 2 ? ` +${markets.length - 2}` : "")
-                            : "–"}
-                        </td>
-                        <td className={pnl >= 0 ? "font-mono text-emerald-500" : "font-mono text-rose-500"}>
-                          {fmtSigned(pnl)}
-                        </td>
-                        <td className="font-mono text-ink-200">
-                          {Number.isFinite(s.win_rate_pct) ? `${Math.round(s.win_rate_pct)}%` : "–"}
-                        </td>
-                        <td className="font-mono text-ink-200">{s.open_positions_count ?? 0}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
-
-        {/* Section 3 — Portfolio (focused account + equity curve + positions + trades). */}
-        <Card
-          title={t("sectionPortfolio")}
-          actions={
-            <Link
-              href="/portfolio"
-              className="text-[12px] text-brand-300 hover:text-brand-200"
-            >
-              {t("viewAll")}
-            </Link>
-          }
-        >
-          <div className="space-y-5">
-            {focusedAccount ? (
-              <FocusedAccountStrip
-                account={focusedAccount}
-                nav={focusedNav}
-                free={focusedFree}
-                reserved={focusedReserved}
-                currency={focusedCurrency}
-              />
-            ) : (
-              <NoFocusedAccountStrip
-                accounts={accounts}
-                onPick={setCurrentAccountId}
-              />
-            )}
-
-            {/* Equity curve */}
-            <Section
-              title={t("equityCurve")}
-              description={t("equityPoints", { count: equity.length })}
-              divider={false}
-            >
-              <div className="h-[120px] relative">
-                <div className="absolute inset-0">
-                  <Sparkline
-                    values={equitySeries}
-                    width={800}
-                    height={120}
-                    tone="brand"
-                    fill
-                  />
-                </div>
-                <div className="absolute top-1 right-1 text-right">
-                  <div className="stat-label">{t("equity")}</div>
-                  <div className="text-brand-300 font-mono text-[14px]">
-                    {fmtMoney(totalEquity)}
-                  </div>
-                </div>
-              </div>
-            </Section>
-
-            {/* Positions */}
-            <Section
-              title={t("positionsTitle")}
-              actions={
-                <Link
-                  href="/portfolio"
-                  className="text-[12px] text-brand-300 hover:text-brand-200"
-                >
-                  {t("viewAll")}
-                </Link>
-              }
-            >
-              {openPositionList.length === 0 ? (
-                <div className="text-[13px] text-[color:var(--text-muted)] py-3">
-                  {t("noOpenPositions")}
-                </div>
-              ) : (
-                <div className="embedded-table-scroll max-h-60">
-                  <table className="table table-compact">
-                    <thead>
-                      <tr>
-                        <th>{t("marketCol")}</th>
-                        <th>{t("sideCol")}</th>
-                        <th>{t("sizeCol")}</th>
-                        <th>{t("entryCol")}</th>
-                        <th>{t("pnlCol")}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {openPositionList.slice(0, 5).map((row) => {
-                        const p = row.pos;
-                        const size = Number((p.size as number) || 0);
-                        const isLong = size >= 0;
-                        const openPnl = Number((p.unrealized_pnl_usd as number) || 0);
-                        const entry = Number((p.avg_entry_price as number) || 0);
-                        return (
-                          <tr key={`${row.account_id}:${row.market}`}>
-                            <td className="font-mono text-[12px]">{row.market}</td>
-                            <td>
-                              <Pill tone={isLong ? "ok" : "danger"}>
-                                {isLong ? t("long") : t("short")}
-                              </Pill>
-                            </td>
-                            <td className="text-ink-200 font-mono">{size.toFixed(4)}</td>
-                            <td className="text-ink-200 font-mono">{entry ? entry.toFixed(2) : "–"}</td>
-                            <td className={openPnl >= 0 ? "text-emerald-500 font-mono" : "text-rose-500 font-mono"}>
-                              {fmtSigned(openPnl)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </Section>
-
-            {/* Recent trades */}
-            <Section
-              title={t("tradesTitle")}
-              actions={
-                <Link
-                  href="/orders"
-                  className="text-[12px] text-brand-300 hover:text-brand-200"
-                >
-                  {t("viewAll")}
-                </Link>
-              }
-            >
-              {recentTrades.length === 0 ? (
-                <div className="text-[13px] text-[color:var(--text-muted)] py-3">
-                  {t("noFills")}
-                </div>
-              ) : (
-                <div className="embedded-table-scroll max-h-60">
-                  <table className="table table-compact">
-                    <thead>
-                      <tr>
-                        <th>{t("timeCol")}</th>
-                        <th>{t("marketCol")}</th>
-                        <th>{t("sideCol")}</th>
-                        <th>{t("priceCol")}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {recentTrades.slice(0, 5).map((tr, i) => {
-                        const side = tr.side?.toLowerCase();
-                        const isBuy = side === "buy";
-                        return (
-                          <tr key={tr.order_id || i}>
-                            <td className="font-mono text-[12px]">{formatTime(tr.ts)}</td>
-                            <td className="font-mono text-[12px]">{tr.market || "–"}</td>
-                            <td>
-                              <Pill tone={isBuy ? "ok" : "danger"}>
-                                {isBuy ? t("buy") : t("sell")}
-                              </Pill>
-                            </td>
-                            <td className="text-ink-200 font-mono">
-                              {tr.price ? Number(tr.price).toFixed(4) : "–"}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </Section>
-          </div>
-        </Card>
-
-        {/* Section 3.5 — Market (K-line), demoted below the strategy +
-            position cockpit since the overview now leads with those. */}
-        <Card
-          title={t("sectionMarket")}
-          description={t("liveCandles", {
-            venue: settings.kline.venue,
-            interval: settings.kline.interval,
-          })}
-          actions={
-            <div className="flex items-center gap-2 flex-wrap">
-              <div className="min-w-[140px]">
-                <Select
-                  value={settings.kline.venue}
-                  onChange={(value) =>
-                    patchSettings({
-                      kline: {
-                        ...settings.kline,
-                        venue: value as typeof settings.kline.venue,
-                      },
-                    })
-                  }
-                  options={
-                    venues.length === 0
-                      ? [{
-                          value: settings.kline.venue,
-                          label: t("noVenues"),
-                          disabled: true,
-                        }]
-                      : venues.map((v) => ({ value: v.name, label: v.label }))
-                  }
-                  size="sm"
-                  ariaLabel={t("dataSource")}
-                />
-              </div>
-              <input
-                value={settings.kline.symbol}
-                onChange={(e) => patchSettings({ kline: { ...settings.kline, symbol: e.target.value.toUpperCase() } })}
-                className="bg-ink-900 border border-[color:var(--line)] rounded-md px-2 py-1 text-[12px] text-ink-100 focus:outline-none focus:border-brand-500/60 w-28 font-mono"
-                placeholder={t("symbolPlaceholder")}
-              />
-              <div className="flex gap-1">
-                {INTERVAL_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.key}
-                    onClick={() => patchSettings({ kline: { ...settings.kline, interval: opt.key as typeof settings.kline.interval } })}
-                    className={`px-2 py-0.5 text-[12px] rounded-md font-medium ${
-                      settings.kline.interval === opt.key
-                        ? "bg-brand-500/15 text-brand-200 border border-brand-500/30"
-                        : "text-ink-400 hover:text-ink-100"
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-              <button
-                onClick={() => loadCandles()}
-                className="px-2 py-0.5 text-[12px] rounded-md text-brand-200 hover:bg-brand-500/10 border border-brand-500/25"
-                title={t("refresh")}
-              >
-                ↻
-              </button>
-              {firstClose ? (
-                <span
-                  className={`text-[12px] ml-1 ${candleDeltaPct >= 0 ? "text-emerald-500" : "text-rose-500"}`}
-                >
-                  {candleDeltaPct >= 0 ? "+" : ""}
-                  {candleDeltaPct.toFixed(2)}%
-                </span>
-              ) : null}
-            </div>
-          }
-        >
-          <CandleChart
-            candles={candles}
-            width={960}
-            height={220}
-            mode={settings.chartType}
-            showVolume={settings.showVolume}
-            loading={candleLoading}
-            error={candleError || undefined}
-          />
-        </Card>
-
-        {/* Section 4 — Attention (only when there are signals). */}
+        {/* Section 1.5 — Attention. Kill-switch, pending proposals and
+            alerts sit directly under the KPI row — an operator console leads
+            with "what needs me", and every row links to where the item is
+            handled (/incidents, /inbox, /portfolio, …). Only rendered when
+            there are signals. */}
         {attentionList.length > 0 ? (
           <Card
             title={t("sectionAttention")}
@@ -718,33 +484,395 @@ export default function DashboardOverview() {
                           ? "danger"
                           : item.severity === "warn"
                           ? "warn"
-                          : "brand"
+                          : "neutral"
                       }
                     />
                   </span>
                   <div className="flex-1 min-w-0">
-                    <div className="text-[13px] text-[color:var(--text-base)] truncate">
-                      {item.title}
-                    </div>
+                    {item.href ? (
+                      <Link
+                        href={item.href}
+                        className="block text-[13px] text-[color:var(--text-base)] truncate hover:text-brand-200 hover:underline"
+                        title={item.title}
+                      >
+                        {item.title}
+                      </Link>
+                    ) : (
+                      <div className="text-[13px] text-[color:var(--text-base)] truncate">
+                        {item.title}
+                      </div>
+                    )}
                     {item.summary ? (
                       <div className="text-[12px] text-[color:var(--text-muted)] truncate">
                         {item.summary}
                       </div>
                     ) : null}
                   </div>
-                  {item.href ? (
-                    <Link
-                      href={item.href}
-                      className="text-[12px] text-brand-300 hover:text-brand-200 shrink-0"
-                    >
-                      {tHero("open")}
-                    </Link>
-                  ) : null}
                 </li>
               ))}
             </ul>
           </Card>
         ) : null}
+
+        {/* Setup checklist — auto-hides when everything is ok. */}
+        <SetupReadinessCard collapsed />
+
+        {/* Agent-authored, read-only widgets from ui/workspace.yml. */}
+        <WorkspaceUiHome />
+
+        {/* Section 2 — Strategies (cockpit focus: status + P&L + win-rate
+            for every registered strategy, at a glance). */}
+        <Card
+          title={t("activeStrategiesTitle")}
+          actions={
+            <Link
+              href="/strategies"
+              className="text-[12px] text-brand-300 hover:text-brand-200"
+            >
+              {t("viewAll")}
+            </Link>
+          }
+        >
+          {!coreLoaded ? (
+            <div className="space-y-2.5 py-2" aria-hidden>
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="skeleton h-5 w-full" />
+              ))}
+            </div>
+          ) : strategies.length === 0 ? (
+            <div className="text-[13px] text-[color:var(--text-muted)] py-3">
+              {t("noStrategies")}
+            </div>
+          ) : (
+            <div className="embedded-table-scroll max-h-80">
+              <table className="table table-compact">
+                <thead>
+                  <tr>
+                    <th>{t("strategyCol")}</th>
+                    <th>{t("statusCol")}</th>
+                    <th>{t("marketCol")}</th>
+                    <th className="text-right">{t("pnlCol")}</th>
+                    <th className="text-right">{t("winRateCol")}</th>
+                    <th className="text-right">{t("openPositions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {strategies.slice(0, 8).map((s) => {
+                    const pnl = Number(s.total_pnl_usd || 0);
+                    const markets = (s.markets || []).filter(Boolean);
+                    return (
+                      <tr key={s.id}>
+                        <td className="min-w-0">
+                          <Link
+                            href={`/strategies/${encodeURIComponent(s.id)}`}
+                            className="block max-w-[220px] truncate text-[13px] text-[color:var(--text-base)] hover:text-brand-200"
+                            title={s.title || s.id}
+                          >
+                            {s.title || s.id}
+                          </Link>
+                        </td>
+                        <td>
+                          <Pill tone={strategyPillTone(s.status)}>{s.status || "–"}</Pill>
+                        </td>
+                        <td className="font-mono text-[12px] text-ink-300">
+                          {markets.length
+                            ? markets.slice(0, 2).join(", ") + (markets.length > 2 ? ` +${markets.length - 2}` : "")
+                            : "–"}
+                        </td>
+                        <td className={`text-right font-mono tabular-nums ${
+                          pnl > 0 ? "text-ok" : pnl < 0 ? "text-danger" : "text-ink-300"
+                        }`}>
+                          {fmtSigned(pnl)}
+                        </td>
+                        <td className="text-right font-mono tabular-nums text-ink-200">
+                          {Number.isFinite(s.win_rate_pct) ? `${Math.round(s.win_rate_pct)}%` : "–"}
+                        </td>
+                        <td className="text-right font-mono tabular-nums text-ink-200">{s.open_positions_count ?? 0}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+
+        {/* Section 3 — Portfolio (focused account + equity curve + positions + trades). */}
+        <Card
+          title={t("sectionPortfolio")}
+          actions={
+            <Link
+              href="/portfolio"
+              className="text-[12px] text-brand-300 hover:text-brand-200"
+            >
+              {t("viewAll")}
+            </Link>
+          }
+        >
+          <div className="space-y-5">
+            {!coreLoaded ? (
+              <div className="skeleton h-12 w-full" aria-hidden />
+            ) : focusedAccount ? (
+              <FocusedAccountStrip
+                account={focusedAccount}
+                nav={focusedNav}
+                free={focusedFree}
+                reserved={focusedReserved}
+                currency={focusedCurrency}
+              />
+            ) : (
+              <NoFocusedAccountStrip
+                accounts={accounts}
+                onPick={setCurrentAccountId}
+              />
+            )}
+
+            {/* Equity curve */}
+            <Section
+              title={t("equityCurve")}
+              description={t("equityPoints", { count: equity.length })}
+              divider={false}
+            >
+              <div className="h-[120px] relative">
+                <div className="absolute inset-0">
+                  {coreLoaded ? (
+                    <Sparkline
+                      values={equitySeries}
+                      width={800}
+                      height={120}
+                      tone={curveDelta && !curveDelta.up ? "danger" : "accent"}
+                      fill
+                    />
+                  ) : (
+                    <div className="skeleton h-full w-full" aria-hidden />
+                  )}
+                </div>
+                {coreLoaded && curveDelta ? (
+                  <div className="absolute top-1 right-1 text-right">
+                    <div
+                      className={`font-mono text-[13px] tabular-nums ${
+                        curveDelta.up ? "text-ok" : "text-danger"
+                      }`}
+                    >
+                      {curveDelta.up ? "+" : "-"}
+                      {Math.abs(curveDelta.pct).toFixed(2)}%
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </Section>
+
+            {/* Positions */}
+            <Section
+              title={t("positionsTitle")}
+              actions={
+                <Link
+                  href="/portfolio"
+                  className="text-[12px] text-brand-300 hover:text-brand-200"
+                >
+                  {t("viewAll")}
+                </Link>
+              }
+            >
+              {!coreLoaded ? (
+                <div className="space-y-2.5 py-2" aria-hidden>
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="skeleton h-5 w-full" />
+                  ))}
+                </div>
+              ) : openPositionList.length === 0 ? (
+                <div className="text-[13px] text-[color:var(--text-muted)] py-3">
+                  {t("noOpenPositions")}
+                </div>
+              ) : (
+                <div className="embedded-table-scroll max-h-60">
+                  <table className="table table-compact">
+                    <thead>
+                      <tr>
+                        <th>{t("marketCol")}</th>
+                        <th>{t("sideCol")}</th>
+                        <th className="text-right">{t("sizeCol")}</th>
+                        <th className="text-right">{t("entryCol")}</th>
+                        <th className="text-right">{t("pnlCol")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {openPositionList.slice(0, 5).map((row) => {
+                        const p = row.pos;
+                        const size = Number((p.size as number) || 0);
+                        const isLong = size >= 0;
+                        const openPnl = Number((p.unrealized_pnl_usd as number) || 0);
+                        const entry = Number((p.avg_entry_price as number) || 0);
+                        return (
+                          <tr key={`${row.account_id}:${row.market}`}>
+                            <td className="font-mono text-[12px]">{row.market}</td>
+                            <td>
+                              <Pill tone={isLong ? "ok" : "danger"}>
+                                {isLong ? t("long") : t("short")}
+                              </Pill>
+                            </td>
+                            <td className="text-right font-mono tabular-nums text-ink-200">{size.toFixed(4)}</td>
+                            <td className="text-right font-mono tabular-nums text-ink-200">{entry ? entry.toFixed(2) : "–"}</td>
+                            <td className={`text-right font-mono tabular-nums ${
+                              openPnl > 0 ? "text-ok" : openPnl < 0 ? "text-danger" : "text-ink-300"
+                            }`}>
+                              {fmtSigned(openPnl)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Section>
+
+            {/* Recent trades */}
+            <Section
+              title={t("tradesTitle")}
+              actions={
+                <Link
+                  href="/orders"
+                  className="text-[12px] text-brand-300 hover:text-brand-200"
+                >
+                  {t("viewAll")}
+                </Link>
+              }
+            >
+              {!coreLoaded ? (
+                <div className="space-y-2.5 py-2" aria-hidden>
+                  {[0, 1, 2].map((i) => (
+                    <div key={i} className="skeleton h-5 w-full" />
+                  ))}
+                </div>
+              ) : recentTrades.length === 0 ? (
+                <div className="text-[13px] text-[color:var(--text-muted)] py-3">
+                  {t("noFills")}
+                </div>
+              ) : (
+                <div className="embedded-table-scroll max-h-60">
+                  <table className="table table-compact">
+                    <thead>
+                      <tr>
+                        <th>{t("timeCol")}</th>
+                        <th>{t("marketCol")}</th>
+                        <th>{t("sideCol")}</th>
+                        <th className="text-right">{t("priceCol")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {recentTrades.slice(0, 5).map((tr, i) => {
+                        const side = tr.side?.toLowerCase();
+                        const isBuy = side === "buy";
+                        return (
+                          <tr key={tr.order_id || i}>
+                            <td className="font-mono text-[12px]">{formatTime(tr.ts)}</td>
+                            <td className="font-mono text-[12px]">{tr.market || "–"}</td>
+                            <td>
+                              <Pill tone={isBuy ? "ok" : "danger"}>
+                                {isBuy ? t("buy") : t("sell")}
+                              </Pill>
+                            </td>
+                            <td className="text-right font-mono tabular-nums text-ink-200">
+                              {tr.price ? Number(tr.price).toFixed(4) : "–"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Section>
+          </div>
+        </Card>
+
+        {/* Section 3.5 — Market (K-line). Reference info, not an operating
+            surface, so it collapses behind <Advanced> by default; the range
+            delta stays visible in the collapsed header. */}
+        <Advanced
+          title={t("sectionMarket")}
+          count={
+            firstClose
+              ? `${candleDeltaPct >= 0 ? "+" : ""}${candleDeltaPct.toFixed(2)}%`
+              : undefined
+          }
+          storageKey="dashboard-market-open"
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="min-w-[140px]">
+              <Select
+                value={settings.kline.venue}
+                onChange={(value) =>
+                  patchSettings({
+                    kline: {
+                      ...settings.kline,
+                      venue: value as typeof settings.kline.venue,
+                    },
+                  })
+                }
+                options={
+                  venues.length === 0
+                    ? [{
+                        value: settings.kline.venue,
+                        label: t("noVenues"),
+                        disabled: true,
+                      }]
+                    : venues.map((v) => ({ value: v.name, label: v.label }))
+                }
+                size="sm"
+                ariaLabel={t("dataSource")}
+              />
+            </div>
+            <input
+              value={symbolDraft}
+              onChange={(e) => setSymbolDraft(e.target.value.toUpperCase())}
+              onBlur={commitSymbol}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                  e.preventDefault();
+                  commitSymbol();
+                }
+              }}
+              className="bg-ink-900 border border-[color:var(--line)] rounded-md px-2 py-1 text-[12px] text-ink-100 focus:outline-none focus:border-brand-500/60 w-28 font-mono"
+              placeholder={t("symbolPlaceholder")}
+            />
+            <div className="flex gap-1">
+              {INTERVAL_OPTIONS.map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => patchSettings({ kline: { ...settings.kline, interval: opt.key as typeof settings.kline.interval } })}
+                  className={`px-2 py-1 text-[12px] rounded-md font-medium transition-colors ${
+                    settings.kline.interval === opt.key
+                      ? "bg-brand-500/15 text-brand-200 border border-brand-500/30"
+                      : "text-ink-400 hover:text-ink-100"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => loadCandles()}
+              className="px-2 py-1 text-[12px] rounded-md text-brand-200 hover:bg-brand-500/10 border border-brand-500/25 transition-colors"
+              title={t("refresh")}
+            >
+              ↻
+            </button>
+          </div>
+          <div className="mt-3">
+            <CandleChart
+              candles={candles}
+              width={960}
+              height={220}
+              mode={settings.chartType}
+              showVolume={settings.showVolume}
+              loading={candleLoading}
+              error={candleError || undefined}
+            />
+          </div>
+        </Advanced>
+
       </PageBody>
     </div>
   );
@@ -773,8 +901,11 @@ function FocusedAccountStrip({
         <div className="font-mono text-[14px] text-[color:var(--text-base)]">
           {profile.id}
         </div>
-        <div className="text-[12px] text-[color:var(--text-muted)]">
-          {profile.venue} · {profile.kind} · {profile.mode}
+        <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-[color:var(--text-muted)]">
+          <ModePill mode={profile.mode} />
+          <span>
+            {profile.venue} · {profile.kind}
+          </span>
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2 ml-auto">
@@ -811,7 +942,7 @@ function FocusedKpi({
 }) {
   const colour =
     tone === "warn"
-      ? "text-amber-500"
+      ? "text-warn"
       : tone === "brand"
       ? "text-brand-300"
       : "text-[color:var(--text-base)]";
@@ -839,9 +970,9 @@ function NoFocusedAccountStrip({
   const t = useTranslations("home");
   if (accounts.length === 0) {
     return (
-      <div className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-3 py-2.5 text-[13px] text-amber-300">
+      <div className="rounded-lg border border-warn/20 bg-warn/5 px-3 py-2.5 text-[13px] text-warn">
         {t("noAccountsPrefix")}{" "}
-        <Link href="/accounts" className="underline hover:text-amber-100">
+        <Link href="/accounts" className="underline hover:text-warn/80">
           {t("addAccountLink")}
         </Link>
       </div>
@@ -863,7 +994,7 @@ function NoFocusedAccountStrip({
         >
           <span
             className={`h-1.5 w-1.5 rounded-full ${
-              acc.profile.mode === "live" ? "bg-rose-400" : "bg-emerald-400"
+              acc.profile.mode === "live" ? "bg-danger" : "bg-brand-400"
             }`}
           />
           <span className="font-mono">{acc.profile.id}</span>
@@ -884,6 +1015,20 @@ function strategyPillTone(status: string): "ok" | "warn" | "brand" | "neutral" {
   if (s === "canary") return "warn";
   if (s === "paper") return "brand";
   return "neutral";
+}
+
+/**
+ * Shimmer placeholder built on the shared `.skeleton` class. Used while the
+ * first loadCore round is in flight so KPIs and tables never present
+ * "$0.00 / no strategies" as if it were real (empty) data.
+ */
+function Skel({ className }: { className?: string }) {
+  return (
+    <span
+      aria-hidden
+      className={`skeleton inline-block rounded-md ${className ?? "h-4 w-24 align-middle"}`}
+    />
+  );
 }
 
 function fmtMoney(v: number | undefined): string {

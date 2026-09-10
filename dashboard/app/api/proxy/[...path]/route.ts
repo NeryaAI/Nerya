@@ -22,11 +22,21 @@ import https from "node:https";
 // `next dev` restarts (the .next cache is reused).  Reading the env var
 // through a function defeats the static analysis so the value is always
 // resolved at request time.
+// The fallback must match the backend's real default port
+// (local_server.serve defaults to 18317). 18318 is the E2E-isolation
+// port and would silently point the dashboard at a server that usually
+// is not running.
 function _apiBase(): string {
-  return process.env.NERYA_API || "http://127.0.0.1:18318";
+  return process.env.NERYA_API || "http://127.0.0.1:18317";
 }
-const BASE_DEFAULT = "http://127.0.0.1:18318";
+const BASE_DEFAULT = "http://127.0.0.1:18317";
 const SERVER_TOKEN = process.env.NERYA_API_TOKEN || "";
+function _dashboardInternalToken(): string {
+  // Resolve per request. Next can otherwise inline a stale value into the
+  // compiled route bundle and keep sending an old/missing assertion after a
+  // service restart.
+  return process.env.NERYA_DASHBOARD_INTERNAL_TOKEN || "";
+}
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
 const DEFAULT_PROXY_TIMEOUT_MS = 120_000;
 const LONG_PROXY_TIMEOUT_MS = 30 * 60 * 1000;
@@ -330,6 +340,10 @@ async function forward(req: NextRequest, path: string[], method: string) {
   // public dashboard calls bypass the admin-login requirement.
   if (SERVER_TOKEN && !headers.has("authorization") && !headers.has("x-nerya-token")) {
     headers.set("Authorization", `Bearer ${SERVER_TOKEN}`);
+  }
+  const dashboardInternalToken = _dashboardInternalToken();
+  if (joined === "agent/run_turn_internal" && dashboardInternalToken) {
+    headers.set("X-Nerya-Dashboard-Internal", dashboardInternalToken);
   }
   if (method === "GET" && isSSEPath(joined)) {
     try {

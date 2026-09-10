@@ -212,30 +212,92 @@ def capture_ratios(
 
 
 def _closed_trade_pairs(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    opens: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    """Pair fills into closed round-trip trades, direction-aware.
+
+    Engine fills carry only the executor leg (``buy`` / ``sell``), so
+    the side alone cannot tell an entry from an exit: a short *entry*
+    is a sell fill. We replay every fill against a running signed
+    position per market (same bookkeeping as the portfolio: buy =
+    ``+qty``, sell = ``-qty``) — a fill that opens from flat or adds to
+    the current direction is an entry, a fill against it is an exit
+    that pairs FIFO with the matching open. Long-only streams replay
+    identically to the old side-only pairing (buys while flat/long are
+    entries, sells are exits).
+    """
+
+    opens: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
+    pos: dict[str, float] = defaultdict(float)
     pairs: list[dict[str, Any]] = []
     for t in trades:
         market = str(t.get("market") or "")
-        if str(t.get("side")).lower() == "buy" and not t.get("forced_close"):
-            opens[market].append(t)
+        side = str(t.get("side")).lower()
+        qty = float(t.get("qty", 0.0) or 0.0)
+        signed = qty if side == "buy" else -qty
+        current = pos[market]
+        if current == 0.0 or (current > 0.0) == (signed > 0.0):
+            # Entry: opens from flat or adds to the held direction.
+            pos[market] = current + signed
+            opens[market].append((1.0 if signed > 0.0 else -1.0, t))
             continue
+        pos[market] = current + signed
         if not opens[market]:
+            # Exit against nothing recorded — nothing to pair (the old
+            # side-only pass dropped these too).
             continue
-        o = opens[market].pop(0)
-        qty = min(float(o.get("qty", 0.0)), float(t.get("qty", 0.0)))
-        pnl = (float(t.get("price", 0.0)) - float(o.get("price", 0.0))) * qty
-        pnl -= float(o.get("fee", 0.0)) + float(t.get("fee", 0.0))
-        entry_notional = float(o.get("price", 0.0)) * qty
-        pairs.append({
-            "market": market,
-            "entry_ts": int(o.get("ts", 0)),
-            "exit_ts": int(t.get("ts", 0)),
-            "pnl_usd": pnl,
-            "pnl_pct": pnl / entry_notional * 100.0 if entry_notional else 0.0,
-            "duration_hours": (int(t.get("ts", 0)) - int(o.get("ts", 0))) / 3600.0,
-        })
-        t["pnl"] = pnl
-        t["pnl_pct"] = pairs[-1]["pnl_pct"]
+        # One exit fill can close several opens, or only part of one:
+        # pair FIFO, and when the open outlives the exit the unconsumed
+        # residual stays queued at the FRONT (same entry fill, remaining
+        # qty) so the next exit pairs against it — popping the open
+        # whole used to discard the residual and understate PnL.
+        exit_price = float(t.get("price", 0.0) or 0.0)
+        exit_fee = float(t.get("fee", 0.0) or 0.0)
+        remaining = qty
+        paired_pnl = 0.0
+        paired_any = False
+        while remaining > 1e-12 and opens[market]:
+            direction, o = opens[market].pop(0)
+            o_qty = float(o.get("qty", 0.0) or 0.0)
+            o_fee = float(o.get("fee", 0.0) or 0.0)
+            pair_qty = min(o_qty, remaining)
+            if pair_qty <= 1e-12:
+                continue
+            entry_price = float(o.get("price", 0.0) or 0.0)
+            # Fees are allocated pro-rata so a partially consumed open
+            # (or a partially consumed exit) is never double-counted.
+            fee = 0.0
+            if o_qty > 0.0:
+                fee += o_fee * (pair_qty / o_qty)
+            if qty > 0.0:
+                fee += exit_fee * (pair_qty / qty)
+            # A long pair profits when the exit prints above the entry; a
+            # short pair inverts (direction = -1).
+            pnl = (exit_price - entry_price) * pair_qty * direction - fee
+            entry_notional = entry_price * pair_qty
+            pairs.append({
+                "market": market,
+                "entry_ts": int(o.get("ts", 0)),
+                "exit_ts": int(t.get("ts", 0)),
+                "pnl_usd": pnl,
+                "pnl_pct": pnl / entry_notional * 100.0 if entry_notional else 0.0,
+                "duration_hours": (int(t.get("ts", 0)) - int(o.get("ts", 0))) / 3600.0,
+            })
+            paired_pnl += pnl
+            paired_any = True
+            if o_qty > remaining + 1e-12:
+                # Residual of a partially consumed open keeps its FIFO
+                # slot; its fee scales with the remaining qty.
+                residual_qty = o_qty - remaining
+                opens[market].insert(0, (direction, {
+                    **o,
+                    "qty": residual_qty,
+                    "fee": o_fee * (residual_qty / o_qty) if o_qty else 0.0,
+                }))
+                remaining = 0.0
+            else:
+                remaining -= pair_qty
+        if paired_any:
+            t["pnl"] = paired_pnl
+            t["pnl_pct"] = pairs[-1]["pnl_pct"]
     return pairs
 
 

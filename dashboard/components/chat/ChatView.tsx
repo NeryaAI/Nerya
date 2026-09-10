@@ -35,7 +35,7 @@ import {
 import { AssistantBubble, UserBubble } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { WorkspaceCanvas, hasWorkspaceCanvas } from "./WorkspaceCanvas";
-import { takeComposeDraft } from "../../lib/composeDraft";
+import { takeComposeDraftPayload } from "../../lib/composeDraft";
 
 function parseTs(ts: string | undefined | null): number | null {
   if (!ts) return null;
@@ -370,6 +370,7 @@ function pendingApprovalIdsForThread(
 export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const router = useRouter();
   const t = useTranslations("chat");
+  const tCommon = useTranslations("common");
   const tHome = useTranslations("commandHome");
   const cancelledReply = t("cancelNotice");
   const heroSuggestions = useMemo(
@@ -387,6 +388,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const [sending, setSending] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [missingSession, setMissingSession] = useState(false);
+  // Distinguish "the fetch blew up" from "the session does not exist" so
+  // the failure case can offer a Retry instead of a dead end.
+  const [transcriptLoadFailed, setTranscriptLoadFailed] = useState(false);
+  const [transcriptRetry, setTranscriptRetry] = useState(0);
   const [settings, setSettings] = useState<ChatRunSettings>(
     DEFAULT_CHAT_RUN_SETTINGS,
   );
@@ -476,11 +481,12 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   // turn so the home box behaves like Codex's "what should we build?" entry.
   useEffect(() => {
     if (!hydrated || draftConsumedRef.current || sessionId) return;
-    const draft = takeComposeDraft();
-    if (!draft.trim()) return;
+    const draft = takeComposeDraftPayload();
+    if (!draft || (!draft.text.trim() && !draft.attachments.length)) return;
     draftConsumedRef.current = true;
-    setInput(draft);
-    void send(draft);
+    setInput(draft.text);
+    setAttachments(draft.attachments);
+    if (draft.autoSend) void runAgentTurn(draft.text, { visibleUser: true, attachments: draft.attachments });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, sessionId]);
 
@@ -878,6 +884,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   // as authoritative. LocalStorage is only a UI cache and may contain an
   // older partial import from a previous dashboard load.
   useEffect(() => {
+    setTranscriptLoadFailed(false);
     if (!hydrated || !sessionId) {
       setMissingSession(false);
       return;
@@ -932,7 +939,9 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           setMissingSession(true);
         }
       } catch {
-        if (!cancelled) setMissingSession(true);
+        // Transport/library error — the session may well exist. Surface a
+        // retryable failure instead of claiming it is missing.
+        if (!cancelled) setTranscriptLoadFailed(true);
       } finally {
         if (!cancelled) {
           setLoadingTranscriptIds((prev) => {
@@ -952,7 +961,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, sessionId]);
+  }, [hydrated, sessionId, transcriptRetry]);
 
   // Pick up a first message that was staged on `/chat` before the route
   // switched to `/chat/[id]`. Running it here keeps the turn alive across
@@ -1213,6 +1222,8 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       kind?: string;
       channel?: string;
       payloadExtra?: Record<string, unknown>;
+      /** Retry replay: the failed assistant bubble to replace. */
+      replaceFailedId?: string;
     } = {},
   ) {
     const clean = text.trim();
@@ -1254,7 +1265,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           JSON.stringify({
             threadId,
             text: clean,
-            attachments: outgoingAttachments,
+            attachments: requestAttachments,
           }),
         );
         staged = true;
@@ -1262,6 +1273,8 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         // sessionStorage may be disabled; fall back to in-place send.
       }
       if (staged) {
+        turnInFlightRef.current = true;
+        setSending(true);
         // Persist the freshly-created thread now so the next mount sees it.
         saveThreads(upsertThread(loadThreads(), thread));
         router.replace(`/chat/${threadId}`);
@@ -1297,7 +1310,15 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
           : t.title,
       messages: visibleUser
         ? [...t.messages, userMessage, assistantMessage]
-        : [...t.messages, assistantMessage],
+        : [
+            // Retry replay: drop the failed assistant bubble in the same
+            // commit that appends the new loading one. The error card is
+            // replaced (never duplicated) and only after the replay has
+            // been admitted past the in-flight / approval guards above —
+            // if a guard bails, the failed turn stays on screen.
+            ...t.messages.filter((m) => m.id !== options.replaceFailedId),
+            assistantMessage,
+          ],
     }));
 
     if (visibleUser) {
@@ -1411,7 +1432,11 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     }
 
     try {
-      const res = await callApi<TurnPayload>("/agent/run_turn", {
+      // Dashboard is a trusted server-side lane. Public AgentOn traffic must
+      // use /agent/run_turn so the public research-only intent gate remains
+      // enforced; dashboard chat uses the separately authenticated internal
+      // route and still gets Nerya's own prompt/risk/approval safeguards.
+      const res = await callApi<TurnPayload>("/agent/run_turn_internal", {
         method: "POST",
         signal: ctrl.signal,
         body: {
@@ -1553,6 +1578,32 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     }
   }
 
+  // Review-B P1: a failed turn used to be a dead end. The user message the
+  // turn answered is still in the thread, so rebuild the original request
+  // from it and re-run the turn with ``visibleUser: false`` — no duplicate
+  // user bubble is appended and the failed assistant bubble is replaced.
+  // Invisible turns (approval_continue) never stored their synthetic
+  // prompt, so their error cards don't offer Retry (ChatView only wires
+  // ``onRetry`` when the previous message is a user message).
+  async function retryFailedTurn(assistantMsgId: string) {
+    const thread = active;
+    if (!thread) return;
+    const idx = thread.messages.findIndex((m) => m.id === assistantMsgId);
+    if (idx < 0) return;
+    const failed = thread.messages[idx];
+    if (failed.role !== "assistant" || failed.loading || !failed.error) return;
+    const prev = thread.messages[idx - 1];
+    if (!prev || prev.role !== "user") return;
+    const text = prev.text.trim();
+    const attachments = prev.attachments ?? [];
+    if (!text && !attachments.length) return;
+    await runAgentTurn(text, {
+      visibleUser: false,
+      attachments,
+      replaceFailedId: assistantMsgId,
+    });
+  }
+
   async function send(text: string) {
     await runAgentTurn(text, { visibleUser: true, attachments });
   }
@@ -1605,13 +1656,16 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   if (!hydrated) {
     return (
       <div className="h-full flex items-center justify-center text-ink-500 text-sm">
-        Loading chat…
+        {t("loadingChat")}
       </div>
     );
   }
 
   const conversationEmpty = !active || active.messages.length === 0;
   const showMissing = Boolean(sessionId && missingSession && conversationEmpty);
+  const showLoadFailure = Boolean(
+    sessionId && transcriptLoadFailed && conversationEmpty,
+  );
   // A URL that addresses a session is still being resolved until we either
   // load its transcript or confirm it's missing. Treat that window as
   // "loading" so we never flash the new-chat hero for a session the user
@@ -1622,16 +1676,19 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
     Boolean(sessionId) &&
     conversationEmpty &&
     !showMissing &&
+    !showLoadFailure &&
     pendingFirstMessageThreadId() !== sessionId;
   const showLoading =
     conversationEmpty &&
     !showMissing &&
+    !showLoadFailure &&
     (activeTranscriptLoading || resolvingAddressedSession);
   // Codex-style new-chat surface: a centred composer in the middle of
   // the canvas instead of a docked input + suggestion page. Only the
   // home route (no sessionId) or a fresh pending-first-message thread
   // reaches it now.
-  const showHero = conversationEmpty && !showMissing && !showLoading;
+  const showHero =
+    conversationEmpty && !showMissing && !showLoadFailure && !showLoading;
 
   const composerProps = {
     value: input,
@@ -1653,7 +1710,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
       <div className="flex min-h-0 flex-1 flex-col min-w-0">
         {showHero ? (
           <div className="flex-1 overflow-y-auto">
-            <div className="mx-auto flex min-h-full w-full max-w-[760px] flex-col justify-center px-4 py-10 lg:px-5">
+            <div className="mx-auto flex min-h-full w-full max-w-[860px] flex-col justify-center px-4 py-10 lg:px-5">
               <h1 className="text-center text-[30px] font-semibold leading-[1.15] tracking-tight text-[color:var(--text-base)]">
                 {tHome("title")}
               </h1>
@@ -1685,30 +1742,56 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         ) : (
           <>
             <div ref={scrollRef} className="flex-1 overflow-y-auto">
-              {showMissing ? (
+              {showLoadFailure ? (
                 <div className="max-w-xl mx-auto px-6 py-16 text-center">
                   <h2 className="text-lg text-white font-semibold mb-2">
-                    Session not found
+                    {t("transcriptLoadFailed")}
+                  </h2>
+                  <div className="flex items-center justify-center gap-3">
+                    <button
+                      onClick={() => {
+                        setTranscriptLoadFailed(false);
+                        setTranscriptRetry((c) => c + 1);
+                      }}
+                      className="btn-primary px-4 py-2 text-sm"
+                    >
+                      {tCommon("retry")}
+                    </button>
+                    <button
+                      onClick={() => router.push("/chat")}
+                      className="glass hover:bg-white/[0.05] hover:border-brand-500/30 px-4 py-2 text-sm text-white transition-colors"
+                    >
+                      {t("startNewChat")}
+                    </button>
+                  </div>
+                </div>
+              ) : showMissing ? (
+                <div className="max-w-xl mx-auto px-6 py-16 text-center">
+                  <h2 className="text-lg text-white font-semibold mb-2">
+                    {t("sessionNotFound")}
                   </h2>
                   <p className="text-sm text-ink-400 mb-6">
-                    The conversation <span className="font-mono">{sessionId}</span>{" "}
-                    isn't available locally and the backend has no transcript for
-                    it.
+                    {t.rich("sessionNotFoundBody", {
+                      sessionId,
+                      code: (chunks) => (
+                        <span className="font-mono">{chunks}</span>
+                      ),
+                    })}
                   </p>
                   <button
                     onClick={() => router.push("/chat")}
                     className="glass hover:bg-white/[0.05] hover:border-brand-500/30 px-4 py-2 text-sm text-white transition-colors"
                   >
-                    Start a new chat
+                    {t("startNewChat")}
                   </button>
                 </div>
               ) : showLoading ? (
                 <div className="h-full flex items-center justify-center text-ink-500 text-sm">
-                  Loading conversation…
+                  {t("loadingConversation")}
                 </div>
               ) : (
-                <div className="max-w-4xl mx-auto px-4 py-6 space-y-5">
-                  {active!.messages.map((m) =>
+                <div className="max-w-[860px] mx-auto px-4 py-6 space-y-5">
+                  {active!.messages.map((m, mi) =>
                     m.role === "user" ? (
                       <UserBubble
                         key={m.id}
@@ -1728,6 +1811,11 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                         pendingApprovals={pendingApprovals}
                         onApprovalAction={resolveApproval}
                         resolvingApprovalIds={resolvingApprovalIds}
+                        onRetry={
+                          m.error && !m.loading && active!.messages[mi - 1]?.role === "user"
+                            ? () => void retryFailedTurn(m.id)
+                            : undefined
+                        }
                         onEdit={() => startEditMessage(m.id)}
                         onDelete={() => deleteMessage(m.id)}
                         editing={editingMessageId === m.id}
@@ -1743,10 +1831,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
             </div>
             {awaitingApproval ? (
               <div
-                className="border-t border-warn/25 bg-warn/[0.06] px-4 py-2 text-xs text-amber-200"
+                className="border-t border-warn/25 bg-warn/[0.06] px-4 py-2 text-xs text-warn"
                 role="status"
               >
-                <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
+                <div className="max-w-[860px] mx-auto flex items-center justify-between gap-3">
                   <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
                   <span className="font-mono text-[10px] text-warn/80">
                     {activeApprovalIds[0]?.slice(0, 18)}

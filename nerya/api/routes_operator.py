@@ -22,6 +22,7 @@ having to reverse-engineer ad-hoc JSON.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Iterable
 
 from ..core import jsonl
@@ -195,23 +196,56 @@ def _trading_strategy_count(client) -> int:
 
 
 def _wallet_providers(client) -> list[dict[str, Any]]:
-    try:
-        from ..wallet.providers import describe_providers
+    """Wallet readiness rows for the setup checklist.
 
-        return list(describe_providers(client.config))
-    except Exception:
-        try:
-            return list(getattr(client, "wallet", None).list_providers())  # type: ignore[union-attr]
-        except Exception:
-            return []
+    Previously imported a nonexistent
+    ``wallet.providers.describe_providers``; the import always raised,
+    the fallback returned ``[]``, and the readiness probe permanently
+    reported "No wallet or exchange provider is ready". Reuse
+    ``wallet.registry.readiness_report`` — the same source the
+    ``/wallet/providers`` route and ``nerya wallet list`` use — and
+    flatten each row to the ``{id, label, ready, missing}`` shape the
+    readiness check consumes.
+    """
+    try:
+        from ..wallet import registry as wallet_registry
+
+        rows = wallet_registry.readiness_report(
+            client.config.data, workspace=client.config.paths.root,
+        )
+    except Exception:  # pragma: no cover — defensive readiness fallback
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        readiness = row.get("readiness") or {}
+        out.append({
+            "id": row.get("id"),
+            "label": row.get("label"),
+            "ready": bool(readiness.get("ready")),
+            "missing": list(readiness.get("missing") or []),
+        })
+    return out
 
 
 def _exchange_providers(client) -> list[dict[str, Any]]:
-    try:
-        from ..exchanges.providers import describe_providers
+    """Exchange venue rows from the real connector registry.
 
-        return list(describe_providers(client.config))
-    except Exception:
+    The old ``from ..exchanges.providers import describe_providers``
+    referenced a module that does not exist, so this helper silently
+    returned ``[]`` forever. Route through the same registry the
+    ``/exchanges/providers`` route uses (``connectors.registry``).
+    Venue specs carry no live readiness signal, so the raw spec rows
+    are returned as-is rather than fabricating a ``ready`` flag.
+    """
+    try:
+        from ..connectors.provider_spec import get_registry
+        from ..connectors.registry import list_providers
+
+        # Make sure any workspace/providers/* are hot-loaded too —
+        # mirrors routes_exchanges.list_all.
+        get_registry().reload_workspace(Path(client.config.paths.root))
+        return [dict(row) for row in list_providers()]
+    except Exception:  # pragma: no cover — defensive readiness fallback
         return []
 
 

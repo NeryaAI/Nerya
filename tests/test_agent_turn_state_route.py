@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from nerya.api import routes_agent
+from nerya.api import route_scopes
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
 
@@ -69,3 +70,36 @@ def test_agent_tools_route_delegates_to_agent_api():
     )
 
     assert handler(client, {}) is expected
+
+
+def test_dashboard_internal_run_turn_is_separate_and_scoped():
+    route_map = {(method, path): handler for method, path, handler in routes_agent.routes()}
+    assert route_map[("POST", "/agent/run_turn")] is not route_map[("POST", "/agent/run_turn_internal")]
+    assert route_scopes.required_scope("POST", "/agent/run_turn_internal") == "write:chat"
+
+
+def test_dashboard_internal_run_turn_skips_public_intent_gate(tmp_path, monkeypatch):
+    cfg = Config(paths=WorkspacePaths(root=tmp_path))
+    cfg.data.setdefault("runtime", {})["intent_gate"] = {"enabled": True, "fail_closed": True}
+    client = SimpleNamespace(config=cfg, skills=object())
+
+    def deny_public(*_args, **_kwargs):
+        return {"status": "isolated", "allowed": False, "reason_code": "test_block"}
+
+    monkeypatch.setattr(
+        "nerya.agent.intent_gate.classify_request",
+        deny_public,
+    )
+    route_map = {(method, path): handler for method, path, handler in routes_agent.routes()}
+    payload = {
+        "session_id": "sess-internal-gate",
+        "payload": {"text": "/workflows", "platform": "dashboard"},
+    }
+
+    public_result = route_map[("POST", "/agent/run_turn")](client, payload)
+    assert public_result["_status"] == 403
+    assert public_result["error"] == "intent_gate_blocked"
+
+    internal_result = route_map[("POST", "/agent/run_turn_internal")](client, payload)
+    assert internal_result["stopped_reason"] == "command"
+    assert internal_result["harness"] == "command"

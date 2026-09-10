@@ -16,16 +16,18 @@ every method that actually needs the dep raises
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
-from .errors import WalletProviderNotFound
+from .errors import WalletError, WalletProviderNotFound
 from .protocol import WalletCapabilities, WalletProvider, WalletReadiness
 from .providers import (
     BinanceAgenticWallet,
     BitgetWalletSkill,
     ByrealWallet,
     CoinbaseWallet,
+    MetaMaskWallet,
     OkxOsWallet,
     SelfCustodyWallet,
 )
@@ -162,6 +164,80 @@ PROVIDERS: dict[str, dict[str, Any]] = {
                 "rpc_urls.solana", "Solana RPC URL", kind="url",
                 required=False, sensitive=False,
                 placeholder="https://api.mainnet-beta.solana.com",
+            ),
+        ],
+    },
+    "metamask": {
+        "id": "metamask",
+        "label": "MetaMask agent wallet (BIP-44 self-custody)",
+        "description": (
+            "Use a MetaMask-compatible BIP-39/BIP-44 account as the agent "
+            "wallet. Create a fresh seed with `nerya wallet create "
+            "metamask` or import an existing MetaMask seed / exported "
+            "private key — the derived address matches what MetaMask "
+            "shows. Balances read on every supported EVM chain; live "
+            "swaps are wired for BSC (PancakeSwap v2) behind the operator "
+            "approval gate. Seed and keys live only in the workspace "
+            "vault, referenced by vault:// pointers."
+        ),
+        "install_hint": "pip install eth-account",
+        "install_command": "pip install eth-account",
+        "links": {
+            "docs": (
+                "https://support.metamask.io/getting-started/"
+                "getting-started-with-metamask/"
+            ),
+            "config": (
+                "wallet.metamask.{seed_ref, private_key_ref, address, "
+                "address_index, rpc_urls}"
+            ),
+        },
+        "runtime": "python",
+        "credential_fields": [
+            _field(
+                "seed", "Seed phrase (12/24 words)", kind="secret",
+                required=False, sensitive=True,
+                description=(
+                    "BIP-39 mnemonic backing the MetaMask account. Pasted "
+                    "values are vaultified automatically; nerya.yml keeps "
+                    "only the vault:// reference."
+                ),
+                placeholder="twelve ... words",
+            ),
+            _field(
+                "private_key", "Account private key", kind="secret",
+                required=False, sensitive=True,
+                description=(
+                    "Alternative to the seed: the exported private key of "
+                    "one MetaMask account (0x...). Stored in the vault."
+                ),
+                placeholder="0x...",
+            ),
+            _field(
+                "address", "Expected address", kind="public",
+                required=False, sensitive=False,
+                description=(
+                    "Optional checksum address this wallet must derive; "
+                    "readiness fails loudly on mismatch so the agent can "
+                    "never operate on the wrong wallet."
+                ),
+                placeholder="0x...",
+            ),
+            _field(
+                "address_index", "Address index", kind="public",
+                required=False, sensitive=False,
+                description="BIP-44 index m/44'/60'/0'/0/<index> (default 0).",
+                placeholder="0",
+            ),
+            _field(
+                "rpc_urls.bsc", "BSC RPC URL", kind="url",
+                required=False, sensitive=False,
+                placeholder="https://bsc-dataseed.binance.org",
+            ),
+            _field(
+                "rpc_urls.ethereum", "Ethereum RPC URL", kind="url",
+                required=False, sensitive=False,
+                placeholder="https://...",
             ),
         ],
     },
@@ -817,9 +893,28 @@ def build_provider(
     cfg = dict(cfg or {})
     if name_l == "self_custody":
         return SelfCustodyWallet(
-            signer_ref=cfg.get("signer_ref", ""),
+            signer_ref=str(cfg.get("signer_ref") or ""),
             rpc_urls=dict(cfg.get("rpc_urls") or {}),
             chains=tuple(cfg.get("chains") or SelfCustodyWallet.chains),
+            workspace=str(workspace or ""),
+            vault_passphrase=vault_passphrase or "",
+            config=cfg,
+        )
+    if name_l == "metamask":
+        # Seed / key refs stay vault:// pointers — resolved at execution
+        # time (see MetaMaskWallet._resolve_signer_key), never at build.
+        return MetaMaskWallet(
+            seed_ref=str(cfg.get("seed_ref") or cfg.get("seed") or ""),
+            private_key_ref=str(
+                cfg.get("private_key_ref") or cfg.get("private_key") or ""
+            ),
+            signer_ref=str(cfg.get("signer_ref") or ""),
+            address_index=int(cfg.get("address_index") or 0),
+            expected_address=str(cfg.get("address") or ""),
+            rpc_urls=dict(cfg.get("rpc_urls") or {}),
+            chains=tuple(cfg.get("chains") or MetaMaskWallet.chains),
+            workspace=str(workspace or ""),
+            vault_passphrase=vault_passphrase or "",
             config=cfg,
         )
     if name_l == "okx_os":
@@ -1030,6 +1125,12 @@ def resolve_for_account(
             if b["wallet_id"] == wallet_id:
                 selected = b
                 break
+        if selected is None:
+            # An explicit wallet_id that matches nothing (renamed/deleted
+            # binding, or a typo) must NOT silently resolve to an arbitrary
+            # first binding — that would report one wallet's balances under
+            # another wallet's NAV.
+            return wallet_id, None, "unmatched"
     if selected is None and bindings:
         selected = bindings[0]
     if selected is None:
@@ -1214,15 +1315,32 @@ def _resolve(
     v = str(value)
     if not v.startswith("vault://") or not workspace:
         return v
+    from ..core.errors import SecretAccessDenied, SecretNotFoundError
+    vp = Path(workspace) / "vault" / "secrets.enc"
+    if not vp.exists():
+        return None
     try:
         from ..security.secrets import SecretVault
-        vp = Path(workspace) / "vault" / "secrets.enc"
-        if not vp.exists():
-            return None
         s = SecretVault.open(vp, passphrase=vault_passphrase)
+    except Exception as exc:
+        # A vault that exists but cannot be opened (wrong passphrase,
+        # corrupt file) must NOT look like "credential not set".
+        raise WalletError(
+            f"vault at {vp} could not be opened while resolving {v}: {exc}"
+        ) from exc
+    if getattr(s, "load_error", ""):
+        raise WalletError(
+            f"vault at {vp} could not be decrypted while resolving {v}: "
+            f"{s.load_error}"
+        )
+    try:
         return s.resolve(v.split("vault://", 1)[-1], required_scope="wallet")
-    except Exception:
+    except SecretNotFoundError:
         return None
+    except SecretAccessDenied as exc:
+        raise WalletError(
+            f"secret {v} exists but lacks the 'wallet' scope: {exc}"
+        ) from exc
 
 
 # Convenience alias for older code paths.
@@ -1236,16 +1354,28 @@ class WalletRegistry:
         self._cached: dict[str, WalletProvider] = {}
 
     def get(self, name: str, cfg: dict[str, Any] | None = None) -> WalletProvider:
-        if name in self._cached:
-            return self._cached[name]
+        # Cache key must include the effective config: two calls with the
+        # same provider name but different bindings must not share one
+        # instance (per-account credential overrides would silently leak
+        # across accounts otherwise).
+        try:
+            cfg_key = json.dumps(dict(cfg or {}), sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            cfg_key = repr(sorted((cfg or {}).keys()))
+        key = f"{(name or '').lower()}::{cfg_key}"
+        if key in self._cached:
+            return self._cached[key]
         p = build_provider(name, cfg, workspace=self.workspace,
                             vault_passphrase=self.vault_passphrase)
-        self._cached[name] = p
+        self._cached[key] = p
         return p
 
     def invalidate(self, name: str | None = None) -> None:
         if name:
-            self._cached.pop(name, None)
+            prefix = f"{(name or '').lower()}::"
+            for key in [k for k in self._cached
+                        if k == name or k.startswith(prefix)]:
+                self._cached.pop(key, None)
         else:
             self._cached.clear()
 

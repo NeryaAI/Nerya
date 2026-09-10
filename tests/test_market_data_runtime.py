@@ -12,13 +12,10 @@ from nerya.core import jsonl, yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
 from nerya.data.candles import discover_market_data_sources, fetch_candles, fetch_public_ticker
-from nerya.skills.kernel import SkillKernel
 from nerya.strategies.context import StrategyContext, StrategyMarket, StrategyPnL, StrategyPortfolio
 from nerya.strategies.runner import StrategyRunner
-from nerya.subagents.runtime import SubAgentRuntime
 from nerya.tools.native.connectors import market_data_handler
-from nerya.tools.registry import ToolRegistry, make_native_descriptor
-from nerya.tools.types import PermissionScope, RiskLevel, ToolCall
+from nerya.tools.types import ToolCall
 from nerya.trading.virtual_ledger import open_ledger
 
 
@@ -1284,7 +1281,10 @@ def test_bitget_python_skill_readiness_and_klines(tmp_path, monkeypatch) -> None
 
     assert candles == [
         {
-            "ts": 1778562000000,
+            # Kline timestamps are normalized to SECONDS across all wallet
+            # providers (okx/byreal/binance/bitget) — the old python-skill
+            # path emitted milliseconds.
+            "ts": 1778562000,
             "open": 1.0,
             "high": 2.0,
             "low": 0.5,
@@ -1375,8 +1375,11 @@ def test_coinbase_readiness_prefers_agentic_wallet_binding_over_legacy_defaults(
     coinbase = next(row for row in rows if row["id"] == "coinbase")
 
     assert coinbase["configured_wallet_id"] == "coinbase_main"
-    assert coinbase["readiness"]["ready"] is True
-    assert coinbase["readiness"]["missing"] == []
+    # An agentic_session_path alone is not a runnable code path (no method
+    # implements it): readiness must NOT claim ready without a real SDK /
+    # node skill plus credentials — the old readiness overstated this case.
+    assert coinbase["readiness"]["ready"] is False
+    assert coinbase["readiness"]["missing"] != []
 
 
 def test_okx_wallet_market_data_routes_through_fetch_candles(
@@ -1810,52 +1813,16 @@ def test_wallet_swap_journals_approval_request_and_one_shot_result(
     assert "private" not in str(rows).lower()
 
 
-def test_subagent_legacy_market_data_skill_call_falls_through_to_native_tool(tmp_path) -> None:
+def test_subagent_market_data_uses_the_native_executor(tmp_path) -> None:
+    from test_subagent_native_runtime import Gateway, call, final, runtime, spec, run, descriptor
     cfg = _config(tmp_path)
-    skills = SkillKernel.boot(cfg)
-    registry = ToolRegistry()
-    registry.register(
-        make_native_descriptor(
-            name="market_data",
-            description="test market data",
-            input_schema={"type": "object"},
-            handler=lambda call: market_data_handler(call, config_like=cfg),
-            risk=RiskLevel.READ,
-            permission_scope=PermissionScope.NETWORK,
-            read_only=True,
-            auto_approve=True,
-        )
-    )
-    runtime = SubAgentRuntime(
-        config=cfg,
-        skills=skills,
-        llm=None,  # type: ignore[arg-type]
-        tool_registry=registry,
-    )
-
-    result = runtime._dispatch_one(
-        {
-            "skill": "market_data",
-            "payload": {
-                "action": "calculate_features",
-                "market": "mock:BTC/USDT",
-                "interval": "1m",
-                "count": 40,
-            },
-        },
-        spec_name="technical_analyst",
-        allowed=[],
-        allowed_native_tools=["market_data"],
-        trigger_event_id=None,
-        strategy_id=None,
-        session_id=None,
-    )
-
-    assert result is not None
-    assert result["ok"] is True
-    data = result["result"]["data"]
+    gateway = Gateway(call("market_data", action="calculate_features", market="mock:BTC/USDT", interval="1m", count=40), final())
+    rt = runtime(tmp_path, gateway, [descriptor("market_data", handler=lambda c: market_data_handler(c, config_like=cfg))])
+    result = run(rt, spec(tmp_path))
+    data = result["metrics"]["skill_calls"][0]["result"]["data"]
     assert data["count"] == 40
     assert data["features"]["rsi_14"] is not None
+    assert len(gateway.calls) == 2
 
 
 def test_strategy_context_legacy_portfolio_pnl_and_dict_return_compat(tmp_path) -> None:

@@ -78,7 +78,7 @@ function ChartBlockCard({ block: rawBlock }: { block: ChartBlockShape }) {
       <ChartHeader block={block} />
       {canvas}
       {warnings.length > 0 ? (
-        <ul className="text-[11px] text-amber-300/80 space-y-0.5">
+        <ul className="text-[11px] text-warn/80 space-y-0.5">
           {warnings.map((w, i) => (
             <li key={i}>· {w}</li>
           ))}

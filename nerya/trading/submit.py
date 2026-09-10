@@ -36,16 +36,15 @@ from typing import Any, Optional
 
 from ..core import jsonl
 from ..core.config import Config
-from ..core.errors import ApprovalPending
+from ..core.errors import ApprovalPending, IntentValidationError
 from ..core.redaction import redact_dict
 from ..core.time import now_iso
 from ..core.truth import (
     degraded_envelope,
-    live_envelope,
     mock_envelope,
     resolve_allow_mock,
 )
-from ..messaging.trade_notifications import broadcast_trade_event, event_from_order_result
+from ..messaging.trade_notifications import broadcast_trade_event
 from ..strategy_history import open_session, store as history_store, track_outcome
 from .account_snapshots import capture_snapshot, fresh_snapshot
 from .accounts import get_account_profile
@@ -53,9 +52,9 @@ from .approval import ApprovalGate
 from .capital import BudgetChecker, CapitalReservationStore
 from .executors.orchestrator import ExecutorOrchestrator
 from .intents import TradeIntent
-from .order_intents import SizingPolicy, TradePlan
+from .order_intents import ProtectionRule, SizingPolicy, TradePlan
 from .position_book import PositionBook
-from .risk import RiskGate
+from .risk import RiskGate, is_usd_stable_quote
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +122,90 @@ def _maybe_auto_approve_strategy_order(
     )
 
 
+def _blocking_reasons(reasons: list[str]) -> list[str]:
+    """Reasons that actually gate the decision (drop ``ok``/audit-only)."""
+    return [
+        str(r)
+        for r in (reasons or [])
+        if str(r) != "ok" and not str(r).endswith("_exempt")
+    ]
+
+
+def _reason_approval_signature(reason: str) -> str:
+    """Canonical form of a risk reason for approval matching (R2B2b).
+
+    Parameterized escalation reasons embed volatile numbers. For reasons
+    of the form ``key:<observed>>=<threshold>`` (e.g.
+    ``approval_required_threshold:5041.23>=5000.00``) the *observed*
+    value drifts with NAV between card creation and resume, but the
+    *threshold* is policy and stable — an operator who approved "orders
+    above $5000 need sign-off" does not need to re-approve the same
+    policy because the notional moved $30. Match on ``key`` plus
+    everything after ``>=`` and ignore the observed part. Reasons
+    without an ``observed>=threshold`` tail compare verbatim, so a
+    genuinely new reason family (or a changed threshold) still
+    re-escalates.
+    """
+    text = str(reason)
+    key, sep, comparison = text.partition(":")
+    if not sep or ">=" not in comparison:
+        return text
+    _observed, _, threshold = comparison.partition(">=")
+    return f"{key}:>={threshold.strip()}"
+
+
+def _resume_reasons_satisfied(
+    reasons: list[str],
+    resume_approval: Optional[dict[str, Any]],
+) -> bool:
+    """Whether every current escalate reason was in the approved decision.
+
+    The approval record carries ``risk_reasons`` — the decision reasons
+    the operator signed off on. Comparison is by
+    :func:`_reason_approval_signature`: parameterized threshold reasons
+    match on key + threshold while ignoring the embedded (NAV-drifted)
+    notional, and everything else must match exactly. A raised/lowered
+    threshold, a fresh ``reconciliation_action_required:<report>`` or any
+    other new reason never inherits an approval granted before it
+    appeared. Without a resume record there is nothing to compare
+    against, so we fail closed.
+    """
+    blocking = _blocking_reasons(reasons)
+    if not blocking:
+        return True
+    if not isinstance(resume_approval, dict):
+        return False
+    approved = {
+        _reason_approval_signature(str(r))
+        for r in _blocking_reasons(
+            list(resume_approval.get("risk_reasons") or []),
+        )
+    }
+    return all(
+        _reason_approval_signature(str(reason)) in approved
+        for reason in blocking
+    )
+
+
+def _prior_approved_reasons(
+    resume_approval: Optional[dict[str, Any]],
+) -> list[str]:
+    """Approved risk reasons carried by the resume record (R2B2a).
+
+    Used to seed a NEW operator card created later in the same approval
+    chain (e.g. a post-budget threshold escalation after the canary card
+    was approved). Without the carry-over, the new card's record only
+    knows its own reasons, the resume of THAT card fails the
+    already-approved check for the earlier reasons, and operators get
+    ping-ponged with alternately-typed cards forever.
+    """
+    if not isinstance(resume_approval, dict):
+        return []
+    return [
+        str(r) for r in (resume_approval.get("risk_reasons") or []) if str(r)
+    ]
+
+
 def _approval_summary(record) -> dict[str, Any] | None:
     if record is None:
         return None
@@ -162,29 +245,7 @@ def submit_trade_intent(
     default_strategy: str = "manual_agent",
     default_source: str = "agent",
 ) -> dict[str, Any]:
-    """Run the full trade-intent pipeline and return a canonical envelope.
-
-    This is now a thin adapter over :func:`submit_trade_plan`: the
-    intent is translated into a :class:`TradePlan` and flows through the
-    same unified pipeline (Risk Gate → BudgetChecker → ApprovalGate →
-    executor) as the plan path. That means *every* order — legacy intent
-    or new plan — now goes through the same guards:
-
-    * account ``place_order`` permission check
-      (:func:`_real_money_execution_blocker`)
-    * :class:`BudgetChecker` sizing against the live snapshot
-    * :class:`CapitalReservationStore` reservation
-    * durable executor with atomic fill → PositionBook → protection
-
-    Previously the legacy path jumped straight from the Risk Gate to
-    :class:`ExecutionEngine.execute`, bypassing the permission and
-    budget checks — an account with ``place_order: false`` could still
-    trade via this path. That bypass is now closed.
-
-    The return envelope keeps its historical shape so native tools, the
-    SDK, and ``ctx.trading.submit_intent`` callers are unaffected.
-    """
-
+    """Validate an intent and submit it through the one guarded plan executor."""
     payload = dict(spec or {})
     if "intent_id" in payload:
         intent = TradeIntent(**payload)
@@ -192,68 +253,39 @@ def submit_trade_intent(
         payload.setdefault("strategy_id", default_strategy)
         payload.setdefault("source", default_source)
         intent = TradeIntent.new(**payload)
-
-    plan = _intent_to_plan(intent)
-    plan_response = submit_trade_plan(config, plan, market_snapshot=market_snapshot)
-
-    # Reshape the plan envelope into the legacy intent envelope so
-    # existing callers see the keys they expect (``order_id``,
-    # ``order``). The plan envelope carries strictly more information,
-    # so we only synthesise the legacy ``order`` summary when the
-    # executor produced one.
-    status = str(plan_response.get("status") or "")
-    response: dict[str, Any] = {
-        "status": status,
-        "order_id": None,
-        "session_id": plan_response.get("session_id"),
-        "intent": redact_dict(intent.asdict()),
-        "risk_decision": plan_response.get("risk_decision") or {},
-    }
-    if plan_response.get("approval_id"):
-        response["approval_id"] = plan_response["approval_id"]
-        response["status"] = "pending_approval"
-    if plan_response.get("budget_decision"):
-        response["budget_decision"] = plan_response["budget_decision"]
-    if plan_response.get("execution_blocker"):
-        response["execution_blocker"] = plan_response["execution_blocker"]
-    if plan_response.get("approval"):
-        response["approval"] = plan_response["approval"]
-    if plan_response.get("notifications"):
-        response["notifications"] = plan_response["notifications"]
-    executor = plan_response.get("executor") or {}
-    if executor:
-        response["executor_id"] = executor.get("executor_id") or plan_response.get("executor_id")
-        response["order_ids"] = executor.get("order_ids") or []
-        # Synthesise an ``order`` summary from the executor result so
-        # legacy callers that read ``response["order"]`` keep working.
-        result = executor.get("result") or {}
-        response["order"] = {
-            "order_id": (executor.get("order_ids") or [None])[0],
-            "intent_id": intent.intent_id,
-            "status": status,
-            "notional_usd": result.get("notional_usd", 0.0),
-            "avg_price": result.get("fill_price", 0.0),
-            "filled_size": result.get("size_base", 0.0),
-        }
-        response["order_id"] = response["order"]["order_id"]
-    return response
+    return submit_trade_plan(config, _intent_to_plan(intent), market_snapshot=market_snapshot)
 
 
 def _intent_to_plan(intent: TradeIntent) -> TradePlan:
-    """Translate a legacy :class:`TradeIntent` into a :class:`TradePlan`.
+    """Translate an order intent into the canonical execution plan.
 
     The plan carries the same information but in the unified control-plane
     schema so it flows through :func:`submit_trade_plan`. Action is inferred
     from ``meta.plan_action`` when present (set by the resume path) or from
     the side / reduce_only hint, defaulting to ``open_position``.
+
+    ``plan_action`` accepts the strategy facade's vocabulary
+    (``close`` / ``exit`` / ``flatten`` / ``close_all`` / ``open_long`` /
+    ``open_short`` / ``reduce`` / ``partial_exit``) plus the canonical
+    plan tokens; unknown values keep the historical open default.
     """
     from .order_intents import SizingPolicy, TradeEntry, TradePlan
 
     meta = intent.meta or {}
-    plan_action = str(meta.get("plan_action") or "").strip()
+    plan_action = str(meta.get("plan_action") or "").strip().lower()
     reduce_only = bool(meta.get("reduce_only"))
     if plan_action in ("close_position", "reduce_position", "attach_protection"):
         action = plan_action  # type: ignore[assignment]
+    elif plan_action in ("close", "exit", "flatten", "close_all"):
+        # D1: the strategy facade documents these close aliases, but the
+        # recognized-set check above let them fall through to the open
+        # branch — a sell+close intent became an OPEN-SHORT plan while
+        # the backtest engine and the risk gate treated it as an exit.
+        action = "close_position"
+    elif plan_action in ("reduce", "partial_exit"):
+        action = "reduce_position"
+    elif plan_action in ("open_long", "open_short"):
+        action = "open_position"
     elif reduce_only:
         action = "reduce_position"
     else:
@@ -267,8 +299,19 @@ def _intent_to_plan(intent: TradeIntent) -> TradePlan:
         side = "short" if intent.side == "buy" else "long"
 
     # Sizing policy: intent.size is already a concrete number in a known
-    # unit, so we hand the BudgetChecker a fixed value.
+    # unit, so we hand the BudgetChecker a fixed value. Quote-unit sizes
+    # are USD amounts only when the market's quote asset is a USD stable
+    # (C9/D2) — anything else previously hit fixed_base and traded the
+    # quote count as base units (100 USDT requested → 100 BTC ordered).
     if intent.size_unit == "usd":
+        sizing = SizingPolicy(method="fixed_usd", fixed_usd=float(intent.size))
+    elif intent.size_unit == "quote":
+        if not is_usd_stable_quote(intent.market):
+            raise IntentValidationError(
+                f"size_unit='quote' is only supported on USD-stable quote "
+                f"assets; market {intent.market!r} does not have one — "
+                "resubmit with size_unit='base' or 'usd'"
+            )
         sizing = SizingPolicy(method="fixed_usd", fixed_usd=float(intent.size))
     else:
         sizing = SizingPolicy(method="fixed_base", fixed_base=float(intent.size))
@@ -496,6 +539,7 @@ def submit_trade_plan(
     *,
     market_snapshot: Optional[dict[str, Any]] = None,
     resume: bool = False,
+    resume_approval: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Run a :class:`TradePlan` through the new control-plane.
 
@@ -518,6 +562,14 @@ def submit_trade_plan(
     """
 
     paths = config.paths
+    if plan.action == "attach_protection":
+        # R3T5: an ``attach_protection`` plan must never reach the
+        # MarketOrderExecutor. It used to fall through as a real BUY
+        # market order (``side`` was forced to "buy" only to dodge
+        # ``buy_or_sell``'s raise, risk treated it as non-reducing) —
+        # a strategy asking to attach SL/TP silently opened an
+        # unintended long. Route it to the protection path instead.
+        return _attach_protection_for_plan(config, plan)
     # Resolve ``close_all`` / ``reduce_pct`` sizing against the live
     # PositionBook *before* the BudgetChecker / executor see the plan.
     # Otherwise the BudgetChecker emits an ``OrderCandidate(size_base
@@ -614,16 +666,22 @@ def submit_trade_plan(
         approval_record = _maybe_auto_approve_strategy_order(config, intent, risk)
         if approval_record is None and resume:
             # Resume path: an operator already approved the original
-            # intent, so re-escalation (e.g. canary per-trade approval)
-            # is auto-satisfied. This closes the loop where a resumed
-            # canary order would re-escalate forever.
-            approval_record = ApprovalGate(config).auto_approve(
-                intent, risk, reason="resumed_from_operator_approval",
-            )
+            # intent. Auto-satisfy the re-escalation ONLY for reasons
+            # that were part of the approved decision; a reason that
+            # appeared afterwards (reconciliation drift, tightened
+            # thresholds, fresh stale guards) must re-escalate to a new
+            # card instead of riding on the old approval (B3).
+            if _resume_reasons_satisfied(risk.reasons, resume_approval):
+                approval_record = ApprovalGate(config).auto_approve(
+                    intent, risk, reason="resumed_from_operator_approval",
+                )
         if approval_record is None:
             try:
                 ApprovalGate(config).require(
                     intent, risk, market_snapshot=snapshot, plan=plan,
+                    prior_approved_risk_reasons=_prior_approved_reasons(
+                        resume_approval if resume else None,
+                    ),
                 )
             except ApprovalPending as p:
                 return {
@@ -692,9 +750,19 @@ def submit_trade_plan(
         }
     snap = fresh_snapshot(config, plan.account_id, profile=profile)
     store = CapitalReservationStore(paths)
+    # R2B7: sweep TTL-expired reservations up front so budget blocked by
+    # a crashed executor actually frees when the TTL passes, instead of
+    # only advancing as a side effect of active_for_account reads.
+    try:
+        store.expire_due()
+    except Exception:
+        log.exception("reservation expire_due sweep failed")
     checker = BudgetChecker(profile=profile, snapshot=snap, store=store)
     mark_price = (snapshot or {}).get("price") or plan.entry.limit_price
-    side = plan.buy_or_sell if plan.action != "attach_protection" else "buy"
+    # R3T5: ``attach_protection`` plans are intercepted above, so every
+    # plan reaching this line is directional and ``buy_or_sell`` is
+    # always defined.
+    side = plan.buy_or_sell
     risk_reducing = plan.action in ("close_position", "reduce_position")
     decision = checker.evaluate(
         plan_strategy_id=plan.strategy_id,
@@ -721,6 +789,68 @@ def submit_trade_plan(
             "risk_decision": risk.asdict(),
             "budget_decision": decision.asdict(),
         }
+
+    # NAV-derived sizing (pct_nav / risk_to_stop / volatility_target /
+    # target_weight / position-relative methods) reached RiskGate with a
+    # placeholder notional (≈$0) because the real amount only exists once
+    # the BudgetChecker resolves it against the account snapshot. Re-run
+    # every notional-scaled check — single-order cap, canary cap, total
+    # exposure, per-market cap, daily notional, approval threshold —
+    # against the resolved amount so a strategy cannot open full-NAV
+    # positions while every size gate saw nothing (C1). Risk-reducing
+    # plans stay exempt, matching the original gate's carve-out.
+    if plan.action not in ("close_position", "reduce_position"):
+        resolved_risk = RiskGate(config).evaluate_resolved_notional(
+            intent,
+            notional_usd=float(
+                getattr(decision.candidate, "notional_usd", 0.0) or 0.0
+            ),
+            mark_price=float(mark_price) if mark_price else None,
+        )
+        if resolved_risk.decision == "reject":
+            return {
+                "status": "rejected",
+                "session_id": session_id,
+                "plan_id": plan.plan_id,
+                "intent": redact_dict(intent.asdict()),
+                "risk_decision": resolved_risk.asdict(),
+                "budget_decision": decision.asdict(),
+            }
+        if resolved_risk.decision == "escalate":
+            # Same approval contract as the pre-budget escalation: policy
+            # auto-approval, then resume-reasons matching, then a fresh
+            # operator card. Nothing has been reserved yet, so a pending
+            # card leaves the account untouched.
+            approval_record = _maybe_auto_approve_strategy_order(
+                config, intent, resolved_risk,
+            )
+            if (
+                approval_record is None
+                and resume
+                and _resume_reasons_satisfied(resolved_risk.reasons, resume_approval)
+            ):
+                approval_record = ApprovalGate(config).auto_approve(
+                    intent, resolved_risk,
+                    reason="resumed_from_operator_approval",
+                )
+            if approval_record is None:
+                try:
+                    ApprovalGate(config).require(
+                        intent, resolved_risk, market_snapshot=snapshot, plan=plan,
+                        prior_approved_risk_reasons=_prior_approved_reasons(
+                            resume_approval if resume else None,
+                        ),
+                    )
+                except ApprovalPending as p:
+                    return {
+                        "status": "pending_approval",
+                        "session_id": session_id,
+                        "plan_id": plan.plan_id,
+                        "approval_id": p.approval_id,
+                        "intent": redact_dict(intent.asdict()),
+                        "risk_decision": resolved_risk.asdict(),
+                        "budget_decision": decision.asdict(),
+                    }
 
     candidate = decision.candidate
     candidate.meta.update({
@@ -791,6 +921,16 @@ def submit_trade_plan(
             "order_ids": run.order_ids,
         },
     }
+    # The receipt is an observed ledger record, never inferred from requested size.
+    from contextlib import closing
+    from .order_tracker import OrderTracker
+    with closing(OrderTracker(paths)) as tracker:
+        orders = [redact_dict(order.asdict()) for order_id in run.order_ids
+                  if (order := tracker.get(order_id)) is not None]
+    response["orders"] = orders
+    if len(orders) == 1:
+        response["order_id"] = orders[0]["order_id"]
+        response["order"] = orders[0]
     # Surface the trade-notification summary the executor's OrderTracker
     # broadcast (it owns the canonical fill notification path so we never
     # double-send). We read the most recent ``trade.notification`` journal
@@ -800,6 +940,92 @@ def submit_trade_plan(
     if approval_record is not None:
         response["approval"] = _approval_summary(approval_record)
     return response
+
+
+def _attach_protection_for_plan(config: Config, plan: TradePlan) -> dict[str, Any]:
+    """Route an ``attach_protection`` plan to the protection path (R3T5).
+
+    Such plans used to flow into the MarketOrderExecutor as a real BUY
+    market order. Instead, the rule carried by the plan is persisted
+    against the strategy's open position — mirroring the fill path's
+    ``_maybe_attach_protection`` (ProtectionStore upsert + a durable
+    position-protection executor) — and a truthful non-order envelope
+    is returned. Raises :class:`IntentValidationError` when there is no
+    open position to protect or the plan carries no rule; callers
+    wanting an arbitrary position should use
+    ``TradingAPI.attach_protection`` with an explicit ``position_id``.
+    """
+    from .protection_store import ProtectionStore
+
+    paths = config.paths
+    position = PositionBook(paths).get_open(
+        account_id=plan.account_id,
+        strategy_id=plan.strategy_id,
+        market=plan.market,
+    )
+    if position is None:
+        raise IntentValidationError(
+            "attach_protection requires an open position: strategy "
+            f"{plan.strategy_id!r} has no share of an open position on "
+            f"{plan.market!r} (account {plan.account_id!r}) — open it "
+            "first, or call TradingAPI.attach_protection with an "
+            "explicit position_id"
+        )
+    src = plan.protection
+    if src is None:
+        raise IntentValidationError(
+            "attach_protection plan carries no protection rule — declare "
+            "stop_loss / take_profit / trailing_stop / partial_exits / "
+            "time_limit_sec on plan.protection"
+        )
+    rule = ProtectionRule(
+        position_id=position.position_id,
+        strategy_id=plan.strategy_id,
+        account_id=plan.account_id,
+        market=plan.market,
+        side=position.side,
+        mode=src.mode,
+        stop_loss=src.stop_loss,
+        take_profit=src.take_profit,
+        time_limit_sec=src.time_limit_sec,
+        trailing_stop=src.trailing_stop,
+        partial_exits=list(src.partial_exits or []),
+        trigger_source=src.trigger_source,
+        status="armed",
+        notes=src.notes or "attached_via_plan",
+    )
+    ProtectionStore(paths).upsert(rule)
+    PositionBook(paths).attach_protection(position.position_id, rule.protection_id)
+    try:
+        orch = ExecutorOrchestrator(config)
+        orch.create_position_protection(rule=rule, position_id=position.position_id)
+        orch.close()
+    except Exception:
+        # The rule is already persisted and armed — a missing executor
+        # row must not fail the attachment; the orchestrator's resume
+        # path can recreate it from the rule.
+        log.exception(
+            "could not persist protection executor for position %s",
+            position.position_id,
+        )
+    jsonl.append(paths.journal("trading"), {
+        "kind": "protection.attached",
+        "ts": now_iso(),
+        "strategy_id": plan.strategy_id,
+        "account_id": plan.account_id,
+        "plan_id": plan.plan_id,
+        "intent_id": plan.intent_id,
+        "position_id": position.position_id,
+        "protection_id": rule.protection_id,
+        "mode": rule.mode,
+    })
+    return {
+        "status": "protection_attached",
+        "plan_id": plan.plan_id,
+        "protection_id": rule.protection_id,
+        "position_id": position.position_id,
+        "mode": rule.mode,
+    }
 
 
 def _resolve_position_sized_plan(paths: Any, plan: TradePlan) -> TradePlan:

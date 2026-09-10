@@ -30,6 +30,14 @@ triggers, and strategy configs, so every strategy comes back sharper than the la
 
 ## Latest updates
 
+- **Mainstream quant framework compatibility** — strategies written for
+  Freqtrade (`IStrategy`) and VNpy (`CtaTemplate`) now run on Nerya's own
+  runtime: `nerya strategy import-external` (or the agent's
+  `strategy_import_external` tool) wraps uploaded source in a regular
+  strategy package, with dependency-free framework shims, freqtrade-style
+  ROI / stoploss / exit-signal execution, vnpy bar replay with an
+  order→intent bridge, and full backtest replay. Every order still goes
+  through Risk Gate. See `docs/strategy-framework-compat.md`.
 - **Git and WebDAV workspace sync** — push or pull a Nerya workspace from the
   dashboard or workspace API while keeping runtime state local and explicit.
 - **Unified durable memory** — session memory, reflection writes, compaction,

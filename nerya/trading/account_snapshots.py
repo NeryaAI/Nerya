@@ -694,7 +694,9 @@ def _wallet_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot
         )
         if provider is None:
             raise RuntimeError(
-                f"wallet binding {wallet_id!r} did not resolve"
+                f"wallet binding {wallet_id!r} did not resolve "
+                f"(source={source!r}; 'unmatched' means the account points "
+                "at a binding that no longer exists)"
             )
         readiness = provider.readiness()
         if not getattr(readiness, "ready", True):

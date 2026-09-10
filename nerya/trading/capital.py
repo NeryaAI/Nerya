@@ -193,11 +193,38 @@ class CapitalReservationStore:
             (new_state, time.time(), reservation_id),
         )
 
-    def consume(self, reservation_id: str) -> None:
-        self._set_state(reservation_id, "consumed")
+    def _transition_if_active(self, reservation_id: str, new_state: ReservationState) -> bool:
+        """Move an *active* reservation to ``new_state`` — atomically.
 
-    def release(self, reservation_id: str) -> None:
-        self._set_state(reservation_id, "released")
+        R2B6: consume/release used to be unconditional writes, so a
+        cancel-raced-with-fill (or a late fill after lost→release) could
+        flip an already-consumed reservation back (double-spend window)
+        or release capital twice. The guard lives in the single UPDATE's
+        WHERE clause so two racing callers can't both "win": only a row
+        still in an active state (``proposed`` / ``reserved``)
+        transitions; everything else is a no-op returning ``False``.
+        """
+        con = self._con_lazy()
+        cur = con.execute(
+            """
+            UPDATE capital_reservations
+               SET state = ?, updated_at = ?
+             WHERE reservation_id = ?
+               AND state IN ('proposed', 'reserved')
+            """,
+            (new_state, time.time(), reservation_id),
+        )
+        return int(cur.rowcount or 0) > 0
+
+    def consume(self, reservation_id: str) -> bool:
+        """Consume an active reservation on fill. No-op (False) when the
+        reservation already reached a terminal state."""
+        return self._transition_if_active(reservation_id, "consumed")
+
+    def release(self, reservation_id: str) -> bool:
+        """Release an active reservation. No-op (False) when the
+        reservation was already consumed / released / expired."""
+        return self._transition_if_active(reservation_id, "released")
 
     def reject(self, reservation_id: str) -> None:
         self._set_state(reservation_id, "rejected")
@@ -443,12 +470,17 @@ class BudgetChecker:
             leverage = 1.0
         estimated_margin = notional / float(leverage)
 
-        # 6. Cash check against snapshot - blocked.
+        # 6. Cash check against snapshot - blocked. Applies to BOTH open
+        # sides: a short consumes margin exactly like a long (linear
+        # perps), so an oversized short must be resized/rejected here
+        # instead of failing late at the venue after approval. Reducing
+        # frees margin rather than consuming it, so reduce-only stays
+        # exempt.
         free_usd = free_usd_for_account(self.snapshot, self.profile.base_currency)
         blocked = self.store.total_blocked_usd(self.profile.id)
         available = max(0.0, free_usd - blocked)
         required = estimated_margin + estimated_fee
-        if side == "buy" and not reduce_only and required > available:
+        if not reduce_only and required > available:
             # Try to resize to fit.
             new_notional = max(0.0, (available - estimated_fee) * leverage)
             if new_notional > 0 and (max_order <= 0 or new_notional <= max_order):

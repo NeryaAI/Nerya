@@ -51,6 +51,7 @@ class ApprovalGate:
         plan: Any = None,
         created_at: float | None = None,
         expires_at: float | None = None,
+        prior_approved_risk_reasons: list[str] | None = None,
     ) -> dict[str, Any]:
         meta = dict(intent.meta or {})
         try:
@@ -78,7 +79,9 @@ class ApprovalGate:
             "stop_price": intent.stop_price,
             "source": intent.source,
             "execution_mode": execution_mode,
-            "risk_reasons": decision.reasons,
+            "risk_reasons": self._merged_risk_reasons(
+                decision, prior_approved_risk_reasons,
+            ),
             "notional_usd": decision.estimated_notional_usd,
             "intent": intent.asdict(),
             "risk": decision.asdict(),
@@ -112,6 +115,29 @@ class ApprovalGate:
                 pass
         return record
 
+    @staticmethod
+    def _merged_risk_reasons(
+        decision: RiskDecision,
+        prior_approved_risk_reasons: list[str] | None,
+    ) -> list[str]:
+        """Current decision reasons + reasons already approved upstream.
+
+        R2B2a: an approval chain can span several cards (pre-budget
+        canary escalation, then a post-budget threshold escalation).
+        The record of a later card must carry the earlier approved
+        reasons too, so when THAT card is approved and resumed, the
+        kernel sees the whole union of operator-approved reasons and the
+        chain converges instead of ping-ponging between cards.
+        """
+        merged = [str(r) for r in (decision.reasons or [])]
+        seen = set(merged)
+        for reason in (prior_approved_risk_reasons or []):
+            text = str(reason)
+            if text and text not in seen:
+                seen.add(text)
+                merged.append(text)
+        return merged
+
     def require(
         self,
         intent: TradeIntent,
@@ -119,6 +145,7 @@ class ApprovalGate:
         *,
         market_snapshot: dict[str, Any] | None = None,
         plan: Any = None,
+        prior_approved_risk_reasons: list[str] | None = None,
     ) -> ApprovalRecord:
         expires_s = float(self.config.get("approvals.expire_seconds", 600))
         aid = approval_id()
@@ -133,6 +160,7 @@ class ApprovalGate:
             plan=plan,
             created_at=created_at,
             expires_at=expires_at,
+            prior_approved_risk_reasons=prior_approved_risk_reasons,
         )
         # Store the rich, redaction-safe approval record in SQLite too. The
         # JSONL queue drives the UI; the DB is the crash-recovery source used
@@ -214,13 +242,36 @@ class ApprovalGate:
         jsonl.append(self.config.paths.approvals_rejected,
                      {"approval_id": aid, "state": "rejected", "reason": reason})
 
+    def mark_expired(self, aid: str, *, ts: str | None = None) -> None:
+        """Move an approval to a terminal ``expired`` state (R2B10).
+
+        The old path reused ``reject(aid, "expired")``, which left the DB
+        state showing ``rejected`` — operators saw approvals they never
+        declined "rejected" in the dashboard. This writes the honest
+        vocabulary: DB state ``expired``, an ``approvals_expired``-style
+        journal row under the trading journal, and no rejected-card
+        residue. Best effort like the rest of the gate's bookkeeping.
+        """
+        repo = ApprovalRepository(self._con_lazy())
+        repo.set_state(aid, "expired")
+        try:
+            jsonl.append(self.config.paths.journal("trading"), {
+                "kind": "approval.expired",
+                "ts": ts or now_iso(),
+                "approval_id": aid,
+                "state": "expired",
+            })
+        except Exception:
+            pass
+
     def list_pending(self) -> list[dict[str, Any]]:
         repo = ApprovalRepository(self._con_lazy())
         now = time.time()
         out = []
         for row in repo.list_pending():
             if row["expires_at"] <= now:
-                self.reject(row["id"], "expired")
+                # R2B10: expiry is its own terminal state, not a reject.
+                self.mark_expired(row["id"])
                 continue
             out.append(row)
         return out

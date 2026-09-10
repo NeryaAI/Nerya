@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 
-import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ActionRecord,
   GatewayEvent,
@@ -486,7 +486,7 @@ function ToolBlock({
     <span className="flex items-center gap-1">
       {ok ? <Tag tone="ok">ok</Tag> : <Tag tone="err">{t.error_kind || "error"}</Tag>}
       {typeof t.elapsed_ms === "number" ? (
-        <Tag>{t.elapsed_ms}ms</Tag>
+        <Tag>{formatDuration(t.elapsed_ms)}</Tag>
       ) : null}
     </span>
   );
@@ -549,7 +549,7 @@ function EventBlock({ event, index }: { event: GatewayEvent; index: number }) {
         <Tag tone="brand">{`${reasoningTokens} thought tok`}</Tag>
       ) : null}
       {typeof event.wall_ms === "number" ? (
-        <Tag>{event.wall_ms}ms</Tag>
+        <Tag>{formatDuration(event.wall_ms)}</Tag>
       ) : null}
     </span>
   );
@@ -1133,9 +1133,23 @@ function traceTone(status: string): "neutral" | "ok" | "warn" | "err" | "brand" 
   return "brand";
 }
 
+// Humanized millisecond durations for mono meta tags: ``720`` → ``720ms``,
+// ``18432`` → ``18.4s``, ``120000`` → ``2m 00s``. Pure number formatting,
+// no i18n involved.
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return `${ms}ms`;
+  if (ms < 1_000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
 function compactNumber(value: unknown, suffix = ""): ReactNode {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   if (suffix === "usd") return <Tag>{`$${value.toFixed(value < 1 ? 4 : 2)}`}</Tag>;
+  if (suffix === "ms") return <Tag>{formatDuration(value)}</Tag>;
   return <Tag>{`${Math.round(value)}${suffix}`}</Tag>;
 }
 
@@ -1150,66 +1164,71 @@ type AgentAccent = {
   text: string;
 };
 
+// Sub-agent accents are drawn from the site palette only (brand violet /
+// fluid cyan / ok mint / warn amber / danger red / neutral ink) instead of
+// a raw 6-hue Tailwind palette — raw hues have no light-mode mapping and
+// pushed the chat surface past the "violet primary + fluid + 3 state
+// colors" token budget.
 const AGENT_ACCENTS: AgentAccent[] = [
   {
-    border: "border-cyan-400/35",
-    bg: "bg-cyan-400/[0.055]",
-    softBg: "bg-cyan-400/[0.08]",
+    border: "border-brand-400/35",
+    bg: "bg-brand-400/[0.055]",
+    softBg: "bg-brand-400/[0.08]",
+    borderColor: "rgba(139, 92, 246, 0.48)",
+    ring: "ring-brand-400/25",
+    dot: "bg-brand-300",
+    chip: "border-brand-400/40 bg-brand-400/10 text-brand-200",
+    text: "text-brand-200",
+  },
+  {
+    border: "border-fluid-400/35",
+    bg: "bg-fluid-400/[0.055]",
+    softBg: "bg-fluid-400/[0.08]",
     borderColor: "rgba(34, 211, 238, 0.48)",
-    ring: "ring-cyan-400/25",
-    dot: "bg-cyan-300",
-    chip: "border-cyan-400/40 bg-cyan-400/10 text-cyan-200",
-    text: "text-cyan-200",
+    ring: "ring-fluid-400/25",
+    dot: "bg-fluid-300",
+    chip: "border-fluid-400/40 bg-fluid-400/10 text-fluid-300",
+    text: "text-fluid-300",
   },
   {
-    border: "border-emerald-400/35",
-    bg: "bg-emerald-400/[0.055]",
-    softBg: "bg-emerald-400/[0.08]",
-    borderColor: "rgba(52, 211, 153, 0.48)",
-    ring: "ring-emerald-400/25",
-    dot: "bg-emerald-300",
-    chip: "border-emerald-400/40 bg-emerald-400/10 text-emerald-200",
-    text: "text-emerald-200",
+    border: "border-accent-400/35",
+    bg: "bg-accent-400/[0.055]",
+    softBg: "bg-accent-400/[0.08]",
+    borderColor: "rgba(16, 217, 147, 0.48)",
+    ring: "ring-accent-400/25",
+    dot: "bg-accent-300",
+    chip: "border-accent-400/40 bg-accent-400/10 text-accent-300",
+    text: "text-accent-300",
   },
   {
-    border: "border-amber-400/35",
-    bg: "bg-amber-400/[0.055]",
-    softBg: "bg-amber-400/[0.08]",
-    borderColor: "rgba(251, 191, 36, 0.48)",
-    ring: "ring-amber-400/25",
-    dot: "bg-amber-300",
-    chip: "border-amber-400/40 bg-amber-400/10 text-amber-200",
-    text: "text-amber-200",
+    border: "border-warn/35",
+    bg: "bg-warn/[0.055]",
+    softBg: "bg-warn/[0.08]",
+    borderColor: "rgba(245, 165, 36, 0.48)",
+    ring: "ring-warn/25",
+    dot: "bg-warn",
+    chip: "border-warn/40 bg-warn/10 text-warn",
+    text: "text-warn",
   },
   {
-    border: "border-fuchsia-400/35",
-    bg: "bg-fuchsia-400/[0.055]",
-    softBg: "bg-fuchsia-400/[0.08]",
-    borderColor: "rgba(232, 121, 249, 0.48)",
-    ring: "ring-fuchsia-400/25",
-    dot: "bg-fuchsia-300",
-    chip: "border-fuchsia-400/40 bg-fuchsia-400/10 text-fuchsia-200",
-    text: "text-fuchsia-200",
+    border: "border-danger/35",
+    bg: "bg-danger/[0.055]",
+    softBg: "bg-danger/[0.08]",
+    borderColor: "rgba(239, 69, 96, 0.48)",
+    ring: "ring-danger/25",
+    dot: "bg-danger",
+    chip: "border-danger/40 bg-danger/10 text-danger",
+    text: "text-danger",
   },
   {
-    border: "border-sky-400/35",
-    bg: "bg-sky-400/[0.055]",
-    softBg: "bg-sky-400/[0.08]",
-    borderColor: "rgba(56, 189, 248, 0.48)",
-    ring: "ring-sky-400/25",
-    dot: "bg-sky-300",
-    chip: "border-sky-400/40 bg-sky-400/10 text-sky-200",
-    text: "text-sky-200",
-  },
-  {
-    border: "border-rose-400/35",
-    bg: "bg-rose-400/[0.055]",
-    softBg: "bg-rose-400/[0.08]",
-    borderColor: "rgba(251, 113, 133, 0.48)",
-    ring: "ring-rose-400/25",
-    dot: "bg-rose-300",
-    chip: "border-rose-400/40 bg-rose-400/10 text-rose-200",
-    text: "text-rose-200",
+    border: "border-ink-500/35",
+    bg: "bg-ink-400/[0.055]",
+    softBg: "bg-ink-400/[0.08]",
+    borderColor: "rgba(128, 126, 158, 0.48)",
+    ring: "ring-ink-500/25",
+    dot: "bg-ink-400",
+    chip: "border-ink-500/40 bg-ink-500/10 text-ink-200",
+    text: "text-ink-200",
   },
 ];
 
@@ -1533,6 +1552,48 @@ function AgentStepCard({
     hasReadableValue(step.raw) ||
     hasReadableValue(step.results) ||
     hasReadableValue(step.failures);
+  // Header real estate: only the first few meta tags stay visible; the
+  // rest collapse into a ``metrics`` section so one step card can't stack
+  // a dozen badges in its header.
+  const metaTags: { key: string; node: ReactNode }[] = [];
+  if (typeof step.iteration === "number") {
+    metaTags.push({ key: "iter", node: <Tag>{`iter ${step.iteration}`}</Tag> });
+  }
+  if (status) {
+    metaTags.push({
+      key: "status",
+      node: <Tag tone={traceTone(status)}>{status}</Tag>,
+    });
+  }
+  if (step.provider) {
+    metaTags.push({ key: "provider", node: <Tag>{String(step.provider)}</Tag> });
+  }
+  if (step.model) {
+    metaTags.push({ key: "model", node: <Tag>{String(step.model)}</Tag> });
+  }
+  if (step.skill && stepTitle(step) !== String(step.skill)) {
+    metaTags.push({ key: "skill", node: <Tag>{String(step.skill)}</Tag> });
+  }
+  if (step.action) {
+    metaTags.push({ key: "action", node: <Tag>{String(step.action)}</Tag> });
+  }
+  if (step.task_id) {
+    metaTags.push({ key: "task_id", node: <Tag>{String(step.task_id)}</Tag> });
+  }
+  if (step.prompt_chars) {
+    metaTags.push({
+      key: "prompt_chars",
+      node: <Tag>{`${String(step.prompt_chars)} chars`}</Tag>,
+    });
+  }
+  const tokensTag = compactNumber(step.tokens);
+  if (tokensTag) metaTags.push({ key: "tokens", node: tokensTag });
+  const usdTag = compactNumber(step.usd, "usd");
+  if (usdTag) metaTags.push({ key: "usd", node: usdTag });
+  const wallMsTag = compactNumber(step.wall_ms, "ms");
+  if (wallMsTag) metaTags.push({ key: "wall_ms", node: wallMsTag });
+  const headerTags = metaTags.slice(0, 3);
+  const overflowTags = metaTags.slice(3);
   return (
     <div
       className={`rounded-md border ${accent.border} ${
@@ -1553,22 +1614,20 @@ function AgentStepCard({
                 <span>{t("current")}</span>
               </span>
             ) : null}
-            {typeof step.iteration === "number" ? (
-              <Tag>{`iter ${step.iteration}`}</Tag>
-            ) : null}
-            {status ? <Tag tone={traceTone(status)}>{status}</Tag> : null}
-            {step.provider ? <Tag>{String(step.provider)}</Tag> : null}
-            {step.model ? <Tag>{String(step.model)}</Tag> : null}
-            {step.skill && stepTitle(step) !== String(step.skill) ? (
-              <Tag>{String(step.skill)}</Tag>
-            ) : null}
-            {step.action ? <Tag>{String(step.action)}</Tag> : null}
-            {step.task_id ? <Tag>{String(step.task_id)}</Tag> : null}
-            {step.prompt_chars ? <Tag>{`${String(step.prompt_chars)} chars`}</Tag> : null}
-            {compactNumber(step.tokens)}
-            {compactNumber(step.usd, "usd")}
-            {compactNumber(step.wall_ms, "ms")}
+            {headerTags.map((tag) => (
+              <Fragment key={tag.key}>{tag.node}</Fragment>
+            ))}
+            {overflowTags.length ? <Tag>{`+${overflowTags.length}`}</Tag> : null}
           </div>
+          {overflowTags.length ? (
+            <Collapsible title={t("metrics")} tone="neutral" defaultOpen={false}>
+              <div className="flex items-center gap-1 flex-wrap">
+                {metaTags.map((tag) => (
+                  <Fragment key={tag.key}>{tag.node}</Fragment>
+                ))}
+              </div>
+            </Collapsible>
+          ) : null}
           {parsedKeys.length ? (
             <div className="flex items-center gap-1 flex-wrap">
               {parsedKeys.map((key) => (
@@ -2462,7 +2521,7 @@ function NativeToolResultBlock({
         <Tag tone="err">{(block.error_kind as string | undefined) || "error"}</Tag>
       )}
       {typeof block.elapsed_ms === "number" ? (
-        <Tag>{block.elapsed_ms}ms</Tag>
+        <Tag>{formatDuration(block.elapsed_ms)}</Tag>
       ) : null}
     </span>
   );
@@ -3137,7 +3196,7 @@ function memberTone(
 
 function memberStepDotClass(step: MemberStep, liveLast: boolean): string {
   if (step.status === "error") return "bg-danger";
-  if (step.status === "retry") return "bg-amber-300";
+  if (step.status === "retry") return "bg-warn";
   if (liveLast) return "bg-fluid-400 animate-pulse";
   return "bg-emerald-300/80";
 }
@@ -3767,7 +3826,6 @@ function ProcessGroupCard({
 export function NativeBlocksTrack({
   envelopes,
   live = false,
-  streamText = false,
   label = "",
   pendingApprovals,
   onApprovalAction,
@@ -3778,7 +3836,6 @@ export function NativeBlocksTrack({
 }: {
   envelopes: NativeBlockEnvelope[];
   live?: boolean;
-  streamText?: boolean;
   label?: string;
   pendingApprovals?: Map<string, ApprovalCard>;
   onApprovalAction?: (callbackData: string) => void;
@@ -3859,7 +3916,7 @@ export function NativeBlocksTrack({
     const kind = (block.kind || env.kind || "").toString();
     const auto = i === pendingIdx && live;
     if (kind === "text")
-      return <NativeTextBlock key={i} block={block} stream={live || streamText} />;
+      return <NativeTextBlock key={i} block={block} stream={live} />;
     if (kind === "thinking")
       return (
         <NativeThinkingBlock
@@ -3867,7 +3924,7 @@ export function NativeBlocksTrack({
           block={block}
           defaultOpen={auto}
           autoOpen={live ? auto : undefined}
-          stream={live || streamText}
+          stream={live}
         />
       );
     if (kind === "tool_use") {
@@ -3918,7 +3975,7 @@ export function NativeBlocksTrack({
           block={block}
           defaultOpen={auto}
           suppressProposalIds={suppressProposalIds}
-          stream={live || streamText}
+          stream={live}
         />
       );
     if (kind === "attachment")
@@ -4040,7 +4097,7 @@ export function NativeBlocksTrack({
     }
     // Backend batch bookkeeping — never had a renderer, only noise.
     if (kind === "tool_batch_summary") return;
-    if (!live && !streamText && isRoutine(env)) {
+    if (!live && isRoutine(env)) {
       run.push({ env, i });
       return;
     }
@@ -4096,7 +4153,6 @@ export function TurnBlocks({
   resolvingApprovalIds,
   suppressTopProposalHoist = false,
   suppressAgentResultCallIds,
-  streamText = false,
 }: {
   turn: TurnPayload;
   pendingApprovals?: Map<string, ApprovalCard>;
@@ -4110,9 +4166,6 @@ export function TurnBlocks({
   suppressTopProposalHoist?: boolean;
   // Team/subagent tool-call ids hoisted into dedicated speaker bubbles.
   suppressAgentResultCallIds?: Set<string>;
-  // Animate text-like committed blocks for a just-settled turn without
-  // changing the structural live trace behavior.
-  streamText?: boolean;
 }) {
   const t = useTranslations("chat");
   const actions = turn.actions || [];
@@ -4201,7 +4254,6 @@ export function TurnBlocks({
       {blocks.length ? (
         <NativeBlocksTrack
           envelopes={blocks}
-          streamText={streamText}
           pendingApprovals={pendingApprovals}
           onApprovalAction={onApprovalAction}
           resolvingApprovalIds={resolvingApprovalIds}
