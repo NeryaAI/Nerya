@@ -14,6 +14,7 @@ import math
 import os
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -127,11 +128,8 @@ class StreamingResponse:
             handler.send_header("X-Accel-Buffering", "no")
             for key, value in self.extra_headers.items():
                 handler.send_header(key, value)
-            handler.send_header("Access-Control-Allow-Origin", "*")
-            handler.send_header(
-                "Access-Control-Allow-Headers",
-                "Content-Type, Authorization, X-Nerya-Token",
-            )
+            for key, value in _cors_headers(handler):
+                handler.send_header(key, value)
             handler.end_headers()
             try:
                 handler.wfile.flush()
@@ -153,6 +151,38 @@ class StreamingResponse:
         except Exception:  # pragma: no cover - background guard
             log.exception("streaming response generator failed")
             return
+
+
+def _cors_allow_origin(origin: str) -> str | None:
+    """Return the Origin to echo, or None when it must not be echoed.
+
+    The dashboard talks to this API same-origin through its own /api/proxy,
+    so CORS only ever needs to serve local dev tools on loopback. In local
+    auth mode a loopback-origin browser request is auto-authenticated, so
+    echoing ``*`` (or an arbitrary origin) would let any webpage the
+    operator visits read wallet/portfolio data cross-origin.
+    """
+    raw = (origin or "").strip()
+    if not raw:
+        return None
+    try:
+        hostname = (urllib.parse.urlsplit(raw).hostname or "").strip().lower()
+    except ValueError:
+        return None
+    if hostname in {"127.0.0.1", "::1", "localhost"} or hostname.startswith("127."):
+        return raw
+    return None
+
+
+def _cors_headers(handler: BaseHTTPRequestHandler) -> list[tuple[str, str]]:
+    origin = _cors_allow_origin(handler.headers.get("Origin") or "")
+    headers = [("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+               ("Access-Control-Allow-Headers",
+                "Content-Type, Authorization, X-Nerya-Token")]
+    if origin:
+        headers.append(("Access-Control-Allow-Origin", origin))
+        headers.append(("Vary", "Origin"))
+    return headers
 
 
 class BinaryResponse:
@@ -183,11 +213,8 @@ class BinaryResponse:
         handler.send_header("Cache-Control", "no-store")
         for key, value in self.extra_headers.items():
             handler.send_header(key, value)
-        handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.send_header(
-            "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, X-Nerya-Token",
-        )
+        for key, value in _cors_headers(handler):
+            handler.send_header(key, value)
         handler.end_headers()
         handler.wfile.write(self.body)
 
@@ -530,13 +557,9 @@ def build_server(
     class Handler(BaseHTTPRequestHandler):
         def _cors(self) -> None:
             # The dashboard normally goes through its own /api/proxy so this
-            # is only useful for local dev tools / curl.
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header(
-                "Access-Control-Allow-Headers",
-                "Content-Type, Authorization, X-Nerya-Token",
-            )
+            # is only useful for local dev tools / curl (loopback origins).
+            for key, value in _cors_headers(self):
+                self.send_header(key, value)
 
         def _write(self, status: int, body: dict[str, Any]) -> None:
             data = json.dumps(_json_safe(body), default=str, allow_nan=False).encode("utf-8")

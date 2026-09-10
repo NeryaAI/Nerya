@@ -1813,18 +1813,6 @@ class MockMessagesBackend:
 # ---------------------------------------------------------------------------
 
 
-def descriptors_to_provider_tools(descriptors: Iterable[Any]) -> list[dict[str, Any]]:
-    """Render ToolRegistry descriptors as Anthropic-shaped tool specs."""
-
-    out: list[dict[str, Any]] = []
-    for d in descriptors:
-        if hasattr(d, "to_provider_tool"):
-            out.append(d.to_provider_tool())
-        elif isinstance(d, dict):
-            out.append(d)
-    return out
-
-
 # ``base64`` is imported above so we can extend backends to support image
 # input later (Gemini ``inlineData``, OpenAI vision, Bedrock vision). It is
 # referenced from the public surface to keep linters happy on builds where
@@ -1842,6 +1830,5 @@ __all__ = [
     "MockMessagesBackend",
     "OllamaMessagesBackend",
     "OpenAIMessagesBackend",
-    "descriptors_to_provider_tools",
     "normalise_provider_native_web_search",
 ]

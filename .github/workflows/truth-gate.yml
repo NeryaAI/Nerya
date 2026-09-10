@@ -44,7 +44,7 @@ jobs:
       - name: Check agent runtime imports and names
         run: >-
           ruff check --select F
-          nerya/agent nerya/api nerya/subagents nerya/teams nerya/tools
+          nerya/ tests/
 
       - name: Build and verify distributions
         run: |
@@ -53,6 +53,30 @@ jobs:
 
       - name: Run + truth gates (quick)
         run: bash scripts/run_truth_gate.sh --quick
+
+  dashboard:
+    name: dashboard typecheck + lint + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install workspace deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck --workspace @nerya/dashboard
+
+      - name: Lint
+        run: npm run lint --workspace @nerya/dashboard
+
+      - name: Build
+        run: npm run build --workspace @nerya/dashboard
 
   regression:
     name: full regression

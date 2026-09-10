@@ -149,7 +149,6 @@ def test_phase4_prompt_guard_and_profile_capture(tmp_path):
     # Profile capture proposes a language fact after 3 EN-only turns
     for _ in range(3):
         observe_turn(client, user_text="Please continue in English clearly.")
-    facts = client  # placeholder for type hint; we re-import to keep lint happy
     from nerya.agent import operator_profile
     style = operator_profile.list_facts(client.config.paths, facet="style")
     assert any(

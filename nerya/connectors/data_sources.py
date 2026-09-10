@@ -365,7 +365,6 @@ class PolygonConnector(_ReadOnlyMixin, CEXConnectorBase):
         symbol = _strip_prefix(market).upper()
         snapshot = client.get_snapshot_ticker(market_type="stocks", ticker=symbol)
         last = float(getattr(snapshot.last_trade, "p", 0.0) or 0.0)
-        bid = float(getattr(snapshot, "min", None).c if hasattr(snapshot, "min") and snapshot.min else last)
         return Ticker(
             market=market, bid=last, ask=last, mid=last, last=last,
             spread_bps=0.0, ts_ms=int(time.time() * 1000), venue=self.venue,

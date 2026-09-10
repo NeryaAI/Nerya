@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.paths import WorkspacePaths
+from .promotion import strategy_id_from_proposal
 
 
 _NUMERIC_METRICS = (
@@ -87,16 +88,9 @@ def proposal_backtest_comparison(
 
 
 def _proposal_strategy_id(proposal_path: Path, proposal: dict[str, Any]) -> str | None:
-    metadata = proposal.get("metadata") if isinstance(proposal.get("metadata"), dict) else {}
-    direct = proposal.get("strategy_id") or metadata.get("strategy_id")
+    direct = strategy_id_from_proposal(proposal)
     if direct:
-        return str(direct)
-    target = str(proposal.get("target") or "")
-    parts = target.replace("\\", "/").split("/")
-    if "strategies" in parts:
-        idx = parts.index("strategies")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
+        return direct
     after_strategies = proposal_path / "after" / "strategies"
     if after_strategies.exists():
         candidates = sorted(p.name for p in after_strategies.iterdir() if p.is_dir())

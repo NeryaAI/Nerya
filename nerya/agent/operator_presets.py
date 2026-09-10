@@ -54,6 +54,8 @@ import fnmatch
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
+from ..core.normalize import norm_key
+
 __all__ = [
     "OperatorPreset",
     "PresetDecision",
@@ -233,7 +235,7 @@ def get_preset(preset_id: Optional[str]) -> OperatorPreset:
 
     if not preset_id:
         return _PRESETS[DEFAULT_PRESET_ID]
-    pid = preset_id.strip().lower().replace("-", "_")
+    pid = norm_key(preset_id)
     if pid in _PRESETS:
         return _PRESETS[pid]
     return _PRESETS[DEFAULT_PRESET_ID]

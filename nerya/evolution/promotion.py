@@ -135,7 +135,7 @@ def build_mutation_plan(paths: WorkspacePaths, prop) -> dict[str, Any]:
     after_files = _after_files(after_dir)
     seen_after: set[str] = set()
     for src in after_files:
-        rel_posix = _normalize_rel_path(src.relative_to(after_dir))
+        rel_posix = normalize_rel_path(src.relative_to(after_dir))
         if rel_posix in seen_after:
             continue
         seen_after.add(rel_posix)
@@ -155,7 +155,7 @@ def build_mutation_plan(paths: WorkspacePaths, prop) -> dict[str, Any]:
     deleted_declarations = _declared_deleted_files(prop)
     seen_deleted: set[str] = set()
     for raw in deleted_declarations:
-        rel_posix = _normalize_rel_path(raw)
+        rel_posix = normalize_rel_path(raw)
         if rel_posix in seen_deleted:
             continue
         seen_deleted.add(rel_posix)
@@ -501,7 +501,7 @@ def proposal_action_gates(paths: WorkspacePaths, proposal_or_id: Any) -> dict[st
                 src.relative_to(prop.path / "after").as_posix()
                 for src in after_files[:20]
             ],
-            "deleted_paths": [_normalize_rel_path(path) for path in deleted_files[:20]],
+            "deleted_paths": [normalize_rel_path(path) for path in deleted_files[:20]],
             "advisory_only": bool(metadata.get("advisory_only")),
         },
         "evidence": {
@@ -555,15 +555,42 @@ def _declared_deleted_files(prop) -> list[str]:
     return proposal_deleted_paths(prop.path)
 
 
-def _normalize_rel_path(value: Any) -> str:
+def normalize_rel_path(value: Any, *, kind: str = "proposal") -> str:
     text = str(value or "").strip().replace("\\", "/")
     path = PurePosixPath(text)
     if not text or path.is_absolute() or any(part == ".." for part in path.parts):
-        raise ProtectedScopeViolation(f"invalid proposal path: {value!r}")
+        raise ProtectedScopeViolation(f"invalid {kind} path: {value!r}")
     normalized = path.as_posix()
     if normalized in {"", "."}:
-        raise ProtectedScopeViolation(f"invalid proposal path: {value!r}")
+        raise ProtectedScopeViolation(f"invalid {kind} path: {value!r}")
     return normalized
+
+
+def strategy_id_from_proposal(proposal: Any) -> str | None:
+    """Resolve the strategy a proposal targets.
+
+    Order: explicit ``strategy_id`` (top-level dict key / ``Proposal``
+    attribute), then ``metadata["strategy_id"]``, then the
+    ``strategies/<id>/`` segment of the target path.
+    """
+    if isinstance(proposal, dict):
+        direct = proposal.get("strategy_id")
+        metadata = proposal.get("metadata")
+        target = proposal.get("target")
+    else:
+        direct = getattr(proposal, "strategy_id", None)
+        metadata = getattr(proposal, "metadata", None)
+        target = getattr(proposal, "target", None)
+    if not direct and isinstance(metadata, dict):
+        direct = metadata.get("strategy_id")
+    if direct:
+        return str(direct)
+    parts = str(target or "").replace("\\", "/").split("/")
+    if "strategies" in parts:
+        idx = parts.index("strategies")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return None
 
 
 def _validate_mutation_path(rel_posix: str, *, pid: str, action: str) -> None:

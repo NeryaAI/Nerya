@@ -12,9 +12,9 @@ from environment variables or :class:`SecretVault`:
   - ``financial_datasets.keys`` (comma-separated multi-key)
 
 Returned values are wrapped in Nerya's truth envelopes
-(:func:`live_envelope` / :func:`degraded_envelope` / :func:`mock_envelope`)
-so downstream skills know whether they're looking at live, fallback, or
-mock data.
+(:func:`live_envelope` / :func:`degraded_envelope`)
+so downstream skills know whether they're looking at live or
+fallback data.
 
 This module never logs or returns the API key.
 """
@@ -26,13 +26,12 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..connectors.http import HttpTransport, UrllibHttp
 from ..core.truth import (
     degraded_envelope,
     live_envelope,
-    mock_envelope,
 )
 
 
@@ -350,36 +349,6 @@ class EquitiesClient:
 
 
 # ---------------------------------------------------------------------------
-# Mock helpers (used when offline / for tests)
-# ---------------------------------------------------------------------------
-
-
-def mock_income_statements(ticker: str = "AAPL", *, periods: int = 4) -> dict[str, Any]:
-    """Deterministic mock for offline / test runs."""
-    items = [
-        {
-            "ticker": ticker,
-            "report_period": f"2025-12-{31 - i*3:02d}",
-            "fiscal_year": 2025 - i,
-            "revenue": 400_000_000_000 - i * 25_000_000_000,
-            "operating_income": 110_000_000_000 - i * 6_000_000_000,
-            "net_income": 95_000_000_000 - i * 5_000_000_000,
-            "earnings_per_share_diluted": 6.5 - i * 0.4,
-            "gross_margin": 0.46 - i * 0.005,
-            "operating_margin": 0.30 - i * 0.005,
-        }
-        for i in range(periods)
-    ]
-    return {
-        "data": {"income_statements": items},
-        "_envelope": _envelope_to_dict(mock_envelope(
-            "financial_datasets", provider="financialdatasets.ai",
-        )),
-        "source_url": f"{_BASE_URL}/financials/income-statements/?ticker={ticker}",
-    }
-
-
-# ---------------------------------------------------------------------------
 # Internal: URL builder for source_url field (does not perform request)
 # ---------------------------------------------------------------------------
 
@@ -393,5 +362,4 @@ def _join_url(base: str, params: dict[str, Any]) -> str:
 
 __all__ = [
     "EquitiesClient",
-    "mock_income_statements",
 ]

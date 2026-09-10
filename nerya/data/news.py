@@ -10,8 +10,6 @@ from __future__ import annotations
 import html
 import logging
 import re
-from dataclasses import dataclass
-from typing import Any
 
 from ..connectors.http import HttpTransport, UrllibHttp
 from ..core.truth import (

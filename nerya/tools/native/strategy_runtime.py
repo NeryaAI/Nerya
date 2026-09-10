@@ -40,6 +40,7 @@ from typing import Any, Optional
 from ...core import yaml_io
 from ...core.config import Config
 from ...core.errors import NeryaError, TradingError
+from ...core.normalize import norm_key
 from ...evolution.patch_proposal import (
     create_proposal,
     delete_proposal,
@@ -643,7 +644,7 @@ def _manifest_execution_mode(content: str) -> str:
         return ""
     if not isinstance(raw, dict):
         return ""
-    return str(raw.get("execution_mode") or "").strip().lower().replace("-", "_")
+    return norm_key(str(raw.get("execution_mode") or ""))
 
 
 def _auto_bind_default_accounts(

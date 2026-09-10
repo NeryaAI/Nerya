@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import LLMError
+from ..core.normalize import norm_key
 from ..core.truth import resolve_allow_mock
 from .provider_catalog import (
     default_base_url as _catalog_default_base_url,
@@ -69,7 +70,7 @@ _REASONING_EFFORT_WIRE_MAP: dict[str, str] = {
 def _normalise_reasoning_effort(value: Any) -> str:
     if value is None:
         return ""
-    s = str(value).strip().lower().replace("-", "_")
+    s = norm_key(str(value))
     if not s:
         return ""
     return _REASONING_EFFORT_WIRE_MAP.get(s, s)

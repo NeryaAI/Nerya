@@ -20,24 +20,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, asdict, field
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 
 SourceMode = Literal["live", "cached", "paper", "mock", "unavailable", "degraded"]
 
 _TRUTHY = {"1", "true", "yes", "on"}
-
-
-class MockNotAllowed(RuntimeError):
-    """Raised when a runtime path tries to return mock data without opt-in."""
-
-    def __init__(self, what: str, detail: str = "") -> None:
-        msg = f"mock fallback for {what!r} is not allowed in production runtime"
-        if detail:
-            msg += f": {detail}"
-        super().__init__(msg)
-        self.what = what
-        self.detail = detail
 
 
 @dataclass
@@ -113,13 +101,6 @@ def resolve_allow_mock(allow_mock: bool | None = None,
     return False
 
 
-def require_mock(what: str, *, allow_mock: bool | None = None,
-                 config_like: Any | None = None, detail: str = "") -> None:
-    """Raise :class:`MockNotAllowed` when mock fallback is not authorised."""
-    if not resolve_allow_mock(allow_mock, config_like):
-        raise MockNotAllowed(what, detail)
-
-
 def degraded_envelope(source: str, *, error: str = "",
                       venue: str = "", provider: str = "") -> RuntimeEnvelope:
     """Build a ``unavailable/degraded`` envelope for empty results."""
@@ -176,12 +157,10 @@ def tag_list_envelope(items: list[dict[str, Any]],
 
 __all__ = [
     "SourceMode",
-    "MockNotAllowed",
     "RuntimeEnvelope",
     "env_allows_mock",
     "config_allows_mock",
     "resolve_allow_mock",
-    "require_mock",
     "degraded_envelope",
     "mock_envelope",
     "live_envelope",

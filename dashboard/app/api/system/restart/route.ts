@@ -3,29 +3,10 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isLocalRequest } from "../../../../lib/requestLocality";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-function normaliseHost(raw: string | null | undefined): string {
-  const value = String(raw || "").trim().toLowerCase();
-  if (!value) return "";
-  if (value.startsWith("[") && value.includes("]")) return value.slice(1, value.indexOf("]"));
-  if (value === "::1") return value;
-  if (value.indexOf(":") === value.lastIndexOf(":")) return value.split(":")[0];
-  return value.split(":")[0];
-}
-
-function isLoopbackHost(host: string): boolean {
-  return !host || host === "localhost" || host === "::1" || host === "0.0.0.0" || host.startsWith("127.");
-}
-
-function isLocalDashboardRequest(req: NextRequest): boolean {
-  const host = normaliseHost(
-    req.headers.get("x-forwarded-host") || req.headers.get("host") || req.nextUrl.hostname,
-  );
-  return isLoopbackHost(host);
-}
 
 function parsePort(raw: string | null | undefined, fallback: number): number {
   const value = Number(String(raw || "").trim());
@@ -33,7 +14,7 @@ function parsePort(raw: string | null | undefined, fallback: number): number {
 }
 
 export async function POST(req: NextRequest) {
-  if (!isLocalDashboardRequest(req)) {
+  if (!isLocalRequest(req)) {
     return NextResponse.json(
       {
         ok: false,

@@ -18,8 +18,6 @@ No test in this file touches the network.
 from __future__ import annotations
 
 import argparse
-import base64
-import os
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any

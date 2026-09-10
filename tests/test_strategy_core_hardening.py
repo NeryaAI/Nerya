@@ -7,8 +7,6 @@ import sys
 import threading
 from copy import deepcopy
 from datetime import datetime, timezone
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 

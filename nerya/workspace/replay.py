@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 
 from ..core import jsonl
 from ..core.paths import WorkspacePaths

@@ -4,7 +4,7 @@
 
 // Use a function to read the env var so Next.js doesn't inline it at build time.
 function _apiBase(): string {
-  return process.env.NERYA_API || "http://127.0.0.1:18318";
+  return process.env.NERYA_API || "http://127.0.0.1:18317";
 }
 const BASE = _apiBase();
 

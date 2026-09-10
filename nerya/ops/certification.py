@@ -25,7 +25,7 @@ the runbook asks the operator to collect actually exist.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 from ..core.config import Config

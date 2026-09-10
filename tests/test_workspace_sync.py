@@ -180,6 +180,7 @@ def test_webdav_provider_round_trip(monkeypatch, tmp_path):
     (first / "strategies" / "alpha").mkdir(parents=True)
     (first / "strategies" / "alpha" / "strategy.yml").write_text("id: alpha\n", encoding="utf-8")
     first_paths = WorkspacePaths(first)
+    monkeypatch.setenv("NERYA_VAULT_PASSPHRASE", "test-vault-passphrase")
     vault = SecretVault.open(first_paths.vault_enc)
     vault.put(name="dav_user", value="nerya-user", kind="webdav", scope=["workspace_sync"])
     vault.put(name="dav_password", value="nerya-pass", kind="webdav", scope=["workspace_sync"])

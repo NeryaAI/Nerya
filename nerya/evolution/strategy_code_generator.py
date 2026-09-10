@@ -56,6 +56,7 @@ from typing import Any, Iterable, Optional
 
 from ..core import yaml_io
 from ..core.errors import NeryaError
+from ..core.normalize import norm_key
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
 from ..strategies.validator import StrategyValidation, validate_proposal_files
@@ -618,7 +619,7 @@ def _merge_manifest_defaults(content: str, defaults: dict[str, Any]) -> str:
         raw.setdefault(key, value)
 
     default_mode = str(defaults.get("execution_mode") or "").strip().lower()
-    raw_mode = str(raw.get("execution_mode") or "").strip().lower().replace("-", "_")
+    raw_mode = norm_key(str(raw.get("execution_mode") or ""))
     if raw_mode == "agent_task":
         raw["execution_mode"] = "agent"
         raw_mode = "agent"
@@ -1506,7 +1507,7 @@ def _default_cron(strategy_class: str) -> str:
 
 
 def _execution_mode(req: StrategyGenerationRequest) -> str:
-    raw = (req.execution_mode or "").strip().lower().replace("-", "_")
+    raw = norm_key(req.execution_mode or "")
     if raw in {"script", "agent", "agent_team"}:
         return raw
     if req.strategy_class == "agent":

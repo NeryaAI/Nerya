@@ -424,7 +424,7 @@ def test_poller_still_marks_lost_on_definitive_not_found(tmp_path):
 
     not_found_stub = _NotFoundConn()
     for _ in range(4):
-        out = poll_active_live_orders(
+        poll_active_live_orders(
             cfg,
             connector_factory=lambda _aid, _cfg: not_found_stub,
         )

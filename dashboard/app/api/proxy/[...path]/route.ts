@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import http from "node:http";
 import https from "node:https";
+import { isLocalRequest } from "../../../../lib/requestLocality";
 
 // the dashboard proxy must forward authentication
 // material to the Nerya backend so per-actor route scoping
@@ -37,7 +38,6 @@ function _dashboardInternalToken(): string {
   // service restart.
   return process.env.NERYA_DASHBOARD_INTERNAL_TOKEN || "";
 }
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
 const DEFAULT_PROXY_TIMEOUT_MS = 120_000;
 const LONG_PROXY_TIMEOUT_MS = 30 * 60 * 1000;
 const SAFE_RETRY_METHODS = new Set(["GET", "HEAD"]);
@@ -79,29 +79,19 @@ function buildForwardHeaders(req: NextRequest): Headers {
     headers.set("content-type", "application/json");
   }
   headers.set("accept-encoding", "identity");
-  // Hint to the backend who originated the call (handy for audit logs).
-  const reqWithIp = req as NextRequest & { ip?: string };
-  const fwd = isLocalDashboardRequest(req)
-    ? "127.0.0.1"
-    : req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip") || reqWithIp.ip || "";
-  if (fwd) headers.set("X-Forwarded-For", fwd);
+  // Never fabricate the client IP. If the caller arrived through a proxy
+  // chain (cloudflared appends to x-forwarded-for), propagate the chain
+  // unchanged so the backend can evaluate trust from the real edge entry.
+  // A direct local browser sends no x-forwarded-for and we must not invent
+  // one — the backend grants local trust from its loopback socket peer plus
+  // the absence of forwarded headers, never from a claimed value.
+  const fwd = req.headers.get("x-forwarded-for");
+  if (fwd) headers.set("x-forwarded-for", fwd);
+  const realIp = req.headers.get("x-real-ip");
+  if (realIp) headers.set("x-real-ip", realIp);
   headers.set("X-Forwarded-Proto", req.nextUrl.protocol.replace(":", ""));
   headers.set("X-Forwarded-Host", req.nextUrl.host);
   return headers;
-}
-
-function normaliseHost(raw: string): string {
-  const host = (raw || "").trim().toLowerCase();
-  if (!host) return "";
-  if (host.startsWith("[") && host.includes("]")) return host.slice(1, host.indexOf("]"));
-  if (host === "::1") return host;
-  if (host.indexOf(":") === host.lastIndexOf(":")) return host.split(":")[0];
-  return host.split(":")[0];
-}
-
-function isLocalDashboardRequest(req: NextRequest): boolean {
-  const host = normaliseHost(req.headers.get("x-forwarded-host") || req.headers.get("host") || req.nextUrl.hostname);
-  return !host || LOCAL_HOSTS.has(host) || host.startsWith("127.");
 }
 
 function isAnonymousProxyPath(joined: string): boolean {
@@ -325,7 +315,7 @@ async function forward(req: NextRequest, path: string[], method: string) {
   const headers = buildForwardHeaders(req);
   const joined = path.join("/");
   if (
-    !isLocalDashboardRequest(req) &&
+    !isLocalRequest(req) &&
     !isAnonymousProxyPath(joined) &&
     !headers.has("authorization") &&
     !headers.has("x-nerya-token")

@@ -16,7 +16,6 @@ the Python side is in scope for these tests. We check:
 from __future__ import annotations
 
 import io
-import sys
 from copy import deepcopy
 
 import pytest

@@ -235,7 +235,6 @@ def test_r2b1_partial_ack_fill_stays_pollable_then_completes(tmp_path, monkeypat
         "nerya.connectors.ConnectorRegistry", lambda **kw: _FakeRegistry(stub),
     )
 
-    from nerya.trading.executors.market_order import MarketOrderExecutor
     from nerya.trading.executors.orchestrator import ExecutorOrchestrator
 
     orch = ExecutorOrchestrator(cfg)

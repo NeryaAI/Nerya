@@ -29,6 +29,11 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 
 ## 最近更新
 
+- **主流量化框架兼容**：为 Freqtrade（`IStrategy`）和 VNpy（`CtaTemplate`）写的策略
+  现在可以直接跑在 Nerya 自有运行时上：`nerya strategy import-external`（或 Agent 的
+  `strategy_import_external` 工具）把上传的源码包成常规策略包，附带零依赖框架 shim、
+  freqtrade 风格的 ROI / 止损 / 退出信号执行、vnpy bar 回放加 order→intent 桥，
+  以及完整回测重放。每一笔订单仍然要过 Risk Gate。见 `docs/strategy-framework-compat.md`。
 - **Git / WebDAV 工作区同步**：可以从 Dashboard 或工作区 API 推送、拉取 Nerya
   工作区，运行时状态仍然保留在本地，并由操作员明确控制。
 - **统一的持久记忆运行时**：会话记忆、反思写入、上下文压缩、原生工具和 Memory API
@@ -50,6 +55,33 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 `strategy_draft → strategy_validate → strategy_submit_proposal → strategy_backtest`。
 代币、股票、市场分析和日常对话共用同一套循环与错误处理。纸面与实盘严格分离，
 所有实盘意图都 fail-closed 地经过 Risk Gate 和人工 Approval Gate。
+
+---
+
+## 从一句需求到一只会进化的策略
+
+> _「我有 **500 美元** 纸面账户的钱。帮我做 BTC，别亏光。」_
+
+策略队长从这句话开一个 `TeamRun`：市场、链上、新闻、技术面分析师分头收集证据，
+风控批评家挑战计划，执行规划员写出可运行的策略包，组合经理在操作员批准前检查敞口。
+
+`strategy_author` 技能写第一版策略包：触发路由、子 Agent 提示词、K 线源、账户绑定、
+风控限额、会话账本。Nerya 先在纸面跑，直到你打开实盘开关并逐笔批准。
+
+会话收尾后，Nerya 记录决策、复盘成交，通过 `MemoryRuntime` 写入脱敏且带证据的发现。
+进化层可以把这些发现变成候选提案；可执行的改动由你签字或拒绝，已应用的提案都带
+回滚快照和应用后观察。
+
+---
+
+## 策略生命周期
+
+1. 你描述市场、账户、预算和风控限额。
+2. 策略队长分派研究、风控、执行、组合检查。
+3. 各 Agent 把证据写上黑板，决策走邮箱传递。
+4. 执行规划员产出带触发器、提示词、数据源、限额和历史的策略包。
+5. 交易内核把意图提交过 Risk Gate 和 Approval Gate。
+6. 反思写入分域记忆，进化层准备候选包，操作员签字后才晋升。
 
 ---
 
@@ -90,7 +122,7 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 
 <img src="branding/screenshots/dashboard-chat-zh.png" alt="Agent workspace" />
 
-> _「写个监控脚本。新建一个子智能体。每分钟跑一次心跳。给我做一次复盘。」_
+> _「帮我写个 BTC 策略，跑一遍团队评审，先纸面跑起来，再提议下一版。」_
 
 每条消息跑一回合：planner 选路由 → 调工具 → 把产物落盘。每条消息都能单独调：
 
@@ -103,7 +135,7 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 | 工具预算     | 跑到 N 次工具调用就强制结束本回合                              |
 | 回合预算     | 这一回合能花的 LLM token 上限                                  |
 
-工作台自带 4 个起步提示词：写监控脚本、建子智能体、挂心跳、跑复盘。点一下就开跑。
+工作台自带 4 个起步提示词：BTC 短线策略、NVIDIA Agent Team、长周期加密策略、宏观新闻台。点一下就开跑。
 
 ### 自我进化审阅台
 
@@ -142,8 +174,8 @@ Nerya 在你自己的机器上跑一支完整的投研团队。策略队长负�
 - 队长综合：等齐必需角色的报告，解决冲突，输出决策备忘
 - 审批门：方案产出门、任务全完成门、验证门、可选的人工审批门
 
-内置三个模板：`market_analysis_team`（市场分析）、`strategy_design_team`（策略设计）、
-`trade_decision_committee`（交易决策委员会）。要自己加直接丢到 `nerya/teams/templates` 里。
+内置两个模板：`market_analysis_team`（市场分析）、`strategy_design_team`（策略设计）。
+新模板在 `nerya/teams/templates.py` 的 `BUILTIN_TEMPLATES` 里注册。
 
 ### 自我进化
 
@@ -190,14 +222,15 @@ references/    按需懒加载的方法论、研究剧本
 templates/     代码、配置模板
 ```
 
-内置 25 个技能，分成五大家族：
+内置 30 个技能，分成五大家族：
 
-- **交易与策略**：`trading`、`strategy_author`、`backtest`、`triggers`、`tasks`
+- **交易与策略**：`trading`、`strategy_author`、`backtest`、`triggers`、`tasks`、
+  `quant-strategy-loop`
 - **市场与数据**：`markets`、`market_data_routing`、`news_social`、`research`、`analysis`
 - **研究与估值**：`market_research`、`quant_research`、`equity_research`、`dcf_valuation`、
-  `sec_filings`、`research_report`、`expert_investors`
-- **Agent、记忆与成长**：`agents`、`team`、`memory`、`evolve`、`llm`
-- **构建与连接**：`coding`、`browser`、`notify`
+  `sec_filings`、`research_report`、`expert_investors`、`finance`、`finance-creators`
+- **Agent、记忆与成长**：`agents`、`team`、`memory`、`evolve`、`llm`、`self_modify`
+- **构建与连接**：`coding`、`browser`、`notify`、`plugin_author`
 
 其中「研究与估值」这一族本身就是一支完整的投研团队：多源市场研究、因子与信号验证、个股深挖、
 DCF 估值、SEC 申报、具名投资者视角，以及研报生成。
@@ -310,7 +343,7 @@ iwr https://raw.githubusercontent.com/NeryaAI/Nerya/main/install/install.ps1 -Us
 
 ```bash
 nerya setup --tui      # 富文本向导：密码、LLM key、网关、记忆、账户一步步带你过
-nerya setup --web      # 浏览器打开同一份向导：http://127.0.0.1:18317/setup
+nerya setup --web      # 浏览器打开同一份向导：http://127.0.0.1:18380/setup
 ```
 
 除了 LLM key，其它每一步都有安全默认值。一路回车也能装出能跑的环境。
@@ -331,6 +364,9 @@ nerya setup --web      # 浏览器打开同一份向导：http://127.0.0.1:18317
 ### 手动跑（不走安装脚本）
 
 ```bash
+# 0. 装依赖
+uv sync --extra trading
+
 # 1. 起一份工作空间
 python -m nerya.cli.app init --workspace ~/.nerya
 
@@ -442,7 +478,7 @@ python sdk/python/examples/whale_wallet_trigger.py   # 巨鲸钱包活动触发
 | `subagents/`         | 类型化子智能体运行时、技能黑/白名单、预算上限、并行分发器、结果聚合                                  |
 | `teams/`             | Agent Team：配置、存储、邮箱、黑板、模板、编排器、审批门、综合器                                    |
 | `triggers/`          | Cron + 触发器路由、`schedules.yml`、幂等键、dry-run                                                |
-| `skills/`            | `SKILL.md` 内核 + 25 个内置技能，覆盖交易、数据、投研、Agent 与构建                                |
+| `skills/`            | `SKILL.md` 内核 + 30 个内置技能，覆盖交易、数据、投研、Agent 与构建                                |
 | `trading/`           | TradeIntent、RiskGate、ApprovalGate、纸面执行、虚拟账本、持仓、PnL、对账                           |
 | `connectors/`        | CCXT 适配器（Binance/Bybit/OKX/Hyperliquid）、原生 EVM/BSC/Solana、动态 Provider Spec               |
 | `wallet/`            | 自托管、OKX OS、Bitget、Binance Agentic、Coinbase 钱包提供商                                       |

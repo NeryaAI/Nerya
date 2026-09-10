@@ -85,7 +85,7 @@ def test_sensitive_payloads_carry_only_dispatcher_auth_identity():
 
 
 def test_dashboard_internal_assertion_is_not_a_payload_source_claim(monkeypatch, tmp_path):
-    cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
     monkeypatch.setenv("NERYA_DASHBOARD_INTERNAL_TOKEN", "server-secret")
     # The assertion is checked by the HTTP dispatcher, and is not derived from
     # a user-controlled JSON source field.

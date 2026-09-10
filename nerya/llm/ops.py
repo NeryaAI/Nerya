@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 
 from ..core import yaml_io
 from ..core.config import Config
+from ..core.normalize import norm_key
 from ..llm.adapters import builtin_providers
 from ..llm.messages import normalise_provider_native_web_search
 from ..llm.model_catalog import ModelCatalog
@@ -431,7 +432,7 @@ def _normalise_model_tier_row(
                 out[key] = first[key]
         raw_effort = raw.get("reasoning_effort")
         if raw_effort is not None:
-            eff = str(raw_effort).strip().lower().replace("-", "_")
+            eff = norm_key(str(raw_effort))
             if eff and eff not in REASONING_EFFORT_LEVELS:
                 raise ValueError(
                     f"{tier}: invalid reasoning_effort {raw_effort!r}; "
@@ -499,7 +500,7 @@ def _normalise_model_tier_row(
     # vocabulary. Unknown values are rejected up-front to fail loud.
     raw_effort = raw.get("reasoning_effort")
     if raw_effort is not None:
-        eff = str(raw_effort).strip().lower().replace("-", "_")
+        eff = norm_key(str(raw_effort))
         if eff and eff not in REASONING_EFFORT_LEVELS:
             raise ValueError(
                 f"{tier}: invalid reasoning_effort {raw_effort!r}; "

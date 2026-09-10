@@ -49,7 +49,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
 
 from ..core.ids import (
     event_id as _new_event_id,

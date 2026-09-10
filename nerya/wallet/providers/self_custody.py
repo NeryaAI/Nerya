@@ -19,7 +19,6 @@ it is never persisted, logged, or returned.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -33,6 +32,7 @@ from ...connectors.bsc_native import (
 )
 from ...connectors.evm_native import EVM_CHAIN_IDS
 from ...core.errors import SecretAccessDenied, SecretNotFoundError, TradingError
+from ..amounts import to_base_units, to_base_units_ceil
 from ..errors import (
     WalletDependencyError,
     WalletError,
@@ -472,7 +472,7 @@ class SelfCustodyWallet(WalletProvider):
         amount_out_min_wei = int(quote["amount_out_min_wei"])
         if min_out is not None and float(min_out) > 0:
             dec_out = conn.get_erc20_decimals(addr_out)
-            approved_min_wei = math.ceil(float(min_out) * (10 ** dec_out))
+            approved_min_wei = to_base_units_ceil(min_out, dec_out)
             amount_out_min_wei = max(amount_out_min_wei, approved_min_wei)
 
         # ERC-20 inputs need a router allowance before the swap can move
@@ -485,7 +485,7 @@ class SelfCustodyWallet(WalletProvider):
                     addr_in, signer_addr, conn.router,
                 )
                 dec_in = conn.get_erc20_decimals(addr_in)
-                allowance_wei = int(allowed * (10 ** dec_in))
+                allowance_wei = to_base_units(allowed, dec_in)
             except TradingError:
                 allowance_wei = 0
             if allowance_wei < int(quote["amount_in_wei"]):
@@ -612,7 +612,7 @@ class SelfCustodyWallet(WalletProvider):
         )
         if min_out is not None and float(min_out) > 0:
             expected_out_wei = int(quote.get("outAmount") or 0)
-            if expected_out_wei < math.ceil(float(min_out) * (10 ** dec_out)):
+            if expected_out_wei < to_base_units_ceil(min_out, dec_out):
                 raise WalletPolicyDenied(
                     f"jupiter quote outAmount {quote.get('outAmount')!r} "
                     f"({expected_out_wei / (10 ** dec_out):.6f} out) is "

@@ -14,6 +14,7 @@ from .observation_summary import (
     summarize_observation_weights,
 )
 from .patch_proposal import Proposal, list_proposals
+from .promotion import strategy_id_from_proposal
 
 
 _POST_APPLY_HEALTHY = set(POST_APPLY_HEALTHY_STATUSES)
@@ -87,7 +88,7 @@ def record_post_apply_observation(
         "kind": "proposal.post_apply_observation",
         "proposal_id": pid,
         "proposal_kind": proposal.kind,
-        "strategy_id": _proposal_strategy(proposal),
+        "strategy_id": strategy_id_from_proposal(proposal),
         "status": normalized_status,
         "summary": _bounded_summary(
             summary,
@@ -198,20 +199,6 @@ def _find_proposal(paths: WorkspacePaths, proposal_id: str) -> Proposal | None:
     for proposal in list_proposals(paths):
         if proposal.id == proposal_id:
             return proposal
-    return None
-
-
-def _proposal_strategy(proposal: Proposal) -> str | None:
-    meta = proposal.metadata or {}
-    direct = meta.get("strategy_id")
-    if direct:
-        return str(direct)
-    target = str(proposal.target or "")
-    parts = target.replace("\\", "/").split("/")
-    if "strategies" in parts:
-        idx = parts.index("strategies")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
     return None
 
 

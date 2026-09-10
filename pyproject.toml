@@ -75,9 +75,9 @@ nerya = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "sdk/python"]
-# Default to the curated smoke suite (~50 cases) so local
-# `pytest` runs are fast. Run the full 1900+ test regression
-# pass via `pytest -m ""` (empty filter selects everything).
+# Default to the smoke-marked suite so local `pytest` runs are fast; this
+# silently DESELECTS the integration/profile-marked tests (~65 of ~2265).
+# CI's regression job runs `pytest -m ""` (empty filter selects everything).
 addopts = "-m smoke"
 markers = [
     "smoke: curated end-to-end smoke suite (default)",

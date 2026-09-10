@@ -16,14 +16,13 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from ...core.errors import NeryaError
 from ..artifacts import candidate_signal_engine_path
 from ..datasets import DatasetRouter, DatasetWindow, OhlcvFrame
 from ..schemas import BacktestConfig, BacktestConfigError
 from ..signals.compiler import (
-    IntentCandidate,
     compile_signal_to_intent_candidate,
 )
 from ..signals.loader import load_signal_engine_module

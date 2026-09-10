@@ -33,8 +33,7 @@ SCRIPT_ALLOWED_SKILLS: set[tuple[str, str]] = {
     ("market_data", "get_candles"),
     ("market_data", "summarize_market"),
     ("market_data", "calculate_features"),
-    # onchain (read-only, incl. new price oracle)
-    ("onchain", "get_onchain_price"),
+    # onchain (read-only)
     ("onchain", "get_token_balance"),
     ("onchain", "get_whale_events"),
     ("onchain", "summarize_onchain_activity"),

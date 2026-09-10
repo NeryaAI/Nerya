@@ -96,14 +96,20 @@ def _effective_client_host(client_addr: str, headers: dict[str, str]) -> str:
     peer = _normalise_host(client_addr)
     if not _is_local_host(peer):
         return peer
-    # When the local API sits behind the dashboard proxy or a reverse proxy,
-    # the socket peer is loopback. Trust forwarded client headers only in
-    # that loopback case so remote direct callers cannot spoof themselves
-    # into the local trust lane.
-    for key in ("x-forwarded-for", "X-Forwarded-For", "x-real-ip", "X-Real-IP"):
-        forwarded = _normalise_host(headers.get(key) or "")
-        if forwarded:
-            return forwarded
+    # The socket peer is loopback, so the caller is either a truly local
+    # client or an edge proxy on this host (dashboard proxy, cloudflared).
+    # Everything BEFORE the last x-forwarded-for entry is client-supplied
+    # and spoofable; only the LAST entry — the one our own edge appended —
+    # identifies the real client. x-real-ip is client-settable and the edge
+    # does not overwrite it, so it must never be consulted: a forwarded
+    # header may break local trust but never grant it.
+    chain = (
+        headers.get("x-forwarded-for")
+        or headers.get("X-Forwarded-For")
+        or ""
+    ).strip()
+    if chain:
+        return _normalise_host(chain.split(",")[-1])
     return peer
 
 

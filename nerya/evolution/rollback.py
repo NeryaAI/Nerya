@@ -6,13 +6,14 @@ import json
 import hashlib
 import os
 import shutil
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from ..core import jsonl
 from ..core.errors import ProtectedScopeViolation
 from ..core.paths import WorkspacePaths
 from .patch_proposal import is_protected, list_proposals, set_state
+from .promotion import normalize_rel_path
 
 
 _MUTATION_MANIFEST_VERSION = 1
@@ -177,7 +178,7 @@ def _manifest_paths(manifest: dict[str, Any], key: str) -> list[str]:
         return []
     out: list[str] = []
     for raw in value:
-        rel = _normalize_rel_path(raw)
+        rel = normalize_rel_path(raw, kind="rollback")
         if rel not in out:
             out.append(rel)
     return sorted(out)
@@ -247,17 +248,6 @@ def _rollback_conflicts(paths: WorkspacePaths, manifest: dict[str, Any]) -> list
         if current.exists() or current.is_symlink():
             conflicts.append(rel)
     return sorted(set(conflicts))
-
-
-def _normalize_rel_path(value: Any) -> str:
-    text = str(value or "").strip().replace("\\", "/")
-    path = PurePosixPath(text)
-    if not text or path.is_absolute() or any(part == ".." for part in path.parts):
-        raise ProtectedScopeViolation(f"invalid rollback path: {value!r}")
-    normalized = path.as_posix()
-    if normalized in {"", "."}:
-        raise ProtectedScopeViolation(f"invalid rollback path: {value!r}")
-    return normalized
 
 
 def _workspace_path(paths: WorkspacePaths, rel_posix: str) -> Path:

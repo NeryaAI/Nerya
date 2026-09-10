@@ -121,6 +121,7 @@ changes; applied proposals carry rollback snapshots and post-apply observation.
 | **Memory** | Vector snippets with weak meaning | Scoped SQLite records with evidence, lifecycle, redaction, and rebuildable Markdown / JSONL projections |
 | **Connectors** | One SDK per venue | Binance, Bybit, OKX, Hyperliquid, PancakeSwap, Jupiter, generic EVM, plus 100+ via CCXT. Missing one? Ask the agent to author it. |
 | **Security** | Key handling left to each integration | Vault-only secrets, `vault://` refs in context, prompt firewall, signer policy, script sandbox |
+| **Ops** | Roll your own supervisor | One-line install; auto-registers systemd / launchd / NSSM host services |
 
 ---
 
@@ -155,8 +156,8 @@ review strategy sessions, and open evolution proposals. Per-message controls:
 | Tool budget   | Maximum tool calls before the kernel ends the turn                 |
 | Turn budget   | LLM token budget for this turn                                     |
 
-Starter prompts ship with the workspace: build a monitoring script, create a
-subagent, schedule a heartbeat, run a postmortem, and draft a strategy package.
+Starter prompts ship with the dashboard: a BTC scalping strategy, an NVIDIA
+agent team, a long-cycle crypto strategy, and a macro news desk.
 
 ### Self-evolution review desk
 
@@ -201,8 +202,8 @@ manager owns exposure:
 - gates: plan-artefact gate, all-tasks-complete gate, verification gate, optional
   human approval gate
 
-Three templates ship today: `market_analysis_team`, `strategy_design_team`,
-`trade_decision_committee`. Drop new ones under `nerya/teams/templates`.
+Two templates ship today: `market_analysis_team`, `strategy_design_team`. New
+ones register in `BUILTIN_TEMPLATES` in `nerya/teams/templates.py`.
 
 ### Strategy and agent evolution
 
@@ -253,14 +254,16 @@ references/    lazy-loaded methodology and research playbooks
 templates/     code and config templates
 ```
 
-Twenty-five built-ins ship today across five families:
+Thirty built-ins ship today across five families:
 
-- **Trading & strategy**: `trading`, `strategy_author`, `backtest`, `triggers`, `tasks`
+- **Trading & strategy**: `trading`, `strategy_author`, `backtest`, `triggers`,
+  `tasks`, `quant-strategy-loop`
 - **Market & data**: `markets`, `market_data_routing`, `news_social`, `research`, `analysis`
 - **Research & valuation**: `market_research`, `quant_research`, `equity_research`,
-  `dcf_valuation`, `sec_filings`, `research_report`, `expert_investors`
-- **Agents, memory & growth**: `agents`, `team`, `memory`, `evolve`, `llm`
-- **Build & connect**: `coding`, `browser`, `notify`
+  `dcf_valuation`, `sec_filings`, `research_report`, `expert_investors`, `finance`,
+  `finance-creators`
+- **Agents, memory & growth**: `agents`, `team`, `memory`, `evolve`, `llm`, `self_modify`
+- **Build & connect**: `coding`, `browser`, `notify`, `plugin_author`
 
 The research and valuation family is a full investment-research desk in itself:
 multi-source market research, factor and signal validation, equity deep-dives, DCF
@@ -378,7 +381,7 @@ The installer is idempotent. It:
 
 ```bash
 nerya setup --tui      # rich text wizard for password, LLM key, gateway, memory, account
-nerya setup --web      # same wizard in the browser at http://127.0.0.1:18317/setup
+nerya setup --web      # same wizard in the browser at http://127.0.0.1:18380/setup
 ```
 
 Every domain except the LLM model carries a safe default. Hit Enter through every
@@ -394,6 +397,9 @@ prompt and you get a working install. Then open the dashboard and chat:
 ### Manual quick start (no installer)
 
 ```bash
+# 0. install dependencies
+uv sync --extra trading
+
 # 1. create a workspace
 python -m nerya.cli.app init --workspace ~/.nerya
 
@@ -511,7 +517,7 @@ python sdk/python/examples/whale_wallet_trigger.py   # whale wallet activity tri
 | `subagents/`         | Per-role runtimes with skill allow/denylists, budget caps, parallel dispatcher, result aggregator   |
 | `teams/`             | Durable Agent Team: config, store, mailbox, blackboard, templates, orchestrator, gates, aggregator  |
 | `triggers/`          | Cron + trigger router, `schedules.yml`, idempotency, dry-run                                        |
-| `skills/`            | `SKILL.md` kernel + 25 built-in skills across trading, data, investment research, agents, and build |
+| `skills/`            | `SKILL.md` kernel + 30 built-in skills across trading, data, investment research, agents, and build |
 | `trading/`           | TradeIntent, RiskGate, ApprovalGate, paper execution, virtual ledger, positions, PnL, reconciliation |
 | `connectors/`        | CCXT adapter (Binance/Bybit/OKX/Hyperliquid), native EVM/BSC/Solana, dynamic provider spec          |
 | `wallet/`            | Self-custody, OKX OS, Bitget, Binance Agentic, Coinbase wallet providers                            |

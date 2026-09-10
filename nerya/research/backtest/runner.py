@@ -19,7 +19,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,7 +40,6 @@ from ..signals.compiler import compile_signal_to_intent_candidate
 from ..signals.loader import load_signal_engine_module
 from ..signals.protocol import SignalFrame, coerce_signal_frame
 from ..validation_report import (
-    REQUIRED_GATE_NAMES,
     ValidationReport,
 )
 from .metrics import compute_metrics

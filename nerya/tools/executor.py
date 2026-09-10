@@ -161,7 +161,7 @@ def _repair_json_string_containers(
     return repaired or args
 
 
-def _coerce_json_number_string(raw: Any, *, integer: bool = False) -> Any:
+def coerce_json_number_string(raw: Any, *, integer: bool = False) -> Any:
     if not isinstance(raw, str):
         return raw
     text = raw.strip()
@@ -203,7 +203,7 @@ def _repair_schema_numeric_strings(
         value = args.get(field)
         expected = field_schema.get("type")
         if expected in {"number", "integer"}:
-            normalized = _coerce_json_number_string(
+            normalized = coerce_json_number_string(
                 value,
                 integer=expected == "integer",
             )
@@ -606,4 +606,5 @@ __all__ = [
     "PermissionDeniedHook",
     "PostHook",
     "PreHook",
+    "coerce_json_number_string",
 ]

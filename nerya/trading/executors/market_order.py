@@ -699,7 +699,7 @@ class MarketOrderExecutor(Executor):
             # active_orders keeps including it — the poller / executor
             # tick drives the remainder to completion (and only a
             # complete fill consumes the reservation in full).
-            order_now = tracker.get(order_id) or order
+            order_now = tracker.get(order_id)
             if self._fill_completes_order(order_now, filled):
                 tracker.update_state(order_id, "filled")
             else:

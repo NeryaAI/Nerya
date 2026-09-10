@@ -20,6 +20,7 @@ import shutil
 import subprocess
 from typing import Any
 
+from ..amounts import to_base_units
 from ..errors import (
     WalletDependencyError,
     WalletError,
@@ -525,7 +526,7 @@ class OkxOsWallet(WalletProvider):
             "chainId": self._chain_index(chain),
             "fromTokenAddress": token_in,
             "toTokenAddress": token_out,
-            "amount": str(int(float(amount_in) * 10 ** dec_in)),
+            "amount": str(to_base_units(amount_in, dec_in)),
             "slippage": str(slippage_bps / 10_000),
         })
         data = (doc.get("data") or [{}])[0]
@@ -577,7 +578,7 @@ class OkxOsWallet(WalletProvider):
             "chainId": self._chain_index(chain),
             "fromTokenAddress": token_in,
             "toTokenAddress": token_out,
-            "amount": str(int(float(amount_in) * 10 ** dec_in)),
+            "amount": str(to_base_units(amount_in, dec_in)),
             "slippage": str(slippage_bps / 10_000),
             "userWalletAddress": receiver,
         })

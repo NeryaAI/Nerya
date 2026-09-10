@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from ..core import yaml_io
 from ..core.errors import TradingError
 from ..core.paths import WorkspacePaths
-from .strategy_lifecycle import STATES as _STATES, is_tradable as _is_tradable
+from .strategy_lifecycle import is_tradable as _is_tradable
 
 
 @dataclass

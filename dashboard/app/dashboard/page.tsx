@@ -35,7 +35,6 @@ import type {
 import { useUiSettings } from "../../lib/settings";
 import { useCurrentAccountId, formatBalance } from "../../lib/currentAccount";
 import { formatTime } from "../../lib/format";
-import { authHeaders } from "../../lib/auth";
 import { WorkspaceCustomizeButton } from "../../components/workspace/WorkspaceCustomizeButton";
 import { WorkspaceUiHome } from "../../components/workspace/WorkspaceUiHome";
 
@@ -109,8 +108,18 @@ export default function DashboardOverview() {
       const [healthOk, ws, pr, msg, ps, pp, st, rt, ec, vn, accList, ov] = await Promise.all([
         healthP,
         safe(clientApi.workspace(), null),
-        safe(fetch("/api/proxy/evolution/proposals", { method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: "{}" }).then((r) => r.json()), { proposals: [] }),
-        safe(fetch("/api/proxy/messages/list", { method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ limit: 30 }) }).then((r) => r.json()), { messages: [] }),
+        safe(
+          clientApi.proposalsList().then((r) => ({
+            proposals: (r?.proposals ?? []) as unknown as Proposal[],
+          })),
+          { proposals: [] },
+        ),
+        safe(
+          clientApi.messagesList(30).then((r) => ({
+            messages: (r?.messages ?? []) as unknown as Message[],
+          })),
+          { messages: [] },
+        ),
         safe(clientApi.portfolioSummary(), null),
         safe(clientApi.portfolioPnl(), null),
         safe(clientApi.strategyList(), { strategies: [] }),

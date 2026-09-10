@@ -317,10 +317,9 @@ def record_promotion(paths: WorkspacePaths, sid: str, *,
         author=author,
         parent_version_id=active_version_id(paths, sid),
     )
-    prev = active_version_id(paths, sid)
-    # The active pointer was updated inside record_version; prev is the
-    # previous value — pull it from the ledger by finding the second
-    # most recent row if any.
+    # The active pointer was updated inside record_version, so the
+    # previous version id is recovered from the ledger: the second
+    # most recent row, if any.
     versions = list_versions(paths, sid)
     prev_version = (versions[-2].version_id
                     if len(versions) >= 2 else None)

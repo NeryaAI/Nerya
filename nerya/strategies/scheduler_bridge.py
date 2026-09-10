@@ -45,13 +45,13 @@ trade intent is submitted. Tuning still uses
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from ..core.errors import TradingError
 from ..core.paths import WorkspacePaths
 from ..triggers.schedule import ScheduleEntry, load_schedules, save_schedules
 from .agent_task_mode import AGENT_TASK_TARGET, agent_task_requested
-from .package import StrategyManifest, StrategyPackage, StrategySchedule, load_package
+from .package import StrategyPackage, StrategySchedule, load_package
 
 
 # ---------------------------------------------------------------------------

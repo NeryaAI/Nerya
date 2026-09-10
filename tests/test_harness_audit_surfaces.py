@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 from nerya.core import jsonl
-from nerya.progress.todo import format_for_injection as progress_format_for_injection
-from nerya.rollout.writer import RolloutWriter, Turn
+from nerya.core.redaction import redact_display_dict
 from nerya.security.audit import record as record_security_audit
 from nerya.skills.registry import list_bundled_skill_names
 from nerya.tools.native.task import TaskState, TodoItem, format_for_injection
 
 
-def test_rollout_writer_appends_redacted_turn_jsonl(tmp_path) -> None:
+def test_rollout_turn_record_is_redacted_into_jsonl(tmp_path) -> None:
     path = tmp_path / "rollout.jsonl"
-    written = RolloutWriter(path).write(
-        Turn(
-            turn_id="turn_1",
-            session_id="sess_1",
-            payload={"api_key": "sk-secret-value-12345678901234567890"},
-        )
-    )
+    record = {
+        "turn_id": "turn_1",
+        "session_id": "sess_1",
+        "payload": {"api_key": "sk-secret-value-12345678901234567890"},
+    }
+    written = jsonl.append(path, redact_display_dict(record))
 
     assert written["turn_id"] == "turn_1"
     rows = jsonl.read_all(path)
@@ -63,7 +61,6 @@ def test_task_progress_formats_unfinished_work_for_injection() -> None:
     assert "in_progress: Running R5 lint" in text
     assert "pending: Running full CSV" in text
     assert "Collect logs" not in text
-    assert progress_format_for_injection(state) == text
 
 
 def test_bundled_skill_allowlist_lists_builtin_skills() -> None:

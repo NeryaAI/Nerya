@@ -147,7 +147,7 @@ def _settings_yml(*, secret: str) -> str:
 use_default_settings: true
 
 server:
-  bind_address: "0.0.0.0"
+  bind_address: "127.0.0.1"
   port: 8080
   secret_key: "{secret}"
   limiter: false

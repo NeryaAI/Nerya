@@ -9,8 +9,6 @@ import os
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone

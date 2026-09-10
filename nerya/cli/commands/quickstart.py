@@ -24,7 +24,6 @@ import subprocess
 import sys
 import time
 import webbrowser
-from pathlib import Path
 
 from .._common import _add_ws
 

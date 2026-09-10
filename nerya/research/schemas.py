@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any, Iterable
 
 from ..core.errors import NeryaError

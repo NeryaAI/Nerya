@@ -8,7 +8,6 @@ that the UI and future GDI selector can explain.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from ..core.paths import WorkspacePaths

@@ -20,7 +20,7 @@ from .post_apply_observation import (
     post_apply_monitor as _post_apply_monitor,
     post_apply_observations_by_proposal,
 )
-from .promotion import proposal_action_gates
+from .promotion import proposal_action_gates, strategy_id_from_proposal
 
 
 _OPEN_PROPOSAL_STATES = {"draft", "pending_review", "proposed", "approved"}
@@ -385,7 +385,7 @@ def _proposal_item(
         "title": _proposal_title(row),
         "summary": row.get("summary") or "",
         "status": state,
-        "strategy_id": _proposal_strategy(row),
+        "strategy_id": strategy_id_from_proposal(row),
         "proposal_id": pid,
         "validation_plan_id": row.get("validation_plan_id"),
         "validation_status": (validation_plan or {}).get("status"),
@@ -1271,7 +1271,7 @@ def proposal_why_reused(
 
 def _audit_for_proposal(paths, proposal: dict[str, Any]) -> dict[str, Any] | None:
     pid = str(proposal.get("id") or "")
-    strategy_id = _proposal_strategy(proposal)
+    strategy_id = strategy_id_from_proposal(proposal)
     run_ids = _strategy_tuning_run_ids(proposal.get("evidence_refs"))
     pdir = Path(str(proposal.get("path") or ""))
     audit_path = pdir / "tuning_audit.json"
@@ -2115,24 +2115,10 @@ def _numeric(value: Any) -> float:
 
 
 def _proposal_matches_strategy(row: dict[str, Any], strategy_id: str) -> bool:
-    if _proposal_strategy(row) == strategy_id:
+    if strategy_id_from_proposal(row) == strategy_id:
         return True
     blob = _search_blob(row)
     return f"strategies/{strategy_id}/" in blob or f"strategy:{strategy_id}" in blob
-
-
-def _proposal_strategy(row: dict[str, Any]) -> str | None:
-    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    direct = row.get("strategy_id") or meta.get("strategy_id")
-    if direct:
-        return str(direct)
-    target = str(row.get("target") or "")
-    parts = target.replace("\\", "/").split("/")
-    if "strategies" in parts:
-        idx = parts.index("strategies")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
-    return None
 
 
 def _post_apply_status_for_item(item: dict[str, Any]) -> str:

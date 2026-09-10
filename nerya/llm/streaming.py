@@ -30,7 +30,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Iterator, Optional
+from typing import Any, Iterator
 
 
 __all__ = [

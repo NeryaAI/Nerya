@@ -22,12 +22,11 @@ The matching function :func:`EvidenceStore.search` enforces these rules.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
 

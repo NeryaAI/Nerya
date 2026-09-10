@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from .promotion import strategy_id_from_proposal
+
 
 VERSION = "lineage_graph_v1"
 MAX_NODES = 80
@@ -43,7 +45,7 @@ def build_lineage_graph(
         metadata={
             "proposal_id": pid,
             "kind": proposal.get("kind"),
-            "strategy_id": _proposal_strategy(proposal),
+            "strategy_id": strategy_id_from_proposal(proposal),
             "target": proposal.get("target"),
             "source_event_id": proposal.get("source_event_id"),
             "validation_plan_id": proposal.get("validation_plan_id"),
@@ -512,21 +514,6 @@ def _add_action_gate_node(
         },
     )
     graph.add_edge(node_id, root_id, type="gates", label="gates apply")
-
-
-def _proposal_strategy(proposal: dict[str, Any]) -> str | None:
-    metadata = proposal.get("metadata") if isinstance(proposal.get("metadata"), dict) else {}
-    if metadata.get("strategy_id"):
-        return str(metadata["strategy_id"])
-    if proposal.get("strategy_id"):
-        return str(proposal["strategy_id"])
-    target = str(proposal.get("target") or "")
-    parts = target.replace("\\", "/").split("/")
-    if "strategies" in parts:
-        idx = parts.index("strategies")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
-    return None
 
 
 def _validation_summary(plan: dict[str, Any]) -> str:

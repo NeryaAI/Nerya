@@ -35,7 +35,6 @@ so the adapter's existing single-retry path kicks in.
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import os
@@ -45,7 +44,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Optional
 
 from ..session_adapter import MCPSessionExpiredError
 

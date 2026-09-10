@@ -133,6 +133,16 @@ class SecretVault:
     # ---------- public API ----------
     def put(self, *, name: str, value: str, kind: str, scope: list[str],
             owner: str = "runtime") -> SecretMeta:
+        if self.passphrase == _DEFAULT_PASSPHRASE:
+            # At-rest encryption under a source-published constant is not
+            # protection: anyone with the vault file gets every credential
+            # in it. Reading back what a previous version stored stays
+            # possible, but storing NEW secrets requires a real passphrase.
+            raise SecretAccessDenied(
+                "refusing to store secrets under the built-in default vault "
+                "passphrase. Set NERYA_VAULT_PASSPHRASE (or pass "
+                "passphrase= to SecretVault.open) before storing secrets."
+            )
         if self.load_error and self.path.exists():
             # The on-disk vault exists but could not be decrypted. _flush()
             # rewrites the file from the in-memory cache only, so storing

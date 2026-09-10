@@ -9,7 +9,7 @@ policy — the connector only ever receives a single-shot hex/base58 key.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from ..core.errors import TradingError
@@ -244,7 +244,6 @@ def _sign_solana_v0_tx(b64_tx: str, signer_private_key: str) -> str:
     try:
         import base64
         import base58  # type: ignore
-        from nacl.signing import SigningKey  # type: ignore
     except Exception as exc:
         raise TradingError(
             f"solana swap requires pynacl + base58: {exc}"
@@ -303,7 +302,6 @@ def _first_required_signer(message: bytes) -> str:
 def _pubkey_from_signer(signer_private_key: str) -> str:
     try:
         import base58  # type: ignore
-        from nacl.signing import SigningKey  # type: ignore
     except Exception as exc:
         raise TradingError(f"solana requires pynacl + base58: {exc}") from exc
     sk = _signing_key_from_secret(signer_private_key)

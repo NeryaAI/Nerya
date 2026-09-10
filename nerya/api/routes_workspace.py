@@ -233,6 +233,12 @@ def routes():
         if target.is_dir():
             return {"ok": False, "error": "is_directory"}
 
+        rel = _rel(client, target)
+        if _is_sensitive(rel):
+            # Mirrors the files_raw guard: the text preview route must not
+            # become the side door around it (nerya.yml, vault/**, .env*).
+            return {"ok": False, "error": "sensitive_path", "detail": rel}
+
         try:
             size = target.stat().st_size
         except OSError as exc:
@@ -297,6 +303,13 @@ def routes():
 
         if target.is_dir():
             return {"ok": False, "error": "is_directory"}
+
+        rel = _rel(client, target)
+        if _is_sensitive(rel):
+            # Same capability line as the mutation guards: nerya.yml carries
+            # runtime.auth.jwt_secret, vault/** carries credentials — a
+            # read:runtime caller must not be able to lift them raw.
+            return {"ok": False, "error": "sensitive_path", "detail": rel}
 
         try:
             size = target.stat().st_size

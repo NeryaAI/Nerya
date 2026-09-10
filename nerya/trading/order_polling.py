@@ -24,7 +24,6 @@ from typing import Any, Callable, Iterable
 
 from ..connectors import ConnectorRegistry
 from ..core.config import Config
-from ..core.ids import fill_id as _new_fill_id
 from .accounts import load_accounts
 from .capital import CapitalReservationStore
 from .order_tracker import OrderTracker, TERMINAL_STATES, TrackedOrder

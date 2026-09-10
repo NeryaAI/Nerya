@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from ..core.config import Config, load_config
 from ..skills.kernel import SkillKernel

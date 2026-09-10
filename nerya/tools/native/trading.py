@@ -50,6 +50,7 @@ from ...trading.risk import RiskGate
 from ...trading.strategies import Strategy, list_strategies, load_strategy
 from ...trading.virtual_ledger import open_ledger
 from ...workspace.state_store import StateStore
+from ..executor import coerce_json_number_string as _coerce_json_number_string
 from ..tool_errors import schema_validation_result as _usage_error
 from ..types import (
     ToolCall,
@@ -372,23 +373,6 @@ _MARKET_SNAPSHOT_NUMBER_FIELDS = {
     "ask",
     "age_s",
 }
-
-
-def _coerce_json_number_string(raw: Any) -> Any:
-    if not isinstance(raw, str):
-        return raw
-    text = raw.strip()
-    if not text:
-        return raw
-    try:
-        value = float(text)
-    except Exception:
-        return raw
-    if value != value or value in (float("inf"), float("-inf")):
-        return raw
-    if value.is_integer() and all(ch not in text.lower() for ch in (".", "e")):
-        return int(value)
-    return value
 
 
 def _normalize_numeric_fields(

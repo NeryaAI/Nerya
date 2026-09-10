@@ -12,6 +12,7 @@
 // transition paints correctly.
 
 import { useEffect, useMemo, useState } from "react";
+import { notFound } from "next/navigation";
 import { NativeBlocksTrack } from "../../../components/chat/TurnBlocks";
 import type { ChartBlockShape, OHLCV } from "../../../lib/chartBlock";
 import type { NativeBlockEnvelope } from "../../../lib/chat";
@@ -66,6 +67,11 @@ function generateLine(n: number): ChartBlockShape["series"][number]["data"] {
 }
 
 export default function ChartDemoPage() {
+  // Dev-only fixture surface: ship a 404 in any non-dev build so the
+  // synthetic-chart demo and its fetch stub are never reachable in prod.
+  if (process.env.NODE_ENV !== "development") {
+    notFound();
+  }
   const envelopes = useMemo<NativeBlockEnvelope[]>(() => {
     const candleBlock: ChartBlockShape = {
       kind: "chart",

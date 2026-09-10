@@ -85,7 +85,7 @@ const BASE = "/api/proxy";
 // Bumped from 1.5s -> 4s. Polled endpoints like
 // `/operator/overview`, `/operator/nav`, `/health`, `/inbox/items`,
 // `/setup/readiness`, `/accounts/list` are touched by multiple
-// long-lived components (TopNav + AccountSelector + page-level
+// long-lived components (TopNav + page-level
 // `loadCore`). With the old TTL, a fresh page navigation (~300-800ms
 // after a polled hit) blew past the window and refetched, doubling
 // round-trip cost for the same data. 4s safely covers cross-page nav

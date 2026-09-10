@@ -701,7 +701,6 @@ def test_agent_intent_with_protection_routes_to_open_position(tmp_path):
     # The bracket was armed if a protection_id surfaces somewhere in the
     # envelope (executor.result, position, or budget_decision); the exact
     # field varies by mode so we accept any.
-    haystack = str(out)
     # We're not asserting the protection_id specifically here because
     # paper-mode pretends the protection is "soft" and may not persist a
     # rule. The smoke test downstream will exercise live-mode arming.

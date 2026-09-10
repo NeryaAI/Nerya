@@ -1076,7 +1076,6 @@ def _strategy_daily_notional(paths, strategy_id: str) -> float | None:
     corrupt ledger as an unlimited budget.
     """
     try:
-        from ..strategy_history import store as history_store
 
         log_path = paths.strategy(strategy_id) / "orders.jsonl"
         if not log_path.exists():

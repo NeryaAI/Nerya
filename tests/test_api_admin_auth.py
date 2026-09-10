@@ -78,6 +78,64 @@ def test_forwarded_remote_host_breaks_loopback_trust_lane(tmp_path):
 
 
 @pytest.mark.smoke
+def test_spoofed_first_xff_entry_does_not_grant_loopback_trust(tmp_path):
+    # A remote caller through the edge proxy can supply its own chain head;
+    # only the LAST entry (appended by our edge) may decide, so the spoofed
+    # loopback head must not resurrect the local trust lane.
+    cfg = load_config(tmp_path)
+    auth.set_admin_password(cfg, "correct-horse")
+
+    result = auth.check_request(
+        cfg,
+        method="GET",
+        path="/workspace",
+        client_addr="127.0.0.1",
+        headers={"x-forwarded-for": "127.0.0.1, 198.51.100.5"},
+    )
+
+    assert not result.ok
+    assert result.status == 401
+    assert result.reason == "missing_token"
+
+
+@pytest.mark.smoke
+def test_x_real_ip_cannot_override_forwarded_remote_verdict(tmp_path):
+    # x-real-ip is client-settable and must never be consulted: once the
+    # x-forwarded-for chain (edge-appended last entry) says remote, a spoofed
+    # loopback x-real-ip cannot resurrect the local trust lane.
+    cfg = load_config(tmp_path)
+    auth.set_admin_password(cfg, "correct-horse")
+
+    result = auth.check_request(
+        cfg,
+        method="GET",
+        path="/workspace",
+        client_addr="127.0.0.1",
+        headers={"x-forwarded-for": "198.51.100.5", "x-real-ip": "127.0.0.1"},
+    )
+
+    assert not result.ok
+    assert result.status == 401
+    assert result.reason == "missing_token"
+
+
+@pytest.mark.smoke
+def test_loopback_peer_without_forwarded_headers_keeps_local_lane(tmp_path):
+    cfg = load_config(tmp_path)
+
+    result = auth.check_request(
+        cfg,
+        method="GET",
+        path="/workspace",
+        client_addr="127.0.0.1",
+        headers={},
+    )
+
+    assert result.ok
+    assert result.actor == "local:loopback"
+
+
+@pytest.mark.smoke
 def test_auth_bootstrap_routes_are_anonymous_but_password_write_is_config_gated():
     assert route_scopes.required_scope("GET", "/auth/status") is None
     assert route_scopes.required_scope("POST", "/auth/login") is None

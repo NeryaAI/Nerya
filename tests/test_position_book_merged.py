@@ -334,13 +334,12 @@ def test_portfolio_merged_row_carries_per_strategy_shares(tmp_path):
     from copy import deepcopy
 
     from nerya.core import yaml_io
-    from nerya.core.config import Config, DEFAULT_CONFIG
+    from nerya.core.config import DEFAULT_CONFIG
     from nerya.trading.portfolio import get_portfolio_summary
 
     data = deepcopy(DEFAULT_CONFIG)
     data["runtime"]["mock_mode"] = False
     paths = _make_paths(tmp_path)
-    cfg = Config(paths=paths, data=data)
     yaml_io.dump(
         paths.accounts_file,
         {
@@ -413,7 +412,7 @@ def test_reconcile_local_does_not_drift_on_merged_position(tmp_path):
     from copy import deepcopy
 
     from nerya.core import yaml_io
-    from nerya.core.config import Config, DEFAULT_CONFIG
+    from nerya.core.config import DEFAULT_CONFIG
     from nerya.core.ids import fill_id as _new_fill_id, order_id as _new_order_id
     from nerya.db.sqlite import connect
     from nerya.trading.reconciliation import reconcile_local
@@ -421,7 +420,6 @@ def test_reconcile_local_does_not_drift_on_merged_position(tmp_path):
     data = deepcopy(DEFAULT_CONFIG)
     data["runtime"]["mock_mode"] = False
     paths = _make_paths(tmp_path)
-    cfg = Config(paths=paths, data=data)
     yaml_io.dump(
         paths.accounts_file,
         {
@@ -582,7 +580,6 @@ def test_snapshot_freshness_gate_exempts_position_reducing_intents(tmp_path, mon
 
     from nerya.core import yaml_io
     from nerya.core.config import Config, DEFAULT_CONFIG
-    from nerya.trading import account_snapshots as snap_mod
     from nerya.trading.account_snapshots import AccountSnapshot
     from nerya.trading.submit import submit_trade_intent
     from nerya.trading import risk as risk_mod

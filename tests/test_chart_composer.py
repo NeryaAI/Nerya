@@ -16,7 +16,6 @@ dynamic code, kernel inline) flows through, so we check:
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest

@@ -8,7 +8,6 @@ any error we fall back to :func:`mock_social`.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from ..connectors.http import HttpTransport, UrllibHttp
 from ..core.truth import (

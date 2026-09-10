@@ -35,7 +35,7 @@ def test_team_skill_uses_standard_description_for_activation(tmp_path) -> None:
 
 def test_team_skill_puts_explicit_launch_before_discovery_or_research(tmp_path) -> None:
     cfg = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
-    kernel = AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]
+    AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]
     entry = SkillRegistry.load_builtin().get("team")
     body = entry.manifest.instructions
     playbook = (entry.manifest.path / "references" / "full-playbook.md").read_text(

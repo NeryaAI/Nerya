@@ -6290,7 +6290,7 @@ export function SettingsWorkspace({
                         <div className="mt-1 line-clamp-2 text-ink-200">{ev.preview}</div>
                       ) : null}
                       {ev.query ? (
-                        <div className="mt-1 italic text-ink-200">"{ev.query}"</div>
+                        <div className="mt-1 italic text-ink-200">&quot;{ev.query}&quot;</div>
                       ) : null}
                     </div>
                   );

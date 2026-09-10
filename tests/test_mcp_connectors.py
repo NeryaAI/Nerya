@@ -15,9 +15,6 @@ from __future__ import annotations
 
 import io
 import json
-import subprocess
-import sys
-import threading
 import time
 import urllib.error
 from dataclasses import dataclass, field
@@ -29,24 +26,18 @@ import pytest
 from nerya.core.paths import WorkspacePaths
 from nerya.mcp.connectors import (
     AuthConfig,
-    BootstrapResult,
     ConnectorConfigError,
-    DEFAULT_MCP_SERVERS_YML,
     HttpTransportConfig,
     MCPServerConfig,
-    MCPServersConfig,
     StdioTransportConfig,
     VaultRef,
     bootstrap_mcp_connectors,
-    build_adapter_for_server,
     ensure_mcp_servers_config,
     load_mcp_servers_config,
 )
-from nerya.mcp.connectors.bootstrap import VaultResolver
 from nerya.mcp.session_adapter import MCPSessionExpiredError
 from nerya.mcp.transports import (
     HttpMCPClient,
-    HttpTransportError,
     OAuthCredentials,
     OAuthTokenCache,
     OAuthTokenError,
@@ -499,7 +490,6 @@ class TestOAuth:
         assert hit is not None and hit.access_token == "aaa"
 
     def test_token_cache_expiry(self, tmp_path: Path) -> None:
-        cache = OAuthTokenCache(cache_path=tmp_path / "cache.json")
         # expires_in is clamped to >= 60s by put(), but is_expired uses
         # 30s slack — so a 60s token is "expired" at t+30s. We can verify
         # the slack behavior by hand-rolling a _CachedToken.

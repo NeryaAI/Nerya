@@ -32,7 +32,6 @@ from typing import Any
 
 import pytest
 
-from nerya.connectors.base import OrderAck
 from nerya.core import yaml_io
 from nerya.core.config import DEFAULT_CONFIG, Config
 from nerya.core.errors import IntentValidationError, TradingError

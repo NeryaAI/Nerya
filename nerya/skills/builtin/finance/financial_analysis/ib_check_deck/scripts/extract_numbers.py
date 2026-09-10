@@ -17,7 +17,6 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass

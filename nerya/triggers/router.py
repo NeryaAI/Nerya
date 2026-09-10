@@ -10,7 +10,6 @@ from typing import Any
 from ..core import jsonl
 from ..core.atomic_write import atomic_write_text
 from ..core.config import Config
-from ..core.errors import TriggerRouteError
 from ..core.time import now_iso
 from ..db import CooldownRepository, DedupeRepository
 from ..db.sqlite import connect
@@ -297,7 +296,6 @@ def _rate_limit_hit(con, route_id: str, max_per_minute: int) -> bool:
     """Sliding 60s window rate limiter backed by the same cooldown table."""
     import time
     now = time.time()
-    tbl = "trigger_rate_window"
     con.execute(
         "CREATE TABLE IF NOT EXISTS trigger_rate_window "
         "(route_id TEXT, ts REAL)"

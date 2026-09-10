@@ -34,7 +34,6 @@ Coverage map (mirrors ``phase_o_done.md`` § 3):
 
 from __future__ import annotations
 
-from typing import Any
 
 import pytest
 

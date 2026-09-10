@@ -171,12 +171,14 @@ def test_okx_quote_records_assumed_and_explicit_decimals(monkeypatch):
         monkeypatch, {"/api/v5/dex/aggregator/quote": quote_doc}
     )
 
-    # No kwargs: 18 assumed on both sides, recorded in extra.
+    # No kwargs: 18 assumed on both sides, recorded in extra. 6.9 is
+    # float-hostile: int(float(6.9) * 10**18) truncates off the exact
+    # base units, Decimal(str(6.9)) does not (F11 invariant).
     q1 = provider.quote(
         chain="ethereum",
         token_in="0xweth",
         token_out="0xusdc",
-        amount_in=1.0,
+        amount_in=6.9,
     )
     assert q1.expected_out == pytest.approx(2_000_000 / 10 ** 18)
     assert q1.extra["decimals_assumed"] == 18
@@ -195,7 +197,7 @@ def test_okx_quote_records_assumed_and_explicit_decimals(monkeypatch):
     amount_param = calls[-1]["params"]["amount"]
     assert amount_param == "2"  # 2.0 * 10**0
 
-    assert calls[0]["params"]["amount"] == str(int(1.0 * 10 ** 18))
+    assert calls[0]["params"]["amount"] == "6900000000000000000"
 
 
 def test_okx_quote_without_positive_output_raises_quote_error(monkeypatch):

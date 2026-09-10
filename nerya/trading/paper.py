@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 from .intents import TradeIntent
 from .orders import OrderRequest, OrderResult, new_fill

@@ -57,7 +57,6 @@ from typing import Any
 
 from ..errors import (
     WalletDependencyError,
-    WalletPolicyDenied,
     WalletTransportError,
 )
 
@@ -80,7 +79,7 @@ class NodeSkillRef:
             f"2. clone the skill: `git clone {self.repo} <skills-dir>/{self.id}`"
         )
         pieces.append(
-            f"3. install deps inside that directory: `npm install`"
+            "3. install deps inside that directory: `npm install`"
         )
         pieces.append(
             f"4. set `wallet.{self.id}.skill_path` in nerya.yml to the "
