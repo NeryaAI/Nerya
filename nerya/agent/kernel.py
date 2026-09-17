@@ -1046,6 +1046,7 @@ def _loop_config_from_config(
     """Build the native execution policy with caller-owned identity and hooks."""
     return LoopConfig.from_config(
         config, turn_id=turn_id, tier=llm_tier or config.get("agent.native.tier"),
+        workspace_root=str(config.paths.root),
         reasoning_effort=reasoning_effort, reasoning_summary=reasoning_summary,
         model_provider=model_provider,
         model_id=model_id,
@@ -1730,7 +1731,9 @@ class AgentKernel:
         todos_before = deps.task_state.snapshot_todos()
         gw = LLMGateway(self.config)
 
-        permission_context = PermissionContext(mode=self.permission_mode)
+        from ..tools.capability_policy import normalise_tool_policy, tool_policy_allows
+        tool_policy = normalise_tool_policy(self.config.get("agent.native.tool_policy"))
+        permission_context = PermissionContext(mode=self.permission_mode, tool_policy=tool_policy)
         if strategy_order_auto_approve:
             permission_context.session_rules.append(
                 PermissionRule(
@@ -2330,6 +2333,7 @@ class AgentKernel:
                 system=system_prompt,
                 user_message=user_message,
                 prior_messages=(None if checkpoint_continue else prior_messages or None),
+                tool_filter=lambda descriptor: tool_policy_allows(tool_policy, descriptor.name),
                 cancel_token=cancel_token,
                 steer_inbox=steer_inbox,
                 turn_id=turn_id,

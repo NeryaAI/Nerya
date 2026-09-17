@@ -10,8 +10,9 @@ inspect task progress.
 - Recurring agent task: create a schedule with `session_kind="agent"`.
 - Recurring script task: create a schedule with `session_kind="script"` and an
   approved script id.
-- Progress inspection: use `task_list`, `task_summary`, `task_get`,
-  `task_output`, or `scripts/list_tasks.py`.
+- Background execution inspection: use `task_list`, `task_summary`, `task_get` or `task_output`.
+- Recurring schedule inspection: use `scripts/list_tasks.py` or `/triggers/schedules/status`, with the exact returned schedule/task id. These are separate registries.
+- New strategy logic, including observation-only or script-gated Agent workflows: use `strategy_author`, not a recurring Agent prompt in place of Python.
 
 ## Prompt Contract
 
@@ -74,6 +75,10 @@ python -m nerya.skills.builtin.tasks.scripts.create_task --json '<payload>'
 ```
 
 ## Guardrails
+
+- Cron fields are local to the named timezone. Do not pre-convert the hour to UTC and also set the local timezone.
+- An Agent task is already an LLM invocation. A requirement for zero AI calls before a numeric condition must be implemented as a real script gate, not as a sentence in an Agent prompt.
+- Do not infer “not created” from an empty background-task listing after schedule creation. Verify the schedule registry using the returned id.
 
 - Do not create a strategy when the user asked for a plain operator task.
 - Prefer `session_mode="reuse"` for daily recurring agent reports so the task

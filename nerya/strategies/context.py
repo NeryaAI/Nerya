@@ -948,34 +948,30 @@ class StrategySubAgents:
         payload: Optional[dict[str, Any]] = None,
         schema: Optional[dict[str, Any]] = None,
         trigger_event_id: Optional[str] = None,
+        max_parallel: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Run several subagents sequentially. Failures don't abort siblings.
+        """Run roles concurrently using the existing dispatcher and executor.
 
-        We don't expose dispatcher concurrency here yet — the strategy
-        runtime owns its own per-tick budget and parallelism is its
-        choice; for now sequential is the safest default.
+        Request order is retained; one failed role does not erase siblings.
+        Use max_parallel=1 when sequencing is intentional.
         """
-
+        requested = list(names or ())
+        if len(requested) != len(set(requested)):
+            raise StrategyRuntimeError("run_many requires unique role names")
+        results = self._disp().dispatch_many(requested, payload=dict(payload or {}),
+            trigger_event_id=trigger_event_id, strategy_id=self.strategy_id,
+            session_id=self.session_id, max_parallel=max_parallel)
         out: list[dict[str, Any]] = []
-        for n in names or ():
-            try:
-                out.append(
-                    self.run(
-                        n,
-                        payload=payload,
-                        schema=schema,
-                        trigger_event_id=trigger_event_id,
-                    )
-                )
-            except StrategyRuntimeError as exc:
-                out.append(
-                    {
-                        "ok": False,
-                        "subagent": n,
-                        "error": str(exc),
-                        "error_kind": "schema",
-                    }
-                )
+        for result in results:
+            envelope = result.asdict() if hasattr(result, "asdict") else dict(result)
+            if self.audit is not None:
+                self.audit.log("subagent.run", {"name": envelope.get("subagent"), "ok": envelope.get("ok", False), "parallel": True, "duration_ms": envelope.get("wall_ms")})
+            if schema is not None and envelope.get("ok"):
+                try:
+                    _validate_minimal_schema(envelope.get("output"), schema, where=f"subagent:{envelope.get('subagent')} output")
+                except StrategyRuntimeError as exc:
+                    envelope.update(ok=False, error=str(exc), error_kind="schema")
+            out.append(envelope)
         return out
 
 
@@ -2113,6 +2109,7 @@ class StrategyContext:
     result: ResultBuilder = field(default_factory=ResultBuilder)
     backtest_replay: Callable[..., dict[str, Any]] | None = None
     run_deadline: StrategyRunDeadline = field(default_factory=StrategyRunDeadline)
+    inputs: Any = None
 
     @property
     def mode(self) -> str:
@@ -2336,6 +2333,7 @@ def build_strategy_context(
             f"{resolved_mode!r}"
         )
 
+    from .input_context import StrategyInputContext
     cfg_view = StrategyConfig(
         strategy_id=manifest.strategy_id,
         title=manifest.title,
@@ -2483,6 +2481,8 @@ def build_strategy_context(
         audit=audit,
         backtest_replay=_bound_backtest_replay,
         run_deadline=run_deadline,
+        inputs=StrategyInputContext(sources=manifest.extras.get("data_sources", []),
+            market=market, news=news, markets=manifest.markets, run_id=rid),
     )
 
 

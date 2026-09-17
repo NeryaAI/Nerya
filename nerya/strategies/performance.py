@@ -92,6 +92,7 @@ class StrategyPerformanceSnapshot:
     evolution_context: dict[str, Any] = field(default_factory=dict)
     package_context: dict[str, Any] = field(default_factory=dict)
     evidence_scope: dict[str, Any] = field(default_factory=dict)
+    workflow_context: dict[str, Any] = field(default_factory=dict)
     last_run_at: Optional[str] = None
     last_review_at: Optional[str] = None
     notes: list[str] = field(default_factory=list)

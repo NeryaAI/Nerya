@@ -96,6 +96,33 @@ def assemble_metrics(result: BacktestResult) -> dict[str, Any]:
         metrics["flags"] = ["risk_breach:max_drawdown"]
     else:
         metrics["flags"] = []
+    # A replay completing without exceptions can still consist entirely of
+    # returned errors or insufficient-data holds. Surface that evidence.
+    counts: dict[str, int] = defaultdict(int)
+    for decision in result.decisions:
+        counts[str(decision.get("status") or "unknown")] += 1
+    errors = sum(counts.get(status, 0) for status in ("error", "failed", "unknown"))
+    activity = counts.get("ok", 0) + counts.get("dispatch", 0)
+    metrics["evaluation_mode"] = cfg.evaluation_mode
+    metrics["replay"] = {
+        "decisions": len(result.decisions), "status_counts": dict(counts),
+        "errors": errors, "observations_or_dispatches": activity,
+        "order_attempts": result.order_attempts,
+        "agent_execution": "not_run", "schedule_execution": "not_run",
+        "scope": "historical_code_replay_only",
+    }
+    if errors:
+        metrics["verdict"] = "FAIL"
+        metrics["flags"].append("strategy_returned_errors")
+    if cfg.evaluation_mode == "observation":
+        unexpected_orders = bool(result.order_attempts or result.trades or result.rejected_signals)
+        metrics["verdict"] = "FAIL" if errors or unexpected_orders else "PASS" if activity else "WARN"
+        metrics["flags"] = [flag for flag in metrics["flags"] if flag != "no_trades"]
+        metrics["flags"].append("observation_replay_not_profit_evidence")
+        if unexpected_orders:
+            metrics["flags"].append("observation_order_attempt")
+        if not activity:
+            metrics["flags"].append("no_observation_or_dispatch_exercised")
     return metrics
 
 

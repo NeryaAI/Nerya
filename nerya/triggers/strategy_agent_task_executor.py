@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -111,7 +112,12 @@ class StrategyAgentTaskExecutor:
         try:
             package = load_package(self.config.paths, str(strategy_id))
             self._assert_mode_allowed(package)
+            from ..strategies.agent_execution import execution_config
+            from ..strategies.input_context import context_prompt
+            scoped_config = execution_config(self.config, package.manifest)
             task = self._build_task(package, event, task_id)
+            if task.status == "dispatch" and task.prompt.strip():
+                task.prompt = context_prompt(task, package, task_id)
         except Exception as exc:
             return self._failed(
                 event,
@@ -179,24 +185,13 @@ class StrategyAgentTaskExecutor:
             session_key=session_key,
             policy=policy,
         )
-        kernel = self._kernel()
-        required_team_run = self._run_required_team(
-            package=package,
-            event=event,
-            task=task,
-            task_id=task_id,
-            session_id=session_id,
-            profile=profile,
-            kernel=kernel,
-        )
-        if required_team_run is not None:
-            task.prompt = self._required_team_decision_prompt(
-                package=package,
-                task=task,
-                team_run=required_team_run,
-            )
-            task.metadata["required_team_run_id"] = required_team_run.get("team_run_id")
-            task.metadata["required_team_run_ok"] = bool(required_team_run.get("ok"))
+        required_team_run = None
+        task.metadata["execution_policy"] = {
+            "max_iterations": scoped_config.get("agent.native.max_iterations"),
+            "max_tool_calls": scoped_config.get("agent.native.max_total_tool_calls"),
+            "max_wall_seconds": scoped_config.get("agent.native.max_wall_seconds"),
+            "capabilities": profile.get("capability_mode", "inherit"),
+        }
         prompt_artifact = self._write_prompt_artifacts(
             package=package,
             task_id=task_id,
@@ -223,12 +218,52 @@ class StrategyAgentTaskExecutor:
                 "trigger_event_id": event.event_id,
             },
         }
-        turn_result = kernel.run_turn(
-            trigger=trigger_for_agent,
-            strategy_id=package.strategy_id,
-            session_id=session_id,
-            attached_skills=self._attached_skills(task, profile),
+        started_at = now_iso()
+        started_clock = time.monotonic()
+        execution_turn_id = "turn_" + uuid.uuid4().hex
+        running = self._task_row(
+            event=event, package=package, task=task, task_id=task_id,
+            session_id=session_id, turn_id=execution_turn_id, status="running",
+            prompt_artifact=prompt_artifact,
         )
+        running["started_at"] = started_at
+        self._record_task(package.strategy_id, session_id, running)
+        try:
+            kernel = self._kernel(scoped_config)
+            required_team_run = self._run_required_team(
+                package=package, event=event, task=task, task_id=task_id,
+                session_id=session_id, profile=profile, kernel=kernel,
+                execution_turn_id=execution_turn_id, config=scoped_config,
+            )
+            if required_team_run is not None:
+                task.prompt = self._required_team_decision_prompt(package=package, task=task, team_run=required_team_run)
+                task.metadata["required_team_run_id"] = required_team_run.get("team_run_id")
+                task.metadata["required_team_run_ok"] = bool(required_team_run.get("ok"))
+                self._write_prompt_artifacts(package=package, task_id=task_id, task=task,
+                    session_id=session_id, profile_record=profile_record)
+                trigger_for_agent["payload"].update(text=task.prompt, metadata=dict(task.metadata), artifacts=list(task.artifacts))
+                wall = float(scoped_config.get("agent.native.max_wall_seconds", 0) or 0)
+                if wall > 0:
+                    remaining = wall - (time.monotonic() - started_clock)
+                    if remaining <= 0:
+                        raise TimeoutError("Parallel team exhausted this run's wall-clock budget")
+                    scoped_config.data["agent"]["native"]["max_wall_seconds"] = remaining
+            turn_result = kernel.run_turn(
+                trigger=trigger_for_agent,
+                strategy_id=package.strategy_id,
+                session_id=session_id,
+                turn_id=execution_turn_id,
+                attached_skills=self._attached_skills(task, profile),
+            )
+        except Exception as exc:
+            return self._failed(
+                event, target=target, strategy_id=package.strategy_id,
+                task_id=task_id, session_id=session_id, turn_id=execution_turn_id,
+                code="agent_execution_failed", message=f"{type(exc).__name__}: {exc}",
+                route_id=route_result.route_id, trace=traceback.format_exc(limit=8),
+                started_at=started_at,
+                duration_ms=round((time.monotonic() - started_clock) * 1000),
+            )
         turn_id = getattr(turn_result, "turn_id", None)
         row = self._task_row(
             event=event,
@@ -250,6 +285,14 @@ class StrategyAgentTaskExecutor:
         row["tool_trace"] = preflight_trace + list(getattr(turn_result, "tool_trace", []) or [])
         row["decision"] = getattr(turn_result, "decision", None)
         row["stopped_reason"] = getattr(turn_result, "stopped_reason", None)
+        row["started_at"] = started_at
+        row["finished_at"] = now_iso()
+        row["duration_ms"] = round((time.monotonic() - started_clock) * 1000)
+        row["final_text"] = getattr(turn_result, "final_text", "")
+        row["iterations"] = getattr(turn_result, "iterations", None)
+        row["budget"] = dict(getattr(turn_result, "budget", {}) or {})
+        # Executed means the kernel returned, not a successful business outcome.
+        # Consumers must retain stopped_reason and the actual final response.
         self._record_task(package.strategy_id, session_id, row)
         jsonl.append(self.config.paths.journal("triggers"), {
             "kind": "trigger.agent_task_executed",
@@ -286,8 +329,9 @@ class StrategyAgentTaskExecutor:
         event: TriggerEvent,
         task_id: str,
     ) -> StrategyAgentTask:
+        from ..strategies.agent_execution import execution_config
         ctx = build_strategy_context(
-            config=self.config,
+            config=execution_config(self.config, package.manifest),
             package=package,
             skills=self.skills,
             run_id=task_id,
@@ -310,7 +354,14 @@ class StrategyAgentTaskExecutor:
 
     def _call_task_builder(self, package: StrategyPackage, fn: Any, ctx: Any) -> Any:
         def _call() -> Any:
-            return fn(ctx)
+            from ..strategies.input_context import collect_task_context
+            task = StrategyAgentTask.from_value(fn(ctx))
+            if task.status == "dispatch" and task.roles is not None:
+                if any(role not in package.manifest.subagents for role in task.roles):
+                    raise ValueError("Task roles must refer to declared strategy subagents")
+                task.metadata["selected_roles"] = list(task.roles)
+            collect_task_context(task, ctx, package.manifest.extras.get("agent_context", {}))
+            return task
 
         return _run_with_timeout(
             _call,
@@ -360,15 +411,19 @@ class StrategyAgentTaskExecutor:
         session_id: str,
         profile: dict[str, Any],
         kernel: Any,
+        execution_turn_id: str = "",
+        config: Config | None = None,
     ) -> dict[str, Any] | None:
-        if not self._is_agent_team_task(task):
+        if not self._is_agent_team_task(task, package):
             return None
         roles = self._team_role_entries(package, task)
         if not roles:
             return None
 
         from ..skills.kernel import SkillKernel
-        from ..tools.native.agents import team_run_handler
+        from ..subagents.dispatcher import SubAgentDispatcher
+        effective = config or self.config
+        team_config = package.manifest.extras.get("agent_execution", {}).get("team", {})
 
         skills = self.skills or getattr(kernel, "skills", None)
         if skills is None:
@@ -379,12 +434,13 @@ class StrategyAgentTaskExecutor:
             name="team_run",
             id=call_id,
             caller="strategy.agent_task.required_team",
+            turn_id=execution_turn_id,
             arguments={
                 "team_run_id": f"team-{task_id[-12:]}",
                 "task": self._team_mission(package, task),
                 "roles": roles,
                 "shared_payload": shared_payload,
-                "max_parallel": min(4, len(roles)),
+                "max_parallel": min(len(roles), int(team_config.get("max_parallel") or effective.get("agent.subagents.max_parallel", 4) or 4)),
                 "strategy_id": package.strategy_id,
                 "session_id": session_id,
                 "trigger_event_id": event.event_id,
@@ -394,22 +450,33 @@ class StrategyAgentTaskExecutor:
                 "session_id": session_id,
                 "trigger_event_id": event.event_id,
                 "required_by": "strategy.agent_team",
+                "turn_deadline_epoch": time.time() + float(effective.get("agent.native.max_wall_seconds", 1800)),
+                "wall_time_final_synthesis_seconds": float(effective.get("agent.native.wall_time_final_synthesis_seconds", 30)),
+                "task_id": task_id,
             },
         )
-        result = team_run_handler(
-            call,
-            config=self.config,
-            skills=skills,
-            tool_registry=getattr(kernel, "tool_registry", None),
-        )
+        scope = SubAgentDispatcher.for_workspace(effective, skills,
+            strategy_id=package.strategy_id, session_id=session_id, turn_id=execution_turn_id)
+        result = scope.executor.execute(call)
         data = self._tool_json_data(result)
         team_run_id = str(
             (data or {}).get("team_run_id")
             or call.arguments.get("team_run_id")
             or ""
         )
-        ok = not bool(result.is_error)
-        compact_data = self._compact_team_result(data)
+        ok = not bool(result.is_error) and (data or {}).get("ok") is not False and not bool((data or {}).get("roles_failed"))
+        from ..strategies.input_context import safe_data
+        full_data = safe_data({k: v for k, v in (data or {}).items() if k not in {"results", "failures", "steps", "_transcript", "transcript", "thinking"}})
+        for group in ("results", "failures"):
+            full_data[group] = [safe_data({k: v for k, v in row.items() if k not in {"steps", "_transcript", "transcript", "thinking", "prompt"}})
+                for row in (data or {}).get(group, []) if isinstance(row, dict)]
+        full_data["evidence_scope"] = "Actual team tool results. Individual long outputs may be compacted by the team tool; inspect the original team records for full evidence."
+        artifact = package.root / "agent_tasks" / task_id / "team-result.json"
+        if not artifact.resolve().is_relative_to(package.root.resolve()):
+            raise ValueError("team evidence path outside strategy root")
+        atomic_write_text(artifact, json.dumps(full_data, ensure_ascii=False, indent=2))
+        task.artifacts.append({"kind": "team_result", "path": artifact.relative_to(package.root).as_posix()})
+        compact_data = self._compact_team_result(full_data)
         compact_call = {
             "name": call.name,
             "id": call.id,
@@ -448,6 +515,8 @@ class StrategyAgentTaskExecutor:
             "summary": summary,
             "data": compact_data,
             "shared_payload": shared_payload,
+            "full_data": full_data,
+            "artifact_path": f"strategies/{package.strategy_id}/{artifact.relative_to(package.root).as_posix()}",
             "action": {
                 "action": "team_run",
                 "skill_id": "native",
@@ -465,7 +534,15 @@ class StrategyAgentTaskExecutor:
         }
 
     @staticmethod
-    def _is_agent_team_task(task: StrategyAgentTask) -> bool:
+    def _is_agent_team_task(task: StrategyAgentTask, package: StrategyPackage | None = None) -> bool:
+        if task.roles is not None:
+            return bool(task.roles)
+        if package is not None:
+            team = package.manifest.extras.get("agent_execution", {}).get("team", {})
+            if "enabled" in team:
+                return team["enabled"]
+            if package.manifest.extras.get("agent_task", {}).get("mode") == "agent_team":
+                return True
         return (task.metadata or {}).get("execution_mode") == "agent_team"
 
     def _team_role_entries(
@@ -474,16 +551,24 @@ class StrategyAgentTaskExecutor:
         task: StrategyAgentTask,
     ) -> list[dict[str, Any]]:
         meta = dict(task.metadata or {})
-        raw_roles = meta.get("roles") or agent_team_roles(package.manifest)
+        team = package.manifest.extras.get("agent_execution", {}).get("team", {})
+        raw_roles = task.roles if task.roles is not None else team.get("roles") or meta.get("roles") or agent_team_roles(package.manifest)
         roles = [str(r).strip() for r in (raw_roles or []) if str(r).strip()]
-        markets = self._task_markets(package, task)
-        return [
-            {
-                "name": role,
-                "instructions": self._role_task_for_markets(role, markets),
-            }
-            for role in roles
-        ]
+        from ..subagents.strategy_registry import StrategySubAgentRegistry
+        registry = StrategySubAgentRegistry(paths=self.config.paths, strategy_id=package.strategy_id)
+        entries = []
+        for role in roles:
+            entry = {"name": role, "instructions": self._role_task_for_markets(role, self._task_markets(package, task))}
+            override = team.get("role_policies", {}).get(role)
+            if override:
+                spec = registry.get(role)
+                # Keep the role's actual prompt and restrictions while applying
+                # a reviewed per-role execution policy.
+                policy = spec.execution_policy.merged(override)
+                entry.update(prompt=spec.prompt, tier=spec.tier, allowed_skills=list(spec.allowed_skills),
+                    execution_policy=policy.asdict())
+            entries.append(entry)
+        return entries
 
     @staticmethod
     def _role_task_for_markets(role: str, markets: list[str]) -> str:
@@ -494,117 +579,44 @@ class StrategyAgentTaskExecutor:
         )
 
     def _team_context_payload(
-        self,
-        package: StrategyPackage,
-        event: TriggerEvent,
-        task: StrategyAgentTask,
-        task_id: str,
+        self, package: StrategyPackage, event: TriggerEvent,
+        task: StrategyAgentTask, task_id: str,
     ) -> dict[str, Any]:
-        markets = self._task_markets(package, task)
-        timeframe = self._task_timeframe(package, event, task)
-        account_id = self._task_account(package, task)
-        ctx = build_strategy_context(
-            config=self.config,
-            package=package,
-            skills=self.skills,
-            run_id=f"{task_id}_team",
-            session_id=None,
-            connector_registry=self.connector_registry,
-            trigger_event=event,
-        )
-        market_context: list[dict[str, Any]] = []
-        for market in markets[:12]:
-            item: dict[str, Any] = {"market": market, "timeframe": timeframe}
-            try:
-                item["features"] = ctx.market.features(
-                    market,
-                    timeframe=timeframe,
-                    lookback=160,
-                )
-            except Exception as exc:
-                item["features_error"] = f"{type(exc).__name__}: {exc}"
-            try:
-                candles = ctx.market.candles(market, timeframe=timeframe, limit=24)
-                item["candles_count"] = len(candles)
-                item["recent_candles"] = list(candles[-8:])
-            except Exception as exc:
-                item["candles_error"] = f"{type(exc).__name__}: {exc}"
-            try:
-                item["ticker"] = ctx.market.ticker(market)
-            except Exception as exc:
-                item["ticker_error"] = f"{type(exc).__name__}: {exc}"
-            market_context.append(item)
-
-        try:
-            from ..strategies.performance import _build_news_context
-
-            news_context = _build_news_context(package, config_like=self.config)
-        except Exception as exc:
-            news_context = {
-                "items": [],
-                "count": 0,
-                "error": f"{type(exc).__name__}: {exc}",
-            }
+        from ..strategies.input_context import safe_data
+        context = safe_data(task.context)
+        cap = int(package.manifest.extras.get("agent_context", {}).get("max_chars", 64000))
+        if len(json.dumps(context, ensure_ascii=False)) > cap:
+            context = {"truncated": True, "artifact": task.metadata.get("input_context"),
+                       "note": "Complete context is in the referenced artifact; the task contains a bounded preview."}
         return {
-            "strategy_id": package.strategy_id,
-            "markets": markets,
-            "timeframe": timeframe,
-            "account_id": account_id,
+            "strategy_id": package.strategy_id, "task_id": task_id,
+            "markets": self._task_markets(package, task),
+            "account_id": self._task_account(package, task),
+            "timeframe": self._task_timeframe(package, event, task),
+            "workflow_context": context,
+            "data_sources": safe_data(package.manifest.extras.get("data_sources", [])),
             "policy": package.manifest.policy.asdict(),
-            "market_context": market_context,
-            "news_context": news_context,
-            "data_policy": "live market/news data only; no mock fallback accepted",
+            "data_policy": "Use the supplied run snapshot. Missing data remains missing; acquire more evidence through authorized tools when useful.",
         }
 
     def _required_team_decision_prompt(
-        self,
-        *,
-        package: StrategyPackage,
-        task: StrategyAgentTask,
+        self, *, package: StrategyPackage, task: StrategyAgentTask,
         team_run: dict[str, Any],
     ) -> str:
-        shared = dict(team_run.get("shared_payload") or {})
-        team_data = self._compact_team_result(team_run.get("data"))
-        return "\n".join([
-            f"Strategy Agent Team task for `{package.strategy_id}`.",
-            "",
-            "The runtime already executed the required `team_run` before this decision turn.",
-            "Do not call `team_run` again unless the team run failed and you must retry a missing role.",
-            "Use the live data context and Agent Team result below to decide one action.",
-            "Before any buy/sell/reduce, call `risk_check`; call `trade_intent_submit` only if risk allows.",
-            "Hold when confidence is below policy.min_confidence, evidence conflicts, or data is degraded.",
-            "",
-            "Live market/news context JSON:",
-            json.dumps(self._compact_jsonable(shared), ensure_ascii=False, indent=2, default=str),
-            "",
-            "Required Agent Team result JSON:",
-            json.dumps(team_data, ensure_ascii=False, indent=2, default=str),
-            "",
-            "Original strategy task metadata JSON:",
-            json.dumps(dict(task.metadata or {}), ensure_ascii=False, indent=2, default=str),
-            "",
-            "Final response contract:",
-            json.dumps(
-                {
-                    "decision": "buy|sell|reduce|hold",
-                    "confidence": 0.0,
-                    "team_run_id": team_run.get("team_run_id"),
-                    "selected_market": "<best candidate or null>",
-                    "ranked_candidates": [
-                        {"market": "<symbol>", "rank": 1, "reason": "..."}
-                    ],
-                    "account_id": shared.get("account_id"),
-                    "technical": "summary",
-                    "fundamental": "summary",
-                    "macro_news": "summary",
-                    "risk": "summary",
-                    "action_taken": "none|risk_check|trade_intent_submit",
-                    "reasoning": ["evidence-backed bullet"],
-                },
-                ensure_ascii=False,
-                indent=2,
-                default=str,
-            ),
+        from ..security.prompt_injection import wrap_untrusted
+        data = team_run.get("full_data", team_run.get("data", {}))
+        text = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+        cap = int(package.manifest.extras.get("agent_context", {}).get("max_chars", 64000))
+        if len(text) > cap:
+            text = json.dumps({"truncated": True, "artifact": team_run.get("artifact_path"),
+                "original_chars": len(text), "preview": text[:max(0, cap - 600)]}, ensure_ascii=False)
+        return "\n\n".join([
+            task.prompt,
+            "## Parallel team evidence\nThe configured team has returned. Complete the original task above, preserving its requested output and restrictions. "
+            "Review each role's actual result and failures; gather more evidence, delegate follow-ups or iterate when useful. "
+            "Do not repeat completed work merely to satisfy a template. A partial or failed role is not a successful result. "
+            "All existing permission, account and trading boundaries remain in force.",
+            wrap_untrusted("team_evidence", text),
         ])
 
     @staticmethod
@@ -687,7 +699,7 @@ class StrategyAgentTaskExecutor:
             or task.session_key.get("timeframe")
             or payload.get("timeframe")
             or payload.get("interval")
-            or ("1d" if package.manifest.strategy_class == "agent_team" else "15m")
+            or next((str(source.get("timeframe")) for source in (package.manifest.extras.get("data_sources") or []) if isinstance(source, dict) and source.get("timeframe")), "")
         )
 
     @staticmethod
@@ -699,23 +711,20 @@ class StrategyAgentTaskExecutor:
         )
 
     def _team_mission(self, package: StrategyPackage, task: StrategyAgentTask) -> str:
-        markets = ", ".join(self._task_markets(package, task))
-        timeframe = str(task.metadata.get("timeframe") or task.session_key.get("timeframe") or "1d")
-        return (
-            f"Analyze strategy {package.strategy_id} basket ({markets}) on {timeframe}; "
-            "rank candidates using live K-line/ticker context, recent news, fundamentals, "
-            "macro regime, and risk. Recommend buy/sell/reduce/hold with evidence."
-        )
+        return task.prompt
 
-    def _kernel(self):
+    def _kernel(self, config: Config | None = None):
+        effective = config or self.config
         if self.kernel_factory is not None:
-            return self.kernel_factory(self.config)
+            return self.kernel_factory(effective)
         import importlib
-
+        from ..tools.permissions import PermissionMode
         agent_mod = importlib.import_module("nerya.agent.kernel")
         skills_mod = importlib.import_module("nerya.skills.kernel")
-        skills = self.skills or skills_mod.SkillKernel.boot(self.config)
-        return agent_mod.AgentKernel(config=self.config, skills=skills)
+        skills = self.skills or skills_mod.SkillKernel.boot(effective)
+        return agent_mod.AgentKernel(config=effective, skills=skills,
+            permission_mode=PermissionMode(effective.get("runtime.permission_mode", "default")),
+            llm_tier=effective.get("agent.native.tier"))
 
     def _resolve_session_key(
         self,
@@ -748,6 +757,8 @@ class StrategyAgentTaskExecutor:
         if policy == "custom":
             return dict(task.session_key or {})
         key = dict(task.session_key or {})
+        if task.path:
+            key.setdefault("path", task.path)
         key.setdefault("market", market)
         key.setdefault("timeframe", timeframe)
         return key
@@ -759,61 +770,24 @@ class StrategyAgentTaskExecutor:
         if not profile.get("title"):
             profile["title"] = f"{package.strategy_id} strategy agent"
         if not profile.get("role"):
-            if use_agent_task:
-                profile["role"] = (
-                    "Run strategy-triggered market analysis through Agent Team, "
-                    "then submit only risk-gated trade intents."
-                )
-            else:
-                profile["role"] = "Execute strategy-generated trading tasks."
+            profile["role"] = (
+                "Complete the strategy's task using supplied evidence and available tools. "
+                "Research, plan, delegate and iterate when useful. Follow the requested "
+                "output and all account, trading and operator restrictions."
+            )
         if not profile.get("accounts"):
             profile["accounts"] = list(package.manifest.accounts)
         if not profile.get("markets"):
             profile["markets"] = list(package.manifest.markets)
-        if not profile.get("allowed_tools"):
-            profile["allowed_tools"] = [
-                "role_list",
-                "team_run",
-                "market_data",
-                "portfolio_summary",
-                "strategy_history",
-                "risk_check",
-                "trade_intent_submit",
-            ]
-        elif use_agent_task:
-            tools = list(profile.get("allowed_tools") or [])
-            for tool in [
-                "role_list",
-                "team_run",
-                "market_data",
-                "portfolio_summary",
-                "strategy_history",
-                "risk_check",
-                "trade_intent_submit",
-            ]:
-                if tool not in tools:
-                    tools.append(tool)
-            profile["allowed_tools"] = tools
+        # An absent custom list inherits the main Agent's existing capability
+        # surface. Explicit lists remain restrictive in the executor as well.
+        profile["capability_mode"] = package.manifest.extras.get("agent_execution", {}).get(
+            "capabilities", "custom" if profile.get("allowed_tools") else "inherit")
+        # Explicit profiles are capability boundaries, not hints to broaden.
+        # In particular, an observation Agent must not acquire trading/team
+        # tools merely because it uses the Agent-task execution path.
         if use_agent_task:
-            skills = list(profile.get("attached_skills") or [])
-            for skill in [
-                "team",
-                "trading",
-                "market_research",
-                "research",
-                "market_data_routing",
-            ]:
-                if skill not in skills:
-                    skills.append(skill)
-            profile["attached_skills"] = skills
-            rules = list(profile.get("order_rules") or [])
-            team_rule = (
-                "For Agent Team strategies, call team_run and review the team "
-                "memo before any risk_check or trade_intent_submit."
-            )
-            if team_rule not in rules:
-                rules.append(team_rule)
-            profile["order_rules"] = rules
+            profile["order_rules"] = list(profile.get("order_rules") or [])
             if not profile.get("min_confidence_to_trade") and policy.min_confidence:
                 profile["min_confidence_to_trade"] = policy.min_confidence
         risk_limits = dict(profile.get("risk_limits") or {})
@@ -887,6 +861,7 @@ class StrategyAgentTaskExecutor:
         return {
             "kind": "strategy.agent_task",
             "ts": now_iso(),
+            "package_hash": package.content_hash,
             "task_id": task_id,
             "strategy_id": package.strategy_id,
             "trigger_event_id": event.event_id,
@@ -925,10 +900,23 @@ class StrategyAgentTaskExecutor:
         message: str,
         route_id: str | None,
         trace: str | None = None,
+        session_id: str | None = None,
+        turn_id: str | None = None,
+        started_at: str | None = None,
+        duration_ms: int | None = None,
     ) -> StrategyAgentTaskExecutionResult:
         error = {"code": code, "message": message}
         if trace:
             error["trace"] = trace
+        if strategy_id:
+            self._record_task(strategy_id, session_id, {
+                "kind": "strategy.agent_task", "ts": now_iso(),
+                "task_id": task_id, "strategy_id": strategy_id,
+                "session_id": session_id, "turn_id": turn_id, "trigger_event_id": event.event_id,
+                "status": "failed", "reason": message, "error": error,
+                "started_at": started_at, "finished_at": now_iso(),
+                "duration_ms": duration_ms,
+            })
         jsonl.append(self.config.paths.journal("triggers"), {
             "kind": "trigger.agent_task_failed",
             "ts": now_iso(),

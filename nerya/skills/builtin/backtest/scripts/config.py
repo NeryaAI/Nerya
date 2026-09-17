@@ -121,6 +121,7 @@ class BacktestConfig:
     risk_free_daily: float = 0.0
     benchmark_mode: str = "buy_hold_equal_weight"
     cache_root: str | None = None
+    evaluation_mode: str = "trading"
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any] | None) -> "BacktestConfig":
@@ -157,11 +158,14 @@ class BacktestConfig:
             risk_free_daily=float(raw.get("risk_free_daily", 0.0)),
             benchmark_mode=str(raw.get("benchmark_mode", "buy_hold_equal_weight")),
             cache_root=(str(raw.get("cache_root")) if raw.get("cache_root") else None),
+            evaluation_mode=str(raw.get("evaluation_mode", "trading")),
         )
         cfg.validate()
         return cfg
 
     def validate(self) -> None:
+        if self.evaluation_mode not in {"trading", "observation"}:
+            raise BacktestConfigError("evaluation_mode must be trading or observation")
         if self.initial_capital_usd <= 0:
             raise BacktestConfigError("initial_capital_usd must be positive")
         if self.min_backtest_days < 0:

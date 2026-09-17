@@ -34,6 +34,8 @@ import {
   StatusDot,
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
+import { StrategyWorkflowHub } from "../../components/workflows/StrategyWorkflowHub";
+import { useWorkflowText } from "../../components/workflows/WorkflowCanvas";
 import { StrategyCardSpark } from "../../components/strategies/StrategyCardSpark";
 import { Select } from "../../components/Select";
 import {
@@ -93,6 +95,12 @@ function finiteNumber(value: number | undefined): number | undefined {
 }
 
 export default function StrategiesPage() {
+  const [legacy, setLegacy] = useState(false);
+  const text = useWorkflowText();
+  return legacy ? <><button className="btn btn-ghost mb-4" onClick={() => setLegacy(false)}>← {text("返回策略工作流", "Back to strategy workflows")}</button><LegacyStrategiesPage /></> : <StrategyWorkflowHub onLegacyView={() => setLegacy(true)} />;
+}
+
+function LegacyStrategiesPage() {
   const t = useTranslations("strategies");
   const tCommon = useTranslations("common");
   const [strategies, setStrategies] = useState<StrategyRecord[]>([]);

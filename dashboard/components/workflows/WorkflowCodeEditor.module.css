@@ -1,0 +1,20 @@
+.editor { border:1px solid var(--line-hi); border-radius:8px; background:var(--bg-deep); overflow:hidden; min-width:0; }
+.body { display:flex; height:390px; min-height:220px; max-height:55vh; }
+.gutter { width:44px; flex:none; text-align:right; color:var(--text-muted); overflow:hidden; padding:12px 8px 12px 0; user-select:none; background:var(--bg); }
+.gutter > div { font:12px/22px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.gutter [data-active=true] { color:var(--text-base); font-weight:600; }
+.surface { position:relative; min-width:0; flex:1; }
+.mirror { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
+.mirror > div { min-width:max-content; }
+.mirror pre,.mirror code,.surface textarea { font:12px/22px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace !important; letter-spacing:normal !important; tab-size:4; text-align:left; white-space:pre; word-break:normal; overflow-wrap:normal; border:0; border-radius:0; margin:0; box-sizing:border-box; }
+.mirror pre,.surface textarea { padding:12px 14px; }
+.mirror code { display:block; padding:0 !important; background:transparent !important; }
+.mirror pre { overflow:visible; background:transparent !important; }
+.mirror :global(.hljs) { color:var(--text-base); }
+.mirror span { font-style:normal !important; font-weight:400 !important; }
+.surface textarea { position:absolute; inset:0; width:100%; height:100%; resize:none; background:transparent; color:transparent; -webkit-text-fill-color:transparent; caret-color:var(--text-base); outline:0; overflow:auto; }
+.surface textarea::selection { background:rgb(var(--brand-readable) / .22); }
+.editor:focus-within { border-color:rgb(var(--brand-readable)); }
+.editor footer { display:flex; align-items:center; justify-content:space-between; padding:7px 12px; border-top:1px solid var(--line); color:var(--text-muted); font-size:11px; }
+@media(max-width:600px) { .body { height:340px; } .surface textarea,.mirror pre,.mirror code { font-size:13px !important; } .gutter { width:34px; } }
+@media(forced-colors:active) { .mirror { display:none; } .surface textarea { color:CanvasText; -webkit-text-fill-color:CanvasText; caret-color:CanvasText; } }

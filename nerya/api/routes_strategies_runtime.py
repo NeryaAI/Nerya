@@ -97,6 +97,47 @@ def _id_tuple(value: Any) -> tuple[str, ...]:
 
 
 def routes():
+    def workflow_list(client, _query):
+        from ..strategies.workflow_service import workflow_index
+        return workflow_index(client.config.paths)
+
+    def agent_defaults(client):
+        return {"max_iterations": client.config.get("agent.native.max_iterations"),
+                "max_tool_calls": client.config.get("agent.native.max_total_tool_calls"),
+                "max_wall_seconds": client.config.get("agent.native.max_wall_seconds"),
+                "max_parallel": client.config.get("agent.team_run.max_parallel", client.config.get("agent.subagents.max_parallel", 4)),
+                "tier": client.config.get("agent.native.tier", "medium")}
+
+    def workflow_get(client, query):
+        from ..strategies.workflow_service import view_workflow
+        try:
+            out = view_workflow(
+                client.config.paths, str((query or {}).get("strategy_id") or ""),
+                (query or {}).get("proposal_id") or None,
+                schedules=client.triggers.list_schedules(),
+            )
+            out["agent_defaults"] = agent_defaults(client)
+            return out
+        except (NeryaError, OSError, ValueError, TypeError) as exc:
+            return _error(str(exc))
+
+    def workflow_propose(client, payload):
+        from ..strategies.workflow_service import propose_workflow
+        try:
+            out = propose_workflow(client.config.paths, payload or {})
+            if out.get("ok") and isinstance(out.get("workflow"), dict):
+                out["workflow"]["agent_defaults"] = agent_defaults(client)
+            return out
+        except (NeryaError, OSError, ValueError, TypeError) as exc:
+            return _error(str(exc))
+
+    def workflow_template(client, payload):
+        from ..strategies.workflow_templates import create_workflow_template
+        try:
+            return create_workflow_template(client.config.paths, payload or {})
+        except (NeryaError, OSError, ValueError, TypeError) as exc:
+            return _error(str(exc))
+
     def list_packages(client, _query):
         return _ok({"strategies": client.strategy.list_packages()})
 
@@ -367,6 +408,10 @@ def routes():
         )
 
     return [
+        ("GET", "/strategies/runtime/workflows", workflow_list),
+        ("GET", "/strategies/runtime/workflow", workflow_get),
+        ("POST", "/strategies/runtime/workflow/propose", workflow_propose),
+        ("POST", "/strategies/runtime/workflow/template", workflow_template),
         ("GET", "/strategies/runtime/list", list_packages),
         ("GET", "/strategies/runtime/get", get_package),
         ("POST", "/strategies/runtime/generate", generate),

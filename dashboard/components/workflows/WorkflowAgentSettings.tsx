@@ -1,0 +1,51 @@
+"use client";
+
+import { ChoiceSelect } from "../ChoiceSelect";
+import { SwitchControl } from "../SwitchControl";
+
+import type { WorkflowNode } from "../../lib/workflowTypes";
+import { asObject, cardTitle, withValue } from "../../lib/workflowPresentation";
+import { useWorkflowText } from "./WorkflowCanvas";
+import styles from "./WorkflowStudio.module.css";
+
+export type AgentDefaults = { max_iterations?: number; max_tool_calls?: number; max_wall_seconds?: number; max_parallel?: number; tier?: string };
+const strings = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+export function WorkflowAgentSettings({ config, nodes, defaults, disabled, onChange }: { config: Record<string, unknown>; nodes: WorkflowNode[]; defaults?: AgentDefaults; disabled: boolean; onChange: (value: Record<string, unknown>) => void }) {
+  const t = useWorkflowText();
+  const execution = asObject(config.agent_execution), context = asObject(config.agent_context), profile = asObject(config.agent_profile), team = asObject(execution.team);
+  const allowed = strings(profile.allowed_tools);
+  const capabilities = String(execution.capabilities || (allowed.length ? "custom" : "inherit"));
+  const sources = nodes.filter((n) => n.kind === "source" && n.binding.path?.[0] === "data_sources");
+  const roles = nodes.filter((n) => n.kind === "agent" && n.id.startsWith("agent:role/"));
+  const selectedSources = strings(context.sources), selectedRoles = strings(team.roles);
+  const update = (path: string[], value: unknown) => onChange(withValue(config, path, value));
+  const toggle = (values: string[], id: string, checked: boolean) => checked ? [...new Set([...values, id])] : values.filter((v) => v !== id);
+  const budget = (key: keyof AgentDefaults, zh: string, en: string) => <label key={key} className={styles.field}>{t(zh, en)}<input type="number" min={1} step={1} aria-label={t(zh, en)} value={typeof execution[key] === "number" ? String(execution[key]) : ""} disabled={disabled} placeholder={defaults?.[key] !== undefined ? t(`继承主 Agent · ${defaults[key]}`, `Inherit main Agent · ${defaults[key]}`) : t("继承主 Agent", "Inherit main Agent")} onChange={(e) => update(["agent_execution", key], e.target.value === "" ? null : Number(e.target.value))} /></label>;
+  return <div className={styles.settingsStack} data-testid="workflow-agent-settings">
+    <label className={styles.field}>{t("让 Agent 做什么？", "What should this Agent do?")}<textarea rows={5} disabled={disabled} value={String(profile.role || "")} onChange={(e) => update(["agent_profile", "role"], e.target.value)} /></label>
+    <details className={styles.advanced}><summary>{t("输入上下文", "Input context")} · {selectedSources.length} {t("个数据源", "sources")}</summary><div className={styles.settingsStack}>
+      {sources.map((source) => { const id = String(asObject(source.config).id || source.binding.path?.[1] || ""); return <label key={source.id} className={styles.toggleRow}><span>{cardTitle(source, t)}</span><input type="checkbox" disabled={disabled} checked={selectedSources.includes(id)} onChange={(e) => update(["agent_context", "sources"], toggle(selectedSources, id, e.target.checked))} /></label>; })}
+      <div className={styles.toggleRow}><span>{t("接收前置脚本输出", "Include upstream script outputs")}</span><SwitchControl label={t("接收前置脚本输出", "Include upstream script outputs")} disabled={disabled} checked={context.include_script_outputs !== false} onCheckedChange={(checked) => update(["agent_context", "include_script_outputs"], checked)} /></div>
+      <div className={styles.toggleRow}><span>{t("接收触发事件数据", "Include trigger payload")}</span><SwitchControl label={t("接收触发事件数据", "Include trigger payload")} disabled={disabled} checked={context.include_trigger !== false} onCheckedChange={(checked) => update(["agent_context", "include_trigger"], checked)} /></div>
+      <label className={styles.field}>{t("数据读取失败时", "When an input cannot be read")}<ChoiceSelect aria-label={t("数据读取失败时", "When an input cannot be read")} value={String(context.on_error || "stop")} disabled={disabled} onValueChange={(value) => update(["agent_context", "on_error"], value)}><option value="stop">{t("停止本次执行", "Stop this run")}</option><option value="continue">{t("带错误说明继续分析", "Continue with the error recorded")}</option></ChoiceSelect></label>
+      <p className={styles.helper}>{t("脚本通过 ctx.inputs.publish 或 dispatch(context=...) 提供真实输出；这里设置默认输入；脚本可按本次分支选择来源和已发布输出。", "Scripts publish actual results through ctx.inputs.publish or dispatch(context=...). These are default inputs; scripts can select sources and published outputs per invocation.")}</p>
+    </div></details>
+    <details className={styles.advanced}><summary>{t("并行协作", "Parallel collaboration")} · {team.enabled ? t("已配置", "Configured") : t("可选", "Optional")}</summary><div className={styles.settingsStack}>
+      <label className={styles.toggleRow}><span>{t("先并行分析，再汇总决策", "Analyze in parallel, then coordinate")}</span><input type="checkbox" disabled={disabled || roles.length === 0} checked={team.enabled === true} onChange={(e) => update(["agent_execution", "team"], { ...team, enabled: e.target.checked, roles: selectedRoles.length ? selectedRoles : roles.map((n) => String(asObject(n.config).name)) })} /></label>
+      {roles.map((role) => { const name = String(asObject(role.config).name); const checked = Array.isArray(team.roles) ? selectedRoles.includes(name) : team.enabled === true; return <label className={styles.toggleRow} key={role.id}><span>{cardTitle(role, t)}</span><input type="checkbox" disabled={disabled} checked={checked} onChange={(e) => update(["agent_execution", "team", "roles"], toggle(Array.isArray(team.roles) ? selectedRoles : team.enabled ? roles.map((n) => String(asObject(n.config).name)) : [], name, e.target.checked))} /></label>; })}
+      {!roles.length && <p className={styles.helper}>{t("先添加角色 Agent，或在底部让 Agent 帮你组建团队。", "Add role Agents, or ask the Agent to assemble a team below.")}</p>}
+      <label className={styles.field}>{t("同时运行的 Agent 数", "Concurrent Agents")}<input type="number" min={1} value={typeof team.max_parallel === "number" ? team.max_parallel : ""} disabled={disabled} placeholder={t(`继承系统${defaults?.max_parallel ? ` · ${defaults.max_parallel}` : ""}`, `System default${defaults?.max_parallel ? ` · ${defaults.max_parallel}` : ""}`)} onChange={(e) => update(["agent_execution", "team", "max_parallel"], e.target.value === "" ? null : Number(e.target.value))} /></label>
+      <p className={styles.helper}>{t("默认团队；脚本可为本次选择部分角色。选中成员共享输入，返回后由此 Agent 汇总。", "Default team. Scripts may select a subset for this run. Selected members share inputs and return evidence for coordination.")}</p>
+    </div></details>
+    <details className={styles.advanced}><summary>{t("能力与运行预算", "Capabilities & budget")} · {capabilities === "inherit" ? t("继承主 Agent", "Inherit main Agent") : t("自定义", "Custom")}</summary><div className={styles.settingsStack}>
+      <label className={styles.field}>{t("可用能力", "Capabilities")}<ChoiceSelect aria-label={t("可用能力", "Capabilities")} value={capabilities} disabled={disabled} onValueChange={(value) => onChange({ ...config, agent_execution: { ...execution, capabilities: value }, agent_profile: { ...profile, allowed_tools: value === "inherit" ? [] : allowed } })}><option value="inherit">{t("继承主 Agent 能力", "Inherit main Agent capabilities")}</option><option value="custom">{t("仅使用指定工具", "Only selected tools")}</option></ChoiceSelect></label>
+      {capabilities === "custom" && <label className={styles.field}>{t("工具名称（每行一个）", "Tool names (one per line)")}<textarea rows={4} disabled={disabled} value={allowed.join("\n")} onChange={(e) => update(["agent_profile", "allowed_tools"], e.target.value.split("\n").map((s) => s.trim()).filter(Boolean))} /></label>}
+      {capabilities === "custom" && !allowed.length && <p className={styles.helper}>{t("自定义列表为空：不允许调用工具。", "Empty custom list: no tools are allowed.")}</p>}
+      <label className={styles.field}>{t("模型档位", "Model tier")}<ChoiceSelect aria-label={t("模型档位", "Model tier")} disabled={disabled} value={String(execution.tier || "inherit")} onValueChange={(value) => update(["agent_execution", "tier"], value === "inherit" ? null : value)}><option value="inherit">{t("继承主 Agent", "Inherit main Agent")}</option><option value="light">{t("轻量", "Light")}</option><option value="medium">{t("均衡", "Balanced")}</option><option value="high">{t("深入", "Deep")}</option></ChoiceSelect></label>
+      {budget("max_iterations", "最多决策轮数", "Maximum decision rounds")}{budget("max_tool_calls", "最多工具调用", "Maximum tool calls")}{budget("max_wall_seconds", "本次最长时间（秒）", "Run time limit (seconds)")}
+      <div className={styles.toggleRow}><span>{t("延续之前的对话", "Include previous messages")}</span><SwitchControl label={t("延续之前的对话", "Include previous messages")} disabled={disabled} checked={asObject(config.agent_session).include_prior_messages === true} onCheckedChange={(checked) => update(["agent_session", "include_prior_messages"], checked)} /></div>
+      <p className={styles.helper}>{t("留空继承主 Agent，不是只运行一轮。已有账户、实盘和明确禁止规则继续生效。", "Blank inherits the main Agent, not a single round. Account, live-trading and explicit deny rules still apply.")}</p>
+      <details><summary>{t("成员单独预算", "Per-member budgets")}</summary>{roles.map((role) => { const name = String(asObject(role.config).name), policy = asObject(asObject(team.role_policies)[name]); return <fieldset key={name} className={styles.settingsStack}><legend>{cardTitle(role, t)}</legend>{[["max_iterations", t("决策轮数", "Decision rounds")], ["max_skill_calls", t("工具调用", "Tool calls")], ["max_wall_seconds", t("最长秒数", "Seconds")]].map(([key, label]) => <label key={key} className={styles.field}>{label}<input type="number" min={1} value={typeof policy[key] === "number" ? String(policy[key]) : ""} disabled={disabled} placeholder={t("继承", "Inherit")} onChange={(e) => update(["agent_execution", "team", "role_policies", name, key], e.target.value === "" ? null : Number(e.target.value))} /></label>)}</fieldset>; })}<p className={styles.helper}>{t("角色自身的显式限制仍优先；需要扩大时修改对应角色配置。", "Explicit role-level limits still take priority; edit the role configuration to raise them.")}</p></details>
+    </div></details>
+  </div>;
+}

@@ -1230,6 +1230,7 @@ def _proposal_strategy_paths(paths, proposal_id: str | None, strategy_id: str | 
         "strategy_yml_path": _rel(root / "strategy.yml"),
         "strategy_md_path": _rel(root / "strategy.md"),
         "main_path": _rel(root / "main.py"),
+        "workflow_path": _rel(root / "workflow.json"),
         "tests_path": _rel(root / "tests"),
     }
 
@@ -1439,16 +1440,27 @@ _DRAFT_SEED_SKIP_DIRS = {"runs", "logs", "state", "versions", "backtests"}
 
 def _draft_next_steps(proposal_id: str, paths_map: dict[str, str]) -> list[str]:
     main_path = paths_map.get("main_path") or "<proposal>/after/strategies/<id>/main.py"
+    strategy_id = paths_map.get("strategy_root", "").rsplit("/", 1)[-1]
+    from urllib.parse import urlencode
+    workflow_url = "/strategies?" + urlencode({"strategy_id": strategy_id, "proposal_id": proposal_id})
     return [
+        (
+            "This proposal is visible in the editable strategy workflow at "
+            f"{workflow_url}. Read strategy_author/references/workflows.md for "
+            "multi-script, script-driven Agent and scheduler-driven Agent authoring. "
+            "Resource cards derive from actual package files and SDK calls; "
+            "workflow.json contains layout and annotation edges, not executable logic."
+        ),
         (
             "The scaffold is a GENERIC momentum example, not your strategy yet. "
             f"Edit the staged files in place with edit_file (e.g. {main_path}); "
             "they live under the proposal's after/strategies tree and are NOT "
-            "live. Keep the contract scaffolding (the run() signature, the "
-            "open_position / close_position calls, the signed-position handling "
-            "and indicator helpers) and replace just the signal/indicator logic "
-            "to match the requested idea — that is far faster than rewriting the "
-            "whole file."
+            "live. Keep the public run(ctx) signature, but replace unrelated "
+            "template logic in one coherent write. Observation-only requests "
+            "must remove order calls and trading tools, not keep them. Replace "
+            "any stale build_agent_task function too: it takes precedence over "
+            "run for Agent tasks. Consume editable data_sources parameters from "
+            "ctx.config.extras, and preserve execution_mode plus agent_task.enabled."
         ),
         (
             "Author real SDK logic in main.py using StrategyContext / "
@@ -1465,7 +1477,8 @@ def _draft_next_steps(proposal_id: str, paths_map: dict[str, str]) -> list[str]:
         (
             "When validation passes, call "
             f'strategy_submit_proposal({{"proposal_id": "{proposal_id}"}}) to '
-            "move it into the pending-review queue."
+            "move it into the pending-review queue, unless the user requested "
+            "an unsubmitted draft. This is not approval, activation or trading. "
         ),
     ]
 

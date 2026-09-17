@@ -47,6 +47,8 @@ import {
 } from "../../../components/Page";
 import { EditIcon, PauseIcon, TrashIcon } from "../../../components/icons";
 import { ModePill } from "../../../components/ModePill";
+import { StrategyWorkflowPanel } from "../../../components/workflows/StrategyWorkflowPanel";
+import { useWorkflowText } from "../../../components/workflows/WorkflowCanvas";
 import {
   clientApi,
   type StrategyDetail,
@@ -93,6 +95,7 @@ interface FilesEnvelope {
 }
 
 type StrategyDetailTab =
+  | "workflow"
   | "overview"
   | "performance"
   | "agent_sessions"
@@ -102,6 +105,7 @@ type StrategyDetailTab =
   | "debug";
 
 const STRATEGY_DETAIL_TABS: StrategyDetailTab[] = [
+  "workflow",
   "overview",
   "performance",
   "agent_sessions",
@@ -130,7 +134,8 @@ export default function StrategyDetailPage({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] =
-    useState<StrategyDetailTab>("overview");
+    useState<StrategyDetailTab>("workflow");
+  const [workflowDirty, setWorkflowDirty] = useState(false);
   // Dirty tracking for the Files & Prompts editors — leaving the tab
   // (or the page) with unsaved edits asks for confirmation.
   const [promptsDirty, setPromptsDirty] = useState(false);
@@ -206,7 +211,7 @@ export default function StrategyDetailPage({
   // Leaving the Files & Prompts tab with unsaved edits confirms first —
   // same contract as the browser-level beforeunload guard in the editors.
   async function handleTabChange(next: StrategyDetailTab) {
-    if (activeTab === "files" && next !== "files" && filesDirty) {
+    if ((activeTab === "files" && next !== "files" && filesDirty) || (activeTab === "workflow" && next !== "workflow" && workflowDirty)) {
       const ok = await confirmDialog({
         title: tStrategies("unsavedLeaveTitle"),
         message: tStrategies("unsavedLeaveMessage"),
@@ -215,6 +220,7 @@ export default function StrategyDetailPage({
       });
       if (!ok) return;
     }
+    if (next !== "workflow") setWorkflowDirty(false);
     setActiveTab(next);
   }
 
@@ -315,6 +321,8 @@ export default function StrategyDetailPage({
                 ledgers: Object.keys(workspace?.history?.ledgers ?? {}).length,
               }}
             />
+
+            {activeTab === "workflow" ? <StrategyWorkflowPanel strategyId={strategyId} onDirtyChange={setWorkflowDirty} /> : null}
 
             {activeTab === "overview" ? (
               <div className="space-y-4">
@@ -532,6 +540,7 @@ function StrategyDetailTabBar({
   counts: { runs: number; ledgers: number };
 }) {
   const t = useTranslations("strategyDetail");
+  const text = useWorkflowText();
   return (
     <div className="rounded-lg border border-brand-500/10 bg-ink-950/25 p-2">
       <div className="flex gap-1 overflow-x-auto pb-1">
@@ -554,10 +563,10 @@ function StrategyDetailTabBar({
                   ? "border-brand-500/45 bg-brand-500/20 text-white"
                   : "border-transparent text-ink-300 hover:border-brand-500/15 hover:bg-brand-500/10",
               ].join(" ")}
-              title={t(`tabs.${tab}.description`)}
+              title={tab === "workflow" ? text("编辑策略卡片、资源关系与复盘流程", "Edit strategy resources, connections and review workflows") : t(`tabs.${tab}.description`)}
             >
               <div className="flex items-center gap-2">
-                <span className="text-[12px] font-semibold">{t(`tabs.${tab}.label`)}</span>
+                <span className="text-[12px] font-semibold">{tab === "workflow" ? text("工作流", "Workflow") : t(`tabs.${tab}.label`)}</span>
                 {badge !== null ? (
                   <span className="rounded-full border border-brand-500/20 px-1.5 py-0.5 text-[10px] text-ink-300">
                     {badge}

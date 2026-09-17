@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..core import yaml_io
-from ..core.errors import TradingError
+from ..core.errors import NeryaError, TradingError
 from ..core.paths import WorkspacePaths
 from .agent_task_mode import agent_task_requested
 from .package import StrategyPackage, _parse_manifest, load_package
@@ -429,7 +429,9 @@ def _validate_loaded(package: StrategyPackage) -> StrategyValidation:
                 code="orphan_no_trade_path",
                 message=(
                     "policy.allow_direct_order=False and no subagents are listed; "
-                    "the strategy can only ever return HOLD"
+                    "no direct trading path is configured. This is expected for "
+                    "observation-only strategies, which can still record signals/results; "
+                    "do not add trading calls merely to remove this warning."
                 ),
                 where="strategy.yml",
             )
@@ -451,6 +453,22 @@ def _validate_loaded(package: StrategyPackage) -> StrategyValidation:
             issues=issues,
         )
 
+    # A graph cannot claim executable connections or reference missing nodes.
+    # Import lazily: workflow graph construction itself never imports scripts.
+    if (package.root / "workflow.json").is_file():
+        from .workflow_graph import build_workflows
+
+        try:
+            workflow_files = {
+                rel: (package.root / rel).read_text(encoding="utf-8")
+                for rel in package.files
+                if rel.endswith((".py", ".md")) or rel in {"strategy.yml", "workflow.json"}
+            }
+            build_workflows(workflow_files)
+        except (NeryaError, ValueError, OSError, TypeError) as exc:
+            issues.append(StrategyValidationIssue(
+                severity="blocker", code="workflow_schema", message=str(exc), where="workflow.json",
+            ))
     issues.extend(_static_scan_package(package))
     if not _has_blocker(issues):
         issues.extend(_smoke_test_import(package))
@@ -604,14 +622,9 @@ def _agent_task_contract_issues(
 
     issues: list[StrategyValidationIssue] = []
     has_dispatch = False
-    allowed_dispatch_keywords = {
-        "prompt",
-        "session_key",
-        "metadata",
-        "artifacts",
-        "attached_skills",
-        "reason",
-    }
+    from inspect import signature
+    from .agent_task import StrategyAgentTask
+    allowed_dispatch_keywords = set(signature(StrategyAgentTask.dispatch).parameters)
     allowed_constructor_keywords = {
         "status",
         "prompt",
@@ -683,8 +696,8 @@ def _agent_task_contract_issues(
                     code="unsupported_agent_task_dispatch_argument",
                     message=(
                         "StrategyAgentTask.dispatch does not accept "
-                        f"{arg_name!r}. Use only prompt, session_key, metadata, "
-                        "artifacts, attached_skills, and reason."
+                        f"{arg_name!r}. Supported arguments: "
+                        + ", ".join(sorted(allowed_dispatch_keywords)) + "."
                     ),
                     where=where,
                 )

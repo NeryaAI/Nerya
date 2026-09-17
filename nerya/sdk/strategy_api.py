@@ -103,8 +103,16 @@ class StrategyAPI:
             rows = history_store.read_ledger(self.config.paths, strategy_id, "agent_tasks")
         except Exception:
             rows = []
+        # A task is append-only and can have a running and a terminal row.
+        # Keep its latest facts, including metadata absent from failure rows.
+        latest: dict[str, dict[str, Any]] = {}
+        for index, row in enumerate(rows):
+            task = dict(row.get("task") or {})
+            key = str(task.get("task_id") or f"legacy:{index}")
+            previous = latest.pop(key, {})
+            latest[key] = {**previous, **row, "task": {**dict(previous.get("task") or {}), **task}}
         entries: list[dict[str, Any]] = []
-        for row in rows[-limit:]:
+        for row in list(latest.values())[-max(1, min(limit, 500)):]:
             task = dict(row.get("task") or {})
             entries.append(
                 {
@@ -119,7 +127,7 @@ class StrategyAPI:
                     "task": task,
                 }
             )
-        return {"strategy_id": strategy_id, "count": len(rows), "tasks": entries}
+        return {"strategy_id": strategy_id, "count": len(latest), "event_count": len(rows), "tasks": entries}
 
     def agent_task(
         self,
@@ -136,12 +144,11 @@ class StrategyAPI:
             rows = []
         match: dict[str, Any] | None = None
         task: dict[str, Any] | None = None
-        for row in reversed(rows):
+        for row in rows:
             candidate = dict(row.get("task") or {})
             if str(candidate.get("task_id") or "") == task_id:
-                match = row
-                task = candidate
-                break
+                task = {**(task or {}), **candidate}
+                match = {**(match or {}), **row, "task": task}
         if match is None or task is None:
             return {"ok": False, "error": "agent_task_not_found", "task_id": task_id}
 
@@ -178,6 +185,25 @@ class StrategyAPI:
                 out["prompt_path"] = str(path)
             else:
                 out["prompt_error"] = "prompt_artifact_missing"
+        if include_prompt:
+            import json
+            from ..core.redaction import redact_display_dict
+            root = self.config.paths.strategy(strategy_id).resolve()
+            for filename, key in (("context.json", "context_snapshot"), ("team-result.json", "team_snapshot")):
+                artifact = (root / "agent_tasks" / task_id / filename).resolve()
+                if artifact == root or root not in artifact.parents:
+                    out[f"{key}_error"] = "artifact_outside_strategy_root"
+                    continue
+                if not artifact.is_file():
+                    continue
+                try:
+                    if artifact.stat().st_size > 262144:
+                        out[key] = {"truncated": True, "bytes": artifact.stat().st_size,
+                            "artifact": artifact.relative_to(root).as_posix(), "note": "Use the artifact for complete data"}
+                    else:
+                        out[key] = redact_display_dict({"value": json.loads(artifact.read_text(encoding="utf-8"))}).get("value")
+                except (OSError, ValueError) as exc:
+                    out[f"{key}_error"] = str(exc)
         return out
 
     def explain_trade(self, strategy_id: str, order_id: str) -> dict[str, Any]:

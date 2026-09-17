@@ -37,6 +37,7 @@ class BacktestResult:
     benchmark_series: list[tuple[int, float]] = field(default_factory=list)
     final_portfolio: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    order_attempts: int = 0
 
 
 def settle(
@@ -222,6 +223,7 @@ def run_backtest(
             )
             decision = _resolve_strategy_decision(strategy_run(ctx))
             result.decisions.append(_decision_row(ts, market, decision))
+            result.order_attempts += len(pending)
             fills, rejects = settle(pending, current, next_bars, portfolio, config)
             result.trades.extend(fills)
             result.rejected_signals.extend(rejects)
@@ -305,6 +307,11 @@ def _views_from_strategy_config(
     strategy_config: dict[str, Any] | None,
 ) -> tuple[SimpleConfigView, MockPolicy]:
     raw = dict(strategy_config or {})
+    # Typed manifests serialize extension fields inside `extras`; raw YAML
+    # presents them at the top level. Mirror StrategyConfig for both shapes.
+    extensions = raw.pop("extras", {})
+    if isinstance(extensions, dict):
+        raw = {**extensions, **raw}
     llm_raw = raw.get("llm_policy") if isinstance(raw.get("llm_policy"), dict) else {}
     policy_raw = raw.get("policy") if isinstance(raw.get("policy"), dict) else {}
     view = SimpleConfigView(

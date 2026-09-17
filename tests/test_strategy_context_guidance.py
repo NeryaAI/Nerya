@@ -141,98 +141,46 @@ def test_ambiguous_targetful_operations_do_not_become_skill_proposals(tmp_path) 
 
 
 def test_strategy_author_skill_contains_soft_context_rules() -> None:
-    text = (
-        __import__("pathlib")
-        .Path("nerya/skills/builtin/strategy_author/SKILL.md")
-        .read_text(encoding="utf-8")
-    )
+    from pathlib import Path
 
-    assert "Market context inheritance" in text
-    assert "Use to author SDK strategy code" in text
-    assert "- meme" in text
-    assert "- wallet" in text
-    assert "- onchain" in text
-    assert "- polymarket" in text
-    assert "- prediction-market" in text
-    assert "advisory context for your judgment, not a hard router" in text
-    assert "Preserve the market scope that the session has already established" in text
-    assert "Examples are examples, not defaults" in text
-    assert "Market scope assumption" in text
-    # New draft -> edit -> validate -> submit lane.
-    assert "SCAFFOLD the package as a draft proposal with `strategy_draft_proposal`" in text
-    assert "asks for a draft/proposal scaffold only" in text
-    assert "AUTHOR the strategy by editing the staged files" in text
-    assert "SUBMIT with `strategy_submit_proposal(" in text
-    assert "strategy_draft_proposal" in text
-    assert "strategy_submit_proposal" in text
-    assert "strategy_generate_proposal" not in text
-    assert "strategy_backtest({\"proposal_id\"" in text
-    assert "--proposal-id <proposal_id>" in text
-    assert "only when the action is still proposal validation" in text
-    assert "Promotion changes the workspace" in text
-    assert "proposal_paths" in text
-    assert "When the operator names a `prp_*` proposal id" in text
-    assert "Resolve and operate on the exact proposal first" in text
-    assert "`proposal_id` into validation/backtest calls" in text
-    assert "Do not substitute a promoted `strategy_id`" in text
-    assert "recommended_coverage_ok" in text
-    assert "attempted short-window real-data backtest" in text
-    assert "Do not call the standard backtest unavailable" in text
-    assert "do not rewrite the thesis into trend/scalping" in text
-    assert "Paper review can continue" in text
-    assert "Shadow/live progression still requires explicit operator approval" in text
-    assert "`paper_review_allowed` or a `review_gate`" in text
-    assert "Do not override it with a manual" in text
-    assert "FAIL/no_trades rejection" in text
-    assert "If `strategy_backtest` returns `ok:true`" in text
-    assert "completed standard OHLCV" in text
-    assert "reason:no_historical_data" in text
-    assert "regenerate a strategy only because" in text
-    assert "promoted strategy path is absent" in text
-    assert "do not reply with a questionnaire" in text
-    assert "non-live mode, modest sizing" in text
-    assert "do not edit `main.py` away from the requested thesis" in text
-    assert "draft the package files yourself with the Nerya strategy SDK" in text
-    assert (
-        "from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask"
-        in text
-    )
-    assert "do not import from nerya.sdk" in text
-    assert "do not import from nerya.strategy" in text
-    assert "Do not call StrategyResult.order" in text
-    assert "Do not call StrategyResult.dispatch" in text
-    assert "prediction-market/Polymarket evidence" in text
-    assert "`strategy_submit_proposal` only validates and queues the package" in text
-    assert "For custom strategies, author `main.py` by editing the staged file" in text
-    assert "Do not call shell, glob, or raw file reads once the efficient evidence boundary is met" in text
-    assert "Never pass `context=`" in text
-    assert "`session_key` must be a" in text
-    assert "not a string" in text
-    assert "Never wrap the task with `ctx.result.agent_task" in text
-    assert "StrategyAgentTask" in text
-    assert "Never multiply raw `_pct` fields by 100" in text
-    assert "For on-chain meme, news, social" in text
-    assert "do not request shell just to" in text
-    assert "stop discovery and write the SDK proposal" in text
-    assert "Do not call shell, glob, or raw file reads" in text
-    assert "the efficient evidence boundary is" in text
-    assert "author the SDK strategy package immediately by editing the staged files" in text
-    assert "Continue until a `strategy_submit_proposal` call for a validated SDK package exists" in text
-    assert "preferred_provider" in text
-    assert "not ready instead of silently substituting another provider" in text
-    assert "Wallet Meme Quick Path" in text
-    assert "selection.mode` is `wallet_binding`" in text
-    assert "market_data` already returned" in text
-    assert "exact chain:token" in text
-    assert "do not install a fallback" in text
-    assert "runtime scanner" in text
-    assert "execution_mode: \"agent\"" in text
-    assert "do not satisfy\nthat request with CEX proxies" in text
-    assert "not a valid on-chain\nbacktest" in text
-    assert "Do not copy those low-level action names into" in text
-    assert "StrategyAgentTask` prompts or operator-facing strategy docs" in text
-    assert "Do not call\n`strategy_promote` during an ordinary" in text
-    assert "do not set `operator_approved: true` yourself" in text
+    root = Path("nerya/skills/builtin/strategy_author")
+    entry = (root / "SKILL.md").read_text(encoding="utf-8")
+    specialized = (root / "references/specialized-contracts.md").read_text(encoding="utf-8")
+    workflows = (root / "references/workflows.md").read_text(encoding="utf-8")
+    text = entry + specialized + workflows
+    # Domain policy stays available through explicit lazy links, not a huge
+    # always-loaded entry or copies of stale SDK examples.
+    assert "references/specialized-contracts.md" in entry
+    assert "references/workflows.md" in entry
+    for contract in (
+        "Market context inheritance", "Use to author SDK strategy code",
+        "advisory context for your judgment, not a hard router",
+        "Preserve the market scope that the session has already established",
+        "Examples are examples, not defaults", "Market scope assumption",
+        "meme", "wallet", "onchain", "polymarket", "prediction-market",
+        "strategy_draft_proposal", "strategy_validate", "strategy_submit_proposal",
+        "proposal_paths", "--proposal-id <proposal_id>", "Promotion changes the workspace",
+        "resolve and operate on the exact proposal first", "Do not substitute a promoted strategy_id",
+        "recommended_coverage_ok", "attempted short-window real-data backtest",
+        "paper_review_allowed", "review_gate", "FAIL/no_trades rejection",
+        "reason:no_historical_data", "promoted strategy path is absent",
+        "do not reply with a questionnaire", "non-live mode, modest sizing",
+        "from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask",
+        "Never multiply raw _pct fields by 100", "preferred_provider",
+        "wallet_binding", "exact chain:token", "runtime scanner",
+        "CEX proxies are not an on-chain backtest", "operator_approved:true",
+    ):
+        assert contract in text, contract
+    assert "strategy_generate_proposal" not in entry
+    assert "A ban on submission means authored draft only" in entry
+    assert "A ban on running/promotion/trading does not ban implementation" in entry
+    assert "No orders” is a runtime restriction, NOT a request for an empty scaffold" in entry
+    assert "agent_task.enabled" in entry and "10–14 tool calls" in entry
+    assert "has ALREADY called AI" in entry
+    assert "No `context=` argument" in workflows
+    assert "no `ctx.session_key`" in workflows
+    assert "no `ctx.result.agent_task`" in workflows
+    assert "No network unit test or fake Agent decision is performance evidence" in (root / "references/full-playbook.md").read_text()
 
 
 def test_strategy_draft_and_submit_descriptions_describe_the_lane(tmp_path) -> None:

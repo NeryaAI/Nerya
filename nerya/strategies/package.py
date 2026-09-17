@@ -59,6 +59,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..core import yaml_io
 from ..core.errors import TradingError
@@ -102,6 +103,7 @@ class StrategySchedule:
     starts_at: Optional[str] = None
     ends_at: Optional[str] = None
     enabled: bool = True
+    timezone: Optional[str] = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any], *, where: str) -> "StrategySchedule":
@@ -113,6 +115,12 @@ class StrategySchedule:
                 f"{where}: schedule.type must be one of {sorted(_VALID_SCHEDULE_TYPES)!r}, "
                 f"got {kind!r}"
             )
+        timezone = _optional_str(raw.get("timezone"))
+        if timezone:
+            try:
+                ZoneInfo(timezone)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise TradingError(f"{where}: unknown schedule timezone {timezone!r}") from exc
         cron_val = raw.get("cron")
         every = raw.get("every_seconds") or raw.get("interval_seconds")
         if kind == "cron":
@@ -121,6 +129,7 @@ class StrategySchedule:
             return cls(
                 type="cron",
                 cron=cron_val.strip(),
+                timezone=timezone,
                 starts_at=_optional_str(raw.get("starts_at")),
                 ends_at=_optional_str(raw.get("ends_at")),
                 enabled=bool(raw.get("enabled", True)),
@@ -137,6 +146,7 @@ class StrategySchedule:
         return cls(
             type="interval",
             every_seconds=every_int,
+            timezone=timezone,
             starts_at=_optional_str(raw.get("starts_at")),
             ends_at=_optional_str(raw.get("ends_at")),
             enabled=bool(raw.get("enabled", True)),
@@ -144,6 +154,8 @@ class StrategySchedule:
 
     def asdict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"type": self.type, "enabled": self.enabled}
+        if self.timezone:
+            out["timezone"] = self.timezone
         if self.cron:
             out["cron"] = self.cron
         if self.every_seconds is not None:
@@ -752,6 +764,11 @@ def _parse_manifest(raw: dict[str, Any], *, source: Path) -> StrategyManifest:
         raw.get("news_sources"), where=f"{source}::news_sources", required=False
     )
     tuning = StrategyTuningConfig.from_dict(raw.get("tuning"), where=f"{source}::tuning")
+    from .agent_execution import validate_agent_configuration
+    try:
+        validate_agent_configuration({**raw, "agent_profile": agent_profile.asdict()})
+    except (ValueError, TypeError) as exc:
+        raise TradingError(f"{source}: {exc}") from exc
 
     handled = {
         "version", "strategy_id", "id", "title", "description", "mode",
@@ -830,6 +847,7 @@ def _collect_files(root: Path) -> tuple[str, ...]:
             "state",
             "versions",
             "reviews",
+            "agent_tasks",
         }:
             continue
         if any(

@@ -157,7 +157,9 @@ async function cachedRead<T>(
     return load();
   }
 
-  const key = `${method}:${path}:${stableBody(body)}`;
+  const auth = authHeaders();
+  const identity = auth.get("authorization") || auth.get("x-nerya-token") || "";
+  const key = `${identity}:${method}:${path}:${stableBody(body)}`;
   const now = Date.now();
   const existing = readCache.get(key);
   if (existing?.promise) return existing.promise as Promise<T>;
@@ -184,19 +186,21 @@ async function cachedRead<T>(
 }
 
 async function post<T>(path: string, body: unknown = {}): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify(body),
-    cache: "no-store",
+  return cachedRead("POST", path, body, async () => {
+    const res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify(body),
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      handleAuthFailure(res.status);
+      throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+    }
+    if (!READONLY_POST_PATHS.has(path)) invalidateReadCache();
+    return (await res.json()) as T;
   });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    handleAuthFailure(res.status);
-    throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
-  }
-  if (!READONLY_POST_PATHS.has(path)) invalidateReadCache();
-  return (await res.json()) as T;
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -267,7 +271,8 @@ export async function callApi<T = unknown>(
     }
     return body as T;
   };
-  if (method === "GET") {
+  // A caller-owned cancellation must not abort another consumer's shared read.
+  if (!init?.signal && (method === "GET" || method === "POST")) {
     return cachedRead(method, normalizedPath, init?.body, load);
   }
   return load();

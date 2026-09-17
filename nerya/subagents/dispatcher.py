@@ -71,6 +71,7 @@ class SubAgentResult:
     metrics: dict[str, Any] = field(default_factory=dict)
     steps: list[dict[str, Any]] = field(default_factory=list)
     audit: dict[str, Any] = field(default_factory=dict)
+    agent_id: str = ""
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
@@ -100,6 +101,8 @@ class SubAgentDispatcher:
         turn_id: str = "", actor_id: str = "default",
     ) -> "SubAgentDispatcher":
         from ..tools import NativeToolExecutor, PermissionContext, PermissionEngine
+        from ..tools.permissions import PermissionMode
+        from ..tools.capability_policy import normalise_tool_policy
         from ..tools.native.bootstrap import build_native_tool_deps, register_native_tools
         from ..tools.registry import ToolRegistry
         from ..tools.tool_approvals import ToolApprovalCoordinator, ToolApprovalScope
@@ -112,10 +115,14 @@ class SubAgentDispatcher:
         deps.active_session_id = session_id
         deps.active_strategy_id = strategy_id
         deps.active_actor_id = actor_id
+        deps.permission_mode = str(config.get("runtime.permission_mode", "default"))
         register_native_tools(registry, deps)
         executor = NativeToolExecutor(
             registry=registry, permission_engine=PermissionEngine(),
-            permission_context=PermissionContext(),
+            permission_context=PermissionContext(
+                mode=PermissionMode(config.get("runtime.permission_mode", "default")),
+                tool_policy=normalise_tool_policy(config.get("agent.native.tool_policy")),
+            ),
             approval_resolver=ToolApprovalCoordinator(
                 config, scope=ToolApprovalScope.from_values(
                     session_id=session_id, strategy_id=strategy_id, actor_id=actor_id,
@@ -154,6 +161,8 @@ class SubAgentDispatcher:
         delegation_depth: int = 0,
         cancel_token: Any = None,
         max_wall_seconds: float | None = None,
+        agent_id: str = "",
+        continuation_text: str = "",
     ) -> SubAgentResult:
         import time as _t
         t0 = _t.monotonic()
@@ -169,7 +178,17 @@ class SubAgentDispatcher:
             # on the fly (no registered role, no save_role round-trip).
             # The denylist below still applies, so an ad-hoc role can never
             # grant itself a live-trading / wallet surface.
-            spec = inline_spec or self._resolve_spec(name, strategy_id=strategy_id)
+            if agent_id:
+                from .threads import AgentThreadStore
+                store = AgentThreadStore(self.config.paths)
+                saved = store.load(agent_id, session_id or "")
+                if saved["name"] != name:
+                    raise ValueError("agent name does not match persistent identity")
+                spec = store.restore_spec(saved)
+                context_scope = saved["context_scope"]
+                strategy_id = saved.get("strategy_id")
+            else:
+                spec = inline_spec or self._resolve_spec(name, strategy_id=strategy_id)
             _assert_allowed_skills(spec)
             required_native_tools = tuple(
                 getattr(spec.execution_policy, "required_native_tools", ()) or ()
@@ -207,6 +226,8 @@ class SubAgentDispatcher:
                 runtime_kwargs["cancel_token"] = cancel_token
             if max_wall_seconds is not None:
                 runtime_kwargs["max_wall_seconds"] = max_wall_seconds
+            if agent_id:
+                runtime_kwargs.update(agent_id=agent_id, continuation_text=continuation_text)
             raw = runtime.run(spec, **runtime_kwargs)
             cancelled = (
                 bool(raw.get("cancelled")) or _token_is_set(cancel_token)
@@ -232,6 +253,7 @@ class SubAgentDispatcher:
                 metrics=(raw.get("metrics") or {}),
                 steps=(raw.get("steps") or []),
                 audit=(raw.get("audit") or {}),
+                agent_id=str(raw.get("agent_id") or agent_id or ""),
                 error=(
                     _token_reason(cancel_token)
                     if cancelled
@@ -302,6 +324,8 @@ class SubAgentDispatcher:
         delegation_depth: int = 0,
         cancel_token: Any = None,
         max_wall_seconds: float | None = None,
+        agent_id: str = "",
+        continuation_text: str = "",
     ) -> dict[str, Any]:
         if not target.startswith("subagent:"):
             return {"ok": False, "reason": "not_subagent_target"}
@@ -317,6 +341,8 @@ class SubAgentDispatcher:
             delegation_depth=delegation_depth,
             cancel_token=cancel_token,
             max_wall_seconds=max_wall_seconds,
+            agent_id=agent_id,
+            continuation_text=continuation_text,
         )
         self._journal(
             res,

@@ -1,8 +1,13 @@
 "use client";
 
+import { ModalFrame } from "../../components/ModalFrame";
+
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslations } from "next-intl";
+import { EvolutionWorkflow } from "../../components/workflows/EvolutionWorkflow";
+import { confirmDiscard } from "../../components/workflows/StrategyWorkflowPanel";
+import { useWorkflowText } from "../../components/workflows/WorkflowCanvas";
 import { Advanced, Card, Empty, ErrorBanner, Json, PageBody, PageHeader, Pill } from "../../components/Page";
 import { SwitchIndicator } from "../../components/SwitchControl";
 import {
@@ -51,7 +56,7 @@ import type {
   EvolutionWhyReusedSignal,
 } from "../../lib/evolutionTypes";
 
-type Tab = "inbox" | "timeline" | "assets" | "proposals";
+type Tab = "workflow" | "inbox" | "timeline" | "assets" | "proposals";
 type CandidateFilter = "all" | "ready" | "blocked" | "positive" | "negative";
 type ReplayStepKey = "prompt" | "input" | "output" | "change" | "validation";
 type EvidenceDrawerState = {
@@ -80,28 +85,13 @@ type PrimaryReplayArtifactRef = {
 };
 type ReplayDigestKind = "subagent_payload" | "subagent_output" | "validation_plan";
 
-const TAB_IDS: Tab[] = ["timeline", "proposals", "inbox", "assets"];
+const TAB_IDS: Tab[] = ["workflow", "timeline", "proposals", "inbox", "assets"];
 const CANDIDATE_FILTERS: CandidateFilter[] = ["all", "ready", "blocked", "positive", "negative"];
 const HISTORY_PAGE_SIZE = 10;
 const OPEN_PROPOSAL_STATES = ["draft", "pending_review", "proposed", "approved"];
 
 function isOpenProposalState(state: string) {
   return OPEN_PROPOSAL_STATES.includes(state);
-}
-
-/**
- * Right-side drawers: minimal Escape-to-close. Full focus-trap drawers
- * are a later consolidation (see ui-review A5/B5).
- */
-function useEscapeToClose(active: boolean, onClose: () => void) {
-  useEffect(() => {
-    if (!active) return;
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [active, onClose]);
 }
 
 function toneForStatus(status?: string): "neutral" | "ok" | "warn" | "danger" | "brand" {
@@ -123,10 +113,12 @@ function stageTone(stage?: string): "neutral" | "ok" | "warn" | "danger" | "bran
 export default function SelfEvolutionPage() {
   const t = useTranslations("selfEvolution");
   const tCommon = useTranslations("common");
-  // Land on the work queue (inbox) instead of the history stream; a valid
-  // ?tab= query param wins over the default (restored after mount so SSR
-  // and hydration stay in sync).
-  const [tab, setTab] = useState<Tab>("inbox");
+  // The workflow is the default entry. Existing deep links still select
+  // their original inbox/history/proposal tabs after hydration.
+  const workflowText = useWorkflowText();
+  const [tab, setTab] = useState<Tab>("workflow");
+  const [workflowDirty, setWorkflowDirty] = useState(false);
+  const [workflowSettingsOpen, setWorkflowSettingsOpen] = useState(false);
   const [envelope, setEnvelope] = useState<EvolutionTimelineEnvelope | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -513,9 +505,13 @@ export default function SelfEvolutionPage() {
                   "relative shrink-0 px-3 py-2 text-[12px] font-medium transition-colors",
                   active ? "text-white" : "text-ink-400 hover:text-ink-100",
                 ].join(" ")}
-                onClick={() => setTab(id)}
+                onClick={async () => {
+                  if (tab === "workflow" && id !== "workflow" && workflowDirty && !await confirmDiscard(workflowText("丢弃未保存的复盘工作流修改？", "Discard unsaved review workflow edits?"))) return;
+                  if (id !== "workflow") setWorkflowDirty(false);
+                  setTab(id);
+                }}
               >
-                {t(labelKey)}
+                {id === "workflow" ? workflowText("工作流", "Workflow") : t(labelKey)}
                 {active ? (
                   <span className="absolute inset-x-2 -bottom-px h-[2px] rounded-full bg-brand-400" />
                 ) : null}
@@ -533,6 +529,11 @@ export default function SelfEvolutionPage() {
           onFilter={() => void load(false)}
           onTuning={runTuningDryRun}
         />
+
+        {tab === "workflow" ? <>
+          {workflowSettingsOpen && <DreamReflectionPanel schedule={envelope?.config.periodic_reflection} enabled={dreamEnabled} time={dreamTime} timezone={dreamTimezone} busy={busy} onEnabled={setDreamEnabled} onTime={setDreamTime} onTimezone={setDreamTimezone} onSave={saveDreamReflection} onRunNow={runDreamReflectionNow} />}
+          <EvolutionWorkflow envelope={envelope} onDirtyChange={setWorkflowDirty} onOpenRecord={(id) => { setSelectedId(id); setTab("timeline"); }} onOpenSettings={() => setWorkflowSettingsOpen((current) => !current)} />
+        </> : null}
 
         {tab === "inbox" ? (
           initialLoading ? (
@@ -1365,21 +1366,8 @@ function TimelineHistoryDrawer({
   onClose: () => void;
 }) {
   const t = useTranslations("selfEvolution");
-  useEscapeToClose(true, onClose);
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("historyTitle", { count: items.length })}
-      data-testid="timeline-history-drawer"
-    >
-      <button
-        type="button"
-        className="absolute inset-0 cursor-default"
-        aria-label={t("closeHistoryDrawer")}
-        onClick={onClose}
-      />
+    <ModalFrame title={t("historyTitle", { count: items.length })} onClose={onClose} side="right" width="36rem" testId="timeline-history-drawer">
       <aside className="relative z-10 flex h-full w-full max-w-xl flex-col border-l border-brand-500/15 bg-ink-950 shadow-2xl">
         <TimelineHistoryPanel
           items={items}
@@ -1388,7 +1376,7 @@ function TimelineHistoryDrawer({
           onClose={onClose}
         />
       </aside>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -2824,24 +2812,11 @@ function EvidenceDrawer({
   onClose: () => void;
 }) {
   const t = useTranslations("selfEvolution");
-  const open = Boolean(state);
-  useEscapeToClose(open, onClose);
   if (!state) return null;
   const item = state.item ?? null;
   const artifacts = item?.artifacts ?? [];
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("evidenceDrawerTitle")}
-    >
-      <button
-        type="button"
-        className="absolute inset-0 cursor-default"
-        aria-label={t("closeEvidence")}
-        onClick={onClose}
-      />
+    <ModalFrame title={t("evidenceDrawerTitle")} onClose={onClose} side="right" width="42rem">
       <aside className="relative z-10 flex h-full w-full max-w-2xl flex-col border-l border-brand-500/15 bg-ink-950 shadow-2xl">
         <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-5 py-4">
           <div className="min-w-0">
@@ -2918,7 +2893,7 @@ function EvidenceDrawer({
           ) : null}
         </div>
       </aside>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -5226,7 +5201,6 @@ function CandidateDetailDrawer({
   onReject: (id: string) => Promise<void>;
 }) {
   const t = useTranslations("selfEvolution");
-  useEscapeToClose(Boolean(row), onClose);
   if (!row) return null;
   const {
     candidate,
@@ -5245,19 +5219,7 @@ function CandidateDetailDrawer({
   const outcomeScore = finiteNumber(payload.outcome_score);
   const blockers = uniqueStrings([...candidate.blocked_reasons, ...gateBlockers]);
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label={candidate.id}
-      data-testid="candidate-detail-drawer"
-    >
-      <button
-        type="button"
-        className="absolute inset-0 cursor-default"
-        aria-label={t("closeCandidateDetails")}
-        onClick={onClose}
-      />
+    <ModalFrame title={candidate.id} onClose={onClose} side="right" width="42rem" busy={busy === candidate.id} testId="candidate-detail-drawer">
       <aside className="relative z-10 flex h-full w-full max-w-2xl flex-col border-l border-brand-500/15 bg-ink-950 shadow-2xl">
         <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-5 py-4">
           <div className="min-w-0">
@@ -5278,6 +5240,7 @@ function CandidateDetailDrawer({
           <button
             type="button"
             data-testid="candidate-detail-close"
+            disabled={busy === candidate.id}
             className="btn btn-ghost px-2"
             aria-label={t("closeCandidateDetails")}
             onClick={onClose}
@@ -5369,7 +5332,7 @@ function CandidateDetailDrawer({
           </button>
         </div>
       </aside>
-    </div>
+    </ModalFrame>
   );
 }
 
@@ -5949,21 +5912,8 @@ function ProposalDetailDrawer({
   onApply?: () => Promise<void>;
 }) {
   const t = useTranslations("selfEvolution");
-  useEscapeToClose(true, onClose);
   return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-ink-950/60 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("proposalDetail")}
-      data-testid="proposal-detail-drawer"
-    >
-      <button
-        type="button"
-        className="absolute inset-0 cursor-default"
-        aria-label={t("closeProposalDetail")}
-        onClick={onClose}
-      />
+    <ModalFrame title={t("proposalDetail")} onClose={onClose} side="right" width="48rem" busy={busy} testId="proposal-detail-drawer">
       <aside className="relative z-10 flex h-full w-full max-w-3xl flex-col border-l border-brand-500/15 bg-ink-950 shadow-2xl">
         <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-5 py-4">
           <div className="min-w-0">
@@ -5977,6 +5927,7 @@ function ProposalDetailDrawer({
             type="button"
             className="btn btn-ghost px-2"
             aria-label={t("closeProposalDetail")}
+            disabled={busy}
             onClick={onClose}
           >
             <XIcon size={16} />
@@ -5997,7 +5948,7 @@ function ProposalDetailDrawer({
           />
         </div>
       </aside>
-    </div>
+    </ModalFrame>
   );
 }
 

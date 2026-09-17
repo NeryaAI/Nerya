@@ -367,6 +367,11 @@ class StrategyCodeGenerator:
             files["strategy.yml"],
             manifest,
         )
+        # Main-Agent and dashboard proposals share the same resource graph.
+        # Later staged file edits are discovered from source, not a stale DAG.
+        from ..strategies.workflow_graph import ensure_workflow_file
+
+        ensure_workflow_file(files)
         return files
 
     @staticmethod

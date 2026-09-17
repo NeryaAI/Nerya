@@ -38,6 +38,34 @@ class StrategyAgentTask:
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     attached_skills: list[str] = field(default_factory=list)
     reason: str = ""
+    context: dict[str, Any] = field(default_factory=dict)
+    # None inherits configured defaults; [] explicitly selects no inputs/roles.
+    sources: list[str] | None = None
+    outputs: list[str] | None = None
+    roles: list[str] | None = None
+    include_trigger: bool | None = None
+    path: str = ""
+
+    def __post_init__(self) -> None:
+        self.validate()
+        for name in ("sources", "outputs", "roles"):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(self, name, list(value))
+        if self.path:
+            self.metadata = {**self.metadata, "path": self.path}
+
+    def validate(self) -> None:
+        if self.status not in {"dispatch", "skip", "error"}:
+            raise ValueError(f"Unknown Agent task status: {self.status!r}")
+        for name in ("sources", "outputs", "roles"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() or v != v.strip() for v in value) or len(value) != len(set(value))):
+                raise ValueError(f"Agent task {name} must be a unique list of identifiers or None")
+        if self.include_trigger is not None and not isinstance(self.include_trigger, bool):
+            raise ValueError("include_trigger must be boolean or None")
+        if not isinstance(self.path, str) or len(self.path) > 200:
+            raise ValueError("path must be a string of at most 200 characters")
 
     @classmethod
     def dispatch(
@@ -49,6 +77,12 @@ class StrategyAgentTask:
         artifacts: list[dict[str, Any]] | None = None,
         attached_skills: list[str] | None = None,
         reason: str = "",
+        context: dict[str, Any] | None = None,
+        sources: list[str] | None = None,
+        outputs: list[str] | None = None,
+        roles: list[str] | None = None,
+        include_trigger: bool | None = None,
+        path: str = "",
     ) -> "StrategyAgentTask":
         return cls(
             status="dispatch",
@@ -58,6 +92,9 @@ class StrategyAgentTask:
             artifacts=[dict(a) for a in (artifacts or [])],
             attached_skills=[str(s) for s in (attached_skills or []) if str(s).strip()],
             reason=str(reason or ""),
+            context=_coerce_mapping(context, string_key="value"),
+            sources=sources, outputs=outputs, roles=roles,
+            include_trigger=include_trigger, path=path,
         )
 
     @classmethod
@@ -72,6 +109,15 @@ class StrategyAgentTask:
             reason=str(reason or ""),
             metadata=_coerce_mapping(metadata, string_key="value"),
         )
+
+    @classmethod
+    def stop(cls, reason: str, *, path: str = "", metadata: dict[str, Any] | None = None) -> "StrategyAgentTask":
+        """End this invocation; callers must return the result to the entrypoint.
+
+        This does not disable the schedule or undo work already performed.
+        """
+        return cls(status="skip", reason=str(reason), path=path,
+                   metadata=_coerce_mapping(metadata, string_key="value"))
 
     @classmethod
     def error(
@@ -89,13 +135,14 @@ class StrategyAgentTask:
     @classmethod
     def from_value(cls, value: Any) -> "StrategyAgentTask":
         if isinstance(value, cls):
+            value.validate()
             return value
         if isinstance(value, str):
             return cls.dispatch(prompt=value)
         if isinstance(value, dict):
             status = str(value.get("status") or "dispatch").strip().lower()
             if status not in {"dispatch", "skip", "error"}:
-                status = "dispatch"
+                return cls.error(f"Unknown Agent task status: {status!r}")
             return cls(
                 status=status,  # type: ignore[arg-type]
                 prompt=str(value.get("prompt") or value.get("text") or ""),
@@ -106,6 +153,10 @@ class StrategyAgentTask:
                     str(s) for s in (value.get("attached_skills") or []) if str(s).strip()
                 ],
                 reason=str(value.get("reason") or ""),
+                context=_coerce_mapping(value.get("context"), string_key="value"),
+                sources=value.get("sources"), outputs=value.get("outputs"),
+                roles=value.get("roles"), include_trigger=value.get("include_trigger"),
+                path=value.get("path", ""),
             )
         if value is None:
             return cls.skip("strategy returned no agent task")

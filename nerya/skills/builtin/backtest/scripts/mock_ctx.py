@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .config import BacktestConfig, MockSurfaceCfg
+from .....strategies.prompt_io import StrategyPromptIO
 
 
 class BacktestUnsupportedSurfaceError(RuntimeError):
@@ -844,6 +845,23 @@ class SimpleConfigView:
     extras: dict[str, Any] = field(default_factory=dict)
 
 
+class BacktestPromptIO:
+    """Reuse real, deterministic formatters without granting artifact writes.
+
+    Formatting an Agent task is not running a model. LLM/subagent surfaces
+    remain independently gated by MockSurfaceCfg.
+    """
+    csv = StrategyPromptIO.csv
+    markdown_table = StrategyPromptIO.markdown_table
+    json_block = StrategyPromptIO.json_block
+    truncate_csv = StrategyPromptIO.truncate_csv
+
+    def artifact(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise BacktestUnsupportedSurfaceError(
+            "prompt.artifact", detail="strategy artifact writes are unavailable during OHLCV replay",
+        )
+
+
 @dataclass
 class MockCtx:
     strategy_id: str
@@ -883,12 +901,17 @@ class MockCtx:
         self.messages = MockMessages("messages", self.config_obj.mock_surfaces["messages"])
         self.policy = self.policy_obj or MockPolicy()
         self.trigger = {"source": "backtest"}
-        self.prompt = None
+        self.prompt = BacktestPromptIO()
         if self.config is None:
             self.config = SimpleConfigView(
                 strategy_id=self.strategy_id,
                 markets=tuple(self.config_obj.markets),
             )
+
+        from nerya.strategies.input_context import StrategyInputContext
+        self.inputs = StrategyInputContext(sources=getattr(self.config, "extras", {}).get("data_sources", []),
+            market=self.market, news=self.news, markets=tuple(self.config.markets),
+            run_id=f"backtest:{self.current_bar.get('ts', '')}")
 
     @property
     def runmode(self) -> str:

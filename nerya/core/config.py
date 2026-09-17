@@ -43,6 +43,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # production runtime must surface degraded envelopes instead of
         # silently fabricating results. See :mod:`nerya.core.truth`.
         "mock_mode": False,
+        # Unattended authoring/testing; dangerous actions and domain gates remain.
+        "permission_mode": "auto",
         "intent_gate": {"enabled": False, "fail_closed": True},
     },
     "network": {
@@ -221,9 +223,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "agent": {
         "native": {
-            "max_iterations": 48,
-            "max_total_tool_calls": 16,
-            "max_wall_seconds": 120.0,
+            # Match the Workspace chat budget for SDK/API callers too.
+            "max_iterations": 120,
+            "max_total_tool_calls": 400,
+            "max_wall_seconds": 1800.0,
+            "max_tokens": 16384,
+            "wall_time_final_synthesis_seconds": 30.0,
+            "action_tool_wall_reserve_seconds": 15.0,
             "result_overflow_threshold_bytes": 65_536,
         },
         # operator-mode preset.  Picks the coarse policy

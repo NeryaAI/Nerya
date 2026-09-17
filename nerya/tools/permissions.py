@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .types import PermissionScope, RiskLevel, ToolDescriptor
+from .capability_policy import normalise_tool_policy, tool_policy_allows
 
 
 class PermissionMode(str, enum.Enum):
@@ -188,6 +189,7 @@ class PermissionContext:
     permanent_rules: list[PermissionRule] = field(default_factory=list)
     session_rules: list[PermissionRule] = field(default_factory=list)
     deny_rules: list[PermissionRule] = field(default_factory=list)
+    tool_policy: dict[str, Any] = field(default_factory=dict)
 
 
 class PermissionEngine:
@@ -208,6 +210,9 @@ class PermissionEngine:
         risk = descriptor.per_call_risk(payload)
         scope = descriptor.permission_scope
         auto_approve = descriptor.per_call_auto_approve(payload)
+        if not tool_policy_allows(normalise_tool_policy(context.tool_policy), descriptor.name):
+            return PermissionDecision(kind=PermissionDecisionKind.DENY,
+                reason="tool outside configured capability scope", risk=risk, scope=scope)
 
         if context.mode is PermissionMode.YOLO:
             for rule in context.deny_rules:

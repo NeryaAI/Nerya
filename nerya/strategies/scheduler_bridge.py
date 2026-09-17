@@ -96,6 +96,8 @@ def _schedule_kwargs(
 
 def _common_kwargs(schedule: StrategySchedule) -> dict[str, Any]:
     out: dict[str, Any] = {"enabled": bool(schedule.enabled)}
+    if schedule.timezone:
+        out["timezone"] = schedule.timezone
     if schedule.starts_at:
         out["starts_at"] = schedule.starts_at
     if schedule.ends_at:

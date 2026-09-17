@@ -1,74 +1,70 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: strategy_author
-description: "Use to author, validate, refactor, or backtest a Nerya strategy package before proposal promotion."
-version: 0.2.0
+description: "Create or edit Nerya workflow strategies from ordinary requests: 观察策略/盯盘, pure scripts, indicator-gated Agents, scheduled Agents, trading and review evolution. Use for new indicator/script logic even when the user says no AI or no orders."
+version: 0.8.0
 license: MIT
 author: Nerya
 ---
 <!-- nerya-skill-frontmatter-end -->
 
 # Strategy Author
-Use when the user wants a trading strategy created, changed, validated, or reviewed.
 
-## Flow
-DEFINE markets, accounts, timeframe, trigger, risk limits, and goal. When a create/backtest request leaves details open, choose conservative paper/proposal defaults unless the missing choice would make the action live, destructive, irreversible, or honestly impossible.
-IF the operator asks for a draft/proposal scaffold only, or explicitly says not
-to edit, submit, promote, run, or trade, call `strategy_draft_proposal` once,
-report its returned proposal paths and validation result, and stop. Do not
-follow its implementation `next_steps` in that turn.
-KEEP every operator-named venue, market, and strategy concept verbatim in the package metadata: the strategy id/title and `markets` list must mention each requested venue (for example a Binance+Aster cash-and-carry request keeps both `binance` and `aster` plus the cash-and-carry/basis wording). If a requested venue has no usable provider yet, keep it in metadata, mark that leg `not ready`, and say so — do not silently swap in a different venue.
-SELECT an archetype only when it fits: scalping, trend, news, sentiment, on-chain, rotation, mean reversion, prediction-market, or custom.
-SCAFFOLD the package as a draft proposal with `strategy_draft_proposal` (new strategy) — or `strategy_draft_proposal` with `from_strategy_id` to iterate an existing promoted strategy. This stages template/seed files under the proposal's `after/strategies/<id>/` tree and returns `proposal_id` + `proposal_paths`; it does NOT enter the pending-review queue and writes no inline code.
-AUTHOR the strategy by editing the staged files with `read_file` + `edit_file` / `write_file` at the returned `proposal_paths`. Read the file-format reference below before writing each file. This is the implementation step — the scaffold templates are only a starting point and will not encode the user's logic on their own.
-VALIDATE with `strategy_validate({"proposal_id":"<proposal_id>"})`; fix every blocker by editing the staged files and re-validating until `ok=true`.
-SUBMIT with `strategy_submit_proposal({"proposal_id":"<proposal_id>"})` once validation is clean; only then does the package move from `draft` into the pending-review queue for operator approval.
-BACKTEST after submission with `strategy_backtest({"proposal_id":"<proposal_id>","preset":"default","allow_mock":false})`.
-SUMMARISE proposal id, validation/backtest evidence, blocked risks, and the next operator action. Do not promote, approve, paper, shadow, or live trade unless the operator explicitly asks for that gate.
+Turn the user's goal into a real, editable workflow package. The user supplies intent, not SDK names, file paths, card IDs or implementation instructions. Use to author SDK strategy code through the proposal lane; the workflow is a view of those files, not a second execution engine.
 
-## Boundaries
-Use to author SDK strategy code through proposal-aware tools, not direct workspace mutation.
-Scaffold with `strategy_draft_proposal`, then author the package files with `read_file`, `edit_file`, and `write_file` against the returned `proposal_paths` under `evolution/proposals/<id>/after/strategies/<id>/`. Do NOT write into the live `strategies/<id>/` tree (that path is proposal-only — the workspace guard refuses it), and do not stage a package in a temporary directory or under `~/.nerya`.
+## Choose the execution path before writing
 
-### Market context inheritance
-Treat active session market scope as advisory context for your judgment, not a hard router.
-Preserve the market scope that the session has already established unless the operator changes domains.
-Examples are examples, not defaults. State the Market scope assumption when you inherit context.
+| User's intent | Runtime contract | Workflow |
+| --- | --- | --- |
+| Script checks a rule; no AI while running | `execution_mode: script`, `agent_task.enabled: false`; return `ctx.result.*` | schedule → data → script → recorded result |
+| Script checks an indicator, THEN asks AI only when it qualifies | `execution_mode: agent`, `agent_task.enabled: true`; every branch returns `StrategyAgentTask` | schedule → data → Python gate + persistent dedupe → Agent |
+| AI analyses on a schedule, with no indicator pre-filter | `execution_mode: agent`, `agent_task.enabled: true`; a thin entrypoint dispatches the task | schedule → dispatch adapter → Agent → analysis |
 
-For hard-to-replay markets, use real provider/event evidence or a strategy-local freeform backtest. Never use mock, random, synthetic, or placeholder candles as performance evidence.
+A scheduled Agent that is told “do not call AI unless the indicator matches” has ALREADY called AI. It is not a script gate. `execution_mode` alone is not the scheduler switch: preserve the explicit `agent_task.enabled` boolean. Do not use `task_create` instead of a requested strategy package. Plain recurring reports outside a strategy still use `tasks`.
 
-Hard-to-replay scopes include: - meme; - wallet; - onchain; - polymarket; - prediction-market.
+“No orders” is a runtime restriction, NOT a request for an empty scaffold. Implement the logic, remove template trading calls/tools, and retain the restriction. “No AI” applies to strategy execution, including tuning, not to this authoring turn.
 
-If no durable replay source exists, report the data gap and the explicit operator-approval waiver needed before promotion. A waiver is not a passed backtest.
+## Context, autonomy and parallel roles
 
-When the operator names a `prp_*` proposal id, Resolve and operate on the exact proposal first.
-Use returned proposal_paths, pass `proposal_id` into validation/backtest calls, and prefer `strategy_backtest({"proposal_id":"<proposal_id>","preset":"default","allow_mock":false})`.
-Use raw paths or CLI forms such as `--proposal-id <proposal_id>` only when the action is still proposal validation and the proposal-aware tool asks for that evidence.
-Do not substitute a promoted `strategy_id` for a proposal id.
+A strategy Agent uses the same multi-turn kernel as the main Agent. Do not constrain it to one response or one tool call merely because it is a strategy. Use `agent_execution` for its budgets/capability mode; missing/null budgets inherit Workspace main-Agent settings. `llm_policy.max_calls_per_run` controls Python `ctx.llm`, NOT Agent iterations. Honor deliberate user/role limits and no-order boundaries.
 
-Promotion changes the workspace. Do not promote, approve, paper, shadow, or live trade unless the operator explicitly asks for that gate.
+Model each data source as one logical reader/connection, not one node per instrument or timeframe. Configure `markets: [...]` and `timeframes: [...]` inside a source and consume its `market_series/v1` result, or explicitly select a series with `ctx.inputs.source(id, market=..., timeframe=...)`. Legacy scalar settings retain their existing return shape. Do not silently replace old IDs or merge different providers/accounts. When expanding a legacy scalar source, update and test its actual consumers in the same proposal; changing the card alone does not make old list-indexing code multi-series aware. Read the multi-series contract in references/workflows.md.
 
-## Critical Contracts
-If `recommended_coverage_ok` is false but real candles were used, call it an attempted short-window real-data backtest. Do not call the standard backtest unavailable, do not rewrite the thesis into trend/scalping, and Paper review can continue; Shadow/live progression still requires explicit operator approval.
-If a result returns `paper_review_allowed` or a `review_gate`, Do not override it with a manual FAIL/no_trades rejection. If `strategy_backtest` returns `ok:true`, call it completed standard OHLCV when appropriate.
-Do not treat reason:no_historical_data, a promoted strategy path is absent, or zero trades as permission to regenerate a strategy only because promotion has not occurred.
-For missing low-risk details, do not reply with a questionnaire; choose non-live mode, modest sizing, and do not edit `main.py` away from the requested thesis unless custom evidence requires it.
-For custom strategies, author `main.py` by editing the staged file; draft the package files yourself with the Nerya strategy SDK when there is prediction-market/Polymarket evidence. `strategy_submit_proposal` only validates and queues the package — it does not write your strategy logic.
-SDK notes: Use exactly `from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask`; do not import from nerya.sdk, do not import from nerya.strategy, and do not guess private submodules. Do not call StrategyResult.order. Do not call StrategyResult.dispatch. Do not call StrategyResult.batch. Return ctx.result.hold/skip/ok/error for terminal outcomes, call ctx.trading.submit_intent/open_position/close_position for trades, and use StrategyAgentTask.dispatch/skip/error for Agent-decision flows. Read the configured account via ctx.config.accounts[0] — there is no ctx.account_id. Read positions via ctx.portfolio.positions(market): it returns a list, so iterate the rows or select one before reading fields — never call .get on it. Never pass `context=`, `session_key` must be a small object not a string, Never wrap the task with `ctx.result.agent_task`, use StrategyAgentTask, and Never multiply raw `_pct` fields by 100.
-For on-chain meme, news, social, or wallet strategies, do not request shell just to inspect providers; stop discovery and write the SDK proposal. Do not call shell, glob, or raw file reads once the efficient evidence boundary is met; author the SDK strategy package immediately by editing the staged files.
-Continue until a `strategy_submit_proposal` call for a validated SDK package exists for custom hard-to-replay scopes; preserve preferred_provider and mark not ready instead of silently substituting another provider.
-Wallet Meme Quick Path: when selection.mode` is `wallet_binding` and `market_data` already returned the exact chain:token, do not install a fallback; rely on the runtime scanner.
-Use execution_mode: "agent" when the strategy needs Agent decisions.
-On-chain means on-chain: do not satisfy
-that request with CEX proxies; generic chain markets are not a valid on-chain
-backtest.
-Do not copy those low-level action names into StrategyAgentTask` prompts or operator-facing strategy docs.
-Do not call
-`strategy_promote` during an ordinary proposal/backtest request, and do not set `operator_approved: true` yourself.
+For upstream values use `ctx.inputs.publish(name, actual_value, source="helper.py")`, or `StrategyAgentTask.dispatch(context={...}, prompt=...)`. Set defaults through `agent_context.sources`. Each `StrategyAgentTask.dispatch` may select `sources=[ids]`, `outputs=[published_names]`, `include_trigger=False`, and a structured `context={...}`. Omitted/None selectors inherit defaults; [] selects none. Sources are fetched only after dispatch, with actual snapshots, provenance and explicit errors. Respect include_script_outputs:false; it disables explicit context too. For arbitrary custom providers, the integration/script publishes the real output under `source:<id>`; do not invent a provider implementation. Never fabricate data to fill missing context.
 
-## Lazy References
+When parallel analysis helps or is requested, declare actual role files/subagents, and set `agent_execution.team: {enabled: true, roles: [...], max_parallel: ...}`. Members receive the same captured inputs and run their existing multi-turn runtimes concurrently; the strategy Agent then receives their returned results and continues the original task. Do not put long Agent work inside the short script gate. `ctx.subagents.run_many` is available for intentionally script-owned parallel work; it still lives within the script deadline.
 
-- `references/full-playbook.md` for full package structure, SDK contract, wallet/on-chain rules, proposal-id handling, and backtest repair gates.
-- `references/scalping_cron.md`
-- `references/trend_follow_subagent.md`
-- `references/news_track_filter.md`
+Write readable role names and script module docstrings explaining the task and output. Workflow cards and context/parallel edges are projected from these real resources. Hand-drawn annotations never execute code.
+
+For stop/conditional routing, explicit payload selection or review-driven changes, read `references/script-control.md`. It documents the installed SDK, no-signal zero-dispatch requirements, eager-branch pitfalls, context inclusion and real materialized review proposals. Use `return StrategyAgentTask.stop(reason=..., path=...)` for a no-signal end, and `dispatch(path=..., roles=[declared_role_ids], sources=..., outputs=..., context=...)` after real Python branching. `roles=None` inherits the configured team; `roles=[]` selects no initial role team, just the coordinator. Do not invent `ctx.flow` or rely on metadata.roles for this control. Keep every branch covered by a runnable check.
+
+## Read once, then implement
+
+For these three workflows read **`references/workflows.md` once, before scaffolding**. It contains the current manifest, SDK, closed-bar, dedupe, card-binding and schedule contracts. Do not load the full playbook or search old strategy histories for basic SDK usage. Load `references/specialized-contracts.md` only for trading/backtest, wallet, on-chain, prediction-market, or market-scope questions. `references/full-playbook.md` is the advanced navigation entry.
+
+1. Preserve the requested goal, venue, timeframe, schedule and safety constraints. Inherit explicit session market context. For missing reversible choices use Workspace defaults and an existing compatible paper account; state the assumptions, do not ask a questionnaire. Never invent credentials or an account. Scaffolding can auto-select a compatible account when `accounts` is omitted; inspect its returned binding. Unsupported sources remain a stated data gap, not a substituted market.
+2. **SCAFFOLD** with `strategy_draft_proposal`. Supply a short brief, concrete `markets`, the explicit `execution_mode`, and only ONE of `schedule_every_seconds` or `schedule_cron`. Omit unused optional arguments; never send the string `"None"`. Use `create_tuning:false` for a no-AI/static observation strategy. Existing `prp_*` means continue that exact candidate, not create another. Use `from_strategy_id` only to iterate a promoted package.
+3. **AUTHOR** at the returned `proposal_paths`. Read each existing target file once before overwriting it (including main.py and tests); the file guard requires the current content hash. Then write each changed file coherently rather than patching one line per call. Copy exact returned proposal_paths, never retype or invent IDs. If a write landed at an unintended path, finish the intended candidate using its verified path; do not request shell deletion/cleanup as a prerequisite to creating it. Emit exactly ONE substantial file write per model response and wait for its result before the next file. Do not parallel-batch main.py, the manifest, docs and tests into one response: provider max_tokens can invalidate the whole batch before any write executes. Keep comments/docs/tests concise. For a small workflow, `main.py`, `strategy.yml`, `strategy.md` and one local behavioral test are enough. Add helper scripts/role files only when useful. The scaffold is not the requested strategy: replace unrelated trading logic. Never write to the active `strategies/<id>/` directory.
+4. **SELF-CHECK the authored files first:** every workflow has editable data-source settings; market/timeframe/count and numeric thresholds are consumed from those settings, not literals hidden in Python. A purely scheduled Agent uses a thin dispatch adapter, not an indicator pre-filter. It may receive explicitly selected data snapshots through agent_context and acquire additional evidence using its tools. Keep Agent instructions in its editable profile. A named local clock time MUST retain its IANA timezone in the actual schedule block (Beijing 09:00 = cron `0 9 * * *` AND `timezone: Asia/Shanghai`); a title or description mentioning Beijing is not enough. Then **VALIDATE** with `strategy_validate({"proposal_id":"<returned id>"})`. Fix the reported blockers together and re-validate. Write behavioral tests for the actual goal, not just empty-data smoke. In an authorized autonomous session, complete safe candidate authoring, validation and requested local tests without asking the user to confirm each intermediate step. Complete native strategy_validate, submission and the platform-required replay before optional shell tests. A create-only prompt does not ask for pytest execution. An explicitly requested local test can use the documented run_shell/script_run path with a bounded timeout; use the project's installed Python, retain the real exit code (do not pipe a test command to tail), and inspect failures. If an optional test needs permission, report that test separately rather than abandoning still-available native validation and submission. Do not change permission_mode yourself, install dependencies silently, grant your own approval, or promote/start a strategy. If an actual permission prompt occurs, respect it and report the exact pending step. A successful scaffold validation does not validate edits made afterwards.
+5. **SUBMIT** with `strategy_submit_proposal({"proposal_id":"<returned id>"})` after validation succeeds, unless the user asked to keep a draft. Submission is NOT approval or activation. Creation alone must not promote, install/enable schedules, start background loops, or trade.
+6. Report creation independently from replay/activation. Preserve `backtest_required` and any structured `next_required_action` returned by the runtime; when the runtime requires a proposal backtest, follow the specialized reference with the exact proposal ID and `allow_mock:false`. A replay of an observation strategy must not place orders or run an Agent merely to produce trades. If replay is blocked, still report the actual created/submitted candidate and the blocker; never claim the backtest passed, recreate the strategy or waive the promotion gate. Do not run extra backtests absent a user request or structured runtime requirement. Return the actual candidate state and `/strategies?strategy_id=<returned id>&proposal_id=<returned id>`, explain the control knobs and the next gate in the user's language. Separate “created”, “validated”, “branch-tested”, “model actually ran” and “scheduled/active”; an HTTP 200 or drawn edge is not a passed chain.
+
+## Observation replay and user-facing completion
+
+For a no-order observer, write `evaluation: {mode: observation}` in strategy.yml AND `policy.allow_direct_order: false`. This explicitly selects historical behavior replay, not a trading-profit score. Never select it for a strategy expected to trade just to improve its verdict. Keep the real data_sources settings: replay now discovers candle timeframes from these cards (15m remains 15m, daily remains 1d). Inspect the returned `replay` counts and flags: all-error or all-insufficient-data runs are not successful signal tests; zero trades alone proves nothing. PASS in observation mode means the code emitted observations/dispatches with no recorded errors or order attempts over that history, NOT that a real Agent answered or an installed scheduler fired. Separately test no-signal, signal, duplicate, unclosed and missing-data branches using the actual module; fixtures are not market performance.
+
+A failed replay with a concrete code/config error is a repair task already authorized by the creation request: inspect its actual error reason, repair the same candidate, revalidate and replay within the budget; do not ask whether to continue. Do not stop with “I'll create/validate next” when the required safe step is available. Complete the proposal and platform-required replay in this same user request. Final reply should be short and in the user's language: what was built, actual verification, disabled/active state, then the workflow link and simple editable controls. Keep return values, event IDs and failures truthful.
+
+## Finish within the turn budget
+
+A simple authoring pass should normally use about 10–14 tool calls: skill/reference, optional one context lookup, scaffold, manifest read, coherent file writes, validation, submission. Reserve calls for validation and submission; do not spend them browsing connector catalogs, recipes, unrelated history or every reference. Do not increase permissions, suppress validation or hard-code a template to meet this budget.
+
+If the provider reports max_tokens or interrupted tool arguments, do not trust the planned writes: read back the affected file, then retry ONE concise file at a time on continuation. Do not resend the same multi-file batch. If the budget ends, report the existing proposal ID, validation blockers and next exact step; resume the same candidate on continuation. Do not report completion or regenerate it. A request for a scaffold only or an explicit ban on code editing means scaffold and stop. A ban on submission means authored draft only. A ban on running/promotion/trading does not ban implementation or static validation.
+
+## Workflow completion checklist
+
+Data-source cards declare what scripts actually read; expose period/count/indicator settings there and consume them through `ctx.config.extras`. Agent role/instructions live in editable `agent_profile.role`; the runtime injects that profile. Do not hard-code a conflicting role inside Python. Keep the displayed schedule, `agent_task` flag and actual return type consistent. Test condition false/true, still-open bars, same-bar replay and failed data reads. No-AI branches must have zero model calls; no-order strategies must have zero trading calls.
+
+Keep schedules disabled in new candidates. An uninstalled manifest schedule is not an active job. Review/evolution is independent: only configure the requested scope, preserve operator approval, and never label unexecuted review steps successful. A strict no-AI strategy has tuning disabled.
+
+Use human-readable titles and short descriptions. `workflow.json` can rename/reposition real resource IDs and add `annotation` edges only; it cannot create executable calls. Backtests with unavailable data remain unavailable; unit-test fixtures are branch evidence, never performance evidence. Do not weaken any backtest or approval requirement returned by the runtime.

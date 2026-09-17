@@ -105,6 +105,12 @@ def run_strategy_backtest(
         config_path=config_path,
         markets=list(package.manifest.markets),
     )
+    evaluation = package.manifest.extras.get("evaluation", {})
+    if isinstance(evaluation, dict) and "mode" in evaluation:
+        cfg.evaluation_mode = str(evaluation["mode"])
+    cfg.validate()
+    if cfg.evaluation_mode == "observation" and package.manifest.policy.allow_direct_order is not False:
+        raise TradingError("Observation evaluation requires policy.allow_direct_order: false")
     _apply_short_lived_window_policy(cfg, package, explicit_config=bool(config_path))
     discovered_timeframes = _discover_strategy_timeframes(package.root)
     if discovered_timeframes:
@@ -276,6 +282,9 @@ def run_strategy_backtest(
         "trades_path": str(outputs["trades"]),
         "config_path": str(out_dir / "config.yml"),
         "verdict": metrics.get("verdict"),
+        "evaluation_mode": metrics.get("evaluation_mode"),
+        "replay": metrics.get("replay"),
+        "flags": metrics.get("flags", []),
         "total_return_pct": metrics.get("total_return_pct"),
         "max_drawdown_pct": metrics.get("max_drawdown_pct"),
         "sharpe_ratio": metrics.get("sharpe_ratio"),
@@ -790,14 +799,23 @@ def _load_candles_with_timeframe_fallback(
 
 
 def _discover_strategy_timeframes(strategy_root: Path) -> list[str]:
+    # Workflow cards are runtime configuration, not merely labels. Prefer their
+    # ordered timeframes before legacy source-literal discovery.
+    manifest = yaml_io.load(strategy_root / "strategy.yml", default={}) or {}
+    sources = manifest.get("data_sources", []) if isinstance(manifest, dict) else []
+    if isinstance(sources, dict):
+        sources = list(sources.values())
+    from nerya.strategies.source_config import dimensions
+    out = [frame for source in sources if isinstance(source, dict)
+           and source.get("capability", "candles") in {"candles", "features"}
+           for frame in dimensions(source, "timeframes", "timeframe", [])]
     main_path = strategy_root / "main.py"
     if not main_path.exists():
-        return []
+        return _unique(out)
     text = main_path.read_text(encoding="utf-8", errors="ignore")
     constants: dict[str, str] = {}
     for name, value in re.findall(r"(?<![A-Za-z0-9_])(_?[A-Z][A-Z0-9_]*)\s*=\s*[\"'](\d+[mhd])[\"']", text):
         constants[name] = value
-    out: list[str] = []
     for name, value in constants.items():
         if "TIMEFRAME" in name:
             out.append(value)

@@ -152,7 +152,7 @@ def build_strategy_review_context(
         "excluded_ledger_counts": excluded_ledgers,
         "excluded_evolution_counts": dict(sorted(evolution_excluded.items())),
     }
-    return _compose_snapshot(
+    snapshot = _compose_snapshot(
         paths,
         package.strategy_id,
         package=package,
@@ -164,6 +164,19 @@ def build_strategy_review_context(
         evidence_scope=evidence_scope,
         config_like=config_like,
     )
+
+    from .agent_review_evidence import agent_review_evidence
+    snapshot.workflow_context = agent_review_evidence(
+        paths, strategy_id=package.strategy_id, package_hash=package.content_hash,
+        execution_mode=policy.execution_mode, package_mode=package.manifest.mode,
+        cutoff=run_scope.cutoff, anchor=anchor, limit=lookback_runs,
+        requested_run_ids=run_scope.requested_run_ids,
+        requested_session_ids=run_scope.requested_session_ids,
+    )
+    snapshot.evidence_scope["selected_agent_task_ids"] = snapshot.workflow_context.get("selected_task_ids", [])
+    if snapshot.workflow_context.get("tasks"):
+        snapshot.notes = ["no script tick records; Agent task evidence is in workflow_context" if note == "no runs recorded yet" else note for note in snapshot.notes]
+    return snapshot
 
 
 def _run_exclusion_reason(

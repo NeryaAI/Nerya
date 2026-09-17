@@ -313,7 +313,9 @@ def test_trigger_runtime_dispatches_strategy_built_prompt_to_stable_agent_sessio
     assert profile["markets"] == ["mock:BTC/USDT"]
 
     task_rows = jsonl.read_all(cfg.paths.strategy_history("macd_agent") / "agent_tasks.jsonl")
-    assert len(task_rows) == 2
+    assert len(task_rows) == 4
+    assert [row["task"]["status"] for row in task_rows] == ["running", "executed", "running", "executed"]
+    assert task_rows[0]["task"]["task_id"] == task_rows[1]["task"]["task_id"]
     artifact = cfg.paths.strategy("macd_agent") / task_rows[0]["task"]["prompt_artifact"]
     assert artifact.read_text(encoding="utf-8").replace("\r\n", "\n") == prompt.replace("\r\n", "\n")
 
@@ -324,7 +326,8 @@ def test_trigger_runtime_dispatches_strategy_built_prompt_to_stable_agent_sessio
     assert detail["ok"] is True
     assert "custom_factor" in detail["prompt"]
     assert detail["session"]["profile"]["profile"]["title"] == "MACD execution agent"
-    assert strategy_api.history("macd_agent")["ledgers"]["agent_tasks"]["count"] == 2
+    assert listed["event_count"] == 4
+    assert strategy_api.history("macd_agent")["ledgers"]["agent_tasks"]["count"] == 4
 
 
 def test_explicit_agent_team_schedule_uses_strategy_owned_prompt(
@@ -337,8 +340,8 @@ def test_explicit_agent_team_schedule_uses_strategy_owned_prompt(
     entry = compile_trading_schedule(package)
     fake = _FakeKernel()
     monkeypatch.setattr(
-        "nerya.tools.native.agents.team_run_handler",
-        lambda call, *, config, skills, tool_registry=None: ToolResult.from_json(
+        "nerya.tools.native.bootstrap.team_run_handler",
+        lambda call, *, config, skills, tool_registry=None, executor=None: ToolResult.from_json(
             tool_use_id=call.id,
             name=call.name,
             data={
@@ -405,8 +408,9 @@ def test_explicit_agent_team_schedule_uses_strategy_owned_prompt(
     profile = SessionStore(cfg.paths.root).load(call["session_id"]).meta[
         "strategy_agent_profile"
     ]["profile"]
-    assert "team_run" in profile["allowed_tools"]
-    assert "trade_intent_submit" in profile["allowed_tools"]
+    assert profile["allowed_tools"] == []
+    assert profile["capability_mode"] == "inherit"
+    assert "trading tasks" not in profile["role"]
 
 
 def test_agent_team_task_executes_required_team_run_before_final_decision(
@@ -420,7 +424,8 @@ def test_agent_team_task_executes_required_team_run_before_final_decision(
     fake = _FakeKernel()
     team_calls: list[ToolCall] = []
 
-    def fake_team_run(call, *, config, skills, tool_registry=None):
+    def fake_team_run(call, *, config, skills, tool_registry=None, executor=None):
+        assert executor is not None
         team_calls.append(call)
         assert call.arguments["strategy_id"] == "amzn_daily_team_long"
         assert call.arguments["shared_payload"]["data_policy"] == "live only in test"
@@ -446,7 +451,7 @@ def test_agent_team_task_executes_required_team_run_before_final_decision(
         )
 
     monkeypatch.setattr(
-        "nerya.tools.native.agents.team_run_handler",
+        "nerya.tools.native.bootstrap.team_run_handler",
         fake_team_run,
     )
     monkeypatch.setattr(
@@ -488,7 +493,9 @@ def test_agent_team_task_executes_required_team_run_before_final_decision(
     assert "steps" not in result.result["actions"][0]["result"]["results"][0]
     assert "shared_payload" in result.result["tool_trace"][0]["call"]["arguments"]
     prompt = fake.calls[0]["trigger"]["payload"]["text"]
-    assert "runtime already executed the required `team_run`" in prompt
+    assert "Parallel team evidence" in prompt
+    assert "Final response contract: cite evidence" in prompt
+    assert "large raw trace should not be persisted" not in prompt
     assert "team-test" in prompt
 
 
@@ -759,3 +766,51 @@ def test_trigger_api_updates_the_requested_schedule_not_the_tail(tmp_path):
     schedules = {row["id"]: row for row in api.list_schedules()}
     assert schedules["first"]["every_seconds"] == 30
     assert schedules["second"]["every_seconds"] == 120
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_agent_lifecycle_is_visible_before_return_and_retains_evidence(tmp_path, fail):
+    cfg = _config(tmp_path)
+    _write_agent_task_strategy(cfg)
+    api = StrategyAPI(config=cfg, skills=None)
+    seen = []
+    # The run records the package it loaded, before writing prompt artifacts.
+    loaded_hash = load_package(cfg.paths, "macd_agent").content_hash
+
+    class ObservedKernel:
+        def run_turn(self, **kwargs):
+            listing = api.agent_tasks("macd_agent")
+            assert listing["count"] == listing["event_count"] == 1
+            current = listing["tasks"][0]["task"]
+            assert current["status"] == "running"
+            assert current["turn_id"] == kwargs["turn_id"]
+            assert current["package_hash"] == loaded_hash
+            assert current["started_at"]
+            seen.append(current)
+            if fail:
+                raise RuntimeError("controlled test provider error")
+            return SimpleNamespace(turn_id=kwargs["turn_id"], final_text="Observed, no order.",
+                                   actions=[], tool_trace=[], decision={}, stopped_reason="end_turn",
+                                   iterations=1, budget={"tool_calls": 0})
+
+    runtime = TriggerRuntime(config=cfg, router=TriggerRuntime.boot(cfg).router,
+        agent_task_executor_factory=lambda config: StrategyAgentTaskExecutor(config=config, kernel_factory=lambda _: ObservedKernel()))
+    outcome = runtime.emit(runtime.from_payload({"source": "test", "kind": "strategy.tick",
+        "payload": {}, "target": TARGET, "strategy_id": "macd_agent"}))
+    assert len(seen) == 1, outcome.asdict()
+    assert outcome.status == ("failed" if fail else "executed")
+    listing = api.agent_tasks("macd_agent")
+    assert listing["count"] == 1 and listing["event_count"] == 2
+    detail = api.agent_task("macd_agent", seen[0]["task_id"])
+    task = detail["task"]
+    assert task["turn_id"] == seen[0]["turn_id"]
+    assert task["status"] == ("failed" if fail else "executed")
+    assert task["duration_ms"] >= 0 and task["finished_at"]
+    assert "custom_factor" in detail["prompt"]
+    if fail:
+        assert task["error"]["code"] == "agent_execution_failed"
+        assert "controlled test provider error" in task["error"]["message"]
+        assert "final_text" not in task
+    else:
+        assert task["final_text"] == "Observed, no order."
+        assert task["budget"] == {"tool_calls": 0}
