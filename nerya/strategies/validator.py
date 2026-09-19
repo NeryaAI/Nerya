@@ -86,7 +86,7 @@ FORBIDDEN_TOP_LEVEL_MODULES: frozenset[str] = frozenset(
         "web3", "eth_account", "solana", "solders", "anchorpy",
         # Raw network
         "socket", "ssl", "asyncio", "aiohttp", "httpx", "requests",
-        "urllib", "http", "smtplib",
+        "urllib", "http", "smtplib", "websockets", "websocket",
         # Process / shell / filesystem traversal
         "subprocess", "os.system", "shutil",
         # Crypto primitives (strategies don't need these directly; if
@@ -316,6 +316,7 @@ def validate_proposal_files(
     *,
     strategy_id: str,
     files: dict[str, str],
+    smoke_test: bool = True,
 ) -> StrategyValidation:
     """Validate the file blobs the generator produced for a proposal.
 
@@ -382,7 +383,7 @@ def validate_proposal_files(
             files=tuple(sorted(files.keys())),
             content_hash="",  # not yet promoted
         )
-        result = _validate_loaded(package)
+        result = _validate_loaded(package, smoke_test=smoke_test)
         result.strategy_id = strategy_id
         return result
 
@@ -412,7 +413,7 @@ def static_scan_blockers(
 # ---------------------------------------------------------------------------
 
 
-def _validate_loaded(package: StrategyPackage) -> StrategyValidation:
+def _validate_loaded(package: StrategyPackage, *, smoke_test: bool = True) -> StrategyValidation:
     issues: list[StrategyValidationIssue] = []
 
     # Schema layer was already enforced when load_package returned —
@@ -470,7 +471,10 @@ def _validate_loaded(package: StrategyPackage) -> StrategyValidation:
                 severity="blocker", code="workflow_schema", message=str(exc), where="workflow.json",
             ))
     issues.extend(_static_scan_package(package))
-    if not _has_blocker(issues):
+    from .continuous_config import is_continuous
+    # A continuous entrypoint must not be run by import/tick smoke tests.
+    # It is exercised by bounded lifecycle/event tests after static validation.
+    if smoke_test and not is_continuous(package.manifest) and not _has_blocker(issues):
         issues.extend(_smoke_test_import(package))
 
     ok = not _has_blocker(issues)

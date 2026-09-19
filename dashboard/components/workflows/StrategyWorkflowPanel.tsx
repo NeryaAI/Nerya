@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { setComposeDraftPayload } from "../../lib/composeDraft";
 import { asObject, cardTitle, cardFacts, stateLabel } from "../../lib/workflowPresentation";
 import { NodeInspector } from "./WorkflowInspector";
+import { WorkflowVerification } from "./WorkflowVerification";
 import { WorkflowCommand, WorkflowHelp } from "./WorkflowNative";
 import { WorkflowEditorDialog } from "./WorkflowEditorDialog";
 import { compactWorkflow } from "../../lib/workflowProjection";
@@ -15,6 +16,7 @@ import sourceUi from "./WorkflowSourceSettings.module.css";
 import { workflowDiff, diffValue } from "../../lib/workflowDiff";
 import ui from "./WorkflowNative.module.css";
 import { WorkflowActivity } from "./WorkflowActivity";
+import { ContinuousStrategyStatus } from "./ContinuousStrategyStatus";
 import { AddResource } from "./AddWorkflowResource";
 import { WorkflowCardGallery } from "./WorkflowCardGallery";
 import { configurationErrors } from "./WorkflowSettings";
@@ -55,6 +57,7 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [commandDirty, setCommandDirty] = useState(false);
+  const [checkOpen, setCheckOpen] = useState(false);
   const reviewing = useRef(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -67,7 +70,7 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
     return representative ? panelRef.current?.querySelector<HTMLElement>(`[data-workflow-node="${CSS.escape(representative)}"] button[aria-pressed]`) || panelRef.current?.querySelector<HTMLElement>(`[data-support-member="${CSS.escape(representative)}"]`) : undefined;
   }
   function reviewFromEditor() { setInspecting(false); setSelectedEdge(null); void reviewChanges(); }
-  const dirty = addDraftDirty || Object.keys(rawDrafts).length > 0 || additions.length > 0 || (!!data && JSON.stringify(metadata) !== JSON.stringify(data.metadata));
+  const dirty = addDraftDirty || Object.keys(rawDrafts).length > 0 || additions.length > 0 || (!!data && workflowDiff(data.metadata, metadata).length > 0);
   const hydrate = useCallback((value: WorkflowView) => {
     setData(value); setMetadata({ version: 1, nodes: value.metadata.nodes || {}, edges: value.metadata.edges || [] });
     setRawDrafts({}); setAdditions([]); setSelectedEdge(null); setAdding(false); setAddDraftDirty(false); setAdditionSeed(null);
@@ -140,10 +143,10 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
   }
   function resetCard(id: string) {
     setRawDrafts((current) => { const next = { ...current }; delete next[id]; return next; });
-    setMetadata((current) => { const nodes = { ...current.nodes }; delete nodes[id]; if (data?.metadata.nodes[id]) nodes[id] = data.metadata.nodes[id]; return { ...current, nodes }; });
+    setMetadata((current) => { const nodes = { ...current.nodes }; if (data?.metadata.nodes[id]) nodes[id] = data.metadata.nodes[id]; else delete nodes[id]; return { ...current, nodes }; });
     setError("");
   }
-  const changedCards = new Set([...Object.keys(rawDrafts), ...Object.keys(metadata.nodes).filter((id) => JSON.stringify(metadata.nodes[id]) !== JSON.stringify(data?.metadata.nodes[id]))]).size + additions.length;
+  const changedCards = new Set([...Object.keys(rawDrafts), ...Object.keys(metadata.nodes).filter((id) => workflowDiff(data?.metadata.nodes[id], metadata.nodes[id]).length > 0)]).size + additions.length;
   async function openRuns() { if (adding && !(await closeAdd())) return; setInspecting(false); setView("runs"); setSelected(null); setSelectedEdge(null); }
   function askAgent(item: WorkflowNode, instruction = "") {
     if (dirty) { setError(t("请先保存当前修改，再交给主 Agent，以免遗漏尚未保存的内容。", "Save your edits before handing this card to the main Agent.")); return; }
@@ -204,11 +207,13 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
   if (!graph || !data) return <section className={ui.panel} data-testid="strategy-workflow-panel" aria-busy={loading}><header className={ui.header}><div className={ui.title}><h2>{renderTitle ? renderTitle(strategyId) : strategyId}</h2></div><div className={ui.headerActions}>{headerActions}</div></header>{loading ? <div className={styles.loading} role="status">{t("正在读取工作流…", "Loading workflow…")}</div> : <div className={styles.empty} role="alert"><p>{error || t("工作流暂不可用", "Workflow unavailable")}</p><button className={styles.secondaryButton} onClick={() => void load()}>{t("重新加载", "Retry")}</button></div>}</section>;
   return <section ref={panelRef} className={ui.panel} data-testid="strategy-workflow-panel" aria-busy={busy || loading} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void reviewChanges(); } }}>
     <header className={ui.header}><div className={ui.title}><h2>{renderTitle ? renderTitle(String(data.manifest.title || strategyId)) : String(data.manifest.title || strategyId)}</h2>{data.manifest.description ? <p>{String(data.manifest.description)}</p> : null}</div><div className={ui.headerActions}><ModePill mode={String(data.manifest.mode || "paper")} /><span className={ui.state}>{stateLabel(data.source.state, t)}</span>{headerActions}</div></header>
+    {asObject(data.manifest.runtime).mode === "continuous" && <ContinuousStrategyStatus key={`${strategyId}:${data.source.proposal_id || "active"}`} strategyId={strategyId} proposalId={data.source.proposal_id} dirty={dirty} />}
     <div className={ui.toolbar}><div className={ui.tabs} role="tablist" aria-label={t("工作流视图", "Workflow view")}>
       <button type="button" role="tab" aria-selected={view === "strategy"} onClick={() => void switchView("strategy")}>{t("工作流", "Workflow")}</button>
       <button type="button" role="tab" aria-selected={view === "runs"} onClick={() => void switchView("runs")}>{t("运行", "Runs")}</button>
       <button type="button" role="tab" aria-selected={view === "evolution"} onClick={() => void switchView("evolution")}>{t("复盘", "Review")}</button>
     </div><span className={ui.spacer} />
+      {view === "runs" && <button type="button" className={ui.quietButton} disabled={dirty || adding || busy || loading} onClick={() => setCheckOpen(true)}>{t("验证记录", "Verification records")}</button>}
       {view !== "runs" && <ChoiceSelect className={ui.quietButton} aria-label={t("显示内容", "Display mode")} value={display} style={{ background: "var(--bg)", minWidth: 0 }} onValueChange={(choiceValue) => { setDisplay(choiceValue as typeof display); setSelectedEdge(null); }}><option value="canvas">{t("精简工作流", "Workflow")}</option><option value="all">{t("全部关系", "All relationships")}</option><option value="cards">{t("资源列表", "Resources")}</option></ChoiceSelect>}
       {view !== "runs" && <button className={ui.iconButton} type="button" disabled={!editable} aria-label={t("添加资源", "Add resource")} title={t("添加资源", "Add resource")} onClick={() => { if (adding) { void closeAdd(); return; } setAdditionSeed(null); setAdding(true); setSelected(null); setSelectedEdge(null); }}>+</button>}
       {dirty ? <><button className={ui.quietButton} disabled={busy} type="button" onClick={async () => { if (await confirmDiscard(t("放弃手动修改？", "Discard manual edits?"))) { invalidateReadCache(); await load(); } }}>{t("撤销", "Discard")}</button><button className={ui.reviewButton} type="button" disabled={!editable || adding} onClick={() => void reviewChanges()}>{busy ? t("保存中…", "Saving…") : t("检查修改", "Review changes")} · {changedCards || 1}</button></> : <Link className={ui.quietButton} href={data.source.proposal_id ? `/self-evolution?tab=proposals&proposal_id=${encodeURIComponent(data.source.proposal_id)}` : `/strategies/${encodeURIComponent(strategyId)}`}>{t("版本", "Versions")} ↗</Link>}
@@ -230,6 +235,10 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
       {edge && <section className={ui.inspector}><header className={ui.inspectorHeader}><h3>{t("说明连线", "Annotation")}</h3><button className={ui.iconButton} type="button" aria-label={t("关闭详情", "Close details")} onClick={() => setInspecting(false)}>×</button></header><div className={ui.inspectorBody}><p className={ui.muted}>{t("仅作说明，不改变执行。", "An annotation, not an execution link.")}</p><label className={styles.field}>{t("连线说明", "Edge label")}<input maxLength={160} disabled={!editable} value={edge.label} onChange={(event) => setMetadata((current) => ({ ...current, edges: current.edges.map((item) => item.id === edge.id ? { ...item, label: event.target.value } : item) }))} /></label><button className={ui.quietButton} disabled={!editable} onClick={() => { setMetadata((current) => ({ ...current, edges: current.edges.filter((item) => item.id !== edge.id) })); setSelectedEdge(null); setInspecting(false); }}>{t("移除连线", "Remove annotation")}</button></div></section>}
       </WorkflowEditorDialog>
     </div>}
+    {checkOpen && <WorkflowVerification workflow={data} onClose={() => setCheckOpen(false)} onEdit={(where) => {
+      const target = [...data.strategy.nodes, ...data.evolution.nodes].find((n) => n.binding.file && (where === n.binding.file || where.startsWith(n.binding.file + ":"))) || data.strategy.nodes.find((n) => n.kind === "strategy");
+      setCheckOpen(false); setView("strategy"); setSelected(target?.id || null); setInspecting(!!target);
+    }} />}
     <WorkflowCommand node={node} disabled={!editable || adding} dirty={dirty} onDraftChange={setCommandDirty} onSubmit={(text, nodeId) => { const target = [...data.strategy.nodes, ...data.evolution.nodes].find((item) => item.id === nodeId) || data.strategy.nodes.find((item) => item.kind === "strategy"); if (target) askAgent(target, text); }} />
   </section>;
 }

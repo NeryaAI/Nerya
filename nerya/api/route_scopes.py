@@ -106,6 +106,10 @@ class RouteRule:
 # default to ``admin:ops`` if no rule matches them.
 
 _RULES: tuple[RouteRule, ...] = (
+    RouteRule("POST", "/strategies/runtime/service/start", "admin:ops", "start a reviewed long-lived strategy; may submit orders within its policy"),
+    RouteRule("POST", "/strategies/runtime/service/stop", "write:config", "stop future listener events and cancel pending Agent work"),
+    RouteRule("GET", "/strategies/runtime/service/status", "read:runtime", "continuous service lifecycle"),
+    RouteRule("GET", "/strategies/runtime/service/events", "read:sessions", "event and Agent execution receipts"),
     # health / ops
     RouteRule("GET", "/health", None, "always anonymous"),
     RouteRule("GET", "/", None, "service banner"),
@@ -131,6 +135,12 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/workspace/file/delete", "write:config", "dashboard files drawer delete"),
     RouteRule("POST", "/workspace/file/create", "write:config", "dashboard files drawer create"),
     RouteRule("POST", "/workspace/file/rename", "write:config", "dashboard files drawer rename"),
+
+    # Persistent child conversations use the parent conversation's read/write scopes.
+    RouteRule("GET", "/teams/agents", "read:sessions", "child session summaries"),
+    RouteRule("POST", "/teams/agents/get", "read:sessions", "child operations and mailbox"),
+    RouteRule("POST", "/teams/agents/message", "write:chat", "queue a child message"),
+    RouteRule("POST", "/teams/agents/resume", "write:chat", "continue with original child policy"),
 
     # agent / sessions / streaming
     RouteRule("POST", "/agent/run_turn", "write:chat", ""),
@@ -214,6 +224,9 @@ _RULES: tuple[RouteRule, ...] = (
         "approve:trade|approve:tool",
         "handler partitions trade and tool approval scopes by record kind",
     ),
+
+    # Read-only schema/AST and version-bound evidence; never imports strategy code.
+    RouteRule("GET", "/strategies/runtime/workflow/check", "read:runtime", "workflow configuration and evidence check"),
 
     # trading / portfolio / strategy
     RouteRule(

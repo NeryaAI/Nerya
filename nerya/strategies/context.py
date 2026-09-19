@@ -2110,6 +2110,8 @@ class StrategyContext:
     backtest_replay: Callable[..., dict[str, Any]] | None = None
     run_deadline: StrategyRunDeadline = field(default_factory=StrategyRunDeadline)
     inputs: Any = None
+    # Only the continuous supervisor injects this stop-aware facade.
+    stream: Any = None
 
     @property
     def mode(self) -> str:

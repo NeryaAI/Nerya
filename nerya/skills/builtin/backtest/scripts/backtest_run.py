@@ -99,7 +99,19 @@ def run_strategy_backtest(
         raise TradingError("exactly one of strategy_id, proposal_id, or package_dir is required")
 
     config_obj = load_workspace_config(Path(workspace).expanduser() if workspace else None)
+    if config_path:
+        supplied = Path(config_path).expanduser()
+        if not supplied.is_absolute():
+            # Native file tools return workspace-relative paths, while the
+            # server process may run from the application installation.
+            supplied = (config_obj.paths.root / supplied).resolve()
+            if not supplied.is_relative_to(config_obj.paths.root.resolve()):
+                raise TradingError("backtest config must remain inside the workspace")
+        config_path = supplied
     package = _load_target_package(config_obj.paths, strategy_id, proposal_id, package_dir)
+    from .....strategies.continuous_config import is_continuous
+    if is_continuous(package.manifest):
+        raise TradingError("continuous listener is not an OHLCV tick strategy; test its finite signal function separately and run isolated lifecycle/event-to-paper-order verification")
     cfg = load_config(
         preset=preset,
         config_path=config_path,
@@ -154,6 +166,10 @@ def run_strategy_backtest(
     out_dir = package.root / "backtests" / ts_name
     out_dir.mkdir(parents=True, exist_ok=True)
     yaml_io.dump(out_dir / "config.yml", cfg.asdict())
+    from .....strategies.verification import replay_provenance, source_revision
+    from .....strategies.workflow_service import _read_files
+    provenance = replay_provenance(package, cfg, timeframe_candles_by_market,
+        proposal_id=proposal_id, allow_mock=allow_mock)
     result = run_backtest(
         package.root,
         cfg,
@@ -164,6 +180,9 @@ def run_strategy_backtest(
     )
     csvs = write_csv_artifacts(result, out_dir)
     metrics = assemble_metrics(result)
+    end_files, end_omitted = _read_files(package.root)
+    provenance["source_changed_during_run"] = bool(end_omitted) or source_revision(end_files) != provenance["source_revision"]
+    metrics["provenance"] = provenance
     metrics["tf"] = cfg.tf
     metrics["timeframes"] = list(cfg.timeframes)
     metrics["requested_primary_timeframe"] = requested_tf
@@ -180,6 +199,14 @@ def run_strategy_backtest(
     else:
         metrics["timeframe_fallback"] = False
     _apply_coverage_gate(metrics, cfg)
+    if provenance["data_kind"] != "historical":
+        metrics["coverage_message"] = (
+            f"{provenance['data_kind'].capitalize()} data only: "
+            f"{float(metrics.get('backtest_days') or 0):.2f}d loaded; "
+            f"{cfg.window_days:.2f}d requested. Not real-history performance evidence."
+        )
+        if metrics.get("timeframe_fallback"):
+            metrics["timeframe_fallback_message"] = f"Requested {requested_tf}; replay used {cfg.tf} {provenance['data_kind']} data."
     metrics_path = out_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     outputs: dict[str, Path] = dict(csvs)
@@ -272,6 +299,7 @@ def run_strategy_backtest(
         "proposal_id": proposal_id,
         "package_dir": _ws_rel(package.root) if package_dir else None,
         "backtest_ts": ts_name,
+        "provenance": provenance,
         "strategy_root": _ws_rel(package.root),
         "strategy_yml_path": _ws_rel(package.root / "strategy.yml"),
         "strategy_md_path": _ws_rel(package.root / "strategy.md"),
@@ -498,6 +526,9 @@ def _metrics_display(metrics: dict[str, Any]) -> dict[str, str]:
         "sharpe_ratio",
         "profit_factor",
         "tf",
+        "start_utc",
+        "end_utc",
+        "requested_window_days",
     ):
         value = metrics.get(key)
         if value is not None:
@@ -521,6 +552,9 @@ def _operator_summary(metrics: dict[str, Any]) -> dict[str, str]:
         "coverage_message",
         "timeframe_fallback_message",
         "tf",
+        "start_utc",
+        "end_utc",
+        "requested_window_days",
         "backtest_days",
         "bars_total",
         "total_trades",
@@ -561,6 +595,9 @@ def _operator_summary_text(summary: dict[str, str]) -> str:
         ("Coverage", get("coverage_message")),
         ("Timeframe fallback", get("timeframe_fallback_message")),
         ("Primary timeframe", get("tf")),
+        ("Actual start UTC", get("start_utc")),
+        ("Actual end UTC", get("end_utc")),
+        ("Requested window days", get("requested_window_days")),
         ("Backtest days", get("backtest_days")),
         ("Bars total", get("bars_total")),
         ("Total trades", get("total_trades")),

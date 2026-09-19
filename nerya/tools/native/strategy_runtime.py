@@ -1314,6 +1314,9 @@ def _proposal_requires_standard_backtest(
         manifest = yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}
     except Exception:
         manifest = {}
+    from ...strategies.continuous_config import is_continuous
+    if is_continuous(manifest):
+        return False
     markets = manifest.get("markets") if isinstance(manifest, dict) else None
     if isinstance(markets, str):
         market_values = [markets]
@@ -1814,6 +1817,11 @@ def strategy_submit_proposal_handler(
             else _proposal_nonstandard_replay_next_action()
         ),
     }
+    from ...strategies.continuous_config import is_continuous
+    if is_continuous(yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}):
+        payload["next_required_action"] = None
+        payload["verification_required"] = ["isolated_listener_lifecycle", "event_dedupe_and_cancellation", "agent_to_paper_order_if_trading"]
+        payload["verification_note"] = "Continuous candidate submitted, not activated or runtime-verified. Do not run the infinite listener in an OHLCV backtest or promote it merely to test. Use bounded isolated tests."
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
 
 

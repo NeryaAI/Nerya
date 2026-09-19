@@ -261,6 +261,7 @@ class RiskGate:
         *,
         market_snapshot: dict[str, Any] | None = None,
         resume: bool = False,
+        preview: bool = False,
     ) -> RiskDecision:
         paths = self.config.paths
         reasons: list[str] = []
@@ -699,7 +700,9 @@ class RiskGate:
             dedupe_key = f"{intent.strategy_id}:{intent.market}:{intent.side}:{round(notional, 2)}"
             dedupe = DedupeRepository(self._con_lazy())
             window = float(self.config.get("trading.dedupe_window_seconds", 300))
-            if dedupe.seen("trade_intent", dedupe_key, window_s=window):
+            # A preflight must check existing duplicates, not consume the
+            # future submission's idempotency slot. Submit remains recording.
+            if dedupe.seen("trade_intent", dedupe_key, window_s=window, record=not preview):
                 reasons.append("duplicate_intent")
                 decision = "reject"
 

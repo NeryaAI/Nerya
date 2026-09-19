@@ -25,13 +25,15 @@ class SessionStrategyMismatch(RuntimeError):
 class DedupeRepository:
     con: Any
 
-    def seen(self, scope: str, key: str, window_s: float) -> bool:
+    def seen(self, scope: str, key: str, window_s: float, *, record: bool = True) -> bool:
         now = time.time()
         row = self.con.execute(
             "SELECT ts FROM dedupe WHERE scope=? AND key=?", (scope, key)
         ).fetchone()
         if row and now - row["ts"] < window_s:
             return True
+        if not record:
+            return False
         self.con.execute(
             "INSERT OR REPLACE INTO dedupe(scope,key,ts) VALUES(?,?,?)",
             (scope, key, now),

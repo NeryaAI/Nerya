@@ -183,6 +183,9 @@ def build_workflows(files: dict[str, str]) -> dict[str, Any]:
                  path=[], x=30, y=30, subtitle=f"{manifest.get('mode', manifest.get('status', 'draft'))} · {sid}")
     add(root)
     schedule = _object(manifest.get("schedule"))
+    continuous = _object(manifest.get("runtime")).get("mode") == "continuous"
+    if continuous or schedule.get("type") == "none":
+        schedule = {}
     if schedule:
         add(_node("scheduler", "trading", "Trading schedule", config=schedule, path=["schedule"],
                   x=30, y=210, subtitle=str(schedule.get("cron") or f"every {schedule.get('every_seconds', '?')}s")))
@@ -206,7 +209,7 @@ def build_workflows(files: dict[str, str]) -> dict[str, Any]:
     evidence = _script_evidence(files, scripts)
     for index, path in enumerate(scripts):
         add(_node("script", path, path, file=path, content=files[path],
-                  x=340, y=120 + index * 176, subtitle="entrypoint" if path == entry else "Python module"))
+                  x=340, y=120 + index * 176, subtitle=("Continuous listener" if continuous else "entrypoint") if path == entry else "Python module"))
         row = evidence[path]
         if row["can_stop"] or row["dispatch_choices"]:
             nodes[-1]["control"] = {"can_stop": row["can_stop"], "paths": [c["path"] for c in row["dispatch_choices"] if isinstance(c.get("path"), str)]}

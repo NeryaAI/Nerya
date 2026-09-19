@@ -85,6 +85,7 @@ from .tool_phase import (
     ToolBatchPolicy,
     ToolCallBuildContext,
     build_tool_calls,
+    failed_required_actions,
     truncate_tool_loop_text as _truncate_for_tool_loop,
 )
 from .tool_projection import project_tool_results
@@ -1789,10 +1790,10 @@ class WorkspaceNativeAgentLoop:
                         transcript.append({
                             "role": "user",
                             "content": (
-                                "[operator steer — mid-turn redirect] "
+                                getattr(steer_inbox, "message_prefix", "[operator steer — mid-turn redirect] ")
                                 + steer_text
                             ),
-                            "pinned": True,
+                            "pinned": getattr(steer_inbox, "pin_messages", True),
                         })
                         emit(
                             "user",
@@ -1907,9 +1908,12 @@ class WorkspaceNativeAgentLoop:
                 required_next_tool_names,
                 successful_tool_names,
             )
+            # A required validation that failed cannot be repaired when the
+            # only advertised tool is that same validation. Re-offer the
+            # existing permission-filtered surface; keep the requirement owed.
             pending_required_action_tools = {
                 name for name in pending_required_for_iteration if name
-            }
+            } - failed_required_actions(set(pending_required_for_iteration), completed_tool_results)
             if pending_required_action_tools and not tool_budget_exhausted:
                 required_action_tools_for_iteration = _filter_provider_tools_by_names(
                     provider_tools,
@@ -3153,6 +3157,33 @@ class WorkspaceNativeAgentLoop:
             if not tool_uses:
                 if aborted_reason:
                     break
+                # An empty provider response is not task completion. Resume
+                # from verified tool results, never replay a completed write.
+                # Use persisted nudges so checkpoint continuation stays bounded.
+                if (
+                    not assistant_text.strip()
+                    and not any(b.get("type") in ATTACHMENT_BLOCK_TYPES for b in assistant_blocks)
+                    and stop_reason in {"end_turn", "stop", ""}
+                    and not text_only_final_attempt
+                ):
+                    recovery = next((key for key in (("empty_response", "1"), ("empty_response", "2"))
+                                     if key not in next_action_nudges), None)
+                    if recovery is not None and iterations < self.config.max_iterations and (deadline is None or deadline - time.time() > 5):
+                        next_action_nudges.add(recovery)
+                        transcript.append({"role": "user", "content": (
+                            "Your previous response contained neither an answer nor a tool call. "
+                            "Continue the existing user request from verified tool results. "
+                            "Do not repeat completed writes or request redundant permissions. "
+                            "Use available tools for unfinished authorized work; otherwise give "
+                            "a substantive final answer. If blocked, state the actual blocker."
+                        )})
+                        final_text = ""
+                        transition_reason = "empty_response_retry"
+                        continue
+                    aborted_reason = "empty_model_response"
+                    transition_reason = "empty_model_response"
+                    final_text = ""
+                    break
                 if text_only_final_attempt and final_text:
                     if transition_reason not in {
                         "llm_safety_rejection_finalized",
@@ -3695,7 +3726,8 @@ class WorkspaceNativeAgentLoop:
                 tools = [t for t in tools if is_visible(t)]
         if tool_filter is not None:
             tools = [t for t in tools if tool_filter(t)]
-        return [t.to_provider_tool() for t in tools]
+        from ..tools.registry import compact_tool_catalog
+        return [t.to_provider_tool() for t in compact_tool_catalog(tools)]
 
     def _lazy_described_signature(self) -> Optional[frozenset]:
         """Cheap snapshot of the lazy-state ``described`` set.

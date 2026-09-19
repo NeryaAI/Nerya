@@ -6,7 +6,7 @@ Read this once, then author at the returned proposal_paths. These are executable
 
 Keep `entrypoint: main.py:run`. Use explicit `execution_mode` AND `agent_task.enabled`: script/false for deterministic ticks; agent/true for script-gated and scheduled Agents. The scheduler checks the boolean, not a strategy name. An old `build_agent_task(ctx)` takes precedence over `run(ctx)` in the Agent executor: replace the whole main.py, or make build_agent_task delegate to the same run; never leave a stale scaffold function behind.
 
-Read the staged manifest once, preserve the returned identity and compatible account, then author the relevant fields together:
+Read the staged manifest once, preserve the returned identity and compatible account, then author the relevant fields together. The following is an OBSERVATION example only. For requested buy/sell backtests with simulated fills, use evaluation.mode=trading, implement the requested ctx.trading behavior, and keep the unpromoted paper candidate's schedule disabled. “No account orders” does not mean remove simulated replay fills:
 
 ```yaml
 version: 1
@@ -54,7 +54,7 @@ agent_session: {include_prior_messages: false, refresh_profile_on_change: true}
 
 The runtime injects `agent_profile.role`. Keep Python task text focused on the event/data rather than hard-coding a competing role. `ctx.config.extras` does NOT contain the typed agent_profile. `ctx.prompt` formats CSV/JSON/tables/artifacts; it has no read/render method. Extra role cards are optional: add subagents/<name>.agent.md and list the name only when the logic actually calls/delegates that role.
 
-No-order means remove template order calls AND trading tools/skills. A zero money cap is not by itself a ban. For a pure script there are no ctx.llm, subagent, team or Agent dispatch calls, and tuning is off. Do not use a zero LLM-call cap as a disable switch: legacy zero semantics are not a reliable no-AI gate. Prove zero calls by branch tests.
+For genuinely observation-only requests, no-order means remove template order calls AND trading tools/skills. This is NOT the rule for a requested simulated trading backtest; preserve its trading intent under the isolated replay context. A zero money cap is not by itself a ban. For a pure script there are no ctx.llm, subagent, team or Agent dispatch calls, and tuning is off. Do not use a zero LLM-call cap as a disable switch: legacy zero semantics are not a reliable no-AI gate. Prove zero calls by branch tests.
 
 ## Main-Agent capability and context contract
 

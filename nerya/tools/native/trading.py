@@ -751,7 +751,7 @@ def risk_check_handler(call: ToolCall, *, config: Config) -> ToolResult:
         intent = _build_intent(normalized.spec)
     except Exception as exc:
         return _usage_error(call, f"invalid intent: {type(exc).__name__}: {exc}")
-    decision = RiskGate(config).evaluate(intent, market_snapshot=snapshot)
+    decision = RiskGate(config).evaluate(intent, market_snapshot=snapshot, preview=True)
     _apply_forced_reject(
         decision,
         normalized.forced_reject_reasons,

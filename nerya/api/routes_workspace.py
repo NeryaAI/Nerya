@@ -88,7 +88,7 @@ def routes():
         paths = client.config.paths
         return {
             "root": str(paths.root),
-            "live_trading_enabled": client.config.live_trading_enabled,
+            "live_trading_enabled": bool(client.config.live_trading_enabled()),
             "kill_switch": client.config.kill_switch(),
         }
 

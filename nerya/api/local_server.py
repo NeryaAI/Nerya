@@ -527,12 +527,25 @@ def _shared_skills_for_config(config: Config) -> SkillKernel:
         return skills
 
 
+class _LocalHTTPServer(ThreadingHTTPServer):
+    # Dashboard mounts fan out to many routes before request threads can drain
+    # the accept queue. The stdlib's five-slot queue resets these local bursts.
+    request_queue_size = 128
+    continuous_supervisor = None
+
+    def server_close(self) -> None:
+        if self.continuous_supervisor is not None:
+            self.continuous_supervisor.shutdown()
+        super().server_close()
+
+
 def build_server(
     config: Config,
     host: str = "127.0.0.1",
     port: int = 18317,
     *,
     start_cron: bool = True,
+    start_continuous: bool = True,
 ) -> ThreadingHTTPServer:
     _collect_routes()
     startup_client = InternalClient.from_config(config)
@@ -693,10 +706,18 @@ def build_server(
         def log_message(self, fmt, *args):  # silence default logging
             return
 
-    return ThreadingHTTPServer((host, port), Handler)
+    server = _LocalHTTPServer((host, port), Handler)
+    from ..strategies.continuous import get_continuous_supervisor
+    server.continuous_supervisor = get_continuous_supervisor(config)
+    if start_continuous:
+        server.continuous_supervisor.restore()
+    return server
 
 
 def serve(config: Config, host: str = "127.0.0.1", port: int = 18317) -> None:
     srv = build_server(config, host=host, port=port)
     print(f"[nerya] local api on http://{host}:{port}")
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    finally:
+        srv.server_close()

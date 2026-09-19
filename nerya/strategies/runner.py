@@ -378,6 +378,9 @@ class StrategyRunner:
 
         package = load_package(self.config.paths, strategy_id)
         manifest = package.manifest
+        from .continuous_config import is_continuous
+        if is_continuous(manifest):
+            raise StrategyRuntimeError("continuous strategy requires service.start; it is not a single tick")
         mode = self._resolve_mode(manifest.mode, mode_override)
 
         rid = run_id or new_run_id()
@@ -807,7 +810,8 @@ class StrategyRunner:
             None,
         )
 
-    def _load_entrypoint(self, package: StrategyPackage) -> Callable[[StrategyContext], Any]:
+    @staticmethod
+    def _load_entrypoint(package: StrategyPackage) -> Callable[[StrategyContext], Any]:
         """Import ``main.py`` and return the configured entrypoint callable."""
 
         manifest = package.manifest

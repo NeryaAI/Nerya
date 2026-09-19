@@ -293,7 +293,7 @@ def _absolute_path_escape(cmd: str, *, root: Path) -> str:
 
     for segment in _shell_segments(cmd):
         head = Path(segment[0]).name.lower()
-        if head not in _FS_PATH_ACCESS_HEADS and not mutation_context:
+        if head not in _FS_PATH_ACCESS_HEADS and not mutation_context and not _SHELL_PROJECT_COMMAND_RE.search(cmd):
             continue
         for token in segment[1:]:
             if not _looks_like_absolute_path_arg(token):
@@ -432,11 +432,19 @@ def _shell_may_mutate_files(cmd: str, heads: list[str]) -> bool:
         cmd,
         flags=re.IGNORECASE,
     )
-    if ">" in without_dev_null or _NETWORK_WRITE_FLAGS_RE.search(cmd):
+    # Duplicating stdout/stderr opens no file. Treating pytest ... 2>&1
+    # as a file write incorrectly forces its canonical test path into the
+    # conversation output directory. Actual redirects remain writes.
+    without_fd_merge = re.sub(r"(?<!\S)[012]?>&[012](?=\s|[|;]|$)", "", without_dev_null)
+    if ">" in without_fd_merge or _NETWORK_WRITE_FLAGS_RE.search(cmd):
         return True
     if _SHELL_WRITE_TEXT_RE.search(cmd):
         return True
     if re.search(r"\b(?:ruff)\b[^\n|;&]*--fix\b", cmd, re.IGNORECASE):
+        return True
+    # A test name must not hide a separate writer in a pipeline/chain.
+    explicit_writers = _DELETE_HEADS | (_WRITE_HEADS - {"python", "python3", "npm", "pnpm", "yarn"})
+    if any(head in explicit_writers for head in heads):
         return True
     if _SHELL_PROJECT_COMMAND_RE.search(cmd):
         return False
@@ -505,7 +513,7 @@ def run_shell_handler(
     cwd_arg = args.get("cwd") or "."
     allow_outside = bool(args.get("allow_outside_conversation", False))
     outside_reason = str(args.get("outside_conversation_reason") or "").strip()
-    timeout_s = args.get("timeout_s") or args.get("timeout") or _DEFAULT_TIMEOUT_S
+    timeout_s = args.get("timeout_sec") or args.get("timeout_s") or args.get("timeout") or _DEFAULT_TIMEOUT_S
     background = bool(args.get("background", False))
     output_limit = int(args.get("output_limit") or _DEFAULT_OUTPUT_BYTES)
     output_limit = max(1024, min(output_limit, _MAX_OUTPUT_BYTES))

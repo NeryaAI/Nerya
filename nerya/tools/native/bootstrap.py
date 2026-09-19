@@ -55,6 +55,7 @@ from .agents import (
     subagent_run_handler,
     team_run_handler,
 )
+from .agent_collaboration import PEERS_SCHEMA, MESSAGE_SCHEMA, collaboration_handler
 from .connectors import (
     CONNECTOR_LIST_SCHEMA,
     CONNECTOR_VIEW_SCHEMA,
@@ -223,6 +224,8 @@ from .strategy_runtime import (
 # ---------------------------------------------------------------------------
 # Dependency bundle
 # ---------------------------------------------------------------------------
+from .continuous_service import SCHEMA as CONTINUOUS_SERVICE_SCHEMA, handle as continuous_service_handler
+
 
 
 @dataclass
@@ -895,6 +898,12 @@ def _wrap_resource_read(deps: NativeToolDeps):
     return handler
 
 
+def _wrap_collaboration(deps: NativeToolDeps, *, send: bool = False):
+    def handler(call: ToolCall):
+        return collaboration_handler(call, config=deps.config, send=send)
+    return handler
+
+
 def _wrap_subagent_list(deps: NativeToolDeps):
     def handler(call: ToolCall):
         return subagent_list_handler(call, config=deps.config)
@@ -1201,6 +1210,21 @@ def _strategy_agent_trade_call(
         )
 
     args["strategy_id"] = deps.active_strategy_id
+    if str(deps.active_trigger_event_id or "").startswith("continuous_"):
+        try:
+            from ...strategies.continuous import assert_event_active
+            from ...strategies.package import load_package
+            assert_event_active(deps.config, deps.active_strategy_id, deps.active_trigger_event_id)
+            package = load_package(deps.config.paths, deps.active_strategy_id)
+            if str(args.get("account_id") or "") not in package.manifest.accounts:
+                raise ValueError("account is outside the reviewed strategy scope")
+            if str(args.get("market") or "") not in package.manifest.markets:
+                raise ValueError("market is outside the reviewed strategy scope")
+            if package.manifest.extras.get("evaluation", {}).get("mode") == "observation":
+                raise ValueError("observation strategy cannot submit orders")
+            args["trigger_event_id"] = deps.active_trigger_event_id
+        except Exception as exc:
+            return _tool_permission_denied(call, f"continuous event cannot trade: {exc}")
     if deps.active_trigger_event_id and not args.get("trigger_event_id"):
         args["trigger_event_id"] = deps.active_trigger_event_id
 
@@ -2544,7 +2568,9 @@ def register_native_tools(
                 make_native_descriptor(
                     name="subagent_run",
                     description=(
-                        "Spawn a child subagent with a JSON payload and "
+                        "Continue an existing child with agent_id + message to preserve its "
+                        "context and identity; discover existing ids with subagent_peers. "
+                        "Without agent_id, spawn a new child with a JSON payload and "
                         "return its envelope. The child runs its own "
                         "observe → think → act loop with a bounded "
                         "skill allowlist; live-trading skills are "
@@ -2568,6 +2594,23 @@ def register_native_tools(
                     tags=("subagent", "exec"),
                     result_kind="json",
                     auto_approve=True,
+                ),
+                make_native_descriptor(
+                    name="subagent_peers",
+                    description="List persistent children in this conversation (or this child's task), including stable ids, status and results. Use these ids to reuse an agent or message a peer.",
+                    input_schema=PEERS_SCHEMA,
+                    handler=_wrap_collaboration(deps),
+                    risk=RiskLevel.READ, permission_scope=PermissionScope.WORKSPACE,
+                    tags=("subagent", "discovery"), result_kind="json", auto_approve=True,
+                ),
+                make_native_descriptor(
+                    name="subagent_message",
+                    description="Send findings or a question to a peer's persistent id. The sender is assigned by the runtime. Delivery is durable, FIFO, and injected between model iterations; idle children receive it when continued. This does not spawn or restart an agent.",
+                    input_schema=MESSAGE_SCHEMA,
+                    handler=_wrap_collaboration(deps, send=True),
+                    risk=RiskLevel.WRITE, permission_scope=PermissionScope.WORKSPACE,
+                    read_only=False, is_concurrency_safe=True,
+                    tags=("subagent", "collaboration"), result_kind="json", auto_approve=True,
                 ),
                 make_native_descriptor(
                     name="team_run",
@@ -3123,10 +3166,12 @@ def register_native_tools(
                         "evolution/proposals/<id>/ which the workspace mutation "
                         "guard allows), run strategy_validate, and finish with "
                         "strategy_submit_proposal. If the operator explicitly "
-                        "asks for a draft/proposal scaffold only or says not to "
-                        "edit, submit, promote, run, or trade, return this "
-                        "scaffold result and stop; do not follow these next "
-                        "steps in the same turn. Read the strategy_author skill "
+                        "asks for a draft/proposal scaffold only or forbids code "
+                        "editing, return this scaffold result and stop. A ban on "
+                        "submission keeps the authored draft unsubmitted. A ban "
+                        "on running, promotion or trading does NOT ban implementing "
+                        "and validating an observation-only strategy. Read the "
+                        "strategy_author skill and references/workflows.md "
                     "(skill_view) for the exact per-file format. Only for "
                     "requests that actually ask for a strategy: never reroute "
                     "'enable live trading' or an immediate buy/sell order into "
@@ -3394,6 +3439,16 @@ def register_native_tools(
                 tags=("strategy", "history", "read"),
                 result_kind="json",
                 auto_approve=True,
+            ),
+            make_native_descriptor(
+                name="strategy_service",
+                description="Inspect/start/stop an applied continuous listener. Start requires explicit operator intent and the current expected_hash; may trigger orders within existing risk and account permissions. Never start a draft. Stop does not undo existing orders.",
+                input_schema=CONTINUOUS_SERVICE_SCHEMA,
+                handler=lambda call: continuous_service_handler(call, deps=deps),
+                risk=RiskLevel.EXEC, permission_scope=PermissionScope.WORKSPACE,
+                read_only=False, is_concurrency_safe=False, mutates_paths=True,
+                tags=("strategy", "continuous", "runtime"), result_kind="json",
+                auto_approve_when=lambda payload: payload.get("action") in {"status", "events"},
             ),
             # ----- self-evolution tuning loop -----
             # tuning is the per-strategy self-evolution

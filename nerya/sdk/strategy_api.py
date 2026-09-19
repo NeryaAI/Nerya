@@ -528,8 +528,28 @@ class StrategyAPI:
             "state": state.asdict(),
         }
 
+    def service_start(self, strategy_id: str, *, expected_hash: str) -> dict[str, Any]:
+        from ..strategies.continuous import get_continuous_supervisor
+        if not expected_hash:
+            raise TradingError("expected_hash from the current strategy status is required")
+        return get_continuous_supervisor(self.config).start(strategy_id, expected_hash=expected_hash)
+
+    def service_stop(self, strategy_id: str) -> dict[str, Any]:
+        from ..strategies.continuous import get_continuous_supervisor
+        return get_continuous_supervisor(self.config).stop(strategy_id)
+
+    def service_status(self, strategy_id: str) -> dict[str, Any]:
+        from ..strategies.continuous import get_continuous_supervisor
+        load_package(self.config.paths, strategy_id)
+        return get_continuous_supervisor(self.config).status(strategy_id)
+
+    def service_events(self, strategy_id: str, *, limit: int = 50) -> dict[str, Any]:
+        from ..strategies.continuous import get_continuous_supervisor
+        load_package(self.config.paths, strategy_id)
+        return get_continuous_supervisor(self.config).events(strategy_id, limit=limit)
+
     def status(self, strategy_id: str) -> dict[str, Any]:
-        """Aggregate status — manifest + schedules + kill switch + last run."""
+        """Aggregate status — manifest, independent service, timers and runs."""
 
         try:
             pkg = load_package(self.config.paths, strategy_id)
@@ -546,6 +566,7 @@ class StrategyAPI:
             "schedules": self.schedule_status(strategy_id),
             "kill_switch": ks_state.asdict(),
             "last_run": last_run,
+            "service": self.service_status(strategy_id) if pkg.manifest.extras.get("runtime", {}).get("mode") == "continuous" else None,
         }
 
     # ------------------------------------------------------------------

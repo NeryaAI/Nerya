@@ -65,7 +65,13 @@ def cmd_llm_models_list(args) -> int:
 # ----------------------------------------------------------------- mcp
 def cmd_mcp_serve(args) -> int:
     from ...mcp.server import serve
-    serve(args.workspace, verbose=args.verbose)
+    serve(
+        args.workspace,
+        verbose=args.verbose,
+        transport=args.transport,
+        host=args.host,
+        port=args.port,
+    )
     return 0
 
 
@@ -192,6 +198,14 @@ def register(sub) -> None:
     mcp = sub.add_parser("mcp").add_subparsers(dest="mcpcmd", required=True)
     p = mcp.add_parser("serve"); _add_ws(p)
     p.add_argument("--verbose", action="store_true")
+    p.add_argument(
+        "--transport",
+        choices=["stdio", "http", "streamable-http"],
+        default="stdio",
+        help="MCP transport. HTTP exposure is opt-in.",
+    )
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
     p.set_defaults(func=cmd_mcp_serve)
     p = mcp.add_parser("list-tools"); _add_ws(p); p.set_defaults(func=cmd_mcp_list_tools)
 

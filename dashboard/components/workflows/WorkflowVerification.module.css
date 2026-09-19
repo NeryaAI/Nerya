@@ -1,0 +1,47 @@
+.root { padding:26px 28px; overflow:auto; max-height:74vh; min-width:0; color:var(--text-base); }
+.heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+.heading h2 { font-size:21px; font-weight:600; line-height:1.5; letter-spacing:-.015em; }
+.heading p { color:var(--text-muted); font-size:12px; margin-top:6px; line-height:1.7; }
+.lead { font-size:15px; line-height:1.8; margin:22px 0 16px; max-width:60ch; }
+.stages { border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.stages > div { display:flex; gap:12px; align-items:center; padding:16px 0; }
+.stages > div + div { border-top:1px solid var(--line); }
+.stages > div > div { flex:1; min-width:0; }
+.stages strong { display:block; font-size:14px; font-weight:500; }
+.stages small { display:block; font-size:12px; color:var(--text-muted); margin-top:5px; line-height:1.7; }
+.stages > div > span:last-child { font-size:12px; color:var(--text-muted); white-space:nowrap; }
+.mark { display:flex; align-items:center; justify-content:center; height:24px; width:24px; border-radius:50%; background:var(--card-hi); color:var(--text-muted); flex:none; }
+.mark[data-tone=ok] { color:var(--ok); }
+.mark[data-tone=error] { color:var(--err); }
+.pending { padding:36px 0; font-size:14px; color:var(--text-muted); }
+.error,.issues > div { padding:15px; background:var(--card); border:1px solid var(--line); border-radius:8px; margin-top:14px; font-size:13px; line-height:1.8; overflow-wrap:anywhere; }
+.error h3,.issues strong { color:var(--err); font-size:14px; }
+.replay { margin-top:22px; }
+.replayTitle { display:flex; gap:12px; align-items:center; justify-content:space-between; margin-bottom:10px; }
+.replayTitle h3 { font-size:14px; font-weight:500; }
+.replayTitle span { color:var(--text-muted); font-size:12px; }
+.root dl > div { display:grid; grid-template-columns:180px minmax(0,1fr); gap:12px; padding:8px 0; font-size:12px; line-height:1.8; }
+.root dt { color:var(--text-muted); }
+.root dd { min-width:0; overflow-wrap:anywhere; }
+.root code { font:11px/1.8 ui-monospace,monospace; }
+.details { border-top:1px solid var(--line); margin-top:18px; padding-top:14px; }
+.details > summary { font-size:13px; cursor:pointer; color:var(--text-muted); line-height:1.8; }
+.details[open] > summary { color:var(--text-base); margin-bottom:14px; }
+.details pre { font:12px/1.8 ui-monospace,monospace; max-height:240px; overflow:auto; background:var(--card); padding:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.tableWrap { overflow:auto; margin:14px 0; }
+.root table { width:100%; text-align:left; border-collapse:collapse; font-size:12px; }
+.root th { font-weight:500; color:var(--text-muted); white-space:nowrap; }
+.root th,.root td { border-bottom:1px solid var(--line); padding:9px 10px 9px 0; line-height:1.7; }
+.root td small { display:block; color:var(--text-muted); font-size:11px; }
+.note,.footerHint { font-size:12px; line-height:1.8; color:var(--text-muted); margin-top:10px; }
+.footerHint { margin-top:24px; }
+.prompt { width:100%; border:1px solid var(--line-hi); background:var(--card); border-radius:8px; color:var(--text-base); font-size:15px; line-height:1.8; min-height:144px; padding:14px; resize:vertical; margin-top:22px; }
+.prompt:focus-visible { outline:2px solid var(--violet-2); outline-offset:2px; }
+.examples { display:flex; flex-direction:column; gap:2px; margin:15px 0; }
+.examples button { display:flex; align-items:center; gap:12px; text-align:left; border-radius:6px; padding:10px 5px; color:var(--text-muted); font-size:13px; line-height:1.7; }
+.examples button:hover { background:var(--card); color:var(--text-base); }
+.examples button span:last-child { margin-left:auto; }
+.exampleHint { font-size:12px; color:var(--text-muted); margin-top:18px; }
+.statusLine { padding:10px 30px; display:flex; align-items:center; gap:12px; font-size:12px; color:var(--text-muted); line-height:1.8; }
+.statusLine span:first-child { color:var(--text-base); }
+@media(max-width:600px) { .root { padding:22px 18px; } .heading h2 { font-size:19px; } .stages > div { gap:9px; flex-wrap:wrap; } .stages > div > span:last-child { margin-left:33px; } .root dl > div { grid-template-columns:1fr; gap:2px; } .prompt { font-size:16px; } .statusLine { padding:9px 18px; flex-wrap:wrap; gap:4px 12px; } }

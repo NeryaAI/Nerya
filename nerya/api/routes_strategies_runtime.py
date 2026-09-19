@@ -121,6 +121,20 @@ def routes():
         except (NeryaError, OSError, ValueError, TypeError) as exc:
             return _error(str(exc))
 
+    def workflow_check(client, query):
+        from ..strategies.verification import check_workflow
+        try:
+            try:
+                schedules = client.triggers.list_schedules()
+            except (NeryaError, OSError, ValueError):
+                schedules = None
+            return check_workflow(client.config.paths,
+                str((query or {}).get("strategy_id") or ""),
+                (query or {}).get("proposal_id") or None,
+                base_revision=str((query or {}).get("base_revision") or ""), schedules=schedules)
+        except (NeryaError, OSError, ValueError, TypeError) as exc:
+            return _error(str(exc))
+
     def workflow_propose(client, payload):
         from ..strategies.workflow_service import propose_workflow
         try:
@@ -276,6 +290,43 @@ def routes():
             )
         )
 
+    def service_start(client, payload):
+        payload = payload or {}
+        sid, revision = payload.get("strategy_id"), payload.get("expected_hash")
+        if not isinstance(sid, str) or not sid or not isinstance(revision, str) or not revision:
+            return _error("strategy_id and expected_hash are required; candidates cannot be started")
+        try:
+            return _ok(client.strategy.service_start(sid, expected_hash=revision))
+        except (NeryaError, ValueError) as exc:
+            return _error(str(exc))
+
+    def service_stop(client, payload):
+        sid = (payload or {}).get("strategy_id")
+        if not isinstance(sid, str) or not sid:
+            return _error("strategy_id required")
+        try:
+            return _ok(client.strategy.service_stop(sid))
+        except (NeryaError, ValueError) as exc:
+            return _error(str(exc))
+
+    def service_status(client, query):
+        sid = (query or {}).get("strategy_id")
+        if not isinstance(sid, str) or not sid:
+            return _error("strategy_id required")
+        try:
+            return _ok(client.strategy.service_status(sid))
+        except (NeryaError, ValueError) as exc:
+            return _error(str(exc))
+
+    def service_events(client, query):
+        sid = (query or {}).get("strategy_id")
+        if not isinstance(sid, str) or not sid:
+            return _error("strategy_id required")
+        try:
+            return _ok(client.strategy.service_events(sid, limit=int((query or {}).get("limit") or 50)))
+        except (NeryaError, ValueError) as exc:
+            return _error(str(exc))
+
     def status(client, query):
         sid = (query or {}).get("strategy_id") or ""
         if not sid:
@@ -410,6 +461,7 @@ def routes():
     return [
         ("GET", "/strategies/runtime/workflows", workflow_list),
         ("GET", "/strategies/runtime/workflow", workflow_get),
+        ("GET", "/strategies/runtime/workflow/check", workflow_check),
         ("POST", "/strategies/runtime/workflow/propose", workflow_propose),
         ("POST", "/strategies/runtime/workflow/template", workflow_template),
         ("GET", "/strategies/runtime/list", list_packages),
@@ -427,6 +479,10 @@ def routes():
         ("GET", "/strategies/runtime/agent_tasks", agent_tasks),
         ("GET", "/strategies/runtime/agent_task", agent_task),
         ("GET", "/strategies/runtime/status", status),
+        ("GET", "/strategies/runtime/service/status", service_status),
+        ("GET", "/strategies/runtime/service/events", service_events),
+        ("POST", "/strategies/runtime/service/start", service_start),
+        ("POST", "/strategies/runtime/service/stop", service_stop),
         ("GET", "/strategies/runtime/workspace", workspace),
         ("POST", "/strategies/runtime/tuning/generate", tuning_generate),
         ("POST", "/strategies/runtime/tuning/schedule", tuning_schedule),

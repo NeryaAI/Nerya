@@ -73,6 +73,11 @@ class StrategyAgentTaskExecutor:
         self,
         event: TriggerEvent,
         route_result: RouterResult,
+        *,
+        prepared_task: Any = None,
+        prepared_inputs: dict[str, Any] | None = None,
+        expected_hash: str = "",
+        cancel_token: Any = None,
     ) -> StrategyAgentTaskExecutionResult:
         target = route_result.target or event.target
         strategy_id = (
@@ -112,10 +117,27 @@ class StrategyAgentTaskExecutor:
         try:
             package = load_package(self.config.paths, str(strategy_id))
             self._assert_mode_allowed(package)
+            from ..strategies.continuous_config import is_continuous
+            if is_continuous(package.manifest):
+                from ..strategies.continuous import assert_event_active
+                if prepared_task is None:
+                    raise NeryaError("continuous listeners require a prepared event, not another tick")
+                assert_event_active(self.config, package.strategy_id, event.event_id)
+            if expected_hash and package.content_hash != expected_hash:
+                raise NeryaError("strategy source changed before event execution")
+            if cancel_token is not None:
+                cancel_token.raise_if_cancelled()
             from ..strategies.agent_execution import execution_config
             from ..strategies.input_context import context_prompt
             scoped_config = execution_config(self.config, package.manifest)
-            task = self._build_task(package, event, task_id)
+            if prepared_task is None:
+                task = self._build_task(package, event, task_id)
+            else:
+                ctx = build_strategy_context(config=scoped_config, package=package, skills=self.skills,
+                    run_id=task_id, connector_registry=self.connector_registry, trigger_event=event)
+                from ..strategies.input_context import safe_data
+                ctx.inputs._values = safe_data(prepared_inputs or {})
+                task = self._call_task_builder(package, lambda _: prepared_task, ctx)
             if task.status == "dispatch" and task.prompt.strip():
                 task.prompt = context_prompt(task, package, task_id)
         except Exception as exc:
@@ -254,6 +276,7 @@ class StrategyAgentTaskExecutor:
                 session_id=session_id,
                 turn_id=execution_turn_id,
                 attached_skills=self._attached_skills(task, profile),
+                **({"cancel_token": cancel_token} if cancel_token is not None else {}),
             )
         except Exception as exc:
             return self._failed(

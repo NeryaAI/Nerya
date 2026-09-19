@@ -1,0 +1,13 @@
+.root { margin: 0 30px; padding: 16px 0; border-bottom: 1px solid var(--line); color: var(--text-base); }
+.line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 13px; }
+.grow { flex: 1; }
+.state { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-muted); }
+.state::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.state[data-state="running"] { color: var(--ok); }
+.state[data-state="restarting"], .state[data-state="stopping"] { color: var(--warn); }
+.state[data-state="failed"], .state[data-state="unknown"], .state[data-state="unresponsive"] { color: var(--err); }
+.note { margin: 8px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.metrics { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.error { color: var(--err); font-size: 12px; overflow-wrap: anywhere; }
+.note summary { cursor: pointer; }
+@media (max-width: 640px) { .root { margin: 0 16px; } .line { gap: 8px; } .metrics { gap: 8px 14px; } }

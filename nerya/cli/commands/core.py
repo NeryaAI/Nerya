@@ -103,6 +103,7 @@ def cmd_run(args) -> int:
     spawn_dashboard = not no_dashboard
     dashboard_proc = None
     if spawn_dashboard:
+        _configure_dashboard_channel(client.config)
         requested_dashboard_port = getattr(args, "dashboard_port", None)
         dash_port = requested_dashboard_port or configured_dashboard_port(client.config)
         dashboard_proc = _spawn_dashboard(
@@ -120,6 +121,19 @@ def cmd_run(args) -> int:
             _stop_dashboard(dashboard_proc)
         signal.signal(signal.SIGTERM, previous_sigterm)
     return 0
+
+
+def _configure_dashboard_channel(config) -> None:
+    """Share a server-only assertion with the bundled Dashboard child.
+
+    Remote requests still need their own authentication at the proxy. This
+    token is not a user credential and must never be sent to the browser.
+    Explicit deployment configuration takes priority over an ephemeral key.
+    """
+    import secrets
+    name = "NERYA_DASHBOARD_INTERNAL_TOKEN"
+    token = str(os.environ.get(name) or config.get("runtime.auth.dashboard_internal_token") or "").strip()
+    os.environ[name] = token or secrets.token_urlsafe(32)
 
 
 def _handle_termination(signum, _frame) -> None:
@@ -185,6 +199,7 @@ def _spawn_dashboard(port: int, *, api_host: str = "127.0.0.1", api_port: int = 
     env["NERYA_API"] = api_base
     env["NEXT_PUBLIC_NERYA_API_BASE"] = api_base
     env["PORT"] = str(port)
+    env["NERYA_DASHBOARD_HOST"] = api_host or "127.0.0.1"
     print(f"[nerya] dashboard NERYA_API={api_base}")
 
     creationflags = 0
@@ -197,7 +212,7 @@ def _spawn_dashboard(port: int, *, api_host: str = "127.0.0.1", api_port: int = 
     print(f"[nerya] launching dashboard: next dev (port={port}) at {dashboard_dir}")
     try:
         return subprocess.Popen(
-            [node, str(next_cli), "dev"],
+            [node, str(dashboard_dir / "scripts" / "local-server.cjs")],
             cwd=str(dashboard_dir),
             env=env,
             stdout=None, stderr=None,

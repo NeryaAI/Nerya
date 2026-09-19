@@ -108,6 +108,9 @@ def _common_kwargs(schedule: StrategySchedule) -> dict[str, Any]:
 def compile_trading_schedule(package: StrategyPackage) -> ScheduleEntry:
     """Render the trading-tick schedule row for ``package``."""
 
+    from .continuous_config import is_continuous
+    if is_continuous(package.manifest) or package.manifest.schedule.type == "none":
+        raise TradingError("continuous/none execution has no trading timer; use service.start")
     manifest = package.manifest
     sid = manifest.strategy_id
     use_agent_task = agent_task_requested(manifest)
@@ -185,7 +188,8 @@ def apply_strategy_schedules(
     """
 
     sid = package.strategy_id
-    trading_entry = compile_trading_schedule(package)
+    from .continuous_config import is_continuous
+    trading_entry = None if is_continuous(package.manifest) or package.manifest.schedule.type == "none" else compile_trading_schedule(package)
     tuning_entry = compile_tuning_schedule(package)
 
     existing = list(load_schedules(paths))
@@ -197,13 +201,13 @@ def apply_strategy_schedules(
     seen_trading = False
     seen_tuning = False
 
-    expected_ids = {trading_entry.id}
+    expected_ids = {trading_entry.id} if trading_entry else set()
     if tuning_entry is not None:
         expected_ids.add(tuning_entry.id)
 
     for entry in existing:
         if entry.strategy_id == sid and is_strategy_schedule(entry):
-            if entry.id == trading_entry.id:
+            if trading_entry is not None and entry.id == trading_entry.id:
                 if not _entries_equal(entry, trading_entry):
                     updated.append(entry.id)
                 seen_trading = True
@@ -223,7 +227,7 @@ def apply_strategy_schedules(
         else:
             out.append(entry)
 
-    if not seen_trading:
+    if trading_entry is not None and not seen_trading:
         out.append(trading_entry)
         added.append(trading_entry.id)
     if tuning_entry is not None and not seen_tuning:
@@ -233,7 +237,7 @@ def apply_strategy_schedules(
     save_schedules(paths, out)
     return StrategyScheduleApplyResult(
         strategy_id=sid,
-        trading_id=trading_entry.id,
+        trading_id=trading_entry.id if trading_entry else "",
         tuning_id=tuning_entry.id if tuning_entry else None,
         added=added,
         updated=updated,

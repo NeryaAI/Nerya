@@ -68,7 +68,7 @@ from ..core.paths import WorkspacePaths
 
 _STRATEGY_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,62}$")
 _VALID_MODES: frozenset[str] = frozenset({"paper", "shadow", "live"})
-_VALID_SCHEDULE_TYPES: frozenset[str] = frozenset({"cron", "interval"})
+_VALID_SCHEDULE_TYPES: frozenset[str] = frozenset({"cron", "interval", "none"})
 _VALID_LLM_TIERS: frozenset[str] = frozenset({"light", "medium", "high"})
 _VALID_OBJECTIVES: frozenset[str] = frozenset({
     "risk_adjusted_return",
@@ -115,6 +115,10 @@ class StrategySchedule:
                 f"{where}: schedule.type must be one of {sorted(_VALID_SCHEDULE_TYPES)!r}, "
                 f"got {kind!r}"
             )
+        if kind == "none":
+            if raw.get("enabled", False) is not False or raw.get("cron") or raw.get("every_seconds"):
+                raise TradingError(f"{where}: schedule.none cannot be enabled or contain a timer")
+            return cls(type="none", enabled=False)
         timezone = _optional_str(raw.get("timezone"))
         if timezone:
             try:
@@ -745,10 +749,21 @@ def _parse_manifest(raw: dict[str, Any], *, source: Path) -> StrategyManifest:
     entrypoint = str(raw.get("entrypoint") or "main.py:run").strip()
     markets = _str_tuple(raw.get("markets"), where=f"{source}::markets", required=False)
     accounts = _str_tuple(raw.get("accounts"), where=f"{source}::accounts", required=False)
+    from .continuous_config import ContinuousConfig, is_continuous
+    runtime = raw.get("runtime", {})
+    if not isinstance(runtime, dict) or runtime.get("mode", "scheduled") not in {"scheduled", "continuous"}:
+        raise TradingError(f"{source}: runtime.mode must be scheduled or continuous")
+    continuous = is_continuous(raw)
+    if continuous:
+        ContinuousConfig.parse(runtime)
     sched_raw = raw.get("schedule")
+    if continuous and not sched_raw:
+        sched_raw = {"type": "none", "enabled": False}
     if not sched_raw:
         raise TradingError(f"{source}: schedule block is required")
     schedule = StrategySchedule.from_dict(sched_raw, where=f"{source}::schedule")
+    if continuous and schedule.enabled:
+        raise TradingError(f"{source}: continuous listeners cannot also enable a trading schedule")
     policy = StrategyPolicy.from_dict(raw.get("policy"), where=f"{source}::policy")
     llm_policy = StrategyLLMPolicy.from_dict(
         raw.get("llm_policy"), where=f"{source}::llm_policy"
@@ -848,6 +863,7 @@ def _collect_files(root: Path) -> tuple[str, ...]:
             "versions",
             "reviews",
             "agent_tasks",
+            "sessions",  # execution receipts, not reviewed strategy source
         }:
             continue
         if any(

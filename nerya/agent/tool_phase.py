@@ -216,6 +216,31 @@ def extract_next_required_tools(
     return required
 
 
+def failed_required_actions(pending: set[str], results: list[ToolResult]) -> set[str]:
+    """A failed operation may need another already-authorized tool to repair it.
+
+    Do not discharge the requirement or bypass approvals/unknown effects. Only
+    stop forcing the identical failing call. Reconstructed from the persisted
+    result ledger so checkpoint continuation has the same recovery surface.
+    """
+    latest: dict[str, ToolResult] = {}
+    for result in reversed(results):
+        if result.name in pending and result.name not in latest:
+            latest[result.name] = result
+    recoverable: set[str] = set()
+    for name, result in latest.items():
+        if result.is_error:
+            error = result.error
+            if (error is not None and error.kind == ToolErrorKind.EXECUTION_ERROR
+                    and error.detail.get("execution_state") != "unknown"):
+                recoverable.add(name)
+        elif not result_counts_as_success(result):
+            data = tool_json_data(result)
+            if isinstance(data, dict) and str(data.get("status") or data.get("state") or "").lower() in {"failed", "error", "invalid"}:
+                recoverable.add(name)
+    return recoverable
+
+
 def truncate_tool_loop_text(text: str, *, limit: int = 1200) -> str:
     text = str(text or "").strip()
     if len(text) <= limit:
