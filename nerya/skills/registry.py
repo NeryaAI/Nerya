@@ -22,6 +22,7 @@ from typing import Any, Callable
 from ..core import yaml_io
 from ..core.errors import SkillNotFoundError
 from .manifest import ActionSpec, SkillManifest
+from .discovery import catalog_ids, catalog_parent
 
 
 def _enabled_ok(skill_id: str, enabled: set[str] | None) -> bool:
@@ -82,7 +83,17 @@ class SkillRegistry:
         return self.by_id[skill_id]
 
     def list(self) -> list[SkillEntry]:
+        """All enabled entries, including exact-name compatibility playbooks."""
         return list(self.by_id.values())
+
+    def catalog(self) -> list[SkillEntry]:
+        """Primary workflows only; exact lookup and enabled scope stay unchanged."""
+        entries = self.list()
+        visible = catalog_ids(
+            (e.manifest.id, e.manifest.path, catalog_parent(e.manifest.metadata))
+            for e in entries
+        )
+        return [e for e in entries if e.manifest.id in visible]
 
     # --- loading ---
     @classmethod
@@ -120,7 +131,7 @@ class SkillRegistry:
         enabled: set[str] | None = None
         if workspace_paths is not None:
             doc = yaml_io.load(workspace_paths.skills_enabled, default={}) or {}
-            if doc.get("enabled"):
+            if isinstance(doc.get("enabled"), list):
                 enabled = {
                     str(item).strip()
                     for item in doc["enabled"]
@@ -291,7 +302,7 @@ def _walk_skill_dirs(root: Path):
     if not root.is_dir():
         return
     for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
+        if not entry.is_dir() or entry.is_symlink():
             continue
         if entry.name.startswith(".") or entry.name == "installed":
             continue

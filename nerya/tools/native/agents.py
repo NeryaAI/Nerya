@@ -2190,7 +2190,7 @@ def role_save_handler(
             config.paths,
             name=(args.get("name") or "").strip(),
             prompt=args.get("prompt") or "",
-            allowed_skills=list(args.get("allowed_skills") or []) or None,
+            allowed_skills=(list(args["allowed_skills"]) if isinstance(args.get("allowed_skills"), list) else None),
             tier=args.get("tier"),
             provider=args.get("provider"),
             model=args.get("model"),

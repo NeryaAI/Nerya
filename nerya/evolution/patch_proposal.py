@@ -45,6 +45,9 @@ PROTECTED_SCOPES = {
     # whitelist or flipping the opt-in flag.
     "nerya.yml:evolution.auto_apply",
     "nerya.yml:evolution.auto_apply.*",
+    # Only the local operator may widen external MCP exposure or change auth.
+    "nerya.yml:mcp",
+    "nerya.yml:mcp.*",
     # trigger routes (rate limits / payload caps) live here too
     "triggers/routes.yml:*.max_payload_bytes",
     "triggers/routes.yml:*.max_per_minute",

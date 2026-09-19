@@ -124,7 +124,7 @@ export function SettingsSidebar() {
   useEffect(() => {
     const read = () => {
       const next = window.location.hash.replace(/^#/, "");
-      setHash(["models", "access", "runtime", "capabilityGates", "interface"].includes(next) ? next : DEFAULT_HASH);
+      setHash(["models", "access", "runtime", "mcp", "capabilityGates", "interface"].includes(next) ? next : DEFAULT_HASH);
     };
     read();
     window.addEventListener("hashchange", read);
@@ -135,6 +135,7 @@ export function SettingsSidebar() {
     { key: "models", label: tTabs("models"), icon: SparkIcon },
     { key: "access", label: tTabs("access"), icon: ShieldCheckIcon },
     { key: "runtime", label: tTabs("runtime"), icon: GlobeIcon },
+    { key: "mcp", label: tTabs("mcp"), icon: GlobeIcon },
     { key: "capabilityGates", label: tTabs("capabilityGates"), icon: WrenchIcon },
     { key: "interface", label: tTabs("interface"), icon: ChartIcon },
   ];

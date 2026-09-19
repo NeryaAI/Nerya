@@ -23,11 +23,11 @@ MCP clients get predictable responses.
 
 from __future__ import annotations
 
+import functools
 import json
-import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..core import yaml_io
 from ..sdk.internal_client import InternalClient
@@ -53,19 +53,14 @@ def _safe(fn):
     neither the caller nor the transport ever sees a raw traceback.
     """
 
+    @functools.wraps(fn)
     def _wrap(self, *args, **kwargs):
         try:
             return fn(self, *args, **kwargs)
         except ToolError as e:
             return e.asdict()
-        except Exception as e:  # pragma: no cover - defensive
-            return {
-                "error": {
-                    "code": "internal",
-                    "message": f"{type(e).__name__}: {e}",
-                    "trace": traceback.format_exc(limit=4),
-                }
-            }
+        except Exception:  # pragma: no cover - defensive
+            return {"error": {"code": "internal", "message": "Tool execution failed"}}
 
     _wrap.__name__ = fn.__name__
     _wrap.__doc__ = fn.__doc__
@@ -80,8 +75,9 @@ class NeryaTools:
 
     # --------------------------------------------------------------- boot
     @classmethod
-    def boot(cls, workspace: str | Path | None = None) -> "NeryaTools":
-        return cls(client=InternalClient.boot(workspace))
+    def boot(cls, workspace: str | Path | None = None, *,
+             profile: str | None = None) -> "NeryaTools":
+        return cls(client=InternalClient.boot(workspace, profile=profile))
 
     # ----------------------------------------------------------- meta
     @_safe
@@ -116,6 +112,31 @@ class NeryaTools:
                 "actions": sorted(m.actions.keys()),
             })
         return {"skills": out}
+
+    @_safe
+    def skills_catalog(self, scope: Literal["all", "builtin", "workspace", "agent"] = "all",
+                       agent_id: str = "", query: str = "", offset: int = 0, limit: int = 100,
+                       include_unassigned: bool = False) -> dict[str, Any]:
+        """Discover all Skill definitions, including nested/disabled playbooks and Agent assignments."""
+        from ..skills.management import catalog
+        return catalog(self.client.config, scope, agent_id, query, offset, limit, include_unassigned)
+
+    @_safe
+    def skill_read(self, skill_id: str, scope: Literal["all", "builtin", "workspace", "agent"] = "all",
+                   agent_id: str = "", file: str = "SKILL.md", offset: int = 0, limit: int = 16000) -> dict[str, Any]:
+        """Read SKILL.md or its references/scripts/templates as paginated text; never execute code."""
+        from ..skills.management import read
+        return read(self.client.config, skill_id, scope, agent_id, file, offset, limit)
+
+    @_safe
+    def skill_manage(self, action: Literal["create", "update", "delete", "enable", "disable"],
+                     skill_id: str, scope: Literal["all", "builtin", "workspace", "agent"] = "workspace",
+                     agent_id: str = "", content: str = "", file: str = "SKILL.md", revision: str = "",
+                     summary: str = "") -> dict[str, Any]:
+        """Stage a reviewed Skill change. Read a file/catalog revision first. Agent scope changes assignments;
+        builtin edits create Workspace overrides. Never auto-apply or execute the Skill."""
+        from ..skills.management import manage
+        return manage(self.client.config, action, skill_id, scope, agent_id, content, file, revision, summary)
 
     # ----------------------------------------------------------- market
     @_safe
@@ -182,7 +203,45 @@ class NeryaTools:
             caller="mcp",
         )
 
+    # --------------------------------------------------------- configuration
+    @_safe
+    def config_get(self, target: str = "nerya.yml") -> dict[str, Any]:
+        """Read a redacted, allow-listed configuration document; never vault data.
+
+        Propose changes through nerya_native_evolve_core_config_patch.
+        Redaction markers must not be copied back into config_after.
+        """
+        from ..evolution.self_config import _ALLOWED_TARGETS
+        from .catalog import public_result
+        if target not in _ALLOWED_TARGETS:
+            raise ToolError("bad_request", "Target is not a managed configuration document")
+        root = self.client.config.paths.root.resolve()
+        path = root / target
+        if any(p.is_symlink() for p in (path, *path.parents) if p != root and root in p.parents):
+            raise ToolError("bad_request", "Symlink configuration documents are not exposed")
+        return {"target": target, "exists": path.exists(), "redacted": True,
+                "config": public_result(yaml_io.load(path, default={}) or {})}
+
     # --------------------------------------------------------- strategy
+    @_safe
+    def strategy_generate(self, strategy_id: str, markets: list[str], accounts: list[str],
+                          prompt: str = "", title: str = "",
+                          strategy_class: Literal["scalping", "trend", "news", "agent", "agent_team"] = "trend",
+                          mode: Literal["paper", "shadow"] = "paper",
+                          files: dict[str, str] | None = None) -> dict[str, Any]:
+        """Generate and validate a strategy proposal; never approve, apply or trade.
+
+        Supply package-relative files for authored code, otherwise the existing
+        generator provides templates. Live activation is operator-only.
+        """
+        from ..evolution.strategy_code_generator import StrategyGenerationRequest
+        request = StrategyGenerationRequest(
+            strategy_id=strategy_id, markets=tuple(markets), accounts=tuple(accounts),
+            prompt=prompt, title=title, strategy_class=strategy_class, mode=mode,
+            files=files or {},
+        )
+        return self.client.strategy.generate_proposal(request, validate=True)
+
     @_safe
     def strategy_history(self, strategy_id: str, limit: int = 20) -> dict[str, Any]:
         """Return the last N events for a strategy."""
@@ -257,7 +316,14 @@ class NeryaTools:
         """Return the manifest + rationale + diff files of a proposal."""
         if not proposal_id:
             raise ToolError("bad_request", "proposal_id required")
-        d = self.client.config.paths.proposals / proposal_id
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", proposal_id):
+            raise ToolError("bad_request", "Invalid proposal identifier")
+        root = self.client.config.paths.proposals.resolve()
+        d = root / proposal_id
+        if d.is_symlink() or any((d / name).is_symlink() for name in
+                                ("proposal.yml", "rationale.md", "diff.patch")):
+            raise ToolError("bad_request", "Symlink proposals are not exposed")
         if not d.exists():
             raise ToolError("not_found", f"proposal {proposal_id} not found")
         out: dict[str, Any] = {"id": proposal_id, "files": [p.name for p in d.iterdir()]}
@@ -289,7 +355,12 @@ class NeryaTools:
         """
         pairs = [
             ("nerya_info", self.info),
+            ("nerya_config_get", self.config_get),
+            ("nerya_strategy_generate", self.strategy_generate),
             ("nerya_skills_list", self.skills_list),
+            ("nerya_skills_catalog", self.skills_catalog),
+            ("nerya_skill_read", self.skill_read),
+            ("nerya_skill_manage", self.skill_manage),
             ("nerya_market_ticker", self.market_ticker),
             ("nerya_market_klines", self.market_klines),
             ("nerya_portfolio_summary", self.portfolio_summary),

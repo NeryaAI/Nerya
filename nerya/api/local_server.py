@@ -536,6 +536,11 @@ class _LocalHTTPServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         if self.continuous_supervisor is not None:
             self.continuous_supervisor.shutdown()
+        if getattr(self, "mcp_config", None) is not None:
+            from ..mcp.bridge import close_workspace
+            from ..mcp.openai_tunnel import stop
+            stop(self.mcp_config)
+            close_workspace(self.mcp_config.paths.root)
         super().server_close()
 
 
@@ -583,7 +588,17 @@ def build_server(
             self.end_headers()
             self.wfile.write(data)
 
+        def _mcp(self):
+            from ..mcp.bridge import handle_http
+            return handle_http(self, config)
+
+        def do_DELETE(self):  # noqa: N802
+            if not self._mcp():
+                self._write(404, {"error": "not_found"})
+
         def do_OPTIONS(self):  # noqa: N802
+            if self._mcp():
+                return
             self.send_response(204)
             self._cors()
             self.end_headers()
@@ -637,6 +652,8 @@ def build_server(
             return result
 
         def do_GET(self):  # noqa: N802
+            if self._mcp():
+                return
             from urllib.parse import parse_qs, urlparse
             parsed = urlparse(self.path)
             auth = self._check_auth("GET", parsed.path)
@@ -666,6 +683,8 @@ def build_server(
                 self._write(500, {"error": f"{type(exc).__name__}: {exc}"})
 
         def do_POST(self):  # noqa: N802
+            if self._mcp():
+                return
             path_only = self.path.split("?")[0]
             auth = self._check_auth("POST", path_only)
             if not auth.ok:
@@ -707,6 +726,9 @@ def build_server(
             return
 
     server = _LocalHTTPServer((host, port), Handler)
+    server.mcp_config = config
+    from ..mcp.openai_tunnel import restore
+    restore(config, api_port=server.server_address[1])
     from ..strategies.continuous import get_continuous_supervisor
     server.continuous_supervisor = get_continuous_supervisor(config)
     if start_continuous:

@@ -9,6 +9,7 @@ import { MemoryEvidencePanel } from "./MemoryEvidencePanel";
 import { MemoryProfilePanel } from "./MemoryProfilePanel";
 import { RuntimeFlagsPanel } from "./RuntimeFlagsPanel";
 import { WorkspaceSyncPanel } from "./WorkspaceSyncPanel";
+import McpSettingsPanel from "./settings/McpSettingsPanel";
 import { SwitchControl } from "./SwitchControl";
 import { Select as PortalSelect } from "./Select";
 import { Row, Field, Metric, CompactSelect as Select } from "./settings/SettingsFields";
@@ -120,7 +121,7 @@ const CUSTOM_PROVIDER_KINDS = [
 ] as const;
 type CustomProviderKind = typeof CUSTOM_PROVIDER_KINDS[number]["id"];
 
-const SETTINGS_TABS = ["models", "access", "runtime", "capabilityGates", "envvault", "search", "browsers", "memory", "interface"] as const;
+const SETTINGS_TABS = ["models", "access", "runtime", "mcp", "capabilityGates", "envvault", "search", "browsers", "memory", "interface"] as const;
 type SettingsTabKey = typeof SETTINGS_TABS[number];
 const DEFAULT_NO_PROXY = "127.0.0.1,localhost,::1";
 
@@ -523,7 +524,8 @@ export type ForceSectionKey =
   | "models"
   | "runtime"
   | "gateway"
-  | "capabilityGates";
+  | "capabilityGates"
+  | "mcp";
 
 export interface SettingsPageProps {
   /** @deprecated Use `forceSection="memory"` instead. */
@@ -1451,6 +1453,7 @@ export function SettingsWorkspace({
   }, [settingsReady, sectionKey]);
 
   async function refreshCurrentSection() {
+    if (effectiveSettingsTab === "mcp") { window.dispatchEvent(new Event("nerya:mcp-refresh")); return; }
     if (effectiveSettingsTab === "models" && dirty && !(await confirm({
       title: tUi("discardChanges"), message: tUi("discardChangesDescription"), tone: "warning",
     }))) return;
@@ -3114,7 +3117,7 @@ export function SettingsWorkspace({
       <div aria-busy={sectionBusy}>
         <fieldset
           className="settings-flat m-0 min-w-0 space-y-6 border-0 p-0"
-          disabled={!["interface", "capabilityGates", "gateway"].includes(effectiveSettingsTab) && sectionStates[sectionKey] !== "ready"}
+          disabled={!["interface", "capabilityGates", "gateway", "mcp"].includes(effectiveSettingsTab) && sectionStates[sectionKey] !== "ready"}
         >
 
       {settingsReady && effectiveSettingsTab === "models" && !loading && !modelLoadError && (!inSectionMode || forceSection === "models") ? (
@@ -4707,6 +4710,8 @@ export function SettingsWorkspace({
           </div>
         </div>
       ) : null}
+
+      {effectiveSettingsTab === "mcp" ? <McpSettingsPanel /> : null}
 
       {effectiveSettingsTab === "capabilityGates" && (!inSectionMode || forceSection === "capabilityGates") ? (
         <div

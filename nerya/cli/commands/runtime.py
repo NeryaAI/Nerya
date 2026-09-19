@@ -65,21 +65,20 @@ def cmd_llm_models_list(args) -> int:
 # ----------------------------------------------------------------- mcp
 def cmd_mcp_serve(args) -> int:
     from ...mcp.server import serve
-    serve(
-        args.workspace,
-        verbose=args.verbose,
-        transport=args.transport,
-        host=args.host,
-        port=args.port,
-    )
+    import sys
+    try:
+        serve(args.workspace, profile=getattr(args, "profile", None),
+              verbose=args.verbose, transport=args.transport, host=args.host, port=args.port)
+    except (ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     return 0
 
 
 def cmd_mcp_list_tools(args) -> int:
-    from ...mcp.tools import NeryaTools, tools_as_json
-    tools = NeryaTools.boot(args.workspace)
-    print(tools_as_json(tools))
-    return 0
+    from .tools import cmd_tools
+    args.tool_action = "list"
+    return cmd_tools(args)
 
 
 # ----------------------------------------------------------------- acp
@@ -201,11 +200,11 @@ def register(sub) -> None:
     p.add_argument(
         "--transport",
         choices=["stdio", "http", "streamable-http"],
-        default="stdio",
-        help="MCP transport. HTTP exposure is opt-in.",
+        default=None,
+        help="Override mcp.transport; the server still requires mcp.enabled: true.",
     )
-    p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--host", default=None)
+    p.add_argument("--port", type=int, default=None)
     p.set_defaults(func=cmd_mcp_serve)
     p = mcp.add_parser("list-tools"); _add_ws(p); p.set_defaults(func=cmd_mcp_list_tools)
 

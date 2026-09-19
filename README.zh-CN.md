@@ -444,8 +444,10 @@ pwsh -File .\scripts\windows\start-local.ps1 -OpenDashboard
 |-----------|---------------------------------------|----------------------------------------------------------|
 | Python    | `sdk/python/nerya_sdk/`               | 本地 Daemon 的瘦客户端：触发器、交易、LLM、策略、记忆       |
 | TypeScript | `sdk/typescript/` → `@nerya/sdk`     | 同一套接口，Node、Bun、Edge 都能跑                         |
-| MCP       | `nerya/mcp/`                          | 把每个技能暴露成 MCP 工具，Claude Desktop、Cursor 直接接进来 |
+| MCP       | `nerya/mcp/`                          | 可选启用的 stdio/HTTP 服务，与 CLI 共享按权限过滤的工具目录 |
 | ACP       | `nerya/acp/`                          | Agent 之间的协议桥，跨群协作用                             |
+
+外部 agent 可使用 `nerya tools list|describe|call`、`nerya agent` 和 `nerya config`。MCP **默认关闭**（`mcp.enabled: false`）。在「设置 → MCP 与外部 Agent」中管理管理员密码 OAuth2、同一公网域名下的 `/mcp`、全量 Skill 与 Agent 分配，以及 OpenAI Secure MCP Tunnel。策略、Skill 和配置变更继续走可审核提案。安装、写权限及客户端配置见 [MCP 与 CLI 接入指南](MCP.md)。
 
 ```bash
 # Python SDK 示例
@@ -487,7 +489,7 @@ python sdk/python/examples/whale_wallet_trigger.py   # 巨鲸钱包活动触发
 | `evolution/`         | 反思引擎、类型化提案、操作员签字应用、快照回滚                                                      |
 | `strategy_history/`  | 每个策略一份 JSONL 账本、会话工件、回放                                                            |
 | `messaging/`         | 统一网关：Telegram、Discord、Slack、飞书、企微、钉钉、WhatsApp、Webhook                            |
-| `mcp/`, `acp/`       | FastMCP 服务器 + ACP 适配器，把技能桥接到外部 Agent 生态                                            |
+| `mcp/`, `acp/`       | 可选 MCP 服务器 + ACP 适配器，把技能桥接到外部 Agent 生态                                            |
 | `install/`           | 跨平台服务（systemd、launchd、NSSM）安装器                                                         |
 | `sdk/`               | 进程内 InternalClient + Trigger / Trading / LLM / Strategy / Message / Skill 接口                  |
 

@@ -365,7 +365,39 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # below. Set ``mcp.dynamic_tools.enabled: false`` to revert to the
     # legacy-only surface.
     "mcp": {
+        # Server exposure is separate from the local tools CLI. Never auto-start.
+        "enabled": False,
+        "auth_mode": "oauth2",
+        "public_url": "",  # blank inherits an active Nerya public tunnel
+        "openai_tunnel": {"enabled": False, "tunnel_id": "", "api_key_ref": ""},
+        "transport": "stdio",
+        "host": "127.0.0.1",
+        "port": 8765,
+        "token_env": "NERYA_MCP_TOKEN",
+        "allowed_hosts": [],
+        "allowed_origins": [],
+        "allow_mutating": False,  # legacy strategy generation / trigger emission
+        "allow_tools": None,  # public names, applied after every layer's safety policy
+        "deny_tools": [],
         "include_legacy": True,
+        "native_tools": {
+            "enabled": True,
+            "mode": "default",
+            "allow_mutating": False,
+            "allow_exec": False,
+            # Management only. Enabling writes must not also expose shell,
+            # trade execution, approval or live-promotion endpoints.
+            "allow_tools": [
+                "role_list", "role_get", "role_save", "role_delete", "subagent_list",
+                "strategy_list", "strategy_view", "strategy_history",
+                "strategy_draft_proposal", "strategy_submit_proposal", "strategy_validate",
+                "strategy_run_history", "strategy_tuning_generate",
+                "strategy_tuning_status", "strategy_tuning_snapshot",
+                "evolve_core_config_patch", "evolve_proposals",
+                "workspace_ui_inspect", "workspace_ui_propose",
+            ],
+            "deny_tools": [],
+        },
         "dynamic_tools": {
             "enabled": True,
             # Defaults to the workspace's active operator preset (see

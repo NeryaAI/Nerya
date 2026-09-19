@@ -479,8 +479,10 @@ it as ordinary files.
 |----------|---------------------------------------|-----------------------------------------------------------------------------|
 | Python   | `sdk/python/nerya_sdk/`               | Thin client over the local daemon. Triggers, trading, LLM, strategy, memory. |
 | TypeScript | `sdk/typescript/` → `@nerya/sdk`    | Same surface. Node, Bun, and Edge friendly.                                  |
-| MCP      | `nerya/mcp/`                          | Exposes every skill as an MCP tool for Claude Desktop, Cursor, etc.         |
+| MCP      | `nerya/mcp/`                          | Optional stdio/HTTP server; shared CLI tool catalog with explicit exposure policy.         |
 | ACP      | `nerya/acp/`                          | Agent-to-agent bridges for inter-swarm communication.                        |
+
+External agents can use `nerya tools list|describe|call`, `nerya agent`, and `nerya config`. MCP is **disabled by default** (`mcp.enabled: false`). Settings → MCP & external agents manages administrator-password OAuth2, the shared public `/mcp` endpoint, all Skill definitions and Agent assignments, and OpenAI Secure MCP Tunnel. Strategy, Skill and configuration changes remain reviewable proposals. See the [MCP and CLI integration guide](MCP.md) for installation, write permissions, and client configuration.
 
 ```bash
 # Python SDK examples
@@ -526,7 +528,7 @@ python sdk/python/examples/whale_wallet_trigger.py   # whale wallet activity tri
 | `evolution/`         | Reflection engine, typed proposals, operator-signed promotion, snapshot rollback                    |
 | `strategy_history/`  | Per-strategy JSONL ledgers, session artifacts, replay                                                |
 | `messaging/`         | Universal gateway: Telegram, Discord, Slack, Feishu, WeCom, DingTalk, WhatsApp, webhooks            |
-| `mcp/`, `acp/`       | FastMCP server + ACP adapter for bridging skills to external agent ecosystems                       |
+| `mcp/`, `acp/`       | Optional MCP server + ACP adapter for bridging skills to external agent ecosystems                       |
 | `install/`           | Cross-platform service (systemd, launchd, NSSM) installer                                           |
 | `sdk/`               | In-process InternalClient + Trigger, Trading, LLM, Strategy, Message, Skill surfaces                |
 

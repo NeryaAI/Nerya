@@ -530,10 +530,29 @@ def propose_core_config_patch(
             f"through the self-config surface"
         )
     config_after = _normalise_core_config_after(target, config_after)
+    checked_after, checked_current = config_after, current_config
+    if target == "nerya.yml":
+        from ..core.config import DEFAULT_CONFIG, _merge
+
+        before = current_config if current_config is not None else (
+            yaml_io.load(paths.root / target, default={}) or {}
+        )
+        # Compare effective transport policy, including omitted/reset keys. This
+        # permits preserving a partial on-disk MCP block but rejects deleting a
+        # restriction to fall back to a more permissive default.
+        old_mcp, new_mcp = before.get("mcp", {}), config_after.get("mcp", {})
+        if not isinstance(old_mcp, dict) or not isinstance(new_mcp, dict):
+            raise ProtectedScopeViolation("proposed patch touches protected scope nerya.yml:mcp")
+        old_mcp = _merge(DEFAULT_CONFIG["mcp"], old_mcp)
+        new_mcp = _merge(DEFAULT_CONFIG["mcp"], new_mcp)
+        if old_mcp != new_mcp:
+            raise ProtectedScopeViolation("proposed patch touches protected scope nerya.yml:mcp")
+        checked_after = {**config_after, "mcp": new_mcp}
+        checked_current = {**before, "mcp": old_mcp}
     _require_non_protected_keys(
         target,
-        config_after,
-        current_config=current_config,
+        checked_after,
+        current_config=checked_current,
     )
 
     body = yaml_io.dumps(config_after)

@@ -42,6 +42,9 @@ from .commands import (
 )
 
 
+from .commands import tools as external_tools
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full ``nerya`` argparse tree.
 
@@ -58,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.register(sub)
     evolution.register(sub)
     runtime.register(sub)
+    external_tools.register(sub)
     wallet.register(sub)
 
     return parser

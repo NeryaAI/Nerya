@@ -1,284 +1,167 @@
-"""FastMCP stdio wiring for :class:`NeryaTools`.
+"""Optional MCP transports over the same catalog consumed by ``nerya tools``.
 
-Loaded lazily so the rest of Nerya keeps working without the ``mcp`` package.
-
-alongside the legacy hand-coded :class:`NeryaTools` registry,
-the server can register a dynamically-generated tool surface built from
-the live skill manifest registry (``DynamicMCPRegistry``). Both surfaces
-coexist by default; operators can disable one or the other via the
-``mcp.dynamic_tools.{enabled, include_legacy}`` config block.
+Uses the official SDK's low-level API to preserve authoritative JSON schemas.
+Importing this module or using the local CLI does not require the MCP extra.
 """
-
 from __future__ import annotations
 
 import json
+import logging
+import secrets
 import sys
+from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
 from typing import Any
 
-from .dynamic_tools import (
-    DynamicMCPRegistry,
-    MCPPolicy,
-    MCPTool,
-    policy_from_config,
-)
-from .registry_bridge import (
-    NativeMCPPolicy,
-    MCPNativeTool,
-    build_native_mcp_registry,
-    policy_from_config as native_policy_from_config,
-)
+from ..core.config import load_config
+from ..sdk.internal_client import InternalClient
+from .catalog import ToolCatalog, build_catalog, is_error
+from .dynamic_tools import DynamicMCPRegistry, MCPPolicy, policy_from_config
+from .settings import ServerSettings, require_enabled, server_settings
 from .tools import NeryaTools
 
-_MCP_INSTALL_HINT = (
-    "Nerya MCP server requires the 'mcp' package. Install with:\n"
-    f"    {sys.executable} -m pip install 'mcp>=1.0'"
-)
+
+_INSTALL_HINT = "MCP SDK is optional; install it with: pip install 'nerya[mcp]' (or pip install -e '.[mcp]')"
 
 
-def _import_fastmcp():
+def create_server(tools: NeryaTools | None = None, *, workspace: str | Path | None = None,
+                  profile: str | None = None, catalog: ToolCatalog | None = None,
+                  dynamic_policy=None, native_policy=None, include_legacy=None,
+                  include_dynamic=None, include_native=None):
+    config = tools.client.config if tools else load_config(workspace, profile=profile)
+    require_enabled(config)
     try:
-        from mcp.server.fastmcp import FastMCP  # type: ignore
+        import anyio
+        from mcp.server.lowlevel import Server
+        from mcp import types
+    except ImportError as exc:
+        raise RuntimeError(_INSTALL_HINT) from exc
+    with redirect_stdout(sys.stderr):
+        if catalog is None:
+            tools = tools or NeryaTools(InternalClient.from_config(config))
+            catalog = build_catalog(tools, dynamic_policy=dynamic_policy,
+                                    native_policy=native_policy, include_legacy=include_legacy,
+                                    include_dynamic=include_dynamic, include_native=include_native)
+    server = Server("nerya", instructions=config.get("mcp.instructions") or (
+        "Discover tools first and use their inputSchema verbatim. Results are in "
+        "structuredContent; isError marks failures. Strategy/config proposals do "
+        "not activate changes. Approval, credentials and live trading remain "
+        "operator-controlled. Never retry a mutation blindly after a timeout."
+    ))
 
-        return FastMCP
-    except ImportError as e:  # pragma: no cover - optional dep
-        raise ImportError(_MCP_INSTALL_HINT) from e
+    @server.list_tools()
+    async def list_tools():
+        return [types.Tool(**row) for row in catalog.list_tools()]
 
-
-def create_server(
-    tools: NeryaTools | None = None,
-    *,
-    workspace: str | Path | None = None,
-    dynamic_policy: MCPPolicy | None = None,
-    include_legacy: bool | None = None,
-    include_dynamic: bool | None = None,
-    include_native: bool | None = None,
-    native_policy: NativeMCPPolicy | None = None,
-):
-    """Build a FastMCP instance with every Nerya tool registered.
-
-    registers two layers:
-
-    * **legacy** static :class:`NeryaTools` registry (back-compat, kept
-      so existing MCP clients keep working);
-    * **dynamic** tools generated from the live skill manifest
-      registry, filtered by ``mcp.dynamic_tools`` policy or the
-      ``dynamic_policy`` override.
-
-    Both layers can be turned on/off independently via config or the
-    function arguments. The tool callables return dicts; we wrap them to
-    JSON strings so the MCP client sees a single ``text`` content block
-    per call.
-    """
-
-    FastMCP = _import_fastmcp()
-    tools = tools or NeryaTools.boot(workspace)
-
-    cfg_data = (getattr(tools.client.config, "data", None) or {}) or {}
-    mcp_cfg = (cfg_data.get("mcp") or {}) if isinstance(cfg_data, dict) else {}
-    dyn_cfg = (mcp_cfg.get("dynamic_tools") or {}) if isinstance(mcp_cfg, dict) else {}
-
-    if include_legacy is None:
-        include_legacy = bool(mcp_cfg.get("include_legacy", True))
-    if include_dynamic is None:
-        include_dynamic = bool(dyn_cfg.get("enabled", True))
-    native_cfg = (mcp_cfg.get("native_tools") or {}) if isinstance(mcp_cfg, dict) else {}
-    if include_native is None:
-        include_native = bool(native_cfg.get("enabled", True))
-
-    instructions = (
-        mcp_cfg.get("instructions") if isinstance(mcp_cfg.get("instructions"), str)
-        else None
-    ) or (
-        "Nerya operator surface. Tools are generated from the live skill "
-        "manifest registry; mutating actions are gated by the configured "
-        "operator preset (see /runtime/operator_presets). Legacy "
-        "trading-focused tools (``nerya_*``) remain available for "
-        "back-compat."
-    )
-
-    mcp = FastMCP("nerya", instructions=instructions)
-
-    if include_legacy:
-        for entry in tools.registry():
-            _register_tool(mcp, entry["name"], entry["description"], entry["fn"])
-
-    if include_dynamic:
-        registry = DynamicMCPRegistry.build(
-            tools.client,
-            policy=dynamic_policy or policy_from_config(tools.client.config),
+    # Shared validation provides identical CLI/MCP errors without echoing secrets.
+    @server.call_tool(validate_input=False)
+    async def call_tool(name: str, arguments: dict[str, Any] | None):
+        result = await anyio.to_thread.run_sync(catalog.call, name, arguments)
+        error = is_error(result)
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))],
+            structuredContent=result, isError=error,
         )
-        for tool in registry.tools:
-            _register_dynamic_tool(mcp, tool)
-        try:
-            setattr(mcp, "_nerya_dynamic_registry", registry)
-        except Exception:
-            pass
 
-    if include_native:
-        try:
-            from ..tools import ToolRegistry
-            from ..tools.native import build_native_tool_deps, register_native_tools
-            native_registry = ToolRegistry()
-            deps = build_native_tool_deps(
-                workspace_root=Path(tools.client.config.paths.root),
-                skill_roots=_default_skill_roots(tools),
-                paths=tools.client.config.paths,
-                config=tools.client.config,
-                skills=tools.client.skills,
-            )
-            register_native_tools(native_registry, deps)
-            native_view, native_executor = build_native_mcp_registry(
-                registry=native_registry,
-                config=tools.client.config,
-                policy=native_policy or native_policy_from_config(
-                    tools.client.config
-                ),
-            )
-            # Native delegation handlers close over ``deps``. Keep the same
-            # executor that backs the MCP bridge on that bundle so any child
-            # native call re-enters the parent validation/permission pipeline.
-            deps.executor = native_executor
-            for tool in native_view.tools:
-                _register_native_tool(mcp, tool)
-            try:
-                setattr(mcp, "_nerya_native_registry", native_view)
-            except Exception:
-                pass
-        except Exception:
-            # The native bridge must never block server boot.
-            pass
-
-    return mcp
+    return server
 
 
-def _default_skill_roots(tools: NeryaTools) -> list[Path]:
-    roots: list[Path] = []
-    try:
-        installed = Path(tools.client.config.paths.skills_installed)
-        if installed.exists():
-            roots.append(installed)
-    except Exception:
-        pass
-    try:
-        from .. import skills as _skills_pkg
-        builtin = Path(_skills_pkg.__file__).parent / "builtin"
-        if builtin.exists():
-            roots.append(builtin)
-    except Exception:
-        pass
-    return roots
-
-
-def build_dynamic_registry(
-    tools: NeryaTools | None = None,
-    *,
-    workspace: str | Path | None = None,
-    policy: MCPPolicy | None = None,
-) -> DynamicMCPRegistry:
-    """Compute the dynamic MCP registry without instantiating FastMCP.
-
-    Useful for the ``/runtime/capability_matrix`` view and for tests that
-    don't want the optional ``mcp`` package as a hard dependency.
-    """
-
+def build_dynamic_registry(tools: NeryaTools | None = None, *, workspace=None,
+                           policy: MCPPolicy | None = None) -> DynamicMCPRegistry:
+    """Retain the SDK-free capability-matrix entry point."""
     nerya = tools or NeryaTools.boot(workspace)
-    return DynamicMCPRegistry.build(
-        nerya.client,
-        policy=policy or policy_from_config(nerya.client.config),
+    return DynamicMCPRegistry.build(nerya.client, policy=policy or policy_from_config(nerya.client.config))
+
+
+class _BearerAuth:
+    """Authenticate every HTTP request before parsing MCP or starting a session."""
+    def __init__(self, app, token: str):
+        self.app = app
+        self._expected = ("Bearer " + token).encode("ascii")
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            values = [v for k, v in scope.get("headers", []) if k.lower() == b"authorization"]
+            if len(values) != 1 or not secrets.compare_digest(values[0], self._expected):
+                from starlette.responses import JSONResponse
+                response = JSONResponse({"error": "unauthorized"}, status_code=401,
+                                        headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def create_http_app(server, settings: ServerSettings, *, config=None):
+    if (settings.auth_mode == "bearer" and not settings.token) or not settings.allowed_hosts:
+        raise ValueError("HTTP MCP requires authentication and explicit allowed hosts")
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from mcp.server.transport_security import TransportSecuritySettings
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    manager = StreamableHTTPSessionManager(
+        app=server, json_response=True, stateless=True,
+        security_settings=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=settings.allowed_hosts, allowed_origins=settings.allowed_origins,
+        ),
     )
 
+    async def endpoint(scope, receive, send):
+        await manager.handle_request(scope, receive, send)
 
-def _register_tool(mcp, name: str, description: str, fn) -> None:
-    """Wrap a :class:`NeryaTools` method as an MCP tool.
+    @asynccontextmanager
+    async def lifespan(app):
+        async with manager.run():
+            yield
 
-    We preserve the callable's signature by deferring to ``fn(**kwargs)`` —
-    FastMCP inspects the wrapper signature, so we explicitly propagate it.
-    """
-    import functools
-    import inspect
+    # ASGI callable instance avoids Starlette treating a function as Request -> Response.
+    class Endpoint:
+        async def __call__(self, scope, receive, send):
+            await endpoint(scope, receive, send)
 
-    sig = inspect.signature(fn)
-
-    @functools.wraps(fn)
-    def _tool(**kwargs: Any) -> str:
-        result = fn(**kwargs)
-        return json.dumps(result, default=str, ensure_ascii=False, indent=2)
-
-    _tool.__signature__ = sig  # type: ignore[attr-defined]
-    _tool.__name__ = name
-    _tool.__doc__ = description or fn.__doc__ or ""
-    mcp.tool(name=name, description=_tool.__doc__)(_tool)
-
-
-def _register_native_tool(mcp, tool: MCPNativeTool) -> None:
-    """Wrap a native :class:`MCPNativeTool` for FastMCP.
-
-    Dispatch goes through :class:`NativeToolExecutor` so the executor's
-    validate / permission / hook pipeline applies even when the call
-    arrives over MCP. The schema is forwarded to the FastMCP layer so
-    clients can render parameter forms.
-    """
-    import functools
-
-    fn = tool.fn
-
-    @functools.wraps(fn or (lambda **_: None))
-    def _tool(**kwargs: Any) -> str:
-        if fn is None:
-            return json.dumps({"error": {
-                "code": "no_handler",
-                "message": f"native tool {tool.name} has no callable",
-            }})
-        result = fn(**kwargs)
-        return json.dumps(result, default=str, ensure_ascii=False, indent=2)
-
-    _tool.__name__ = tool.name
-    _tool.__doc__ = tool.description or tool.tool_name
-    try:
-        mcp.tool(name=tool.name, description=_tool.__doc__)(_tool)
-    except Exception:
-        pass
+    routes = [Route("/mcp", Endpoint(), methods=["GET", "POST", "DELETE"])]
+    provider = None
+    if settings.auth_mode == "oauth2":
+        if config is None:
+            raise ValueError("OAuth2 MCP requires workspace configuration")
+        from .oauth import AdminOAuthProvider
+        provider = AdminOAuthProvider(config, settings.public_origin)
+        routes.extend(provider.routes())
+    app = Starlette(routes=routes, lifespan=lifespan)
+    if provider is not None:
+        from .oauth import OAuthBoundary
+        boundary = OAuthBoundary(app, provider)
+    else:
+        boundary = _BearerAuth(app, settings.token)
+    boundary.lifespan_app = app
+    return boundary
 
 
-def _register_dynamic_tool(mcp, tool: MCPTool) -> None:
-    """Wrap a :class:`MCPTool` (manifest-driven) as a FastMCP tool.
+def serve(workspace: str | Path | None = None, *, profile: str | None = None,
+          verbose: bool = False, transport: str | None = None,
+          host: str | None = None, port: int | None = None) -> None:
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.WARNING, stream=sys.stderr)
+    with redirect_stdout(sys.stderr):
+        config = load_config(workspace, profile=profile)
+        settings = server_settings(config, transport=transport, host=host, port=port)
+        # Gate and validate before booting a skill kernel or opening a socket.
+        try:
+            import anyio
+            from mcp.server.stdio import stdio_server
+        except ImportError as exc:
+            raise RuntimeError(_INSTALL_HINT) from exc
+        server = create_server(NeryaTools(InternalClient.from_config(config)))
+    if settings.transport == "streamable-http":
+        import uvicorn
+        uvicorn.run(create_http_app(server, settings, config=config), host=settings.host, port=settings.port,
+                    access_log=False, log_level="debug" if verbose else "warning")
+        return
 
-    Dynamic tools accept arbitrary keyword payloads (`**kwargs`) — the
-    real schema enforcement happens inside the SkillRuntime via
-    ``validate_payload(input_schema)``, so we do not need FastMCP to
-    introspect the schema. We do still pass the schema to FastMCP via
-    the ``inputSchema`` annotation so MCP clients can render forms.
-    """
-    import functools
+    async def run_stdio():
+        # Capture the actual stdout transport first; all incidental prints go to stderr.
+        async with stdio_server() as (reader, writer):
+            with redirect_stdout(sys.stderr):
+                await server.run(reader, writer, server.create_initialization_options())
 
-    fn = tool.fn
-
-    @functools.wraps(fn or (lambda **_: None))
-    def _tool(**kwargs: Any) -> str:
-        if fn is None:
-            return json.dumps({"error": {
-                "code": "no_handler",
-                "message": f"dynamic tool {tool.name} has no callable",
-            }})
-        result = fn(**kwargs)
-        return json.dumps(result, default=str, ensure_ascii=False, indent=2)
-
-    _tool.__name__ = tool.name
-    _tool.__doc__ = tool.description or f"{tool.skill_id}.{tool.action}"
-    try:
-        mcp.tool(name=tool.name, description=_tool.__doc__)(_tool)
-    except Exception:  # pragma: no cover - defensive: never break server boot
-        pass
-
-
-def serve(workspace: str | Path | None = None,
-          *, verbose: bool = False) -> None:
-    """Run the Nerya MCP server on stdio. Blocks until the client disconnects."""
-    import logging
-
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    tools = NeryaTools.boot(workspace)
-    mcp = create_server(tools)
-    mcp.run()
+    anyio.run(run_stdio)

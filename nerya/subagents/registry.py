@@ -473,7 +473,7 @@ def load_registry(paths: WorkspacePaths) -> dict[str, SubAgentSpec]:
         name = p.stem.replace(".agent", "")
         canonical = canonical_subagent_name(name)
         meta = _load_role_meta(root, name)
-        allowed = meta.get("allowed_skills") or DEFAULT_SUBAGENT_SKILLS.get(canonical, [])
+        allowed = meta.get("allowed_skills", DEFAULT_SUBAGENT_SKILLS.get(canonical, []))
         tier = meta.get("tier") or DEFAULT_TIERS.get(canonical, "medium")
         out[name] = SubAgentSpec.load(
             p, name=name,
@@ -641,7 +641,7 @@ def save_role(
     prompt_path.write_text(prompt, encoding="utf-8")
 
     canonical = canonical_subagent_name(name)
-    final_skills = list(allowed_skills or DEFAULT_SUBAGENT_SKILLS.get(canonical, []))
+    final_skills = list(DEFAULT_SUBAGENT_SKILLS.get(canonical, []) if allowed_skills is None else allowed_skills)
     final_tier = str(tier or DEFAULT_TIERS.get(canonical, "medium"))
     final_provider = str(provider or "").strip()
     final_model = str(model or "").strip()
