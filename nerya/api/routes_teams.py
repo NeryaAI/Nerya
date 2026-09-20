@@ -194,8 +194,40 @@ def _delete_role(client, payload):
     return {"ok": True, "deleted": bool(deleted), "name": name}
 
 
+def _agent_request(client, payload, action: str):
+    from ..core.redaction import redact_text
+    from ..subagents.threads import AgentThreadStore
+    p = payload or {}
+    session_id = str(p.get("session_id") or "").strip()
+    if not session_id:
+        return {"ok": False, "error": "session_id required"}
+    try:
+        store = AgentThreadStore(client.config.paths)
+        agent_id = str(p.get("agent_id") or "").strip()
+        if action == "list":
+            return {"ok": True, "agents": store.list(session_id)}
+        if action == "get":
+            return {"ok": True, **store.detail(agent_id, session_id, before=max(0, int(p.get("before") or 0)))}
+        if action == "message":
+            if not p.get("request_id"):
+                return {"ok": False, "error": "request_id required"}
+            return {"ok": True, "message": store.send(
+                session_id=session_id, sender="operator", recipient=agent_id,
+                content=str(p.get("message") or ""), message_id="ui:" + str(p["request_id"]),
+            )}
+        from ..subagents.control import continue_agent
+        return continue_agent(client, session_id=session_id, agent_id=agent_id,
+                              message=str(p.get("message") or ""), request_id=str(p.get("request_id") or ""))
+    except (ValueError, OSError) as exc:
+        return {"ok": False, "error": redact_text(str(exc))}
+
+
 def routes():
     return [
+        ("GET", "/teams/agents", lambda c, p: _agent_request(c, p, "list")),
+        ("POST", "/teams/agents/get", lambda c, p: _agent_request(c, p, "get")),
+        ("POST", "/teams/agents/message", lambda c, p: _agent_request(c, p, "message")),
+        ("POST", "/teams/agents/resume", lambda c, p: _agent_request(c, p, "resume")),
         ("GET", "/teams/templates", _list_templates),
         ("POST", "/teams/templates", _list_templates),
         ("GET", "/teams/runs", _list_runs),

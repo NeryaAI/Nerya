@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useLocale } from "next-intl";
+import { cleanSeries } from "../../lib/financialChart";
+import { chartTime, financeNumber } from "../../lib/financeDisplay";
 import {
   ColorType,
   CrosshairMode,
@@ -27,17 +30,7 @@ import { useChartTheme } from "../../lib/chartTheme";
 // ---------------------------------------------------------------------------
 
 function toTime(value: number | string): Time {
-  if (typeof value === "number") return value as UTCTimestamp;
-  // ISO 8601 → unix seconds. lightweight-charts also accepts business
-  // day strings (YYYY-MM-DD) as Time directly.
-  if (typeof value === "string") {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      return value as Time; // business day
-    }
-    const ms = Date.parse(value);
-    if (!Number.isNaN(ms)) return Math.floor(ms / 1000) as UTCTimestamp;
-  }
-  return 0 as UTCTimestamp;
+  return (chartTime(value) ?? 0) as UTCTimestamp;
 }
 
 function isOHLCV(p: ChartSeriesPoint): p is OHLCV {
@@ -66,10 +59,8 @@ function priceFormatFromString(
   return undefined;
 }
 
-// Theme — keeps brand alignment with the rest of the dashboard. Lives
-// here (not in CSS vars) because lightweight-charts paints to canvas
-// and can't read CSS at runtime.
-const THEME = {
+// Canvas consumes resolved colors from the same Nerya tokens as the page.
+const DEFAULT_COLORS = {
   background: "transparent",
   text: "#9aa3b2",
   grid: "rgba(255,255,255,0.04)",
@@ -83,11 +74,21 @@ const THEME = {
   marker: "#fbbf24",
 };
 
+function chartPalette() {
+  const css = getComputedStyle(document.documentElement);
+  const token = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
+  return { ...DEFAULT_COLORS, up: token("--ok", DEFAULT_COLORS.up), down: token("--err", DEFAULT_COLORS.down),
+    line: token("--violet-2", DEFAULT_COLORS.line), marker: token("--warn", DEFAULT_COLORS.marker),
+    histogramPositive: token("--fluid", DEFAULT_COLORS.histogramPositive),
+    area: { top: token("--fluid-soft", DEFAULT_COLORS.area.top), bottom: "transparent" } };
+}
+
 function addSeries(
   chart: IChartApi,
   series: ChartSeries
 ): ISeriesApi<"Candlestick" | "Line" | "Area" | "Histogram" | "Bar" | "Baseline"> | null {
-  const data = series.data ?? [];
+  const THEME = chartPalette();
+  const data = cleanSeries(series).data ?? [];
   if (data.length === 0) return null;
 
   switch (series.type) {
@@ -156,11 +157,13 @@ function addSeries(
     }
     case "histogram": {
       const s = chart.addHistogramSeries({
+        ...(series.price_format === "volume" ? { priceScaleId: "volume", lastValueVisible: false, priceLineVisible: false } : {}),
         color: series.color || THEME.histogramPositive,
         priceFormat: priceFormatFromString(series.price_format) ?? {
           type: "volume",
         },
       });
+      if (series.price_format === "volume") s.priceScale().applyOptions({ scaleMargins: { top: .82, bottom: 0 } });
       s.setData(
         data.map((p) => {
           const tv = p as TimeValue;
@@ -193,12 +196,13 @@ function applyOverlays(
   primary: ISeriesApi<"Candlestick" | "Line" | "Area" | "Histogram" | "Bar" | "Baseline">,
   overlays: ChartOverlay[]
 ) {
+  const THEME = chartPalette();
   const markers: SeriesMarker<Time>[] = [];
   for (const overlay of overlays) {
     if (overlay.type === "marker") {
       markers.push({
         time: toTime(overlay.time),
-        position: overlay.position ?? "aboveBar",
+        position: overlay.position === "below" ? "belowBar" : overlay.position === "inBar" ? "inBar" : "aboveBar",
         color: overlay.color ?? THEME.marker,
         shape:
           overlay.shape === "arrow_up"
@@ -218,7 +222,7 @@ function applyOverlays(
         shape: "circle",
         text: overlay.text,
       } as SeriesMarker<Time>);
-    } else if (overlay.type === "price_line") {
+    } else if (overlay.type === "price_line" && Number.isFinite(overlay.price)) {
       primary.createPriceLine({
         price: overlay.price,
         color: overlay.color ?? THEME.marker,
@@ -234,7 +238,7 @@ function applyOverlays(
     // add the renderer without a schema change.
   }
   if (markers.length > 0) {
-    primary.setMarkers(markers);
+    primary.setMarkers(markers.filter((marker) => Number(toTime(marker.time as number | string)) > 0).sort((a, b) => Number(toTime(a.time as number | string)) - Number(toTime(b.time as number | string))));
   }
 }
 
@@ -249,6 +253,8 @@ export type ChartCanvasInnerProps = {
 
 export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInnerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const readoutRef = useRef<HTMLDivElement | null>(null);
+  const locale = useLocale();
   const chartRef = useRef<IChartApi | null>(null);
   const chartTheme = useChartTheme();
 
@@ -257,11 +263,11 @@ export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInn
     if (!container) return;
 
     const chart = createChart(container, {
-      width: container.clientWidth,
+      width: Math.max(1, container.clientWidth),
       height,
       autoSize: false,
       layout: {
-        background: { type: ColorType.Solid, color: THEME.background },
+        background: { type: ColorType.Solid, color: "transparent" },
         textColor: chartTheme.text,
         fontSize: 11,
         attributionLogo: false,
@@ -271,7 +277,7 @@ export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInn
         horzLines: { color: chartTheme.grid },
       },
       crosshair: { mode: CrosshairMode.Magnet },
-      rightPriceScale: { borderColor: chartTheme.grid },
+      rightPriceScale: { borderColor: chartTheme.grid, scaleMargins: { top: .08, bottom: block.series.some((s) => s.price_format === "volume") ? .22 : .08 } },
       timeScale: {
         borderColor: chartTheme.grid,
         timeVisible: block.time?.format !== "business_day",
@@ -282,10 +288,39 @@ export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInn
     chartRef.current = chart;
 
     let primary: ReturnType<typeof addSeries> | null = null;
-    for (let i = 0; i < block.series.length; i += 1) {
-      const s = addSeries(chart, block.series[i]);
-      if (i === 0) primary = s;
+    const names = new Map<NonNullable<ReturnType<typeof addSeries>>, string>();
+    for (const series of block.series) {
+      const s = addSeries(chart, series);
+      if (!s) continue;
+      if (series.price_format !== "volume" && (!primary || series.type === "candlestick")) primary = s;
+      if (series.price_format === "percent" && block.series.some((item) => !item.price_format || item.price_format === "price")) {
+        s.applyOptions({ priceScaleId: "left" });
+        chart.priceScale("left").applyOptions({ visible: true, borderColor: chartTheme.grid });
+      }
+      names.set(s, series.name);
+      if (!series.price_format || series.price_format === "price") {
+        const values = (cleanSeries(series).data || []).map((point) => "close" in point ? point.close : point.value);
+        const nonzero = values.filter((value) => value !== 0).map(Math.abs);
+        const smallest = nonzero.length ? Math.min(...nonzero.slice(0, 1500)) : 1;
+        const minMove = smallest < 1 ? Math.pow(10, Math.max(-16, Math.floor(Math.log10(smallest)) - 5)) : .01;
+        s.applyOptions({ priceFormat: { type: "custom", minMove, formatter: (value: number) => financeNumber(value, locale, Math.abs(value) >= 1 ? 2 : undefined) } });
+      }
     }
+    const hint = locale.startsWith("zh") ? "移动指针查看时间和数值；触屏长按查看。" : "Hover or long-press to inspect time and values.";
+    if (readoutRef.current) readoutRef.current.textContent = hint;
+    chart.subscribeCrosshairMove((event) => {
+      const readout = readoutRef.current;
+      if (!readout) return;
+      if (!event.time || !event.point) { readout.textContent = hint; return; }
+      const time = typeof event.time === "number" ? new Date(event.time * 1000).toLocaleString(locale) : String(event.time);
+      const values = [...names].flatMap(([series, name]) => {
+        const point = event.seriesData.get(series);
+        if (!point) return [];
+        const value = "close" in point ? `O ${financeNumber(point.open, locale)} H ${financeNumber(point.high, locale)} L ${financeNumber(point.low, locale)} C ${financeNumber(point.close, locale)}` : "value" in point ? financeNumber(point.value, locale) : "";
+        return value ? [`${name}: ${value}`] : [];
+      });
+      readout.textContent = [time, ...values].join(" · ");
+    });
     if (primary && block.overlays && block.overlays.length > 0) {
       applyOverlays(primary, block.overlays);
     }
@@ -316,7 +351,7 @@ export default function ChartCanvasInner({ block, height = 240 }: ChartCanvasInn
     // We re-run the effect when the block identity changes; series
     // mutation across renders is rare in v1 and a full re-create keeps
     // memory & overlay state predictable.
-  }, [block, chartTheme, height]);
+  }, [block, chartTheme, height, locale]);
 
-  return <div ref={containerRef} className="w-full" style={{ height }} />;
+  return <div className="min-w-0"><div ref={readoutRef} data-testid="chart-crosshair-values" className="h-10 overflow-y-auto break-words pb-2 text-[11px] leading-4 tabular-nums text-[color:var(--text-muted)]" /><div ref={containerRef} role="img" aria-label={block.title} data-testid="chart-canvas" className="w-full min-w-0" style={{ height }} /></div>;
 }

@@ -1,14 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocale, useTranslations } from "next-intl";
+import { ActionMenu } from "../../components/ActionMenu";
+import { FilterBar, Pagination, SearchField, TableViewport, useListPage } from "../../components/ListControls";
+import { ModePill } from "../../components/ModePill";
 import {
   Advanced,
   Card,
   Empty,
   ErrorBanner,
   Kpi,
+  LoadingState,
   PageBody,
   PageHeader,
   Pill,
@@ -83,30 +87,37 @@ function enumLabel(
 export default function AccountsPage() {
   const t = useTranslations("accounts");
   const tEnum = useTranslations("accountsPage");
+  const zh = useLocale().startsWith("zh");
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [mode, setMode] = useState("all");
+  const generation = useRef(0);
 
   async function load() {
+    const request = ++generation.current;
     setLoading(true);
-    setError(null);
     try {
       const res = await clientApi.accountsList();
+      if (request !== generation.current) return;
       setAccounts(res.accounts || []);
+      setLoadError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (request === generation.current) setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (request === generation.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     void load();
     const t = setInterval(() => void load(), 30_000);
-    return () => clearInterval(t);
+    return () => { clearInterval(t); generation.current += 1; };
   }, []);
 
   async function quarantine(
@@ -231,13 +242,17 @@ export default function AccountsPage() {
     },
   );
 
+  const filtered = useMemo(() => accounts.filter(({ profile }) =>
+    (mode === "all" || profile.mode === mode) && `${profile.id} ${profile.venue} ${profile.wallet_id || ""} ${profile.status}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [accounts, mode, query]);
+  const paging = useListPage(filtered, `${query}:${mode}`);
+
   return (
     <div>
       <PageHeader
         title={t("title")}
         description={t("description")}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setShowWizard((s) => !s)}
               className="btn-ghost text-xs"
@@ -255,7 +270,7 @@ export default function AccountsPage() {
               disabled={loading}
               className="btn-ghost text-xs"
             >
-              {loading ? "…" : t("refresh")}
+              {loading ? t("loading") : t("refresh")}
             </button>
           </div>
         }
@@ -263,6 +278,7 @@ export default function AccountsPage() {
       <SectionTabs section="trading" />
       <PageBody>
         {error && <ErrorBanner error={error} />}
+        <ErrorBanner error={loadError} onRetry={() => void load()} />
 
         <div className="flex flex-wrap items-end gap-x-8 gap-y-3 px-1">
           <Kpi inline label={t("accountsKpi")} value={`${totals.total}`} tone="brand" />
@@ -334,34 +350,32 @@ export default function AccountsPage() {
           title={t("allAccounts")}
           description={t("allAccountsDesc")}
         >
-          {accounts.length === 0 ? (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <SearchField value={query} onChange={setQuery} label={zh ? "搜索账户、交易所或钱包" : "Search accounts, venues or wallets"} className="w-full sm:max-w-sm" />
+            <FilterBar label={zh ? "账户模式" : "Account mode"} value={mode} onChange={setMode}
+              options={[{ value: "all", label: zh ? "全部" : "All" }, ...["paper", "shadow", "canary", "live"].map((value) => ({ value, label: value.toUpperCase() }))]} />
+          </div>
+          {loading && !accounts.length ? <LoadingState /> : loadError && !accounts.length ? null : filtered.length === 0 ? (
             <Empty
-              label={
-                loading
-                  ? t("loading")
-                  : t("noAccounts")
-              }
+              label={query || mode !== "all" ? (zh ? "没有符合条件的账户" : "No matching accounts") : t("noAccounts")}
+              action={query || mode !== "all" ? <button className="btn btn-ghost" onClick={() => { setQuery(""); setMode("all"); }}>{zh ? "清除筛选" : "Clear filters"}</button> : <button className="btn btn-primary" onClick={() => setShowAdd(true)}>{t("addAccount")}</button>}
             />
           ) : (
-            <div className="embedded-table-scroll">
+            <><TableViewport label={t("allAccounts")} className="max-h-[560px]">
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
                     <th>{t("colId")}</th>
                     <th>{t("colMode")}</th>
                     <th>{t("colStatus")}</th>
-                    <th>{t("colVenue")}</th>
-                    <th>{t("colWallet")}</th>
-                    <th>{t("colCurrency")}</th>
                     <th className="text-right">{t("colTotal")}</th>
                     <th className="text-right">{t("colReserved")}</th>
                     <th className="text-right">{t("colPositions")}</th>
-                    <th className="text-right">{t("colExecutors")}</th>
-                    <th></th>
+                    <th><span className="sr-only">{zh ? "账户操作" : "Account actions"}</span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {accounts.map((acc) => {
+                  {paging.rows.map((acc) => {
                     const p = acc.profile;
                     return (
                       <tr key={p.id} className="group text-xs">
@@ -372,21 +386,15 @@ export default function AccountsPage() {
                           >
                             {p.id}
                           </Link>
+                          <div className="mt-1 text-xs text-[color:var(--text-muted)]">{p.venue} / {p.base_currency || "USDT"}</div>
                         </td>
                         <td>
-                          <Pill tone={modePill(p.mode)}>{p.mode}</Pill>
+                          {p.mode === "paper" || p.mode === "live" ? <ModePill mode={p.mode} /> : <Pill tone={modePill(p.mode)}>{p.mode.toUpperCase()}</Pill>}
                         </td>
                         <td>
                           <Pill tone={statusPill(p.status)}>
                             {enumLabel(ACCOUNT_STATUS_KEYS, p.status, tEnum)}
                           </Pill>
-                        </td>
-                        <td className="font-mono">{p.venue}</td>
-                        <td className="font-mono text-ink-400">
-                          {p.wallet_id || "–"}
-                        </td>
-                        <td className="font-mono text-ink-300">
-                          {p.base_currency || "USDT"}
                         </td>
                         <td className="text-right font-mono tabular-nums">
                           {money(acc.snapshot?.total_usd, p.base_currency)}
@@ -401,56 +409,20 @@ export default function AccountsPage() {
                         <td className="text-right font-mono tabular-nums">
                           {acc.open_position_count}
                         </td>
-                        <td className="text-right font-mono tabular-nums">
-                          {acc.active_executors.length}
-                        </td>
-                        {/* Row actions (incl. the destructive quarantine)
-                            reveal on hover/focus so nine rows don't render
-                            27 permanent buttons. */}
-                        <td className="flex flex-wrap gap-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-                          {p.status === "active" ? (
-                            <>
-                              <button
-                                onClick={() => quarantine(p.id, "quarantined")}
-                                disabled={busy === `${p.id}:quarantined`}
-                                className="btn-ghost text-[11px] py-0.5 text-danger"
-                              >
-                                {t("quarantineBtn")}
-                              </button>
-                              <button
-                                onClick={() => quarantine(p.id, "read_only")}
-                                disabled={busy === `${p.id}:read_only`}
-                                className="btn-ghost text-[11px] py-0.5 text-warn"
-                              >
-                                {t("readOnlyBtn")}
-                              </button>
-                            </>
-                          ) : (
-                            <button
-                              onClick={() => quarantine(p.id, "active")}
-                              disabled={busy === `${p.id}:active`}
-                              className="btn-ghost text-[11px] py-0.5 text-accent-300"
-                            >
-                              {t("reactivate")}
-                            </button>
-                          )}
-                          {p.mode === "paper" ? (
-                            <button
-                              onClick={() => void resetPaper(acc)}
-                              disabled={busy === `${p.id}:reset`}
-                              className="btn-ghost text-[11px] py-0.5 text-brand-200"
-                              title={t("resetPaperTitle")}
-                            >
-                              {busy === `${p.id}:reset` ? "…" : t("resetPaper")}
-                            </button>
-                          ) : null}
+                        <td>
+                          <ActionMenu label={`${zh ? "账户操作" : "Account actions"}: ${p.id}`} disabled={Boolean(busy)} items={[
+                            p.status === "active" && { key: "quarantine", label: t("quarantineBtn"), danger: true, onSelect: () => quarantine(p.id, "quarantined") },
+                            p.status === "active" && { key: "readonly", label: t("readOnlyBtn"), onSelect: () => quarantine(p.id, "read_only") },
+                            p.status !== "active" && { key: "active", label: t("reactivate"), onSelect: () => quarantine(p.id, "active") },
+                            p.mode === "paper" && { key: "reset", label: t("resetPaper"), danger: true, onSelect: () => resetPaper(acc) },
+                          ]} />
                         </td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
-            </div>
+            </TableViewport><Pagination {...paging} /></>
           )}
         </Card>
       </PageBody>

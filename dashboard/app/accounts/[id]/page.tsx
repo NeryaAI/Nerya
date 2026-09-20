@@ -398,8 +398,10 @@ export default function AccountDetailPage({
       if (entries.length > 0) {
         setVaultedToast(entries.map(([k, ref]) => `${k} → ${ref}`).join(", "));
       }
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setBusy(null);
     }
@@ -412,9 +414,10 @@ export default function AccountDetailPage({
       setError(t("headerRequired"));
       return;
     }
-    await patchHeaders({ [key]: value }, { autoVault: true });
-    setNewHeaderKey("");
-    setNewHeaderValue("");
+    if (await patchHeaders({ [key]: value }, { autoVault: true })) {
+      setNewHeaderKey("");
+      setNewHeaderValue("");
+    }
   }
 
   async function removeHeader(key: string) {

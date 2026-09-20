@@ -1,0 +1,18 @@
+.exposure { min-width: 0; padding: 14px 0; color: var(--text-base); }
+.exposure h3 { font-size: 14px; font-weight: 600; margin-bottom: 18px; }
+.label, .note { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.total { margin: 4px 0 16px; font-size: 24px; font-weight: 550; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.directions { display: flex; flex-wrap: wrap; gap: 12px 20px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.directions dt { font-size: 11px; color: var(--text-muted); }
+.directions dd { margin-top: 3px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.assets { margin: 8px 0 14px; }
+.asset { width: 100%; display: block; text-align: left; padding: 9px 4px; border-radius: 5px; }
+.asset:hover:not(:disabled) { background: var(--panel-bg); }
+.asset:focus-visible, .more:focus-visible { outline: 2px solid var(--text-muted); outline-offset: 1px; }
+.assetLine { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.assetLine strong { font-weight: 500; overflow-wrap: anywhere; }
+.track { display: block; height: 3px; margin: 7px 0; background: var(--line); border-radius: 2px; }
+.track > span { display: block; height: 100%; border-radius: inherit; background: var(--violet-2); }
+.value { display: block; color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.more { min-height: 32px; padding: 0 4px; margin-bottom: 8px; font-size: 12px; text-decoration: underline; }
+.warning { margin-bottom: 10px; color: var(--warn); font-size: 12px; line-height: 1.6; }

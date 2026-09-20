@@ -39,7 +39,9 @@ function _dashboardInternalToken(): string {
   return process.env.NERYA_DASHBOARD_INTERNAL_TOKEN || "";
 }
 const DEFAULT_PROXY_TIMEOUT_MS = 120_000;
-const LONG_PROXY_TIMEOUT_MS = 30 * 60 * 1000;
+// Transport must outlive the largest supported Agent turn (7200s), plus
+// result delivery. The Agent still enforces the caller's actual budget.
+const LONG_PROXY_TIMEOUT_MS = (7200 + 60) * 1000;
 const SAFE_RETRY_METHODS = new Set(["GET", "HEAD"]);
 
 const HOP_BY_HOP = new Set([
@@ -53,7 +55,7 @@ const HOP_BY_HOP = new Set([
   "proxy-connection",
   "proxy-authorization",
 ]);
-const PROXY_CLIENT_HEADERS = new Set(["x-forwarded-for", "x-real-ip"]);
+const PROXY_CLIENT_HEADERS = new Set(["x-forwarded-for", "x-real-ip", "x-nerya-local-peer"]);
 const RETRYABLE_PROXY_ERROR_CODES = new Set([
   "ECONNABORTED",
   "ECONNRESET",
@@ -102,6 +104,7 @@ function isLongRunningProxyPath(joined: string): boolean {
   return (
     joined.startsWith("agent/run_turn") ||
     joined.startsWith("strategy/") ||
+    joined.startsWith("strategies/runtime/") ||
     joined === "triggers/schedules/run_now" ||
     joined === "triggers/schedules/tick"
   );
@@ -429,11 +432,10 @@ async function forward(req: NextRequest, path: string[], method: string) {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-// Next.js route.ts caps each request at 10s by default in serverless-style
-// runtimes. The Nerya dashboard runs as a long-lived dev / standalone
-// server so this cap really only matters for hosted deployments — bump
-// to 30 min so platforms like Vercel don't synthesise their own 502.
-export const maxDuration = 1800;
+// Keep hosted-route metadata consistent with the transport ceiling.
+// A hosting platform can impose a lower plan limit; long turns need the
+// bundled long-lived server or a host that supports this duration.
+export const maxDuration = 7260;
 
 // Defensive wrapper: anything `forward` throws unexpectedly (a bug in header
 // building, `req.text()`, a dev-mode module/HMR glitch, ...) would otherwise

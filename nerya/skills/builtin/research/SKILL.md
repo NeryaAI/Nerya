@@ -1,72 +1,50 @@
-<!-- nerya-skill-frontmatter-start -->
 ---
 name: research
-description: "Use for external information: web search, page fetch, news, social posts, blog content, and current facts outside the workspace."
-version: 0.1.0
+description: "External evidence and market research: web/pages, current news/social, stock and crypto-token analysis, fundamentals, tokenomics, on-chain context, and evidence-backed reports."
+version: 0.2.0
 license: MIT
 author: Nerya
 ---
-<!-- nerya-skill-frontmatter-end -->
 
 # Research
 
-Use before making claims that depend on current external information.
+One workflow: establish the question, collect bounded evidence, analyse it,
+then deliver the requested brief or report. Do not turn a research request
+into strategy authoring, trading, or an unsolicited artifact.
 
-## Flow
+## Core flow
 
-WHEN an assignment asks for online or current external evidence and
-`research_run` is available, call it at least once before analysis. This is the
-team-safe collection path: a light-tier collector runs search/browser
-fallbacks, persists complete raw captures, and returns source paths for your
-analysis. Do not replace requested web evidence with a quote-only market-data
-read or remembered facts.
-PACK related questions into one comprehensive delegation request. Make another
-`research_run` call only when the returned captures identify a concrete source
-or evidence gap; do not split one brief into repetitive searches.
-WHEN the task payload already contains `urls`, fetch those supplied sources
-directly before broad search. They are part of the assignment, not optional
-search hints.
-Analyse the returned evidence yourself; do not ask the collector for an
-investment opinion.
-READ each returned `capture_path` with `read_file` when the delegated summary
-does not expose enough source detail. Cite the source URLs contained in those
-captures in the final evidence objects; a persisted error response or empty
-search result is a gap, not evidence.
-SEARCH only as broadly as needed.
-FOR latest economy/finance headline requests, load `news_social` first
-and run its RSS script before broad web search.
-FETCH full pages before relying on snippets.
-TREAT a navigation shell, search/index page, login wall, empty result, or
-blocker page as a discovery step rather than a completed capture. If it names
-or links a more specific dated primary document, fetch the most relevant
-filing, earnings release, report, dataset, or original post before stopping.
-When extracted links are unavailable, run one targeted search for that exact
-document instead of repeating the broad query.
-FOR assignments that ask about financial results, capacity, volume, pricing,
-or growth, return at least one source-backed quantitative fact from a dated
-primary source. If no reachable source contains one, record that as a gap; do
-not promote navigation text or an HTTP-success response into evidence.
-USE markdown extraction first; use Jina Reader as fallback when direct
-fetch is blocked or thin.
-IF a page shows anti-bot, CAPTCHA, "verify you are human", JS-only, or
-similar blocker content, keep using `scripts/fetch_url.py`; it falls
-through to Jina Reader and then the configured headless browser engine.
-PDF documents (filings, annual reports, IR decks) are extracted to text
-automatically by `fetch_url.py` (pypdf, Jina fallback) — fetch the PDF
-URL directly instead of skipping it.
-TRACK source URL, fetch method, and timestamp.
-SUMMARISE without over-quoting.
-PASS evidence to `market_research` or `research_report` when needed.
+Reuse provided captures and URLs before broad discovery. For fresh external
+evidence, use one `research_run` request covering the complete question when
+that tool is available. The collector uses exposed web tools directly and
+must not delegate recursively. Fetch supplied URLs first. Read a returned
+capture only when its summary lacks the detail needed for the claim.
 
-## Scripts
+For a market brief, add one `market_data` `summarize_market` call for the named
+market. Do not substitute prices for requested fundamentals/news. Synthesize
+the thesis, evidence, risks, invalidation and confidence in the same turn.
+Additional collection must close a specific material gap, not repeat a
+successful query. For a normal brief, fetch at most two exact primary URLs
+for such gaps, then report remaining limitations and finish.
 
-- `scripts/web_search.py`
-- `scripts/fetch_url.py`
-- `scripts/search_fetch.py`
-- `scripts/news_search.py`
-- `scripts/social_search.py`
+Use dated primary documents. Navigation shells, blocked pages, empty results
+and HTTP success without relevant content are not evidence. Separate facts,
+estimates and inference; retain source URL, publication/as-of date and fetch
+time. Quantitative claims need a sourced value or an explicit data gap.
+Credential or provider failures are limitations, not permission to invent
+figures, repeat a failing loop or silently change the requested source.
 
-## Lazy References
+## On-demand references
 
-- `references/full-playbook.md` for detailed search/fetch rules.
-- `references/libraries.md` for research libraries.
+Read only the matching file with `Skill(skill="research", file="<path>")`.
+Long references return `next_offset` for continuation.
+
+- Market/stock/token brief: `references/market-brief.md`.
+- RSS, social evidence, freshness and feed setup: `references/news-and-social.md`.
+- Report structure, rating and output QA: `references/reports.md`.
+- Blocked pages, PDF extraction, engines and helper scripts: `references/collection.md`.
+- Additional background and libraries: `references/full-playbook.md`, `references/libraries.md`.
+
+`market_research`, `news_social` and `research_report` remain compatibility
+entry points. Specialist valuation, filings and named frameworks are loaded
+only when the assignment needs that method, not for every short brief.

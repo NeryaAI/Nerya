@@ -60,5 +60,9 @@ nothing was wrong.
 
 ## Lazy References
 
+Read a selected reference with `Skill(skill="markets", file="<path>")`.
+Use `references/source-routing.md` when source, provider, venue or wallet
+selection is unclear; `market_data_routing` is a compatibility entry only.
+
 - `references/full-playbook.md` for detailed read rules and chart behavior.
 - `references/libraries.md` for market data libraries.

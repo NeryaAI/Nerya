@@ -215,6 +215,8 @@ def load_config(
                 raise BacktestConfigError(f"{path}: preset must be a mapping")
             raw = _deep_merge(raw, loaded)
     if config_path:
+        if not Path(config_path).is_file():
+            raise BacktestConfigError(f"backtest config not found: {config_path}")
         loaded = yaml_io.load(Path(config_path), default={})
         if not isinstance(loaded, dict):
             raise BacktestConfigError(f"{config_path}: config must be a mapping")

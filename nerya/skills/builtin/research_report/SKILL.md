@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: research_report
+metadata:
+  nerya:
+    catalog_parent: research
 description: "Use to turn gathered evidence into a professional market, stock, sector, strategy, backtest, or flash research report."
 version: 0.1.0
 license: MIT

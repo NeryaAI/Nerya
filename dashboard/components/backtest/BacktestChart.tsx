@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useEffect, useId, useState } from "react";
+import { useTranslations, useLocale } from "next-intl";
+import { WorkspaceTabs } from "../chat/WorkspaceTabs";
 import { createChart, type IChartApi } from "lightweight-charts";
 import {
   clientApi,
@@ -26,7 +27,10 @@ export function BacktestChart({
   ts: string;
   proposalId?: string | null;
 }) {
-  const t = useTranslations("strategyBacktests");
+  const t = useTranslations("strategyBacktests"), zh = useLocale().startsWith("zh");
+  const id = `backtest-${useId().replace(/:/g, "")}`;
+  const [view, setView] = useState("overview");
+  useEffect(() => setView("overview"), [strategyId, ts, proposalId]);
   const [chart, setChart] = useState<BacktestChartData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -66,7 +70,10 @@ export function BacktestChart({
   const diagnosticTables = tables.filter((table) => !isTradeTable(table));
 
   return (
-    <div className="space-y-5">
+    <div className="min-w-0 space-y-4" data-testid="backtest-report">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[color:var(--text-muted)]"><span className="font-medium text-warn">{zh ? "历史回测" : "Historical backtest"}</span><span>{zh ? "不是实盘收益" : "Not live performance"}</span></div>
+      <WorkspaceTabs id={id} label={zh ? "回测报告" : "Backtest report"} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "概览" : "Overview" }, { id: "trades", label: zh ? "成交" : "Trades" }, { id: "diagnostics", label: zh ? "诊断" : "Diagnostics" }]} />
+      <section role="tabpanel" id={`${id}-panel-overview`} aria-labelledby={`${id}-tab-overview`} hidden={view !== "overview"} className={view === "overview" ? "space-y-5" : "hidden"}>
       <SummaryCards cards={chart.summary_cards ?? []} />
       {primaryPanel ? (
         <Section
@@ -82,6 +89,9 @@ export function BacktestChart({
           />
         </Section>
       ) : null}
+      </section>
+      <section role="tabpanel" id={`${id}-panel-trades`} aria-labelledby={`${id}-tab-trades`} hidden={view !== "trades"} className={view === "trades" ? "space-y-5" : "hidden"}>
+      {!tradeTables.length && !pricePanels.length ? <Empty label={zh ? "本次回测未提供成交明细。" : "No trade details were supplied for this run."} /> : null}
       {tradeTables.length > 0 ? (
         <Section
           title={t("tradeDetailsTitle")}
@@ -104,6 +114,9 @@ export function BacktestChart({
           </div>
         </Section>
       ) : null}
+      </section>
+      <section role="tabpanel" id={`${id}-panel-diagnostics`} aria-labelledby={`${id}-tab-diagnostics`} hidden={view !== "diagnostics"} className={view === "diagnostics" ? "space-y-5" : "hidden"}>
+      {!diagnosticPanels.length && !diagnosticTables.length ? <Empty label={zh ? "本次回测未提供诊断记录。" : "No diagnostics were supplied for this run."} /> : null}
       {diagnosticPanels.length > 0 || diagnosticTables.length > 0 ? (
         <Section
           title={t("diagnosticsTitle")}
@@ -120,6 +133,7 @@ export function BacktestChart({
           </div>
         </Section>
       ) : null}
+      </section>
     </div>
   );
 }
@@ -158,10 +172,10 @@ function ChartPanel({
     });
     renderSeries(api, panel);
     const ro = new ResizeObserver(() => {
-      api.applyOptions({ width: Math.max(320, node.clientWidth) });
+      api.applyOptions({ width: Math.max(1, node.clientWidth) });
     });
     ro.observe(node);
-    api.applyOptions({ width: Math.max(320, node.clientWidth) });
+    api.applyOptions({ width: Math.max(1, node.clientWidth) });
     return () => {
       ro.disconnect();
       api.remove();

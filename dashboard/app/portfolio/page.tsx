@@ -29,7 +29,8 @@ import {
   StatusDot,
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
-import { Sparkline } from "../../components/Sparkline";
+import { PortfolioDesk } from "../../components/finance/PortfolioDesk";
+import { finiteNumber } from "../../lib/financeDisplay";
 import { ModePill } from "../../components/ModePill";
 import { formatTsShort } from "../../lib/format";
 
@@ -66,8 +67,8 @@ const MODE_LABEL_KEYS: Record<string, string> = {
 };
 
 function money(value: unknown): string {
-  let n = Number(value);
-  if (!Number.isFinite(n)) return "-";
+  let n = finiteNumber(value);
+  if (n === null) return "—";
   // Avoid the confusing "$-0" rendering for tiny negative values.
   if (Math.abs(n) < 0.005) n = 0;
   const abs = Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -181,6 +182,7 @@ export default function PortfolioPage() {
   const tCommon = useTranslations("common");
   const [summary, setSummary] = useState<PortfolioSummary | null>(null);
   const [positions, setPositions] = useState<PortfolioPosition[]>([]);
+  const [positionsError, setPositionsError] = useState<string | null>(null);
   const [pnl, setPnl] = useState<PortfolioPnl | null>(null);
   const [curve, setCurve] = useState<EquityPoint[]>([]);
   const [health, setHealth] = useState<ControlPlanePortfolioHealth | null>(
@@ -258,9 +260,12 @@ export default function PortfolioPage() {
       walletPortfolioRes,
     ] = await Promise.all([
       summaryP,
-      clientApi.portfolioPositions().catch((e: unknown) => {
-        console.error("portfolio positions failed:", e);
-        return { positions: [] };
+      clientApi.portfolioPositions().then((res) => {
+        if (!Array.isArray(res.positions)) throw new Error("Invalid positions response");
+        setPositionsError(null); return res;
+      }).catch((e: unknown) => {
+        setPositionsError(`${t("loadFailed")}: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
       }),
       clientApi.portfolioPnl().catch((e: unknown) => {
         console.error("portfolio pnl failed:", e);
@@ -286,7 +291,7 @@ export default function PortfolioPage() {
       }),
     ]);
     if (summaryRes) setSummary(summaryRes);
-    setPositions(positionsRes.positions || []);
+    if (positionsRes) setPositions(positionsRes.positions);
     setPnl(pnlRes);
     setHealth(healthRes);
     setReports(reportsRes.reports || []);
@@ -326,17 +331,10 @@ export default function PortfolioPage() {
     return () => clearInterval(t);
   }, []);
 
-  // Equity curve refetches on its own so switching the time range doesn't
-  // re-run the whole 7-endpoint poll.
-  useEffect(() => {
-    void loadCurve(curveRange);
-  }, [curveRange]);
+  // Account-scoped equity history is loaded independently in PortfolioDesk.
 
   const accounts = summary?.accounts || [];
-  const allPositions = useMemo(
-    () => flattenPositions(summary, positions),
-    [summary, positions],
-  );
+  const allPositions = positions;
   const equityValues = curve
     .map((p) => Number(p.equity_usd))
     .filter(Number.isFinite);
@@ -467,50 +465,7 @@ export default function PortfolioPage() {
           </div>
         ) : null}
 
-        <section className="grid grid-cols-2 md:grid-cols-4 gap-x-8 gap-y-4">
-          <Kpi
-            inline
-            label={t("equity")}
-            value={
-              loaded ? (
-                money(summary?.totals?.equity_usd ?? pnl?.equity_usd)
-              ) : (
-                <Skel className="h-6 w-28" />
-              )
-            }
-            tone="brand"
-            delta={
-              accounts.length > 0 ? (
-                // Never present paper + live as one headline number without
-                // context — split the total by mode under it.
-                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <ModePill mode="paper" />
-                  <span className="font-mono">{money(equityByMode.paper)}</span>
-                  <span className="text-[color:var(--text-muted)]">·</span>
-                  <ModePill mode="live" />
-                  <span className="font-mono">{money(equityByMode.live)}</span>
-                </span>
-              ) : undefined
-            }
-          />
-          <Kpi
-            inline
-            label={t("cash")}
-            value={loaded ? money(summary?.totals?.cash_usd) : <Skel className="h-6 w-24" />}
-          />
-          <Kpi
-            inline
-            label={t("realizedPnl")}
-            value={loaded ? moneySigned(pnl?.realized_usd) : <Skel className="h-6 w-24" />}
-            tone={pnlToneKpi(pnl?.realized_usd)}
-          />
-          <Kpi
-            inline
-            label={t("unrealizedPnl")}
-            value={loaded ? moneySigned(pnl?.unrealized_usd) : <Skel className="h-6 w-24" />}
-            tone={pnlToneKpi(pnl?.unrealized_usd)}
-          />
-        </section>
+        <PortfolioDesk accounts={accounts} positions={allPositions} loaded={loaded} positionsError={positionsError} summaryError={summaryError} />
 
         {hasHealth ? (
           <Card
@@ -549,9 +504,7 @@ export default function PortfolioPage() {
                     <span className="font-mono text-[13px] text-[color:var(--text-base)]">
                       {account.id}
                     </span>
-                    <Pill tone={account.live_trading_enabled ? "danger" : "brand"}>
-                      {account.live_trading_enabled ? t("live") : t("paper")}
-                    </Pill>
+                    <ModePill mode={account.mode} />
                     <span className="ml-auto text-[12px] text-[color:var(--text-muted)]">
                       {enumLabel(MODE_LABEL_KEYS, t, account.mode)}
                     </span>
@@ -602,48 +555,7 @@ export default function PortfolioPage() {
           </Card>
         ) : null}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <Card
-            title={t("equityCurve")}
-            description={t("equityCurveDesc")}
-            actions={
-              <div className="flex gap-1">
-                {(["24H", "7D", "30D"] as CurveRange[]).map((range) => (
-                  <button
-                    key={range}
-                    onClick={() => setCurveRange(range)}
-                    className={`px-2 py-0.5 text-[12px] rounded-md font-medium ${
-                      curveRange === range
-                        ? "bg-brand-500/15 text-brand-200 border border-brand-500/30"
-                        : "text-ink-400 hover:text-ink-100"
-                    }`}
-                  >
-                    {t(CURVE_RANGE_KEY[range])}
-                  </button>
-                ))}
-              </div>
-            }
-          >
-            {curveLoading && curve.length === 0 ? (
-              <div className="skeleton h-[120px] w-full" aria-hidden />
-            ) : curve.length === 0 ? (
-              <Empty
-                label={curveError ? `${t("loadFailed")} · ${curveError}` : t("noEquityPoints")}
-              />
-            ) : (
-              /* Color follows the range direction: up = ok mint, down =
-                 danger red — same semantics as the PnL KPIs above. */
-              <div>
-                <Sparkline
-                  values={equityValues}
-                  width={420}
-                  height={120}
-                  tone={curveUp ? "accent" : "danger"}
-                  fill
-                />
-              </div>
-            )}
-          </Card>
+        <div className="min-w-0">
 
           <Card
             title={t("reconciliation")}
@@ -771,77 +683,6 @@ export default function PortfolioPage() {
           </Card>
         ) : null}
 
-        <Card
-          title={t("openPositions", { count: allPositions.length })}
-          description={t("openPositionsDesc")}
-          padded={false}
-        >
-          {!loaded ? (
-            <div className="px-5 py-4 space-y-2.5" aria-hidden>
-              {[0, 1, 2].map((i) => (
-                <div key={i} className="skeleton h-5 w-full" />
-              ))}
-            </div>
-          ) : allPositions.length === 0 ? (
-            <div className="px-5 py-4">
-              <Empty label={t("noOpenPositions")} />
-            </div>
-          ) : (
-            <div className="embedded-table-scroll">
-              <table className="table w-full">
-                <thead>
-                  <tr>
-                    <th>{t("colAccount")}</th>
-                    <th>{t("colMode")}</th>
-                    <th>{t("colMarket")}</th>
-                    <th>{t("colSide")}</th>
-                    <th className="text-right">{t("colSize")}</th>
-                    <th className="text-right">{t("colAvgEntry")}</th>
-                    <th className="text-right">{t("colUnrealized")}</th>
-                    <th className="text-right">{t("colRealized")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {allPositions.map((p, index) => {
-                    const isShort = String(p.side || "").toLowerCase() === "short";
-                    const sideLabel = p.side
-                      ? p.side[0].toUpperCase() + p.side.slice(1).toLowerCase()
-                      : "–";
-                    const posMode = p.account_id
-                      ? modeByAccount[p.account_id]
-                      : undefined;
-                    return (
-                      <tr key={`${p.account_id}-${p.market}-${index}`}>
-                        <td className="font-mono text-[12px]">{p.account_id}</td>
-                        <td>
-                          {posMode ? (
-                            <ModePill mode={posMode} />
-                          ) : (
-                            <span className="text-[12px] text-[color:var(--text-muted)]">–</span>
-                          )}
-                        </td>
-                        <td className="font-mono text-[12px] text-[color:var(--text-base)]">
-                          {p.market || "–"}
-                        </td>
-                        <td>
-                          <Pill tone={isShort ? "danger" : "ok"}>{sideLabel}</Pill>
-                        </td>
-                        <td className="text-right font-mono tabular-nums">{numberish(p.size)}</td>
-                        <td className="text-right font-mono tabular-nums">{numberish(p.avg_entry_price)}</td>
-                        <td className={`text-right font-mono tabular-nums ${pnlToneClass(p.unrealized_pnl_usd)}`}>
-                          {moneySigned(p.unrealized_pnl_usd)}
-                        </td>
-                        <td className={`text-right font-mono tabular-nums ${pnlToneClass(p.realized_pnl_usd)}`}>
-                          {moneySigned(p.realized_pnl_usd)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card>
 
         {summary && (
           <Card

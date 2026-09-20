@@ -31,7 +31,8 @@ function selectedModelKey(settings: ChatRunSettings, options: ChatModelOption[])
 
 export function ComposerPermissionMenu({ settings, onSettingsChange, disabled }: ControlProps) {
   const t = useTranslations("chat");
-  const label = settings.permission_mode === "yolo" ? t("fullAccess") : t("approveActions");
+  const permissionLabel = (mode: PermissionMode) => t(mode === "yolo" ? "fullAccess" : mode === "auto" ? "autonomousMode" : "approveActions");
+  const label = permissionLabel(settings.permission_mode);
   return (
     <Menu.Root>
       <Menu.Trigger asChild>
@@ -44,11 +45,12 @@ export function ComposerPermissionMenu({ settings, onSettingsChange, disabled }:
         <Menu.Content className="ui-select-menu w-64" align="start" sideOffset={8} collisionPadding={8} aria-label={t("modeMenuTitle")}>
           <Menu.Label className="px-3 py-2 text-xs text-[color:var(--text-muted)]">{t("modeMenuTitle")}</Menu.Label>
           <Menu.RadioGroup value={settings.permission_mode} onValueChange={(permission_mode) => onSettingsChange({ ...settings, permission_mode: permission_mode as PermissionMode })}>
-            {(["default", "yolo"] as const).map((mode) => <Menu.RadioItem key={mode} value={mode} className="ui-select-option">
-              <ShieldCheckIcon size={15} /><span className="flex-1">{t(mode === "yolo" ? "fullAccess" : "approveActions")}</span>
+            {(["default", "auto", "yolo"] as const).map((mode) => <Menu.RadioItem key={mode} value={mode} className="ui-select-option">
+              <ShieldCheckIcon size={15} /><span className="flex-1">{permissionLabel(mode)}</span>
               <Menu.ItemIndicator><CheckIcon size={14} /></Menu.ItemIndicator>
             </Menu.RadioItem>)}
           </Menu.RadioGroup>
+          <p className="px-3 py-2 text-xs text-[color:var(--text-muted)]">{t("autonomousModeHelp")}</p>
         </Menu.Content>
       </Menu.Portal>
     </Menu.Root>

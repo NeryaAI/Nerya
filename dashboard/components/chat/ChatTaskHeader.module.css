@@ -1,0 +1,42 @@
+/* Single-row navigation. Brand colors and fonts remain owned by Nerya. */
+.header { container: task-topbar / inline-size; flex: none; min-width: 0; border-bottom: 1px solid var(--line); color: var(--text-base); }
+.bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; height: 39px; padding: 0 12px; }
+.identity { grid-column: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.identity > div button { height: 32px; width: 32px; }
+.title { min-width: 0; margin: 0; font-size: 13px; font-weight: 500; }
+.titleButton { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 30px; padding: 0 4px; border-radius: 5px; text-align: left; }
+.titleGlyph { display: none; }
+.titleButton:hover, .action:hover { background: var(--panel-bg); }
+.titleButton:focus-visible, .action:focus-visible { outline: 2px solid var(--text-muted); outline-offset: -1px; }
+.status { display: none; flex-shrink: 0; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.actions { grid-column: 2; display: flex; align-items: center; gap: 2px; }
+.action { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 30px; padding: 0 6px; border-radius: 5px; color: var(--text-muted); font-size: 12px; }
+.actions > a { height: 30px; width: 30px; border: 0; background: transparent !important; backdrop-filter: none; }
+.action[aria-expanded="true"] { background: var(--panel-bg); color: var(--text-base); }
+.action:disabled { cursor: not-allowed; opacity: .45; }
+.newChat { display: none; }
+.actionLabel { margin-left: 5px; }
+.tabs { grid-column: 2; grid-row: 1; min-width: 0; }
+.tabs [role="tablist"] { gap: 2px; border: 0; padding: 0; overflow: visible; }
+.tabs [role="tab"] { min-height: 30px; max-width: none; justify-content: center; border: 0; border-radius: 5px; padding: 0 10px; gap: 5px; font-size: 12px; }
+.tabs [role="tab"][aria-selected="true"] { background: var(--panel-bg); }
+.tabs [data-tab-label="compact"] { display: none; }
+.menuTitle { max-width: 290px; max-height: 8rem; overflow-y: auto; overflow-wrap: anywhere; }
+@container task-topbar (min-width: 950px) { .status { display: inline-flex; } }
+@container task-topbar (max-width: 600px) {
+  .bar { height: 43px; gap: 3px; padding: 0 6px; grid-template-columns: minmax(56px, 1fr) auto; }
+  .identity { gap: 1px; }
+  .titleButton { min-height: 36px; }
+  .header[data-has-tabs="true"] .titleText { display: block; }
+  .header[data-has-tabs="true"] .titleGlyph { display: none; }
+  .tabs [role="tab"] { min-height: 36px; padding: 0 8px; }
+  .tabs [data-tab-label="full"] { display: none; }
+  .tabs [data-tab-label="compact"] { display: inline; }
+  .tabs [data-tab-meta] { display: none; }
+  .action, .actions > a { height: 36px; min-width: 30px; padding: 0 6px; }
+}
+@container task-topbar (min-width: 360px) and (max-width: 600px) {
+  .header[data-has-tabs="true"] .titleText { display: block; }
+  .header[data-has-tabs="true"] .titleGlyph { display: none; }
+  .title { font-size: 12px; }
+}

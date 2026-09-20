@@ -1,7 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useLocale, useTranslations } from "next-intl";
+import { AgentWorkPanel } from "./AgentWorkspace";
+import type { AgentWorkSource } from "./useAgentWork";
+import { CanvasWorkbench } from "./CanvasWorkbench";
+import type { ResultFocusRequest } from "./ChatResultsPanel";
+import { collectChatResults, type ChatResult } from "../../lib/chatResults";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 
@@ -68,6 +73,7 @@ type CanvasItem = {
   data?: unknown;
   thread?: ChatThread | null;
   workspaceLoaded?: boolean;
+  operation?: string;
   seenAt: number;
 };
 
@@ -885,15 +891,26 @@ function collectThreadItems(thread: ChatThread | null): CanvasItem[] {
       ...(message.turn?.blocks || []),
       ...liveEventsToBlocks(message.live_events || []),
     ];
+    // A committed tool_result can omit the path/query that was present in
+    // its tool_use. Join within this message only, never across turns.
+    const requests = new Map<string, ToolLike>();
+    for (const env of envelopes) {
+      const block = unwrapBlock(env);
+      const callId = String(block.call_id || block.tool_use_id || "");
+      if (block.kind === "tool_use" && callId) requests.set(callId, block as ToolLike);
+    }
     envelopes.forEach((env, index) => {
       const block = unwrapBlock(env);
-      add(
-        itemFromToolLike(
-          block as ToolLike,
-          `block:${message.id}:${String(block.call_id || index)}`,
-          message.ts,
-        ),
-      );
+      const callId = String(block.call_id || block.tool_use_id || "");
+      const request = block.kind === "tool_result" && callId ? requests.get(callId) : undefined;
+      const resolved = request ? { ...request, ...block, payload: block.payload || request.payload } : block;
+      // An attempted write is not a completed file change. Only returned
+      // tool evidence enters the resource collection.
+      if (block.kind === "tool_use") return;
+      const item = itemFromToolLike(resolved as ToolLike, `block:${message.id}:${String(block.call_id || index)}`, message.ts);
+      const returned = resultRecordFrom(resolved.result);
+      const confirmed = resolved.ok === true && returned.ok !== false && returned.success !== false && !returned.error && !resolved.error;
+      add(item ? { ...item, operation: confirmed ? String(resolved.action || "") : undefined } : null);
     });
 
     (message.turn?.tool_trace || []).forEach((tool, index) =>
@@ -2004,14 +2021,82 @@ function EmptyCanvas({ title }: { title?: string }) {
 
 export function WorkspaceCanvas({
   thread,
-  open,
+  open: requestedOpen,
   onToggle,
+  agentWork,
+  agentFocusRequest = 0,
+  embedded = false,
+  resultFocusRequest,
+  onRevealResult,
+  agentResults,
+  onRevealAgent,
+  controls,
 }: {
   thread: ChatThread | null;
   open: boolean;
   onToggle: () => void;
+  agentWork?: AgentWorkSource;
+  agentFocusRequest?: number;
+  embedded?: boolean;
+  resultFocusRequest?: ResultFocusRequest;
+  onRevealResult?: (id: string) => void;
+  agentResults?: ChatResult[];
+  onRevealAgent?: (id: string) => void;
+  controls?: ReactNode;
 }) {
   const t = useTranslations("chat");
+  const zh = useLocale().startsWith("zh");
+  const [mode, setMode] = useState<"overview" | "agents" | "artifacts" | "results">(embedded ? "overview" : "artifacts");
+  const [workbenchBrowsing, setWorkbenchBrowsing] = useState(false);
+  const results = useMemo(() => [...(agentResults || []), ...collectChatResults(thread)], [thread, agentResults]);
+  const [narrow, setNarrow] = useState(false);
+  const open = requestedOpen && (embedded || !narrow || agentFocusRequest > 0);
+  const panelRef = useRef<HTMLElement>(null);
+  const toggleRef = useRef(onToggle);
+  toggleRef.current = onToggle;
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 1279px)");
+    const change = () => setNarrow(query.matches);
+    change(); query.addEventListener("change", change);
+    return () => query.removeEventListener("change", change);
+  }, []);
+  useEffect(() => { if (agentFocusRequest) setMode("agents"); }, [agentFocusRequest]);
+  useEffect(() => {
+    if (embedded || !open || (!narrow && !agentFocusRequest)) return;
+    const panel = panelRef.current;
+    const trigger = document.getElementById("agent-task-trigger");
+    const frame = requestAnimationFrame(() => panel?.focus());
+    const siblings: HTMLElement[] = [];
+    if (narrow && panel) {
+      let node: HTMLElement = panel;
+      while (node.parentElement && node.parentElement !== document.body) {
+        for (const sibling of Array.from(node.parentElement.children)) {
+          if (sibling instanceof HTMLElement && sibling !== node && !sibling.inert) {
+            sibling.inert = true; siblings.push(sibling);
+          }
+        }
+        node = node.parentElement;
+      }
+    }
+    function keydown(event: KeyboardEvent) {
+      if (event.key === "Escape" && (narrow || panel?.contains(document.activeElement))) {
+        event.preventDefault(); event.stopPropagation(); toggleRef.current();
+      }
+      if (event.key !== "Tab" || !narrow || !panel) return;
+      const targets = [...panel.querySelectorAll<HTMLElement>("button:not(:disabled), select, textarea:not(:disabled), summary, a[href], [tabindex='0']")].filter((el) => el.getClientRects().length);
+      const first = targets[0], last = targets[targets.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    }
+    document.addEventListener("keydown", keydown, true);
+    return () => {
+      cancelAnimationFrame(frame); document.removeEventListener("keydown", keydown, true);
+      siblings.forEach((el) => { el.inert = false; });
+      if (narrow || panel?.contains(document.activeElement)) {
+        requestAnimationFrame(() => { if (trigger?.isConnected) trigger.focus(); });
+      }
+    };
+  }, [open, narrow, agentFocusRequest, embedded]);
   const [browserRecord, setBrowserRecord] = useState<BrowserSessionRecord | null>(null);
   const [error, setError] = useState("");
   const [activeItemId, setActiveItemId] = useState("");
@@ -2019,6 +2104,7 @@ export function WorkspaceCanvas({
   const browserRefs = useMemo(() => collectBrowserSessionRefs(thread), [thread]);
 
   useEffect(() => {
+    if (!open || (embedded ? !workbenchBrowsing : mode !== "artifacts")) return;
     if (!browserRefs.length) {
       setBrowserRecord(null);
       setError("");
@@ -2070,13 +2156,15 @@ export function WorkspaceCanvas({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [browserRefs, open]);
+  }, [browserRefs, open, mode, embedded, workbenchBrowsing]);
 
   const browserSeenAt = browserRefs[0]?.seenAt || 0;
-  const browserItem = useMemo(
-    () => itemFromBrowserRecord(browserRecord, browserSeenAt),
-    [browserRecord, browserSeenAt],
-  );
+  const browserItem = useMemo<CanvasItem | null>(() => {
+    const ref = browserRefs[0];
+    if (!ref) return null;
+    const resolved = itemFromBrowserRecord(browserRecord, browserSeenAt);
+    return { ...(resolved || { kind: "browser", title: zh ? "浏览器" : "Browser", subtitle: ref.url, sessionId: ref.sessionId, seenAt: browserSeenAt }), id: `browser-ref:${ref.sessionId || ref.url}` };
+  }, [browserRecord, browserSeenAt, browserRefs, zh]);
   const threadItems = useMemo(() => collectThreadItems(thread), [thread]);
   const chartItem = useMemo<CanvasItem | null>(() => {
     if (!thread || !hasAgentVisuals(thread)) return null;
@@ -2127,6 +2215,7 @@ export function WorkspaceCanvas({
     }
     if (
       browserItem &&
+      !manuallySelectedItemRef.current &&
       activeItemId !== browserItem.id &&
       (!activeStillExists || activeKind === "web")
     ) {
@@ -2146,11 +2235,25 @@ export function WorkspaceCanvas({
   const activeItem = items.find((item) => item.id === activeItemId) || items[0] || null;
   const ActiveIcon = activeItem ? iconForKind(activeItem.kind) : MessagesIcon;
 
+  if (embedded) return <CanvasWorkbench thread={thread} results={results} resources={items} agents={agentWork?.rows}
+    open={open} controls={controls} focusRequest={resultFocusRequest} onReveal={onRevealResult} onAgent={onRevealAgent}
+    onResourceActive={setWorkbenchBrowsing} error={error} renderResource={(id) => {
+      const item = items.find((value) => value.id === id);
+      if (item?.kind === "browser" && !browserRecord) return <p role="status" className="p-5 text-sm text-[color:var(--text-muted)]">{zh ? "正在获取浏览器预览…" : "Loading browser preview…"}</p>;
+      return item ? <CanvasBody key={item.id} item={item} /> : <EmptyCanvas />;
+    }} />;
+
+  if (!open && !items.length) return null;
   return (
     <aside
-      className={`hidden min-h-0 shrink-0 border-l border-brand-500/15 bg-ink-950/45 xl:flex ${
-        open ? "w-[520px]" : "w-11"
-      } flex-col transition-[width] duration-200`}
+      id="workspace-canvas"
+      ref={panelRef}
+      tabIndex={-1}
+      role={open && narrow ? "dialog" : "complementary"}
+      aria-modal={open && narrow ? true : undefined}
+      className={`min-h-0 shrink-0 flex-col border-l border-ink-700/40 bg-ink-950 outline-none ${
+        open ? `${agentFocusRequest ? "flex" : "hidden xl:flex"} fixed inset-y-0 right-0 z-50 w-full sm:w-[520px] xl:static xl:z-auto xl:h-full xl:w-[520px]` : "hidden w-11 xl:flex"
+      } motion-safe:transition-[width] motion-safe:duration-200`}
       aria-label={t("canvasTitle")}
     >
       {open ? (
@@ -2158,12 +2261,12 @@ export function WorkspaceCanvas({
           <div className="border-b border-brand-500/15 px-3 py-2.5">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <div className="flex items-center gap-2 text-[12px] font-medium text-brand-300">
+                <div className="flex items-center gap-2 text-[12px] font-medium text-ink-200">
                   <ActiveIcon size={14} />
                   <span>{t("canvasTitle")}</span>
                 </div>
                 <div className="mt-1 truncate text-[11px] text-ink-400">
-                  {activeItem?.subtitle ||
+                  {(mode === "agents" ? (zh ? "任务、操作与协作消息" : "Tasks, operations and collaboration") : activeItem?.subtitle) ||
                     browserRecord?.current_url ||
                     thread?.title ||
                     t("canvasEmptyTitle")}
@@ -2180,17 +2283,22 @@ export function WorkspaceCanvas({
               </button>
             </div>
 
-            {items.length ? (
+            {items.length || agentWork?.rows.length ? (
               <div className="mt-2 flex gap-1 overflow-x-auto pb-0.5">
+                {agentWork?.rows.length ? <button type="button" onClick={() => setMode("agents")} aria-pressed={mode === "agents"}
+                  className={`inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-400 ${mode === "agents" ? "border-ink-500/60 bg-ink-800/60 text-ink-100" : "border-ink-700/40 text-ink-400 hover:text-ink-100"}`}>
+                  <MessagesIcon size={12} />{zh ? "Agents · 协作" : "Agents"}<span className="text-ink-500">{agentWork.rows.length}</span>
+                </button> : null}
                 {items.slice(0, 8).map((item) => {
                   const Icon = iconForKind(item.kind);
-                  const selected = item.id === activeItem?.id;
+                  const selected = mode === "artifacts" && item.id === activeItem?.id;
                   return (
                     <button
                       key={item.id}
                       type="button"
                       onClick={() => {
                         manuallySelectedItemRef.current = true;
+                        setMode("artifacts");
                         setActiveItemId(item.id);
                       }}
                       className={`inline-flex max-w-[11rem] shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] transition-colors ${
@@ -2211,7 +2319,7 @@ export function WorkspaceCanvas({
               </div>
             ) : null}
 
-            {error ? (
+            {error && mode === "artifacts" ? (
               <div className="mt-2 rounded border border-danger/25 bg-danger/10 px-2 py-1 text-[11px] text-rose-300">
                 {error}
               </div>
@@ -2219,7 +2327,7 @@ export function WorkspaceCanvas({
           </div>
 
           <div className="min-h-0 flex-1 overflow-hidden">
-            {activeItem ? <CanvasBody item={activeItem} /> : <EmptyCanvas />}
+            {mode === "agents" && agentWork ? <AgentWorkPanel source={agentWork} /> : activeItem ? <CanvasBody item={activeItem} /> : <EmptyCanvas />}
           </div>
         </>
       ) : (

@@ -759,7 +759,8 @@ def _wrap_script_inspect(deps: NativeToolDeps):
 
 def _wrap_script_run(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return script_run_handler(call, skill_index=deps.skill_index, cwd=deps.workspace_root)
+        return script_run_handler(call, skill_index=deps.skill_index, cwd=deps.workspace_root,
+                                  conversation_id=str(call.metadata.get('agent_parent_session_id') or deps.active_session_id or ''))
 
     return handler
 

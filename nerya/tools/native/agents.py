@@ -817,6 +817,8 @@ SUBAGENT_LIST_SCHEMA: dict[str, Any] = {
 SUBAGENT_RUN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "agent_id": {"type": "string", "description": "Reuse this persistent child id from subagent_peers or a previous result. Keeps its role, policy and full tool conversation instead of spawning a new child."},
+        "message": {"type": "string", "minLength": 1, "maxLength": 16000, "description": "Follow-up instruction required when agent_id is supplied. For an already-running child use subagent_message instead."},
         "name": {
             "type": "string",
             "description": (
@@ -953,7 +955,7 @@ def subagent_run_handler(
     tool_registry: Any = None,
     executor: Any = None,
 ) -> ToolResult:
-    """Spawn one subagent and return its envelope."""
+    """Spawn a child, or continue an explicitly identified persistent child."""
 
     args = call.arguments or {}
     name = (args.get("name") or "").strip()
@@ -971,6 +973,14 @@ def subagent_run_handler(
         call, "cancellation_token"
     )
     parent_remaining_wall_seconds = _parent_remaining_wall_seconds(call)
+    agent_id = str(args.get("agent_id") or "").strip()
+    continuation_text = str(args.get("message") or "").strip()
+    if agent_id:
+        trusted_session = str(_call_meta(call, "session_id") or "")
+        if trusted_session and session_id != trusted_session:
+            return _schema_error(call, "cannot continue an agent from another conversation")
+        if not session_id or not continuation_text or len(continuation_text) > 16000:
+            return _schema_error(call, "continuation requires a session and a 1–16000 character message")
     inline_spec = _build_inline_role_spec(
         config,
         name=name,
@@ -996,6 +1006,8 @@ def subagent_run_handler(
         }
         if parent_remaining_wall_seconds is not None:
             dispatch_kwargs["max_wall_seconds"] = parent_remaining_wall_seconds
+        if agent_id:
+            dispatch_kwargs.update(agent_id=agent_id, continuation_text=continuation_text)
         envelope = dispatcher.dispatch(
             f"subagent:{name}",
             payload=payload or {},
@@ -1855,6 +1867,7 @@ def team_run_handler(
         caveat_kind = _member_soft_quality_kind(output) if ok else None
         entry = {
             "subagent": role_name,
+            "agent_id": raw.get("agent_id") or "",
             "ok": ok,
             "tier": raw.get("tier"),
             "provider": raw.get("provider"),

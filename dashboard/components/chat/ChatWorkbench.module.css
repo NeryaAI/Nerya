@@ -1,0 +1,54 @@
+/* Structure and reading rhythm only. All surfaces inherit Nerya's theme. */
+.workbench { color: var(--text-base); }
+.workbench [role="tabpanel"][hidden], .workbench [hidden] { display: none; }
+.workbench pre { max-width: 100%; }
+.transcriptViewport { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.conversation { max-width: 800px; width: 100%; margin: 0 auto; padding: 24px 24px 36px; }
+.conversation > * + * { margin-top: 12px; }
+.conversation > [data-turn-role="user"]:not(:first-child) { margin-top: 32px; }
+.jump { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 1px solid var(--line-hi); border-radius: 8px; background: var(--overlay-surface); color: var(--text-base); font-size: 12px; white-space: nowrap; }
+.jump:focus-visible { outline: 2px solid var(--text-muted); outline-offset: 2px; }
+.workbench [data-testid="transcript-scroll"], .workbench [data-testid="agent-detail-content"] { overscroll-behavior: contain; scrollbar-gutter: stable; }
+.workbench [data-turn-section="reply"] { overflow-wrap: anywhere; }
+.workbench :is([data-turn-section="reply"], [data-testid="canvas-result-body"]) :global(.nerya-markdown) { font-size: 15px; line-height: 1.75; }
+.workbench :is([data-turn-section="reply"], [data-testid="canvas-result-body"]) :global(.nerya-markdown) :is(p, ul, ol) { font-size: 15px; line-height: 1.75; margin-bottom: 16px; color: var(--text-base); }
+.workbench :is([data-turn-section="reply"], [data-testid="canvas-result-body"]) :global(.nerya-markdown) :is(h1,h2) { font-size: 21px; font-weight: 600; line-height: 1.4; margin: 26px 0 12px; text-wrap: balance; }
+.workbench :is([data-turn-section="reply"], [data-testid="canvas-result-body"]) :global(.nerya-markdown) h3 { font-size: 16px; font-weight: 600; line-height: 1.5; margin: 24px 0 8px; }
+.workbench :is([data-turn-section="reply"], [data-testid="canvas-result-body"]) :global(.nerya-markdown) > :first-child { margin-top: 0; }
+.workbench :is([data-turn-section="reply"], [data-testid="canvas-result-body"]) :global(.nerya-markdown) table { width: 100%; font-size: 13px; }
+.workbench :is([data-turn-section="reply"], [data-testid="canvas-result-body"]) :global(.nerya-markdown) :is(td,th) { padding: 8px 10px; }
+.workbench [data-turn-section="trace"] { margin-bottom: 14px; }
+.workbench [data-turn-section="trace"] > details > summary { min-height: 30px; }
+.workbench [data-testid="result-actions"] { margin-top: 18px; padding-top: 8px; border: 0; gap: 8px; }
+.workbench [data-testid="result-actions"] button { border-color: transparent; background: transparent; color: var(--text-muted); }
+.workbench [data-testid="result-actions"] button:hover { background: var(--panel-bg); color: var(--text-base); }
+.workbench [data-testid="result-actions"] [data-testid="open-result-canvas"] { border-color: var(--line); padding: 0 10px; min-height: 30px; }
+.workbench [data-chat-composer="docked"] { padding: 10px 12px; border-radius: 12px; }
+.workbench [data-composer-toolbar] { flex-wrap: nowrap; gap: 4px; margin-top: 6px; }
+.workbench [data-composer-toolbar] > button { min-width: 0; max-width: 138px; padding: 0 5px; gap: 4px; flex-shrink: 0; }
+.workbench [data-composer-toolbar] > button svg { flex-shrink: 0; }
+.workbench [data-composer-models] { width: auto; margin-left: auto; flex: 0 1 auto; gap: 4px; }
+.workbench [data-composer-models] > button:first-child { max-width: 200px; }
+.workbench [data-testid="agent-task-bar"] > button { min-height: 32px; height: 32px; padding: 0 8px; border: 0; border-radius: 8px 8px 0 0; background: transparent; gap: 8px; }
+.workbench [data-testid="agent-task-bar"] > button > svg { width: 13px; height: 13px; }
+.workbench [data-testid="agent-task-bar"] > button span { font-size: 12px; }
+.workbench [data-testid="agent-work-panel"] > [role="tablist"] { height: 36px; }
+.workbench [data-testid="agent-work-panel"] > [role="tablist"] > button { min-height: 35px; font-size: 12px; }
+.workbench [data-testid="agent-context"] summary { min-height: 30px; font-size: 11px; }
+.workbench [data-testid="agent-detail-content"] > div { max-width: 800px; padding: 12px 24px 36px; }
+.workbench [data-testid="agent-work-panel"] form { padding: 8px 24px 12px; }
+.workbench [data-testid="agent-work-panel"] form > div { max-width: 752px; border-radius: 12px; padding: 10px 12px; }
+.workbench [data-testid="workbench-navigation"] { height: 36px; }
+.workbench [data-testid="workbench-navigation"] button { height: 32px; min-height: 32px; font-size: 12px; }
+.workbench [data-testid="canvas-overview"] { padding: 18px 20px; }
+.workbench [data-testid="canvas-overview"] > div > section { border: 0; border-radius: 0; }
+.workbench [data-testid="canvas-overview"] > div > section > :first-child { background: transparent; }
+@media (max-width: 600px) {
+  .conversation { padding: 20px 16px 28px; }
+  .workbench [data-composer-toolbar] > button { max-width: 112px; font-size: 11px; }
+  .workbench [data-composer-models] > button:first-child { max-width: 115px; font-size: 11px; }
+  .workbench [data-composer-models] > button:first-child > svg:first-child { display: none; }
+  .workbench [data-composer-models] > button:last-child { width: 30px; height: 30px; }
+  .workbench [data-testid="agent-detail-content"] > div { padding: 8px 16px 28px; }
+  .workbench [data-testid="agent-work-panel"] form { padding: 8px 16px 12px; }
+}

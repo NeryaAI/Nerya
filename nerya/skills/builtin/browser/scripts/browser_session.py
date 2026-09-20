@@ -15,10 +15,11 @@ import argparse
 import json
 import os
 import sys
+import uuid
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 _DEFAULT_API_BASE = "http://127.0.0.1:18317"
@@ -59,13 +60,21 @@ _LEGACY_ACTION_OPERATIONS = {
 
 
 def _api_base(value: str | None = None) -> str:
-    raw = (
-        value
-        or os.environ.get("NERYA_API")
-        or os.environ.get("NERYA_API_BASE")
-        or _DEFAULT_API_BASE
-    )
-    return str(raw).rstrip("/")
+    configured = str(os.environ.get("NERYA_API") or os.environ.get("NERYA_API_BASE") or _DEFAULT_API_BASE).rstrip("/")
+    raw = str(value or configured).rstrip("/")
+    parts = urlsplit(raw)
+    if (parts.scheme not in {"http", "https"} or not parts.hostname or parts.username
+            or parts.password or parts.query or parts.fragment or any(c in raw for c in "\r\n\x00")):
+        raise ValueError("invalid_configured_api_base")
+    _ = parts.port
+    if raw != configured:
+        raise ValueError("api_base_override_requires_operator_configuration")
+    return raw
+
+
+class _NoApiRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HTTPError(req.full_url, code, "API redirects are disabled", headers, None)
 
 
 def _auth_token(value: str | None = None) -> str:
@@ -113,7 +122,7 @@ def _request(
         method=method.upper(),
     )
     try:
-        with urlopen(req, timeout=timeout_s) as resp:
+        with build_opener(_NoApiRedirect()).open(req, timeout=timeout_s) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             return json.loads(raw) if raw else {"ok": True}
     except HTTPError as exc:
@@ -303,177 +312,60 @@ def _cdp_action(
     )
 
 
-def run(
-    *,
-    operation: str = "status",
-    api_base: str | None = None,
-    token: str | None = None,
-    timeout_s: float = 60.0,
-    **payload: Any,
-) -> dict[str, Any]:
-    op = str(operation or "status").strip().lower()
-    timeout_s = float(timeout_s or payload.get("timeout_s") or 60.0)
-
-    if op == "registry":
-        return _request("GET", "/browsers/registry", api_base=api_base, token=token, timeout_s=timeout_s)
-    if op == "status":
-        return _request("GET", "/browsers/status", api_base=api_base, token=token, timeout_s=timeout_s)
-    if op == "list":
-        return _request("GET", "/browsers/session/list", api_base=api_base, token=token, timeout_s=timeout_s)
-    if op == "get":
-        sid = _session_id(payload)
-        if not sid:
-            return {"ok": False, "error": "session_id is required"}
-        return _request(
-            "GET",
-            _query("/browsers/session/get", {"session_id": sid}),
-            api_base=api_base,
-            token=token,
-            timeout_s=timeout_s,
-        )
-
-    if op == "open":
-        if not payload.get("url"):
-            return {"ok": False, "error": "url is required"}
-        interactive = bool(payload.get("interactive", True))
-        endpoint = "/browsers/session/cdp_open" if interactive else "/browsers/session/start"
-        return _request("POST", endpoint, api_base=api_base, token=token, payload=payload, timeout_s=timeout_s)
-
-    if op == "navigate":
-        if bool(payload.get("interactive", True)):
-            return _cdp_action("goto", payload, api_base=api_base, token=token, timeout_s=timeout_s)
-        return _request(
-            "POST",
-            "/browsers/session/navigate",
-            api_base=api_base,
-            token=token,
-            payload=payload,
-            timeout_s=timeout_s,
-        )
-
-    if op == "snapshot":
-        payload = _with_default_session_id(
-            payload,
-            api_base=api_base,
-            token=token,
-            timeout_s=timeout_s,
-        )
-        if bool(payload.get("interactive", True)):
-            return _cdp_action("snapshot", payload, api_base=api_base, token=token, timeout_s=timeout_s)
-        return _request(
-            "POST",
-            "/browsers/session/snapshot",
-            api_base=api_base,
-            token=token,
-            payload=payload,
-            timeout_s=timeout_s,
-        )
-
-    if op == "screenshot":
-        payload = _with_default_session_id(
-            payload,
-            api_base=api_base,
-            token=token,
-            timeout_s=timeout_s,
-        )
-        endpoint = (
-            "/browsers/session/cdp_screenshot"
-            if bool(payload.get("interactive", True))
-            else "/browsers/session/screenshot"
-        )
-        result = _request(
-            "POST",
-            endpoint,
-            api_base=api_base,
-            token=token,
-            payload=payload,
-            timeout_s=timeout_s,
-        )
-        return _omit_data_uri_by_default(result, payload)
-
-    if op == "close":
-        payload = _with_default_session_id(
-            payload,
-            api_base=api_base,
-            token=token,
-            timeout_s=timeout_s,
-        )
-        sid = _session_id(payload)
-        if not sid:
-            return {"ok": False, "error": "session_id is required"}
-        if bool(payload.get("interactive", True)):
-            cdp = _request(
-                "POST",
-                "/browsers/session/cdp_close",
-                api_base=api_base,
-                token=token,
-                payload={"session_id": sid},
-                timeout_s=timeout_s,
-            )
-            if not bool(payload.get("drop_session", True)):
-                return cdp
-        closed = _request(
-            "POST",
-            "/browsers/session/close",
-            api_base=api_base,
-            token=token,
-            payload={"session_id": sid},
-            timeout_s=timeout_s,
-        )
-        if "cdp" in locals():
-            closed["cdp_close"] = cdp
-        return closed
-
+def _managed_run(op: str, payload: dict[str, Any], *, api_base, token, timeout_s) -> dict[str, Any]:
+    """One request returns the action receipt and fresh observation. No auto retry."""
+    nested = payload.get("payload") or {}
+    if not isinstance(nested, dict):
+        return {"ok":False, "error":"payload_must_be_object", "retryable":False}
+    data = {**nested, **payload}
+    data.pop("payload", None)
+    data.pop("backend", None)
+    data.pop("engine", None)
     if op == "action":
-        action = str(payload.get("action") or "").strip()
-        if not action:
-            return {"ok": False, "error": "action is required"}
-        legacy = _normalise_legacy_action_payload(action, payload)
-        if legacy is not None:
-            legacy_op, legacy_payload = legacy
-            return run(
-                operation=legacy_op,
-                api_base=api_base,
-                token=token,
-                timeout_s=timeout_s,
-                **legacy_payload,
-            )
-        return _cdp_action(action, payload, api_base=api_base, token=token, timeout_s=timeout_s)
-
-    if op == "click":
-        action = "click_selector" if payload.get("selector") else "click_xy"
-        result = _cdp_action(action, payload, api_base=api_base, token=token, timeout_s=timeout_s)
-        selector = str(payload.get("selector") or "").strip()
-        if result.get("ok") or not selector:
-            return result
-        fallback_payload = dict(payload)
-        fallback_payload["expression"] = _click_fallback_expression(selector)
-        fallback = _cdp_action(
-            "eval",
-            fallback_payload,
-            api_base=api_base,
-            token=token,
-            timeout_s=timeout_s,
-        )
-        if fallback.get("ok"):
-            fallback["fallback_for"] = {"action": action, "selector": selector}
-            return fallback
+        op = str(data.pop("action", ""))
+    op = {"type": "fill", "get": "status", "list": "list", "wait": "wait_for",
+          "wait_for_selector": "wait_for", "console": "events", "network": "network",
+          "api_requests": "network", "go_back": "back", "go_forward": "forward"}.get(op, op)
+    if "target" not in data:
+        target = {k:data[k] for k in ("ref", "role", "name", "label", "test_id", "selector", "frame_id") if k in data}
+        if target:
+            data["target"] = target
+    request_id = data.setdefault("request_id", uuid.uuid4().hex)
+    data.setdefault("profile_id", "work")
+    data["operation"] = op
+    # Correlation is stamped by the executor, never read from model arguments.
+    data.pop('_trace_token', None)
+    if os.environ.get('NERYA_BROWSER_TRACE_TOKEN'):
+        data['_trace_token'] = os.environ['NERYA_BROWSER_TRACE_TOKEN']
+    # Never borrow a different task's most-recent tab/session implicitly.
+    if op not in {"open", "list", "status"} and not data.get("session_id"):
+        return {"ok":False, "error":"session_id_required_use_open_receipt", "request_id":request_id}
+    try:
+        result = _request("POST", "/browsers/agent", api_base=api_base, token=token,
+                          payload=data, timeout_s=max(40, min(timeout_s, 60)))
+        result.setdefault("request_id", request_id)
+        if not result.get("ok"):
+            result.setdefault("retryable", False)
+            result.setdefault("next_action", "inspect_state_or_reuse_exact_request_id")
         return result
-    if op == "console":
-        return _cdp_action("get_console", payload, api_base=api_base, token=token, timeout_s=timeout_s)
-    if op == "network":
-        return _cdp_action("get_network", payload, api_base=api_base, token=token, timeout_s=timeout_s)
-    if op == "api_requests":
-        return _cdp_action("get_api_requests", payload, api_base=api_base, token=token, timeout_s=timeout_s)
+    except ValueError:
+        return {"ok":False, "error":"invalid_or_unapproved_api_base", "request_id":request_id, "retryable":False}
+    except (TimeoutError, OSError):
+        return {"ok":False, "error":"transport_outcome_unknown", "request_id":request_id,
+                "retryable":False, "next_action":"inspect_state_or_reuse_exact_request_id"}
 
-    if op in _INTERACTIVE_ACTIONS:
-        action = {
-            "eval": "eval",
-            "clear_events": "clear_events",
-        }.get(op, op)
-        return _cdp_action(action, payload, api_base=api_base, token=token, timeout_s=timeout_s)
 
-    return {"ok": False, "error": f"unknown_operation: {op}"}
+def run(*, operation: str = 'status', api_base: str | None = None,
+        token: str | None = None, timeout_s: float = 60.0, **payload: Any) -> dict[str, Any]:
+    """All browser tasks use the same managed Chromium runtime."""
+    op = str(operation or 'status').strip().lower()
+    if (payload.get('backend', 'managed') != 'managed'
+            or payload.get('engine') not in (None, '', 'chromium')
+            or str(payload.get('session_id', '')).startswith('bs_')):
+        return {'ok':False, 'error':'legacy_browser_removed_use_managed', 'retryable':False}
+    if op == 'registry':
+        return {'ok':True, 'engine':'chromium', 'managed':True}
+    return _managed_run(op, payload, api_base=api_base, token=token, timeout_s=float(timeout_s or 60))
 
 
 def _load_payload(args: argparse.Namespace) -> dict[str, Any]:

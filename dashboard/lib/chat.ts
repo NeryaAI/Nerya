@@ -220,7 +220,7 @@ export type ReasoningEffort =
   | "high"
   | "xhigh";
 
-export type PermissionMode = "default" | "yolo";
+export type PermissionMode = "default" | "auto" | "yolo";
 export type ModelContextWindow = 131072 | 262144 | 1048576;
 
 export type ChatModelOverride = {
@@ -423,7 +423,8 @@ const TRANSCRIPT_CACHE_PREFIX = "nerya.chat.transcript.v2:";
 const TRANSCRIPT_CACHE_INDEX_KEY = "nerya.chat.transcriptIndex.v2";
 const MAX_TRANSCRIPT_CACHE_ENTRIES = 20;
 const DEFAULT_PERMISSION_MODE: PermissionMode =
-  process.env.NEXT_PUBLIC_NERYA_PERMISSION_MODE === "yolo" ? "yolo" : "default";
+  process.env.NEXT_PUBLIC_NERYA_PERMISSION_MODE === "yolo" ? "yolo"
+    : process.env.NEXT_PUBLIC_NERYA_PERMISSION_MODE === "default" ? "default" : "auto";
 
 export const DEFAULT_CHAT_RUN_SETTINGS: ChatRunSettings = {
   reasoning_effort: "off",
@@ -816,7 +817,7 @@ export function loadRunSettings(): ChatRunSettings {
         effort && ["off", "minimal", "low", "medium", "high", "xhigh"].includes(effort)
           ? effort
           : DEFAULT_CHAT_RUN_SETTINGS.reasoning_effort,
-      permission_mode: mode === "yolo" ? "yolo" : "default",
+      permission_mode: mode === "yolo" || mode === "auto" || mode === "default" ? mode : DEFAULT_PERMISSION_MODE,
       model_context_window: saneContextWindow(parsed.model_context_window),
       model_tier:
         typeof parsed.model_tier === "string" ? parsed.model_tier.trim() : "",

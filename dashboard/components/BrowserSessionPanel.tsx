@@ -28,7 +28,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
+import { ManagedBrowserPanel } from "./ManagedBrowserPanel";
 
 import { Card, Pill } from "./Page";
 import { Select } from "./Select";
@@ -64,7 +65,19 @@ function fmtTs(ts?: string): string {
 /** Show at most this many characters of a session id, then ellipsis. */
 const SESSION_ID_PREFIX = 10;
 
-export function BrowserSessionPanel({
+export function BrowserSessionPanel(props: { onGoToEngines?: () => void }) {
+  const zh = useLocale().startsWith("zh");
+  const [mode, setMode] = useState<"work" | "research">("work");
+  return <div className="space-y-4">
+    <div className="flex gap-2" aria-label={zh ? "浏览器模式" : "Browser mode"}>
+      <button type="button" className={`btn ${mode === "work" ? "btn-primary" : "btn-ghost"}`} aria-pressed={mode === "work"} onClick={() => setMode("work")}>{zh ? "工作浏览器" : "Work browser"}</button>
+      <button type="button" className={`btn ${mode === "research" ? "btn-primary" : "btn-ghost"}`} aria-pressed={mode === "research"} onClick={() => setMode("research")}>{zh ? "研究引擎" : "Research engines"}</button>
+    </div>
+    {mode === "work" ? <ManagedBrowserPanel /> : <ResearchBrowserSessionPanel {...props} />}
+  </div>;
+}
+
+function ResearchBrowserSessionPanel({
   onGoToEngines,
 }: {
   /** Offered by the "no engines installed" banner → Engines sub-tab. */

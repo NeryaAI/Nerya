@@ -1,4 +1,5 @@
 "use client";
+import { BrowserPreferences } from './BrowserPreferences';
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
@@ -849,13 +850,6 @@ export function SettingsWorkspace({
   const [searxngRebuild, setSearxngRebuild] = useState<boolean>(false);
   const [searchEngineRowResult, setSearchEngineRowResult] = useState<Record<string, string>>({});
 
-  // ---- Headless browser engines ----------------------------------
-  const [browsersStatus, setBrowsersStatus] = useState<BrowsersStatus | null>(null);
-  const [browsersBusy, setBrowsersBusy] = useState<string>("");
-  const [browserProbeUrl, setBrowserProbeUrl] = useState<string>("https://example.com");
-  const [browserProbeName, setBrowserProbeName] = useState<string>("");
-  const [browserProbeResult, setBrowserProbeResult] = useState<string | null>(null);
-  const [browserRowResult, setBrowserRowResult] = useState<Record<string, string>>({});
 
   // ---- Financial Datasets API keys -------------------------------
   const [fdStatus, setFdStatus] = useState<FinancialDatasetsStatus | null>(null);
@@ -1403,8 +1397,7 @@ export function SettingsWorkspace({
           applySearchStatus(checked(await clientApi.searchEnginesStatus()));
           break;
         case "browsers":
-          setBrowsersStatus(checked(await clientApi.browsersStatus()));
-          break;
+          break; // BrowserPreferences owns the single automatic-mode preference.
         case "memory": {
           if (refresh || !loadedSections.current.has("memory:status")) {
             const [status, external] = await Promise.all([clientApi.memoryVectorStatus(), clientApi.memoryExternalConfig()]);
@@ -2722,61 +2715,6 @@ export function SettingsWorkspace({
     }
   }
 
-  async function loadBrowsersStatus() {
-    try {
-      const next = await clientApi.browsersStatus();
-      setBrowsersStatus(next);
-    } catch (e) {
-      // best effort — settings page should still render
-      setBrowsersStatus(null);
-    }
-  }
-
-  async function selectBrowser(name: string) {
-    setBrowsersBusy(`select:${name}`);
-    try {
-      const res = await clientApi.browsersSelect(name);
-      setBrowsersStatus(res);
-      reportOk(tBrowsers("selectedToast", { name }));
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBrowsersBusy("");
-    }
-  }
-
-  async function installBrowser(name: string) {
-    setBrowsersBusy(`install:${name}`);
-    try {
-      const res = await clientApi.browsersInstall(name);
-      if (!res.ok) {
-        throw new Error(res.detail || res.error || "install failed");
-      }
-      if (res.status) setBrowsersStatus(res.status);
-      else await loadBrowsersStatus();
-      reportOk(tBrowsers("installedToast", { name, version: res.version ? ` (${res.version})` : "" }));
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBrowsersBusy("");
-    }
-  }
-
-  async function uninstallBrowser(name: string) {
-    setBrowsersBusy(`uninstall:${name}`);
-    try {
-      const res = await clientApi.browsersUninstall(name);
-      if (!res.ok) throw new Error(res.detail || res.error || "uninstall failed");
-      if (res.status) setBrowsersStatus(res.status);
-      else await loadBrowsersStatus();
-      reportOk(tBrowsers("uninstalledToast", { name }));
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBrowsersBusy("");
-    }
-  }
-
   async function loadFinancialDatasetsStatus() {
     try {
       const next = await clientApi.financialDatasetsStatus();
@@ -2818,64 +2756,6 @@ export function SettingsWorkspace({
       reportError(e instanceof Error ? e.message : String(e));
     } finally {
       setFdBusy("");
-    }
-  }
-
-  async function probeBrowser() {
-    setBrowsersBusy("probe");
-    setBrowserProbeResult(null);
-    try {
-      const res = await clientApi.browsersProbe({
-        name: browserProbeName.trim().toLowerCase() || undefined,
-        url: browserProbeUrl.trim() || "https://example.com",
-      });
-      if (!res.ok) {
-        setBrowserProbeResult(
-          [res.error, res.detail, res.stderr_tail].filter(Boolean).join("\n"),
-        );
-        return;
-      }
-      const preview = res.markdown_preview || res.text_preview || res.html_preview
-        || res.markdown || res.text || res.html || "";
-      setBrowserProbeResult(
-        `via ${res.fetch_method || res.name} · ${res.elapsed_ms ?? "?"}ms · ${res.bytes ?? "?"}B`
-          + (preview ? "\n\n" + preview : ""),
-      );
-    } catch (e) {
-      setBrowserProbeResult(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBrowsersBusy("");
-    }
-  }
-
-  async function testBrowserRow(name: string) {
-    setBrowsersBusy(`test:${name}`);
-    setBrowserRowResult((p) => ({ ...p, [name]: "probing…" }));
-    try {
-      const res = await clientApi.browsersProbe({
-        name,
-        url: browserProbeUrl.trim() || "https://example.com",
-      });
-      if (!res.ok) {
-        setBrowserRowResult((p) => ({
-          ...p,
-          [name]: `error: ${[res.error, res.detail, res.stderr_tail]
-            .filter(Boolean)
-            .join(" · ")}`,
-        }));
-        return;
-      }
-      setBrowserRowResult((p) => ({
-        ...p,
-        [name]: `ok: ${res.fetch_method || name} · ${res.elapsed_ms ?? "?"}ms · ${res.bytes ?? "?"}B`,
-      }));
-    } catch (e) {
-      setBrowserRowResult((p) => ({
-        ...p,
-        [name]: e instanceof Error ? e.message : String(e),
-      }));
-    } finally {
-      setBrowsersBusy("");
     }
   }
 
@@ -5165,254 +5045,7 @@ export function SettingsWorkspace({
       ) : null}
 
       {effectiveSettingsTab === "browsers" && (!inSectionMode || forceSection === "browsers") ? (
-        <div
-          id={settingsPanelId("browsers")}
-          role="region"
-          aria-label={tTabs("browsers")}
-          className="space-y-5"
-        >
-          <Card
-            title={tBrowsers("cardTitle")}
-            description={tBrowsers("cardDesc")}
-            actions={
-              <div className="flex flex-wrap items-center gap-2">
-                {browsersStatus ? (
-                  <Pill tone={browsersStatus.selected ? "ok" : "warn"}>
-                    {browsersStatus.selected
-                      ? tBrowsers("selectedPill", { name: browsersStatus.selected })
-                      : tBrowsers("noEngineSelected")}
-                  </Pill>
-                ) : null}
-              </div>
-            }
-          >
-            <div className="mb-2 text-[11px] text-ink-500">
-              {tBrowsers("platformInfo", {
-                platform: browsersStatus?.platform || "?",
-                dir: browsersStatus?.binaries_dir || "–",
-              })}
-            </div>
-            <div className="space-y-3">
-              {(() => {
-                const engines = browsersStatus?.engines || [];
-                const sorted = [...engines].sort((a, b) => {
-                  const aSel = browsersStatus?.selected === a.name ? 0 : 1;
-                  const bSel = browsersStatus?.selected === b.name ? 0 : 1;
-                  if (aSel !== bSel) return aSel - bSel;
-                  const aInst = a.installed ? 0 : 1;
-                  const bInst = b.installed ? 0 : 1;
-                  return aInst - bInst;
-                });
-                return sorted;
-              })().map((row) => {
-                const isSelected = browsersStatus?.selected === row.name;
-                const cannotInstall = row.kind === "binary" && !row.platform_supported;
-                const hasDetails = Boolean(
-                  row.homepage || row.version || row.binary_path || row.checkout_path || row.service_url || row.module || row.notes,
-                );
-                return (
-                  <div
-                    key={row.name}
-                    className={`rounded-xl border p-3 ${
-                      isSelected
-                        ? "border-brand-400/40 bg-brand-500/10"
-                        : "border-brand-500/10 bg-ink-900/35"
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-mono text-[13px] text-ink-100">{row.title}</span>
-                          <Pill tone="brand">
-                            {row.kind === "binary"
-                              ? tBrowsers("kindBinary")
-                              : row.kind === "node_service"
-                                ? tBrowsers("kindService")
-                                : tBrowsers("kindPython")}
-                          </Pill>
-                          <Pill tone={row.installed ? "ok" : "warn"}>
-                            {row.installed ? tBrowsers("installed") : tBrowsers("notInstalled")}
-                          </Pill>
-                          {cannotInstall ? (
-                            <Pill tone="warn">
-                              {tBrowsers("noBinaryForPlatform", { platform: row.platform || "?" })}
-                            </Pill>
-                          ) : null}
-                        </div>
-                        <div className="mt-1 text-[11px] text-ink-400">{row.summary}</div>
-                        {hasDetails ? (
-                          <details className="mt-1.5 text-[11px]">
-                            <summary className="cursor-pointer text-ink-500 hover:text-ink-300">
-                              {tBrowsers("rowDetailsToggle")}
-                            </summary>
-                            <div className="mt-1.5 space-y-1 text-ink-500 font-medium">
-                              {row.homepage ? (
-                                <div>
-                                  <a className="text-brand-300 hover:underline" href={row.homepage} target="_blank" rel="noreferrer">
-                                    {row.homepage}
-                                  </a>
-                                </div>
-                              ) : null}
-                              {(row.version || row.binary_path || row.checkout_path || row.service_url || row.module) ? (
-                                <div className="font-mono">
-                                  {[
-                                    row.version,
-                                    row.binary_path,
-                                    row.checkout_path,
-                                    row.service_url,
-                                    row.module ? tBrowsers("moduleSuffix", { module: row.module }) : "",
-                                  ]
-                                    .filter(Boolean)
-                                    .join(" · ")}
-                                </div>
-                              ) : null}
-                              {row.notes ? (
-                                <div className="text-amber-200/80">{row.notes}</div>
-                              ) : null}
-                            </div>
-                          </details>
-                        ) : null}
-                      </div>
-                      <div className="flex flex-wrap justify-end gap-2">
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => void selectBrowser(row.name)}
-                          disabled={Boolean(browsersBusy) || !row.installed || isSelected}
-                        >
-                          {browsersBusy === `select:${row.name}` ? tBrowsers("selecting") : tBrowsers("select")}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => void testBrowserRow(row.name)}
-                          disabled={Boolean(browsersBusy) || !row.installed}
-                          title={
-                            row.installed
-                              ? tBrowsers("testTitleInstalled", {
-                                  url: browserProbeUrl.trim() || "https://example.com",
-                                  engine: row.name,
-                                })
-                              : tBrowsers("testTitleNotInstalled")
-                          }
-                        >
-                          <SparkIcon size={12} />
-                          {browsersBusy === `test:${row.name}` ? tBrowsers("testing") : tBrowsers("test")}
-                        </button>
-                        {row.installed ? (
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            onClick={() => void uninstallBrowser(row.name)}
-                            disabled={Boolean(browsersBusy)}
-                          >
-                            {browsersBusy === `uninstall:${row.name}` ? tBrowsers("uninstalling") : tBrowsers("uninstall")}
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={() => void installBrowser(row.name)}
-                            disabled={Boolean(browsersBusy) || cannotInstall}
-                            title={
-                              cannotInstall
-                                ? tBrowsers("installTitleNoBinary", { platform: row.platform || "?" })
-                                : row.kind === "binary"
-                                  ? tBrowsers("installTitleBinary", { asset: row.asset || row.name })
-                                  : row.kind === "node_service"
-                                    ? tBrowsers("installTitleService")
-                                    : tBrowsers("installTitlePython", { pkg: row.pip_package || "" })
-                            }
-                          >
-                            {browsersBusy === `install:${row.name}` ? tBrowsers("installing") : tBrowsers("install")}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                    {browserRowResult[row.name] ? (
-                      <div
-                        className={`mt-2 rounded-md border px-2 py-1 font-mono text-[11px] whitespace-pre-wrap ${
-                          /^(error|fail|missing|❌)/i.test(browserRowResult[row.name] || "")
-                            ? "border-rose-500/30 bg-rose-500/10 text-rose-200"
-                            : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-                        }`}
-                      >
-                        {browserRowResult[row.name]}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
-              {(!browsersStatus?.engines || browsersStatus.engines.length === 0) ? (
-                <div className="rounded-md border border-brand-500/10 bg-ink-950/30 p-3 text-[12px] text-ink-400">
-                  {tBrowsers("registryNotLoaded")}
-                </div>
-              ) : null}
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => void loadBrowsersStatus()}
-                disabled={Boolean(browsersBusy)}
-              >
-                <RefreshIcon size={14} />
-                {tCommon("refresh")}
-              </button>
-              {browsersStatus?.selected ? (
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => void selectBrowser("")}
-                  disabled={Boolean(browsersBusy)}
-                >
-                  {tBrowsers("clearSelection")}
-                </button>
-              ) : null}
-            </div>
-          </Card>
-
-          <Advanced
-            title={tBrowsers("probeTitle")}
-            description={tBrowsers("probeDesc")}
-            storageKey="nerya.settings.browsers.advanced.probe"
-          >
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_180px_auto]">
-              <Field label={tBrowsers("url")}>
-                <input
-                  className="input-dark text-xs"
-                  value={browserProbeUrl}
-                  onChange={(e) => setBrowserProbeUrl(e.target.value)}
-                  placeholder="https://example.com"
-                />
-              </Field>
-              <Field label={tBrowsers("engineOverride")} hint={tBrowsers("engineOverrideHint")}>
-                <input
-                  className="input-dark font-mono text-xs"
-                  value={browserProbeName}
-                  onChange={(e) => setBrowserProbeName(e.target.value)}
-                  placeholder={tBrowsers("engineOverridePlaceholder")}
-                />
-              </Field>
-              <div className="flex items-end">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={() => void probeBrowser()}
-                  disabled={Boolean(browsersBusy)}
-                >
-                  <SearchIcon size={14} />
-                  {browsersBusy === "probe" ? tBrowsers("probing") : tBrowsers("probe")}
-                </button>
-              </div>
-            </div>
-            {browserProbeResult ? (
-              <div className="mt-3 max-h-72 overflow-auto rounded-md border border-brand-500/10 bg-ink-950/35 px-3 py-2 font-mono text-[11px] text-ink-300 whitespace-pre-wrap">
-                {browserProbeResult}
-              </div>
-            ) : null}
-          </Advanced>
-        </div>
+        <BrowserPreferences />
       ) : null}
 
       {/* Memory panel renders ONLY when this component is mounted by

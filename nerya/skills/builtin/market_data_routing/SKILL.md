@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: market_data_routing
+metadata:
+  nerya:
+    catalog_parent: markets
 description: "Use before research, backtests, valuation, or reports when choosing symbols, venues, data sources, freshness checks, and fallbacks."
 version: 0.1.0
 license: MIT

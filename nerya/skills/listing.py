@@ -36,7 +36,8 @@ def build_skill_listing(skills: SkillKernel | None) -> list[dict[str, str]]:
     if skills is None:
         return out
     try:
-        entries = list(skills.registry.list())
+        catalog = getattr(skills.registry, "catalog", skills.registry.list)
+        entries = list(catalog())
     except Exception:  # pragma: no cover - defensive
         return out
 

@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: news_social
+metadata:
+  nerya:
+    catalog_parent: research
 description: "Use for RSS-specific current news or social evidence, source-by-source headline review, and custom feed registration; general market research should use its own bounded research flow."
 version: 0.1.0
 license: MIT

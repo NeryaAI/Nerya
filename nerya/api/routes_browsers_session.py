@@ -486,6 +486,9 @@ class _CloakBrowserWorker:
             exc = result.get("exc") or RuntimeError("cloakbrowser launch failed")
             raise exc
 
+    def is_owner_thread(self) -> bool:
+        return threading.current_thread() is self._thread
+
     def call(self, fn, *, timeout_s: float) -> Any:
         outq: queue.Queue[Any] = queue.Queue(maxsize=1)
         self._jobs.put((fn, outq))
@@ -532,6 +535,11 @@ def _resolve_engine(client, override: str | None) -> tuple[str, str | None]:
 
 
 def routes():
+    """Legacy HTTP automation is retired; use /browsers/agent."""
+    return []
+
+
+def _retired_routes():
     def start(client, payload):
         body = payload or {}
         url = (body.get("url") or "").strip()
@@ -936,17 +944,10 @@ def routes():
         runtime = _runtime_get(sid)
         if runtime is None:
             return {"ok": False, "error": "session_not_found_or_not_cdp"}
-        if runtime.get("kind") == "cloakbrowser_worker" and not runtime.get("_inside_worker"):
-            worker = runtime.get("worker")
-            if worker is None:
-                return {"ok": False, "error": "worker_unavailable"}
-
-            def _run_in_worker(rt: dict[str, Any]) -> dict[str, Any]:
-                rt["_inside_worker"] = True
-                try:
-                    return cdp_action(client, payload)
-                finally:
-                    rt.pop("_inside_worker", None)
+        worker = runtime.get("worker")
+        if worker is not None and not worker.is_owner_thread():
+            def _run_in_worker(_rt: dict[str, Any]) -> dict[str, Any]:
+                return cdp_action(client, payload)
 
             try:
                 return worker.call(
@@ -1274,17 +1275,10 @@ def routes():
         runtime = _runtime_get(sid)
         if runtime is None:
             return {"ok": False, "error": "session_not_found_or_not_cdp"}
-        if runtime.get("kind") == "cloakbrowser_worker" and not runtime.get("_inside_worker"):
-            worker = runtime.get("worker")
-            if worker is None:
-                return {"ok": False, "error": "worker_unavailable"}
-
-            def _run_in_worker(rt: dict[str, Any]) -> dict[str, Any]:
-                rt["_inside_worker"] = True
-                try:
-                    return cdp_screenshot(client, payload)
-                finally:
-                    rt.pop("_inside_worker", None)
+        worker = runtime.get("worker")
+        if worker is not None and not worker.is_owner_thread():
+            def _run_in_worker(_rt: dict[str, Any]) -> dict[str, Any]:
+                return cdp_screenshot(client, payload)
 
             try:
                 return worker.call(

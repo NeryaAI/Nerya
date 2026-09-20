@@ -1,7 +1,8 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import {
   Advanced,
   Card,
@@ -25,6 +26,7 @@ import {
 import { clientApi, type SkillSummary } from "../../lib/clientApi";
 import { confirm as confirmDialog, toast } from "../../lib/dialogs";
 import { Select } from "../../components/Select";
+import { Markdown } from "../../components/chat/Markdown";
 
 // Backend actually sends source: "workspace" | "default" | "default_profile"
 // (describe_role marks alias roles), plus provider/model/execution_policy/
@@ -36,6 +38,7 @@ type AgentSummary = {
   tier: string;
   allowed_skills: string[];
   source: string;
+  description?: string;
   prompt_path?: string;
   prompt_excerpt?: string;
   provider?: string;
@@ -109,16 +112,12 @@ function tierOptions(t: Translator): Array<{ value: Tier; label: string }> {
   ];
 }
 
-// List avatar: first letter of the agent name, tinted by tier so the
-// column reads as a spectrum instead of 40 identical violet icons.
-function tierAvatarClass(tier: string): string {
-  if (tier === "high") {
-    return "border-magenta-400/30 bg-magenta-500/10 text-magenta-400";
-  }
-  if (tier === "light") {
-    return "border-ink-500/20 bg-ink-900/60 text-ink-300";
-  }
-  return "border-brand-400/30 bg-brand-500/10 text-brand-200";
+// Show an excerpt of the saved instructions, never an invented capability.
+function promptSummary(prompt: string): string {
+  const body = prompt.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, "");
+  const paragraph = body.split(/\n\s*\n/).map((block) => block.split("\n")
+    .filter((line) => !/^(#{1,6}\s|```)/.test(line.trim())).join(" ").trim()).find(Boolean) || "";
+  return paragraph.length > 360 ? `${paragraph.slice(0, 360).trimEnd()}…` : paragraph;
 }
 
 // Flattened execution_policy rows for the read-only Advanced panel.
@@ -173,6 +172,7 @@ export default function AgentsPage() {
   });
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [agentQuery, setAgentQuery] = useState("");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "workspace" | "default">("all");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [fetchingDetail, setFetchingDetail] = useState(false);
@@ -180,9 +180,26 @@ export default function AgentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [skillsError, setSkillsError] = useState<string | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailRevision, setDetailRevision] = useState(0);
+  const [createError, setCreateError] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const detailPanelRef = useRef<HTMLDivElement | null>(null);
+  const explicitSelection = useRef(false);
+
+  function roleLabel(name: string) {
+    const key = `roleNames.${name}`;
+    return t.has(key) ? t(key) : name.replace(/_/g, " ");
+  }
 
   function applySelected(name: string | null) {
+    if (name !== selected) {
+      setDetail(null);
+      setDetailError(null);
+      setEditing(false);
+      setEditorDirty(false);
+    }
     setSelected(name);
     // Keep the selection deep-linkable: /agents?agent=<name>.
     if (typeof window === "undefined") return;
@@ -193,7 +210,7 @@ export default function AgentsPage() {
   }
 
   async function selectAgent(name: string) {
-    if (name === selected) return;
+    if (name === selected || busy) return;
     if (editorDirty) {
       const ok = await confirmDialog({
         message: t("discardDraftConfirm"),
@@ -201,7 +218,14 @@ export default function AgentsPage() {
       });
       if (!ok) return;
     }
+    explicitSelection.current = true;
     applySelected(name);
+  }
+
+  async function closeEditor() {
+    if (editorDirty && !await confirmDialog({ message: t("discardEditsConfirm"), tone: "warning" })) return;
+    setEditing(false);
+    setEditorDirty(false);
   }
 
   function loadSkills() {
@@ -220,6 +244,7 @@ export default function AgentsPage() {
     setLoading(true);
     try {
       const res = await clientApi.agentsList();
+      if (!res.ok) throw new Error(t("loadFailedTitle"));
       const list: AgentSummary[] = (res.roles || []).slice();
       list.sort((a, b) => {
         if (a.source !== b.source) return a.source === "workspace" ? -1 : 1;
@@ -257,21 +282,23 @@ export default function AgentsPage() {
       };
     }
     setFetchingDetail(true);
+    setDetail(null);
+    setDetailError(null);
     clientApi
       .agentsGet(selected)
       .then((res) => {
         if (cancelled) return;
         if (!res.ok || !res.role) {
           setDetail(null);
-          setError(res.error || t("roleNotFound"));
+          setDetailError(res.error || t("roleNotFound"));
         } else {
           setDetail(res.role);
-          setError(null);
         }
       })
       .catch((e) => {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
+        setDetail(null);
+        setDetailError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
         if (!cancelled) setFetchingDetail(false);
@@ -280,19 +307,21 @@ export default function AgentsPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, detailRevision]);
+
+  // Explicit selection on a stacked mobile layout brings the role into view.
+  useEffect(() => {
+    if (!explicitSelection.current) return;
+    explicitSelection.current = false;
+    if (window.matchMedia("(max-width: 1023px)").matches) detailPanelRef.current?.scrollIntoView({ block: "start" });
   }, [selected]);
 
-  // Create-modal a11y: Escape closes, focus moves to the first field on
-  // open (mirrors lib/dialogs.tsx DialogShell behaviour).
   useEffect(() => {
-    if (!creating) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCreating(false);
-    };
-    document.addEventListener("keydown", onKey);
-    nameInputRef.current?.focus();
-    return () => document.removeEventListener("keydown", onKey);
-  }, [creating]);
+    if (!editorDirty) return;
+    const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [editorDirty]);
 
   const counts = useMemo(() => {
     const ws = items.filter((i) => i.source === "workspace").length;
@@ -301,10 +330,12 @@ export default function AgentsPage() {
 
   const filteredItems = useMemo(() => {
     const needle = agentQuery.trim().toLowerCase();
-    if (!needle) return items;
-    return items.filter((agent) =>
-      [
+    return items.filter((agent) => {
+      if (sourceFilter === "workspace" && agent.source !== "workspace") return false;
+      if (sourceFilter === "default" && agent.source === "workspace") return false;
+      return !needle || [
         agent.name,
+        roleLabel(agent.name),
         agent.tier,
         translateTier(t, agent.tier),
         agent.source,
@@ -315,10 +346,10 @@ export default function AgentsPage() {
         .filter(Boolean)
         .join(" ")
         .toLowerCase()
-        .includes(needle),
-    );
+        .includes(needle);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentQuery, items]);
+  }, [agentQuery, sourceFilter, items, t]);
 
   const selectedSummary = useMemo(
     () => items.find((i) => i.name === selected) ?? null,
@@ -346,6 +377,8 @@ export default function AgentsPage() {
       });
       if (!res.ok || !res.role) throw new Error(res.error || t("saveFailed"));
       setDetail(res.role);
+      setEditing(false);
+      setEditorDirty(false);
       toast({ message: t("savedInfo", { name: next.name }), tone: "ok" });
       await refreshList(next.name);
     } catch (e) {
@@ -375,15 +408,24 @@ export default function AgentsPage() {
   }
 
   async function createAgent() {
-    if (!/^[A-Za-z0-9_]+$/.test(draft.name)) {
-      setError(t("nameValidation"));
+    if (busy) return;
+    const name = draft.name.trim();
+    if (!/^[A-Za-z0-9_]+$/.test(name)) {
+      setCreateError(t("nameValidation"));
+      nameInputRef.current?.focus();
       return;
     }
+    if (items.some((agent) => agent.name === name)) {
+      setCreateError(t("nameExists"));
+      nameInputRef.current?.focus();
+      return;
+    }
+    setCreateError(null);
     setBusy(true);
     try {
       const res = await clientApi.agentsSave({
-        name: draft.name,
-        prompt: draft.prompt,
+        name,
+        prompt: draft.prompt.replaceAll("<role-name>", name),
         tier: draft.tier,
         allowed_skills: draft.allowed_skills
           .map((s) => s.trim())
@@ -400,16 +442,16 @@ export default function AgentsPage() {
       });
       await refreshList(res.role.name);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setCreateError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }
 
   return (
+    <Dialog.Root open={creating} onOpenChange={(open) => { if (!busy) { setCreating(open); setCreateError(null); } }}>
     <PageBody>
       <PageHeader
-        eyebrow={t("eyebrow")}
         title={t("title")}
         description={t("description")}
         actions={
@@ -418,20 +460,20 @@ export default function AgentsPage() {
               type="button"
               className="btn btn-ghost cursor-pointer"
               onClick={() => refreshList(selected)}
-              disabled={loading}
+              disabled={loading || busy || editorDirty}
             >
               <WrenchIcon size={14} />
               {loading ? tCommon("refreshing") : tCommon("refresh")}
             </button>
-            <button
+            <Dialog.Trigger asChild><button
               type="button"
               className="btn btn-primary cursor-pointer"
-              onClick={() => setCreating(true)}
-              disabled={busy}
+              disabled={busy || editorDirty}
+              title={editorDirty ? t("saveDraftFirst") : undefined}
             >
               <PlusIcon size={14} />
               {t("newAgent")}
-            </button>
+            </button></Dialog.Trigger>
           </>
         }
       />
@@ -451,10 +493,10 @@ export default function AgentsPage() {
         </div>
       ) : null}
 
-      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-5">
+      <div className="agent-library grid grid-cols-1 items-start gap-5 lg:grid-cols-[300px_minmax(0,1fr)] xl:grid-cols-[320px_minmax(0,1fr)]">
         <Card
-          title={t("personasCount", { count: counts.total })}
-          description={t("personasCountsDesc", { workspace: counts.workspace, defaults: counts.defaults })}
+          title={loading && !items.length ? t("loadingAgents") : t("personasCount", { count: counts.total })}
+          description={t("libraryHint")}
         >
           <div className="relative mb-3">
             <SearchIcon size={15} className="absolute left-2.5 top-2.5 text-ink-500" />
@@ -463,7 +505,14 @@ export default function AgentsPage() {
               value={agentQuery}
               onChange={(e) => setAgentQuery(e.target.value)}
               placeholder={t("searchPlaceholder")}
+              aria-label={t("searchPlaceholder")}
             />
+          </div>
+          <div className="mb-4 flex gap-1 rounded-lg bg-[color:var(--bg)] p-1" role="group" aria-label={t("filterSource")}>
+            {(["all", "workspace", "default"] as const).map((source) => <button key={source} type="button" aria-pressed={sourceFilter === source} onClick={() => setSourceFilter(source)}
+              className={`min-h-8 min-w-0 flex-1 rounded-md px-1.5 text-xs transition-colors ${sourceFilter === source ? "bg-[color:var(--card)] font-semibold text-[color:var(--text-base)] shadow-sm" : "text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]"}`}>
+              {t(source === "all" ? "filterAll" : source === "workspace" ? "filterCustom" : "filterBuiltIn")}
+            </button>)}
           </div>
           {loading && items.length === 0 ? (
             <div className="space-y-2" aria-hidden>
@@ -495,43 +544,41 @@ export default function AgentsPage() {
           ) : items.length === 0 ? (
             <Empty title={t("noAgentsYet")} subtitle={t("noAgentsYetHint")} />
           ) : filteredItems.length === 0 ? (
-            <Empty title={t("noMatchingAgents")} subtitle={t("noMatchingAgentsHint")} />
+            <div className="text-center"><Empty title={t("noMatchingAgents")} subtitle={t("noMatchingAgentsHint")} /><button type="button" className="btn btn-ghost mb-3" onClick={() => { setAgentQuery(""); setSourceFilter("all"); }}>{t("clearFilters")}</button></div>
           ) : (
-            <ul className="embedded-scroll max-h-[calc(100vh-260px)] min-h-[260px] space-y-1 pr-1">
+            <ul className="agent-library-list embedded-scroll max-h-64 space-y-1 pr-1 lg:max-h-[calc(100dvh-360px)] lg:min-h-[240px]" aria-label={t("title")}>
               {filteredItems.map((agent) => (
                 <li key={`${agent.source}_${agent.name}`}>
                   <button
                     type="button"
-                    className={`group w-full text-left rounded-lg border px-3 py-2.5 text-[12px] cursor-pointer transition-colors duration-200 ${
+                    aria-pressed={selected === agent.name}
+                    disabled={busy}
+                    className={`group w-full text-left rounded-lg border px-3 py-3 text-[13px] cursor-pointer transition-colors disabled:opacity-50 ${
                       selected === agent.name
                         ? "border-brand-400/60 bg-brand-500/10"
-                        : "border-brand-500/10 bg-ink-950/30 hover:border-brand-500/25 hover:bg-brand-500/[0.04]"
+                        : "border-transparent hover:bg-[color:var(--card-hi)]"
                     }`}
                     onClick={() => selectAgent(agent.name)}
                   >
                     <div className="flex items-start gap-2.5">
                       <span
-                        className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border font-mono text-[13px] font-semibold ${tierAvatarClass(agent.tier)}`}
+                        className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[color:var(--line)] bg-[color:var(--bg)] text-[color:var(--text-muted)]"
                         aria-hidden
                       >
-                        {agent.name.charAt(0).toUpperCase()}
+                        <AgentsIcon size={17} />
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center justify-between gap-2">
-                          <span className="truncate font-mono text-[12px] text-ink-100">
-                            {agent.name}
+                          <span className="truncate font-medium text-ink-100" title={agent.name}>
+                            {roleLabel(agent.name)}
                           </span>
                         </span>
                         <span
                           className="mt-1 block truncate text-[11px] text-ink-500"
                           title={(agent.allowed_skills || []).join(", ") || undefined}
                         >
-                          {translateTier(t, agent.tier)}
-                          {" · "}
                           {t("skillsCount", { count: agent.allowed_skills.length })}
-                          {agent.source !== "workspace"
-                            ? ` · ${translateSource(t, agent.source)}`
-                            : ""}
+                          {" · "}{t(agent.source === "workspace" ? "filterCustom" : "filterBuiltIn")}
                         </span>
                       </span>
                     </div>
@@ -542,41 +589,27 @@ export default function AgentsPage() {
           )}
         </Card>
 
+        <div ref={detailPanelRef} className="min-w-0 scroll-mt-4" role="region" aria-label={t("agentDetails")} data-testid="agent-details">
         <Card
-          title={detail ? <span className="font-mono">{detail.name}</span> : t("pickAgent")}
+          title={selected ? roleLabel(selected) : t("pickAgent")}
           description={
-            detail
-              ? t("detailDescription", {
-                  source: translateSource(t, detail.source),
-                  tier: translateTier(t, detail.tier),
-                  count: detail.allowed_skills.length,
-                })
+            selected
+              ? selected
               : t("pickAgentHint")
           }
           actions={
-            detail && detail.source === "workspace" ? (
-              <button
-                type="button"
-                className="btn btn-ghost cursor-pointer text-danger"
-                onClick={() => deleteAgent(detail.name)}
-                disabled={busy}
-              >
-                <TrashIcon size={14} />
-                {tCommon("delete")}
-              </button>
-            ) : null
+            detail && !fetchingDetail ? <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => { if (editing) void closeEditor(); else setEditing(true); }}>
+              {editing ? t("backToOverview") : t("editConfiguration")}
+            </button> : null
           }
         >
-          {detail ? (
+          {fetchingDetail || (selected && !detail && !detailError) ? (
+            <div className="space-y-4 py-4" role="status" aria-label={t("loadingDetails")}><div className="skeleton h-4 w-2/5" /><div className="skeleton h-16 w-full" /><div className="skeleton h-10 w-3/4" /></div>
+          ) : detailError ? (
+            <div className="space-y-4 py-3"><ErrorBanner error={detailError} /><button type="button" className="btn btn-primary" onClick={() => setDetailRevision((value) => value + 1)}>{t("retry")}</button></div>
+          ) : detail ? (
             <>
-              {/* Detail fetch no longer touches `busy`: while it is in
-                  flight the previous editor dims instead of faking
-                  "Saving..." on every button. */}
-              <div
-                className={`transition-opacity ${
-                  fetchingDetail ? "pointer-events-none opacity-60" : ""
-                }`}
-              >
+              {editing ? <fieldset disabled={busy} className="min-w-0">
                 <AgentEditor
                   key={detail.name}
                   detail={detail}
@@ -584,10 +617,27 @@ export default function AgentsPage() {
                   skillOptions={skillOptions}
                   onSave={persistDetailEdit}
                   onDirtyChange={setEditorDirty}
+                  onCancel={closeEditor}
                 />
-              </div>
+              </fieldset> : <div className="space-y-6 py-2" data-testid="agent-overview">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Pill tone={detail.source === "workspace" ? "brand" : "neutral"}>{t(detail.source === "workspace" ? "filterCustom" : "filterBuiltIn")}</Pill>
+                  <span className="text-xs text-[color:var(--text-muted)]">{t("llmTier")}: {translateTier(t, detail.tier)}</span>
+                </div>
+                <section>
+                  <h2 className="mb-2 text-sm font-semibold">{t("responsibility")}</h2>
+                  <p className="max-w-[68ch] whitespace-pre-wrap break-words text-sm leading-7 text-[color:var(--text-muted)]">{selectedSummary?.description || promptSummary(detail.prompt) || t("noDescription")}</p>
+                </section>
+                <section>
+                  <h2 className="mb-3 text-sm font-semibold">{t("preloadedSkills")}</h2>
+                  <div className="flex flex-wrap gap-2">{detail.allowed_skills.length ? detail.allowed_skills.map((skill) => <Pill key={skill}>{skillOptions.find((item) => item.id === skill)?.label || skill}</Pill>) : <span className="text-sm text-[color:var(--text-muted)]">{t("noSkillsSelected")}</span>}</div>
+                </section>
+                <p className="border-t border-[color:var(--line)] pt-4 text-xs leading-6 text-[color:var(--text-muted)]">{t(detail.source === "workspace" ? "customHint" : "builtInHint")}</p>
+                <Advanced title={t("viewInstructions")}><div className="max-h-96 overflow-auto"><Markdown>{detail.prompt}</Markdown></div></Advanced>
+              </div>}
               <Advanced title={t("advancedTitle")}>
                 <div className="space-y-1.5 text-[12px]">
+                  <AdvancedRow label={t("storagePath")} value={detail.prompt_path || ""} />
                   <AdvancedRow
                     label={t("advProvider")}
                     value={detail.provider || selectedSummary?.provider || ""}
@@ -619,120 +669,59 @@ export default function AgentsPage() {
                   ) : null}
                 </div>
               </Advanced>
+              {detail.source === "workspace" && !editing ? <div className="mt-4 flex justify-end border-t border-[color:var(--line)] pt-3"><button type="button" className="btn btn-ghost text-danger" disabled={busy} onClick={() => deleteAgent(detail.name)}><TrashIcon size={14} />{tCommon("delete")}</button></div> : null}
             </>
           ) : (
             <Empty title={t("pickAgent")} subtitle={t("pickAgentHint")} />
           )}
         </Card>
+        </div>
       </div>
 
-      {creating ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setCreating(false);
-          }}
-        >
-          <div className="embedded-scroll w-[760px] max-w-[92vw] max-h-[88vh] rounded-2xl border border-brand-500/20 bg-bg-card shadow-glow" role="dialog" aria-modal="true" aria-label={t("createPersona")}>
-            <div className="flex items-start justify-between gap-4 border-b border-brand-500/10 px-6 py-4">
-              <div className="flex items-start gap-3">
-                <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-brand-500/20 bg-brand-500/10 text-brand-200">
-                  <AgentsIcon size={18} />
-                </span>
-                <div>
-                  <h3 className="text-lg font-semibold text-ink-100">{t("createPersona")}</h3>
-                  <p className="mt-1 text-[12px] text-ink-400">
-                    {t.rich("createPersonaPath", {
-                      code: (chunks) => <code className="text-fluid-300">{chunks}</code>,
-                    })}
-                  </p>
+      <Dialog.Portal>
+        <Dialog.Overlay className="ui-modal-overlay" />
+        <Dialog.Content className="ui-dialog agent-create-dialog" onOpenAutoFocus={(event) => { event.preventDefault(); nameInputRef.current?.focus(); }}>
+          <div className="flex items-start justify-between gap-4 border-b border-[color:var(--line)] px-5 py-4 sm:px-6">
+            <div>
+              <Dialog.Title className="text-lg font-semibold">{t("createPersona")}</Dialog.Title>
+              <Dialog.Description className="mt-1 text-sm leading-6 text-[color:var(--text-muted)]">{t("createHint")}</Dialog.Description>
+            </div>
+            <Dialog.Close disabled={busy} className="ui-icon-button shrink-0" aria-label={tCommon("close")}><XIcon size={17} /></Dialog.Close>
+          </div>
+          <form className="space-y-5 px-5 pt-5 sm:px-6" onSubmit={(event) => { event.preventDefault(); void createAgent(); }}>
+            <fieldset disabled={busy} className="min-w-0 space-y-5">
+              {createError ? <div id="agent-create-error" role="alert" className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{createError}</div> : null}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label className="block text-sm">
+                  {t("nameLabel")}
+                  <input ref={nameInputRef} type="text" className="input-dark mt-2" placeholder="risk_critic" value={draft.name}
+                    aria-describedby={createError ? "agent-create-error agent-name-help" : "agent-name-help"}
+                    onChange={(event) => { setDraft({ ...draft, name: event.target.value }); setCreateError(null); }} />
+                  <span id="agent-name-help" className="mt-1.5 block text-xs leading-5 text-[color:var(--text-muted)]">{t("nameHint")}</span>
+                </label>
+                <div className="text-sm">
+                  <div className="mb-2">{t("llmTier")}</div>
+                  <Select<Tier> value={draft.tier} onChange={(tier) => setDraft({ ...draft, tier })} options={tierOptions(t)} size="sm" ariaLabel={t("llmTier")} />
                 </div>
               </div>
-              <button
-                type="button"
-                className="icon-btn h-8 w-8"
-                onClick={() => setCreating(false)}
-                aria-label={tCommon("close")}
-              >
-                <XIcon size={15} />
-              </button>
-            </div>
-
-            <div className="space-y-4 px-6 py-5">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <label className="text-[12px] text-ink-300">
-                  {t("nameLabel")}
-                  <input
-                    type="text"
-                    ref={nameInputRef}
-                    className="input-dark mt-1 w-full"
-                    placeholder="risk_critic"
-                    value={draft.name}
-                    onChange={(e) =>
-                      setDraft({ ...draft, name: e.target.value })
-                    }
-                  />
-                </label>
-                <label className="text-[12px] text-ink-300 block">
-                  {t("llmTier")}
-                  <div className="mt-1">
-                    <Select<Tier>
-                      value={draft.tier}
-                      onChange={(value) => setDraft({ ...draft, tier: value })}
-                      options={tierOptions(t)}
-                      size="sm"
-                      ariaLabel={t("llmTier")}
-                    />
-                  </div>
-                </label>
+              <div className="text-sm">
+                <div className="mb-2">{t("preloadedSkills")}</div>
+                <SkillSelector selected={draft.allowed_skills} options={skillOptions} onChange={(allowed_skills) => setDraft({ ...draft, allowed_skills })} />
               </div>
-
-              <div className="block text-[12px] text-ink-300">
-                <div className="mb-1">{t("preloadedSkills")}</div>
-                <SkillSelector
-                  selected={draft.allowed_skills}
-                  options={skillOptions}
-                  onChange={(allowed_skills) =>
-                    setDraft({ ...draft, allowed_skills })
-                  }
-                />
-              </div>
-
-              <label className="block text-[12px] text-ink-300">
+              <label className="block text-sm">
                 {t("promptBody")}
-                <textarea
-                  className="input-dark mt-1 min-h-[320px] w-full font-mono text-[12px]"
-                  rows={14}
-                  value={draft.prompt}
-                  onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
-                />
+                <textarea className="input-dark mt-2 min-h-[200px] font-mono text-[13px] leading-6" rows={8} value={draft.prompt} onChange={(event) => setDraft({ ...draft, prompt: event.target.value })} />
               </label>
-
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  className="btn btn-ghost cursor-pointer"
-                  onClick={() => setCreating(false)}
-                  disabled={busy}
-                >
-                  <XIcon size={14} />
-                  {tCommon("cancel")}
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary cursor-pointer"
-                  onClick={createAgent}
-                  disabled={busy || !draft.name.trim()}
-                >
-                  <CheckIcon size={14} />
-                  {busy ? tCommon("saving") : t("create")}
-                </button>
-              </div>
+            </fieldset>
+            <div className="sticky bottom-0 flex justify-end gap-2 border-t border-[color:var(--line)] bg-[color:var(--overlay-surface)] py-4">
+              <Dialog.Close asChild><button type="button" className="btn btn-ghost" disabled={busy}>{tCommon("cancel")}</button></Dialog.Close>
+              <button type="submit" className="btn btn-primary" disabled={busy || !draft.name.trim()}><PlusIcon size={14} />{busy ? tCommon("saving") : t("create")}</button>
             </div>
-          </div>
-        </div>
-      ) : null}
+          </form>
+        </Dialog.Content>
+      </Dialog.Portal>
     </PageBody>
+    </Dialog.Root>
   );
 }
 
@@ -742,12 +731,14 @@ function AgentEditor({
   skillOptions,
   onSave,
   onDirtyChange,
+  onCancel,
 }: {
   detail: AgentDetail;
   busy: boolean;
   skillOptions: Array<{ id: string; label: string; style: string }>;
   onSave: (next: AgentDetail) => void | Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
+  onCancel: () => void | Promise<void>;
 }) {
   const t = useTranslations("agentsPage");
   const tCommon = useTranslations("common");
@@ -776,7 +767,7 @@ function AgentEditor({
   }, [dirty, onDirtyChange]);
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-5" data-testid="agent-editor">
       <div className="grid grid-cols-1 xl:grid-cols-[220px_1fr] gap-3">
         <label className="text-[12px] text-ink-300 block">
           {t("llmTier")}
@@ -803,20 +794,18 @@ function AgentEditor({
       <label className="text-[12px] text-ink-300 block">
         {t("promptBodyShort")}
         <textarea
-          className="input-dark mt-1 w-full font-mono text-[12px]"
-          rows={20}
+          className="input-dark mt-2 w-full font-mono text-[13px] leading-6"
+          rows={12}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
         />
       </label>
 
-      {detail.prompt_path ? (
-        <p className="text-[11px] text-ink-500 font-mono">
-          {detail.prompt_path}
-        </p>
-      ) : null}
+      <p className="text-xs leading-6 text-[color:var(--text-muted)]">{t("promptHelp")}</p>
 
-      <div className="flex justify-end gap-2">
+      <div className="sticky bottom-0 flex flex-wrap items-center justify-end gap-2 border-t border-[color:var(--line)] bg-[color:var(--card)] py-3">
+        <span className="mr-auto text-xs text-[color:var(--text-muted)]" role="status">{dirty ? t("unsavedChanges") : t("noChanges")}</span>
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => void onCancel()}>{tCommon("cancel")}</button>
         <button
           type="button"
           className="btn btn-primary cursor-pointer"
@@ -851,6 +840,7 @@ function SkillSelector({
 }) {
   const t = useTranslations("agentsPage");
   const selectedSet = new Set(selected);
+  const optionsId = useId();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const selectedOptions = options.filter((skill) => selectedSet.has(skill.id));
@@ -883,7 +873,7 @@ function SkillSelector({
   }
 
   return (
-    <div className="mt-1 rounded-lg border border-brand-500/10 bg-ink-900/40 p-2">
+    <div className="mt-1 rounded-lg border border-[color:var(--line)] bg-[color:var(--bg)] p-2">
       <div className="flex min-h-8 items-center gap-2">
         <div className="min-w-0 flex-1">
           {selected.length ? (
@@ -893,10 +883,12 @@ function SkillSelector({
                   key={skill.id}
                   type="button"
                   onClick={() => toggle(skill.id)}
-                  className="inline-flex max-w-[160px] items-center gap-1 rounded-md border border-brand-400/30 bg-brand-500/10 px-2 py-0.5 font-mono text-[10px] text-brand-100"
+                  aria-label={t("removeSkill", { name: skill.label })}
+                  title={skill.id}
+                  className="inline-flex min-h-8 max-w-[200px] items-center gap-1 rounded-md border border-[color:var(--line-hi)] bg-[color:var(--card)] px-2 py-1 text-xs text-[color:var(--text-base)]"
                 >
-                  <span className="truncate">{skill.id}</span>
-                  <XIcon size={11} className="shrink-0 text-brand-200" />
+                  <span className="truncate">{skill.label}</span>
+                  <XIcon size={13} className="shrink-0 text-[color:var(--text-muted)]" />
                 </button>
               ))}
               {selectedMissing.slice(0, 4).map((id) => (
@@ -904,15 +896,16 @@ function SkillSelector({
                   key={id}
                   type="button"
                   onClick={() => toggle(id)}
-                  className="inline-flex max-w-[160px] items-center gap-1 rounded-md border border-warn/30 bg-warn/10 px-2 py-0.5 font-mono text-[10px] text-warn"
+                  aria-label={t("removeSkill", { name: id })}
+                  className="inline-flex min-h-8 max-w-[200px] items-center gap-1 rounded-md border border-warn/30 bg-warn/10 px-2 py-1 text-xs text-warn"
                 >
                   <span className="truncate">{id}</span>
                   <XIcon size={11} className="shrink-0" />
                 </button>
               ))}
-              {selected.length > 6 ? (
+              {selected.length > selectedOptions.slice(0, 6).length + selectedMissing.slice(0, 4).length ? (
                 <span className="rounded-md border border-brand-500/10 bg-white/[0.03] px-2 py-0.5 text-[10px] text-ink-400">
-                  +{selected.length - 6}
+                  +{selected.length - selectedOptions.slice(0, 6).length - selectedMissing.slice(0, 4).length}
                 </span>
               ) : null}
             </div>
@@ -924,7 +917,7 @@ function SkillSelector({
           <button
             type="button"
             onClick={() => onChange([])}
-            className="rounded-md border border-brand-500/10 px-2 py-1 text-[10px] text-ink-400 hover:border-brand-500/30 hover:text-white"
+            className="min-h-8 rounded-md px-2 py-1 text-xs text-[color:var(--text-muted)] hover:bg-[color:var(--card-hi)] hover:text-[color:var(--text-base)]"
           >
             {t("clear")}
           </button>
@@ -932,7 +925,9 @@ function SkillSelector({
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
-          className="inline-flex items-center gap-1 rounded-md border border-brand-500/20 px-2 py-1 text-[11px] text-brand-200 hover:bg-brand-500/10"
+          aria-expanded={open}
+          aria-controls={optionsId}
+          className="inline-flex min-h-8 items-center gap-1 rounded-md border border-[color:var(--line-hi)] bg-[color:var(--card)] px-2 py-1 text-xs text-[color:var(--text-base)] hover:bg-[color:var(--card-hi)]"
         >
           <PlusIcon size={12} />
           {t("add")}
@@ -940,7 +935,7 @@ function SkillSelector({
       </div>
 
       {open ? (
-        <div className="mt-2 border-t border-brand-500/10 pt-2">
+        <div id={optionsId} className="mt-2 border-t border-[color:var(--line)] pt-2">
           <div className="relative mb-2">
             <SearchIcon size={14} className="absolute left-2.5 top-2.5 text-ink-500" />
             <input
@@ -948,6 +943,7 @@ function SkillSelector({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t("searchSkillsPlaceholder")}
+              aria-label={t("searchSkillsPlaceholder")}
             />
           </div>
           <div className="embedded-list-scroll-sm space-y-1">
@@ -958,27 +954,30 @@ function SkillSelector({
                   key={skill.id}
                   type="button"
                   onClick={() => toggle(skill.id)}
+                  role="checkbox"
+                  aria-checked={checked}
+                  aria-label={skill.label}
                   className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-[11px] transition-colors ${
                     checked
-                      ? "border-brand-400/50 bg-brand-500/15 text-white"
-                      : "border-brand-500/10 bg-ink-950/40 text-ink-300 hover:bg-brand-500/[0.04]"
+                      ? "border-brand-400/50 bg-brand-500/10 text-[color:var(--text-base)]"
+                      : "border-transparent text-[color:var(--text-muted)] hover:bg-[color:var(--card-hi)]"
                   }`}
                 >
                   <span
                     className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border ${
-                      checked ? "border-brand-300 bg-brand-500" : "border-ink-600"
+                      checked ? "border-brand-600 bg-brand-600 text-white" : "border-[color:var(--line-hi)]"
                     }`}
                   >
                     {checked ? <CheckIcon size={12} /> : null}
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
-                      <SkillsIcon size={12} className="shrink-0 text-brand-200" />
-                      <span className="block truncate font-mono text-[11px]">{skill.id}</span>
+                      <SkillsIcon size={14} className="shrink-0 text-[color:var(--text-muted)]" />
+                      <span className="block truncate text-xs">{skill.label}</span>
                     </span>
                     {skill.label !== skill.id || skill.style ? (
                       <span className="block truncate text-[10px] text-ink-500">
-                        {[skill.label !== skill.id ? skill.label : "", skill.style]
+                        {[skill.label !== skill.id ? skill.id : "", skill.style]
                           .filter(Boolean)
                           .join(" · ")}
                       </span>

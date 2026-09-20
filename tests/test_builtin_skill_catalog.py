@@ -28,6 +28,7 @@ SUPPORTED_FRONTMATTER_FIELDS = {
     "version",
     "license",
     "author",
+    "metadata",  # Discovery only; no actions, routing policy or permissions.
 }
 
 
@@ -51,6 +52,18 @@ def test_builtin_skill_md_files_parse_and_stay_compact() -> None:
             (skill_dir / "references" / "full-playbook.md").exists()
             or (skill_dir.parent / "references" / "full-playbook.md").exists()
         )
+        # A primary workflow may link existing leaf references directly;
+        # requiring another full-playbook would duplicate the library.
+        references = re.findall(
+            r"`([^`]+/references/full-playbook\.md)`",
+            md.read_text(encoding="utf-8"),
+        )
+        if references and not has_playbook:
+            for reference in references:
+                target = (skill_dir / reference).resolve()
+                assert target.is_relative_to(skill_dir.resolve())
+                assert target.is_file(), reference
+            has_playbook = True
         assert has_playbook, (
             f"{skill_dir.name} should keep the expanded playbook under "
             "references/ (own or hub)"
@@ -63,6 +76,16 @@ def test_builtin_skill_frontmatter_has_no_routing_extensions() -> None:
         doc, _body = _split_frontmatter(md.read_text(encoding="utf-8"), source=md)
         extras = set(doc) - SUPPORTED_FRONTMATTER_FIELDS
         assert extras == set(), f"{md} has unsupported frontmatter: {sorted(extras)}"
+        metadata = doc.get("metadata", {})
+        assert isinstance(metadata, dict), md
+        assert set(metadata) <= {"nerya"}, md
+        grouping = metadata.get("nerya", {})
+        assert isinstance(grouping, dict), md
+        assert set(grouping) <= {"catalog_parent"}, md
+        if grouping:
+            parent = grouping["catalog_parent"]
+            assert isinstance(parent, str) and parent.strip(), md
+            assert parent != doc["name"], md
 
 
 def test_builtin_skill_tree_has_no_legacy_definition_surfaces() -> None:

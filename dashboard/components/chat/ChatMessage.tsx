@@ -1,28 +1,23 @@
 "use client";
 
 import { type ReactNode, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import type {
   AssistantMessage,
   ChatAttachment,
   NativeBlockEnvelope,
   UserMessage,
 } from "../../lib/chat";
-import { liveEventsToBlocks, topLevelDecisionText } from "../../lib/chat";
+import { liveEventsToBlocks } from "../../lib/chat";
+import { finalReplyText, turnWithoutFinalReply, withoutFinalReply } from "../../lib/chatResults";
 import type { ApprovalCard } from "../../lib/clientApi";
 import {
-  AgentSegmentBlock,
-  type AgentSegmentInfo,
   formatDuration,
-  LiveAgentTranscriptBlock,
-  type MemberStep,
   NativeBlocksTrack,
   StrategyProposalsHoist,
   StreamedMarkdown,
   TurnBlocks,
   activeProposalsFromTurn,
-  collectAgentSegments,
-  collectLiveAgentSegments,
 } from "./TurnBlocks";
 import { formatTime as formatTimeWithTz } from "../../lib/format";
 import {
@@ -34,6 +29,10 @@ import {
   XIcon,
 } from "../icons";
 import { NeryaAvatar } from "../NeryaLogo";
+import { readableTurnSteps } from "../../lib/readableExecution";
+import { toolPresentation } from "../../lib/agentConversation";
+import { ReadableExecution } from "./ReadableExecution";
+import { browserCalls } from '../../lib/browserTrace';
 
 function formatTime(ts: number): string {
   try {
@@ -340,10 +339,12 @@ function MessageActions({
   text,
   onEdit,
   onDelete,
+  persistent = false,
 }: {
   text: string;
   onEdit?: () => void;
   onDelete?: () => void;
+  persistent?: boolean;
 }) {
   const t = useTranslations("chat");
   // Hidden until the parent message (``group``) is hovered or the row
@@ -352,7 +353,7 @@ function MessageActions({
   // have no hover, so the row falls back to always-visible via the
   // ``hover:none`` media query.
   return (
-    <div className="mt-1 flex items-center gap-1.5 text-[10px] opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+    <div className={`mt-1 flex items-center gap-1.5 text-[10px] transition-opacity duration-150 ${persistent ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"}`}>
       <CopyButton text={text} />
       {onEdit ? (
         <IconButton label={t("editMessage")} onClick={onEdit}>
@@ -514,17 +515,9 @@ export function UserBubble({
           )}
           {!editing ? <MessageAttachmentList attachments={msg.attachments} /> : null}
         </div>
-        {!editing ? (
-          <div className="flex justify-end">
-            <MessageActions
-              text={msg.text}
-              onEdit={msg.text ? onEdit : undefined}
-              onDelete={onDelete}
-            />
-          </div>
-        ) : null}
-        <div className="text-[10px] text-ink-400 mt-1 text-right">
-          {formatTime(msg.ts)}
+        <div data-testid="user-message-meta" className="mt-1 flex min-h-7 items-center justify-end gap-2 text-[10px] text-[color:var(--text-muted)]">
+          {!editing ? <MessageActions text={msg.text} onEdit={msg.text ? onEdit : undefined} onDelete={onDelete} /> : null}
+          <time>{formatTime(msg.ts)}</time>
         </div>
       </div>
     </div>
@@ -532,390 +525,90 @@ export function UserBubble({
 }
 
 export function AssistantBubble({
-  msg,
-  pendingApprovals,
-  onApprovalAction,
-  resolvingApprovalIds,
-  onRetry,
-  onEdit,
-  onDelete,
-  editing = false,
-  editValue = "",
-  onEditChange,
-  onSaveEdit,
-  onCancelEdit,
+  msg, pendingApprovals, onApprovalAction, resolvingApprovalIds, onRetry,
+  onEdit, onDelete, editing = false, editValue = "", onEditChange,
+  onSaveEdit, onCancelEdit, onOpenResult, traceContent, traceLabel, conversationId = '', onOpenBrowser,
 }: {
   msg: AssistantMessage;
   pendingApprovals?: Map<string, ApprovalCard>;
   onApprovalAction?: (callbackData: string) => void;
   resolvingApprovalIds?: Set<string>;
-  onRetry?: () => void;
-  onEdit?: () => void;
-  onDelete?: () => void;
-  editing?: boolean;
-  editValue?: string;
-  onEditChange?: (value: string) => void;
-  onSaveEdit?: () => void;
-  onCancelEdit?: () => void;
+  onRetry?: () => void; onEdit?: () => void; onDelete?: () => void;
+  editing?: boolean; editValue?: string; onEditChange?: (value: string) => void;
+  onSaveEdit?: () => void; onCancelEdit?: () => void; onOpenResult?: () => void;
+  traceContent?: ReactNode; traceLabel?: string; conversationId?: string; onOpenBrowser?: () => void;
 }) {
-  // Render each assistant turn in execution order: thinking, then tool
-  // use/results, and finally the reply text. While the turn is still
-  // running, keep the reply text at the bottom so live activity and audit
-  // details stay in the order the agent produced them.
-  const reasoning = topLevelDecisionText(msg.turn);
-  const showStreaming = msg.loading && !msg.error;
-  const liveEvents = mergeActivityEvents(
-    msg.turn?.activity_events ?? [],
-    msg.live_events ?? [],
-  );
-  const hasLive = liveEvents.length > 0;
-  const hasTurnBody = !!msg.turn && (
-    (msg.turn.actions?.length ?? 0) > 0
-    || (msg.turn.tool_trace?.length ?? 0) > 0
-    || (msg.turn.events?.length ?? 0) > 0
-    || Object.keys(msg.turn.subagents ?? {}).length > 0
-    || !!msg.turn.plan?.kind
-  );
-  // Source of truth for the chronological tool/thinking trace:
-  //   - while ``loading`` we materialise the live event stream into
-  //     block envelopes so the chat can render
-  //     ``NativeBlocksTrack`` immediately, expanding the most recent
-  //     pending tool_use card.
-  //   - after the turn returns ``TurnBlocks`` owns the render (it
-  //     already re-emits ``NativeBlocksTrack`` from ``msg.turn.blocks``).
-  //     If the backend skipped native blocks, fall back to the
-  //     reconstructed live stream so the audit history isn't lost.
-  const finalBlocks = msg.turn?.blocks ?? [];
-  const liveBlocks = hasLive ? liveEventsToBlocks(liveEvents) : [];
-  const fallbackBlocks = reasoning ? withoutTextBlocks(liveBlocks) : liveBlocks;
-  const approvalEvents = liveEvents.filter(
-    (ev) => ev.kind === "approval.request" || ev.kind === "approval.resolved",
-  );
-  const activityEvents = liveEvents.filter(
-    (ev) => ev.kind.startsWith("subagent.") || ev.kind.startsWith("team."),
-  );
-  const replayEvents = liveEvents.filter((ev) => ev.kind === "tool.complete");
-  // Strategy proposals are hoisted to the BOTTOM of the bubble (under the
-  // reply/verdict) rather than the top of the trace, so the operator reads what
-  // the agent did and its recommendation before approving/adding. The in-trace
-  // duplicates stay suppressed via ``suppressTopProposalHoist``.
-  const bottomProposals =
-    !msg.loading && !msg.error && msg.turn
-      ? activeProposalsFromTurn(msg.turn)
-      : [];
-  // Multi-agent turns (team_run / subagent_run) are broken out of the
-  // single Nerya bubble: each sub-agent becomes its own avatar + bubble
-  // ("speaker") and their generic tool cards are suppressed from the
-  // trace. Only applies to committed, non-error turns.
-  const agentSegments =
-    !msg.loading && !msg.error && msg.turn
-      ? collectAgentSegments(msg.turn)
-      : { segments: [], suppressedCallIds: new Set<string>() };
-  // While the turn is still streaming, hoist the live team/subagent snapshot
-  // into a single group-chat transcript: A says a step, then B says a step,
-  // in event order. The settled turn can still render a tidy final summary.
-  const liveAgentSegments =
-    msg.loading && !msg.error
-      ? collectLiveAgentSegments(liveBlocks).segments
-      : [];
-  // Committed multi-agent turns lose the per-member step stream: the
-  // ``team_run`` result is compacted for the model down to
-  // output/tokens/usd. The rehydrated ``activity_events`` (subagent.step /
-  // team.member.*) still carry the full trace, so rebuild the per-member
-  // timeline with the same reducer the live view uses and merge it back so a
-  // settled team renders the same step-by-step progress instead of one card.
-  const committedSegments: AgentSegmentInfo[] = (() => {
-    const base = agentSegments.segments;
-    if (msg.loading || !base.length || !liveBlocks.length) return base;
-    const stepsByName = new Map<string, MemberStep[]>();
-    for (const seg of collectLiveAgentSegments(liveBlocks).segments) {
-      for (const m of seg.members) {
-        if (m.steps?.length && !stepsByName.has(m.name)) {
-          stepsByName.set(m.name, m.steps);
-        }
-      }
-    }
-    if (!stepsByName.size) return base;
-    return base.map((seg) => ({
-      ...seg,
-      members: seg.members.map((m) =>
-        m.steps?.length
-          ? m
-          : { ...m, steps: stepsByName.get(m.name) ?? m.steps },
-      ),
-    }));
-  })();
+  const zh = useLocale().startsWith("zh");
+  const reply = finalReplyText(msg);
+  const events = mergeActivityEvents(msg.turn?.activity_events ?? [], msg.live_events ?? []);
+  const streamedBlocks = liveEventsToBlocks(events);
+  const liveBlocks = withoutFinalReply(streamedBlocks.length ? streamedBlocks : msg.turn?.blocks || [], reply);
+  const traceTurn = msg.turn ? turnWithoutFinalReply(msg.turn, reply) : undefined;
+  const browserOperations = browserCalls([...(msg.turn?.blocks || []), ...streamedBlocks], events);
+  const approvalEvents = events.filter((e) => e.kind === "approval.request" || e.kind === "approval.resolved");
+  const activityEvents = events.filter((e) => e.kind.startsWith("subagent.") || e.kind.startsWith("team."));
+  const replayEvents = events.filter((e) => e.kind === "tool.complete");
+  const hasStoredTrace = Boolean(traceTurn && ((traceTurn.blocks?.length ?? 0)
+    || (traceTurn.tool_trace?.length ?? 0) || (traceTurn.events?.length ?? 0)
+    || (traceTurn.actions?.length ?? 0) || traceTurn.plan?.kind || activityEvents.length));
+  const pending = Boolean(pendingApprovals?.size && (approvalEvents.length
+    || liveBlocks.some((env) => (env.block?.kind || env.kind) === "approval_request")
+    || traceTurn?.blocks?.some((env) => (env.block?.kind || env.kind) === "approval_request")));
+  const proposals = !msg.loading && !msg.error && msg.turn ? activeProposalsFromTurn(msg.turn) : [];
+  // Specialized blocks, approval controls and team activities retain their existing renderer.
+  const readableSteps = traceContent === undefined && !pending && !approvalEvents.length && !activityEvents.length
+    && !traceTurn?.plan && !traceTurn?.events?.length && !traceTurn?.actions?.length
+    ? readableTurnSteps(withoutFinalReply([...(msg.turn?.blocks || []), ...streamedBlocks], reply), msg.ts) : null;
+  const toolSteps = readableSteps?.filter((step) => step.event.kind !== "text") || [];
+  const failedSteps = toolSteps.filter((step) => toolPresentation(step, msg.loading ? "running" : "completed", zh).failed).length;
+  const hasTrace = traceContent !== undefined || (readableSteps !== null ? readableSteps.length > 0 : hasStoredTrace || liveBlocks.length > 0);
+  const trace = traceContent ?? (readableSteps !== null ? <ReadableExecution steps={readableSteps} state={msg.loading ? "running" : "completed"} /> : !msg.loading && traceTurn && hasStoredTrace ? (
+    <TurnBlocks turn={traceTurn} hoistTeamTraces pendingApprovals={pendingApprovals}
+      onApprovalAction={onApprovalAction} resolvingApprovalIds={resolvingApprovalIds}
+      approvalEvents={approvalEvents} activityEvents={activityEvents} replayEvents={replayEvents}
+      suppressTopProposalHoist />
+  ) : <NativeBlocksTrack envelopes={liveBlocks} live={Boolean(msg.loading && !msg.error)}
+    hoistTeamTraces pendingApprovals={pendingApprovals} onApprovalAction={onApprovalAction}
+    resolvingApprovalIds={resolvingApprovalIds} suppressTopProposalHoist />);
+  const processLabel = msg.loading ? (zh ? "正在执行" : "Working")
+    : msg.error ? (zh ? "执行记录（含错误）" : "Execution log with errors")
+    : (zh ? "查看执行过程" : "View execution steps");
 
-  // --- LIVE multi-agent layout -------------------------------------------
-  // Nerya streams in its own bubble (team traces hoisted out), followed by one
-  // chronological group-chat transcript for the sub-agents.
-  if (msg.loading && !msg.error && liveAgentSegments.length > 0) {
-    return (
-      <div
-        className="space-y-5"
-        data-turn-role="assistant"
-        data-turn-id={msg.id}
-        data-turn-loading="true"
-      >
-        <NeryaSpeaker streaming>
-          {liveBlocks.length ? (
-            <div data-turn-section="blocks">
-              <NativeBlocksTrack
-                envelopes={liveBlocks}
-                live
-                hoistTeamTraces
-                label="agent transcript"
-                pendingApprovals={pendingApprovals}
-                onApprovalAction={onApprovalAction}
-                resolvingApprovalIds={resolvingApprovalIds}
-              />
-            </div>
-          ) : (
-            <div className="text-ink-400 text-xs italic" data-turn-section="pending">
-              {/* team dispatched but Nerya has no other inline activity yet */}
-              Waiting for the kernel to emit the first block…
-            </div>
-          )}
-        </NeryaSpeaker>
-
-        <LiveAgentTranscriptBlock segments={liveAgentSegments} />
-      </div>
-    );
-  }
-
-  if (agentSegments.segments.length > 0 && msg.turn) {
-    const turn = msg.turn;
-    return (
-      <div
-        className="space-y-5"
-        data-turn-role="assistant"
-        data-turn-id={msg.id}
-        data-turn-loading="false"
-      >
-        {/* Nerya — how it planned and dispatched the team */}
-        <NeryaSpeaker elapsedMs={msg.elapsed_ms}>
-          <TurnBlocks
-            turn={turn}
-            pendingApprovals={pendingApprovals}
-            onApprovalAction={onApprovalAction}
-            approvalEvents={approvalEvents}
-            activityEvents={activityEvents}
-            replayEvents={replayEvents}
-            resolvingApprovalIds={resolvingApprovalIds}
-            suppressTopProposalHoist
-            suppressAgentResultCallIds={agentSegments.suppressedCallIds}
-          />
-        </NeryaSpeaker>
-
-        {/* One distinct avatar + bubble per sub-agent */}
-        {committedSegments.map((segment, i) => (
-          <AgentSegmentBlock
-            key={segment.callId || segment.runId || `seg-${i}`}
-            segment={segment}
-          />
-        ))}
-
-        {/* Nerya — final synthesised reply */}
-        {reasoning ? (
-          <NeryaSpeaker
-            footer={
-              <div className="text-[10px] text-ink-400 mt-1">
-                {formatTime(msg.ts)}
-              </div>
-            }
-          >
-            <div data-turn-section="reply">
-              <AnswerPanel>
-                {editing ? (
-                  <InlineEditor
-                    value={editValue}
-                    onChange={onEditChange ?? (() => {})}
-                    onSave={onSaveEdit ?? (() => {})}
-                    onCancel={onCancelEdit ?? (() => {})}
-                  />
-                ) : (
-                  <>
-                    <StreamedMarkdown text={reasoning} />
-                    <MessageActions
-                      text={reasoning}
-                      onEdit={onEdit}
-                      onDelete={onDelete}
-                    />
-                  </>
-                )}
-              </AnswerPanel>
-            </div>
-            {bottomProposals.length ? (
-              <div data-turn-section="proposal-actions" className="pt-1">
-                <StrategyProposalsHoist proposals={bottomProposals} />
-              </div>
-            ) : null}
-          </NeryaSpeaker>
-        ) : null}
-      </div>
-    );
-  }
-  return (
-    <div
-      className="flex justify-start"
-      data-turn-role="assistant"
-      data-turn-id={msg.id}
-      data-turn-loading={msg.loading ? "true" : "false"}
-    >
-      <div className="group max-w-[92%] min-w-[200px] w-full">
-        <div className="flex items-center gap-2 mb-1.5">
-          <div className="relative h-8 w-8 shrink-0">
-            {showStreaming ? (
-              <span className="absolute -inset-0.5 rounded-full ring-ai opacity-80 animate-spin" style={{ animationDuration: "8s" }} />
-            ) : null}
-            <div className="relative h-8 w-8 rounded-full overflow-hidden ring-1 ring-brand-500/40 shadow-glow bg-black/20 flex items-center justify-center">
-              <NeryaAvatar size={32} />
-            </div>
-            <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-accent-500 ring-2 ring-[var(--bg-deep)]" />
-          </div>
-          <div className="text-[12px] text-ink-200 font-semibold tracking-tight">Nerya</div>
-          {showStreaming ? (
-            <div className="flex items-center gap-1.5 text-[10px] text-fluid-400">
-              <StreamingDots />
-              <span className="text-ink-400">thinking…</span>
-            </div>
-          ) : null}
-          {msg.elapsed_ms && !msg.loading ? (
-            <div className="text-[10px] text-ink-500 font-mono">
-              {formatDuration(msg.elapsed_ms)}
-            </div>
-          ) : null}
-        </div>
-        <div className="bubble-ai space-y-2">
-          {/* When a turn fails before the backend commits ``msg.turn``,
-            * the already-streamed live events may be the only surviving
-            * record of what happened. Render those partial blocks before
-            * the error card so the user still sees the audit trail. */}
-          {msg.error && liveBlocks.length ? (
-            <div data-turn-section="blocks-on-error">
-              <NativeBlocksTrack
-                envelopes={liveBlocks}
-                label="partial transcript before error"
-                pendingApprovals={pendingApprovals}
-                onApprovalAction={onApprovalAction}
-                resolvingApprovalIds={resolvingApprovalIds}
-              />
-            </div>
-          ) : null}
-
-          {msg.error ? <ErrorCard error={msg.error} onRetry={onRetry} /> : null}
-
-          {msg.loading && !hasLive && !hasTurnBody ? (
-            <div className="text-ink-400 text-xs italic" data-turn-section="pending">
-              Waiting for the kernel to emit the first block…
-            </div>
-          ) : null}
-
-          {/* Native block stream — chronological text / thinking /
-            * tool_use / tool_result blocks, mirroring exactly what the
-            * model produced. While ``loading`` is true we feed the
-            * live ``message.delta`` / ``turn.step`` / ``tool.*`` events
-            * through ``liveEventsToBlocks`` so the same renderer
-            * powers both streaming and committed turns. After commit
-            * we let ``TurnBlocks`` own the rendering so the audit
-            * trail (actions / subagents / plan) shows alongside it. */}
-          {msg.loading && liveBlocks.length ? (
-            <div data-turn-section="blocks">
-              <NativeBlocksTrack
-                envelopes={liveBlocks}
-                live
-                label="agent transcript"
-                pendingApprovals={pendingApprovals}
-                onApprovalAction={onApprovalAction}
-                resolvingApprovalIds={resolvingApprovalIds}
-              />
-            </div>
-          ) : null}
-
-          {!msg.loading && msg.turn ? (
-            <div data-turn-section="trace">
-              <TurnBlocks
-                turn={msg.turn}
-                pendingApprovals={pendingApprovals}
-                onApprovalAction={onApprovalAction}
-                approvalEvents={approvalEvents}
-                activityEvents={activityEvents}
-                replayEvents={replayEvents}
-                resolvingApprovalIds={resolvingApprovalIds}
-                suppressTopProposalHoist
-              />
-            </div>
-          ) : null}
-
-          {/* Fallback: turn settled but the backend didn't return
-            * native blocks — surface the converted live stream so the
-            * chronological tool trace doesn't disappear. */}
-          {!msg.loading && msg.turn && !finalBlocks.length && fallbackBlocks.length ? (
-            <div data-turn-section="blocks-fallback">
-              <NativeBlocksTrack
-                envelopes={fallbackBlocks}
-                label="reconstructed transcript"
-                pendingApprovals={pendingApprovals}
-                onApprovalAction={onApprovalAction}
-                resolvingApprovalIds={resolvingApprovalIds}
-                suppressTopProposalHoist
-              />
-            </div>
-          ) : null}
-
-          {/* Final reply text last — chat transcript order: the
-            * assistant's prose summary always lands AFTER tool_use
-            * blocks, never above them. The text is rendered through
-            * the shared Markdown component (Apr-27 user feedback —
-            * the runtime already does GFM, our previous plain-text
-            * ``whitespace-pre-wrap`` made tables/lists/code blocks
-            * unreadable). */}
-          {!msg.error && reasoning ? (
-            <div data-turn-section="reply">
-              <AnswerPanel>
-                {editing ? (
-                  <InlineEditor
-                    value={editValue}
-                    onChange={onEditChange ?? (() => {})}
-                    onSave={onSaveEdit ?? (() => {})}
-                    onCancel={onCancelEdit ?? (() => {})}
-                  />
-                ) : (
-                  <>
-                    <StreamedMarkdown text={reasoning} />
-                    <MessageActions
-                      text={reasoning}
-                      onEdit={onEdit}
-                      onDelete={onDelete}
-                    />
-                  </>
-                )}
-              </AnswerPanel>
-            </div>
-          ) : null}
-
-          {!msg.error && !reasoning && !msg.loading ? (
-            <div data-turn-section="reply">
-              <AnswerPanel>
-                <div className="text-ink-400 italic text-xs">
-                  (no reply returned)
-                </div>
-              </AnswerPanel>
-            </div>
-          ) : null}
-
-          {/* Proposal approve/add card lands at the BOTTOM of the bubble —
-            * under the agent's plain-language verdict — so the operator reads
-            * what happened and the recommendation before acting. The in-trace
-            * duplicates above are suppressed via ``suppressTopProposalHoist``. */}
-          {bottomProposals.length ? (
-            <div data-turn-section="proposal-actions" className="pt-1">
-              <StrategyProposalsHoist proposals={bottomProposals} />
-            </div>
-          ) : null}
-        </div>
-        <div className="text-[10px] text-ink-400 mt-1">{formatTime(msg.ts)}</div>
-      </div>
-    </div>
-  );
+  return <article tabIndex={-1} className="group min-w-0 w-full py-2 outline-none" data-turn-role="assistant"
+    data-turn-id={msg.id} data-turn-loading={msg.loading ? "true" : "false"} data-presentation="flat">
+    {conversationId && browserOperations.length && onOpenBrowser ? <button type="button" className="mb-3 inline-flex min-h-9 items-center gap-2 rounded-lg border border-[color:var(--line)] px-3 text-xs text-[color:var(--text-muted)]" onClick={onOpenBrowser} data-testid="show-browser-sidebar">↗ {zh ? '在侧栏查看浏览器' : 'View browser in side panel'}</button> : null}
+    {hasTrace ? <div data-turn-section="trace" className="mb-5 text-[13px]">
+      {pending ? <div className="space-y-3">{trace}</div> : <details open={Boolean(msg.loading || msg.error)} className="group/process">
+        <summary className="flex min-h-9 w-fit cursor-pointer list-none items-center gap-2 rounded text-xs text-[color:var(--text-muted)] outline-none focus-visible:ring-2 focus-visible:ring-ink-400">
+          <span aria-hidden="true" className="inline-block transition-transform group-open/process:rotate-90">›</span>
+          {msg.loading && !msg.error ? <StreamingDots /> : null}
+          <span>{traceLabel || processLabel}{!traceLabel && toolSteps.length ? (zh ? ` · ${toolSteps.length} 项操作` : ` · ${toolSteps.length} operations`) : ""}</span>
+          {failedSteps ? <span className="text-warn">{zh ? `${failedSteps} 项需查看` : `${failedSteps} need review`}</span> : null}
+          {msg.elapsed_ms ? <span className="tabular-nums">· {formatDuration(msg.elapsed_ms)}</span> : null}
+        </summary>
+        <div className="pt-3">{trace}</div>
+      </details>}
+    </div> : msg.loading && !msg.error ? <div role="status" className="flex items-center gap-2 py-2 text-xs text-[color:var(--text-muted)]" data-turn-section="pending">
+      <StreamingDots />{zh ? "正在处理你的任务…" : "Working on your task…"}
+    </div> : null}
+    {msg.error ? <ErrorCard error={msg.error} onRetry={onRetry} /> : null}
+    {proposals.length ? <div data-turn-section="proposal-actions" className="mb-5"><StrategyProposalsHoist proposals={proposals} /></div> : null}
+    {reply ? <section data-turn-section="reply" aria-label={zh ? "最终结果" : "Final result"}>
+      {hasTrace && !/^\s{0,3}#{1,6}\s/.test(reply.trimStart()) ? <div className="mb-3 flex items-center gap-2 text-xs font-medium text-[color:var(--text-muted)]">
+        <FileIcon size={13} />{zh ? "本轮结果" : "Result"}
+      </div> : null}
+      {editing ? <InlineEditor value={editValue} onChange={onEditChange ?? (() => {})}
+        onSave={onSaveEdit ?? (() => {})} onCancel={onCancelEdit ?? (() => {})} /> : <StreamedMarkdown text={reply} />}
+      {!editing ? <div data-testid="result-actions" className="mt-5 flex flex-wrap items-center gap-3 border-t border-[color:var(--line)] pt-3 text-xs text-[color:var(--text-muted)]">
+        <MessageActions text={reply} onEdit={onEdit} onDelete={onDelete} persistent />
+        {onOpenResult ? <button type="button" onClick={onOpenResult} data-testid="open-result-canvas"
+          className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-[color:var(--line)] bg-[color:var(--card)] px-3 text-xs text-[color:var(--text-base)] hover:border-[color:var(--line-hi)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
+          <FileIcon size={13} />{zh ? "在 Canvas 中查看" : "Open in Canvas"}
+        </button> : null}
+        <time className="ml-auto text-[11px]">{formatTime(msg.ts)}</time>
+      </div> : null}
+    </section> : !msg.loading && !msg.error ? <p className="py-2 text-xs text-[color:var(--text-muted)]" data-turn-section="empty-result">
+      {zh ? "本轮没有返回最终结果。" : "No final result was returned for this turn."}
+    </p> : null}
+  </article>;
 }

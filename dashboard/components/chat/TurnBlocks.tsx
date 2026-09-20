@@ -34,6 +34,8 @@ import {
   strategyProposalFromToolResult,
 } from "../strategies/StrategyProposalApprovalCard";
 import { ChartBlock as NativeChartBlock } from "./ChartBlock";
+import { portfolioSnapshot } from "../../lib/portfolioSnapshot";
+import { PortfolioSnapshot } from "../finance/PortfolioSnapshot";
 import {
   CustomizationProposalCard,
   customizationFromToolResult,
@@ -2489,6 +2491,8 @@ function NativeToolResultBlock({
   if (isAgentTool(block)) {
     return <AgentToolResultCard block={block} />;
   }
+  const snapshot = portfolioSnapshot(block);
+  if (snapshot) return <div className="min-w-0 py-2"><PortfolioSnapshot accounts={snapshot} /><RawDetails><JsonPanel label="raw result" value={block} /></RawDetails></div>;
   const ok = block.ok !== false && !block.error;
   const action = (block.action as string | undefined) || "tool";
   const customization = ok
@@ -4153,7 +4157,9 @@ export function TurnBlocks({
   resolvingApprovalIds,
   suppressTopProposalHoist = false,
   suppressAgentResultCallIds,
+  hoistTeamTraces = false,
 }: {
+  hoistTeamTraces?: boolean;
   turn: TurnPayload;
   pendingApprovals?: Map<string, ApprovalCard>;
   onApprovalAction?: (callbackData: string) => void;
@@ -4259,6 +4265,7 @@ export function TurnBlocks({
           resolvingApprovalIds={resolvingApprovalIds}
           suppressTopProposalHoist={suppressTopProposalHoist}
           suppressAgentResultCallIds={suppressAgentResultCallIds}
+          hoistTeamTraces={hoistTeamTraces}
         />
       ) : null}
 
@@ -4292,7 +4299,7 @@ export function TurnBlocks({
         </div>
       ) : null}
 
-      {subNames.length ? (
+      {!hoistTeamTraces && subNames.length ? (
         <div className="space-y-1.5">
           <div className="text-[11px] text-ink-400 font-medium">
             subagents

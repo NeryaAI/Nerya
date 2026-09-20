@@ -4,7 +4,7 @@ The on-disk shape mirrors the agent skill runtime ``SKILL.md`` exactly:
 
 * The frontmatter is a tiny YAML block with **only** the fields the
   spec defines: ``name``, ``description``, ``version``, ``license``,
-  ``author``. Anything else is ignored.
+  ``author`` and optional ``metadata`` for discovery. Other fields are ignored.
 * The markdown body is the operator-facing playbook the agent reads
   when it loads the skill.
 * Any executable scripts that ship with the skill live under
@@ -122,7 +122,8 @@ class SkillManifest:
     * ``description`` (required) — one-paragraph trigger blurb.
     * ``version`` — semver (defaults to ``0.1.0``).
     * ``license`` / ``author`` — provenance.
-    Anything else in the frontmatter is ignored. Actions, when
+    Optional ``metadata`` is preserved for catalog grouping only; it never
+    grants permissions or defines actions. Other fields are ignored. Actions, when
     present, come from procedural single-file SKILL.md loading and
     not from auto-importing scripts.
     """
@@ -166,7 +167,7 @@ class SkillManifest:
         * ``description`` (required)
         * ``version`` / ``license`` / ``author`` (optional)
 
-        Anything else is ignored.
+        Optional ``metadata`` is retained for discovery, not execution policy.
         """
 
         if not md_path.exists():
@@ -196,7 +197,7 @@ class SkillManifest:
         """Project Anthropic-spec frontmatter onto a manifest.
 
         Only ``name`` / ``description`` / ``version`` / ``license`` /
-        ``author`` are read off ``doc``; anything else is ignored.
+        ``author`` and optional ``metadata`` are read off ``doc``.
         """
 
         name = doc.get("name") or source_path.parent.name
@@ -228,7 +229,7 @@ class SkillManifest:
             status="ready",
             tags=[],
             instructions=body,
-            metadata={},
+            metadata=dict(doc["metadata"]) if isinstance(doc.get("metadata"), dict) else {},
         )
 
 

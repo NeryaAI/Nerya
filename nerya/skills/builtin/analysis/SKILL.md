@@ -1,7 +1,7 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: analysis
-description: "Use for local data, logs, tables, databases, charts, profiling, disk inspection, or one-off evidence extraction."
+description: "Use for local data/log/table analysis and quantitative research: profiling, charts, factors, leakage checks, signal validation and performance attribution."
 version: 0.1.0
 license: MIT
 author: Nerya
@@ -26,6 +26,10 @@ SAVE generated artifacts only when they help reproduce the result.
 - `scripts/explore_table.py` for quick CSV/parquet/table profiling.
 
 ## Lazy References
+
+Read only the selected method with `Skill(skill="analysis", file="<path>")`.
+- `references/quant-validation.md` for statistical/factor research; replaces
+  repeated loading of the compatibility `quant_research` playbook.
 
 - `references/full-playbook.md` for deeper analysis patterns.
 - `references/libraries.md` for local data-analysis library choices.

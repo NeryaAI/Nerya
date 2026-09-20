@@ -21,22 +21,20 @@ playbook never mutates state. Anything the playbook then *tells* the
 model to do still flows through the model -> tool_use loop, so each
 underlying tool call still goes through the permission engine.
 
-Why a separate tool when ``skill_view`` already exists?
--------------------------------------------------------
-``skill_view`` returns the *raw* SKILL.md (frontmatter included) and
-takes ``skill_id`` as its arg name — that's useful for operator
-debugging and dashboards, but it's not the shape the model
-expects. ``Skill`` takes the ``skill`` field name, strips the frontmatter,
-and prepends the base-dir header. Keeping the two tools separate lets
-the model pick the right one for the right job: ``Skill`` to *invoke*
-a playbook, ``skill_view`` (and ``skill_index``) for discovery /
-inspection.
+One read-only discovery surface
+-------------------------------
+``Skill`` also lists primary workflows, reads bounded reference pages, and
+inspects scripts without executing them. ``skill_index``, ``skill_view`` and
+``script_inspect`` remain callable compatibility entries. The provider catalog
+folds them only after policy filtering and only when ``Skill`` is available.
+``script_run`` remains a separate EXEC tool with its original approval policy.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +49,9 @@ from ..types import (
     ToolResult,
     ToolResultPart,
 )
-from .skill import SkillIndex
+from .skill import (
+    SkillIndex, script_inspect_handler, skill_index_handler, skill_view_handler,
+)
 
 
 _LOG = logging.getLogger(__name__)
@@ -67,32 +67,33 @@ SKILL_TOOL_NAME = "Skill"
 
 
 SKILL_TOOL_DESCRIPTION = (
-    "Load a matching SKILL.md playbook into the conversation. "
-    "Use the skill name from the available skills catalog; the playbook "
-    "contains the domain procedure and references to any required tools. "
-    "Catalog skill names are not callable tools: always load them through "
-    "this exact Skill tool instead of calling the skill name directly."
+    "Read-only skill discovery: action=list lists primary workflows; "
+    "skill=<name> loads a playbook; file=<relative path> reads a reference "
+    "page (use returned next_offset to continue); action=inspect with script "
+    "reads a helper without executing it. Catalog skill names are not callable tools: "
+    "load them through this exact Skill tool. Scripts execute only through script_run."
 )
 
 
 SKILL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "skill": {
-            "type": "string",
-            "description": (
-                "Exact <name> value from the available skills catalog."
-            ),
+        "action": {
+            "type": "string", "enum": ["list", "load", "read", "inspect"],
+            "description": "Defaults to load, or read when file is supplied.",
         },
-        "args": {
-            "type": "string",
-            "description": (
-                "Optional free-form arguments forwarded to the skill"
-                " body via the ``$ARGUMENTS`` placeholder."
-            ),
-        },
+        "skill": {"type": "string", "description": "Exact catalog or compatibility skill name."},
+        "file": {"type": "string", "description": "Asset path confined to the skill directory."},
+        "script": {"type": "string", "description": "Helper filename for action=inspect."},
+        "offset": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 400},
+        "refresh": {"type": "boolean"},
+        "args": {"type": "string", "description": "Optional $ARGUMENTS substitution on load."},
     },
-    "required": ["skill"],
+    "anyOf": [
+        {"required": ["skill"]},
+        {"required": ["action"], "properties": {"action": {"const": "list"}}},
+    ],
 }
 
 
@@ -135,6 +136,11 @@ def skill_tool_handler(
     skill_index: SkillIndex,
 ) -> ToolResult:
     args = call.arguments or {}
+    action = args.get("action") or ("read" if args.get("file") else "load")
+    if action not in ("list", "load", "read", "inspect"):
+        return schema_validation_result(call, "Skill supports list, load, read or inspect; never execution.")
+    if action == "list":
+        return skill_index_handler(call, skill_index=skill_index)
     raw_skill_name = args.get("skill")
     skill_name = raw_skill_name.strip() if isinstance(raw_skill_name, str) else ""
     if not skill_name:
@@ -142,7 +148,18 @@ def skill_tool_handler(
             call, 'Skill tool requires a non-empty "skill" argument.',
         )
 
-    record = skill_index.get(skill_name)
+    if action in ("read", "inspect"):
+        if args.get("refresh") or skill_index.get(skill_name) is None:
+            skill_index.reload()
+        mapped = dict(args, skill_id=skill_name)
+        if action == "read":
+            if not isinstance(args.get("file"), str) or not args["file"].strip():
+                return schema_validation_result(call, "Skill read requires a relative file path.")
+            mapped.setdefault("limit", 200)
+            return skill_view_handler(replace(call, arguments=mapped), skill_index=skill_index)
+        return script_inspect_handler(replace(call, arguments=mapped), skill_index=skill_index)
+
+    record = skill_index.get(skill_name, refresh=bool(args.get("refresh")))
     if record is None:
         record = skill_index.get(skill_name, refresh=True)
     if record is None:
@@ -158,12 +175,12 @@ def skill_tool_handler(
     skill_md_path = Path(record.path)
     try:
         text = skill_md_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
             error=ToolError(
-                kind=ToolErrorKind.IO_ERROR,
+                kind=ToolErrorKind.EXECUTION_ERROR,
                 message=f"failed to read SKILL.md for {skill_name!r}: {exc}",
             ),
         )

@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: market_research
+metadata:
+  nerya:
+    catalog_parent: research
 description: "Use for professional market, stock, or crypto-token research (代币/加密资产分析), combining price, company fundamentals or tokenomics, valuation, news, sentiment, macro, flows or on-chain activity, catalysts, and risk."
 version: 0.1.0
 license: MIT

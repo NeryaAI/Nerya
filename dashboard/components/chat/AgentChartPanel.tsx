@@ -1,7 +1,11 @@
 "use client";
 
+import { ChoiceSelect } from "../ChoiceSelect";
+
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useTranslations } from "next-intl";
+import { useTranslations, useLocale } from "next-intl";
+import { FinancialChart } from "../finance/FinancialChart";
+import { cleanSeries } from "../../lib/financialChart";
 import {
   ColorType,
   CrosshairMode,
@@ -140,11 +144,7 @@ export function AgentChartPanel({
   const [activeBacktestId, setActiveBacktestId] = useState("");
 
   useEffect(() => {
-    if (ctx.backtests.length) {
-      setView("backtests");
-    } else if (ctx.charts.length) {
-      setView("charts");
-    }
+    setView((previous) => previous === "charts" && ctx.charts.length ? previous : previous === "backtests" && ctx.backtests.length ? previous : ctx.charts.length ? "charts" : "backtests");
   }, [ctx.charts.length, ctx.backtests.length]);
 
   useEffect(() => {
@@ -174,109 +174,23 @@ export function AgentChartPanel({
     ctx.backtests[0] ??
     null;
 
-  const content = (
-    <>
-      <div className="border-b border-brand-500/15 px-3 py-2.5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[12px] font-medium text-brand-300">
-              <ChartIcon size={14} />
-              <span>{t("title")}</span>
-            </div>
-            <div className="mt-1 truncate text-[11px] text-ink-400">
-              {thread?.title || t("noSession")}
-            </div>
-          </div>
-          <div className="flex rounded-md border border-brand-500/20 bg-ink-900/50 p-0.5 text-[11px]">
-            <button
-              type="button"
-              onClick={() => setView("charts")}
-              disabled={!ctx.charts.length}
-              className={`rounded px-2 py-1 transition-colors ${
-                view === "charts"
-                  ? "bg-brand-500 text-white"
-                  : "text-ink-400 hover:text-white disabled:opacity-35"
-              }`}
-            >
-              {t("charts")} · {ctx.charts.length}
-            </button>
-            <button
-              type="button"
-              onClick={() => setView("backtests")}
-              disabled={!ctx.backtests.length}
-              className={`rounded px-2 py-1 transition-colors ${
-                view === "backtests"
-                  ? "bg-brand-500 text-white"
-                  : "text-ink-400 hover:text-white disabled:opacity-35"
-              }`}
-            >
-              {t("backtests")} · {ctx.backtests.length}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        {view === "charts" && activeChart ? (
-          <div className="space-y-3">
-            {ctx.charts.length > 1 ? (
-              <VisualPicker
-                label={t("selectChart")}
-                value={activeChart.id}
-                rows={ctx.charts.map((v) => ({
-                  id: v.id,
-                  label: v.block.title,
-                  meta: v.source,
-                }))}
-                onPick={setActiveChartId}
-              />
-            ) : null}
-            <AgentVisualChart visual={activeChart} />
-          </div>
-        ) : null}
-
-        {view === "backtests" && activeBacktest ? (
-          <div className="space-y-3">
-            {ctx.backtests.length > 1 ? (
-              <VisualPicker
-                label={t("selectBacktest")}
-                value={activeBacktest.id}
-                rows={ctx.backtests.map((v) => ({
-                  id: v.id,
-                  label: v.title,
-                  meta: [v.proposalId, v.strategyId, v.ts].filter(Boolean).join(" · "),
-                }))}
-                onPick={setActiveBacktestId}
-              />
-            ) : null}
-            <div className="rounded-md border border-brand-500/15 bg-ink-900/35 px-3 py-2">
-              <div className="text-[11px] text-ink-500 font-medium">
-                {t("backtestRun")}
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
-                <span className="max-w-full break-all rounded border border-brand-500/20 bg-brand-500/[0.08] px-1.5 py-0.5 font-mono text-[color:var(--violet)]">
-                  {activeBacktest.strategyId}
-                </span>
-                {activeBacktest.proposalId ? (
-                  <span className="max-w-full break-all rounded border border-[color:var(--fluid)] bg-[color:var(--fluid-soft)] px-1.5 py-0.5 font-mono text-[color:var(--fluid)]">
-                    {activeBacktest.proposalId}
-                  </span>
-                ) : null}
-                <span className="max-w-full break-all rounded border border-[color:var(--line)] bg-[color:var(--card-hi)] px-1.5 py-0.5 font-mono text-[color:var(--text-muted)]">
-                  {activeBacktest.ts}
-                </span>
-              </div>
-            </div>
-            <BacktestChart
-              strategyId={activeBacktest.strategyId}
-              ts={activeBacktest.ts}
-              proposalId={activeBacktest.proposalId}
-            />
-          </div>
-        ) : null}
-      </div>
-    </>
-  );
+  const content = <>
+    {ctx.charts.length && ctx.backtests.length ? <div className="flex h-9 shrink-0 items-center gap-1 border-b border-[color:var(--line)] px-3" role="group" aria-label={t("title")}>
+      <button type="button" aria-pressed={view === "charts"} onClick={() => setView("charts")} className="min-h-8 rounded px-3 text-xs aria-pressed:bg-[color:var(--panel-bg)]">{t("charts")} {ctx.charts.length}</button>
+      <button type="button" aria-pressed={view === "backtests"} onClick={() => setView("backtests")} className="min-h-8 rounded px-3 text-xs aria-pressed:bg-[color:var(--panel-bg)]">{t("backtests")} {ctx.backtests.length}</button>
+    </div> : null}
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      {view === "charts" && activeChart ? <div className="space-y-3">
+        {ctx.charts.length > 1 ? <VisualPicker label={t("selectChart")} value={activeChart.id} rows={ctx.charts.map((v) => ({ id: v.id, label: v.block.title, meta: v.source }))} onPick={setActiveChartId} /> : null}
+        <AgentVisualChart key={activeChart.id} visual={activeChart} />
+      </div> : null}
+      {view === "backtests" && activeBacktest ? <div className="space-y-3">
+        {ctx.backtests.length > 1 ? <VisualPicker label={t("selectBacktest")} value={activeBacktest.id} rows={ctx.backtests.map((v) => ({ id: v.id, label: v.title, meta: v.ts }))} onPick={setActiveBacktestId} /> : null}
+        <div className="flex flex-wrap items-center gap-2 text-xs text-[color:var(--text-muted)]"><span>{t("backtestRun")}</span><span>{activeBacktest.strategyId}</span><time>{activeBacktest.ts}</time></div>
+        <BacktestChart strategyId={activeBacktest.strategyId} ts={activeBacktest.ts} proposalId={activeBacktest.proposalId} />
+      </div> : null}
+    </div>
+  </>;
 
   if (embedded) {
     return <div className="flex h-full min-h-0 flex-col">{content}</div>;
@@ -330,221 +244,70 @@ function AgentVisualChart({ visual }: { visual: AgentVisual }) {
   }
 
   if (isCandlestickBlock(resolved.block)) {
-    return <MarketChartWorkbench block={resolved.block} />;
+    return <MarketChartWorkbench key={resolved.block.chart_id} block={resolved.block} />;
   }
 
-  return (
-    <div className="space-y-3">
-      <ChartCardHeader block={resolved.block} />
-      <div className="rounded-md border border-brand-500/15 bg-ink-900/35 p-2">
-        <ChartCanvas block={resolved.block} height={360} />
-      </div>
-      <Insights block={resolved.block} />
-    </div>
-  );
+  return <FinancialChart key={resolved.block.chart_id} block={resolved.block} height={320} />;
 }
 
 function MarketChartWorkbench({ block }: { block: ChartBlockShape }) {
-  const t = useTranslations("chatChartPanel");
+  const t = useTranslations("chatChartPanel"), zh = useLocale().startsWith("zh");
   const initialTarget = useMemo(() => inferMarketTarget(block), [block]);
   const [overrideBlock, setOverrideBlock] = useState<ChartBlockShape | null>(null);
   const [interval, setIntervalValue] = useState(initialTarget.interval || "1h");
-  const [count, setCount] = useState(
-    nearestCount(primaryCandles(block).length || 120),
-  );
-  const [indicators, setIndicators] =
-    useState<IndicatorState>(DEFAULT_INDICATORS);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    setOverrideBlock(null);
-    setIntervalValue(initialTarget.interval || "1h");
-    setCount(nearestCount(primaryCandles(block).length || 120));
-    setError("");
-  }, [block.chart_id, initialTarget.interval]);
-
+  const [count, setCount] = useState(nearestCount(primaryCandles(block).length || 120));
+  const [indicators, setIndicators] = useState<IndicatorState>({ ...DEFAULT_INDICATORS, ema50: false, bb20: false, rsi: false, macd: false });
+  const [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const request = useRef(0);
+  useEffect(() => () => { request.current += 1; }, []);
   const displayBlock = overrideBlock ?? block;
-  const target = useMemo(
-    () => inferMarketTarget(displayBlock) || initialTarget,
-    [displayBlock, initialTarget],
-  );
-  const candles = primaryCandles(displayBlock);
-  const agentSeries = useMemo(
-    () => splitAgentSeries(displayBlock, candles),
-    [displayBlock, candles],
-  );
-  const rsi = useMemo(() => computeRsi(candles, 14), [candles]);
-  const macd = useMemo(() => computeMacd(candles), [candles]);
-
+  const candles = useMemo(() => primaryCandles({ ...displayBlock, series: displayBlock.series.map(cleanSeries) }), [displayBlock]);
+  const agentSeries = useMemo(() => splitAgentSeries(displayBlock, candles), [displayBlock, candles]);
+  const rendered = useMemo<ChartBlockShape>(() => {
+    const series: ChartSeries[] = [{ type: "candlestick", name: initialTarget.market || block.title, data: candles }];
+    if (indicators.volume) series.push({ type: "histogram", name: zh ? "成交量" : "Volume", price_format: "volume", data: candles.filter((c) => typeof c.volume === "number").map((c) => ({ time: c.time, value: c.volume! })) });
+    if (indicators.ma20) series.push({ type: "line", name: "MA20", color: THEME.ma, data: computeSma(candles, 20) });
+    if (indicators.ema50) series.push({ type: "line", name: "EMA50", color: THEME.ema, data: computeEma(candles, 50) });
+    if (indicators.bb20) { const bands = computeBollinger(candles, 20, 2); series.push({ type: "line", name: "BB upper", data: bands.upper }, { type: "line", name: "BB lower", data: bands.lower }); }
+    if (indicators.vwap) series.push({ type: "line", name: "VWAP", data: computeVwap(candles) });
+    if (indicators.agent) for (const row of agentSeries.priceLike) series.push({ type: "line", name: row.name, data: row.data, color: row.color });
+    return { ...displayBlock, series };
+  }, [displayBlock, candles, indicators, agentSeries, zh, initialTarget.market, block.title]);
   async function loadCandles(next?: { interval?: string; count?: number }) {
-    if (!target.market || !target.venue) {
-      setError(t("noMarketTarget"));
-      return;
-    }
-    const nextInterval = next?.interval ?? interval;
-    const nextCount = next?.count ?? count;
-    setBusy(true);
-    setError("");
+    if (!initialTarget.market || !initialTarget.venue) { setError(t("noMarketTarget")); return; }
+    const nextInterval = next?.interval ?? interval, nextCount = next?.count ?? count;
+    const id = ++request.current; setBusy(true); setError("");
     try {
-      const res = await clientApi.marketCandles({
-        venue: target.venue,
-        market: target.market,
-        interval: nextInterval,
-        count: nextCount,
-      });
-      if (res.error) {
-        setError(res.error);
-      }
-      setOverrideBlock(
-        blockFromCandles({
-          base: displayBlock,
-          market: res.market || target.market,
-          venue: res.venue || target.venue,
-          interval: res.interval || nextInterval,
-          candles: res.candles || [],
-        }),
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+      const res = await clientApi.marketCandles({ venue: initialTarget.venue, market: initialTarget.market, interval: nextInterval, count: nextCount });
+      if (request.current !== id) return;
+      if (res.error || !res.candles?.length) throw new Error(res.error || (zh ? "没有返回K线，保留原图。" : "No candles returned. Previous chart retained."));
+      if ((res.market && res.market !== initialTarget.market) || (res.interval && res.interval !== nextInterval)) throw new Error(zh ? "行情范围不匹配，保留原图。" : "Candle scope mismatch. Previous chart retained.");
+      const fresh = blockFromCandles({ base: block, market: initialTarget.market, venue: initialTarget.venue, interval: nextInterval, candles: res.candles });
+      const valid = cleanSeries(fresh.series[0]);
+      if (!valid.data?.length) throw new Error(zh ? "K线数据无效，保留原图。" : "Invalid candle data. Previous chart retained.");
+      setOverrideBlock({ ...fresh, series: [valid], default_range: undefined, caption: undefined, overlays: [], insights: [], warnings: block.overlays?.length ? [zh ? "原任务注释属于原始快照，未复制到新行情区间。" : "Original annotations belong to the original snapshot and are not copied to the new window."] : [], source: { skill: "market", action: "candles", as_of: new Date(Number(valid.data[valid.data.length - 1].time) * 1000).toISOString() } });
+      setIntervalValue(nextInterval); setCount(nextCount);
+    } catch (e) { if (request.current === id) setError(e instanceof Error ? e.message : String(e)); }
+    finally { if (request.current === id) setBusy(false); }
   }
-
-  function toggleIndicator(key: IndicatorKey) {
-    setIndicators((cur) => ({ ...cur, [key]: !cur[key] }));
-  }
-
-  return (
-    <div className="space-y-3">
-      <ChartCardHeader block={displayBlock} />
-
-      <div className="rounded-md border border-brand-500/15 bg-ink-900/35 px-3 py-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1">
-            {INTERVALS.map((opt) => (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => {
-                  setIntervalValue(opt);
-                  void loadCandles({ interval: opt });
-                }}
-                disabled={busy || !target.market}
-                className={`rounded px-2 py-1 text-[11px] font-mono transition-colors ${
-                  interval === opt
-                    ? "bg-brand-500 text-white"
-                    : "border border-ink-700 bg-ink-950/40 text-ink-300 hover:border-brand-500/40 hover:text-white"
-                } disabled:opacity-45`}
-              >
-                {opt}
-              </button>
-            ))}
-          </div>
-          <select
-            value={count}
-            onChange={(e) => {
-              const nextCount = Number(e.target.value);
-              setCount(nextCount);
-              void loadCandles({ count: nextCount });
-            }}
-            disabled={busy || !target.market}
-            className="rounded-md border border-ink-700 bg-ink-950/60 px-2 py-1 text-[11px] text-ink-100 focus:border-brand-500/50 focus:outline-none disabled:opacity-45"
-            aria-label={t("bars")}
-          >
-            {BAR_COUNTS.map((n) => (
-              <option key={n} value={n}>
-                {n} {t("bars")}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={() => loadCandles()}
-            disabled={busy || !target.market}
-            className="inline-flex items-center gap-1 rounded-md border border-brand-500/25 px-2 py-1 text-[11px] text-brand-100 hover:border-brand-500/50 hover:bg-brand-500/10 disabled:opacity-45"
-          >
-            <RefreshIcon size={12} className={busy ? "animate-spin" : ""} />
-            <span>{t("refresh")}</span>
-          </button>
-        </div>
-
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {(["volume", "ma20", "ema50", "bb20", "vwap", "rsi", "macd", "agent"] as IndicatorKey[]).map((key) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => toggleIndicator(key)}
-              className={`rounded border px-2 py-1 text-[10px] transition-colors ${
-                indicators[key]
-                  ? "border-brand-500/35 bg-brand-500/[0.10] text-brand-100"
-                  : "border-ink-700 bg-ink-950/40 text-ink-500 hover:text-ink-200"
-              }`}
-            >
-              {t(key)}
-            </button>
-          ))}
-        </div>
-
-        {error ? (
-          <div className="mt-2 rounded border border-danger/25 bg-danger/10 px-2 py-1 text-[11px] text-rose-300">
-            {error}
-          </div>
-        ) : null}
-      </div>
-
-      <div className="rounded-md border border-brand-500/15 bg-ink-950/30 p-2">
-        <AgentKlineCanvas
-          candles={candles}
-          priceSeries={indicators.agent ? agentSeries.priceLike : []}
-          indicators={indicators}
-          height={360}
-          emptyTitle={t("kline")}
-          emptySubtitle={t("noCandleData")}
-        />
-      </div>
-
-      <Insights block={displayBlock} />
-
-      {indicators.rsi && rsi.length > 0 ? (
-        <MiniSeriesPanel
-          title={t("rsi14")}
-          height={132}
-          series={[{ name: "RSI(14)", data: rsi, color: THEME.rsi }]}
-          priceLines={[30, 70]}
-        />
-      ) : null}
-
-      {indicators.macd && macd.macd.length > 0 ? (
-        <MiniSeriesPanel
-          title={t("macd")}
-          height={132}
-          series={[
-            { name: "histogram", data: macd.histogram, color: THEME.histogramUp, histogram: true },
-            { name: "MACD", data: macd.macd, color: THEME.macd },
-            { name: "signal", data: macd.signal, color: THEME.signal },
-          ]}
-        />
-      ) : null}
-
-      {indicators.agent && agentSeries.detached.length > 0 ? (
-        <div className="space-y-2">
-          <div className="text-[11px] text-ink-500 font-medium">
-            {t("agentIndicators")}
-          </div>
-          {agentSeries.detached.slice(0, 6).map((series) => (
-            <MiniSeriesPanel
-              key={series.name}
-              title={series.name}
-              height={118}
-              series={[series]}
-            />
-          ))}
-        </div>
-      ) : null}
+  const rsi = useMemo(() => indicators.rsi ? computeRsi(candles, 14) : [], [candles, indicators.rsi]);
+  const macd = useMemo(() => computeMacd(candles), [candles]);
+  const controls = <>
+    <div className="flex flex-wrap items-center gap-2 border-b border-[color:var(--line)] pb-2">
+      <div className="flex flex-wrap gap-1" role="group" aria-label={zh ? "K线周期" : "Candle interval"}>{INTERVALS.map((value) => <button type="button" key={value} aria-pressed={interval === value} disabled={busy || !initialTarget.market || !initialTarget.venue} onClick={() => void loadCandles({ interval: value })} className={`min-h-8 rounded px-2 text-xs disabled:opacity-40 ${interval === value ? "bg-[color:var(--panel-bg)] text-[color:var(--text-base)]" : "text-[color:var(--text-muted)]"}`}>{value}</button>)}</div>
+      <ChoiceSelect aria-label={t("bars")} value={count} disabled={busy || !initialTarget.market || !initialTarget.venue} onValueChange={(value) => void loadCandles({ count: Number(value) })} className="min-h-8 text-xs">{BAR_COUNTS.map((n) => <option key={n} value={n}>{n} {t("bars")}</option>)}</ChoiceSelect>
+      <button type="button" className="ml-auto inline-flex min-h-8 items-center gap-1 px-2 text-xs" disabled={busy || !initialTarget.venue} onClick={() => void loadCandles()}><RefreshIcon size={13} />{busy ? (zh ? "更新中" : "Updating") : t("refresh")}</button>
     </div>
-  );
+    {!initialTarget.market || !initialTarget.venue ? <p role="status" className="text-xs text-[color:var(--text-muted)]">{zh ? "原快照未提供可查询的市场或交易场所，仍可查看图表和数据；周期切换暂不可用。" : "The snapshot has no queryable market or venue. Chart and data remain available; interval refresh is unavailable."}</p> : null}
+    <details data-testid="chart-indicators" className="text-xs text-[color:var(--text-muted)]"><summary className="w-fit cursor-pointer py-2">{zh ? "指标与叠加" : "Indicators and overlays"}</summary><div className="flex flex-wrap gap-2 py-2">{(["volume", "ma20", "ema50", "bb20", "vwap", "rsi", "macd", "agent"] as IndicatorKey[]).map((key) => <button key={key} type="button" aria-pressed={indicators[key]} onClick={() => setIndicators((value) => ({ ...value, [key]: !value[key] }))} className={`min-h-8 rounded border px-2 ${indicators[key] ? "border-[color:var(--line-hi)] bg-[color:var(--panel-bg)] text-[color:var(--text-base)]" : "border-[color:var(--line)]"}`}>{t(key)}</button>)}</div></details>
+    {error ? <p role="alert" className="text-xs text-warn">{error}</p> : null}
+  </>;
+  return <div className="min-w-0 space-y-3" data-testid="market-chart-workbench">
+    <FinancialChart key={displayBlock.chart_id} block={rendered} height={320} controls={controls} />
+    {indicators.rsi && rsi.length ? <MiniSeriesPanel title={t("rsi14")} height={132} series={[{ name: "RSI(14)", data: rsi, color: THEME.rsi }]} priceLines={[30, 70]} /> : null}
+    {indicators.macd && macd.macd.length ? <MiniSeriesPanel title={t("macd")} height={132} series={[{ name: "histogram", data: macd.histogram, color: THEME.histogramUp, histogram: true }, { name: "MACD", data: macd.macd, color: THEME.macd }, { name: "signal", data: macd.signal, color: THEME.signal }]} /> : null}
+    {indicators.agent ? agentSeries.detached.slice(0, 6).map((series) => <MiniSeriesPanel key={series.name} title={series.name} height={132} series={[series]} />) : null}
+  </div>;
 }
 
 function AgentKlineCanvas({
@@ -839,9 +602,9 @@ function VisualPicker({
       <label className="text-[11px] text-ink-500 font-medium">
         {label}
       </label>
-      <select
+      <ChoiceSelect
         value={value}
-        onChange={(e) => onPick(e.target.value)}
+        onValueChange={onPick}
         className="mt-1 w-full rounded-md border border-ink-700 bg-ink-950/70 px-2 py-1.5 text-xs text-ink-100 focus:border-brand-500/50 focus:outline-none"
       >
         {rows.map((row) => (
@@ -849,7 +612,7 @@ function VisualPicker({
             {row.label} · {row.meta}
           </option>
         ))}
-      </select>
+      </ChoiceSelect>
     </div>
   );
 }
@@ -1122,13 +885,13 @@ function inferMarketTarget(block: ChartBlockShape): {
   interval: string;
 } {
   const titleParts = block.title.split("·").map((p) => p.trim());
-  const rawMarket = titleParts[0] || "";
-  const rawInterval = titleParts.find((p) => /^\d+[mhd]$/.test(p)) || "";
+  const rawMarket = typeof block.market === "string" ? block.market : titleParts[0] || "";
+  const rawInterval = typeof block.interval === "string" ? block.interval : titleParts.find((p) => /^\d+[mhd]$/.test(p)) || "";
   const subtitle = block.subtitle || "";
   const venueFromSubtitle = /venue:\s*([A-Za-z0-9:_-]+)/i.exec(subtitle)?.[1] || "";
   const venueFromMarket = rawMarket.includes(":") ? rawMarket.split(":", 1)[0] : "";
   return {
-    venue: (venueFromSubtitle || venueFromMarket || "").toLowerCase(),
+    venue: (typeof block.venue === "string" ? block.venue : venueFromSubtitle || venueFromMarket || "").toLowerCase(),
     market: rawMarket,
     interval: rawInterval,
   };
@@ -1173,7 +936,7 @@ function createBaseChart(
   theme: ChartTheme,
 ): IChartApi {
   return createChart(node, {
-    width: Math.max(320, node.clientWidth),
+    width: Math.max(1, node.clientWidth),
     height,
     layout: {
       background: { type: ColorType.Solid, color: THEME.background },
@@ -1201,7 +964,7 @@ function createBaseChart(
 
 function observeChart(node: HTMLDivElement, chart: IChartApi, height: number): ResizeObserver {
   const ro = new ResizeObserver(() => {
-    const width = Math.max(320, node.clientWidth);
+    const width = Math.max(1, node.clientWidth);
     chart.applyOptions({ width, height });
   });
   ro.observe(node);

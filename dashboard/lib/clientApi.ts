@@ -8,6 +8,8 @@
  * mirror `lib/api.ts` where useful but this module runs in the browser.
  */
 
+import type { DesktopBrowserResponse } from "./browserDesktopTypes";
+import type { BrowserTrace } from "./browserTrace";
 import type {
   Candle,
   EquityPoint,
@@ -3698,19 +3700,25 @@ export const clientApi = {
   // ---------------------------------------------------------------
   // Headless browser engines (camofox / cloakbrowser / lightpanda / obscura)
   // ---------------------------------------------------------------
+  browserSurface: async (body: Record<string, unknown>, signal?: AbortSignal): Promise<DesktopBrowserResponse> => {
+    const response = await fetch(`${BASE}/browsers/desktop`, { method: 'POST',
+      headers: authHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(body), cache: 'no-store', signal });
+    if (!response.ok) { handleAuthFailure(response.status); throw new Error(`browser_surface_http_${response.status}`); }
+    return response.json() as Promise<DesktopBrowserResponse>;
+  },
+  browserTrace: async (body: Record<string, unknown>, signal?: AbortSignal): Promise<BrowserTrace> => {
+    const response = await fetch(`${BASE}/browsers/desktop`, { method: 'POST',
+      headers: authHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(body), cache: 'no-store', signal });
+    if (!response.ok) { handleAuthFailure(response.status); throw new Error(`browser_trace_http_${response.status}`); }
+    return response.json() as Promise<BrowserTrace>;
+  },
+  browserDesktopStatus: (profile_id: string) =>
+    get<DesktopBrowserResponse>(`/browsers/desktop?profile_id=${encodeURIComponent(profile_id)}`),
+  browserDesktop: (body: Record<string, unknown>) =>
+    post<DesktopBrowserResponse>("/browsers/desktop", body),
   browsersStatus: () => get<BrowsersStatus>("/browsers/status"),
   browsersRegistry: () =>
     get<{ ok: boolean; engines: BrowserSpec[] }>("/browsers/registry"),
-  browsersSelect: (name: string) =>
-    post<BrowsersStatus>("/browsers/select", { name }),
-  browsersConfigure: (body: BrowsersConfigureRequest) =>
-    post<BrowsersStatus>("/browsers/configure", body),
-  browsersInstall: (name: string) =>
-    post<BrowserActionResponse>("/browsers/install", { name }),
-  browsersUninstall: (name: string) =>
-    post<BrowserActionResponse>("/browsers/uninstall", { name }),
-  browsersProbe: (body: { name?: string; url?: string; timeout_s?: number }) =>
-    post<BrowserProbeResponse>("/browsers/probe", body),
 
   // ---------------------------------------------------------------
   // Live browser sessions (dashboard-driven navigation)

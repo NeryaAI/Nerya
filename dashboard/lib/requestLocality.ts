@@ -27,10 +27,14 @@ export function isLoopbackHost(rawHost: string): boolean {
     // "127.0.0.1:3000" -> "127.0.0.1"
     name = name.split(":")[0];
   }
-  return name === "localhost" || name === "::1" || name.startsWith("127.");
+  return name === "localhost" || name === "::1" || /^127(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/.test(name);
 }
 
 export function isLocalRequest(req: Request): boolean {
+  // The bundled server proves socket locality before Next inserts forwarding
+  // headers. The random key is server-only and incoming proofs are stripped.
+  const key = process.env.NERYA_LOCAL_PEER_KEY;
+  if (key) return req.headers.get("x-nerya-local-peer") === key && isLoopbackHost(req.headers.get("host") || "");
   // Any proxy hop makes the request remote, even if it claims a loopback
   // host — `x-forwarded-for` is trivial to send but a direct local browser
   // never has one.

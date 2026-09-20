@@ -71,6 +71,7 @@ def _json_safe(value: Any) -> Any:
 
 
 _TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
+    "/browsers/agent",
     "/agent/run_turn",
     "/agent/run_turn_internal",
     "/approvals/callback",

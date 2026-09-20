@@ -108,6 +108,10 @@ _DEFAULT_ENABLED_SKILLS = [
     "trading", "triggers", "self_modify", "plugin_author",
     # Integration-gated: listed here but loaded only after configuration.
     "dcf_valuation", "equity_research", "sec_filings",
+    # Canonical hubs expose specialist methods only on demand.
+    "finance.equity_research", "finance.financial_analysis", "finance.fund_admin",
+    "finance.investment_banking", "finance.operations", "finance.private_equity",
+    "finance.wealth_management",
 ]
 
 

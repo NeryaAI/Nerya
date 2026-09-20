@@ -191,6 +191,10 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/skills/lock/clear_signature", "write:skills", ""),
 
     # browser engines / browser sessions
+    RouteRule("POST", "/browsers/agent", "write:tools",
+              "dispatcher-bound actor; expiring operator site grant and exclusive browser lease"),
+    RouteRule(None, "/browsers/desktop", "admin:ops",
+              "operator-only persistent profiles and reviewed extension packages; not an Agent tool"),
     RouteRule("GET", "/browsers/registry", "read:runtime", ""),
     RouteRule("GET", "/browsers/status", "read:runtime", ""),
     RouteRule("POST", "/browsers/select", "write:config", ""),

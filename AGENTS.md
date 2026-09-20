@@ -62,8 +62,12 @@ capability.
    `SKILL.md` or files under `references/`. Keep always-on prompts,
    default subagent prompts, route manifests, and team templates small:
    they should name the role, preferred skills, and output contract only.
-   Load the relevant skill (`Skill`, `skill_view`, or script docs) only
-   when a task actually needs that research capability.
+   Use the canonical `Skill` tool to load the relevant workflow or a bounded
+   reference page only when needed. `skill_view` remains a compatibility entry.
+   Shared role contracts live in the default prompt bundle's `shared/` folder;
+   domain methodology stays in Skills, not those shared contracts.
+   See `docs/skill-agent-consolidation.md` for catalog grouping, tool boundaries
+   and existing-workspace migration behavior.
 
 ## 3. Repo layout (top-level)
 

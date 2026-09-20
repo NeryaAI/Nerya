@@ -165,9 +165,10 @@ test("Radix choice menu supports keyboard selection and returns focus", async ({
   await page.keyboard.press("Enter");
   const selectedTheme = page.getByRole("button", { name: "Light", exact: true });
   await expect(selectedTheme).toBeFocused();
-  await expect(selectedTheme).toHaveCSS("background-color", "rgb(240, 236, 255)");
-  await expect(selectedTheme).toHaveCSS("color", "rgb(26, 24, 48)");
-  await expect(page.getByRole("button", { name: "Interface", exact: true })).toHaveCSS("color", "rgb(26, 24, 48)");
+  await expect(page.locator("html")).toHaveClass(/light/);
+  await expect(selectedTheme).toHaveCSS("background-color", "rgb(238, 241, 247)");
+  await expect(selectedTheme).toHaveCSS("color", "rgb(28, 35, 51)");
+  await expect(page.getByRole("button", { name: "Interface", exact: true })).toHaveCSS("color", "rgb(28, 35, 51)");
   await page.screenshot({ path: info.outputPath("settings-light.png"), fullPage: true, animations: "disabled" });
   expect(state.errors).toEqual([]);
 });
@@ -545,4 +546,3 @@ test("late candles from the previous symbol cannot overwrite the current market"
     expect(state.errors).toEqual([]);
   } finally { release(); }
 });
-

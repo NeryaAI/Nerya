@@ -15,11 +15,14 @@ import {
   ErrorBanner,
   Json,
   Kpi,
+  LoadingState,
   PageBody,
   PageHeader,
   Pill,
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
+import { FilterBar, Pagination, SearchField, TableViewport, useListPage } from "../../components/ListControls";
+import { ModalFrame } from "../../components/ModalFrame";
 import { ModePill } from "../../components/ModePill";
 import { formatTsShort } from "../../lib/format";
 import { confirm as confirmDialog, toast } from "../../lib/dialogs";
@@ -103,8 +106,16 @@ export default function IncidentsPage() {
   // Guards against a toast on every 30s poll while the kill switch
   // endpoint keeps failing — surface the failure once per failure streak.
   const killToastShown = useRef(false);
+  const [query, setQuery] = useState("");
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const generation = useRef(0);
+  const windowRef = useRef(windowS);
+  windowRef.current = windowS;
+  const [reportsError, setReportsError] = useState<string | null>(null);
 
   async function load() {
+    const request = ++generation.current;
     setLoading(true);
     setError(null);
     try {
@@ -117,15 +128,19 @@ export default function IncidentsPage() {
         .then((value) => ({ ok: true as const, value }))
         .catch((e: unknown) => ({ ok: false as const, error: e }));
       const [incidentsRes, reportsRes] = await Promise.all([
-        clientApi.controlIncidents(windowS),
+        clientApi.controlIncidents(windowRef.current),
         clientApi
           .controlReconciliationReports({ limit: 25 })
-          .catch(() => ({ reports: [], worst_recent: null, filter: {} })),
+          .catch((reason: unknown) => ({ reports: null, worst_recent: null, loadError: reason })),
       ]);
+      if (request !== generation.current) return;
+      setHasLoaded(true);
       setIncidents(incidentsRes.incidents || []);
-      setReports(reportsRes.reports || []);
-      setWorst(reportsRes.worst_recent ?? null);
+      if (reportsRes.reports !== null) {
+        setReports(reportsRes.reports || []); setWorst(reportsRes.worst_recent ?? null); setReportsError(null);
+      } else setReportsError(t("reportsUnavailable"));
       const killState = await killGet;
+      if (request !== generation.current) return;
       if (killState.ok) {
         setKillSwitch(killState.value);
         setKillUnknown(false);
@@ -146,9 +161,9 @@ export default function IncidentsPage() {
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (request === generation.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (request === generation.current) setLoading(false);
     }
   }
 
@@ -170,16 +185,17 @@ export default function IncidentsPage() {
           : { kill_switch: !!res.kill_switch, live_trading_enabled: false, ts: new Date().toISOString() },
       );
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
   }
 
   useEffect(() => {
+    setIncidents([]); setHasLoaded(false); setSelected(null);
     void load();
     const t = setInterval(() => void load(), 30_000);
-    return () => clearInterval(t);
+    return () => { clearInterval(t); generation.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [windowS]);
 
@@ -191,13 +207,14 @@ export default function IncidentsPage() {
     return map;
   }, [incidents]);
 
-  const filteredIncidents = useMemo(
-    () =>
-      kindFilter === "all"
-        ? incidents
-        : incidents.filter((i) => i.kind === kindFilter),
-    [incidents, kindFilter],
-  );
+  const filteredIncidents = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return incidents.filter((incident) => (kindFilter === "all" || incident.kind === kindFilter) && (!needle ||
+      [incident.kind, incident.account_id, incident.subject, incident.order_id, incident.executor_id, incident.report_id]
+        .some((value) => String(value ?? "").toLocaleLowerCase().includes(needle))));
+  }, [incidents, kindFilter, query]);
+  const incidentPage = useListPage(filteredIncidents, windowS + ":" + kindFilter + ":" + query);
+  const reportPage = useListPage(reports, "reports", 10);
 
   // Dispatch actions available per selected incident kind: recon-type
   // events can trigger a reconciliation run, lost orders deep-link to the
@@ -220,7 +237,7 @@ export default function IncidentsPage() {
       setSelected(null);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -285,7 +302,9 @@ export default function IncidentsPage() {
       />
       <SectionTabs section="trading" />
       <PageBody>
-        {error && <ErrorBanner error={error} />}
+        {error && <ErrorBanner error={error} onRetry={() => void load()} />}
+        <ErrorBanner error={actionError} />
+        {killUnknown && <p role="status" className="text-sm text-warn">{t("killUnknown")}</p>}
 
         {worst &&
         (worst.severity === "action_required" ||
@@ -318,7 +337,7 @@ export default function IncidentsPage() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi
             label={t("kpiIncidents")}
-            value={`${incidents.length}`}
+            value={hasLoaded ? String(incidents.length) : "–"}
             tone={incidents.length > 0 ? "warn" : "neutral"}
           />
           <Kpi
@@ -328,73 +347,31 @@ export default function IncidentsPage() {
           />
           <Kpi
             label={t("kpiLostOrders")}
-            value={`${incidentsByKind["lost_order"] || 0}`}
+            value={hasLoaded ? String(incidentsByKind["lost_order"] || 0) : "–"}
             tone={(incidentsByKind["lost_order"] || 0) > 0 ? "danger" : "ok"}
           />
           <Kpi
             label={t("kpiKillSwitch")}
-            value={killSwitch?.kill_switch ? t("killSwitchEngaged") : t("killSwitchReleased")}
-            tone={killSwitch?.kill_switch ? "danger" : "ok"}
+            value={killUnknown || !killSwitch ? t("statusUnknown") : killSwitch.kill_switch ? t("killSwitchEngaged") : t("killSwitchReleased")}
+            tone={killUnknown || !killSwitch ? "warn" : killSwitch.kill_switch ? "danger" : "ok"}
           />
         </div>
 
-        <div className="flex flex-wrap gap-2 items-center text-[12px] border-b border-brand-500/10 pb-3">
-          <span className="text-ink-500">{t("timeWindowTitle")}</span>
-          {WINDOW_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setWindowS(opt.value)}
-              className={`px-2.5 py-1 rounded-md border transition ${
-                windowS === opt.value
-                  ? "bg-brand-500/15 text-brand-100 border-brand-500/40"
-                  : "text-ink-400 border-transparent hover:text-ink-200 hover:border-brand-500/20"
-              }`}
-            >
-              {t("lastWindow", { label: opt.label })}
-            </button>
-          ))}
-          {/* Kind filter chips with counts — a 24h window can hold hundreds
-              of rows; scanning by eye was the only option before. */}
-          <span className="ml-4 text-ink-500">{t("colKind")}</span>
-          <button
-            onClick={() => setKindFilter("all")}
-            className={`px-2.5 py-1 rounded-md border transition ${
-              kindFilter === "all"
-                ? "bg-brand-500/15 text-brand-100 border-brand-500/40"
-                : "text-ink-400 border-transparent hover:text-ink-200 hover:border-brand-500/20"
-            }`}
-          >
-            {tEnum("filterAll")} · {incidents.length}
-          </button>
-          {Object.keys(incidentsByKind)
-            .sort()
-            .map((kind) => (
-              <button
-                key={kind}
-                onClick={() => setKindFilter(kind)}
-                className={`px-2.5 py-1 rounded-md border transition ${
-                  kindFilter === kind
-                    ? "bg-brand-500/15 text-brand-100 border-brand-500/40"
-                    : "text-ink-400 border-transparent hover:text-ink-200 hover:border-brand-500/20"
-                }`}
-              >
-                {enumLabel(INCIDENT_KIND_KEYS, kind, tEnum)} ·{" "}
-                {incidentsByKind[kind]}
-              </button>
-            ))}
+        <div className="space-y-3 border-b border-[color:var(--line)] pb-4">
+          <FilterBar label={t("timeWindowTitle")} value={String(windowS)} onChange={(value) => setWindowS(Number(value))}
+            options={WINDOW_OPTIONS.map((option) => ({ value: String(option.value), label: t("lastWindow", { label: option.label }) }))} />
+          <FilterBar label={t("colKind")} value={kindFilter} onChange={setKindFilter}
+            options={[{ value: "all", label: tEnum("filterAll"), count: incidents.length }, ...Object.keys(incidentsByKind).sort().map((kind) => ({ value: kind, label: enumLabel(INCIDENT_KIND_KEYS, kind, tEnum), count: incidentsByKind[kind] }))]} />
+          <SearchField label={t("searchPlaceholder")} value={query} onChange={setQuery} />
         </div>
 
         <Card title={t("kpiIncidents")} description={t("incidentsDescription")}>
           {loading && incidents.length === 0 ? (
-            <div className="space-y-2">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <div key={i} className="skeleton h-7" />
-              ))}
-            </div>
-          ) : filteredIncidents.length === 0 ? (
-            <Empty label={t("noIncidentsInWindow")} />
+            <LoadingState />
+          ) : error && !hasLoaded ? null : filteredIncidents.length === 0 ? (
+            <Empty label={t("noIncidentsInWindow")} action={query || kindFilter !== "all" ? <button type="button" className="btn btn-ghost" onClick={() => { setQuery(""); setKindFilter("all"); }}>{t("clearFilters")}</button> : undefined} />
           ) : (
-            <div className="embedded-table-scroll">
+            <TableViewport label={t("kpiIncidents")}>
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
@@ -403,11 +380,11 @@ export default function IncidentsPage() {
                     <th>{t("colAccount")}</th>
                     <th>{t("colSubject")}</th>
                     <th>{t("colWhen")}</th>
-                    <th></th>
+                    <th><span className="sr-only">{t("inspect")}</span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredIncidents.map((incident, idx) => (
+                  {incidentPage.rows.map((incident, idx) => (
                     <tr
                       key={`${incident.kind}-${idx}-${String(incident.ts)}`}
                       className="text-xs"
@@ -442,7 +419,7 @@ export default function IncidentsPage() {
                       <td>
                         <button
                           onClick={() => setSelected(incident)}
-                          className="btn-ghost text-[11px] py-0.5"
+                          className="btn btn-ghost text-xs"
                         >
                           {t("inspect")}
                         </button>
@@ -451,18 +428,20 @@ export default function IncidentsPage() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableViewport>
           )}
+          <Pagination {...incidentPage} />
         </Card>
 
         <Card
           title={t("kpiReconReports")}
           description={t("reconciliationReportsDescription")}
         >
-          {reports.length === 0 ? (
+          <ErrorBanner error={reportsError} onRetry={() => void load()} />
+          {reportsError && !reports.length ? null : reports.length === 0 ? (
             <Empty label={t("noReconciliationReports")} />
           ) : (
-            <div className="embedded-table-scroll">
+            <TableViewport label={t("kpiReconReports")}>
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
@@ -472,11 +451,11 @@ export default function IncidentsPage() {
                     <th>{t("colStrategy")}</th>
                     <th>{t("colIssues")}</th>
                     <th>{t("colWhen")}</th>
-                    <th></th>
+                    <th><span className="sr-only">{t("inspect")}</span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {reports.map((r) => (
+                  {reportPage.rows.map((r) => (
                     <tr key={r.report_id} className="text-xs">
                       <td>
                         <Pill tone={severityTone(r.severity)}>
@@ -502,7 +481,7 @@ export default function IncidentsPage() {
                               ts: r.ts,
                             })
                           }
-                          className="btn-ghost text-[11px] py-0.5"
+                          className="btn btn-ghost text-xs"
                         >
                           {t("inspect")}
                         </button>
@@ -511,11 +490,13 @@ export default function IncidentsPage() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableViewport>
           )}
+          <Pagination {...reportPage} />
         </Card>
 
         {selected ? (
+          <ModalFrame title={t("incidentDetailTitle", { kind: enumLabel(INCIDENT_KIND_KEYS, selected.kind, tEnum) })} side="right" onClose={() => setSelected(null)} busy={busy !== null}>
           <Card
             title={t("incidentDetailTitle", {
               kind: enumLabel(INCIDENT_KIND_KEYS, selected.kind, tEnum),
@@ -548,8 +529,14 @@ export default function IncidentsPage() {
               </div>
             }
           >
+            <dl className="mb-5 grid grid-cols-2 gap-4 text-sm">
+              <div><dt className="text-[color:var(--text-muted)]">{t("colSeverity")}</dt><dd className="mt-1"><Pill tone={severityTone(selected.severity)}>{enumLabel(SEVERITY_KEYS, String(selected.severity || "info"), tEnum)}</Pill></dd></div>
+              <div><dt className="text-[color:var(--text-muted)]">{t("colWhen")}</dt><dd className="mt-1">{fmtTs(selected.ts)}</dd></div>
+              <div className="col-span-2"><dt className="text-[color:var(--text-muted)]">{t("colAccount")}</dt><dd className="mt-1 break-words">{String(selected.account_id ?? "–")}</dd></div>
+            </dl>
             <Json value={selected} />
           </Card>
+          </ModalFrame>
         ) : null}
       </PageBody>
     </div>

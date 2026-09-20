@@ -1,6 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Local servers and UI previews isolate build output from other builds.
+  // Workers must receive the same directory through normal Next configuration.
+  ...(process.env.NERYA_UI_DIST_DIR ? {
+    distDir: process.env.NERYA_UI_DIST_DIR,
+    typescript: { tsconfigPath: process.env.NERYA_UI_TSCONFIG || "tsconfig.json" },
+  } : {}),
   // NOTE: Do NOT put NERYA_API in the `env` block — Next.js inlines those
   // values at build time, so a stale port gets baked into the compiled
   // proxy route and survives `next dev` restarts.  The proxy route now

@@ -13,6 +13,7 @@ import {
   Empty,
   ErrorBanner,
   Kpi,
+  LoadingState,
   PageBody,
   PageHeader,
   Pill,
@@ -20,6 +21,9 @@ import {
 import { JsonView } from "../../components/JsonView";
 import { SectionTabs } from "../../components/SectionTabs";
 import { Select } from "../../components/Select";
+import { FilterBar, SearchField, Pagination, TableViewport, useListPage } from "../../components/ListControls";
+import { ModalFrame } from "../../components/ModalFrame";
+import { finiteNumber } from "../../lib/financeDisplay";
 import { ModePill } from "../../components/ModePill";
 import { formatTsShort } from "../../lib/format";
 import { confirm as confirmDialog } from "../../lib/dialogs";
@@ -118,8 +122,8 @@ function fmtTs(ts?: number | null): string {
 }
 
 function num(v: unknown, digits = 6): string {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return "–";
+  const n = finiteNumber(v);
+  if (n === null) return "–";
   return n.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
@@ -136,7 +140,13 @@ export default function OrdersPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [accountModes, setAccountModes] = useState<Record<string, string>>({});
-  const detailRef = useRef<HTMLDivElement | null>(null);
+  const requestId = useRef(0);
+  const filtersRef = useRef({ stateFilter, accountFilter });
+  filtersRef.current = { stateFilter, accountFilter };
+  const [query, setQuery] = useState("");
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [accountError, setAccountError] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const selected = useMemo(
     () => orders.find((o) => o.order_id === selectedId) ?? null,
@@ -151,37 +161,43 @@ export default function OrdersPage() {
   ];
 
   async function load() {
+    const id = ++requestId.current;
+    const scope = filtersRef.current;
     setLoading(true);
     setError(null);
     try {
       const [ordersRes, executorsRes, accountsRes] = await Promise.all([
         clientApi.controlOrdersList({
-          state: stateFilter,
-          account_id: accountFilter || undefined,
+          state: scope.stateFilter,
+          account_id: scope.accountFilter || undefined,
           limit: 200,
         }),
         clientApi.controlExecutorsList({
-          state: stateFilter === "lost" ? "recent" : "active",
-          account_id: accountFilter || undefined,
+          state: scope.stateFilter === "lost" ? "recent" : "active",
+          account_id: scope.accountFilter || undefined,
           limit: 100,
         }),
-        clientApi.accountsList().catch(() => ({ accounts: [], ts: 0 })),
+        clientApi.accountsList().catch(() => null),
       ]);
+      if (id !== requestId.current) return;
+      setHasLoaded(true);
+      setAccountError(accountsRes === null);
       setOrders(ordersRes.orders || []);
       setExecutors(executorsRes.executors || []);
       const modes: Record<string, string> = {};
-      for (const a of accountsRes.accounts || []) {
+      for (const a of accountsRes?.accounts || []) {
         modes[a.profile.id] = a.profile.mode;
       }
-      if (Object.keys(modes).length > 0) setAccountModes(modes);
+      if (accountsRes) setAccountModes(modes);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (id === requestId.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (id === requestId.current) setLoading(false);
     }
   }
 
   useEffect(() => {
+    setOrders([]); setExecutors([]); setSelectedId(null); setHasLoaded(false);
     void load();
     const t = setInterval(() => {
       if (document.visibilityState === "visible") void load();
@@ -191,16 +207,12 @@ export default function OrdersPage() {
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      requestId.current += 1;
       clearInterval(t);
       document.removeEventListener("visibilitychange", onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stateFilter, accountFilter]);
-
-  useEffect(() => {
-    if (!selectedId) return;
-    detailRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [selectedId]);
 
   async function cancelOrder(order: ControlPlaneOrder) {
     const ok = await confirmDialog({
@@ -212,6 +224,7 @@ export default function OrdersPage() {
       tone: "warning",
     });
     if (!ok) return;
+    setActionError(null);
     setBusy(order.order_id);
     try {
       await clientApi.controlOrderCancel({
@@ -221,7 +234,7 @@ export default function OrdersPage() {
       });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
@@ -236,6 +249,7 @@ export default function OrdersPage() {
       tone: "warning",
     });
     if (!ok) return;
+    setActionError(null);
     setBusy(exec.executor_id);
     try {
       await clientApi.controlExecutorCancel({
@@ -245,19 +259,25 @@ export default function OrdersPage() {
       });
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
   }
 
   const accountIds = useMemo(() => {
-    const ids = new Set<string>();
+    const ids = new Set<string>(Object.keys(accountModes));
     for (const o of orders) ids.add(o.account_id);
     for (const e of executors) ids.add(e.account_id);
     return Array.from(ids).sort();
-  }, [orders, executors]);
+  }, [orders, executors, accountModes]);
 
+  const filteredOrders = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return orders.filter((order) => !needle || [order.order_id, order.account_id, order.market, order.strategy_id, order.executor_id].some((value) => String(value || "").toLocaleLowerCase().includes(needle)));
+  }, [orders, query]);
+  const orderPage = useListPage(filteredOrders, stateFilter + ":" + accountFilter + ":" + query);
+  const executorPage = useListPage(executors, stateFilter + ":" + accountFilter);
   const totals = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const o of orders) counts[o.state] = (counts[o.state] || 0) + 1;
@@ -281,7 +301,8 @@ export default function OrdersPage() {
       />
       <SectionTabs section="trading" />
       <PageBody>
-        {error && <ErrorBanner error={error} />}
+        {error && <ErrorBanner error={error} onRetry={() => void load()} />}
+        <ErrorBanner error={actionError} />
 
         <div className="flex flex-wrap items-end gap-x-8 gap-y-3 px-1">
           <Kpi
@@ -312,21 +333,9 @@ export default function OrdersPage() {
 
         <div className="flex flex-wrap gap-2 items-center text-[12px] border-b border-brand-500/10 pb-3">
           <span className="text-ink-500">{t("stateLabel")}</span>
-          {STATE_LABELS.map((s) => (
-            <button
-              key={s.value}
-              onClick={() => setStateFilter(s.value)}
-              className={`px-2.5 py-1 rounded-md border transition ${
-                stateFilter === s.value
-                  ? "bg-brand-500/15 text-brand-100 border-brand-500/40"
-                  : "text-ink-400 border-transparent hover:text-ink-200 hover:border-brand-500/20"
-              }`}
-            >
-              {s.label}
-            </button>
-          ))}
+          <FilterBar label={t("stateLabel")} value={stateFilter} onChange={setStateFilter} options={STATE_LABELS} />
           <span className="ml-4 text-ink-500">{t("accountLabel")}</span>
-          <div className="min-w-[180px]">
+          <div className="w-full min-w-0 sm:w-56">
             <Select
               value={accountFilter || ""}
               onChange={(value) => setAccountFilter(value)}
@@ -340,14 +349,16 @@ export default function OrdersPage() {
           </div>
         </div>
 
+        {accountError && <p role="status" className="text-sm text-warn">{t("accountLoadError")}</p>}
+        <SearchField value={query} onChange={setQuery} label={t("searchPlaceholder")} />
         <Card
-          title={t("ordersTitle", { count: orders.length })}
+          title={t("ordersTitle", { count: filteredOrders.length })}
           description={t("ordersDescription")}
         >
-          {orders.length === 0 ? (
-            <Empty label={loading ? t("loadingOrders") : t("noOrdersMatch")} />
+          {loading && !hasLoaded ? <LoadingState label={t("loadingOrders")} /> : error && !hasLoaded ? null : filteredOrders.length === 0 ? (
+            <Empty label={t("noOrdersMatch")} action={query ? <button type="button" className="btn btn-ghost" onClick={() => setQuery("")}>{t("clearSearch")}</button> : undefined} />
           ) : (
-            <div className="embedded-table-scroll">
+            <TableViewport label={t("ordersTitle", { count: filteredOrders.length })}>
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
@@ -361,11 +372,11 @@ export default function OrdersPage() {
                     <th className="text-right">{tEnum("sizeFilled")}</th>
                     <th className="text-right">{t("colAvgPrice")}</th>
                     <th>{t("colAge")}</th>
-                    <th></th>
+                    <th><span className="sr-only">{t("inspect")}</span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {orders.map((o) => {
+                  {orderPage.rows.map((o) => {
                     const filledNum = Number(o.filled_size || 0);
                     const sizeNum = Number(o.size_base || 0);
                     const fillPct =
@@ -446,7 +457,8 @@ export default function OrdersPage() {
                               e.stopPropagation();
                               setSelectedId(o.order_id);
                             }}
-                            className="btn-ghost text-[11px] py-0.5"
+                            aria-label={`${t("inspect")} ${o.order_id}`}
+                            className="btn btn-ghost text-xs"
                           >
                             {t("inspect")}
                           </button>
@@ -458,7 +470,7 @@ export default function OrdersPage() {
                                 e.stopPropagation();
                                 void cancelOrder(o);
                               }}
-                              disabled={busy === o.order_id}
+                              disabled={busy !== null}
                               className="btn-ghost text-[11px] py-0.5 text-danger"
                             >
                               {busy === o.order_id ? "…" : t("cancel")}
@@ -471,8 +483,10 @@ export default function OrdersPage() {
                   })}
                 </tbody>
               </table>
-            </div>
+            </TableViewport>
           )}
+          <Pagination {...orderPage} />
+          {hasLoaded && <p className="mt-3 text-xs text-[color:var(--text-muted)]">{t("loadedLimit")}</p>}
         </Card>
 
         <Advanced
@@ -484,7 +498,7 @@ export default function OrdersPage() {
           {executors.length === 0 ? (
             <Empty label={t("noExecutors")} />
           ) : (
-            <div className="embedded-table-scroll">
+            <TableViewport label={t("executorsTitle", { count: executors.length })}>
               <table className="table w-full">
                 <thead>
                   <tr className="text-[11px] text-ink-400">
@@ -497,11 +511,11 @@ export default function OrdersPage() {
                     <th>{t("colLastHeartbeat")}</th>
                     <th className="text-right">{t("colOrders")}</th>
                     <th>{t("colExecutorId")}</th>
-                    <th></th>
+                    <th><span className="sr-only">{t("inspect")}</span></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {executors.map((e) => (
+                  {executorPage.rows.map((e) => (
                     <tr key={e.executor_id} className="text-xs">
                       <td>
                         <Pill tone={executorStateTone(e.state)}>
@@ -532,7 +546,7 @@ export default function OrdersPage() {
                           e.state === "submitted") && (
                           <button
                             onClick={() => cancelExecutor(e)}
-                            disabled={busy === e.executor_id}
+                            disabled={busy !== null}
                             className="btn-ghost text-[11px] py-0.5 text-danger"
                           >
                             {busy === e.executor_id ? "…" : t("cancel")}
@@ -543,12 +557,13 @@ export default function OrdersPage() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </TableViewport>
           )}
+          <Pagination {...executorPage} />
         </Advanced>
 
         {selected ? (
-          <div ref={detailRef}>
+          <ModalFrame title={t("orderDetailTitle", { orderId: selected.order_id })} side="right" width="48rem" onClose={() => setSelectedId(null)}>
             <Card
               title={t("orderDetailTitle", { orderId: selected.order_id })}
               description={`${selected.market} · ${enumLabel(ORDER_SIDE_KEYS, selected.side, tEnum)} ${enumLabel(ORDER_TYPE_KEYS, selected.order_type, tEnum)}`}
@@ -566,7 +581,7 @@ export default function OrdersPage() {
                 mode={accountModes[selected.account_id]}
               />
             </Card>
-          </div>
+          </ModalFrame>
         ) : null}
       </PageBody>
     </div>
@@ -727,7 +742,7 @@ function DetailRow({
   return (
     <div className="grid grid-cols-[110px_minmax(0,1fr)] items-baseline gap-2 text-[11px]">
       <dt className="text-ink-500">{label}</dt>
-      <dd className={`min-w-0 truncate text-ink-100 ${mono ? "font-mono" : ""}`}>{value}</dd>
+      <dd className={`min-w-0 break-words text-ink-100 ${mono ? "font-mono" : ""}`}>{value}</dd>
     </div>
   );
 }

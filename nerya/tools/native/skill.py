@@ -31,6 +31,7 @@ Tools provided here:
 from __future__ import annotations
 
 import json
+import base64
 import re
 import subprocess
 import sys
@@ -42,6 +43,8 @@ from xml.sax.saxutils import escape as xml_escape
 
 from ...core.sandbox import sandbox_exec
 from ...security.runtime_env import build_process_env
+from ...skills.discovery import catalog_ids, catalog_parent
+from ...skills.registry import _walk_skill_dirs
 from ..tool_errors import schema_validation_result
 from ..types import (
     ToolCall,
@@ -73,6 +76,7 @@ class SkillRecord:
     body_chars: int = 0
     has_scripts: bool = False
     scripts: list[str] = field(default_factory=list)
+    catalog_parent: str = ""
 
     def asdict(self) -> dict[str, Any]:
         return {
@@ -132,11 +136,9 @@ def index_skills(
         [Path(path) for path in skill_files]
         if skill_files is not None
         else [
-            child / "SKILL.md"
+            md
             for root in roots
-            if root.exists() and root.is_dir()
-            for child in sorted(root.iterdir())
-            if child.is_dir()
+            for _child, md in _walk_skill_dirs(root)
         ]
     )
     for md in files:
@@ -161,6 +163,7 @@ def index_skills(
                 body_chars=len(body),
                 has_scripts=bool(scripts),
                 scripts=scripts,
+                catalog_parent=catalog_parent(fm.get("metadata")),
             )
         )
     found.sort(key=lambda r: r.skill_id)
@@ -209,6 +212,14 @@ class SkillIndex:
             self.reload()
         return self._by_id.get(skill_id)
 
+    def catalog(self, *, refresh: bool = False) -> list[SkillRecord]:
+        """Fold compatible/nested playbooks only when their hub is available."""
+        rows = self.records(refresh=refresh)
+        visible = catalog_ids(
+            (r.skill_id, Path(r.path).parent, r.catalog_parent) for r in rows
+        )
+        return [r for r in rows if r.skill_id in visible]
+
     def render_for_prompt(self, *, max_chars: int | None = None) -> str:
         """Render the standard progressive-disclosure skill catalog.
 
@@ -217,7 +228,7 @@ class SkillIndex:
         """
         entries: list[str] = []
         used = len("<available_skills>\n</available_skills>")
-        for r in self.records():
+        for r in self.catalog():
             entry = (
                 "  <skill>\n"
                 f"    <name>{xml_escape(r.skill_id)}</name>\n"
@@ -240,7 +251,7 @@ class SkillIndex:
 def skill_index_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult:
     args = call.arguments or {}
     refresh = bool(args.get("refresh") or False)
-    rows = skill_index.records(refresh=refresh)
+    rows = skill_index.catalog(refresh=refresh)
     text_lines = [f"Discovered {len(rows)} skill(s)."]
     for r in rows:
         line = f"- {r.skill_id}"
@@ -304,22 +315,33 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
         target = candidate
     try:
         text = target.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
             error=ToolError(
-                kind=ToolErrorKind.IO_ERROR,
+                kind=ToolErrorKind.EXECUTION_ERROR,
                 message=f"failed to read skill file: {exc}",
             ),
         )
+    page: dict[str, Any] = {}
+    if "offset" in args or "limit" in args:
+        offset, limit = args.get("offset", 0), args.get("limit", 200)
+        if (type(offset) is not int or offset < 0
+                or type(limit) is not int or not 1 <= limit <= 400):
+            return schema_validation_result(call, "offset must be non-negative; limit must be 1..400.")
+        lines = text.splitlines()
+        text = "\n".join(lines[offset:offset + limit])
+        end = min(offset + limit, len(lines))
+        page = {"offset": offset, "total_lines": len(lines),
+                "next_offset": end if end < len(lines) else None}
     return ToolResult(
         tool_use_id=call.id,
         name=call.name,
         content=[
             ToolResultPart.text_part(text),
             ToolResultPart.json_part(
-                {"skill": record.asdict(), "path": str(target)}
+                {"skill": record.asdict(), "path": str(target), **page}
             ),
         ],
     )
@@ -334,9 +356,11 @@ def _script_path(skill_index: SkillIndex, skill_id: str, name: str) -> Optional[
     rec = skill_index.get(skill_id)
     if rec is None:
         return None
-    base = Path(rec.path).parent / "scripts"
+    root = Path(rec.path).parent.resolve()
+    base = root / "scripts"
     candidate = (base / name).resolve()
     try:
+        candidate.relative_to(root)
         candidate.relative_to(base.resolve())
     except ValueError:
         return None
@@ -356,7 +380,7 @@ def is_browser_skill_script_run(payload: dict[str, Any]) -> bool:
 
     sid = str(payload.get("skill_id") or payload.get("id") or "").strip().lower()
     name = str(payload.get("name") or payload.get("script") or "").strip()
-    return sid == "browser" and bool(name)
+    return sid == "browser" and name in {"browser_session.py", "scripts/browser_session.py"}
 
 
 def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult:
@@ -384,7 +408,7 @@ def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolRe
             tool_use_id=call.id,
             name=call.name,
             error=ToolError(
-                kind=ToolErrorKind.IO_ERROR,
+                kind=ToolErrorKind.EXECUTION_ERROR,
                 message=f"failed to read script: {exc}",
             ),
         )
@@ -414,6 +438,7 @@ def script_run_handler(
     skill_index: SkillIndex,
     cwd: Optional[Path] = None,
     timeout_default: float = 60.0,
+    conversation_id: str = "",
 ) -> ToolResult:
     args = call.arguments or {}
     sid = str(args.get("skill_id") or "").strip()
@@ -448,6 +473,14 @@ def script_run_handler(
         env = build_process_env(None, root)
     except Exception:
         env = None
+    trace = None
+    builtin_browser = Path(__file__).resolve().parents[2] / 'skills/builtin/browser/scripts/browser_session.py'
+    if sid == 'browser' and p.resolve() == builtin_browser.resolve():
+        import os
+        from ...integrations import browser_trace
+        trace = browser_trace.create(root, conversation_id, call.id)
+        env = dict(env if env is not None else os.environ)
+        env['NERYA_BROWSER_TRACE_TOKEN'] = trace.token
     try:
         proc = sandbox_exec(
             cmd,
@@ -459,6 +492,8 @@ def script_run_handler(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
+        if trace:
+            trace.finish('failed')
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
@@ -469,6 +504,8 @@ def script_run_handler(
             ),
         )
     except FileNotFoundError as exc:
+        if trace:
+            trace.finish('failed')
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
@@ -488,6 +525,32 @@ def script_run_handler(
         except Exception:
             stdout_json = None
     success = proc.returncode == 0
+    if trace:
+        trace.finish('completed' if success else 'failed')
+    builtin_browser = Path(__file__).resolve().parents[2] / 'skills/builtin/browser/scripts/browser_session.py'
+    if sid == 'browser' and p.resolve() == builtin_browser.resolve() and isinstance(stdout_json, dict):
+        observation = dict(stdout_json)
+        image = observation.pop('image', None)
+        parts = [ToolResultPart.json_part(observation)]
+        if isinstance(image, str) and image.startswith('data:image/png;base64,') and len(image) <= 14 * 1024 * 1024:
+            try:
+                encoded = image.split(',', 1)[1]
+                decoded = base64.b64decode(encoded, validate=True)
+                if decoded.startswith(b'\x89PNG\r\n\x1a\n'):
+                    parts.append(ToolResultPart(type='image', data={'type':'base64','media_type':'image/png','data':encoded}, media_type='image/png', metadata={'name':'browser-viewport','provider_input':True}))
+            except (ValueError, TypeError):
+                observation['image_error'] = 'invalid_browser_image'
+        # Browser evidence is already structured and bounded. Do not duplicate
+        # it (or a base64 image) inside shell stdout, the UI or model text.
+        return ToolResult(tool_use_id=call.id, name=call.name,
+                          is_error=not (success and observation.get('ok') is True),
+                          semantic_success=success and observation.get('ok') is True,
+                          content=parts, elapsed_ms=round(duration * 1000),
+                          metadata={"external_content":True},
+                          error=None if success and observation.get('ok') is True else ToolError(
+                              kind=ToolErrorKind.EXECUTION_ERROR,
+                              message=json.dumps(observation, ensure_ascii=False), retryable=False,
+                              recovery_hint={"action":"inspect_state_before_retry"}))
     text_summary = (
         f"$ {' '.join(cmd[:3])}{' …' if len(cmd) > 3 else ''}\n"
         f"exit={proc.returncode}  duration={duration:.2f}s\n"

@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next-native-review/types/**/*.ts",
+    ".next-local-taste/types/**/*.ts",
+    ".next-local-taste-verified/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "tests/e2e",
+    "playwright.config.ts"
+  ]
+}

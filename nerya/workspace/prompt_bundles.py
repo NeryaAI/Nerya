@@ -168,10 +168,23 @@ def load_bundle(bundle_id: str = DEFAULT_BUNDLE_ID) -> PromptBundle:
         raise ValueError(
             f"prompt bundle '{bundle_id}': 'subagents' must be a mapping"
         )
+    common_ref = manifest_raw.get("subagent_common")
+    if common_ref is not None and not isinstance(common_ref, str):
+        raise ValueError("subagent_common must be a relative path string")
+    common = _read_relative(root, common_ref).strip() if common_ref else ""
+    if common_ref:
+        bundle.sources["subagent_common"] = common_ref
     for sid, rel in sorted(subagents.items()):
-        body = _read_relative(root, str(rel))
-        bundle.subagents[str(sid)] = body
-        bundle.sources[f"subagents/{sid}"] = str(rel)
+        # Lists compose shared contracts without copying them into every role.
+        parts = [rel] if isinstance(rel, str) else rel
+        if (not isinstance(parts, list) or not parts
+                or any(not isinstance(p, str) or not p.strip() for p in parts)):
+            raise ValueError(f"subagent {sid!r} must reference a path or non-empty path list")
+        parts = list(dict.fromkeys(parts))
+        bodies = [_read_relative(root, p) for p in parts]
+        body = bodies[0] if len(bodies) == 1 else "\n\n".join(b.strip() for b in bodies) + "\n"
+        bundle.subagents[str(sid)] = f"{common}\n\n{body}" if common else body
+        bundle.sources[f"subagents/{sid}"] = " + ".join(parts)
 
     policy_config: Dict[str, Any] = manifest_raw
     policy_ref = str(manifest_raw.get("execution_policies") or "").strip()

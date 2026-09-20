@@ -7,7 +7,7 @@ resulting evidence for providers, persistence and live UI subscribers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from ..tools.types import ToolResult
@@ -39,7 +39,8 @@ def project_tool_results(
     approval_by_id: dict[str, dict[str, Any]] = {}
 
     for result in results:
-        rendered = render_tool_result(result)
+        text_result = replace(result, content=[p for p in result.content if not (p.type == 'image' and p.metadata.get('provider_input'))])
+        rendered = render_tool_result(text_result)
         transcript_blocks.append(rendered)
         visible = rendered_tool_result_text(rendered) if not result.is_error else None
         if visible is None and not result.is_error:
@@ -107,6 +108,14 @@ def project_tool_results(
         ApprovalRequestBlock.from_dict(request).as_dict()
         for request in approval_by_id.values()
     )
+    # Keep all tool-result pairs ahead of supplementary images. Images are
+    # top-level user content so OpenAI/Gemini do not flatten them to tool text.
+    for result in results:
+        if result.is_error:
+            continue
+        for part in result.content:
+            if part.type == 'image' and part.metadata.get('provider_input') and isinstance(part.data, dict):
+                transcript_blocks.append({'type':'image', 'source':dict(part.data)})
     return ToolResultProjection(
         transcript_blocks=tuple(transcript_blocks),
         event_blocks=tuple(event_blocks),

@@ -12,9 +12,11 @@
  * server-side, so the UI does not need to mirror the deny list.
  */
 
-import { useCallback, useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
-import { Card, Empty, ErrorBanner, Pill } from "./Page";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocale, useTranslations } from "next-intl";
+import { Card, Empty, ErrorBanner, LoadingState, Pill } from "./Page";
+import { ChoiceSelect } from "./ChoiceSelect";
+import { Pagination, SearchField, useListPage } from "./ListControls";
 import { clientApi } from "../lib/clientApi";
 import type { ProfileFact } from "../lib/operatorTypes";
 
@@ -30,6 +32,10 @@ const FACET_OPTIONS = [
 export function MemoryProfilePanel() {
   const t = useTranslations("memoryProfile");
   const tCommon = useTranslations("common");
+  const zh = useLocale().startsWith("zh");
+  const facetNames: Record<string, string> = zh
+    ? { style: "表达风格", tooling: "工具偏好", universe: "关注市场", risk_preference: "风险偏好", veto: "避免事项", channel: "通知渠道" }
+    : { style: "Style", tooling: "Tools", universe: "Markets", risk_preference: "Risk preferences", veto: "Things to avoid", channel: "Notifications" };
 
   const [facts, setFacts] = useState<ProfileFact[]>([]);
   const [stats, setStats] = useState<Record<string, unknown>>({});
@@ -37,14 +43,20 @@ export function MemoryProfilePanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const generation = useRef(0);
 
   const [draftFacet, setDraftFacet] = useState("style");
   const [draftKey, setDraftKey] = useState("");
   const [draftValue, setDraftValue] = useState("");
 
   const load = useCallback(async () => {
+    const request = ++generation.current;
+    setLoading(true);
     try {
       const env = await clientApi.profileList({ include_forgotten: includeForgotten });
+      if (request !== generation.current) return;
       if (env.ok) {
         setFacts(env.facts ?? []);
         setStats((env.stats as unknown as Record<string, unknown>) ?? {});
@@ -53,19 +65,21 @@ export function MemoryProfilePanel() {
         setError(env.error || env.detail || t("disabled"));
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (request === generation.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (request === generation.current) setLoading(false);
     }
   }, [includeForgotten, t]);
 
   useEffect(() => {
-    load();
+    void load();
+    return () => { generation.current += 1; };
   }, [load]);
 
   async function addFact() {
     if (!draftKey.trim()) return;
     setBusy(true);
+    setActionError(null);
     try {
       let parsed: unknown = draftValue;
       // Try JSON-parse so booleans/numbers/arrays/objects pass through cleanly,
@@ -81,14 +95,14 @@ export function MemoryProfilePanel() {
         value: parsed,
       });
       if (!env.ok) {
-        setError(env.error || t("setFailed"));
+        throw new Error(env.error || t("setFailed"));
       } else {
         setDraftKey("");
         setDraftValue("");
       }
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -96,24 +110,30 @@ export function MemoryProfilePanel() {
 
   async function actOn(id: string, action: "pin" | "forget") {
     setBusy(true);
+    setActionError(null);
     try {
       const env = action === "pin"
         ? await clientApi.profilePin(id)
         : await clientApi.profileForget(id);
       if (!env.ok) {
-        setError(env.error || t("setFailed"));
+        throw new Error(env.error || t("setFailed"));
       }
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }
 
+  const filtered = useMemo(() => facts.filter((fact) =>
+    `${fact.key} ${fact.facet} ${JSON.stringify(fact.value)}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())), [facts, query]);
+  const paging = useListPage(filtered, `${query}:${includeForgotten}`);
+
   return (
     <div className="space-y-4">
-      {error ? <ErrorBanner error={error} /> : null}
+      {error ? <ErrorBanner error={error} onRetry={() => void load()} /> : null}
+      <ErrorBanner error={actionError} />
 
       <Card title={t("title")} description={t("description")}>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
@@ -121,23 +141,25 @@ export function MemoryProfilePanel() {
             <div className="text-[11px] text-ink-400 font-medium mb-1">
               {t("facet")}
             </div>
-            <select
+            <ChoiceSelect
+              aria-label={t("facet")}
               value={draftFacet}
-              onChange={(e) => setDraftFacet(e.target.value)}
+              onValueChange={setDraftFacet}
               className="w-full text-[12px] bg-ink-950/40 border border-brand-500/25 rounded-md px-2 py-1 text-ink-100"
             >
               {FACET_OPTIONS.map((f) => (
                 <option key={f} value={f}>
-                  {f}
+                  {facetNames[f] ?? f}
                 </option>
               ))}
-            </select>
+            </ChoiceSelect>
           </div>
           <div>
             <div className="text-[11px] text-ink-400 font-medium mb-1">
               {t("key")}
             </div>
             <input
+              aria-label={t("key")}
               value={draftKey}
               onChange={(e) => setDraftKey(e.target.value)}
               placeholder={t("keyPlaceholder")}
@@ -149,6 +171,7 @@ export function MemoryProfilePanel() {
               {t("value")}
             </div>
             <input
+              aria-label={t("value")}
               value={draftValue}
               onChange={(e) => setDraftValue(e.target.value)}
               placeholder={t("valuePlaceholder")}
@@ -158,7 +181,7 @@ export function MemoryProfilePanel() {
           <button
             disabled={busy || !draftKey.trim()}
             onClick={addFact}
-            className="text-[12px] px-3 py-1.5 rounded-md text-brand-200 border border-brand-500/40 hover:bg-brand-500/10 disabled:opacity-50"
+            className="btn btn-primary"
           >
             {t("addFact")}
           </button>
@@ -168,6 +191,7 @@ export function MemoryProfilePanel() {
         </div>
       </Card>
 
+      <SearchField value={query} onChange={setQuery} label={zh ? "搜索偏好记录" : "Search preferences"} />
       <Card
         title={t("factsTitle")}
         description={t("factsDescription", { total: Number(stats.total ?? 0) })}
@@ -183,23 +207,25 @@ export function MemoryProfilePanel() {
         }
         padded={false}
       >
-        {loading ? (
-          <div className="p-4 text-[12px] text-ink-500">{tCommon("loading")}</div>
-        ) : facts.length === 0 ? (
-          <Empty label={t("empty")} />
+        {loading && !facts.length ? (
+          <LoadingState label={tCommon("loading")} />
+        ) : error && !facts.length ? null : filtered.length === 0 ? (
+          <Empty label={query ? (zh ? "没有匹配的偏好" : "No matching preferences") : t("empty")}
+            subtitle={query ? (zh ? "更换关键词，或清除搜索查看全部记录。" : "Try another term or clear the search.") : (zh ? "在上方添加一条偏好，让 Agent 更了解你的工作方式。" : "Add a preference above to guide how your agent works.")}
+            action={query ? <button type="button" className="btn btn-ghost" onClick={() => setQuery("")}>{zh ? "清除搜索" : "Clear search"}</button> : undefined} />
         ) : (
-          <ul>
-            {facts.map((f) => (
+          <><ul>
+            {paging.rows.map((f) => (
               <li
                 key={f.id}
                 className="px-3 py-2 border-b border-brand-500/5 last:border-b-0"
               >
-                <div className="flex items-center gap-2">
-                  <Pill tone="brand">{f.facet}</Pill>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Pill tone="brand">{facetNames[f.facet] ?? f.facet}</Pill>
                   <span className="text-[12.5px] font-mono text-ink-100 truncate">
                     {f.key}
                   </span>
-                  <span className="text-[12px] text-ink-300 truncate flex-1">
+                  <span className="min-w-[120px] flex-1 break-words text-[13px] text-ink-300">
                     {typeof f.value === "string"
                       ? f.value
                       : JSON.stringify(f.value)}
@@ -226,7 +252,7 @@ export function MemoryProfilePanel() {
                 </div>
               </li>
             ))}
-          </ul>
+          </ul><div className="px-3 pb-3"><Pagination {...paging} /></div></>
         )}
       </Card>
     </div>

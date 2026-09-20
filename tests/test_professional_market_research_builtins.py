@@ -62,7 +62,9 @@ def test_prompt_bundle_seeds_professional_research_subagents() -> None:
     assert "technical_analyst" in bundle.subagents
     assert "fundamentals_analyst" in bundle.subagents
     assert "research_manager" in bundle.subagents
-    assert "research_report" in bundle.subagents["research_editor"]
+    editor = bundle.subagents["research_editor"]
+    assert "`research`" in editor
+    assert "references/reports.md" in editor
 
 
 def test_research_team_templates_use_specialist_roles() -> None:

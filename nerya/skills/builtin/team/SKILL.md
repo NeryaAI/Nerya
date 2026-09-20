@@ -56,4 +56,9 @@ silently ignoring the constraint.
 
 ## Lazy References
 
+- `references/delegation.md` for choosing single-worker versus team tools,
+  role reuse, task follow-up and stop conditions; replaces the overlapping `agents` entry.
 - `references/full-playbook.md` for team templates, role selection, and failure handling.
+
+Read a selected reference with `Skill(skill="team", file="<path>")` only
+when needed. An explicit team request still goes straight to `team_run`.

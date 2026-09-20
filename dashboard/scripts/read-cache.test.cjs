@@ -1,0 +1,14 @@
+"use strict";
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=require('typescript');
+const source=fs.readFileSync(path.join(__dirname,'../lib/clientApi.ts'),'utf8');
+const compiled=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+function load(fetch,auth=()=>new Headers()){const exports={};vm.runInNewContext(compiled,{exports,window:{},fetch,process:{env:{}},require(name){if(name==='./auth')return {authHeaders:h=>new Headers([...auth().entries(),...new Headers(h).entries()]),handleAuthFailure:()=>{}};throw new Error(name);}});return exports;}
+function ok(data={strategies:[]}){return {ok:true,json:async()=>data,text:async()=>JSON.stringify(data)};}
+test('identity changes cannot reuse another identity read',async()=>{let calls=0,identity='fixture-first';const api=load(async()=>{calls++;return ok()},()=>new Headers({authorization:identity}));await api.clientApi.strategiesAll();identity='fixture-second';await api.clientApi.strategiesAll();assert.equal(calls,2);});
+test('concurrent readonly POST calls share existing cache, including generic callers',async()=>{let calls=0;const api=load(async()=>{calls++;return ok()});await Promise.all([api.clientApi.strategiesAll(),api.clientApi.strategiesAll(),api.callApi('/strategy/list_all',{method:'POST',body:{include_archived:false}})]);assert.equal(calls,1);await api.clientApi.strategiesAll();assert.equal(calls,1);});
+test('different query bodies do not share results',async()=>{let calls=0;const api=load(async()=>{calls++;return ok()});await Promise.all([api.clientApi.strategiesAll(false),api.clientApi.strategiesAll(true)]);assert.equal(calls,2);});
+test('mutating POSTs are never cached or replayed and invalidate reads',async()=>{let calls=0;const api=load(async()=>{calls++;return ok()});await api.clientApi.strategiesAll();await Promise.all([api.callApi('/fixture/write',{method:'POST',body:{}}),api.callApi('/fixture/write',{method:'POST',body:{}})]);await api.clientApi.strategiesAll();assert.equal(calls,4);});
+test('failed reads are not cached as success',async()=>{let calls=0;const api=load(async()=>{if(++calls===1)return {ok:false,status:502,text:async()=> 'fixture failure'};return ok();});await assert.rejects(api.clientApi.strategiesAll(),/502/);await api.clientApi.strategiesAll();assert.equal(calls,2);});
+test('cancelable requests remain independent',async()=>{let calls=0;const api=load(async()=>{calls++;return ok()});const one=new AbortController(),two=new AbortController();await Promise.all([api.callApi('/strategy/list_all',{method:'POST',body:{},signal:one.signal}),api.callApi('/strategy/list_all',{method:'POST',body:{},signal:two.signal})]);assert.equal(calls,2);});

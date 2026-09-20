@@ -32,6 +32,22 @@ from typing import Any, Iterable, Iterator, Optional
 from .types import RiskLevel, ToolDescriptor, ToolHandler
 
 
+def compact_tool_catalog(tools: Iterable[ToolDescriptor]) -> list[ToolDescriptor]:
+    """Fold redundant read entry points AFTER permission/lazy-tool filtering.
+
+    This is presentation only: registry lookup and executor authorization do
+    not change. A policy that allows only a legacy entry still sees that entry.
+    """
+    rows = list(tools)
+    native = {t.name for t in rows if t.namespace == "native"}
+    hidden: set[str] = set()
+    if "Skill" in native:
+        hidden.update({"skill_index", "skill_view", "script_inspect"})
+    if "task_get" in native:
+        hidden.add("task_output")
+    return [t for t in rows if t.namespace != "native" or t.name not in hidden]
+
+
 class ToolNotFoundError(KeyError):
     """Raised when a tool name is not registered."""
 
@@ -202,7 +218,7 @@ class ToolRegistry:
 
         return [
             d.to_provider_tool()
-            for d in self.list_tools(namespaces=namespaces, tags=tags)
+            for d in compact_tool_catalog(self.list_tools(namespaces=namespaces, tags=tags))
         ]
 
 
@@ -274,5 +290,6 @@ __all__ = [
     "ToolAlreadyRegisteredError",
     "ToolNotFoundError",
     "ToolRegistry",
+    "compact_tool_catalog",
     "make_native_descriptor",
 ]

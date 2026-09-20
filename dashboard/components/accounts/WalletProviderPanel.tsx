@@ -1,5 +1,8 @@
 "use client";
 
+import { ChoiceSelect } from "../ChoiceSelect";
+import { ModalFrame } from "../ModalFrame";
+
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useTranslations } from "next-intl";
@@ -712,12 +715,9 @@ export function WalletProviderPanel({
         )}
 
         {selected && dialogOpen ? (
-          <div
-            className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 px-4 py-8 backdrop-blur-sm"
-            role="dialog"
-            aria-modal="true"
-          >
-          <div className="max-h-[calc(100vh-4rem)] w-full max-w-3xl overflow-y-auto rounded border border-brand-500/25 bg-ink-950 p-4 shadow-2xl">
+          <ModalFrame title={t("configFor", { provider: selected.id })} width="48rem" busy={busy === `save:${selected.id}`}
+            onClose={() => { setDialogOpen(false); setSelected(null); }}>
+          <div className="ui-panel-body max-h-[calc(100dvh-32px)] overflow-y-auto p-5">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-medium text-ink-100">
@@ -728,6 +728,7 @@ export function WalletProviderPanel({
                 </div>
               </div>
               <button
+                disabled={busy === `save:${selected.id}`}
                 onClick={() => {
                   setDialogOpen(false);
                   setSelected(null);
@@ -883,11 +884,11 @@ export function WalletProviderPanel({
               {autoCreateAccount ? (
                 <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
                   <Field label={t("autoCreate.mode")}>
-                    <select
+                    <ChoiceSelect
                       value={accountMode}
-                      onChange={(e) =>
+                      onValueChange={(value) =>
                         setAccountMode(
-                          e.target.value as
+                          value as
                             | "paper"
                             | "shadow"
                             | "canary"
@@ -900,7 +901,7 @@ export function WalletProviderPanel({
                       <option value="shadow">{t("autoCreate.modeShadow")}</option>
                       <option value="canary">{t("autoCreate.modeCanary")}</option>
                       <option value="live">{t("autoCreate.modeLive")}</option>
-                    </select>
+                    </ChoiceSelect>
                   </Field>
                   <Field label={t("autoCreate.accountIdHint")}>
                     <input
@@ -1042,7 +1043,7 @@ export function WalletProviderPanel({
               </div>
             ) : null}
           </div>
-          </div>
+          </ModalFrame>
         ) : null}
       </div>
     </>

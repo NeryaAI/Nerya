@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import {
   callApi,
   clientApi,
@@ -34,8 +34,24 @@ import {
 } from "../../lib/chat";
 import { AssistantBubble, UserBubble } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
+import { AgentStart } from "./AgentStart";
+import { AgentTaskBar, AgentWorkPanel } from "./AgentWorkspace";
+import { ChatTaskHeader } from "./ChatTaskHeader";
+import { collectChatResults, type ChatResult } from "../../lib/chatResults";
+import { childResult } from "../../lib/agentConversation";
+import styles from "./ChatWorkbench.module.css";
+import { useAgentWork } from "./useAgentWork";
 import { WorkspaceCanvas, hasWorkspaceCanvas } from "./WorkspaceCanvas";
+import { TaskDockHeader } from './TaskDockHeader';
+import { useTaskDock, type TaskDockTab } from './useTaskDock';
+import { BrowserWorkspacePanel } from './BrowserWorkspacePanel';
+import { browserCalls } from '../../lib/browserTrace';
+import { liveEventsToBlocks } from '../../lib/chat';
+import { useCanvasLayout } from "./useCanvasLayout";
+import { XIcon } from "../icons";
 import { takeComposeDraftPayload } from "../../lib/composeDraft";
+import { FinanceDraftContext, appendReviewDraft } from "../finance/FinanceReview";
+import { toast } from "../../lib/dialogs";
 
 function parseTs(ts: string | undefined | null): number | null {
   if (!ts) return null;
@@ -47,7 +63,6 @@ const DELETED_SESSIONS_KEY = "nerya.chat.deletedSessions.v1";
 const SESSION_PAGE_SIZE = 20;
 const CANVAS_PANEL_KEY = "nerya.chat.canvasPanel.open.v1";
 const LIVE_EVENT_POLL_MS = 160;
-const LIVE_SCROLL_SYNC_MS = 180;
 
 type PendingFirstMessage = {
   threadId: string;
@@ -154,7 +169,8 @@ function sessionTitle(session: AgentSession, sid: string): string {
     typeof session.meta?.title === "string"
       ? session.meta.title
       : String(session.meta?.title || "");
-  return deriveTitle(title || `Session ${sid.slice(0, 8)}`);
+  // Persisted titles remain complete; CSS owns visual truncation.
+  return title.trim() || `Session ${sid.slice(0, 8)}`;
 }
 
 function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
@@ -371,17 +387,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const router = useRouter();
   const t = useTranslations("chat");
   const tCommon = useTranslations("common");
-  const tHome = useTranslations("commandHome");
   const cancelledReply = t("cancelNotice");
-  const heroSuggestions = useMemo(
-    () => [
-      { title: t("starterBtcScalpTitle"), prompt: t("starterBtcScalpPrompt") },
-      { title: t("starterNvdaTeamTitle"), prompt: t("starterNvdaTeamPrompt") },
-      { title: t("starterCryptoStrategyTitle"), prompt: t("starterCryptoStrategyPrompt") },
-      { title: t("starterMacroNewsTitle"), prompt: t("starterMacroNewsPrompt") },
-    ],
-    [t],
-  );
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
@@ -409,6 +415,14 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const turnInFlightRef = useRef(false);
   const draftConsumedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const followLatest = useRef(true);
+  const lastScrollTop = useRef(0);
+  const [readingHistory, setReadingHistory] = useState(false);
+  function jumpToLatest() {
+    followLatest.current = true; setReadingHistory(false);
+    if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight });
+  }
   // Live-event poller handle. We track it so ``cancel`` and unmount
   // can stop the timer; without this guard a fast click-and-cancel
   // would leak a setInterval and keep hitting ``/agent/stream/events``
@@ -731,10 +745,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
         });
       }
     }
-    const titleSeed = t.title || sessionMeta.title || firstUser || `Session ${sid.slice(0, 8)}`;
+    const savedTitle = t.title?.trim() || sessionMeta.title?.trim();
     const thread: ChatThread = {
       id: sid,
-      title: deriveTitle(titleSeed),
+      title: savedTitle || deriveTitle(firstUser || `Session ${sid.slice(0, 8)}`),
       created_ts: created,
       updated_ts: updated,
       message_count: msgs.length,
@@ -868,7 +882,93 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const activeTranscriptLoading = Boolean(
     sessionId && loadingTranscriptIds.has(sessionId),
   );
-  const activeHasCanvas = useMemo(() => hasWorkspaceCanvas(active), [active]);
+  const agentWork = useAgentWork(active);
+  const zh = useLocale().startsWith("zh");
+  const [resultFocus, setResultFocus] = useState({ session: "", id: "", count: 0 });
+  const results = useMemo(() => collectChatResults(active), [active]);
+  const { layoutRef, width: canvasWidth, compact, changeWidth, separatorProps } = useCanvasLayout(hydrated);
+  const [manualBrowser, setManualBrowser] = useState<Record<string, boolean>>({});
+  const browserOperations = useMemo(() => {
+    const rows = (active?.messages || []).flatMap(message => {
+      if (message.role !== 'assistant') return [];
+      const events = [...(message.turn?.activity_events || []), ...(message.live_events || [])];
+      return browserCalls([...(message.turn?.blocks || []), ...liveEventsToBlocks(events)], events);
+    });
+    return [...new Map(rows.map(row => [row.id, row])).values()];
+  }, [active]);
+  function revealAgent(id: string, attempt?: number) {
+    setAgentFocus((old) => ({ session: active?.id || "", id, count: old.count + 1, attempt: attempt || 0 }));
+    selectWorkspace("agents", true);
+  }
+  const [inspectedChildResult, setInspectedChildResult] = useState<{ session: string; result: ChatResult } | null>(null);
+  const [agentFocus, setAgentFocus] = useState({ session: "", id: "", count: 0, attempt: 1 });
+  const agentResults = useMemo(() => {
+    const latest = agentWork.rows.filter((a) => a.state === "completed" && a.output != null).map((a) => childResult(a, a.output, a.attempt, zh));
+    const prior = inspectedChildResult && inspectedChildResult.session === active?.id && agentWork.rows.some((a) => a.id === inspectedChildResult.result.agentId) ? [inspectedChildResult.result] : [];
+    return [...new Map([...prior, ...latest].map((r) => [r.id, r])).values()].filter((r) => r.text);
+  }, [agentWork.rows, active?.id, inspectedChildResult, zh]);
+  function openChildResult(result: ChatResult) {
+    setInspectedChildResult({ session: active?.id || "", result });
+    openResult(result.id);
+  }
+  const hasBrowser = browserOperations.length > 0 || !!manualBrowser[active?.id || ''];
+  const canvasResources = useMemo(() => hasWorkspaceCanvas(active), [active]);
+  const hasCanvas = results.length > 0 || agentResults.length > 0 || canvasResources;
+  const dockTabs = [
+    ...(hasBrowser ? [{ id: 'browser' as TaskDockTab, label: zh ? '浏览器' : 'Browser' }] : []),
+    ...(hasCanvas ? [{ id: 'canvas' as TaskDockTab, label: 'Canvas' }] : []),
+    ...(agentWork.rows.length ? [{ id: 'agents' as TaskDockTab, label: zh ? '成员' : 'Agents', compactLabel: zh ? '成员' : 'Agents', meta: <span className="text-[11px] tabular-nums">{agentWork.rows.length}</span> }] : []),
+  ];
+  const taskDock = useTaskDock(active?.id || '', dockTabs.map(tab => tab.id));
+  const canvasVisible = taskDock.open;
+  const fullCanvas = taskDock.expanded;
+  const hideSource = canvasVisible && (compact || fullCanvas);
+  const canvasTrigger = useRef<HTMLElement | null>(null);
+  const focusDock = (tab: string) => requestAnimationFrame(() => document.getElementById(`task-dock-tab-${tab}`)?.focus({ preventScroll: true }));
+  function closeCanvas() {
+    taskDock.close();
+    requestAnimationFrame(() => {
+      const trigger = canvasTrigger.current;
+      if (trigger?.isConnected && trigger.getClientRects().length && !trigger.closest('#task-workspace')) trigger.focus({ preventScroll: true });
+      else document.getElementById('task-workspace-toggle')?.focus({ preventScroll: true });
+    });
+  }
+  function selectWorkspace(tab: string, focus = false) {
+    if (tab === 'conversation') { closeCanvas(); return; }
+    if (!dockTabs.some(item => item.id === tab)) return;
+    if (!canvasVisible) canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    taskDock.select(tab as TaskDockTab);
+    if (focus) focusDock(tab);
+  }
+  function openDock() { selectWorkspace('canvas', true); }
+  function openBrowserDock() {
+    canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setManualBrowser(old => ({ ...old, [active?.id || '']: true }));
+    taskDock.select('browser');
+    focusDock('browser');
+  }
+  function toggleCanvasSize() { taskDock.toggleSize(); }
+  function openResult(id: string) {
+    setResultFocus((old) => ({ session: active?.id || "", id, count: old.count + 1 }));
+    canvasTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    taskDock.select('canvas');
+    focusDock('canvas');
+  }
+  function revealResult(id: string) {
+    const child = agentResults.find((r) => r.id === id);
+    if (child?.agentId) {
+      setAgentFocus((old) => ({ session: active?.id || "", id: child.agentId!, count: old.count + 1, attempt: child.attempt || 1 }));
+      selectWorkspace("agents", true);
+      return;
+    }
+    followLatest.current = false; setReadingHistory(true);
+    selectWorkspace("conversation");
+    requestAnimationFrame(() => {
+      const article = Array.from(scrollRef.current?.querySelectorAll<HTMLElement>("[data-turn-id]") || []).find((el) => el.dataset.turnId === id);
+      article?.scrollIntoView({ block: "start" });
+      article?.focus({ preventScroll: true });
+    });
+  }
   function pendingFirstMessageThreadId(): string {
     try {
       const raw = sessionStorage.getItem("nerya.chat.pendingFirstMessage");
@@ -989,26 +1089,33 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   }, [hydrated, sessionId]);
 
   useEffect(() => {
-    if (!scrollRef.current) return;
-    scrollRef.current.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
-    });
-  }, [active?.messages.length, active?.id, activeLiveEventCount, activeApprovalKey]);
+    followLatest.current = true; lastScrollTop.current = 0; setReadingHistory(false);
+  }, [active?.id]);
 
   useEffect(() => {
-    const hasLoadingAssistant =
-      active?.messages.some((m) => m.role === "assistant" && m.loading) ?? false;
-    if (!hasLoadingAssistant && !sending) return;
-    const timer = window.setInterval(() => {
-      const el = scrollRef.current;
-      if (!el) return;
-      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (distanceFromBottom > 260) return;
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    }, LIVE_SCROLL_SYNC_MS);
-    return () => window.clearInterval(timer);
-  }, [active?.id, active?.messages.length, sending]);
+    const viewport = scrollRef.current, content = transcriptRef.current;
+    if (!viewport || !content) return;
+    // Streaming and late-loading content follow only while the reader is at the end.
+    const follow = () => {
+      if (followLatest.current && viewport.clientHeight) {
+        viewport.scrollTo({ top: viewport.scrollHeight });
+        lastScrollTop.current = viewport.scrollTop;
+      } else if (viewport.clientHeight) {
+        setReadingHistory(viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight > 80);
+      }
+    };
+    follow();
+    const observer = new ResizeObserver(follow);
+    observer.observe(content); observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [active?.id, active?.messages.length, hydrated]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && el.clientHeight && followLatest.current) {
+      el.scrollTo({ top: el.scrollHeight }); lastScrollTop.current = el.scrollTop;
+    }
+  }, [active?.messages.length, activeLiveEventCount, activeApprovalKey]);
 
   /** Strategy binding requested via ``/chat?strategy=<id>`` (the "+"
    * button on a sidebar strategy). Read lazily from the location so we
@@ -1655,8 +1762,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
 
   if (!hydrated) {
     return (
-      <div className="h-full flex items-center justify-center text-ink-500 text-sm">
-        {t("loadingChat")}
+      <div className="flex h-full min-h-0 flex-col">
+        <ChatTaskHeader thread={null} agents={[]} results={[]} sending={false} approvalCount={0} loading showTabs={false}
+          tab="conversation" canvasVisible={false} onSelect={selectWorkspace} onToggleCanvas={openDock} onOpenResult={openResult} />
+        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-ink-500">{t("loadingChat")}</div>
       </div>
     );
   }
@@ -1693,7 +1802,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   const composerProps = {
     value: input,
     onChange: setInput,
-    onSend: () => send(input),
+    onSend: () => { followLatest.current = true; setReadingHistory(false); send(input); },
     onCancel: cancel,
     sending,
     locked: awaitingApproval,
@@ -1706,42 +1815,44 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col md:flex-row">
-      <div className="flex min-h-0 flex-1 flex-col min-w-0">
+    <FinanceDraftContext.Provider value={{ disabled: sending || awaitingApproval, append: (text) => {
+      setInput((previous) => appendReviewDraft(previous, text));
+      selectWorkspace("conversation");
+      requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('#chat-workspace-panel-conversation [data-chat-composer] textarea')?.focus());
+      toast({ tone: "ok", message: zh ? "已填入当前对话草稿，确认后再发送。" : "Added to this conversation’s draft. Review before sending." });
+    } }}>
+    <div className={`${styles.workbench} flex h-full min-h-0 min-w-0 flex-col`} data-testid="chat-workbench">
+      <ChatTaskHeader thread={active} agents={agentWork.rows} results={[...agentResults, ...results]} sending={sending}
+        approvalCount={activeApprovalIds.length} loading={showLoading} showTabs={!showHero} tab={taskDock.selected || ''}
+        workspaceAvailable={dockTabs.length > 0} canvasVisible={canvasVisible} onSelect={(tab) => selectWorkspace(tab, true)}
+        onToggleBrowser={openBrowserDock}
+        onToggleCanvas={() => { if (canvasVisible) closeCanvas(); else { taskDock.show(); focusDock(taskDock.selected || ''); } }} onOpenResult={openResult} />
+      {!showHero && awaitingApproval && hideSource ? <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-warn/25 bg-warn/10 px-4 py-2 text-xs text-warn">
+        <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
+        <button type="button" onClick={() => selectWorkspace("conversation", true)} className="min-h-8 rounded px-2 underline">{zh ? "查看待审批操作" : "Review pending approvals"}</button>
+      </div> : null}
+      <div ref={layoutRef} className="flex min-h-0 min-w-0 flex-1" data-testid="workspace-split" data-compact={compact ? "true" : "false"}>
+      <div hidden={!showHero && hideSource} className={showHero || !hideSource ? "flex min-h-0 min-w-0 flex-1 flex-col" : "hidden"} data-testid="workspace-source">
+      <section id="chat-workspace-panel-conversation" aria-label={zh ? '对话' : 'Conversation'} className="flex min-h-0 flex-1 flex-col min-w-0">
         {showHero ? (
-          <div className="flex-1 overflow-y-auto">
-            <div className="mx-auto flex min-h-full w-full max-w-[860px] flex-col justify-center px-4 py-10 lg:px-5">
-              <h1 className="text-center text-[30px] font-semibold leading-[1.15] tracking-tight text-[color:var(--text-base)]">
-                {tHome("title")}
-              </h1>
-              <p className="mx-auto mt-2.5 max-w-lg text-center text-[13px] leading-relaxed text-[color:var(--text-muted)]">
-                {tHome("subtitle")}
-              </p>
-              <div className="mt-8">
-                <ChatInput {...composerProps} variant="hero" />
-              </div>
-              <div className="mt-6">
-                {heroSuggestions.map((s, index) => (
-                  <button
-                    key={s.title}
-                    type="button"
-                    onClick={() => setInput(s.prompt)}
-                    className={`group flex h-10 w-full items-center gap-2.5 px-4 text-left text-[14px] text-[color:var(--text-muted)] transition-colors hover:bg-brand-500/8 hover:text-[color:var(--text-base)] ${
-                      index > 0 ? "border-t border-[color:var(--line)]" : ""
-                    }`}
-                  >
-                    <span className="flex-1 truncate">{s.title}</span>
-                    <span className="shrink-0 text-[18px] text-brand-300/40 transition-colors group-hover:text-brand-300">
-                      →
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
+          <AgentStart value={input} onChange={setInput} disabled={sending || awaitingApproval}
+            composer={<ChatInput {...composerProps} variant="hero" />} />
         ) : (
           <>
-            <div ref={scrollRef} className="flex-1 overflow-y-auto">
+            <div className={styles.transcriptViewport}>
+            <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto" data-testid="transcript-scroll"
+              onWheel={(e) => { if (e.deltaY < 0) followLatest.current = false; }}
+              onPointerDownCapture={(e) => { if (e.target instanceof Element && e.target.closest("summary")) followLatest.current = false; }}
+              onKeyDownCapture={(e) => { if (["PageUp", "Home", "ArrowUp"].includes(e.key) || (["Enter", " "].includes(e.key) && e.target instanceof Element && e.target.closest("summary"))) followLatest.current = false; }}
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                if (!el.clientHeight) return;
+                const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+                if (near) followLatest.current = true;
+                else if (el.scrollTop < lastScrollTop.current - 1) followLatest.current = false;
+                lastScrollTop.current = el.scrollTop;
+                setReadingHistory(!followLatest.current && !near);
+              }}>
               {showLoadFailure ? (
                 <div className="max-w-xl mx-auto px-6 py-16 text-center">
                   <h2 className="text-lg text-white font-semibold mb-2">
@@ -1790,7 +1901,7 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                   {t("loadingConversation")}
                 </div>
               ) : (
-                <div className="max-w-[860px] mx-auto px-4 py-6 space-y-5">
+                <div ref={transcriptRef} className={styles.conversation} data-testid="conversation-content">
                   {active!.messages.map((m, mi) =>
                     m.role === "user" ? (
                       <UserBubble
@@ -1807,7 +1918,10 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                     ) : (
                       <AssistantBubble
                         key={m.id}
+                        conversationId={active!.id}
+                        onOpenBrowser={openBrowserDock}
                         msg={m}
+                        onOpenResult={() => openResult(m.id)}
                         pendingApprovals={pendingApprovals}
                         onApprovalAction={resolveApproval}
                         resolvingApprovalIds={resolvingApprovalIds}
@@ -1829,6 +1943,8 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                 </div>
               )}
             </div>
+            {readingHistory ? <button type="button" className={styles.jump} data-testid="jump-to-latest" onClick={jumpToLatest}>{zh ? "回到最新消息" : "Jump to latest"}<span aria-hidden>↓</span></button> : null}
+            </div>
             {awaitingApproval ? (
               <div
                 className="border-t border-warn/25 bg-warn/[0.06] px-4 py-2 text-xs text-warn"
@@ -1842,17 +1958,42 @@ export function ChatView({ sessionId }: { sessionId?: string } = {}) {
                 </div>
               </div>
             ) : null}
-            <ChatInput {...composerProps} variant="docked" />
+            <ChatInput {...composerProps} variant="docked" taskHeader={agentWork.rows.length ? (
+              <AgentTaskBar source={agentWork} open={canvasVisible && taskDock.selected === 'agents'} onOpen={() => selectWorkspace("agents", true)} />
+            ) : undefined} />
           </>
         )}
+      </section>
       </div>
-      {activeHasCanvas ? (
-        <WorkspaceCanvas
-          thread={active}
-          open={canvasPanelOpen}
-          onToggle={() => setCanvasPanelOpen((v) => !v)}
-        />
-      ) : null}
+      {!showHero && canvasVisible && !compact && !fullCanvas ? <div role="separator" tabIndex={0} aria-label={zh ? "调整工作区宽度" : "Resize workspace"} aria-orientation="vertical"
+        aria-valuemin={38} aria-valuemax={62} aria-valuenow={Math.round(canvasWidth)} aria-controls="task-workspace"
+        {...separatorProps} onDoubleClick={() => changeWidth(48)} onKeyDown={(event) => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          event.preventDefault(); changeWidth(event.key === "Home" ? 38 : event.key === "End" ? 62 : canvasWidth + (event.key === "ArrowLeft" ? 2 : -2));
+        }} className="w-1 shrink-0 touch-none cursor-col-resize bg-[color:var(--line)] hover:bg-brand-400/50 focus-visible:bg-brand-400 focus-visible:outline-none" /> : null}
+      {!showHero && dockTabs.length > 0 ? <section id="task-workspace" role="complementary" aria-label={zh ? '任务工作区' : 'Task workspace'}
+        hidden={!canvasVisible} className={canvasVisible ? "flex min-h-0 min-w-0 flex-col bg-[color:var(--card)]" : "hidden"}
+        style={canvasVisible ? { width: fullCanvas || compact ? "100%" : `${canvasWidth}%`, flexShrink: 0 } : undefined}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !event.defaultPrevented && !(event.target instanceof HTMLElement && event.target.closest("select, textarea, input, [role='dialog'], [role='menu']"))) {
+            event.preventDefault(); closeCanvas();
+          }
+        }}>
+        <TaskDockHeader tabs={dockTabs} selected={taskDock.selected || ''} onSelect={tab => selectWorkspace(tab, true)} expanded={fullCanvas} onToggleSize={toggleCanvasSize} onClose={closeCanvas}/>
+        {hasBrowser && <section id="task-dock-panel-browser" role="tabpanel" aria-labelledby="task-dock-tab-browser" hidden={taskDock.selected !== 'browser'} className={taskDock.selected === 'browser' ? 'min-h-0 flex-1' : 'hidden'}>
+          <BrowserWorkspacePanel key={active?.id} conversationId={active?.id || ''} calls={browserOperations} active={canvasVisible && taskDock.selected === 'browser'} />
+        </section>}
+        {hasCanvas && <section id="task-dock-panel-canvas" role="tabpanel" aria-labelledby="task-dock-tab-canvas" hidden={taskDock.selected !== 'canvas'} className={taskDock.selected === 'canvas' ? 'min-h-0 flex-1' : 'hidden'}>
+          <WorkspaceCanvas key={active?.id} thread={active} embedded open={canvasVisible && taskDock.selected === 'canvas'} onToggle={closeCanvas} agentWork={agentWork} agentResults={agentResults}
+            resultFocusRequest={resultFocus.session === active?.id ? resultFocus : undefined} onRevealAgent={revealAgent} onRevealResult={revealResult} />
+        </section>}
+        {agentWork.rows.length > 0 && <section id="task-dock-panel-agents" role="tabpanel" aria-labelledby="task-dock-tab-agents" hidden={taskDock.selected !== 'agents'} className={taskDock.selected === 'agents' ? 'min-h-0 flex-1' : 'hidden'}>
+          <AgentWorkPanel key={active?.id} source={agentWork} active={canvasVisible && taskDock.selected === 'agents'} onOpenResult={openChildResult}
+            focusRequest={agentFocus.session === active?.id ? agentFocus : undefined}/>
+        </section>}
+      </section> : null}
+      </div>
     </div>
+    </FinanceDraftContext.Provider>
   );
 }

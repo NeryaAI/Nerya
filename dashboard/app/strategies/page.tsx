@@ -111,17 +111,13 @@ function LegacyStrategiesPage() {
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [walletBindings, setWalletBindings] = useState<WalletBinding[]>([]);
-  const [draft, setDraft] = useState<DraftForm>(EMPTY_DRAFT);
-  const [showCreate, setShowCreate] = useState(false);
   const [filter, setFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [loading, setLoading] = useState(true);
-  const [createBusy, setCreateBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Pause / delete / rename share the lifecycle hook with the detail
-  // page; the local busy state only tracks the create form.
+  // Existing strategy administration shares the detail-page lifecycle.
   const lifecycle = useStrategyLifecycle({ onRefresh: load });
-  const busy = lifecycle.busy ?? (createBusy ? "create" : null);
+  const busy = lifecycle.busy;
 
   async function load() {
     setLoading(true);
@@ -152,18 +148,6 @@ function LegacyStrategiesPage() {
       setStrategyProposals((proposalRes.proposals ?? []).filter(isActiveStrategyProposal));
       setAccounts(accList.accounts ?? []);
       setWalletBindings(wallets.bindings ?? []);
-      const firstBindable =
-        accList.accounts?.find((a) => a.profile.status === "active")?.profile.id ??
-        accList.accounts?.[0]?.profile.id ??
-        snap?.accounts?.[0]?.id ??
-        "";
-      if (snap || accList.accounts.length > 0) {
-        setDraft((prev) => ({
-          ...prev,
-          account_id: prev.account_id || firstBindable,
-          markets: prev.markets || (snap?.markets?.[0] ?? ""),
-        }));
-      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -176,68 +160,6 @@ function LegacyStrategiesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function createStrategy() {
-    // Surface the same soft warning we put on the
-    // /strategy/bind_account flow. The backend will return ``warning``
-    // post-hoc, but at the form level we already know which account
-    // the operator picked, so we pre-flight against the cached
-    // ``bound_strategies`` summary and let them back out before the
-    // manifest gets written.
-    const targetAccount = draft.account_id.trim();
-    if (targetAccount) {
-      const acct = accounts.find((a) => a.profile.id === targetAccount);
-      const shared = (acct?.bound_strategies || []).filter(
-        (entry) => entry.strategy_id && entry.strategy_id !== draft.strategy_id.trim().toLowerCase(),
-      );
-      if (shared.length > 0) {
-        const names = shared.slice(0, 5).map((entry) => entry.strategy_id).join(", ");
-        const proceed = await confirmDialog({
-          title: t("shareWarningTitle"),
-          message: t("shareWarningMessage", {
-            count: shared.length,
-            accountId: targetAccount,
-            strategies: names,
-          }),
-          okLabel: t("shareWarningContinue"),
-          cancelLabel: t("shareWarningCancel"),
-          tone: "warning",
-        });
-        if (!proceed) return;
-      }
-    }
-    setCreateBusy(true);
-    setError(null);
-    try {
-      const out = await clientApi.strategyCreate({
-        strategy_id: draft.strategy_id.trim().toLowerCase(),
-        title: draft.title.trim() || draft.strategy_id.trim(),
-        description: draft.description.trim(),
-        account_id: draft.account_id.trim(),
-        markets: parseList(draft.markets),
-        trigger_kinds: parseList(draft.trigger_kinds),
-        subagents: parseList(draft.subagents),
-        driver: draft.driver,
-        status: draft.status,
-        wallet_id: draft.wallet_id || undefined,
-        main_prompt: draft.main_prompt.trim() || undefined,
-      });
-      if (!out.ok) throw new Error(JSON.stringify(out));
-      let message = `${t("createdPrefix")} ${out.strategy_id}. ${t("createdSuffix")}`;
-      if (out.warning && out.warning.code === "account_already_bound") {
-        message += ` · ${t("createdAccountSharedSuffix", {
-          count: out.warning.strategies?.length ?? 0,
-        })}`;
-      }
-      toast({ message, tone: "ok" });
-      setDraft(EMPTY_DRAFT);
-      setShowCreate(false);
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCreateBusy(false);
-    }
-  }
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -310,12 +232,6 @@ function LegacyStrategiesPage() {
         actions={
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setShowCreate((v) => !v)}
-              className="btn btn-primary cursor-pointer text-xs"
-            >
-              {t("newStrategy")}
-            </button>
-            <button
               onClick={() => void load()}
               disabled={loading}
               className="btn btn-ghost cursor-pointer text-xs"
@@ -357,110 +273,6 @@ function LegacyStrategiesPage() {
           />
         </div>
 
-        {showCreate ? (
-          <Card title={t("createStrategy")} description={t("createStrategyDesc")}>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-              <Field label={t("fieldTitle")}>
-                <input
-                  value={draft.title}
-                  onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-                  className="input-dark"
-                  placeholder="ETH mean reversion"
-                />
-              </Field>
-              <Field label={t("fieldStrategyId")}>
-                <input
-                  value={draft.strategy_id}
-                  onChange={(e) => setDraft({ ...draft, strategy_id: e.target.value })}
-                  className="input-dark font-mono"
-                  placeholder="eth_mean_reversion"
-                />
-              </Field>
-              <Field label={t("fieldAccount")}>
-                <AccountSelect
-                  value={draft.account_id}
-                  accounts={accounts}
-                  discovery={discovery}
-                  onChange={(account_id) => setDraft({ ...draft, account_id })}
-                />
-              </Field>
-              <Field label={t("fieldMarkets")}>
-                <input
-                  value={draft.markets}
-                  onChange={(e) => setDraft({ ...draft, markets: e.target.value })}
-                  className="input-dark font-mono"
-                  placeholder={t("fieldMarketsPlaceholder")}
-                />
-              </Field>
-            </div>
-            <Advanced
-              title={t("createAdvancedGroupTitle")}
-              description={t("createAdvancedHint")}
-            >
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                <Field label={t("fieldWallet")}>
-                  <WalletSelect
-                    value={draft.wallet_id}
-                    bindings={walletBindings}
-                    discovery={discovery}
-                    onChange={(wallet_id) => setDraft({ ...draft, wallet_id })}
-                  />
-                </Field>
-                <Field label={t("fieldTriggerKinds")}>
-                  <input
-                    value={draft.trigger_kinds}
-                    onChange={(e) => setDraft({ ...draft, trigger_kinds: e.target.value })}
-                    className="input-dark font-mono"
-                    placeholder={t("fieldTriggerKindsPlaceholder")}
-                  />
-                </Field>
-                <Field label={t("fieldSubagents")}>
-                  <input
-                    value={draft.subagents}
-                    onChange={(e) => setDraft({ ...draft, subagents: e.target.value })}
-                    className="input-dark font-mono"
-                    placeholder={t("fieldSubagentsPlaceholder")}
-                  />
-                </Field>
-                <Field label={t("fieldDriver")}>
-                  <Select<DraftForm["driver"]>
-                    value={draft.driver}
-                    onChange={(value) => setDraft({ ...draft, driver: value })}
-                    options={[
-                      { value: "prompt", label: "prompt" },
-                      { value: "script", label: "script" },
-                    ]}
-                    size="sm"
-                    ariaLabel={t("fieldDriver")}
-                  />
-                </Field>
-                <Field label={t("fieldDescription")} full>
-                  <textarea
-                    value={draft.description}
-                    onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-                    className="input-dark h-16"
-                  />
-                </Field>
-                <Field label={t("fieldMainPrompt")} full>
-                  <textarea
-                    value={draft.main_prompt}
-                    onChange={(e) => setDraft({ ...draft, main_prompt: e.target.value })}
-                    className="input-dark font-mono h-28"
-                  />
-                </Field>
-              </div>
-            </Advanced>
-            <div className="mt-3 flex justify-end">
-              <button
-                onClick={() => void createStrategy()}
-                disabled={busy !== null || !draft.strategy_id || !draft.account_id || !draft.markets}
-                className="btn btn-primary cursor-pointer"
-              >
-                {createBusy ? t("creating") : t("createStrategyBtn")}
-              </button>
-            </div>
-          </Card>
-        ) : null}
 
         {pendingStrategyProposals.length > 0 ? (
           <Card

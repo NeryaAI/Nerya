@@ -85,7 +85,18 @@ export function Section({
 }
 
 export function PageBody({ children }: { children: ReactNode }) {
-  return <div className="space-y-8">{children}</div>;
+  return <div className="space-y-6">{children}</div>;
+}
+
+export function LoadingState({ rows = 3, label }: { rows?: number; label?: string }) {
+  const t = useTranslations("common");
+  return <div role="status" aria-busy="true" className="space-y-3 px-4 py-5">
+    <span className="sr-only">{label ?? t("loading")}</span>
+    {Array.from({ length: rows }, (_, index) => <div key={index} aria-hidden="true" className="flex items-center gap-3">
+      <div className="skeleton h-9 w-9 shrink-0 rounded-lg" />
+      <div className="min-w-0 flex-1 space-y-2"><div className="skeleton h-3 w-2/3" /><div className="skeleton h-2.5 w-1/3" /></div>
+    </div>)}
+  </div>;
 }
 
 /**
@@ -199,7 +210,7 @@ export function Card({
         featured ? "card-featured" : "",
       ].join(" ")}
     >
-      {(title || actions) && (
+      {(title || description || actions) && (
         <div className="card-head">
           <div className="min-w-0">
             {title && (

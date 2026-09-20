@@ -290,6 +290,12 @@ def run_backtest(
 def _load_run_fn(strategy_root: Path | None) -> Any:
     if strategy_root is None:
         raise ValueError("strategy_pkg_path or run_fn is required")
+    if (strategy_root / "strategy.yml").is_file():
+        # Use the same package-local imports and configured entrypoint as live
+        # script execution. Replay still receives only the isolated MockCtx.
+        from .....strategies.package import load_package_from_dir
+        from .....strategies.runner import StrategyRunner
+        return StrategyRunner._load_entrypoint(load_package_from_dir(strategy_root))
     main_path = strategy_root / "main.py"
     module_name = f"nerya_backtest_{strategy_root.name}"
     spec = importlib.util.spec_from_file_location(module_name, main_path)

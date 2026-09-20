@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import { useTranslations } from "next-intl";
 import { useEffect, useId, useRef, useState, type Ref } from "react";
 import type { ChatAttachment, ChatModelOption, ChatRunSettings } from "../../lib/chat";
@@ -53,12 +55,13 @@ export interface ChatInputProps {
   onAttachmentsChange?: (attachments: ChatAttachment[]) => void;
   variant?: "docked" | "hero";
   inputRef?: Ref<HTMLTextAreaElement>;
+  taskHeader?: ReactNode;
 }
 
 /** One composer for home, empty chat and active chat. Only its frame changes. */
 export function ChatInput({ value, onChange, onSend, onCancel, sending, locked = false,
   lockMessage, placeholder, settings, onSettingsChange, modelOptions = [], attachments = [],
-  onAttachmentsChange, variant = "docked", inputRef }: ChatInputProps) {
+  onAttachmentsChange, variant = "docked", inputRef, taskHeader }: ChatInputProps) {
   const t = useTranslations("chat");
   const tUi = useTranslations("ui");
   const fieldId = useId();
@@ -131,7 +134,7 @@ export function ChatInput({ value, onChange, onSend, onCancel, sending, locked =
   }
 
   const composer = (
-    <div data-chat-composer={variant} className="min-w-0 rounded-2xl border border-[color:var(--line-hi)] bg-[color:var(--card-hi)] p-3 transition-colors focus-within:border-brand-500/60 sm:p-4">
+    <div data-chat-composer={variant} className={`min-w-0 ${taskHeader ? "rounded-b-2xl" : "rounded-2xl"} border border-[color:var(--line-hi)] bg-[color:var(--card-hi)] p-3 transition-colors focus-within:border-brand-500/60 sm:p-4`}>
       {attachments.length ? (
         <div className="mb-3 flex max-h-28 flex-wrap gap-2 overflow-y-auto">
           {attachments.map((file) => (
@@ -165,9 +168,9 @@ export function ChatInput({ value, onChange, onSend, onCancel, sending, locked =
         aria-label={placeholder ?? t("inputPlaceholder")}
         aria-describedby={uploading || uploadError ? `${fieldId}-status` : undefined}
         placeholder={locked ? lockMessage : placeholder ?? t("inputPlaceholder")}
-        className="block min-h-8 w-full resize-none overflow-y-auto bg-transparent text-base leading-6 text-[color:var(--text-base)] placeholder:text-[color:var(--text-muted)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-70 sm:text-[15px]"
+        className={`block ${hero ? "min-h-[88px]" : "min-h-8"} w-full resize-none overflow-y-auto bg-transparent text-base leading-6 text-[color:var(--text-base)] placeholder:text-[color:var(--text-muted)] focus:outline-none disabled:cursor-not-allowed disabled:opacity-70 sm:text-[15px]`}
       />
-      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+      <div data-composer-toolbar className="mt-2 flex flex-wrap items-center gap-1.5">
         <input ref={pickerRef} id={fieldId} type="file" multiple className="hidden" tabIndex={-1}
           aria-label={t("addAttachment")} disabled={sending || locked || uploading || !onAttachmentsChange}
           accept="image/*,.pdf,.txt,.md,.csv,.json,.html,.xml"
@@ -175,7 +178,7 @@ export function ChatInput({ value, onChange, onSend, onCancel, sending, locked =
         <button type="button" onClick={() => pickerRef.current?.click()} aria-label={t("addAttachment")}
           disabled={sending || locked || uploading || !onAttachmentsChange} className="ui-icon-button disabled:cursor-not-allowed disabled:opacity-40"><FilePlusIcon size={18} /></button>
         <ComposerPermissionMenu settings={settings} onSettingsChange={onSettingsChange} disabled={sending || locked} size={variant} />
-        <div className="ml-auto flex min-w-0 items-center gap-1.5 max-[520px]:ml-0 max-[520px]:w-full max-[520px]:justify-end">
+        <div data-composer-models className="ml-auto flex min-w-0 items-center gap-1.5 max-[520px]:ml-0 max-[520px]:w-full max-[520px]:justify-end">
           <ComposerModelMenu settings={settings} onSettingsChange={onSettingsChange} modelOptions={modelOptions} disabled={sending || locked} size={variant} />
           {sending && onCancel ? <button type="button" onClick={onCancel} className="ui-icon-button border border-[color:var(--line-hi)]" aria-label={t("cancelTurn")}><StopIcon size={17} /></button> : null}
           {!sending ? <button type="button" onClick={submit} disabled={!canSend} aria-label={t("send")} title={locked ? lockMessage : t("send")}
@@ -189,8 +192,8 @@ export function ChatInput({ value, onChange, onSend, onCancel, sending, locked =
     </div>
   );
   return hero ? composer : (
-    <div className="shrink-0 border-t border-[color:var(--line)] bg-[color:var(--bg)]">
-      <div className="mx-auto max-w-[860px] px-3 py-3 sm:px-4">{composer}</div>
+    <div className="shrink-0 bg-[color:var(--bg)]" data-testid="composer-dock">
+      <div className="mx-auto max-w-[800px] px-4 pb-3 pt-1 sm:px-6">{taskHeader}{composer}</div>
     </div>
   );
 }

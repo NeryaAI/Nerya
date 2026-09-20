@@ -1,5 +1,7 @@
 "use client";
 
+import { ChoiceSelect } from "./ChoiceSelect";
+
 import { useCallback, useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card, ErrorBanner, Pill } from "./Page";
@@ -141,14 +143,14 @@ export function WorkspaceSyncPanel() {
           </label>
           <label className="space-y-1.5">
             <span className="block text-[11px] font-medium text-ink-300">{t("provider")}</span>
-            <select
+            <ChoiceSelect
               className="input-dark text-xs"
               value={draft.provider}
-              onChange={(event) => patch("provider", event.target.value as "git" | "webdav")}
+              onValueChange={(value) => patch("provider", value as "git" | "webdav")}
             >
               <option value="git">Git</option>
               <option value="webdav">WebDAV</option>
-            </select>
+            </ChoiceSelect>
           </label>
           <label className="space-y-1.5">
             <span className="block text-[11px] font-medium text-ink-300">{t("remote")}</span>

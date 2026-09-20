@@ -44,7 +44,6 @@ import { useOperatorNav } from "../../lib/useOperatorNav";
 import { NeryaLogo } from "../NeryaLogo";
 import { useCommandPalette } from "./CommandPalette";
 import { SidebarStrategies } from "./SidebarStrategies";
-import { WorkspaceCustomizeButton } from "../workspace/WorkspaceCustomizeButton";
 import {
   AgentsIcon,
   ChevronDownIcon,
@@ -151,7 +150,7 @@ function SideRow({
         <>
           <span className="truncate">{label}</span>
           {typeof badge === "number" && badge > 0 ? (
-            <span className="ml-auto inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-rose-500/15 px-1.5 text-[11px] text-rose-400">
+            <span className="ml-auto inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-danger/15 px-1.5 text-[11px] text-danger">
               {badge > 99 ? "99+" : badge}
             </span>
           ) : shortcut ? (
@@ -283,12 +282,18 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
     return out;
   }, [nav.data]);
 
+  const advancedActive = isActive(pathname, "/portfolio", ["/accounts", "/orders", "/incidents", "/workflows"])
+    || advancedItems.some((item) => isActive(pathname, item.href, item.match_hrefs));
+  useEffect(() => {
+    if (advancedActive) setAdvancedOpen(true);
+  }, [pathname, advancedActive]);
+
   const railCollapsed = !inDrawer && (collapsed || isNarrow);
   const width = railCollapsed ? (isNarrow ? "w-14" : "w-[68px]") : "w-64";
 
   return (
     <aside
-      className={`${width} nerya-sidebar sticky top-0 flex h-screen shrink-0 flex-col overflow-hidden border-r transition-[width] duration-200`}
+      className={`${width} nerya-sidebar sticky top-0 flex h-dvh shrink-0 flex-col overflow-hidden border-r`}
       style={{ background: "var(--panel-bg)", borderColor: "var(--line)" }}
     >
       {/* Brand + collapse */}
@@ -337,11 +342,8 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
             single "More". Notifications live in the top-right shell bell. */}
         <div className="shrink-0 space-y-0.5">
           <SideRow icon={OverviewIcon} label={t("overview")} href="/dashboard" collapsed={railCollapsed} active={isActive(pathname, "/dashboard")} />
-          <SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed={railCollapsed} active={isActive(pathname, "/chat")} />
+          <SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed={railCollapsed} active={pathname === "/chat"} />
           <SideRow icon={SearchIcon} label={t("search")} collapsed={railCollapsed} shortcut="⌘K" onClick={() => palette.setOpen(true)} />
-          {!railCollapsed ? (
-            <WorkspaceCustomizeButton context="home" compact className="w-full" />
-          ) : null}
           <SideRow icon={AgentsIcon} label={t("agents")} href="/agents" collapsed={railCollapsed} active={isActive(pathname, "/agents", ["/skills", "/tasks"])} />
           <SideRow icon={StrategiesIcon} label={t("strategies")} href="/strategies" collapsed={railCollapsed} active={isActive(pathname, "/strategies")} />
 
@@ -369,6 +371,7 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
                 type="button"
                 onClick={() => setAdvancedOpen((v) => !v)}
                 aria-expanded={advancedOpen}
+                aria-controls="sidebar-additional-destinations"
                 className="group sidebar-item sidebar-item-idle w-full"
               >
                 <ChevronDownIcon
@@ -378,7 +381,7 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
                 <span className="truncate">{t("sectionAdvanced")}</span>
               </button>
               {advancedOpen ? (
-                <>
+                <div id="sidebar-additional-destinations" className="space-y-0.5">
                   <SideRow icon={PortfolioIcon} label={t("trading")} href="/portfolio" collapsed={false} active={isActive(pathname, "/portfolio", ["/accounts", "/orders", "/incidents"])} />
                   <SideRow icon={TriggersIcon} label={t("automation")} href="/workflows" collapsed={false} active={isActive(pathname, "/workflows")} />
                   {advancedItems.map((item) => {
@@ -394,7 +397,7 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
                       />
                     );
                   })}
-                </>
+                </div>
               ) : null}
             </>
           )}
@@ -421,6 +424,7 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
                         >
                           <Link
                             href={`/chat/${encodeURIComponent(c.id)}`}
+                            aria-current={active ? "page" : undefined}
                             className="flex min-w-0 flex-1 items-center gap-2"
                             title={c.title}
                           >

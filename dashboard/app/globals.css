@@ -2,13 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url("https://rsms.me/inter/inter.css");
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");
-/* Plus Jakarta Sans — refreshed display + body face. Matches the
-   "airy" reference dashboard look (rounded geometry, generous
-   x-height, gentle weight contrast) without losing legibility on the
-   dense data tables Nerya ships. */
-@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap");
+/* The console uses local system fonts: readable CJK fallbacks and no
+   remote font requests in a private, sometimes offline workspace. */
 
 /* ── 暗色模式（默认）──────────────────────────────────────────── */
 :root {
@@ -17,41 +12,45 @@
   /* Ink palette — RGB triples so Tailwind ``<alpha-value>`` opacity
      modifiers (``bg-ink-800/70`` etc.) can compose against them.
      The ``rgb(...)`` is constructed in ``tailwind.config.ts``. */
-  --ink-50:  246 245 251;
-  --ink-100: 231 229 242;
-  --ink-200: 201 199 219;
-  --ink-300: 156 152 186;
-  --ink-400: 107 106 133;
-  --ink-500: 69 69 96;
-  --ink-600: 42 42 62;
-  --ink-700: 30 30 48;
-  --ink-800: 19 20 38;
-  --ink-900: 10 11 26;
-  --ink-950: 4 4 13;
+  --ink-50:  245 246 250;
+  --ink-100: 233 235 242;
+  --ink-200: 203 208 221;
+  --ink-300: 174 181 199;
+  --ink-400: 155 163 183;
+  --ink-500: 139 148 168;
+  --ink-600: 57 63 80;
+  --ink-700: 39 44 58;
+  --ink-800: 27 30 40;
+  --ink-900: 21 24 32;
+  --ink-950: 16 18 25;
+  --brand-readable: 199 178 251;
+  --tone-ok: 85 207 153;
+  --tone-warn: 235 183 83;
+  --tone-danger: 249 124 141;
 
-  --overlay-surface: #131426;
-  --grid: rgba(139, 92, 246, 0.06);
-  --bg-deep: #04040d;
-  --bg: #0a0b1a;
-  --card: rgba(19, 20, 38, 0.72);
-  --card-hi: rgba(30, 30, 48, 0.86);
-  --line: rgba(139, 92, 246, 0.14);
-  --line-hi: rgba(139, 92, 246, 0.32);
-  --ok: #10d993;
-  --warn: #f5a524;
-  --err: #ef4560;
+  --overlay-surface: #1b1e28;
+  --grid: transparent;
+  --bg-deep: #101219;
+  --bg: #151820;
+  --card: #1b1e28;
+  --card-hi: #242836;
+  --line: rgb(179 190 218 / 14%);
+  --line-hi: rgb(179 190 218 / 30%);
+  --ok: rgb(var(--tone-ok));
+  --warn: rgb(var(--tone-warn));
+  --err: rgb(var(--tone-danger));
   --violet: #8b5cf6;
   --violet-2: #b48bff;
   --fluid: #22d3ee;
   --fluid-soft: rgba(34, 211, 238, 0.16);
-  --text-base: #e6e5f1;
-  --text-muted: #9c98ba;
-  --scrollbar-track: #0a0b1a;
-  --scrollbar-thumb: #2a2a3e;
-  --scrollbar-thumb-hover: #454560;
-  --table-sticky-bg: rgba(10, 11, 26, 0.96);
-  --header-bg: rgba(4, 4, 13, 0.65);
-  --panel-bg:  rgba(4, 4, 13, 0.55);
+  --text-base: #e9ebf2;
+  --text-muted: #a3acc0;
+  --scrollbar-track: #151820;
+  --scrollbar-thumb: #394050;
+  --scrollbar-thumb-hover: #555f75;
+  --table-sticky-bg: #1b1e28;
+  --header-bg: #101219;
+  --panel-bg: #151820;
 }
 
 /* ── 亮色模式（html.light 时覆盖）──────────────────────────────── */
@@ -59,51 +58,47 @@ html.light {
   color-scheme: light;
 
   /* Ink palette — light mode (RGB triples, see :root above) */
-  --ink-50:  15 14 26;
-  --ink-100: 26 24 48;
-  --ink-200: 45 43 80;
-  --ink-300: 78 75 114;
-  --ink-400: 107 104 133;
-  --ink-500: 152 149 184;
-  --ink-600: 200 196 232;
-  --ink-700: 221 217 245;
-  --ink-800: 234 231 255;
-  --ink-900: 242 240 255;
-  --ink-950: 248 247 255;
+  --ink-50:  21 27 40;
+  --ink-100: 28 35 51;
+  --ink-200: 49 58 77;
+  --ink-300: 73 82 103;
+  --ink-400: 87 97 118;
+  --ink-500: 102 112 131;
+  --ink-600: 193 201 215;
+  --ink-700: 215 221 231;
+  --ink-800: 232 236 243;
+  --ink-900: 242 244 248;
+  --ink-950: 248 249 252;
+  --brand-readable: 109 40 217;
+  --tone-ok: 19 115 71;
+  --tone-warn: 139 88 15;
+  --tone-danger: 190 49 70;
 
-  --overlay-surface: #fcfbff;
-  --grid: rgba(139, 92, 246, 0.05);
-  --bg-deep: #ebe8ff;
-  --bg: #f3f0ff;
-  --card: #fcfbff;
-  --card-hi: #f0ecff;
-  --line: rgba(109, 40, 217, 0.18);
-  --line-hi: rgba(109, 40, 217, 0.36);
-  --ok: #059669;
-  --warn: #d97706;
-  --err: #dc2626;
+  --overlay-surface: #fdfdff;
+  --bg-deep: #f8f9fc;
+  --bg: #f2f4f8;
+  --card: #fdfdff;
+  --card-hi: #eef1f7;
+  --line: rgb(38 52 78 / 13%);
+  --line-hi: rgb(38 52 78 / 28%);
   --violet: #7c3aed;
   --violet-2: #8b5cf6;
   --fluid: #0891b2;
   --fluid-soft: rgba(8, 145, 178, 0.12);
-  --text-base: #1a1830;
-  --text-muted: #6b6a85;
-  --scrollbar-track: #f0effe;
-  --scrollbar-thumb: #c9c7db;
-  --scrollbar-thumb-hover: #9c98ba;
-  --table-sticky-bg: rgba(248, 247, 255, 0.97);
-  --header-bg: rgba(243, 240, 255, 0.94);
-  --panel-bg:  rgba(230, 224, 255, 0.95);
-}
-
-@supports (font-variation-settings: normal) {
-  html { font-family: "Plus Jakarta Sans", "InterVariable", "Inter", system-ui, sans-serif; }
+  --text-base: #1c2333;
+  --text-muted: #59657b;
+  --scrollbar-track: #f2f4f8;
+  --scrollbar-thumb: #c1c9d7;
+  --scrollbar-thumb-hover: #9ba6ba;
+  --table-sticky-bg: #fdfdff;
+  --header-bg: #f8f9fc;
+  --panel-bg: #eef1f7;
 }
 
 html, body {
   background-color: var(--bg-deep);
   color: var(--text-base);
-  font-family: "Plus Jakarta Sans", "InterVariable", "Inter", system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", sans-serif;
   font-feature-settings: "cv03", "cv04", "cv09", "ss01";
   letter-spacing: 0;
   overflow-x: clip;
@@ -148,7 +143,7 @@ body::after {
   }
   html.light .card {
     background: var(--card);
-    border-color: rgba(109, 40, 217, 0.10);
+    border-color: var(--line);
     box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
   }
   /* Hover: only darken the border, no translate, no extra shadow. */
@@ -186,7 +181,7 @@ body::after {
   html.light .glass,
   html.light .glass-hi {
     background: var(--card);
-    border-color: rgba(109, 40, 217, 0.10);
+    border-color: var(--line);
     box-shadow: 0 1px 2px rgba(76, 29, 149, 0.04);
   }
   /* Subtle "thinking" gradient ring used on the agent avatar / running
@@ -200,10 +195,11 @@ body::after {
         rgba(139, 92, 246, 0) 360deg);
   }
   .card-head {
-    @apply flex flex-wrap items-start justify-between gap-3 px-4 py-3 border-b border-brand-500/10;
+    @apply flex flex-wrap items-start justify-between gap-3 px-4 py-4 border-b;
+    border-color: var(--line);
   }
   html.light .card-head {
-    @apply border-b-[rgba(109,40,217,0.08)];
+    border-color: var(--line);
   }
   .card-title {
     @apply text-[14px] font-medium;
@@ -357,19 +353,21 @@ body::after {
   }
 
   .btn {
-    @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors;
+    @apply inline-flex min-h-9 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors;
     @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-ink-950;
     letter-spacing: 0;
   }
   .btn-ghost {
-    @apply btn border border-brand-500/20 hover:bg-brand-500/10 hover:border-brand-500/40 transition-colors;
-    color: var(--text-muted);
+    @apply btn border transition-colors;
+    border-color: var(--line);
+    color: var(--text-base);
   }
+  .btn-ghost:hover { background: var(--card-hi); border-color: var(--line-hi); }
   html.light .btn-ghost:hover {
     color: var(--text-base);
   }
   .btn-primary {
-    @apply btn bg-brand-500 text-white hover:bg-brand-400;
+    @apply btn bg-brand-600 text-white hover:bg-brand-700;
   }
   /* Disabled actions must stop competing with the screen's single solid
      primary (e.g. an untouched "Save" next to the header CTA). */
@@ -378,9 +376,12 @@ body::after {
   }
 
   .input-dark {
-    @apply w-full bg-ink-900 border border-brand-500/20 rounded-md px-3 py-1.5 text-[13px]
-           text-ink-100 placeholder:text-ink-300 focus:outline-none focus:border-brand-500/60;
+    @apply min-h-9 w-full border rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:border-brand-500;
+    background: var(--bg);
+    border-color: var(--line-hi);
+    color: var(--text-base);
   }
+  .input-dark::placeholder { color: var(--text-muted); opacity: 1; }
   textarea.input-dark { @apply font-mono; }
 
   .mode-toggle-wrap {
@@ -429,7 +430,8 @@ body::after {
      (impeccable side-stripe ban) with a full background tint + bolder
      weight contrast. Same affordance, no decorative stripe. */
   .sidebar-item-active {
-    @apply bg-brand-500/15 text-white font-semibold;
+    @apply bg-brand-500/10 font-semibold;
+    color: var(--text-base);
   }
 
   /* ── Top-nav pills ─────────────────────────────────────────────
@@ -763,26 +765,7 @@ body::after {
    Left command rail + ⌘K palette + command-home composer. Flat, calm
    surfaces; keeps the Nerya violet accent for active/focus states. */
 @layer components {
-  .nerya-sidebar {
-    backdrop-filter: blur(18px);
-  }
-  /* Dark-only palette takeover: in light mode these surfaces must follow
-     the ``html.light`` token overrides instead of forcing dark values
-     (custom properties on a closer element always beat inherited ones). */
-  html:not(.light) .nerya-settings-shell {
-    --bg-deep: #04040d;
-    --bg: #0a0b1a;
-    --card: rgba(19, 20, 38, 0.76);
-    --card-hi: rgba(30, 30, 48, 0.88);
-    --line: rgba(139, 92, 246, 0.14);
-    --line-hi: rgba(139, 92, 246, 0.32);
-    --panel-bg: rgba(4, 4, 13, 0.72);
-    --text-base: #e6e5f1;
-    --text-muted: #9c98ba;
-    --scrollbar-track: #0a0b1a;
-    --scrollbar-thumb: #2a2a3e;
-    --scrollbar-thumb-hover: #454560;
-  }
+  /* Every surface inherits the same theme; no nested palette takeovers. */
   .nerya-settings-shell main {
     background: var(--bg-deep);
   }
@@ -812,7 +795,7 @@ body::after {
     background: rgba(139, 92, 246, 0.10);
   }
   .nerya-sidebar .sidebar-item {
-    @apply rounded-lg px-2.5 py-1.5 text-[13px];
+    @apply min-h-9 rounded-lg px-2.5 py-2 text-[13px];
   }
 
   .cmdk-panel {
@@ -822,8 +805,8 @@ body::after {
     box-shadow: 0 24px 60px -12px rgba(2, 6, 23, 0.55);
   }
   html.light .cmdk-panel {
-    background: #fcfbff;
-    border-color: rgba(109, 40, 217, 0.16);
+    background: var(--overlay-surface);
+    border-color: var(--line-hi);
     box-shadow: 0 24px 60px -12px rgba(76, 29, 149, 0.18);
   }
   .cmdk-kbd {
@@ -845,8 +828,8 @@ body::after {
     border-color: var(--violet);
   }
   html.light .composer-shell {
-    background: #fcfbff;
-    border-color: rgba(109, 40, 217, 0.14);
+    background: var(--card);
+    border-color: var(--line-hi);
   }
   .composer-chip {
     @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] transition-colors;
@@ -857,20 +840,6 @@ body::after {
   .composer-chip:hover {
     color: var(--text-base);
     border-color: var(--line-hi);
-  }
-  html:not(.light) .nerya-app-shell:has(.command-home-root) {
-    --bg-deep: #04040d;
-    --bg: #0a0b1a;
-    --card: rgba(19, 20, 38, 0.72);
-    --card-hi: rgba(30, 30, 48, 0.86);
-    --line: rgba(139, 92, 246, 0.14);
-    --line-hi: rgba(139, 92, 246, 0.32);
-    --panel-bg: rgba(4, 4, 13, 0.55);
-    --text-base: #e6e5f1;
-    --text-muted: #9c98ba;
-    --scrollbar-track: #0a0b1a;
-    --scrollbar-thumb: #2a2a3e;
-    --scrollbar-thumb-hover: #454560;
   }
   .command-home-root {
     background: var(--bg-deep);
@@ -892,7 +861,7 @@ body::after {
     border-radius: 10px;
   }
   html.light .settings-flat .card {
-    border: 1px solid rgba(109, 40, 217, 0.10);
+    border: 1px solid var(--line);
     background: var(--card);
     box-shadow: none;
   }
@@ -932,6 +901,7 @@ body::after {
   box-shadow: 0 12px 40px rgb(2 6 23 / 20%);
 }
 .ui-dialog.ui-command-palette { top: min(12dvh, 96px); transform: translateX(-50%); width: min(600px, calc(100vw - 24px)); padding: 0; overflow: hidden; }
+.ui-dialog.agent-create-dialog { width: min(760px, calc(100vw - 32px)); padding: 0; }
 .ui-select-menu {
   z-index: 1250; min-width: 120px; max-width: calc(100vw - 16px);
   max-height: min(320px, var(--radix-dropdown-menu-content-available-height)); overflow-y: auto;
@@ -944,7 +914,7 @@ body::after {
 .ui-select-option[data-disabled] { opacity: .45; cursor: not-allowed; }
 .ui-icon-button { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; min-width: 32px; border-radius: 8px; color: var(--text-muted); }
 .ui-icon-button:hover { background: rgb(139 92 246 / 10%); color: var(--text-base); }
-.ui-danger-button { background: var(--err); color: white; border-color: transparent; }
+.ui-danger-button { background: #be3146; color: white; border-color: transparent; }
 .ui-danger-button:hover { filter: brightness(.92); }
 .ui-toast-stack { position: fixed; z-index: 1300; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); width: min(380px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .ui-toast { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--line-hi); border-radius: 12px; background: var(--overlay-surface); color: var(--text-base); font-size: 13px; line-height: 1.5; box-shadow: 0 4px 16px rgb(2 6 23 / 12%); pointer-events: auto; }
@@ -955,6 +925,59 @@ body::after {
 .ui-navigation-drawer { position: fixed; z-index: 1101; inset: 0 auto 0 0; display: flex; flex-direction: column; width: min(320px, calc(100vw - 40px)); height: 100dvh; background: var(--overlay-surface); color: var(--text-base); border-right: 1px solid var(--line); }
 .ui-navigation-drawer .nerya-sidebar { width: 100%; height: 100%; border: 0; }
 .nerya-app-shell { height: 100dvh; }
+/* Console controls share tokens in the document, including Radix portals. */
+.ui-choice {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
+  min-height: 34px; min-width: 0; max-width: 100%; padding: 6px 10px;
+  border: 1px solid var(--line-hi); border-radius: 8px; background: var(--card);
+  color: var(--text-base); font: inherit; font-size: 13px; line-height: 20px; text-align: left;
+}
+label > .ui-choice { width: 100%; }
+.ui-choice:hover, .ui-choice[data-state=open] { border-color: var(--violet); }
+.ui-choice:disabled { cursor: not-allowed; opacity: .55; }
+.ui-choice[aria-invalid=true] { border-color: var(--err); }
+.ui-choice-panel {
+  z-index: 1250; width: var(--radix-popover-trigger-width); min-width: min(240px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px); max-height: var(--radix-popover-content-available-height);
+  overflow: hidden; border: 1px solid var(--line-hi); border-radius: 10px;
+  background: var(--overlay-surface); color: var(--text-base); box-shadow: 0 8px 24px rgb(2 6 23 / 16%);
+}
+.ui-choice-search { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--text-muted); }
+.ui-choice-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text-base); font-size: 14px; line-height: 24px; }
+.ui-choice-search input::-webkit-search-cancel-button, .ui-search-field input::-webkit-search-cancel-button { display: none; }
+.ui-choice-options { max-height: min(300px, calc(var(--radix-popover-content-available-height) - 54px)); overflow-y: auto; overscroll-behavior: contain; padding: 4px; outline: none; }
+.ui-choice-option { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 8px 10px; border-radius: 6px; font-size: 13px; line-height: 20px; cursor: pointer; }
+.ui-choice-option[data-active=true] { background: var(--card-hi); outline: 1px solid var(--line-hi); outline-offset: -1px; }
+.ui-choice-option[aria-selected=true] { color: rgb(var(--brand-readable)); font-weight: 600; }
+.ui-choice-option[aria-disabled=true] { opacity: .45; cursor: not-allowed; }
+.ui-choice-group { padding: 10px 10px 4px; color: var(--text-muted); font-size: 12px; font-weight: 500; }
+.ui-choice-form-value { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+/* Panels sit above navigation (1100) and below confirm dialogs (1200). */
+.ui-panel-overlay { position: fixed; z-index: 1150; inset: 0; background: rgb(2 6 23 / 48%); }
+.ui-panel { position: fixed; z-index: 1151; display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: var(--overlay-surface); color: var(--text-base); border: 1px solid var(--line-hi); outline: none; }
+.ui-panel-center { left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(var(--panel-width), calc(100vw - 24px)); max-height: calc(100dvh - 32px); border-radius: 14px; }
+.ui-panel-right { inset: 0 0 0 auto; width: min(var(--panel-width), 100vw); height: 100dvh; border-width: 0 0 0 1px; }
+.ui-panel > aside, .ui-panel > section, .ui-panel > .ui-panel-body { width: 100%; max-width: none; min-height: 0; border: 0; border-radius: 0; background: var(--overlay-surface); box-shadow: none; }
+.ui-search-field { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 38px; border: 1px solid var(--line-hi); border-radius: 8px; background: var(--bg); color: var(--text-muted); padding: 2px 10px; }
+.ui-search-field:focus-within { outline: 2px solid var(--violet); outline-offset: 2px; }
+.ui-search-field input { min-width: 0; width: 100%; background: transparent; color: var(--text-base); padding: 6px 0; font-size: 13px; line-height: 20px; outline: none; }
+.ui-search-field input::placeholder { color: var(--text-muted); }
+.ui-filter-bar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ui-filter-bar > button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 6px 12px; border: 1px solid transparent; border-radius: 8px; color: var(--text-muted); font-size: 13px; }
+.ui-filter-bar > button:hover { color: var(--text-base); background: var(--card-hi); }
+.ui-filter-bar > button[aria-pressed=true] { background: var(--card-hi); border-color: var(--line-hi); color: var(--text-base); font-weight: 600; }
+.ui-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; color: var(--text-muted); font-size: 12px; }
+.ui-table-viewport { max-width: 100%; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 10px; scrollbar-gutter: stable; }
+.ui-table-viewport table { min-width: 100%; }
+.ui-table-viewport thead th { position: sticky; top: 0; z-index: 1; background: var(--table-sticky-bg); white-space: nowrap; }
+.ui-table-viewport tbody tr:last-child td { border-bottom: 0; }
+input[type=checkbox], input[type=radio] { accent-color: var(--violet); }
+@media (max-width: 767px) {
+  .ui-choice { min-height: 40px; }
+  .ui-choice-option { min-height: 42px; }
+  .ui-choice-search input, .ui-search-field input { font-size: 16px; }
+  .ui-filter-bar > button { min-height: 40px; }
+}
 .nerya-app-shell > .ui-desktop-navigation { height: 100%; }
 .ui-desktop-navigation .nerya-sidebar { height: 100%; }
 :where(button, a, input, textarea, select, [tabindex]):focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
@@ -965,6 +988,10 @@ body::after {
   .ui-dialog { padding: 20px; }
   .ui-select-option { min-height: 42px; }
 }
+@media (pointer: coarse) {
+  .agent-library button, .agent-create-dialog button { min-height: 40px; }
+}
 @media (prefers-reduced-motion: reduce) {
   .ui-dialog, .ui-select-menu, .ui-navigation-drawer, .nerya-sidebar { animation: none !important; transition: none !important; }
+  .skeleton, .animate-shimmer, .animate-ai-pulse { animation: none !important; }
 }

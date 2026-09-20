@@ -1,15 +1,15 @@
 version: 1
 id: default
 description: >
-  Default Nerya workspace prompt bundle. Ships with `nerya init` and seeds
-  the `agents/` and `subagents/` directories of a fresh workspace. Each
-  prompt is its own ``.md`` file under this directory so operators can
-  diff/upgrade them without editing Python source.
+  Default Nerya prompt bundle. Domain procedures live in Skills and references;
+  shared contracts are composed with role-specific prompts at load time.
+  Workspace seeding preserves operator edits and records composed-content hashes.
 profile: trading_paper
 agents:
   system: system.md
   policies: policies.md
   main: main.agent.md
+subagent_common: shared/worker-contract.md
 subagents:
   market_analyst: subagents/market_analyst.agent.md
   technical_analyst: subagents/technical_analyst.agent.md
@@ -36,12 +36,12 @@ subagents:
   strategy_tuner: subagents/strategy_tuner.agent.md
   coding_agent: subagents/coding_agent.agent.md
   code_critic: subagents/code_critic.agent.md
-  buffett_lens: subagents/buffett_lens.agent.md
-  damodaran_lens: subagents/damodaran_lens.agent.md
-  marks_lens: subagents/marks_lens.agent.md
-  mauboussin_lens: subagents/mauboussin_lens.agent.md
-  druckenmiller_lens: subagents/druckenmiller_lens.agent.md
-  serenity_lens: subagents/serenity_lens.agent.md
-  unusual_whales_lens: subagents/unusual_whales_lens.agent.md
-  kobeissi_lens: subagents/kobeissi_lens.agent.md
+  buffett_lens: [subagents/buffett_lens.agent.md, shared/lens-contract.md]
+  damodaran_lens: [subagents/damodaran_lens.agent.md, shared/lens-contract.md]
+  marks_lens: [subagents/marks_lens.agent.md, shared/lens-contract.md]
+  mauboussin_lens: [subagents/mauboussin_lens.agent.md, shared/lens-contract.md]
+  druckenmiller_lens: [subagents/druckenmiller_lens.agent.md, shared/lens-contract.md]
+  serenity_lens: [subagents/serenity_lens.agent.md, shared/lens-contract.md]
+  unusual_whales_lens: [subagents/unusual_whales_lens.agent.md, shared/lens-contract.md]
+  kobeissi_lens: [subagents/kobeissi_lens.agent.md, shared/lens-contract.md]
 execution_policies: execution-policies.json

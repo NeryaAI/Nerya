@@ -1,6 +1,9 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: quant_research
+metadata:
+  nerya:
+    catalog_parent: analysis
 description: "Use for factor research, statistical analysis, leakage checks, signal validation, backtest diagnostics, and performance attribution."
 version: 0.1.0
 license: MIT

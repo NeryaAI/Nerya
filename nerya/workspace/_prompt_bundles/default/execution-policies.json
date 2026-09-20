@@ -8,6 +8,7 @@
       "preload_skills": ["research"],
       "native_tools": {
         "allow": [
+          "Skill",
           "skill_index",
           "skill_view",
           "research_run",
@@ -26,6 +27,7 @@
       "llm_max_attempts": 1,
       "native_tools": {
         "allow": [
+          "Skill",
           "skill_index",
           "skill_view",
           "script_inspect",
