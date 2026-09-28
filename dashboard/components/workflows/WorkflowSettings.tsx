@@ -26,7 +26,7 @@ const FIELDS: Record<string, FieldSpec[]> = {
 export function configurationErrors(node: WorkflowNode, value: unknown, t: WorkflowText): string[] {
   if (node.binding.file || !node.editable) return [];
   const errors: string[] = node.kind === "source" && typeof value === "object" ? sourceErrors(asObject(value), t) : [];
-  for (const spec of FIELDS[node.kind] || []) {
+  for (const spec of FIELDS[node.id === "evidence:review" ? "evidence" : node.kind] || []) {
     const v = at(value, spec.path.split("."));
     if (v === undefined) continue;
     if (spec.type === "number" && (typeof v !== "number" || !Number.isFinite(v) || (spec.min !== undefined && v < spec.min) || (spec.max !== undefined && v > spec.max))) errors.push(t(spec.label) + t("copy.components_workflows_WorkflowSettings.001"));
@@ -99,7 +99,7 @@ export function CommonSettings({ node, config, disabled, onChange, markets = [] 
   const t = useWorkflowText();
   if (node.kind === "source") return <WorkflowSourceSettings config={config} markets={markets} disabled={disabled} onChange={onChange} parameters={<details className={styles.advanced}><summary>{t("copy.components_workflows_WorkflowSettings.014")}</summary><ConfigTree value={extraSourceFields(config)} disabled={disabled} onChange={(next) => onChange({ ...config, ...asObject(next) })} /></details>} />;
   if (node.kind === "scheduler") return <ScheduleSettings config={config} disabled={disabled} onChange={onChange} />;
-  const specs = node.kind === "agent" && node.id !== "agent:runtime" ? [{ path: "name", label: "copy.workflowSettings.fields.runtimeAgent.name" }, { path: "tier", label: "copy.workflowSettings.fields.runtimeAgent.tier", options: ["light", "medium", "high"] }] : FIELDS[node.kind] || [];
+  const specs = node.kind === "agent" && node.id !== "agent:runtime" ? [{ path: "name", label: "copy.workflowSettings.fields.runtimeAgent.name" }, { path: "tier", label: "copy.workflowSettings.fields.runtimeAgent.tier", options: ["light", "medium", "high"] }] : FIELDS[node.id === "evidence:review" ? "evidence" : node.kind] || [];
   return <div className={styles.settingsStack}>{node.kind === "proposal" && <ObjectiveSettings value={config.objectives} disabled={disabled} onChange={(value) => onChange({ ...config, objectives: value })} />}{specs.filter((spec) => !["consumers", "provider", "capability", "agent_session.include_prior_messages", "agent_profile.allowed_tools", "proposal_policy.allowed_targets"].includes(spec.path)).map((spec) => <Field key={spec.path} spec={spec} value={at(config, spec.path.split("."))} disabled={disabled} onChange={(value) => onChange(withValue(config, spec.path.split("."), value))} />)}
     {specs.filter((spec) => ["consumers", "provider", "capability", "agent_session.include_prior_messages", "agent_profile.allowed_tools", "proposal_policy.allowed_targets"].includes(spec.path)).map((spec) => <details className={styles.advanced} key={spec.path}><summary>{t(spec.label)}</summary><Field spec={spec} value={at(config, spec.path.split("."))} disabled={disabled} onChange={(value) => onChange(withValue(config, spec.path.split("."), value))} /></details>)}
     {node.kind === "validation" && <p className={styles.helper}>{t("copy.components_workflows_WorkflowSettings.015")}</p>}

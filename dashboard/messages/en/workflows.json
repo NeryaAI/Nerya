@@ -771,6 +771,19 @@
     "dailyAt": "Daily at {time}"
   },
   "copy": {
+    "simpleReview": {
+      "scriptTitle": "Review evidence script",
+      "agentTitle": "Review Agent · Proposer",
+      "scriptPurpose": "Collect run, fill and risk evidence for the current strategy version and pass it to the Agent.",
+      "agentPurpose": "Analyze evidence and propose strategy changes directly; keep the strategy unchanged when evidence is insufficient.",
+      "scriptFacts": "Built-in script · Up to {runs} runs",
+      "agentFacts": "Outputs a proposal · Never auto-applies",
+      "scriptHow": "This is the runtime's built-in read-only collector, not a Python file in the strategy package. Adjust the run limit, time window and minimum closed trades below without changing history.",
+      "schedule": "Review schedule",
+      "proposalSettings": "Proposal & approval settings",
+      "summary": "Evidence script → Agent → Suggested changes",
+      "safety": "The default uses one evidence script and one review Agent. A proposal is the Agent's output, not another wired node. Validation, operator approval and version history remain in place. Insufficient evidence does not force a strategy change."
+    },
     "workflowKinds": {
       "001": "Strategy",
       "002": "Data source",

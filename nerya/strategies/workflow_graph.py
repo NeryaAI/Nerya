@@ -404,17 +404,22 @@ def _evolution_graph(manifest: dict[str, Any], files: dict[str, str]) -> dict[st
     subagent = _object(tuning.get("subagent"))
     prompt_path = str(subagent.get("prompt_file") or "subagents/strategy_tuner.agent.md")
     nodes = [
-        _node("evidence", "review", "Run evidence", config=_object(tuning.get("lookback")), path=["tuning", "lookback"], x=30, y=60, subtitle="runs · fills · drawdown"),
+        _node("evidence", "review", "Run evidence", config=_object(tuning.get("lookback")), path=["tuning", "lookback"], x=30, y=100, subtitle="built-in · build_strategy_review_context"),
         _node("scheduler", "tuning", "Review schedule", config=_object(tuning.get("schedule")), path=["tuning", "schedule"], x=30, y=280, subtitle="independent of trading"),
         _node("agent", "tuner", str(subagent.get("name") or "strategy_tuner"), config=subagent,
               file=prompt_path if prompt_path in files else None, content=files.get(prompt_path),
-              path=None if prompt_path in files else ["tuning", "subagent"], x=340, y=160, subtitle="review & propose"),
+              path=None if prompt_path in files else ["tuning", "subagent"], x=390, y=100, subtitle="review & propose"),
         _node("proposal", "tuning", "Change proposal", config={"objectives": tuning.get("objectives", []), "proposal_policy": _object(tuning.get("proposal_policy")), "tuning_prompt": tuning.get("tuning_prompt", "")}, path=["$tuning"], x=650, y=60, subtitle="code · configuration · prompt"),
         _node("validation", "tuning", "Validation & replay", config=_object(tuning.get("guardrails")), path=["tuning", "guardrails"], x=960, y=60, subtitle="static scan → backtest → shadow"),
         _node("approval", "operator", "Operator approval", config={"required": True}, x=960, y=300, subtitle="approval cannot be skipped", href="/self-evolution?tab=proposals"),
         _node("apply", "version", "Version & apply", config={"protected_scopes": ["accounts", "secrets", "live_trading_enabled"]}, x=650, y=440, subtitle="reviewed candidate only", href="/self-evolution?tab=proposals"),
         _node("observation", "feedback", "Observe & learn", config={"description": "Post-apply observations feed the next review; a graph is not execution evidence."}, x=340, y=440, subtitle="health · rollback · next review", href="/self-evolution?tab=timeline"),
     ]
+    # This is the real built-in evidence collector called by StrategyEvolutionRunner,
+    # not an editable package script. Retain its ID and lookback binding so existing
+    # layouts, annotations and saved edits continue to resolve. The UI projects the
+    # collector + tuner; schedule and proposal lifecycle resources stay accessible.
+    nodes[0]["kind"] = "script"
     chain = [("evidence:review", "agent:tuner"), ("scheduler:tuning", "agent:tuner"), ("agent:tuner", "proposal:tuning"),
              ("proposal:tuning", "validation:tuning"), ("validation:tuning", "approval:operator"), ("approval:operator", "apply:version"),
              ("apply:version", "observation:feedback"), ("observation:feedback", "evidence:review")]

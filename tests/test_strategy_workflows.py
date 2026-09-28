@@ -229,3 +229,54 @@ def test_symlink_file_is_not_exposed(paths, tmp_path):
     files, info = source_files(paths, "safe")
     assert "exfiltrate.md" not in files
     assert "exfiltrate.md" in info["omitted_files"]
+
+
+@pytest.mark.parametrize("template", TEMPLATES)
+def test_default_review_exposes_one_builtin_script_and_one_proposer(paths, template):
+    out = example(paths, template)
+    nodes = {node["id"]: node for node in out["workflow"]["evolution"]["nodes"]}
+    steps = [node for node in nodes.values() if node["kind"] in {"script", "agent"}]
+    assert [node["id"] for node in steps] == ["evidence:review", "agent:tuner"]
+    assert nodes["evidence:review"]["binding"] == {"file": None, "path": ["tuning", "lookback"]}
+    assert nodes["approval:operator"]["config"]["required"] is True
+    assert nodes["validation:tuning"]["config"]["require_operator_approval"] is True
+    prompt = nodes["agent:tuner"]["content"]
+    assert "review Agent and Proposer" in prompt
+    assert 'file="references/review.md"' in prompt
+    assert "proposed_changes: []" in prompt
+    assert "pending-review PatchProposal" in prompt
+
+
+def test_review_settings_and_custom_layout_survive_candidate_save(paths):
+    out = example(paths)
+    before, _ = source_files(paths, out["strategy_id"], out["proposal_id"])
+    custom_prompt = "Review execution errors only; preserve the operator's custom review.\n"
+    metadata = {"version": 1, "nodes": {
+        "evidence:review": {"title": "My evidence", "position": {"x": 18, "y": 37}},
+        "agent:tuner": {"title": "My reviewer"},
+    }, "edges": [{"id": "review-note", "source": "agent:tuner", "target": "approval:operator",
+                  "relation": "annotation", "label": "Operator reviews the result"}]}
+    edited = propose_workflow(paths, save_payload(out, metadata=metadata, changes=[
+        {"node_id": "evidence:review", "config": {"runs": 12, "max_age_hours": 48, "min_closed_trades": 0}},
+        {"node_id": "agent:tuner", "content": custom_prompt},
+    ]))
+    assert edited["ok"], edited
+    reloaded = view_workflow(paths, out["strategy_id"], edited["proposal_id"])
+    assert reloaded["manifest"]["tuning"]["lookback"] == {"runs": 12, "max_age_hours": 48, "min_closed_trades": 0}
+    nodes = {node["id"]: node for node in reloaded["evolution"]["nodes"]}
+    assert nodes["agent:tuner"]["content"] == custom_prompt
+    assert nodes["agent:tuner"]["title"] == "My reviewer"
+    assert nodes["evidence:review"]["position"] == {"x": 18, "y": 37}
+    assert any(edge["id"] == "review-note" for edge in reloaded["evolution"]["edges"])
+    assert source_files(paths, out["strategy_id"], out["proposal_id"])[0] == before
+    assert not paths.strategy(out["strategy_id"]).exists()
+    assert edited["state"] == "pending_review"
+
+
+def test_builtin_review_collector_cannot_be_overwritten_as_a_package_script(paths):
+    out = example(paths)
+    with pytest.raises(WorkflowError, match="no editable package file"):
+        propose_workflow(paths, save_payload(out, changes=[
+            {"node_id": "evidence:review", "content": "raise RuntimeError('not a package file')\n"},
+        ]))
+    assert len(list_proposals(paths)) == 1

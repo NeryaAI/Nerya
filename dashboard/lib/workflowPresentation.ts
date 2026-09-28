@@ -7,6 +7,8 @@ import type { ResourceTranslator as WorkflowText } from "./i18n";
 export const asObject = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const names: Record<string, string> = { "main.py": "copy.workflowTitles.001", "market_inputs.py": "copy.workflowTitles.002", "signals.py": "copy.workflowTitles.003", "risk_rules.py": "copy.workflowTitles.004", "Trading schedule": "copy.workflowTitles.005", "Review schedule": "copy.workflowTitles.006", "Strategy Agent": "copy.workflowTitles.007", "market_analyst": "copy.workflowTitles.008", "risk_critic": "copy.workflowTitles.009", "strategy_tuner": "copy.workflowTitles.010", "Risk & approval gate": "copy.workflowTitles.011", "paper_main": "copy.workflowTitles.012", "Run evidence": "copy.workflowTitles.013", "Change proposal": "copy.workflowTitles.014", "Validation & replay": "copy.workflowTitles.015", "Operator approval": "copy.workflowTitles.016", "Version & apply": "copy.workflowTitles.017", "Observe & learn": "copy.workflowTitles.018" };
 export function cardTitle(node: WorkflowNode, t: WorkflowText): string {
+  if (node.id === "evidence:review" && node.title === "Run evidence") return t("copy.simpleReview.scriptTitle");
+  if (node.id === "agent:tuner" && node.title === "strategy_tuner") return t("copy.simpleReview.agentTitle");
   if (node.kind === "script" && node.content && node.title === node.resource) {
     const title = parseScriptDocumentation(node.content).title;
     if (title) return title;
@@ -22,6 +24,8 @@ export function cardPurpose(node: WorkflowNode, t: WorkflowText): string {
     if (description) return description;
   }
   if (node.description) return node.description;
+  if (node.id === "evidence:review") return t("copy.simpleReview.scriptPurpose");
+  if (node.id === "agent:tuner") return t("copy.simpleReview.agentPurpose");
   const configuredRole = asObject(asObject(node.config).agent_profile).role;
   if (node.kind === "agent" && typeof configuredRole === "string" && configuredRole.trim()) return configuredRole;
   if (node.kind === "strategy" && asObject(node.config).description) return String(asObject(node.config).description);
@@ -48,6 +52,8 @@ export function cardFacts(node: WorkflowNode, t: WorkflowText): string {
   const c = asObject(node.config);
   if (node.status) return stateLabel(node.status, t);
   if (node.presentation?.summary) return node.presentation.summary;
+  if (node.id === "evidence:review") return t("copy.simpleReview.scriptFacts", { runs: c.runs ?? 200 });
+  if (node.id === "agent:tuner") return t("copy.simpleReview.agentFacts");
   switch (node.kind) {
     case "scheduler": return `${scheduleSummary(c, t)} · ${c.enabled === false ? t("copy.lib_workflowPresentation.010") : c.enabled === true ? t("copy.lib_workflowPresentation.011") : t("copy.lib_workflowPresentation.012")}`;
     case "source": return typeof node.config === "string" ? node.config : sourceSummary(c, t);

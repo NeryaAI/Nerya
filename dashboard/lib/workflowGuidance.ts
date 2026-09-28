@@ -18,6 +18,7 @@ const GUIDES: Record<WorkflowKind, { how: string; impact: string }> = {
   observation: { how: "copy.workflowGuidance.observation.how", impact: "copy.workflowGuidance.observation.impact" },
 };
 export function cardGuide(node: WorkflowNode, t: WorkflowText) {
+  if (node.id === "evidence:review") return { how: t("copy.simpleReview.scriptHow"), impact: t("copy.workflowGuidance.evidence.impact") };
   const guide = GUIDES[node.kind];
   return { how: t(guide.how), impact: t(guide.impact) };
 }

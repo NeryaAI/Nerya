@@ -13,8 +13,8 @@ export function WorkflowCardGallery({ graph, selectedId, onSelect }: { graph: Wo
   const t = useWorkflowText();
   const [query, setQuery] = useState("");
   const nodes = graph.nodes.filter((node) => `${node.title} ${node.resource} ${cardTitle(node, t)} ${kindName(node.kind, t)}`.toLowerCase().includes(query.trim().toLowerCase()));
-  const groups: Array<{ title: string; kinds: WorkflowKind[] }> = graph.id.endsWith(":evolution") ? [
-    { title: t("copy.components_workflows_WorkflowCardGallery.001"), kinds: ["evidence", "scheduler", "agent", "proposal"] },
+  const groups: Array<{ title: string; kinds: WorkflowKind[] }> = graph.id === "evolution" || graph.id.endsWith(":evolution") ? [
+    { title: t("copy.components_workflows_WorkflowCardGallery.001"), kinds: ["script", "evidence", "scheduler", "agent", "proposal"] },
     { title: t("copy.components_workflows_WorkflowCardGallery.002"), kinds: ["validation", "approval", "apply", "observation"] },
   ] : [
     { title: t("copy.components_workflows_WorkflowCardGallery.003"), kinds: ["scheduler", "script", "agent"] },

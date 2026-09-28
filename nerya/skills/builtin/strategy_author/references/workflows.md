@@ -289,6 +289,12 @@ workflow.json format is `{"version":1,"nodes":{},"edges":[]}`. Override only exi
 
 Review uses tuning.enabled, tuning.schedule, tuning.lookback, tuning.subagent with actual prompt_file, tuning.objectives, tuning.proposal_policy, tuning.guardrails and tuning.tuning_prompt. Respect current schema and the scaffold's supported values. Approval stays mandatory. Do not fabricate performance, auto-apply changes, or add AI tuning to a no-AI strategy. A disabled/unexecuted review workflow is a configuration, not a completed evolution run.
 
+The default review is one built-in evidence script → one review Agent acting as
+Proposer. Do not expand it into a team, candidate tournament, or wired chain of
+proposal/validation/approval/apply nodes unless explicitly requested. These
+remain proposal lifecycle settings, not extra review steps. Read
+`references/review.md` for the evidence and proposal output contract.
+
 ## Acceptance before reporting ready
 
 For these no-order observers keep `evaluation: {mode: observation}` alongside the explicit no-order policy. Read `evaluation_mode`, `replay.status_counts`, `replay.errors`, `replay.order_attempts` and actual timeframes returned by the backtest. If a fallback timeframe differs, state the gap; never call it verification of the missing requested timeframe. Historical Agent dispatch replay does not execute a real model or prove the installed daily clock fired. Do not substitute ROI or zero trades for behavior evidence. Keep the final reply and workflow titles short and understandable.

@@ -50,12 +50,13 @@ export function NodeInspector({ node, raw, writable, onRaw, onMetadata, onClose,
   if (!node.binding.file) { try { value = JSON.parse(raw); } catch { parseError = t("copy.components_workflows_WorkflowInspector.005"); } }
   const errors = parseError ? [parseError] : configurationErrors(node, value, t);
   const isObject = value !== null && typeof value === "object" && !Array.isArray(value);
-  const canDuplicate = node.kind === "script" || node.kind === "agent" && !!node.binding.file || editableSource(node);
+  const canDuplicate = (node.kind === "script" || node.kind === "agent") && !!node.binding.file && node.id !== "agent:tuner" || editableSource(node);
   const source = node.binding.file || (node.binding.path ? `strategy.yml · ${node.binding.path.join(".") || "title"}` : node.resource);
   const code = <label className={styles.field}>{node.kind === "agent" ? t("copy.components_workflows_WorkflowInspector.006") : "Python"}<textarea className={node.kind === "agent" ? styles.promptEditor : styles.codeEditor} aria-label={t("copy.components_workflows_WorkflowInspector.007")} spellCheck={false} rows={node.kind === "agent" ? 7 : 14} value={raw} readOnly={!canEdit} onChange={(event) => onRaw(event.target.value)} /></label>;
   return <section className={ui.inspector} aria-label={t("copy.components_workflows_WorkflowInspector.008")} data-testid="workflow-inspector" onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); event.stopPropagation(); if (dirty && !busy) onSave?.(); } }}>
     <header className={ui.inspectorHeader}><h3>{displayTitle || cardTitle(node, t)}</h3><WorkflowHelp label={t("copy.components_workflows_WorkflowInspector.009")}><p>{cardPurpose(node, t)}</p><p>{guide.how}</p><p>{guide.impact}</p></WorkflowHelp><button className={ui.iconButton} type="button" onClick={onClose} aria-label={t("copy.components_workflows_WorkflowInspector.010")}><NeryaGlyph name="x" size={18} /></button></header>
     <div className={ui.inspectorBody}>
+      {node.id === "evidence:review" && <p className={ui.inspectorDescription}>{t("copy.simpleReview.scriptHow")}</p>}
       {node.binding.file ? node.kind === "agent" ? code : <>
         <ScriptExplanation source={raw} fallback={node.description} />
         <details className={ui.disclosure}>

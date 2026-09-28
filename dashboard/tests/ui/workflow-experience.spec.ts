@@ -2,7 +2,11 @@ import { test, expect, type Page } from "@playwright/test";
 import { parseScriptDocumentation } from "../../lib/scriptDocumentation";
 import { strategyLanding, strategyMarketTarget } from "../../lib/strategyLanding";
 import { invocationGraph, publicReplay, recordedTurnReplay, selectedInvocation } from "../../lib/workflowReplay";
-import type { WorkflowView } from "../../lib/workflowTypes";
+import type { WorkflowGraph, WorkflowNode, WorkflowView } from "../../lib/workflowTypes";
+import { compactWorkflow } from "../../lib/workflowProjection";
+import { cardFacts, cardTitle } from "../../lib/workflowPresentation";
+import { copy } from "../../lib/i18n";
+import { chooseOption } from "./choice-control";
 
 const source = `# @nerya.title Collect observations
 # @nerya.description Read candles without placing orders.
@@ -63,16 +67,16 @@ const workflow: WorkflowView = {
   ], edges: [] }, evolution: { id: "evolution", nodes: [], edges: [] },
 };
 
-async function mock(page: Page) {
+async function mock(page: Page, selectedWorkflow: WorkflowView = workflow, language = "en") {
   const errors: string[] = [], writes: string[] = [];
   let failOld = false;
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.addInitScript(() => localStorage.setItem("nerya.ui_settings.v1", JSON.stringify({ language: "en", darkMode: "dark" })));
+  await page.addInitScript((language) => localStorage.setItem("nerya.ui_settings.v1", JSON.stringify({ language, darkMode: "dark" })), language);
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url()), endpoint = url.pathname.replace(/^\/api\/proxy/, "");
     if (route.request().method() === "POST" && endpoint !== "/strategy/list_all") writes.push(endpoint);
     let result: unknown = { ok: true, items: [], count: 0, total: 0 };
-    if (endpoint === "/strategies/runtime/workflow") result = workflow;
+    if (endpoint === "/strategies/runtime/workflow") result = selectedWorkflow;
     else if (endpoint === "/strategies/runtime/workflows") result = { ok: true, workflows: [{ key: "alpha", strategy_id: "alpha", title: "Alpha fixture", mode: "paper", status: "draft", state: "active", markets: [], counts: { script: 1 } }] };
     else if (endpoint === "/strategies/runtime/tuning/history") result = { ok: true, strategy_id: "alpha", runs: ["new", "old"].map((id, index) => ({ run_id: id, strategy_id: "alpha", status: "ok", started_at: `2026-09-0${2 - index}T00:00:00Z`, reason: `Review ${id}` })), has_more: false };
     else if (endpoint === "/strategies/runtime/tuning/record") {
@@ -152,3 +156,101 @@ test("a vanished review clears the prior conclusion on refresh", async ({ page }
   await expect(page.getByTestId("review-explanation")).toHaveCount(0);
   expect(fixture.writes).toEqual([]);
 });
+
+// API-shape fixture only: no execution or performance is claimed by this graph.
+function reviewFixture(): WorkflowView {
+  const node = (id: string, kind: WorkflowNode["kind"], title: string, config: unknown, path: WorkflowNode["binding"]["path"]): WorkflowNode => ({
+    id, kind, title, config, subtitle: "", resource: id.split(":")[1],
+    position: { x: id === "agent:tuner" ? 390 : 30, y: 100 },
+    binding: { file: null, path }, editable: path !== null,
+  });
+  const nodes: WorkflowNode[] = [
+    node("evidence:review", "script", "Run evidence", { runs: 200, max_age_hours: 168, min_closed_trades: 0 }, ["tuning", "lookback"]),
+    node("scheduler:tuning", "scheduler", "Review schedule", { type: "interval", every_seconds: 3600, enabled: false }, ["tuning", "schedule"]),
+    { ...node("agent:tuner", "agent", "strategy_tuner", { name: "strategy_tuner", tier: "medium" }, null),
+      editable: true, binding: { file: "subagents/strategy_tuner.agent.md", path: null }, content: "Review the frozen evidence and propose one focused change." },
+    node("proposal:tuning", "proposal", "Change proposal", { objectives: ["drawdown"], tuning_prompt: "", proposal_policy: {} }, ["$tuning"]),
+    node("validation:tuning", "validation", "Validation & replay", { require_operator_approval: true, require_backtest: true }, ["tuning", "guardrails"]),
+    node("approval:operator", "approval", "Operator approval", { required: true }, null),
+    node("apply:version", "apply", "Version & apply", {}, null),
+    node("observation:feedback", "observation", "Observe & learn", {}, null),
+  ];
+  const chain = [["evidence:review", "agent:tuner"], ["scheduler:tuning", "agent:tuner"], ["agent:tuner", "proposal:tuning"], ["proposal:tuning", "validation:tuning"], ["validation:tuning", "approval:operator"], ["approval:operator", "apply:version"], ["apply:version", "observation:feedback"], ["observation:feedback", "evidence:review"]];
+  const evolution: WorkflowGraph = { id: "evolution", enabled: false, nodes, edges: chain.map(([source, target], index) => ({ id: `review-edge-${index}`, source, target, relation: "review_stage", label: "review_stage", origin: "manifest" })) };
+  return { ...structuredClone(workflow), evolution };
+}
+
+test("default review projects two steps without losing settings, bindings or custom flows", () => {
+  const graph = reviewFixture().evolution;
+  const before = structuredClone(graph);
+  const t = (key: string, values?: Record<string, unknown>) => copy(false, key, values);
+  const result = compactWorkflow(graph, t);
+  expect(result.graph.nodes.map((node) => [node.id, node.kind])).toEqual([["evidence:review", "script"], ["agent:tuner", "agent"]]);
+  expect(result.graph.edges).toEqual([graph.edges[0]]);
+  expect(result.supporting.map((group) => group.members.map((node) => node.id))).toEqual([
+    ["scheduler:tuning"], ["proposal:tuning", "validation:tuning", "approval:operator", "apply:version", "observation:feedback"],
+  ]);
+  expect(graph).toEqual(before);
+  const legacy = structuredClone(graph);
+  legacy.nodes[0].kind = "evidence";
+  legacy.nodes[0].title = "Custom collector";
+  legacy.nodes[0].position = { x: 71, y: 83 };
+  const collector = compactWorkflow(legacy, t).graph.nodes[0];
+  expect(collector.binding).toEqual(graph.nodes[0].binding);
+  expect(collector.position).toEqual({ x: 71, y: 83 });
+  expect(cardTitle(collector, t)).toBe("Custom collector");
+  expect(cardFacts(collector, t)).toContain("200");
+  const custom = structuredClone(graph);
+  custom.nodes.push({ ...graph.nodes[0], id: "script:custom.py" });
+  expect(compactWorkflow(custom, t).graph).toBe(custom);
+  const unknown = { ...graph, nodes: graph.nodes.filter((node) => node.id !== "evidence:review") };
+  expect(compactWorkflow(unknown, t).graph).toBe(unknown);
+});
+
+for (const language of ["en", "zh"]) {
+  test(`simple review canvas and settings remain usable in ${language}`, async ({ page }, info) => {
+    const fixture = await mock(page, reviewFixture(), language);
+    const t = (key: string) => copy(language === "zh", key);
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    await page.goto("/strategies?strategy_id=alpha&workflow_log=evolution");
+    await expect(page.getByTestId("workflow-review-activity")).toBeVisible();
+    await page.getByTestId("workflow-review-log-toggle").click();
+    const panel = page.getByTestId("strategy-workflow-panel");
+    await expect(panel.locator("[data-workflow-node]")).toHaveCount(2);
+    await expect(panel.locator("[data-edge]")).toHaveCount(1);
+    const collector = panel.locator('[data-workflow-node="evidence:review"]');
+    await expect(collector).toHaveAttribute("data-kind", "script");
+    await expect(collector).toContainText(t("copy.simpleReview.scriptTitle"));
+    await expect(panel.locator('[data-workflow-node="agent:tuner"]')).toContainText(t("copy.simpleReview.agentTitle"));
+    await expect(panel.getByRole("button", { name: t("copy.components_workflows_StrategyWorkflowPanel.042"), exact: true })).toHaveCount(0);
+
+    await collector.locator("button[aria-pressed]").click();
+    const inspector = page.getByTestId("workflow-inspector");
+    await expect(inspector.getByLabel(t("copy.workflowSettings.fields.evidence.runs"), { exact: true })).toHaveValue("200");
+    await expect(inspector.getByLabel(t("copy.workflowSettings.fields.evidence.min_closed_trades"), { exact: true })).toHaveValue("0");
+    await expect(inspector).toContainText(t("copy.simpleReview.scriptHow"));
+    await expect(inspector.getByRole("button", { name: t("copy.components_workflows_WorkflowInspector.024"), exact: true })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+
+    await panel.locator('[data-support-member="scheduler:tuning"]').click();
+    await expect(inspector).toBeVisible();
+    await expect(inspector).toContainText(t("copy.simpleReview.schedule"));
+    await page.keyboard.press("Escape");
+    await panel.locator('[data-support-member="proposal:tuning"]').click();
+    await chooseOption(page.locator("#workflow-group-resource"), "validation:tuning");
+    await expect(inspector.getByRole("switch", { name: t("copy.workflowSettings.fields.validation.require_backtest"), exact: true })).toBeChecked();
+    await chooseOption(page.locator("#workflow-group-resource"), "approval:operator");
+    await expect(inspector.getByRole("switch")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+
+    await chooseOption(panel.getByLabel(t("copy.components_workflows_StrategyWorkflowPanel.039"), { exact: true }), "cards");
+    await expect(panel.locator("[data-workflow-node]")).toHaveCount(2);
+    await chooseOption(panel.getByLabel(t("copy.components_workflows_StrategyWorkflowPanel.039"), { exact: true }), "canvas");
+    await panel.screenshot({ path: info.outputPath(`review-template-${language}.png`), animations: "disabled" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(collector).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 2)).toBeTruthy();
+    expect(fixture.errors).toEqual([]);
+    expect(fixture.writes).toEqual([]);
+  });
+}
