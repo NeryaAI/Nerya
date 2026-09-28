@@ -5,6 +5,7 @@ import pytest
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
 from nerya.data.history_store import HistoryStore
+from nerya.skills.builtin.backtest.scripts.history_data import prepare_series
 from nerya.tools.native.historical_data import historical_data_handler, historical_data_descriptors, tool_progress
 from nerya.tools.types import ToolCall
 
@@ -63,3 +64,34 @@ def test_cli_and_native_schema_share_actions(tmp_path):
     descriptor = historical_data_descriptors(Config(paths=WorkspacePaths(tmp_path)))[0]
     assert descriptor.name == "historical_data"
     assert args.data_action in descriptor.input_schema["properties"]["action"]["enum"]
+
+
+def test_binance_monthly_download_keeps_recent_post_listing_rows_first(tmp_path):
+    store = HistoryStore(tmp_path)
+    calls = []
+
+    def fetch(_market, *, tf, start, end, **_kwargs):
+        calls.append((start, end))
+        step = 86400
+        return [
+            {"ts": stamp, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 10}
+            for stamp in range(start, end + 1, step)
+        ]
+
+    rows, receipt = prepare_series(
+        store,
+        "BINANCE:BTCUSDT",
+        "1d",
+        1735689600,  # 2025-01-01
+        1743465600,  # 2025-04-01
+        max_requests=1,
+        retries=0,
+        timeout_seconds=5,
+        fetch=fetch,
+    )
+
+    assert calls == [(1740787200, 1743465599)]  # 2025-03-01 .. 2025-03-31
+    assert rows
+    assert rows[0]["ts"] == 1740787200
+    assert receipt["complete"] is False
+    assert receipt["missing_bars"] > 0

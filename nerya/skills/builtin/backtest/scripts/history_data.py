@@ -216,7 +216,19 @@ def prepare_series(
 
     loader = fetch or _source_fetch
     monthly = _binance_vision_base(key) is not None
-    queue = deque(segment for gap in missing for segment in _segments(gap["start"], gap["end"], tf, monthly=monthly))
+    segments = [
+        segment
+        for gap in missing
+        for segment in _segments(gap["start"], gap["end"], tf, monthly=monthly)
+    ]
+    # Binance archive windows can predate a newly listed market by months.
+    # Probe the newest monthly chunks first so a bounded download can retain
+    # real post-listing candles instead of spending its whole timeout proving
+    # that old, pre-listing months are empty. Full-window completeness is still
+    # evaluated against the original requested range below.
+    if monthly:
+        segments.reverse()
+    queue = deque(segments)
     deadline = time.monotonic() + float(timeout_seconds)
     publish("downloading")
     try:
