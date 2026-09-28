@@ -146,8 +146,9 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "default": False,
             "description": (
-                "Opt in only when the operator explicitly requests automatic "
-                "tuning. Ordinary authoring/backtesting never authorizes a tuner."
+                "Generate a review-plan scaffold for strategy_author to tailor after "
+                "implementing the strategy. Supply its tuning config and prompt file; "
+                "the review schedule defaults off. Does not run a review or apply changes."
             ),
         },
         "tuning_prompt": {
@@ -369,7 +370,7 @@ STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
         "subagents": {"type": "array", "items": {"type": "string"}},
         "policy_overrides": {"type": "object"},
         "llm_policy_overrides": {"type": "object"},
-        "create_tuning": {"type": "boolean", "default": False, "description": "Opt in only on explicit operator request; no automatic tuning for ordinary creation/backtesting."},
+        "create_tuning": {"type": "boolean", "default": False, "description": "Generate a review-plan scaffold, then tailor tuning and its prompt file to the completed strategy. The review schedule defaults off; no review execution or automatic application."},
         "tuning_prompt": {"type": "string"},
         "tuning_cron": {"type": "string"},
         "tuning_objectives": {"type": "array", "items": {"type": "string"}},

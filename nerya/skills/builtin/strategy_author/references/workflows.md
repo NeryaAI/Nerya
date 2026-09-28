@@ -45,7 +45,7 @@ agent_session: {policy: per_strategy, include_prior_messages: true, refresh_prof
 
 The runtime injects `agent_profile.role`. Keep Python task text focused on the event/data rather than hard-coding a competing role. `ctx.config.extras` does NOT contain the typed agent_profile. `ctx.prompt` formats CSV/JSON/tables/artifacts; it has no read/render method. Extra role cards are optional: add subagents/<name>.agent.md and list the name only when the logic actually calls/delegates that role.
 
-For genuinely observation-only requests, no-order means remove template order calls AND trading tools/skills. This is NOT the rule for a requested simulated trading backtest; preserve its trading intent under the isolated replay context. A zero money cap is not by itself a ban. For a pure script there are no ctx.llm, subagent, team or Agent dispatch calls, and tuning is off. Do not use a zero LLM-call cap as a disable switch: legacy zero semantics are not a reliable no-AI gate. Prove zero calls by branch tests.
+For genuinely observation-only requests, no-order means remove template order calls AND trading tools/skills. This is NOT the rule for a requested simulated trading backtest; preserve its trading intent under the isolated replay context. A zero money cap is not by itself a ban. For pure script execution there are no ctx.llm, subagent, team or Agent dispatch calls in the trading tick. Author its separate review plan after the strategy; an explicit whole-strategy no-AI/no-review restriction instead keeps tuning disabled. Do not use a zero LLM-call cap as a disable switch: legacy zero semantics are not a reliable no-AI gate. Prove zero calls by branch tests.
 
 ## Main-Agent capability and context contract
 
@@ -283,17 +283,22 @@ def run(ctx: StrategyContext) -> StrategyAgentTask:
 
 ## Cards, customization, and evolution
 
-The strategy canvas displays only script:<path> and agent:<id> nodes. Schedule, market scope, risk and account configuration live beside the canvas. No dedicated executable "condition" node exists: label the actual gate script clearly. Multi-script strategies can extract data, indicators and decisions to separate modules with real imports/calls. Legacy consumers declarations are compatibility configuration; static imports/SDK calls are not evidence of an observed run.
+The strategy canvas displays scheduler, script:<path> and agent:<id> nodes. Market scope, risk and account configuration live beside the canvas. No dedicated executable "condition" node exists: label the actual gate script clearly. Multi-script strategies can extract data, indicators and decisions to separate modules with real imports/calls. Legacy consumers declarations are compatibility configuration; static imports/SDK calls are not evidence of an observed run.
 
 workflow.json format is `{"version":1,"nodes":{},"edges":[]}`. Override only existing node IDs (title, description, finite x/y); extra edges have relation:annotation, unique IDs and existing endpoints. Do not invent scheduler/Agent resource types or fake an execution edge. User-visible docs should state what to change in the schedule, script reader parameters, Agent role, and account binding, and that saving produces a new reviewable candidate.
 
-Review uses tuning.enabled, tuning.schedule, tuning.lookback, tuning.subagent with actual prompt_file, tuning.objectives, tuning.proposal_policy, tuning.guardrails and tuning.tuning_prompt. Respect current schema and the scaffold's supported values. Approval stays mandatory. Do not fabricate performance, auto-apply changes, or add AI tuning to a no-AI strategy. A disabled/unexecuted review workflow is a configuration, not a completed evolution run.
+Review uses tuning.enabled, tuning.schedule, tuning.lookback, tuning.subagent with actual prompt_file, tuning.objectives, tuning.proposal_policy, tuning.guardrails and tuning.tuning_prompt. Respect current schema and the scaffold's supported values. Approval stays mandatory. Do not fabricate performance, auto-apply changes, or add AI review against an explicit whole-strategy no-AI/no-review restriction. A disabled/unexecuted review workflow is a configuration, not a completed evolution run.
 
-The default review is one built-in evidence script → one review Agent acting as
-Proposer. Do not expand it into a team, candidate tournament, or wired chain of
-proposal/validation/approval/apply nodes unless explicitly requested. These
-remain proposal lifecycle settings, not extra review steps. Read
-`references/review.md` for the evidence and proposal output contract.
+After implementing the strategy, separately adapt `templates/review-plan.md`
+and save its plan in tuning.subagent.prompt_file before reporting completion.
+The default review is its own scheduler → built-in evidence script → review Agent
+acting as Proposer. The scheduler belongs on the review canvas, not hidden beside
+it or wired to trading. Do not expand it into a team, candidate tournament, or
+chain of proposal/validation/approval/apply nodes. These remain lifecycle settings.
+Read `references/review.md` for per-run adaptation and the proposal output contract.
+The executable snippets above omit review for brevity; a normal completed package
+must add the tailored plan, or document an explicit no-review opt-out. Keep both
+schedules disabled until separately activated; do not run tuning while authoring.
 
 ## Acceptance before reporting ready
 
@@ -306,7 +311,7 @@ Validate the latest files and submit only after blockers are fixed. Include runn
 
 ### Strategy canvas and context contract
 
-Author only script and Agent nodes. Fetch and transform market/news data in
+Author scheduler, script and Agent nodes. Fetch and transform market/news data in
 Python scripts with ctx.market / ctx.news; do not introduce data_sources for
 new strategies. Compose scripts through normal Python imports and calls.
 Use ctx.inputs.publish(name, value) and ctx.inputs.read(name) to exchange

@@ -617,11 +617,11 @@ def _normalize_inline_manifest(content: str) -> str:
             tuning["schedule"] = {
                 "type": "cron",
                 "cron": "0 */6 * * *",
-                "enabled": True,
+                "enabled": False,
             }
         elif isinstance(tuning.get("schedule"), dict):
             tuning["schedule"] = normalize_schedule(
-                tuning.get("schedule"),
+                {"enabled": False, **tuning["schedule"]},
                 default_cron="0 */6 * * *",
             )
 
@@ -1727,7 +1727,7 @@ def _default_llm_policy(strategy_class: str) -> dict[str, Any]:
 def _tuning_block(req: StrategyGenerationRequest) -> dict[str, Any]:
     return {
         "enabled": True,
-        "schedule": {"type": "cron", "cron": req.tuning_cron, "enabled": True},
+        "schedule": {"type": "cron", "cron": req.tuning_cron, "enabled": False},
         "lookback": {"runs": 200, "min_closed_trades": 0, "max_age_hours": 168},
         "subagent": {
             "name": "strategy_tuner",
@@ -2638,6 +2638,8 @@ def _tuning_subagent_prompt(req: StrategyGenerationRequest) -> str:
         "You are this strategy's review Agent and Proposer. The built-in script\n"
         "has already collected the frozen evidence in performance. Load\n"
         "Skill(skill=\"strategy_author\", file=\"references/review.md\").\n"
+        "Follow this strategy's saved review plan and tuning_prompt. On each run,\n"
+        "include a review_plan with checks adapted to the current version and evidence.\n"
         "Analyze that evidence and return one focused set of proposed_changes.\n"
         "Do not add a team or multiple competing candidates by default.\n"
         "With insufficient evidence, explain the gap and return proposed_changes: [].\n"
@@ -2649,6 +2651,7 @@ def _tuning_subagent_prompt(req: StrategyGenerationRequest) -> str:
         "```json\n"
         "{\n"
         '  "summary": "...",\n'
+        '  "review_plan": {"strategy_id": "<supplied strategy_id>", "package_hash": "<frozen hash>", "run_id": "<supplied run_id>", "checks": ["<evidence-driven check>"], "deferred_checks": []},\n'
         '  "evidence": [{ "source": "strategy_runs", "finding": "..." }],\n'
         '  "proposed_changes": [\n'
         '    {"file": "main.py", "kind": "full_file", "after_content": "<complete source with @nerya comments>", "summary": "<plain-language change>", "before_summary": "<previous behavior>", "after_summary": "<proposed behavior>", "scope": ["<affected rule or branch>"], "rationale": "<reason tied to evidence>"}\n'

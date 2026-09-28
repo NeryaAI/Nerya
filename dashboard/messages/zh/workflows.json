@@ -775,14 +775,15 @@
       "scriptTitle": "复盘汇总脚本",
       "agentTitle": "复盘 Agent · Proposer",
       "scriptPurpose": "汇总当前策略版本的运行、成交和风险证据，交给 Agent。",
-      "agentPurpose": "分析证据并直接提出策略修改；依据不足时保持不变。",
+      "agentPurpose": "按该策略的专属复盘计划，结合每轮证据调整检查重点，并提出有依据的修改。",
+      "planLabel": "策略专属复盘计划",
       "scriptFacts": "内置脚本 · 最多回看 {runs} 次运行",
       "agentFacts": "输出修改提案 · 不自动应用",
       "scriptHow": "这是运行时内置的只读汇总脚本，不是策略包中的 Python 文件。下方可调整回看次数、时间窗口和最低成交数，不会修改历史记录。",
       "schedule": "复盘时间",
       "proposalSettings": "提案与审核设置",
-      "summary": "汇总脚本 → Agent → 修改建议",
-      "safety": "默认只有一个汇总脚本和一个复盘 Agent。提案是 Agent 的输出，不需要额外连线；验证、人工确认与版本记录仍保留。没有充分依据时不强行修改策略。"
+      "summary": "复盘调度器 → 汇总脚本 → Agent · Proposer",
+      "safety": "策略编写完成后单独生成专属复盘计划。独立调度器触发汇总脚本和复盘 Agent，每轮按当前证据调整检查重点。提案是 Agent 的输出，不增加连线；创建计划不会立即启动调度，也不会跳过验证和人工确认。"
     },
     "workflowKinds": {
       "001": "策略",

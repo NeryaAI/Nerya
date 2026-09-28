@@ -237,6 +237,13 @@ def test_default_review_exposes_one_builtin_script_and_one_proposer(paths, templ
     nodes = {node["id"]: node for node in out["workflow"]["evolution"]["nodes"]}
     steps = [node for node in nodes.values() if node["kind"] in {"script", "agent"}]
     assert [node["id"] for node in steps] == ["evidence:review", "agent:tuner"]
+    assert nodes["scheduler:tuning"]["binding"]["path"] == ["tuning", "schedule"]
+    visible_ids = {"scheduler:tuning", "evidence:review", "agent:tuner"}
+    edges = [edge for edge in out["workflow"]["evolution"]["edges"]
+             if edge["source"] in visible_ids and edge["target"] in visible_ids]
+    assert [(edge["source"], edge["target"]) for edge in edges] == [
+        ("scheduler:tuning", "evidence:review"), ("evidence:review", "agent:tuner")]
+    assert all(edge["relation"] == "review_stage" for edge in edges)
     assert nodes["evidence:review"]["binding"] == {"file": None, "path": ["tuning", "lookback"]}
     assert nodes["approval:operator"]["config"]["required"] is True
     assert nodes["validation:tuning"]["config"]["require_operator_approval"] is True
