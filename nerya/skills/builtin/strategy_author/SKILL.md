@@ -1,7 +1,7 @@
 ---
 name: strategy_author
 description: "Create, edit, debug and validate Nerya script, script-gated Agent and event Agent strategies. Use the main conversation; finish the requested historical replay without activating trading."
-version: 0.16.0
+version: 0.17.0
 license: MIT
 author: Nerya
 ---
@@ -89,6 +89,39 @@ a runtime setting. Explicit daily risk limits remain authoritative and must not
 be relaxed to improve a result. If no daily limit was requested, use 0 (uncapped
 at this strategy layer, not a bypass of account-level limits), not a guessed cap.
 
+## Default sizing and participation
+
+For NEW trading strategies with no explicit sizing request, use **percentage of
+current account NAV**, not a fixed 50/100/1000 USD order. Persist
+`params.sizing: {method: pct_nav, pct_nav: 0.90}` for one position slot and pass
+`ctx.config.params["sizing"]` unchanged to `open_position`. `0.90` means 90%,
+NOT 0.9% and NOT 90. With K simultaneous slots, allocate `0.90 / K` per slot;
+normally K = min(3, number of markets), and bind `policy.max_open_positions` and
+`backtest.max_open_trades` to the same K. A ranked winner-only strategy uses K=1.
+This is a 90% deployment budget with 10% headroom, not a promise to stay invested
+or permission to use the same 90% on every asset. NAV is not free cash: existing
+positions, other strategies, reservations, fees and account limits still apply.
+
+Never inherit a template's 100 USD single-order or 1000 USD daily cap. When the
+user supplied neither, set those NEW strategy-layer dollar caps to 0; do not
+change existing strategy/account limits. Use `backtest.stake_amount.mode: unlimited`
+to respect SDK sizing (it does NOT mean unlimited funds or leverage). Explicit
+fixed sizes, lower risk budgets, observation-only rules and existing strategy
+settings take precedence. Do not rescale an existing strategy without a request.
+
+For an open-ended creation request, favor an **active, capital-efficient** design:
+one meaningful entry signal, only necessary independent filters, a documented
+exit and a re-entry rule. Avoid stacking arbitrary RSI/volume/trend/confidence
+vetoes or tiny fixed take-profits that leave a trend strategy mostly in cash.
+Keep named/user-specified algorithms intact. More exposure is not more alpha;
+do not force trades, remove stops, add leverage or martingale, or tune until a
+curve looks good. A normal creation still runs one verification replay.
+
+For multi-asset allocation, Agent order fields, explicit risk budgets, weak
+participation or an almost-flat curve, load `references/position-sizing.md`.
+The final receipt review must distinguish no signals, rejected orders, small
+notional, missing Agent execution and genuinely flat market returns.
+
 ## SDK essentials for finite script strategies
 
 This section is the installed SDK contract for ordinary script authoring. Do not
@@ -174,7 +207,7 @@ bars = ctx.market.candles(market, timeframe=timeframe, limit=200)
 position = ctx.portfolio.position(market)   # None, or settled size/avg_price
 indicators = ctx.market.features(market, timeframe=timeframe, lookback=200)
 entry = ctx.trading.open_position(
-    market=market, side="long", sizing={"method": "fixed_usd", "fixed_usd": 1000},
+    market=market, side="long", sizing=ctx.config.params["sizing"],
     protection={"stop_loss": {"type": "pct", "value": 0.02},
                 "take_profit": {"type": "pct", "value": 0.05}},
     confidence=0.8, reasoning_ref="the actual entry signal",

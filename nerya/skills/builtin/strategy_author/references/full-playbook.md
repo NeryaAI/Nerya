@@ -4,6 +4,7 @@ The canonical lifecycle is in `../SKILL.md`. For ordinary script, indicator-gate
 
 - `workflows.md`: actual SDK signatures, manifest/card bindings, closed-candle processing, persistent dedupe, schedule and Agent contracts; executable patterns for all three workflow types.
 - `specialized-contracts.md`: market inheritance, wallet/on-chain/prediction-market constraints, trading SDK safety, real-data backtests, exact candidate handling and approval gates.
+- `position-sizing.md`: percentage-NAV defaults, slot allocation, Agent order fields, active participation and honest flat-curve diagnosis. Use saved params, not archetype dollar amounts.
 - `scalping_cron.md`, `trend_follow_subagent.md`, `news_track_filter.md`: domain examples only when they match the user's thesis. Examples never override the current SDK/permission contract or silently choose markets.
 
 ## Package
