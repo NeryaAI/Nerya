@@ -21,7 +21,7 @@ or enforcing governance rules (no lookahead, multi-window OOS, cost-adjusted pro
 
 1. CLASSIFY intent: register, validate, evaluate, promote, deprecate, or audit.
 2. READ the factor schema and governance rules before creating or modifying any factor.
-3. RUN the narrowest pipeline or script that produces the requested evidence.
+3. RUN the narrowest Nerya tool or script that produces the requested evidence.
 4. SUMMARIZE factor metrics, validation results, and lifecycle recommendations.
 5. SAVE artifacts only when they help reproduce or audit the result.
 
@@ -40,6 +40,13 @@ rejected     degraded    retired
 - `degraded`: recent decay detected, pending review.
 - `retired`: no longer in use, preserved for audit.
 - `rejected`: failed validation, record preserved.
+
+## Using Nerya tools for factor research
+
+- Load `Skill(skill="quant_research")` for factor research, statistical analysis, leakage checks, and signal validation.
+- Load `Skill(skill="analysis")` for data profiling, charts, and performance attribution.
+- Load `Skill(skill="backtest")` for running backtests with realistic fees and execution.
+- Load `Skill(skill="quant-strategy-loop")` for bounded train/calibrate -> replay -> review cycles.
 
 ## Governance rules
 

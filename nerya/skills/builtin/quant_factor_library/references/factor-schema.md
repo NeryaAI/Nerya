@@ -11,7 +11,7 @@
   "scope": "universal",
   "version": 1,
   "status": "candidate",
-  "formula_path": "factor_library/candidates/ema_slope_20.py",
+  "formula_path": "strategies/research/ema_slope_20.py",
   "description": "Normalized slope of the 20-period exponential moving average.",
   "data_requirements": ["open", "high", "low", "close", "volume"],
   "required_data": ["ohlcv"],
@@ -50,7 +50,7 @@
 | `scope` | string | `universal` or `market_specific`. |
 | `version` | int | Monotonically increasing version. |
 | `status` | string | One of: `candidate`, `validated`, `production`, `degraded`, `retired`, `rejected`. |
-| `formula_path` | string | Path to the factor implementation. |
+| `formula_path` | string | Path to the factor implementation (project-relative). |
 | `description` | string | What the factor measures and its economic logic. |
 | `data_requirements` | list | Required data fields. |
 | `required_data` | list | Required data bundles (e.g., `ohlcv`). |
