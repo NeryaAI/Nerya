@@ -1,10 +1,13 @@
 <!-- nerya-skill-frontmatter-start -->
 ---
 name: quant_factor_library
-description: "Govern, validate, and promote quantitative factors in a local factor library. Use when the user asks to register, validate, evaluate, deprecate, or promote factors; manage factor status lifecycle (candidate -> validated -> production -> degraded/retired); run factor research pipelines; or enforce factor governance with leak-free multi-window out-of-sample evidence, cost stress, and correlation deduplication."
+metadata:
+  nerya:
+    catalog_parent: quant_research
+description: "Govern, validate, and promote quantitative factors in a local factor library. Use when the user asks to register, validate, evaluate, deprecate, or promote factors; manage factor status lifecycle (candidate -> validated -> production -> degraded/retired); or enforce factor governance with leak-free multi-window out-of-sample evidence, cost stress, and correlation deduplication."
 version: 0.1.0
 license: MIT
-author: Nerya Community
+author: Nerya
 ---
 <!-- nerya-skill-frontmatter-end -->
 
