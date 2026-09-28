@@ -53,10 +53,6 @@ At minimum, promotion requires:
 
 `production` status MUST be human-approved. No automatic task may execute promotion.
 
-## Scripts
-
-- `scripts/factor_cli.py` for factor registry operations (init, register, list, validate, promote).
-
 ## Lazy References
 
 Read only the selected reference with `Skill(skill="quant_factor_library", file="<path>")`.

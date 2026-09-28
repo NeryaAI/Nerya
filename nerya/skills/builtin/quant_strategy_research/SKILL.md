@@ -18,7 +18,7 @@ evaluate gates, manage batch parameter research, or produce strategy/experiment 
 1. CLASSIFY the request as one or more configured intents. When uncertain, choose the stricter route.
 2. READ every required document for each selected intent completely before acting.
 3. Check every required precondition. Stop and report missing conditions; do not downgrade them to warnings.
-4. Use only the route's allowed tools through project CLI/API/ResearchToolGateway-compatible interfaces.
+4. Use only the route's allowed tools through project CLI/API-compatible interfaces.
 5. Produce every required output artifact and append audit events for key actions and failures.
 6. Report the intent, documents read, preconditions, approvals, tools, artifact keys, tests, and unresolved gaps.
 
