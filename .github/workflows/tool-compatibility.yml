@@ -1,0 +1,46 @@
+name: tool-compatibility
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tool-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-tools:
+    name: native tools (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/python
+      - name: Install runtime and test dependencies
+        run: uv pip install --constraint desktop/requirements.lock -e '.[dev,mcp,trading,prediction,browser]'
+      - name: Run offline cross-platform tool contracts
+        run: >-
+          python -m pytest -m "" -q
+          tests/test_cross_platform_tools.py
+          tests/test_sandbox_exec.py
+          tests/test_native_search_tool.py
+          tests/test_runtime_env.py
+          tests/test_builtin_script_module.py
+          tests/test_mcp_connectors.py
+          tests/test_shell_test_output.py
+          tests/test_proposal_only_mutation_guards.py
+      - name: POSIX process-group regressions
+        if: runner.os != 'Windows'
+        run: python -m pytest -m "" -q tests/test_managed_io_polish.py

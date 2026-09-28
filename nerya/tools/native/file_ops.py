@@ -531,6 +531,15 @@ def edit_file_handler(
     if old_string == new_string:
         return schema_validation_result(call, "old_string equals new_string; no-op edit")
 
+    # Tool transcripts render lines without CRLF. Match their LF snippets while
+    # retaining an existing file's newline convention (never rewrite mixed EOLs).
+    if "\r\n" in before and "\n" not in before.replace("\r\n", ""):
+        old_string = old_string.replace("\r\n", "\n").replace("\n", "\r\n")
+        new_string = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
+    elif "\r\n" not in before:
+        old_string = old_string.replace("\r\n", "\n")
+        new_string = new_string.replace("\r\n", "\n")
+
     occurrences = before.count(old_string)
     if occurrences == 0:
         return ToolResult.from_error(
@@ -568,7 +577,7 @@ def edit_file_handler(
         after = before.replace(old_string, new_string, 1)
 
     try:
-        p.write_text(after, encoding="utf-8")
+        p.write_bytes(after.encode("utf-8"))
     except OSError as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -722,7 +731,9 @@ def write_file_handler(
             )
 
     try:
-        p.write_text(content, encoding="utf-8")
+        # Text-mode newline translation on Windows changes the bytes behind
+        # the recorded hash and turns existing CRLF into CRCRLF.
+        p.write_bytes(content.encode("utf-8"))
     except OSError as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
