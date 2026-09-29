@@ -30,8 +30,17 @@ triggers:
     payload:
       tf: "1d"
 subagents: [market_analyst]
+params:
+  sizing: {method: pct_nav, pct_nav: 0.90}  # one slot; see position-sizing.md
+policy:
+  max_open_positions: 1
+  max_single_order_usd: 0
+  max_daily_notional_usd: 0
+backtest:
+  max_open_trades: 1
+  stake_amount: {mode: unlimited}
 tuning:
-  enabled: true
+  enabled: false
   cadence: weekly
 ```
 
@@ -66,25 +75,23 @@ def run(ctx) -> dict:
     last_close = candles[-1]["close"]
     bullish = ema50 > ema200 and last_close > ema50
 
-    pos = ctx.state.get(f"position:{market}")
+    pos = ctx.portfolio.position(market)
     have_pos = bool(pos)
 
     if have_pos:
         if ema50 < ema200:
-            intent = ctx.trading.submit_intent(
-                market=market, side="sell", size=0, size_unit="usd",
-                order_type="market",
-                reasoning=f"nvda_trend:{ctx.clock.now_iso()[:10]}:exit",
+            intent = ctx.trading.close_position(
+                market=market, side="long", confidence=0.8,
+                reasoning_ref=f"nvda_trend:{ctx.clock.now_iso()[:10]}:exit",
             )
             return {"decision": "EXIT",
                     "reason": "ema50<ema200",
                     "intent_id": intent.get("intent_id")}
         unreal_pct = (last_close - pos["avg_price"]) / pos["avg_price"] * 100
         if unreal_pct <= -8.0:
-            intent = ctx.trading.submit_intent(
-                market=market, side="sell", size=0, size_unit="usd",
-                order_type="market",
-                reasoning=f"nvda_trend:{ctx.clock.now_iso()[:10]}:stop",
+            intent = ctx.trading.close_position(
+                market=market, side="long", confidence=0.8,
+                reasoning_ref=f"nvda_trend:{ctx.clock.now_iso()[:10]}:stop",
             )
             return {"decision": "EXIT",
                     "reason": f"stop hit pnl%={unreal_pct:.1f}",
@@ -117,10 +124,10 @@ def run(ctx) -> dict:
                 "reason": f"subagent vetoed: decision={decision} conf={confidence:.2f}",
                 "subagent": verdict}
 
-    intent = ctx.trading.submit_intent(
-        market=market, side="buy", size=1000, size_unit="usd",
-        order_type="market",
-        reasoning=f"nvda_trend:{ctx.clock.now_iso()[:10]}:entry",
+    intent = ctx.trading.open_position(
+        market=market, side="long", sizing=ctx.config.params["sizing"],
+        protection=ctx.config.params.get("protection"), confidence=confidence,
+        reasoning_ref=f"nvda_trend:{ctx.clock.now_iso()[:10]}:entry",
     )
     return {
         "decision": "ENTRY",
@@ -159,59 +166,23 @@ You are a single-asset market analyst for NVDA on the daily timeframe.
 3. Output ENTRY only if structure + macro both bullish.
 ```
 
-## Backtest harness (required, data is available)
+## Verification
 
-```python
-# tests/test_main.py
-from main import run
+Unit-test positive confirmation, veto, missing data, repeated signals, saved
+percentage entries and settled-quantity exits. A fixture Agent verdict tests
+branches only, never historical model decisions or profitability. Use native
+`strategy_backtest` for supported saved-candidate replay; do not invent
+`ctx.backtest_replay`. If historical Agent execution is not_run, label the
+result as dispatch/input verification, not a zero-return or profitable strategy.
 
-def test_replay_with_subagent_stub(make_ctx):
-    ctx = make_ctx(window_days=365, tf="1d",
-                   subagent_stub={"decision": "ENTRY", "confidence": 0.7})
-    stats = ctx.backtest_replay(
-        run,
-        fee_bps=1.0,
-        slippage_bps=2.0,
-        mock_surfaces={
-            "subagents": {
-                "mode": "stub",
-                "payload": {"decision": "ENTRY", "confidence": 0.7},
-            },
-        },
-    )
-    assert stats["sharpe_ratio"] is None or stats["sharpe_ratio"] >= 0.3
-    assert stats["max_drawdown_pct"] <= 12.0
+## Limits and verification
 
-def test_replay_subagent_pessimistic(make_ctx):
-    """When subagent always vetoes, strategy never trades."""
-    ctx = make_ctx(window_days=365, tf="1d",
-                   subagent_stub={"decision": "HOLD", "confidence": 0.9})
-    stats = ctx.backtest_replay(
-        run,
-        mock_surfaces={
-            "subagents": {
-                "mode": "stub",
-                "payload": {"decision": "HOLD", "confidence": 0.9},
-            },
-        },
-    )
-    assert stats["win_trades"] + stats["loss_trades"] == 0
-```
-
-## limits.yml
-
-```yaml
-max_single_order_usd: 5000
-max_total_exposure_usd: 15000
-daily_loss_usd: 500
-max_drawdown_pct: 12.0
-stop_loss_pct: 8.0
-min_confidence: 0.6
-max_slippage_bps: 50
-max_stale_seconds: 600       # daily tick — generous staleness OK
-approval_threshold_usd: 1000
-kill_switch: false
-```
+Read `position-sizing.md`. Persist the requested stop in params.protection and
+respect the portfolio risk budget; an 8% stop on a 90% position risks roughly
+7.2% NAV before costs/gaps, not 1%. Explicit lower risk budgets reduce allocation.
+Never lift actual limits or import archetype dollar caps. Subagent stubs only
+test dispatch/veto branches; their returns are NOT historical Agent performance.
+Do not require a positive fixture Sharpe ratio or optimize against it.
 
 ## Common gotchas
 

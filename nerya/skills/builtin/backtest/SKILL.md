@@ -1,7 +1,7 @@
 ---
 name: backtest
 description: "Run a saved Nerya strategy over reusable local historical data; diagnose errors and present version-bound results without activation."
-version: 0.4.0
+version: 0.5.0
 license: MIT
 author: Nerya
 ---
@@ -109,6 +109,25 @@ Positive alpha means outperformed even when both returns are negative. Prefer
 old report: run the strategy again and link the NEW timestamp; retain old evidence.
 GBS is only an explicitly recorded strategy signal, never inferred from buy/sell.
 No replay or report view approves a strategy, activates a schedule or trades an account.
+
+## Percentage sizing and flat-curve review
+
+Honor saved `params.sizing: {method: pct_nav, pct_nav: ...}`; fractions are
+0..1, unlike report `_pct` fields. Percentage sizing follows current NAV, not
+initial capital. `stake_amount.mode: unlimited` preserves SDK sizing;
+`mode: fixed` overrides it and is only for an explicitly requested fixed-stake
+study. Match `max_open_trades` to the candidate's intended concurrent slots.
+Do not silently replace percentage sizing with 100U or override existing limits.
+
+An almost-flat curve needs an explanation: compare real price movement,
+filled notional/NAV, attempts/fills/rejections, fees, exposure time and benchmark
+capture. `exposure_pct` is time/rows invested, NOT capital utilization. No fills
+does not establish trading performance; Agent execution not_run is not 0% return.
+Use recorded evidence, not fabricated utilization fields or extra automatic
+replays. For low participation, capital allocation or authorized optimization,
+load `Skill(skill="strategy_author", file="references/position-sizing.md")`.
+Preserve negative results and unchanged benchmark scaling; do not manufacture
+activity or tune a strategy merely to make its chart attractive.
 
 ## Research review, only when requested
 

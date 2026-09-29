@@ -1,7 +1,7 @@
 # Archetype: Scalping cron
 
 Goal: a one-minute (or sub-minute) tick that reads top-of-book, applies
-a deterministic rule, and either submits a small order or holds.
+a deterministic rule, and either submits a percentage-sized order or holds.
 Latency-sensitive; no subagent calls inside the tick.
 
 ## When this archetype fits
@@ -10,7 +10,7 @@ Latency-sensitive; no subagent calls inside the tick.
   level-1 quote).
 - The decision is a **mechanical rule**: one or two indicators, no
   qualitative reasoning required.
-- USD per trade is small enough that a missed fill is acceptable.
+- The requested risk budget and liquidity support the position size and cadence.
 
 If any of these break (e.g. you'd want news context, or the venue
 quote is expensive to pull), this is *not* the right archetype —
@@ -34,6 +34,15 @@ triggers:
     payload:
       tf: "1m"
 subagents: []                      # NO subagents — adds latency
+params:
+  sizing: {method: pct_nav, pct_nav: 0.90}  # one slot; see position-sizing.md
+policy:
+  max_open_positions: 1
+  max_single_order_usd: 0
+  max_daily_notional_usd: 0
+backtest:
+  max_open_trades: 1
+  stake_amount: {mode: unlimited}
 tuning:
   enabled: false
 ```
@@ -43,7 +52,7 @@ tuning:
 ```python
 """1m RSI(14) mean-reversion scalp on BTCUSDT.
 
-Entry rule:  RSI(14) < 25 AND last_close > VWAP_30m  → LONG 0.001 BTC
+Entry rule:  RSI(14) < 25 AND last_close > VWAP_30m → LONG with saved NAV sizing
 Exit rule:   RSI(14) > 70 OR  unrealised_pct >= 0.4  → CLOSE
 Hold:        every other case
 """
@@ -63,17 +72,17 @@ def run(ctx) -> dict:
     vwap30 = (sum(float(c["close"]) for c in candles[-30:]) / 30)
     last_close = candles[-1]["close"]
 
-    pos = ctx.state.get(f"position:{market}")
+    pos = ctx.portfolio.position(market)
     have_pos = bool(pos)
 
     if not have_pos and rsi_value is not None and rsi_value < 25 and last_close > vwap30:
-        intent = ctx.trading.submit_intent(
+        intent = ctx.trading.open_position(
             market=market,
-            side="buy",
-            size=100,
-            size_unit="usd",
-            order_type="market",
-            reasoning=f"scalp:{ctx.clock.now_iso()[:16]}",
+            side="long",
+            sizing=ctx.config.params["sizing"],
+            protection=ctx.config.params.get("protection"),
+            confidence=0.8,
+            reasoning_ref=f"scalp:{ctx.clock.now_iso()[:16]}",
         )
         return {
             "decision": "ENTRY",
@@ -85,13 +94,11 @@ def run(ctx) -> dict:
     if have_pos:
         unreal = (last_close - pos["avg_price"]) / pos["avg_price"] * 100
         if (rsi_value is not None and rsi_value > 70) or unreal >= 0.4:
-            intent = ctx.trading.submit_intent(
+            intent = ctx.trading.close_position(
                 market=market,
-                side="sell",
-                size=0,
-                size_unit="usd",
-                order_type="market",
-                reasoning=f"scalp:{ctx.clock.now_iso()[:16]}:exit",
+                side="long",
+                confidence=0.8,
+                reasoning_ref=f"scalp:{ctx.clock.now_iso()[:16]}:exit",
             )
             return {
                 "decision": "EXIT",
@@ -104,33 +111,23 @@ def run(ctx) -> dict:
             "reason": "no edge", "metrics": {"rsi": rsi_value}}
 ```
 
-## Backtest harness (required)
+## Verification
 
-```python
-# tests/test_main.py
-from main import run
+Unit fixtures must exercise entry, hold, exit, duplicate suppression and the
+saved percentage sizing. Then use the native `strategy_backtest` call for the
+saved candidate with real historical data and requested fees. There is no
+`ctx.backtest_replay` helper to invent inside the strategy. Report trade counts,
+exposure and net performance; do not make a positive Sharpe ratio a unit-test
+requirement or silently change thresholds to manufacture passing trades.
 
-def test_replay_paper(make_ctx):
-    ctx = make_ctx(window_days=14, tf="1m")
-    stats = ctx.backtest_replay(run, fee_bps=2.0, slippage_bps=1.0)
-    assert stats["win_trades"] + stats["loss_trades"] >= 5, "too few trades"
-    assert stats["max_drawdown_pct"] <= 5.0
-    assert stats["sharpe_ratio"] >= 0.0, "no edge"
-```
+## Limits and verification
 
-## limits.yml
-
-```yaml
-max_single_order_usd: 200
-max_total_exposure_usd: 500
-daily_loss_usd: 25
-max_drawdown_pct: 5.0
-min_confidence: 0.0          # rule-based; no LLM confidence
-max_slippage_bps: 30
-max_stale_seconds: 5         # 1m tick + 5s slack
-approval_threshold_usd: 50   # below this auto-fills in paper mode
-kill_switch: false
-```
+Read `position-sizing.md`. Preserve operator/account limits; do not copy small
+USD caps or approval thresholds from an archetype. Declare an appropriate stop
+in params.protection before use. The signal above is illustrative, not a mandate
+to combine rare filters or promise a positive Sharpe ratio. Unit fixtures test
+entry/hold/exit and percentage sizing; only recorded historical replay provides
+performance evidence. A losing replay is not permission to tune until it passes.
 
 ## Common gotchas
 

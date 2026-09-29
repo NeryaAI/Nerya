@@ -9,7 +9,17 @@ def configuration_issues(manifest):
     params = extras.get("params") or {}
     if not isinstance(params, dict):
         return [("invalid_strategy_params", "params must be a mapping")]
-    sizing = params.get("sizing") or {}
+    sizing = params.get("sizing", {})
+    if "sizing" in params:
+        from ..core.errors import IntentValidationError
+        from ..trading.order_intents import SizingPolicy
+        try:
+            if not isinstance(sizing, dict):
+                raise IntentValidationError("params.sizing must be a mapping")
+            SizingPolicy(**sizing)
+        except (IntentValidationError, TypeError) as exc:
+            issues.append(("invalid_strategy_sizing", str(exc)))
+            sizing = {}
     if isinstance(sizing, dict) and sizing.get("method") == "fixed_usd":
         amount = sizing.get("fixed_usd")
         if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount <= 0:
