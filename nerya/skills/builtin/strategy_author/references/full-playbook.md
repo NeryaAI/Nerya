@@ -11,7 +11,7 @@ The canonical lifecycle is in `../SKILL.md`. For ordinary script, indicator-gate
 
 Use the `proposal_paths` returned by `strategy_draft_proposal`. The staged package normally contains `strategy.yml`, `main.py`, `strategy.md`, `limits.yml`, `workflow.json`, and `tests/`. Add package-local scripts or `subagents/<name>.agent.md` only when the logic needs them. The runner, not authoring, writes run histories and state. Active `strategies/<id>/` is not a scratch directory.
 
-Scaffold → author real files → validate the edited candidate → submit for review. Only a separately authorized promotion applies the proposal and compiles its schedule. Do not call an active-package tick API with a proposal id or invent a dry_run argument. Do not auto-promote to demonstrate a graph.
+Scaffold → author real strategy files → separately author its review plan → validate the complete candidate → submit for review. Only a separately authorized promotion applies the proposal and compiles its schedules. Do not call an active-package tick API with a proposal id or invent a dry_run argument. Do not auto-promote to demonstrate a graph.
 
 ## Backtesting
 
@@ -21,4 +21,4 @@ For observation-only workflows first verify branch behavior and output; zero ord
 
 ## Evolution
 
-Use only the review/evolution fields described in workflows.md and the current manifest schema. Keep tuning independent from the trading/observation schedule, disabled until activation is requested, and approval mandatory. Do not add automatic AI review to a no-AI strategy. Shared accounts, credentials, runtime limits and historical evidence remain protected.
+After implementing each strategy, adapt `../templates/review-plan.md` and persist its separate plan in tuning.subagent.prompt_file with the actual tuning configuration. The review canvas is scheduler → evidence script → Agent/Proposer. Match its frequency, lookback, checks and validation to the strategy, and adapt checks to each run's evidence. Keep trading and review schedules independently disabled until activation is requested; approval stays mandatory. Pure script trading does not prohibit a separate review plan, but an explicit whole-strategy no-AI/no-review restriction does. Shared accounts, credentials, runtime limits and historical evidence remain protected.

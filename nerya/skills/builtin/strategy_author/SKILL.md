@@ -1,7 +1,7 @@
 ---
 name: strategy_author
 description: "Create, edit, debug and validate Nerya script, script-gated Agent and event Agent strategies. Use the main conversation; finish the requested historical replay without activating trading."
-version: 0.17.0
+version: 0.18.0
 license: MIT
 author: Nerya
 ---
@@ -37,8 +37,11 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    For a clearly fresh creation request with no candidate ID, do not grep/list the
    workspace or recall memory just to hunt for an older strategy with the same name.
    Check current candidates before following an ID recalled from old history.
-2. **Save one real candidate.** When the request is sufficiently specified, prefer
-   `strategy_draft_proposal(files={"main.py":..., "strategy.yml":..., "strategy.md":..., "tests/test_contract.py":...})`.
+2. **Implement the strategy.** Settle its actual rules, parameters, inputs and
+   execution tests first; then author its separate review plan in step 3. When the
+   request is sufficiently specified, prefer saving the completed bundle in one
+   `strategy_draft_proposal(create_tuning=true, files={"main.py":..., "strategy.yml":..., "strategy.md":..., "subagents/strategy_tuner.agent.md":..., "tests/test_contract.py":...})`
+   call (use only fields present in the tool schema).
    The tool saves and validates that actual bundle. Keep the returned ID; a successful
    inline validation needs no duplicate read/edit/validate cycle. For an existing
    candidate or intentionally incomplete scaffold, use `read_file` then
@@ -49,14 +52,29 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    researching once the definition is sufficient. Use an existing paper account;
    call `account_list` at most once per turn and reuse that result. Never repeat it
    merely to reconfirm the same selected account. Choose one schedule form (cron OR
-   interval), disabled. Pure script means
-   `execution_mode:script`, `agent_task.enabled:false`, and no AI tuning.
-3. **Verify the saved version.** If the saved bundle was not already validated by
+   interval), disabled. Pure script execution means `execution_mode:script`,
+   `agent_task.enabled:false`, and no model calls in trading ticks; its separate
+   review plan does not turn the trading script into an Agent strategy.
+3. **Build the strategy-specific review plan.** Load
+   `Skill(skill="strategy_author", file="templates/review-plan.md")` after settling
+   the strategy, and adapt it to THIS strategy rather than copying stock prose.
+   Save `strategy.yml::tuning` and its actual `subagents/strategy_tuner.agent.md`
+   together in the SAME candidate; do not create a second trading strategy or a
+   separate task. Supply these files in step 2's complete bundle, or edit the exact
+   existing proposal paths. The separate review workflow is **review scheduler →
+   evidence script → review Agent (Proposer)**. Include independent timing/timezone,
+   lookback, evidence sufficiency, strategy-specific checks, permitted changes and
+   validation/hold conditions. Keep `tuning.schedule.enabled:false` as well as the
+   trading schedule disabled. Normal creation uses `tuning.enabled:true` to define
+   the review capability, not to start it. An explicit no-AI/no-review requirement
+   covering the whole strategy uses `create_tuning:false`, `tuning.enabled:false`
+   and a documented opt-out instead; never silently widen an existing opt-out.
+4. **Verify the saved version.** If the saved bundle was not already validated by
    the generation receipt, run `strategy_validate` after the final edit,
    then `strategy_submit_proposal` for the SAME candidate. A normal
    creation request includes verification, not activation. Honor explicit draft-only
    or no-test restrictions. Do not repeatedly validate unchanged files.
-4. **Run the actual replay once.** Load `Skill(skill="backtest")` when its contract
+5. **Run the actual replay once.** Load `Skill(skill="backtest")` when its contract
    is not already present. `strategy_backtest` owns preflight, reusable local history,
    coverage checks, isolated replay and reports. If the candidate already declares
    `strategy.yml.backtest`, call `strategy_backtest` directly with its `proposal_id`;
@@ -69,12 +87,15 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    inspect, download and local-replay calls unless preparation fails or the user
    specifically requested download-only/offline operation. Keep strict coverage;
    never shorten the year, change timeframe or remove stops to get a green result.
-5. **Inspect the receipt and finish.** Report actual dates, requested dates, markets,
+6. **Inspect the receipt and finish.** Report actual dates, requested dates, markets,
    coverage, execution counts and research verdict. The tool automatically supplies
    the strategy/backtest card. Do not publish duplicate market/research charts merely
    to make a backtest card appear. A poor return is not a tool failure or permission
    to run an unrequested optimization loop. Repair a concrete error in the SAME
-   candidate; do not retry unchanged input or recreate the strategy.
+   candidate; do not retry unchanged input or recreate the strategy. If those fixes
+   changed strategy behavior, update the review plan in the same candidate before
+   final validation. Completion includes the saved review plan (or explicit opt-out),
+   its independent schedule and disabled/active state, not a promise to add it later.
 
 No housekeeping, deleted-test cleanup, environment probes or unrelated Git work is
 part of this path. Existing loaded references remain usable: reread only when a
@@ -187,8 +208,9 @@ Expose tunable parameters in strategy.yml and actually read them. Explain the sa
 parameters through the shared SDK: `ctx.config.params`, `ctx.config.timeframe`,
 and `ctx.config.get(...)` work identically in runtime and replay; the older
 `ctx.config.extras` mapping remains available. Do not catch AttributeError and
-silently replace authored parameters with defaults. Tuning must remain disabled
-unless explicitly requested; a completed losing backtest is a valid research result.
+silently replace authored parameters with defaults. Review scheduling must remain
+disabled until activation is requested; generating a review plan is part of creation,
+not permission to optimize a losing backtest now. A loss is a valid research result.
 Persist protection state until the settled position is actually flat, not merely
 when a close request is submitted. Use entry/prior high-water state for historical
 stops, never `price <= price - distance`, and never relabel a generic EMA as a named indicator.
@@ -250,6 +272,10 @@ to describe actual configuration; `execute` is the stable step ID, not a number)
 
 ## Load only the reference matching this strategy
 
+- Creation/edit completion: `templates/review-plan.md` for the separately authored
+  strategy review plan. Every review invocation uses `references/review.md` to
+  adapt its checks to that version and run's evidence without changing the strategy
+  or future schedule automatically.
 - Script-gated/scheduled/finite event Agent: `references/workflows.md` and the
   relevant `references/script-control.md` section. A Python gate runs BEFORE AI;
   skipped branches do not call a model. Native Agent replay checks dispatch/inputs,

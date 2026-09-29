@@ -161,7 +161,7 @@ test("a vanished review clears the prior conclusion on refresh", async ({ page }
 function reviewFixture(): WorkflowView {
   const node = (id: string, kind: WorkflowNode["kind"], title: string, config: unknown, path: WorkflowNode["binding"]["path"]): WorkflowNode => ({
     id, kind, title, config, subtitle: "", resource: id.split(":")[1],
-    position: { x: id === "agent:tuner" ? 390 : 30, y: 100 },
+    position: { x: id === "agent:tuner" ? 750 : id === "evidence:review" ? 390 : 30, y: 100 },
     binding: { file: null, path }, editable: path !== null,
   });
   const nodes: WorkflowNode[] = [
@@ -175,27 +175,27 @@ function reviewFixture(): WorkflowView {
     node("apply:version", "apply", "Version & apply", {}, null),
     node("observation:feedback", "observation", "Observe & learn", {}, null),
   ];
-  const chain = [["evidence:review", "agent:tuner"], ["scheduler:tuning", "agent:tuner"], ["agent:tuner", "proposal:tuning"], ["proposal:tuning", "validation:tuning"], ["validation:tuning", "approval:operator"], ["approval:operator", "apply:version"], ["apply:version", "observation:feedback"], ["observation:feedback", "evidence:review"]];
+  const chain = [["scheduler:tuning", "evidence:review"], ["evidence:review", "agent:tuner"], ["agent:tuner", "proposal:tuning"], ["proposal:tuning", "validation:tuning"], ["validation:tuning", "approval:operator"], ["approval:operator", "apply:version"], ["apply:version", "observation:feedback"], ["observation:feedback", "evidence:review"]];
   const evolution: WorkflowGraph = { id: "evolution", enabled: false, nodes, edges: chain.map(([source, target], index) => ({ id: `review-edge-${index}`, source, target, relation: "review_stage", label: "review_stage", origin: "manifest" })) };
   return { ...structuredClone(workflow), evolution };
 }
 
-test("default review projects two steps without losing settings, bindings or custom flows", () => {
+test("default review keeps its independent scheduler, script and Proposer", () => {
   const graph = reviewFixture().evolution;
   const before = structuredClone(graph);
   const t = (key: string, values?: Record<string, unknown>) => copy(false, key, values);
   const result = compactWorkflow(graph, t);
-  expect(result.graph.nodes.map((node) => [node.id, node.kind])).toEqual([["evidence:review", "script"], ["agent:tuner", "agent"]]);
-  expect(result.graph.edges).toEqual([graph.edges[0]]);
+  expect(result.graph.nodes.map((node) => [node.id, node.kind])).toEqual([["scheduler:tuning", "scheduler"], ["evidence:review", "script"], ["agent:tuner", "agent"]]);
+  expect(result.graph.edges).toEqual(graph.edges.slice(0, 2));
   expect(result.supporting.map((group) => group.members.map((node) => node.id))).toEqual([
-    ["scheduler:tuning"], ["proposal:tuning", "validation:tuning", "approval:operator", "apply:version", "observation:feedback"],
+    ["proposal:tuning", "validation:tuning", "approval:operator", "apply:version", "observation:feedback"],
   ]);
   expect(graph).toEqual(before);
   const legacy = structuredClone(graph);
   legacy.nodes[0].kind = "evidence";
   legacy.nodes[0].title = "Custom collector";
   legacy.nodes[0].position = { x: 71, y: 83 };
-  const collector = compactWorkflow(legacy, t).graph.nodes[0];
+  const collector = compactWorkflow(legacy, t).graph.nodes.find((node) => node.id === "evidence:review")!;
   expect(collector.binding).toEqual(graph.nodes[0].binding);
   expect(collector.position).toEqual({ x: 71, y: 83 });
   expect(cardTitle(collector, t)).toBe("Custom collector");
@@ -216,8 +216,8 @@ for (const language of ["en", "zh"]) {
     await expect(page.getByTestId("workflow-review-activity")).toBeVisible();
     await page.getByTestId("workflow-review-log-toggle").click();
     const panel = page.getByTestId("strategy-workflow-panel");
-    await expect(panel.locator("[data-workflow-node]")).toHaveCount(2);
-    await expect(panel.locator("[data-edge]")).toHaveCount(1);
+    await expect(panel.locator("[data-workflow-node]")).toHaveCount(3);
+    await expect(panel.locator("[data-edge]")).toHaveCount(2);
     const collector = panel.locator('[data-workflow-node="evidence:review"]');
     await expect(collector).toHaveAttribute("data-kind", "script");
     await expect(collector).toContainText(t("copy.simpleReview.scriptTitle"));
@@ -232,9 +232,12 @@ for (const language of ["en", "zh"]) {
     await expect(inspector.getByRole("button", { name: t("copy.components_workflows_WorkflowInspector.024"), exact: true })).toHaveCount(0);
     await page.keyboard.press("Escape");
 
-    await panel.locator('[data-support-member="scheduler:tuning"]').click();
+    await panel.locator('[data-workflow-node="scheduler:tuning"] button[aria-pressed]').click();
     await expect(inspector).toBeVisible();
     await expect(inspector).toContainText(t("copy.simpleReview.schedule"));
+    await page.keyboard.press("Escape");
+    await panel.locator('[data-workflow-node="agent:tuner"] button[aria-pressed]').click();
+    await expect(inspector.getByLabel(t("copy.simpleReview.planLabel"), { exact: true })).toHaveValue("Review the frozen evidence and propose one focused change.");
     await page.keyboard.press("Escape");
     await panel.locator('[data-support-member="proposal:tuning"]').click();
     await chooseOption(page.locator("#workflow-group-resource"), "validation:tuning");
@@ -244,7 +247,7 @@ for (const language of ["en", "zh"]) {
     await page.keyboard.press("Escape");
 
     await chooseOption(panel.getByLabel(t("copy.components_workflows_StrategyWorkflowPanel.039"), { exact: true }), "cards");
-    await expect(panel.locator("[data-workflow-node]")).toHaveCount(2);
+    await expect(panel.locator("[data-workflow-node]")).toHaveCount(3);
     await chooseOption(panel.getByLabel(t("copy.components_workflows_StrategyWorkflowPanel.039"), { exact: true }), "canvas");
     await panel.screenshot({ path: info.outputPath(`review-template-${language}.png`), animations: "disabled" });
     await page.setViewportSize({ width: 390, height: 844 });

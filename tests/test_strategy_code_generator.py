@@ -187,7 +187,7 @@ def run(ctx: StrategyContext) -> StrategyResult:
     }
     assert manifest["tuning"]["schedule"] == {
         "cron": "0 */6 * * *",
-        "enabled": True,
+        "enabled": False,
         "type": "cron",
     }
     assert manifest["llm_policy"]["default_tier"] == "medium"
