@@ -13,7 +13,7 @@ import sys
 MAX_FRAMES = 24
 MIN_FRAMES = 8
 MAX_FRAME_BYTES = 1_000_000
-NOD_AMPLITUDE = 0.04
+NOD_AMPLITUDE = 0.03
 MAX_SPAN = 10
 RECOVERY_RATIO = 0.35
 
@@ -108,25 +108,23 @@ def _nose_y(face, y1: float, y2: float) -> float | None:
     return None
 
 
-def detect_nod(ratios: list[float]) -> tuple[bool, int, float]:
-    """Return (nod, half_cycle_count, amplitude) from a pitch series.
+def detect_nod(ratios: list[float]) -> tuple[bool, int, float, float]:
+    """Return (nod, half_cycles, amplitude, end_offset) from a pitch series.
 
-    Real people nod continuously — two or three down-up cycles without
-    settling — so the series is mean-centred and split into same-sign runs.
-    Each run whose peak reaches NOD_AMPLITUDE counts as a half cycle.
-    Accept when:
+    Real people nod continuously and the capture often ends mid-motion, so:
 
-    - at least two alternating half cycles exist (a full out-and-back cycle
-      around the neutral position), and
-    - the burst ends back near the neutral position (drift and "moved to a
-      new position and stayed" never do).
+    - **≥ 3 alternating half cycles** (peak ≥ NOD_AMPLITUDE) — the operator
+      is actively oscillating; accept regardless of where the burst ends.
+    - **exactly 2 opposite half cycles** — a single nod; accept only when it
+      completed (the return stroke reaches at least RECOVERY_RATIO of the
+      first stroke) and the burst ends back near centre.
 
-    A held head produces one run (rejected); monotone drift produces two
-    runs but ends far from centre (rejected); micro-jitter never reaches
-    the amplitude floor (rejected).
+    A held head is one run (rejected); monotone drift is two runs but ends
+    far from centre (rejected); micro-jitter never reaches the floor
+    (rejected).
     """
     if len(ratios) < MIN_FRAMES:
-        return False, 0, 0.0
+        return False, 0, 0.0, 0.0
     # Windows are 8–25 frames; downsampling here aliases the nod oscillation.
     sampled = ratios
     smoothed = [
@@ -136,11 +134,12 @@ def detect_nod(ratios: list[float]) -> tuple[bool, int, float]:
     reference = sum(smoothed) / len(smoothed)
     deviations = [v - reference for v in smoothed]
     amplitude = max((abs(v) for v in deviations), default=0.0)
+    end_offset = abs(deviations[-1]) if deviations else 0.0
     if amplitude < NOD_AMPLITUDE:
-        return False, 0, amplitude
+        return False, 0, amplitude, end_offset
 
     eps = max(0.01, 0.25 * NOD_AMPLITUDE)
-    runs = []  # (sign, span, peak)
+    runs: list[tuple[int, int, float]] = []  # (sign, span, peak)
     current_sign = 0
     span = 0
     peak = 0.0
@@ -161,27 +160,45 @@ def detect_nod(ratios: list[float]) -> tuple[bool, int, float]:
     if current_sign:
         runs.append((current_sign, span, peak))
 
-    significant = [r for r in runs if r[2] >= NOD_AMPLITUDE and r[1] <= MAX_SPAN + 2]
+    # Run threshold adapts to the oscillation's own scale: a tail or slight
+    # tilt shifts the mean, making one direction's strokes smaller than the
+    # other. A fixed floor would discard the smaller direction entirely.
+    run_floor = max(0.02, 0.35 * amplitude)
+    significant = [r for r in runs if r[2] >= run_floor and r[1] <= MAX_SPAN + 2]
     half_cycles = len(significant)
-    if half_cycles < 2:
-        return False, half_cycles, amplitude
-    signs = [r[0] for r in significant]
-    alternating = all(signs[i] != signs[i + 1] for i in range(len(signs) - 1))
-    ends_near_centre = abs(deviations[-1]) <= max(
-        NOD_AMPLITUDE, 0.5 * significant[-1][2]
-    )
-    return alternating and ends_near_centre, half_cycles, amplitude
+    if half_cycles >= 3:
+        signs = [r[0] for r in significant]
+        # Allow one same-sign adjacency: a burst that ends mid-stroke (the
+        # operator still looking up or down) splits the final return into
+        # two runs of the same sign. Anything beyond that is not nodding.
+        adjacencies = sum(1 for i in range(len(signs) - 1) if signs[i] == signs[i + 1])
+        if adjacencies <= 1:
+            return True, half_cycles, amplitude, end_offset
+        return False, half_cycles, amplitude, end_offset
+    if half_cycles == 2:
+        first, second = significant
+        if first[0] == second[0]:
+            return False, half_cycles, amplitude, end_offset
+        returned = second[2] >= RECOVERY_RATIO * first[2]
+        ends_near_centre = end_offset <= max(NOD_AMPLITUDE, 0.5 * second[2])
+        # Fuzzy by design: a burst that is still travelling back toward the
+        # neutral position at capture end counts too — only moving *away*
+        # (drift / held-off-centre) is rejected.
+        moving_back = abs(deviations[-1]) < abs(deviations[-3]) if len(deviations) >= 3 else True
+        return (returned and (ends_near_centre or moving_back)), half_cycles, amplitude, end_offset
+    return False, half_cycles, amplitude, end_offset
 
 
 def infer(frames) -> dict:
     ratios = _pitch_series(frames)
-    nod, excursions, amplitude = detect_nod(ratios)
+    nod, half_cycles, amplitude, end_offset = detect_nod(ratios)
     return {
         "nod": bool(nod),
-        "excursions": int(excursions),
+        "half_cycles": int(half_cycles),
         "amplitude": round(float(amplitude), 4),
+        "end_offset": round(float(end_offset), 4),
         "frames_used": len(ratios),
-        "detector": "nose-bbox-ratio-v2",
+        "detector": "nose-bbox-ratio-v3",
     }
 
 

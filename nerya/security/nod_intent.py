@@ -309,7 +309,8 @@ class NodIntentService:
             # Measured telemetry helps the operator nod visibly enough next try.
             error.detail = {
                 "amplitude": inferred.get("amplitude"),
-                "half_cycles": inferred.get("excursions"),
+                "half_cycles": inferred.get("half_cycles"),
+                "end_offset": inferred.get("end_offset"),
                 "frames_used": inferred.get("frames_used"),
             }
             raise error

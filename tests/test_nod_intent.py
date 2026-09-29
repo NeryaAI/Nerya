@@ -53,17 +53,19 @@ def test_detect_nod_accepts_single_and_continuous_nods():
     # One clear out-and-back cycle...
     assert nod_worker.detect_nod([0.5] + _nod_cycle(0.12) + [0.5, 0.5])[0] is True
     assert nod_worker.detect_nod([0.5, 0.5] + _nod_cycle(0.12, up_first=True) + [0.5])[0] is True
-    # ...and continuous nodding (people nod two-three times naturally).
-    double = [0.5] + _nod_cycle(0.10) + _nod_cycle(0.10)
-    nod, cycles, amp = nod_worker.detect_nod(double)
-    assert nod is True and cycles >= 3 and amp >= 0.04
+    # ...and continuous nodding — including bursts that end mid-motion.
+    double = [0.5] + _nod_cycle(0.10) + _nod_cycle(0.10) + [0.56]
+    nod, cycles, amp, end_offset = nod_worker.detect_nod(double)
+    assert nod is True and cycles >= 3
+    triple = [0.5] + _nod_cycle(0.08) * 3 + [0.44]
+    assert nod_worker.detect_nod(triple)[0] is True
 
 
 def test_detect_nod_rejects_static_drift_and_held():
     assert nod_worker.detect_nod([0.5] * 12)[0] is False
-    # Monotone drift never returns to centre.
+    # Monotone drift crosses the centre once and ends far from it.
     assert nod_worker.detect_nod([0.4 + 0.02 * i for i in range(12)])[0] is False
-    # Nod down and stay there.
+    # Nod down and stay there — no return stroke.
     assert nod_worker.detect_nod(
         [0.5, 0.44, 0.36, 0.30, 0.24, 0.18, 0.12, 0.12, 0.12, 0.12, 0.12, 0.12]
     )[0] is False
