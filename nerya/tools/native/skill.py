@@ -47,6 +47,7 @@ from ...skills.discovery import catalog_ids, catalog_parent
 from ...skills.registry import SkillRegistry, _enabled_ok, load_entry, discover_entries
 from ...skills.manifest import _slugify
 from ..tool_errors import schema_validation_result
+from .paths import WorkspaceEscapeError, resolve_workspace_path
 from ..types import (
     ToolCall,
     ToolError,
@@ -361,10 +362,9 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
     rel = str(args.get("file") or "").strip()
     if rel:
         base = Path(record.path).parent.resolve()
-        candidate = (base / rel).resolve()
         try:
-            candidate.relative_to(base)
-        except ValueError:
+            candidate = resolve_workspace_path(rel, root=base)
+        except WorkspaceEscapeError:
             return schema_validation_result(
                 call, f"'file' must stay inside the skill directory: {rel!r}",
             )
@@ -429,11 +429,13 @@ def _script_path(skill_index: SkillIndex, skill_id: str, name: str) -> Optional[
         return None
     root = Path(rec.path).parent.resolve()
     base = root / "scripts"
-    candidate = (base / name).resolve()
     try:
+        relative = Path(name)
+        if relative.parts and relative.parts[0] == "scripts":
+            relative = Path(*relative.parts[1:])
+        candidate = resolve_workspace_path(str(relative), root=base)
         candidate.relative_to(root)
-        candidate.relative_to(base.resolve())
-    except ValueError:
+    except (ValueError, OSError):
         return None
     if not candidate.is_file():
         return None
@@ -565,6 +567,13 @@ def script_run_handler(
             cmd = [sys.executable, '-m', '.'.join(('nerya', 'skills', 'builtin', *relative.parts)), *[str(a) for a in argv_extra]]
     elif p.suffix.lower() in {".sh", ".bash"}:
         cmd = ["bash", str(p), *[str(a) for a in argv_extra]]
+    elif p.suffix.lower() == ".ps1":
+        import shutil
+        interpreter = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+        cmd = [interpreter, "-NoProfile", "-NonInteractive", "-File", str(p),
+               *[str(a) for a in argv_extra]]
+    elif p.suffix.lower() in {".js", ".mjs", ".cjs"}:
+        cmd = ["node", str(p), *[str(a) for a in argv_extra]]
     else:
         cmd = [str(p), *[str(a) for a in argv_extra]]
     started = time.time()
@@ -603,7 +612,7 @@ def script_run_handler(
                 detail={"stdout": (exc.stdout or "")[-2000:], "stderr": (exc.stderr or "")[-2000:]},
             ),
         )
-    except FileNotFoundError as exc:
+    except OSError as exc:
         if trace:
             trace.finish('failed')
         return ToolResult.from_error(

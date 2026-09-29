@@ -10,6 +10,7 @@ tool handlers.
 from __future__ import annotations
 
 import os
+import locale
 import selectors
 import signal
 import subprocess
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from ..harness.cancellation import CancelledError, is_cancelled
+from .process import prepare_process_env, resolve_process_args, terminate_windows_tree
 
 
 class SandboxViolation(RuntimeError):
@@ -59,7 +61,8 @@ class ManagedProcess:
         self.cancelled = self.timed_out = self.truncated = False
         self.group_stopped = False
         self.error = None
-        self._thread = threading.Thread(target=self._drain, name=f"shell-{proc.pid}", daemon=False)
+        drain = self._drain_windows if os.name == "nt" else self._drain
+        self._thread = threading.Thread(target=drain, name=f"shell-{proc.pid}", daemon=False)
         self._thread.start()
 
     def stop(self):
@@ -73,6 +76,11 @@ class ManagedProcess:
             return True
         except ProcessLookupError:
             return False
+        except PermissionError:
+            # An inaccessible group is not proof that the group has stopped.
+            # In particular, do not turn a post-exit probe race into a crashed
+            # reader thread or a false stop confirmation.
+            return True
 
     def _signal(self, sig):
         try:
@@ -84,6 +92,66 @@ class ManagedProcess:
                 self.proc.kill()
         except ProcessLookupError:
             pass
+        except PermissionError:
+            if self.proc.poll() is None:
+                raise
+            # The owned parent is already gone. Do not signal a potentially
+            # reused/inaccessible process group; keep group_stopped false.
+
+    def _append_output(self, name, chunk):
+        with self._lock:
+            value = self._output[name] + chunk
+            if self.output_limit is not None and len(value) > self.output_limit:
+                self.truncated = True
+                value = value[-self.output_limit:]
+            self._output[name] = value
+
+    def _drain_windows(self):
+        """Windows selectors accept sockets, not anonymous subprocess pipes.
+
+        Drain each pipe independently while the supervisor enforces the same
+        timeout/cancellation contract as POSIX. Readers own their pipes: closing
+        a BufferedReader from another thread can deadlock on a blocked read.
+        """
+        readers = []
+
+        def read_pipe(name, pipe):
+            try:
+                while chunk := os.read(pipe.fileno(), 65536):
+                    self._append_output(name, chunk)
+            except (OSError, ValueError):
+                pass  # teardown can close the underlying Windows handle
+            finally:
+                pipe.close()
+
+        try:
+            for name in ("stdout", "stderr"):
+                pipe = getattr(self.proc, name)
+                if pipe is not None:
+                    reader = threading.Thread(target=read_pipe, args=(name, pipe),
+                                              name=f"shell-{self.proc.pid}-{name}", daemon=True)
+                    reader.start()
+                    readers.append(reader)
+            while self.proc.poll() is None:
+                self.cancelled = self._stop.is_set() or is_cancelled(self.cancel_token)
+                self.timed_out = (self.timeout is not None
+                                  and time.monotonic() - self.started >= self.timeout)
+                if self.cancelled or self.timed_out:
+                    self.group_stopped = terminate_windows_tree(self.proc)
+                    break
+                self._stop.wait(0.02)
+            self.proc.wait()
+            # An independently detached descendant may retain a pipe. Do not
+            # hang the tool (or claim its whole tree stopped) in that case.
+            deadline = time.monotonic() + 2.0
+            for reader in readers:
+                reader.join(max(0.0, deadline - time.monotonic()))
+        except BaseException as exc:
+            self.error = exc
+            terminate_windows_tree(self.proc)
+            self.proc.wait()
+        finally:
+            self._done.set()
 
     def _drain(self):
         stopping_at = None
@@ -112,12 +180,7 @@ class ManagedProcess:
                             selector.unregister(key.fileobj)
                             key.fileobj.close()
                             continue
-                        with self._lock:
-                            value = self._output[key.data] + chunk
-                            if self.output_limit is not None and len(value) > self.output_limit:
-                                self.truncated = True
-                                value = value[-self.output_limit:]
-                            self._output[key.data] = value
+                        self._append_output(key.data, chunk)
                     if self.proc.poll() is not None and not selector.get_map():
                         break
                     # Escaped descendants may retain a pipe. Do not equate
@@ -162,10 +225,13 @@ class ManagedProcess:
 
 
 def _resolve_cwd(cwd: str | Path, root: str | Path | None) -> Path:
-    cwd_path = Path(cwd).expanduser().resolve()
+    cwd_path = Path(cwd).expanduser()
     if root is None:
-        return cwd_path
+        return cwd_path.resolve()
     root_path = Path(root).expanduser().resolve()
+    if not cwd_path.is_absolute():
+        cwd_path = root_path / cwd_path
+    cwd_path = cwd_path.resolve()
     try:
         cwd_path.relative_to(root_path)
     except ValueError as exc:
@@ -179,6 +245,13 @@ def _text(value: str | bytes | None) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):
+        if os.name == "nt":
+            try:
+                return value.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                # Python children use UTF-8; legacy native Windows programs
+                # can still emit the machine's code page.
+                return value.decode(locale.getpreferredencoding(False), errors="replace")
         return value.decode("utf-8", errors="replace")
     return str(value)
 
@@ -208,12 +281,16 @@ def sandbox_exec(
     started = time.monotonic()
     if is_cancelled(cancel_token):
         raise CancelledError("cancelled before process launch")
+    process_env = prepare_process_env(env)
+    launch_args = resolve_process_args(args, env=process_env, cwd=cwd_path, shell=shell)
     proc = subprocess.Popen(
-        args, shell=shell, cwd=str(cwd_path),
-        env=dict(env) if env is not None else None,
+        launch_args, shell=shell, cwd=str(cwd_path),
+        env=process_env,
         stdout=subprocess.PIPE if capture_output else None,
         stderr=subprocess.PIPE if capture_output else None,
         text=False, start_new_session=(os.name == "posix"),
+        creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+        if os.name == "nt" else 0,
     )
     managed = ManagedProcess(proc, args=args, cwd=cwd_path, timeout=timeout,
                              cancel_token=cancel_token, output_limit=output_limit)

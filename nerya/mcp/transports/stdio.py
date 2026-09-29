@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -46,6 +47,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ...core.process import prepare_process_env, resolve_process_args, terminate_windows_tree
 from ..session_adapter import MCPSessionExpiredError
 
 
@@ -122,6 +124,10 @@ class StdioMCPClient:
         default_factory=threading.Lock, init=False, repr=False,
     )
     _initialized: bool = field(default=False, init=False, repr=False)
+    _frames: Any = field(default=None, init=False, repr=False)
+    _reader_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _readers: list[threading.Thread] = field(default_factory=list, init=False, repr=False)
+    _rpc_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     # ------------------------------------------------------------------
     # MCPClient Protocol
@@ -174,10 +180,14 @@ class StdioMCPClient:
         proc = self._proc
         self._proc = None
         self._initialized = False
+        self._reader_stop.set()
         if proc is None:
             return
         try:
-            proc.terminate()
+            if os.name == "nt" and hasattr(proc, "pid"):
+                terminate_windows_tree(proc)
+            else:
+                proc.terminate()
         except Exception:
             pass
         try:
@@ -185,8 +195,64 @@ class StdioMCPClient:
         except Exception:
             try:
                 proc.kill()
+                proc.wait(timeout=5.0)
             except Exception:  # pragma: no cover - best-effort
                 pass
+        if proc.stdin is not None:
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+        for reader in self._readers:
+            reader.join(timeout=0.2)
+        self._readers = []
+
+    def _start_readers(self, proc) -> None:
+        # Blocking readline() cannot enforce a deadline and stderr left unread
+        # can fill its pipe before the server writes a JSON reply. Dedicated
+        # readers work on Windows pipes as well as POSIX; only parsed stdout
+        # reaches the caller. Never log the server's stderr (it may hold secrets).
+        frames = self._frames = queue.Queue(maxsize=8)
+        stop = self._reader_stop = threading.Event()
+
+        def enqueue(value):
+            while not stop.is_set():
+                try:
+                    frames.put(value, timeout=0.1)
+                    return
+                except queue.Full:
+                    continue
+
+        def stdout_reader():
+            try:
+                while not stop.is_set():
+                    line = proc.stdout.readline(16 * 1024 * 1024 + 1)
+                    if len(line) > 16 * 1024 * 1024:
+                        raise StdioTransportError("stdio response exceeds 16 MiB frame limit")
+                    enqueue(line or None)
+                    if not line:
+                        return
+            except Exception as exc:
+                enqueue(exc)
+            finally:
+                proc.stdout.close()
+
+        def stderr_reader():
+            try:
+                while not stop.is_set() and proc.stderr.read(65536):
+                    pass
+            except (OSError, ValueError):
+                pass
+            finally:
+                proc.stderr.close()
+
+        self._readers = []
+        for name, pipe, target in (("stdout", proc.stdout, stdout_reader),
+                                   ("stderr", proc.stderr, stderr_reader)):
+            if pipe is not None:
+                reader = threading.Thread(target=target, name=f"mcp-{self.server_id}-{name}", daemon=True)
+                reader.start()
+                self._readers.append(reader)
 
     def __enter__(self) -> "StdioMCPClient":
         return self
@@ -212,17 +278,20 @@ class StdioMCPClient:
         # ``self.env`` and never appear in the parent env.
         full_env = dict(os.environ)
         full_env.update(self.env or {})
+        full_env = prepare_process_env(full_env)
+        command = resolve_process_args(self.command, env=full_env, cwd=self.cwd)
 
         try:
             proc = subprocess.Popen(  # nosec - operator-controlled command
-                self.command,
+                command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=full_env,
                 cwd=self.cwd,
                 bufsize=0,  # unbuffered: we frame JSON-RPC ourselves
-                close_fds=(sys.platform != "win32"),
+                close_fds=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
         except FileNotFoundError as exc:
             raise StdioTransportError(
@@ -245,6 +314,7 @@ class StdioMCPClient:
 
         proc = self._spawn_proc()
         self._proc = proc
+        self._start_readers(proc)
 
         # MCP ``initialize`` handshake. Even servers that don't strictly
         # require it answer it; servers that DO require it will refuse all
@@ -270,7 +340,7 @@ class StdioMCPClient:
 
         try:
             envelope = self._read_frame(deadline)
-        except StdioTransportError:
+        except (StdioTransportError, MCPSessionExpiredError):
             self.close()
             raise
 
@@ -339,17 +409,16 @@ class StdioMCPClient:
                     raise StdioTransportError(
                         f"server {self.server_id!r}: timed out waiting for response"
                     )
-                if proc.poll() is not None:
-                    raise MCPSessionExpiredError(
-                        f"server {self.server_id!r}: subprocess exited "
-                        f"(rc={proc.returncode}) before responding"
-                    )
                 try:
-                    line = proc.stdout.readline()
-                except Exception as exc:  # pragma: no cover - rare
+                    line = self._frames.get(timeout=max(0.0, deadline - time.time()))
+                except queue.Empty as exc:
                     raise StdioTransportError(
-                        f"server {self.server_id!r}: stdout read failed: {exc}"
+                        f"server {self.server_id!r}: timed out waiting for response"
                     ) from exc
+                if isinstance(line, Exception):
+                    raise StdioTransportError(
+                        f"server {self.server_id!r}: stdout read failed: {line}"
+                    ) from line
                 if not line:
                     # EOF — process exited.
                     raise MCPSessionExpiredError(
@@ -364,12 +433,18 @@ class StdioMCPClient:
                     # Some servers print non-JSON warnings/banners on stdout
                     # before they're fully booted. Skip and keep reading.
                     _LOG.debug(
-                        "stdio server %s: skipping non-JSON line: %r",
-                        self.server_id, stripped[:120],
+                        "stdio server %s: skipping non-JSON line",
+                        self.server_id,
                     )
                     continue
 
     def _rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        # One request/reply pair at a time: concurrent tool calls must not
+        # consume each other's stdout frames.
+        with self._rpc_lock:
+            return self._rpc_serial(method, params)
+
+    def _rpc_serial(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._ensure_started()
         rpc = _build_rpc(method, params)
         try:
@@ -382,7 +457,12 @@ class StdioMCPClient:
             ) from exc
 
         deadline = time.time() + self.read_timeout
-        envelope = self._read_frame(deadline)
+        try:
+            envelope = self._read_frame(deadline)
+        except (StdioTransportError, MCPSessionExpiredError):
+            # Do not let a late reply after timeout become the next call's result.
+            self.close()
+            raise
 
         if "error" in envelope and "result" not in envelope:
             err = envelope["error"]

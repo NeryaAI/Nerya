@@ -149,7 +149,7 @@ from .tasks import (
     task_summary_handler,
     task_update_handler,
 )
-from .shell import classify_shell_risk, run_shell_handler
+from .shell import classify_shell_risk, run_shell_handler, shell_runtime_description
 from .skill import (
     SkillIndex,
     is_browser_skill_script_run,
@@ -399,6 +399,12 @@ _RUN_SHELL_SCHEMA = {
     "type": "object",
     "properties": {
         "command": {"type": "string"},
+        "shell": {
+            "type": "string",
+            "enum": ["default", "cmd", "powershell", "pwsh", "bash", "sh"],
+            "default": "default",
+            "description": "Interpreter for command syntax. Defaults to cmd on Windows, /bin/sh on POSIX.",
+        },
         "cwd": {"type": "string"},
         "timeout_sec": {"type": "number", "minimum": 0.1},
         "background": {"type": "boolean", "default": False},
@@ -1808,6 +1814,7 @@ def register_native_tools(
         make_native_descriptor(
             name="run_shell",
             description=(
+                shell_runtime_description() +
                 "Run a shell command (tests, builds, git, one-off scripts). "
                 "Risk is classified per-call: rm -rf, sudo, git push --force, "
                 "etc. are flagged as DANGEROUS. "

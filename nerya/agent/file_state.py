@@ -42,6 +42,7 @@ runtime, and tests can all import it without ordering hazards.
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -165,7 +166,7 @@ class FileStateCache:
             p = p.resolve()
         except OSError:
             p = p.absolute()
-        return str(p)
+        return os.path.normcase(str(p))
 
     # ---- read tracking -----------------------------------------------------
 

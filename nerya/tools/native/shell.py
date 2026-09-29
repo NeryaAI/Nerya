@@ -6,8 +6,8 @@ Implementation notes:
 
 Behaviour:
 
-* Commands run with ``shell=True`` so chained pipelines work as the
-  model expects (``ls | head``).
+* Default commands use the host shell. Explicit interpreters receive commands
+  directly, without another shell re-parsing their paths and arguments.
 * ``cwd`` is resolved under the workspace root via
   :func:`resolve_workspace_path`. Escapes are denied.
 * ``timeout`` defaults to 30s, hard cap 300s.
@@ -22,6 +22,7 @@ Behaviour:
 from __future__ import annotations
 
 import os
+import base64
 import re
 import shlex
 import subprocess
@@ -55,6 +56,43 @@ _DEFAULT_TIMEOUT_S = 30
 _MAX_TIMEOUT_S = 300
 _DEFAULT_OUTPUT_BYTES = 64 * 1024
 _MAX_OUTPUT_BYTES = 256 * 1024
+
+
+def shell_runtime_description() -> str:
+    if os.name == "nt":
+        return (
+            "Host: Windows; default shell is cmd.exe, NOT Bash. "
+            "Use shell='powershell' for PowerShell syntax; do not send Bash "
+            "heredocs, export or /bin paths to cmd. Prefer workspace-relative "
+            "paths with forward slashes; pass cwd separately and quote paths "
+            "containing spaces. Use script_run for Python skill scripts. "
+        )
+    return "Host: POSIX; default shell is /bin/sh. Use shell='bash' for Bash-only syntax. "
+
+
+def _shell_invocation(command: str, shell: str, cwd: Path):
+    if shell not in {"default", "cmd", "powershell", "pwsh", "bash", "sh"}:
+        raise ValueError(f"unsupported shell: {shell}")
+    if shell == "cmd" and os.name != "nt":
+        raise ValueError("cmd is only available on Windows")
+    if os.name == "nt" and str(cwd).startswith("\\\\") and shell in {"default", "cmd"}:
+        if shell == "cmd":
+            raise ValueError("cmd cannot use a UNC cwd; select shell='powershell'")
+        shell = "powershell"
+    if shell in {"default", "cmd"}:
+        return command, True, "cmd" if os.name == "nt" else "sh"
+    if shell in {"powershell", "pwsh"}:
+        # Encode only at the launch boundary, AFTER classifying the original
+        # command. This avoids a second shell parsing quotes/backslashes/Unicode.
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); "
+            "$OutputEncoding=[Console]::OutputEncoding;\n"
+            + command + "\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }"
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return [shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], False, shell
+    return [shell, "-c", command], False, shell
 
 
 # Destructive patterns mirror the operator skill heuristics but are
@@ -206,7 +244,7 @@ def _mask_quoted_shell_text(cmd: str) -> str:
                 out.append(" ")
                 escaped = False
                 continue
-            if ch == "\\" and quote == '"':
+            if ch == "\\" and quote == '"' and os.name != "nt":
                 out.append(" ")
                 escaped = True
                 continue
@@ -236,7 +274,15 @@ def _command_heads(cmd: str) -> list[str]:
 
 def _shell_segments(cmd: str) -> list[list[str]]:
     segments: list[list[str]] = []
-    for raw in re.split(r"[;&|]+", cmd):
+    # Split using positions outside quotes, not on '&' or ';' inside a path.
+    # Keep the original characters for tokenization and eventual execution.
+    spans = []
+    start = 0
+    for separator in re.finditer(r"[;&|]+", _mask_quoted_shell_text(cmd)):
+        spans.append(cmd[start:separator.start()])
+        start = separator.end()
+    spans.append(cmd[start:])
+    for raw in spans:
         raw = raw.strip()
         if not raw:
             continue
@@ -687,6 +733,12 @@ def run_shell_handler(
         env = os.environ.copy()
     if conversation_dir is not None:
         env["NERYA_CONVERSATION_DIR"] = str(conversation_dir)
+    try:
+        launch_command, use_shell, shell_name = _shell_invocation(
+            cmd, str(args.get("shell") or "default"), cwd,
+        )
+    except ValueError as exc:
+        return schema_validation_result(call, str(exc))
     started = time.monotonic()
     cancel_token = (call.metadata or {}).get("cancel_token")
     record = None
@@ -701,8 +753,8 @@ def run_shell_handler(
             record = store.create(name="run_shell", payload={"command": cmd},
                                   parent_turn_id=call.turn_id, parent_session_id=session_id)
             proc = sandbox_exec(
-                cmd,
-                shell=True,
+                launch_command,
+                shell=use_shell,
                 cwd=cwd,
                 root=root,
                 env=env,
@@ -726,6 +778,7 @@ def run_shell_handler(
                     ToolResultPart.json_part(
                         {
                             "command": cmd,
+                            "shell": shell_name,
                             "cwd": to_workspace_relative(cwd, root),
                             "pid": pid,
                             "task_id": record.task_id,
@@ -745,6 +798,7 @@ def run_shell_handler(
                 ],
                 metadata={
                     "pid": pid,
+                    "shell": shell_name,
                     "task_id": record.task_id,
                     "background": True,
                     "placement": shell_placement,
@@ -757,8 +811,8 @@ def run_shell_handler(
             )
 
         proc = sandbox_exec(
-            cmd,
-            shell=True,
+            launch_command,
+            shell=use_shell,
             cwd=cwd,
             root=root,
             env=env,
@@ -841,6 +895,7 @@ def run_shell_handler(
         ],
         metadata={
             "command": cmd,
+            "shell": shell_name,
             "exit_code": exit_code,
             "process_exited": getattr(proc, "process_exited", False),
             "process_group_stopped": getattr(proc, "process_group_stopped", False),

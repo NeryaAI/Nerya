@@ -17,7 +17,7 @@ import re
 import shutil
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Optional
 
 from ...core.sandbox import sandbox_exec
@@ -77,6 +77,16 @@ def _glob_base_and_pattern(
     base: str,
     pattern: str,
 ) -> tuple[Path, str] | ToolResult:
+    if PureWindowsPath(pattern).drive and (os.name != "nt" or not PureWindowsPath(pattern).root):
+        try:
+            resolve_workspace_path(pattern, root=root)
+        except WorkspaceEscapeError as exc:
+            return ToolResult.from_error(
+                tool_use_id="", name="glob",
+                error=ToolError(kind=ToolErrorKind.PERMISSION_DENIED, message=str(exc)),
+            )
+    if os.name == "nt":
+        pattern = pattern.replace("\\", "/")
     absolute = _absolute_glob_parts(pattern)
     if absolute is None:
         try:
@@ -132,6 +142,10 @@ def glob_handler(call: ToolCall, *, root: Path) -> ToolResult:
     truncated = False
     try:
         for path in base_p.rglob(str(pattern)):
+            try:
+                resolve_workspace_path(str(path), root=root)
+            except WorkspaceEscapeError:
+                continue
             if not path.is_file():
                 continue
             if len(matches) >= limit:
@@ -208,7 +222,7 @@ def _grep_with_rg(
     if file_type:
         cmd.extend(["--type", file_type])
     cmd.append("--max-count=2000")
-    cmd.append(pattern)
+    cmd.extend(["--regexp", pattern, "--"])
     cmd.append(str(base))
     try:
         proc = sandbox_exec(
@@ -274,6 +288,10 @@ def _grep_python(
             truncated = True
             break
         if not path.is_file():
+            continue
+        try:
+            resolve_workspace_path(str(path), root=root)
+        except WorkspaceEscapeError:
             continue
         rel = to_workspace_relative(path, root)
         if glob and not fnmatch.fnmatch(path.name, glob):

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..core.paths import WorkspacePaths
+from ..core.process import prepare_process_env
 from ..core.proxy import proxy_env_for_workspace
 from .secrets import SecretMeta, SecretVault
 
@@ -135,7 +136,7 @@ def build_process_env(
         env.update(proxy_env_for_workspace(paths))
     except Exception:
         pass
-    return env
+    return prepare_process_env(env)
 
 
 __all__ = [
