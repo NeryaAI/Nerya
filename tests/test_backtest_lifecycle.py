@@ -73,8 +73,10 @@ def test_create_validate_replay_report_same_candidate(tmp_path, monkeypatch, mod
     assert checked.content[0].data["ok"], checked.text()
     yaml_io.dump(tmp_path / "replay.yml", {"tf": "1h", "warmup_bars": 0, "window_days": 2})
     monkeypatch.setattr("nerya.skills.builtin.backtest.scripts.backtest_run.get_candles", lambda *a, **kw: bars())
+    # This fixture intentionally requests replay.yml instead of the candidate defaults.
     out = strategy_backtest_handler(ToolCall(name="strategy_backtest", arguments={"proposal_id": pid,
-        "engine": "native", "config_path": "replay.yml", "allow_mock": True}), config=cfg)
+        "engine": "native", "config_path": "replay.yml", "allow_mock": True,
+        "override_candidate_backtest_defaults": True}), config=cfg)
     assert not out.is_error, out.text()
     data = out.content[0].data
     assert data["proposal_id"] == pid and data["strategy_id"] == CASE(mode)["strategy_id"]
