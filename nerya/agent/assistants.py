@@ -15,7 +15,6 @@ from contextlib import closing
 from typing import Any
 
 from ..core.config import Config
-from ..core import yaml_io
 from ..db.sqlite import connect
 from ..db.repositories import AgentSessionRepository
 from ..tools.capability_policy import normalise_tool_policy

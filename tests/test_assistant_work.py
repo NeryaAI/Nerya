@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import threading
 import time
 
 import pytest
@@ -171,7 +170,6 @@ def test_run_only_followup_with_lower_queue_position_delivers_success_and_keeps_
     with manager.store.transaction() as con:
         con.execute("UPDATE agent_commands SET state='failed',error_json=? WHERE command_id=?", ('{"code":"model_stream_tls_error"}',receipt["command_id"]))
     work.sync(sid)
-    initial = manager.store.snapshot(child)["commands"][0]
     manager.control({"session_id":child,"action":"pause","expected_revision":manager.store.snapshot(child)["queue"]["revision"]})
     manager.submit({"session_id":child,"command_id":"followup-only","request":{"payload":{"text":"Inspect existing proposal"},"run_only":True},"_auth_actor_id":"owner"},start=False)
     with manager.store.transaction() as con:
