@@ -86,6 +86,9 @@ def test_policy_ceiling_composes_and_revocation_is_live(config):
     context = PermissionContext(mode=PermissionMode.YOLO, current_tool_policy=lambda: current_assistant_policy(config, sid, policy))
     request = PermissionRequest(descriptor=descriptor)
     assert PermissionEngine().evaluate(request, context).kind == PermissionDecisionKind.ALLOW
+    from dataclasses import replace
+    child = replace(context, tool_policy={"deny": ["web_search"]})
+    assert PermissionEngine().evaluate(request, child).kind == PermissionDecisionKind.DENY
     store.save({"research_allowed": False}, aid=profile["id"], expected_revision=profile["revision"])
     assert not tool_policy_allows(current_assistant_policy(config, sid, {}), "web_search")
     assert PermissionEngine().evaluate(request, context).kind == PermissionDecisionKind.DENY
