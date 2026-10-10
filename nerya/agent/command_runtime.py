@@ -24,13 +24,15 @@ from .streaming import get_default_bus
 
 _LOG = logging.getLogger(__name__)
 EPOCH = uuid.uuid4().hex
-_FIELDS = ("source", "kind", "payload", "strategy_id", "strategy_proposal_id", "reasoning_effort",
+_FIELDS = ("source", "kind", "payload", "assistant_id", "conversation_kind", "strategy_id", "strategy_proposal_id", "reasoning_effort",
            "reasoning_summary", "permission_mode", "model_tier", "model_provider", "model_id",
            "model_context_window", "max_iterations", "max_total_tool_calls", "max_wall_seconds",
            "evidence_contract", "resume_turn_id", "continuation_feedback", "work_mode", "interaction_id", "plan_id", "run_only")
 
 
 def outcome_state(result: dict) -> str:
+    if result.get("execution_status") == "unconfirmed":
+        return "unconfirmed"
     if result.get("ok") is False or result.get("status") == "error":
         return "failed"
     stop = str(result.get("stopped_reason") or "").lower()
@@ -38,7 +40,7 @@ def outcome_state(result: dict) -> str:
         return "awaiting_input"
     if "approval" in stop or result.get("awaiting_approval"):
         return "awaiting_approval"
-    if any(word in stop for word in ("cancel", "interrupt", "operator_stop")):
+    if any(word in stop for word in ("cancel", "interrupt", "operator_stop", "assistant_permissions_changed")):
         return "interrupted"
     if result.get("aborted") or stop not in ("", "end_turn", "completed", "succeeded", "stop"):
         return "blocked"
@@ -84,15 +86,19 @@ class CommandRuntime:
         request["session_id"] = payload.get("session_id")
         request["target"] = "main"
         validate_command_request(kind, request)
-        # Keep the original request fingerprint even after operator edits.
         identity_request = copy.deepcopy(request)
         existing = self.store.existing_receipt(payload.get("command_id"),payload.get("session_id"),
             str(payload.get("_auth_actor_id") or "local"),kind,identity_request)
         if existing is not None:
             return existing
+        from .assistants import AssistantError, prepare_request
+        try:
+            request = prepare_request(self.config, request)
+        except AssistantError as exc:
+            raise CommandError(exc.code, exc.status) from exc
         context = {"version": 1, **input_context(request), "plan_id": request.get("plan_id"),
                    "strategy_id": request.get("strategy_id"), "proposal_id": request.get("strategy_proposal_id"),
-                   "accepted_model": self.accepted_model(request)}
+                   "accepted_model": self.accepted_model(request), "assistant_id": request.get("assistant_id")}
         if request.get("interaction_id"):
             # UI text comes from the durable answer, never the generated execution prompt.
             with self.store.transaction() as con:
@@ -240,6 +246,15 @@ class CommandRuntime:
             unsubscribe()
         self.store.save_outcome(cid,sid,tid,state,result,error)
         self.store.finish(cid,sid,owner,state,result,error)
+        try:
+            from .assistant_work import AssistantWork
+            AssistantWork(self.config.paths).sync(sid)
+        except Exception:
+            _LOG.exception("assistant result delivery failed; durable command outcome retained")
+
+    def recover_tasks(self):
+        from .assistant_work import AssistantWork
+        AssistantWork(self.config.paths).recover(self)
 
     def check_approvals(self, sid):
         from ..approval_service import ApprovalService

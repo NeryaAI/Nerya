@@ -126,6 +126,8 @@ class SubAgentDispatcher:
             ),
         )
         deps.executor = executor
+        from ..agent.assistants import current_assistant_policy
+        executor.permission_context.current_tool_policy = lambda: current_assistant_policy(config, session_id, executor.permission_context.tool_policy)
         return cls(config=config, skills=skills, tool_registry=registry, executor=executor)
 
     def _registry_for(self, strategy_id: str | None) -> StrategySubAgentRegistry:

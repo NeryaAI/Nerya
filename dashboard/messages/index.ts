@@ -1,3 +1,5 @@
+import zhAssistants from "./zh/assistants.json";
+import enAssistants from "./en/assistants.json";
 import enSdkAccounts from "./en/sdk-accounts.json";
 import zhSdkAccounts from "./zh/sdk-accounts.json";
 import enAccountConnection from "./en/account-connection.json";
@@ -60,6 +62,7 @@ function mergeMessages(
 }
 
 export const en = {
+  ...enAssistants,
   ...enSdkAccounts,
   ...enAccountConnection,
   ...enChatHistory,
@@ -83,6 +86,7 @@ export const en = {
 } as const;
 
 export const zh = {
+  ...zhAssistants,
   ...zhSdkAccounts,
   ...zhAccountConnection,
   ...zhChatHistory,

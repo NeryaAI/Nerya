@@ -7,7 +7,7 @@ import { useEffect, useId, useRef, useState, type Ref } from "react";
 import type { ChatAttachment, ChatModelOption, ChatRunSettings } from "../../lib/chat";
 import { callApi } from "../../lib/clientApi";
 import { uuid } from "../../lib/chat";
-import { FileIcon, SendIcon, StopIcon, XIcon } from "../icons";
+import { FileIcon, SendIcon, StopIcon, XIcon, PlusIcon } from "../icons";
 import type { ComposerOption } from "../../lib/composerInput";
 import { ComposerResourceError, prepareComposerReference } from "../../lib/composerResources";
 import { ComposerAddMenu, ComposerSourceIcon, ComposerSuggestions, useComposerSuggestions } from "./ComposerSuggestions";
@@ -69,13 +69,14 @@ export interface ChatInputProps {
   taskHeader?: ReactNode;
   contextControl?: ReactNode;
   external?: boolean;
+  assistant?: boolean;
   sessionId?: string;
 }
 
 /** One composer for home, empty chat and active chat. Only its frame changes. */
 export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending, queued=false, submitMode, submitting = sending, stopping = false, locked = false, draftLocked = false,
   lockMessage, placeholder, settings, onSettingsChange, modelOptions = [], attachments = [],
-  onAttachmentsChange, variant = "docked", inputRef, taskHeader, contextControl, external = false, sessionId }: ChatInputProps) {
+  onAttachmentsChange, variant = "docked", inputRef, taskHeader, contextControl, external = false, assistant = false, sessionId }: ChatInputProps) {
   const t = useTranslations("chat");
   const tUi = useTranslations("ui");
   const tc = useTranslations("composer");
@@ -84,7 +85,7 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
   const identityGeneration = workspaceGeneration();
   const editingLocked = draftLocked || (external && locked);
   const busy = submitting || (external && sending);
-  const sendLabel = (submitMode ? submitMode === "queue" : sending||queued) && !external ? (zh ? "排队发送" : "Queue message") : t("send");
+  const sendLabel = assistant ? t("send") : (submitMode ? submitMode === "queue" : sending||queued) && !external ? (zh ? "排队发送" : "Queue message") : t("send");
   const fieldId = useId();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const pickerRef = useRef<HTMLInputElement>(null);
@@ -203,7 +204,7 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
   }
 
   const composer = (
-    <div data-chat-composer={variant} data-composer-mode={external ? 'external' : 'agent'}
+    <div data-chat-composer={variant} data-composer-mode={external ? 'external' : assistant ? 'assistant' : 'agent'}
       onDragEnter={event => { if (!external && event.dataTransfer.types.includes("Files")) { event.preventDefault(); dragDepth.current += 1; if (!editingLocked && workspaceId && !uploading) setDragging(true); } }}
       onDragOver={event => { if (!external && event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = editingLocked || !workspaceId || uploading ? "none" : "copy"; } }}
       onDragLeave={event => { if (!external && event.dataTransfer.types.includes("Files")) { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); } }}
@@ -262,15 +263,16 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
           aria-label={t("addAttachment")} disabled={editingLocked || !workspaceId || uploading || !onAttachmentsChange}
           accept="image/*,.pdf,.txt,.md,.csv,.json,.html,.xml"
           onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void pickFiles(files); }} />
-        <ComposerAddMenu disabled={editingLocked} uploadDisabled={!workspaceId || uploading || !onAttachmentsChange}
+        {assistant ? <button type="button" className="ui-icon-button" aria-label={t("addAttachment")}
+          disabled={editingLocked || !workspaceId || uploading || !onAttachmentsChange} onClick={() => openPicker(false)}><PlusIcon size={18}/></button> : <ComposerAddMenu disabled={editingLocked} uploadDisabled={!workspaceId || uploading || !onAttachmentsChange}
           settings={settings} onSettingsChange={onSettingsChange}
-          onFiles={openPicker} onTrigger={suggestions.openTrigger} onOpen={suggestions.dismiss} inputRef={textareaRef} />
-        <div data-composer-options>
+          onFiles={openPicker} onTrigger={suggestions.openTrigger} onOpen={suggestions.dismiss} inputRef={textareaRef} />}
+        {!assistant && <div data-composer-options>
           <ComposerPermissionMenu settings={settings} onSettingsChange={onSettingsChange} disabled={editingLocked} size={variant} compact/>
-        </div>
+        </div>}
         <div data-composer-models title={sending ? (zh ? "模型与权限更改只用于下一条消息，不改变正在执行的任务。" : "Model and permission changes apply to the next message, not the running task.") : undefined} className="ml-auto flex min-w-0 items-center gap-1.5">
-          {!external && <ComposerModelMenu settings={settings} onSettingsChange={onSettingsChange} modelOptions={modelOptions} disabled={editingLocked} size={variant} />}
-          {contextControl}
+          {!external && !assistant && <ComposerModelMenu settings={settings} onSettingsChange={onSettingsChange} modelOptions={modelOptions} disabled={editingLocked} size={variant} />}
+          {!assistant && contextControl}
         </div>
         <div data-composer-actions>
           {sending && value.trim() && onGuide ? <button type="button" onClick={onGuide} data-testid="guide-current-turn" disabled={!canSend || attachments.length > 0}
@@ -279,7 +281,7 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
           {sending && onCancel ? <button type="button" onClick={onCancel} disabled={stopping} aria-busy={stopping} data-testid="stop-current-command"
             className="ui-icon-button border border-[color:var(--line-hi)] disabled:opacity-40" title={zh?"请求停止当前轮次；已完成的外部操作不会撤销。":"Request this turn to stop. Completed external actions remain."} aria-label={stopping ? (zh ? "正在停止" : "Stopping") : t("cancelTurn")}><StopIcon size={17} /></button> : null}
           {(!sending||Boolean(value.trim()||attachments.length))&&<button type="button" onClick={submit} disabled={!canSend} aria-label={sendLabel} title={locked ? lockMessage : sendLabel} aria-busy={busy}
-            data-testid="native-command-send" className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-full bg-brand-500 text-white transition-colors hover:bg-brand-400 disabled:cursor-not-allowed disabled:opacity-40 ${sending ? "px-3" : "w-9"}`}><SendIcon size={17} />{sending ? <span className="text-xs">{sendLabel}</span> : null}</button>}
+            data-testid="native-command-send" className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-full bg-brand-500 text-white transition-colors hover:bg-brand-400 disabled:cursor-not-allowed disabled:opacity-40 ${sending && !assistant ? "px-3" : "w-9"}`}><SendIcon size={17} />{sending && !assistant ? <span className="text-xs">{sendLabel}</span> : null}</button>}
         </div>
       </div>}
       {sendStatus && <p id={`${fieldId}-send-status`} role="status" className="mt-2 text-xs text-[color:var(--text-muted)]">{sendStatus}</p>}

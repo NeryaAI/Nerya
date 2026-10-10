@@ -576,6 +576,7 @@ export type GatewayChannelConfig = {
   mode: string;
   outbound_ready: boolean;
   config: Record<string, unknown>;
+  assistant_id?: string;
   secret_refs: Record<string, GatewaySecretRef>;
 };
 
@@ -590,6 +591,7 @@ export type GatewayConfigEnvelope = {
 
 export type GatewayUpsertRequest = {
   channel: string;
+  assistant_id?: string;
   kind: string;
   platform?: string;
   enabled?: boolean;

@@ -99,6 +99,8 @@ class ScheduleEntry:
     session_mode: str = "reuse"
     session_id: str | None = None
     session_ids: list[str] = field(default_factory=list)
+    execution: dict[str, Any] = field(default_factory=dict)
+    owner_actor_id: str = "local:loopback"
 
     def __post_init__(self) -> None:
         self.session_kind = str(self.session_kind or "trigger").strip().lower()
@@ -262,6 +264,8 @@ def load_schedules(paths: WorkspacePaths) -> list[ScheduleEntry]:
             # Default interval mirrors the old behaviour (60s) only when
             # the caller gave nothing at all.
             kwargs["every_seconds"] = int(row.get("every_seconds") or 60)
+        kwargs["execution"] = dict(row.get("execution") or {})
+        kwargs["owner_actor_id"] = str(row.get("owner_actor_id") or "local:loopback")
         out.append(ScheduleEntry(**kwargs))
     return out
 
@@ -292,6 +296,10 @@ def save_schedules(paths: WorkspacePaths, entries: list[ScheduleEntry]) -> None:
             row["ends_at"] = e.ends_at
         if e.strategy_id:
             row["strategy_id"] = e.strategy_id
+        if e.execution:
+            row["execution"] = dict(e.execution)
+        if e.owner_actor_id != "local:loopback":
+            row["owner_actor_id"] = e.owner_actor_id
         if e.payload:
             row["payload"] = dict(e.payload)
         if e.timezone:

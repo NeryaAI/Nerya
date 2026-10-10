@@ -563,6 +563,11 @@ def routes():
 
     def run_turn(client, payload, *, enforce_public_gate: bool = True):
         payload = payload if isinstance(payload, dict) else {}
+        from ..agent.assistants import AssistantError, prepare_request
+        try:
+            payload = prepare_request(client.config, payload)
+        except AssistantError as exc:
+            return {"ok": False, "error": exc.code, "_status": exc.status}
         # Permission mode resolution order (most → least specific):
         # explicit payload field, env override, default. Env override
         # ``NERYA_PERMISSION_MODE`` exists so headless / unattended runs
@@ -598,6 +603,8 @@ def routes():
         model_provider = _normalise_model_provider(payload.get("model_provider"))
         model_id = _normalise_model_id(payload.get("model_id") or payload.get("model"))
         run_config = _with_turn_limit_overrides(client.config, payload)
+        from ..agent.assistants import AssistantStore, assistant_config
+        run_config = assistant_config(run_config, AssistantStore(run_config.paths).for_session(payload.get("session_id")), session_id=payload.get("session_id"))
         from copy import deepcopy
         from ..core.config import Config
         run_config = Config(paths=run_config.paths,data=deepcopy(run_config.data))
@@ -840,7 +847,7 @@ def routes():
         # Operator profile self-learning capture — propose facts after
         # stable patterns are observed. Never blocks the turn; failures
         # are swallowed.
-        if not resume_turn_id and not (response.get("strategy_id") or payload.get("strategy_id")):
+        if not resume_turn_id and not (response.get("strategy_id") or payload.get("strategy_id")) and run_config.get("agent.native.assistant_profile.memory_allowed", True):
             try:
                 from ..agent.profile_capture import observe_turn as _observe_turn
                 _channel_for_capture = (

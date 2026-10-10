@@ -133,6 +133,8 @@ from .resources import (
 )
 from .search import glob_handler, grep_handler
 from .tasks import (
+    ASSISTANT_TASK_CREATE_SCHEMA,
+    assistant_task_create_handler,
     SUBAGENT_RUN_ASYNC_SCHEMA,
     TASK_CREATE_SCHEMA,
     TASK_GET_SCHEMA,
@@ -856,35 +858,44 @@ def _wrap_subagent_run_async(deps: NativeToolDeps):
 
 def _wrap_task_create(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return task_create_handler(call, workspace=deps.workspace_root)
+        from dataclasses import replace
+        from ...agent.assistants import AssistantStore, DEFAULT_ID
+        args = dict(call.arguments or {})
+        profile = AssistantStore(deps.paths).for_session(deps.active_session_id) if deps.paths else None
+        if deps.active_session_id:
+            args["payload"] = {**dict(args.get("payload") or {}), "assistant_conversation_id": deps.active_session_id, "title": str(args.get("title") or "")}
+            args["execution"] = {**dict(args.get("execution") or {}), "assistant_id": (profile or {"id": DEFAULT_ID})["id"]}
+            args["owner_actor_id"] = deps.active_actor_id or "local:loopback"
+        result = task_create_handler(replace(call, arguments=args), workspace=deps.workspace_root)
+        return result
 
     return handler
 
 
 def _wrap_task_list(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return task_list_handler(call, store=deps.task_store)
+        return task_list_handler(call, store=deps.task_store, owner_session_id=deps.active_session_id)
 
     return handler
 
 
 def _wrap_task_get(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return task_get_handler(call, store=deps.task_store)
+        return task_get_handler(call, store=deps.task_store, owner_session_id=deps.active_session_id)
 
     return handler
 
 
 def _wrap_task_output(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return task_output_handler(call, store=deps.task_store)
+        return task_output_handler(call, store=deps.task_store, owner_session_id=deps.active_session_id)
 
     return handler
 
 
 def _wrap_task_stop(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return task_stop_handler(call, store=deps.task_store)
+        return task_stop_handler(call, store=deps.task_store, config=deps.config, session_id=deps.active_session_id)
 
     return handler
 
@@ -898,7 +909,7 @@ def _wrap_task_update(deps: NativeToolDeps):
 
 def _wrap_task_summary(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return task_summary_handler(call, store=deps.task_store)
+        return task_summary_handler(call, store=deps.task_store, owner_session_id=deps.active_session_id)
 
     return handler
 
@@ -2812,6 +2823,16 @@ def register_native_tools(
                     is_concurrency_safe=True,
                     tags=("subagent", "team", "configuration"),
                     result_kind="json",
+                ),
+                make_native_descriptor(
+                    name="assistant_task_create",
+                    description="Delegate investment research, strategy creation, reports or other complex work to an independent task conversation. Supply a title, kind and complete instructions including relevant user context. Return the task receipt and conversation link immediately; completion conclusions return to the assistant and the report/result list. Simple chat stays here. Use task_create for explicitly requested recurring schedules. Do not create another assistant.",
+                    input_schema=ASSISTANT_TASK_CREATE_SCHEMA,
+                    handler=lambda call: assistant_task_create_handler(call, config=deps.config, skills=deps.skills,
+                        store=deps.task_store, session_id=deps.active_session_id, actor_id=deps.active_actor_id or "local"),
+                    risk=RiskLevel.EXEC, permission_scope=PermissionScope.WORKSPACE,
+                    read_only=False, is_concurrency_safe=False, auto_approve=True,
+                    child_max_depth=1, tags=("assistant", "task", "async"), result_kind="json",
                 ),
                 make_native_descriptor(
                     name="subagent_run_async",

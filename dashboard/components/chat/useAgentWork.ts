@@ -118,7 +118,7 @@ export function useAgentWork(thread: ChatThread | null) {
     return () => { cancelled = true; controller.abort(); clearTimeout(timer); };
   }, [sessionId, loading, refreshKey]);
   const history = useMemo(() => historicalAgentWork(thread), [thread]);
-  const rows = useMemo(() => mergeAgentWork(snapshot.session === sessionId ? snapshot.rows : [], history), [snapshot, sessionId, history]);
+  const rows = useMemo(() => mergeAgentWork(snapshot.session === sessionId ? snapshot.rows : [], history).filter(row => row.name !== "assistant_task"), [snapshot, sessionId, history]);
   return { rows, sessionId, error: snapshot.session === sessionId ? snapshot.error : "", refresh };
 }
 

@@ -21,7 +21,10 @@ When the user calls it a strategy, needs new script logic, or requires a numeric
 CLASSIFY the task as one-off background work, recurring agent work, recurring
 approved-script work, or just progress inspection.
 
-For one-off background subagent work, use native `subagent_run_async`, then
+For one-off work created directly in an assistant conversation, use native
+`assistant_task_create` with a title and full task instructions. Its progress
+and result stay in that conversation. For an explicitly selected subagent role,
+use native `subagent_run_async`, then
 monitor with `task_summary`, `task_get`, `task_output`, or `task_stop`.
 
 For recurring work, run `scripts/create_task.py`. It writes a schedule with

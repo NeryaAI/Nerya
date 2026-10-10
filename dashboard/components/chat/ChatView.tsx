@@ -1,4 +1,5 @@
 "use client";
+import { useCallback } from "react";
 import { Icon as NeryaGlyph } from "../icons";
 import { copy as i18nCopy } from "../../lib/i18n";
 
@@ -6,12 +7,17 @@ import { StrategyWorkflowPanel } from "../workflows/StrategyWorkflowPanel";
 import { BacktestChart } from "../backtest/BacktestChart";
 import { WorkspaceFiles } from "./WorkspaceFiles";
 import { TaskDeliverables } from "./TaskDeliverables";
+import { useAssistantTasks } from "./useAssistantTasks";
+import { AssistantChatHeader } from "../AssistantChatHeader";
+import { AssistantAvatar } from "../NeryaLogo";
+import { AssistantResults } from "../shell/AssistantResults";
+import { assistantsApi, type AssistantProfile } from "../../lib/assistants";
 import { WorkspaceTerminal } from "./WorkspaceTerminal";
 import { useStrategyReports } from "./useStrategyReports";
 import { resolveMessageApproval } from "../../lib/approvalResolution";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import {
   callApi,
@@ -45,6 +51,7 @@ import {
   uuid,
 } from "../../lib/chat";
 import { AssistantBubble, UserBubble } from "./ChatMessage";
+import { AssistantReplyBubble } from "./AssistantReplyBubble";
 import { ExternalCallMessage } from "./ExternalCallMessage";
 import { ExternalSessionTimeline } from "./ExternalSessionTimeline";
 import { requestConversationReveal } from "./timelineReveal";
@@ -70,7 +77,6 @@ import { useChatDraft } from "./useChatDraft";
 import { useMessageHistory } from "./useMessageHistory";
 import { HistoryDeleteDialog } from "./ChatHistoryActions";
 import { historyPending, historyRevision, HISTORY_CHANGED_EVENT } from "../../lib/historyClient";
-import { AgentStart } from "./AgentStart";
 import { AgentTaskBar, AgentWorkPanel } from "./AgentWorkspace";
 import { ChatTaskHeader } from "./ChatTaskHeader";
 import { collectChatResults, type ChatResult } from "../../lib/chatResults";
@@ -372,15 +378,56 @@ function pendingApprovalIdsForThread(
 }
 
 export function ChatView({ sessionId }: { sessionId?: string } = {}) {
-  const workspace = useWorkspaceIdentity();
-  return <WorkspaceChatView key={workspace || "unresolved"} sessionId={sessionId}/>;
+  return <Suspense><AssistantScopedChatView sessionId={sessionId} /></Suspense>;
 }
 
-function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
+function AssistantScopedChatView({ sessionId }: { sessionId?: string }) {
+  const workspace = useWorkspaceIdentity();
+  const query = useSearchParams();
+  const router = useRouter();
+  const [homeError, setHomeError] = useState("");
+  const assistantId = query?.get("assistant") || "main";
+  const isTask = query?.get("conversation") === "task";
+  useEffect(() => {
+    if (sessionId || isTask) return;
+    let active = true; setHomeError("");
+    assistantsApi.home(assistantId).then(home => {
+      if (!active) return;
+      const next = new URLSearchParams(query?.toString()); next.delete("assistant");
+      router.replace("/chat/" + encodeURIComponent(home.session_id) + (next.size ? "?" + next : ""));
+    }).catch(error => { if (active) setHomeError(String(error)); });
+    return () => { active = false; };
+  }, [sessionId, isTask, assistantId, router, query]);
+  if (!sessionId && !isTask) return <p role={homeError ? "alert" : "status"} className="p-6 text-sm text-[color:var(--text-muted)]">{homeError || "…"}</p>;
+  return <WorkspaceChatView key={(workspace || "unresolved") + ":" + (sessionId || assistantId)} sessionId={sessionId} preferredAssistantId={assistantId}/>;
+}
+
+function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: string; preferredAssistantId: string }) {
+  const [assistantIdentity, setAssistantIdentity] = useState<AssistantProfile | null>(null);
+  const [assistantConversation, setAssistantConversation] = useState<{sessionId?: string; kind?: string; parentSessionId?: string}>({});
+  const onAssistantIdentity = useCallback((profile: AssistantProfile, kind?: string, parentSessionId?: string) => {
+    setAssistantIdentity(profile); setAssistantConversation({sessionId, kind, parentSessionId});
+  }, [sessionId]);
+  const tAssistants = useTranslations("assistants");
+  const [requestedReport, setRequestedReport] = useState<{commandId: string} | null>(null);
   const router = useRouter();
   const t = useTranslations("chat");
   const tCommon = useTranslations("common");
   const [threads, setThreads] = useState<ChatThread[]>([]);
+  useEffect(() => {
+    if (!sessionId) return;
+    let active = true;
+    async function refreshResult(event: Event) {
+      if ((event as CustomEvent).detail?.sessionId !== sessionId) return;
+      const row = await clientApi.sessionGet(sessionId!);
+      if (!("session_id" in row)) return;
+      const imported = await buildImportedThread(sessionId!, {...row, title: sessionTitle(row, sessionId!)});
+      if (active && imported) setThreads(previous => upsertThread(previous, mergeAuthoritativeThread(previous.find(thread => thread.id === sessionId), imported)));
+    }
+    const refresh = (event: Event) => { void refreshResult(event).catch(() => {}); };
+    window.addEventListener("nerya:assistant-result", refresh);
+    return () => { active = false; window.removeEventListener("nerya:assistant-result", refresh); };
+  }, [sessionId]);
   const draftScope = sessionId || `new:${typeof window !== "undefined" ? window.location.search : ""}`;
   const draft = useChatDraft(draftScope);
   const { text: input, setText: setInput, attachments, setAttachments } = draft;
@@ -1013,6 +1060,13 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
     [active, pendingApprovals],
   );
   const activeApprovalKey = activeApprovalIds.join("|");
+  const isAssistantConversation = !active?.strategy_id && !externalView && (
+    assistantConversation.sessionId === sessionId && assistantConversation.kind
+      ? assistantConversation.kind === "assistant"
+      : active?.source === "assistant" || Boolean(sessionId?.startsWith("assistant_"))
+  );
+  const taskOwnerSession = assistantConversation.sessionId === sessionId ? assistantConversation.parentSessionId || active?.id || sessionId : active?.id || sessionId;
+  const assistantTasks = useAssistantTasks(!active?.strategy_id && !externalView ? taskOwnerSession : undefined);
   const activeLiveEventCount = useMemo(
     () =>
       active?.messages.reduce(
@@ -1102,10 +1156,11 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
     ...(agentWork.rows.length ? [{ id: 'agents' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.004") }] : []),
   ];
   const toolTabs = [{ id: 'deliverables' as TaskDockTab, label: zh ? "任务产物" : "Task deliverables" }, { id: 'files' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.005") }, { id: 'browser' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.006") }, { id: 'terminal' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.007") }];
-  const dockChoices = [...new Map([...toolTabs, ...automaticTabs, ...instrumentTabs].map(tab => [tab.id, tab])).values()];
+  const reportTabs = !active?.strategy_id && !externalView ? [{id: "reports" as TaskDockTab, label: tAssistants("reportsAndResults")}] : [];
+  const dockChoices = [...new Map([...toolTabs, ...reportTabs, ...automaticTabs, ...instrumentTabs].map(tab => [tab.id, tab])).values()];
   // On compact layouts the workspace replaces, rather than sits beside, chat.
   // Discovering old results must not navigate away from the conversation.
-  const taskDock = useTaskDock(researchSession, ['deliverables', ...[...automaticTabs, ...instrumentTabs].map(tab => tab.id)], [], true);
+  const taskDock = useTaskDock(researchSession, ['deliverables', ...[...reportTabs, ...automaticTabs, ...instrumentTabs].map(tab => tab.id)], [], true);
   const fileTabKey = JSON.stringify(taskDock.tabs.filter(id => id.startsWith('file:')));
   const openedFiles = useMemo(() => (JSON.parse(fileTabKey) as string[]).map(id => ({ id, item: workspaceFileItem(id.slice(5)) })), [fileTabKey]);
   const dockTabs = taskDock.tabs.flatMap(id => { const tab = dockChoices.find(tab => tab.id === id); const detail = parseStrategyDetailId(id); return tab ? [tab] : detail ? [{ id, label: strategyDetailLabel(detail, zh) }] : id.startsWith('file:') ? [{ id, label: id.slice(5).split('/').pop() || id.slice(5) }] : []; });
@@ -1400,18 +1455,19 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
     const commandKind = options.commandKind || (options.resumeTurnId ? "resume" : "send");
     const body: Record<string, unknown> = {
       source: options.source || "user_chat", kind: options.kind || "user.chat", target: "main",
+      ...(!thread.strategy_id && !externalView ? {assistant_id: assistantIdentity?.id || preferredAssistantId, conversation_kind: isAssistantConversation ? "assistant" : "task"} : {}),
       payload: { text: clean || "Please review the attached files.", channel: options.channel || "dashboard",
         attachments: outgoing.map(attachmentForRequest), ...(options.payloadExtra ?? {}) },
       ...(thread.strategy_id ? { strategy_id: thread.strategy_id, strategy_proposal_id: thread.strategy_proposal_id || undefined } : {}),
-      reasoning_effort: runSettings.reasoning_effort === "inherit" ? undefined : runSettings.reasoning_effort,
-      reasoning_summary: ["inherit", "off"].includes(runSettings.reasoning_effort) ? undefined : "auto",
+      reasoning_effort: isAssistantConversation || runSettings.reasoning_effort === "inherit" ? undefined : runSettings.reasoning_effort,
+      reasoning_summary: isAssistantConversation || ["inherit", "off"].includes(runSettings.reasoning_effort) ? undefined : "auto",
       ...(options.runOnly ? {run_only:true} : {}),
-      work_mode: runSettings.work_mode || "execute",
-      permission_mode: runSettings.permission_mode, model_tier: runSettings.model_tier || undefined,
-      model_provider: runSettings.model_provider || undefined, model_id: runSettings.model_id || undefined,
-      model_context_window: runSettings.model_context_window || undefined, max_iterations: runSettings.max_iterations,
+      work_mode: isAssistantConversation ? "execute" : runSettings.work_mode || "execute",
+      permission_mode: isAssistantConversation ? undefined : runSettings.permission_mode, model_tier: isAssistantConversation ? undefined : runSettings.model_tier || undefined,
+      model_provider: isAssistantConversation ? undefined : runSettings.model_provider || undefined, model_id: isAssistantConversation ? undefined : runSettings.model_id || undefined,
+      model_context_window: isAssistantConversation ? undefined : runSettings.model_context_window || undefined, max_iterations: runSettings.max_iterations,
       max_total_tool_calls: runSettings.max_total_tool_calls, max_wall_seconds: runSettings.max_wall_seconds,
-      evidence_contract: runSettings.evidence_contract,
+      evidence_contract: isAssistantConversation ? undefined : runSettings.evidence_contract,
       ...(options.resumeTurnId ? { resume_turn_id: options.resumeTurnId, continuation_feedback: clean } : {}),
     };
     turnInFlightRef.current = true; setSubmitting(true);
@@ -1449,7 +1505,7 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
     const index = active.messages.findIndex(message => message.id === assistantMsgId);
     const failed = active.messages[index], previous = active.messages[index-1];
     if (failed?.role !== "assistant" || failed.execution_status === "unconfirmed" || previous?.role !== "user") return;
-    const accepted = await confirmDialog({
+    const accepted = isAssistantConversation || await confirmDialog({
       title: zh ? "重新运行任务" : "Run the task again",
       message: zh ? "这会新建一轮，可能重新获取数据或执行动作。原失败记录和已完成操作会保留；有可用断点时优先使用“从断点继续”。" : "This starts a new turn and may fetch data or execute actions again. The previous record and completed actions remain. Prefer a checkpoint when available.",
       okLabel: zh ? "新建一轮运行" : "Start a new turn", cancelLabel: zh ? "取消" : "Cancel",
@@ -1562,7 +1618,7 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
     onChange: setInput,
     onSend: () => { followLatest.current = true; setReadingHistory(false); send(input); },
     onCancel: externalView ? undefined : () => { void cancel(); },
-    onGuide: !externalView && commandEngine.active?.state === "running" ? () => { void runAgentTurn(input, { commandKind: "guide", attachments: [] }); } : undefined,
+    onGuide: !externalView && !isAssistantConversation && commandEngine.active?.state === "running" ? () => { void runAgentTurn(input, { commandKind: "guide", attachments: [] }); } : undefined,
     submitting: externalView ? externalSending : submitting,
     stopping: stopPending || commandEngine.active?.state === "stopping",
     sending: externalView ? externalSending : Boolean(commandEngine.active),
@@ -1570,9 +1626,10 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
     queued: !externalView && delivery.mode === "queue",
     locked: externalView ? !active : !delivery.canSubmit || history.pending || Boolean(history.edit),
     external: externalView,
-    placeholder: externalView ? (zh ? '向此会话追加消息…' : 'Add a message to this session…') : delivery.mode === 'queue' ? (zh ? '补充消息，加入队列…' : 'Add a follow-up to the queue…') : (zh ? '继续追问…' : 'Ask a follow-up…'),
+    placeholder: isAssistantConversation ? tAssistants("messageAssistant", {name: assistantIdentity?.name || "Nerya"}) : externalView ? (zh ? '向此会话追加消息…' : 'Add a message to this session…') : delivery.mode === 'queue' ? (zh ? '补充消息，加入队列…' : 'Add a follow-up to the queue…') : (zh ? '继续追问…' : 'Ask a follow-up…'),
     lockMessage: awaitingApproval ? t("approvalPaused") : workbench.view?.pending_interactions.length ? (zh ? "请先处理上方问题或计划；可以继续撰写草稿。" : "Resolve the question or plan above before sending. You can keep drafting.") : history.edit ? th("editLabel") : workbench.connection==="connecting" ? (zh?"正在连接…":"Connecting…") : (zh?"连接暂不可用":"Connection unavailable"),
     settings,
+    assistant: isAssistantConversation,
     contextControl:externalView?undefined:<ComposerContextSummary thread={active} settings={settings}/>,
     onSettingsChange: (next:ChatRunSettings)=>{setSettings(next);draft.setSettings(next);},
     modelOptions,
@@ -1592,13 +1649,20 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
     <ResearchVisualContext.Provider value={openResearchVisual}>
     <ResearchInstrumentContext.Provider value={openResearchInstrument}>
     <StrategyDetailContext.Provider value={{ open: openStrategyDetail, active: canvasVisible ? taskDock.selected : '' }}>
-    <div className={`${styles.workbench} flex h-full min-h-0 min-w-0 flex-col`} data-testid="chat-workbench">
-      <RuntimeNotice workbench={workbench} />
-      <ChatTaskHeader diagnostics={<><RuntimeNotice workbench={workbench} diagnostics/><TaskProvenance thread={active}/></>} workStatus={taskStatus(active,commandEngine.commands,workbench.view)} connection={workbench.connection} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]} sending={sending}
+    <div className={`${styles.workbench} flex h-full min-h-0 min-w-0 flex-col`} data-testid="chat-workbench" data-conversation-kind={isAssistantConversation ? "assistant" : "task"}>
+      {!active?.strategy_id && !externalView && <AssistantChatHeader sessionId={active?.id || sessionId} preferredId={preferredAssistantId} onIdentity={onAssistantIdentity}
+        onToggleReports={isAssistantConversation ? () => { setRequestedReport(null); if (canvasVisible && taskDock.selected === "reports") closeCanvas(); else selectWorkspace("reports", true); } : undefined}
+        reportsOpen={canvasVisible && taskDock.selected === "reports"} tasks={assistantTasks}
+        lastActiveAt={Math.max(0, ...(active?.messages.filter(message => message.role === "assistant").map(message => message.ts) || []))}
+        onOpenReports={() => { setRequestedReport(null); selectWorkspace("reports", true); }}
+        onOpenResult={commandId => { setRequestedReport({commandId}); selectWorkspace("reports", true); }} />}
+      {!isAssistantConversation && <RuntimeNotice workbench={workbench} />}
+      {!isAssistantConversation && <ChatTaskHeader diagnostics={<><RuntimeNotice workbench={workbench} diagnostics/><TaskProvenance thread={active}/></>} workStatus={taskStatus(active,commandEngine.commands,workbench.view)} connection={workbench.connection} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]} sending={sending}
         approvalCount={activeApprovalIds.length} loading={showLoading} showTabs tab={taskDock.selected || ''}
         workspaceAvailable canvasVisible={canvasVisible} onSelect={(tab) => selectWorkspace(tab, true)}
         onToggleBrowser={openBrowserDock}
-        onToggleCanvas={() => { if (canvasVisible) closeCanvas(); else openDock(); }} onOpenResult={openResult} />
+        onToggleCanvas={() => { if (canvasVisible) closeCanvas(); else openDock(); }} onOpenResult={openResult}
+        onToggleReports={reportTabs.length ? ()=>{setRequestedReport(null);if(canvasVisible && taskDock.selected === "reports") closeCanvas(); else selectWorkspace("reports",true);} : undefined}/>}
 
       {commandEngine.data?.branch_of && <div className="shrink-0 border-b border-[color:var(--line)] px-5 py-2 text-xs text-[color:var(--text-muted)]" data-testid="branch-origin">
         {zh ? '此分支保留了原会话上下文，不包含原操作的可执行副本。' : 'This branch retains conversation context, not executable copies of prior actions.'}
@@ -1617,9 +1681,14 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
       <div hidden={hideSource} className={!hideSource ? "flex min-h-0 min-w-0 flex-1 flex-col" : "hidden"} data-testid="workspace-source">
       <section id="chat-workspace-panel-conversation" aria-label={i18nCopy(zh, "copy.components_chat_ChatView.011")} className="flex min-h-0 flex-1 flex-col min-w-0">
         {showHero ? (
-          <div className="min-h-0 flex-1 overflow-y-auto">
-          <AgentStart value={input} onChange={setInput} disabled={sending || awaitingApproval}
-            composer={<><ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+'\n'+text : text)} /><ChatInput {...composerProps} variant="hero" /></>} />
+          <div className="flex min-h-0 flex-1 flex-col" data-testid="assistant-empty-conversation">
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 pb-12 text-center">
+              <AssistantAvatar profile={assistantIdentity} size={72} className="mb-4" />
+              <h2 className="text-xl font-medium tracking-tight">{tAssistants("greeting", {name: assistantIdentity?.name || "Nerya"})}</h2>
+              <p className="mt-2 max-w-md text-sm leading-7 text-[color:var(--text-muted)]">{tAssistants("chatHint")}</p>
+            </div>
+            <ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+'\n'+text : text)} />
+            <ChatInput {...composerProps} variant="docked" />
           </div>
         ) : (
           <>
@@ -1688,7 +1757,7 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
                 </div>
               ) : (
                 <div ref={transcriptRef} className={styles.conversation} data-testid="conversation-content">
-                  {isExternalSource(active?.source) ? <ExternalSessionTimeline session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} traces={active!.messages.flatMap(m => m.role === "assistant" && m.turn?.external_call ? [m.turn.external_call] : [])} userMessages={active!.messages.filter((m): m is UserMessage => m.role === 'user')} pendingApprovals={pendingApprovals} onApprovalAction={resolveApproval} resolvingApprovalIds={resolvingApprovalIds} /> : <ConversationTimeline messages={active!.messages} session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} renderMessage={(m,mi)=>
+                  {isExternalSource(active?.source) ? <ExternalSessionTimeline session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} traces={active!.messages.flatMap(m => m.role === "assistant" && m.turn?.external_call ? [m.turn.external_call] : [])} userMessages={active!.messages.filter((m): m is UserMessage => m.role === 'user')} pendingApprovals={pendingApprovals} onApprovalAction={resolveApproval} resolvingApprovalIds={resolvingApprovalIds} /> : <ConversationTimeline publicOnly={isAssistantConversation} messages={active!.messages} session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} renderMessage={(m,mi)=>
                     m.role === "user" ? (
                       <UserBubble
                         key={m.id}
@@ -1706,6 +1775,10 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
                         editError={history.editError}
                         actionsDisabled={sending || awaitingApproval || history.pending || externalView}
                       />
+                    ) : isAssistantConversation ? (
+                      <AssistantReplyBubble key={m.id} message={m}
+                        onContinue={!sending && commandEngine.data?.checkpoint?.turn_id === m.turn?.turn_id && commandEngine.data?.checkpoint?.resumable && m.execution_status !== "unconfirmed" ? () => continueCheckpoint(m.turn!.turn_id!) : undefined}
+                        onRetry={m.error && !m.loading && m.execution_status !== "unconfirmed" && active!.messages[mi - 1]?.role === "user" ? () => void retryFailedTurn(m.id) : undefined} />
                     ) : m.turn?.external_call ? (
                       <ExternalCallMessage key={m.id} trace={m.turn.external_call} />
                     ) : (
@@ -1748,8 +1821,8 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
             {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[800px] flex-wrap items-center gap-2 px-4 text-xs" role="status"><span>{zh?"找到其他窗口保存的草稿":"Saved drafts from other windows"}</span>{draft.recovery.slice(0,3).map(row=><button type="button" key={row.key} className="min-h-11 underline" onClick={()=>draft.restore(row)}>{zh?"恢复：":"Restore: "}{row.draft.text.slice(0,40)||row.draft.attachments[0]?.name}</button>)}<button type="button" className="min-h-11" onClick={draft.dismissRecovery}>{zh?"忽略":"Dismiss"}</button></div>}
             {draft.storageError&&<p role="status" className="mx-auto max-w-[800px] px-4 text-xs text-warn">{zh?"持久化草稿暂不可用，当前输入仍保留在此窗口。":"Persistent draft storage is unavailable. Current input remains in this window."}</p>}
             {workbench.view?.pending_interactions.length ? <InteractionPanel items={workbench.view.pending_interactions} onResolved={()=>{workbench.refresh();commandEngine.refresh();}} /> : null}
-            {!externalView && <ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+"\n"+text : text)} />}
-            {!externalView && <ChatInput {...composerProps} variant="docked" taskHeader={agentWork.rows.length ? (
+            {!externalView && (!isAssistantConversation || commandEngine.pending.length > 0 || commandEngine.commands.some(command => command.state === "unconfirmed") || commandEngine.connection === "offline" || commandEngine.data?.checkpoint?.resumable || commandEngine.data?.queue.pause_reason === "operator" || Boolean(commandEngine.data?.queue.paused && commandEngine.commands.some(command => command.state === "queued"))) && <ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+"\n"+text : text)} />}
+            {!externalView && <ChatInput {...composerProps} variant="docked" taskHeader={!isAssistantConversation && agentWork.rows.length ? (
               <AgentTaskBar source={agentWork} open={canvasVisible && taskDock.selected === 'agents'} onOpen={() => selectWorkspace("agents", true)} />
             ) : undefined} />}
           </>
@@ -1783,6 +1856,9 @@ function WorkspaceChatView({ sessionId }: { sessionId?: string }) {
         {!dockTabs.length && <div className="flex min-h-0 flex-1 items-center justify-center px-6" data-testid="workspace-launcher"><div className="w-full max-w-md space-y-1">
           {toolTabs.map(tab => <button type="button" key={tab.id} onClick={() => selectWorkspace(tab.id, true)} className="flex min-h-11 w-full items-center gap-3 rounded-lg bg-[color:var(--panel-bg)] px-4 text-left text-sm hover:bg-[color:var(--line)] focus-visible:ring-2"><NeryaGlyph name={tab.id === 'files' ? 'folder' : tab.id === 'browser' ? 'globe' : 'terminal'} size={18} className="text-[color:var(--text-muted)]" />{tab.label}</button>)}
         </div></div>}
+        {taskDock.tabs.includes('reports') && <section id="task-dock-panel-reports" role="tabpanel" aria-labelledby="task-dock-tab-reports" hidden={taskDock.selected !== 'reports'} className={taskDock.selected === 'reports' ? 'min-h-0 flex-1' : 'hidden'}>
+          {taskDock.selected === 'reports' && <AssistantResults assistantId={assistantIdentity?.id || preferredAssistantId} requestedResult={requestedReport} onOpenFile={path=>{taskDock.select(("file:"+path) as TaskDockTab);focusDock("file:"+path);}}/>}
+        </section>}
         {taskDock.tabs.includes('strategy') && strategyId && <section id="task-dock-panel-strategy" role="tabpanel" aria-labelledby="task-dock-tab-strategy" hidden={taskDock.selected !== 'strategy'} className={taskDock.selected === 'strategy' ? 'min-h-0 flex-1 overflow-auto' : 'hidden'}>
           {strategyReports.error && <div role="alert" className="flex items-center justify-between gap-2 px-4 py-2 text-xs text-warn"><span>{i18nCopy(zh, "copy.components_chat_ChatView.015")}</span><button type="button" onClick={strategyReports.retry} className="underline">{i18nCopy(zh, "copy.components_chat_ChatView.016")}</button></div>}
           <StrategyWorkflowPanel key={strategyId} embedded strategyId={strategyId} proposalId={strategyProposal} onDirtyChange={setStrategyDirty} onSaved={(view) => {

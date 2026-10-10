@@ -67,6 +67,7 @@ class CommandContext:
     save_state: Callable[[Mapping[str, Any]], None] | None = None
     delete_session: Callable[[str], None] | None = None
     dashboard_url: str = ""
+    assistant_id: str = "main"
 
     def update_state(self, **values: Any) -> None:
         if self.save_state is None:
@@ -307,6 +308,9 @@ def _last_session_message(paths: Any, session_id: str) -> str:
 def _handle_sessions(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
     try:
         rows = _shared_session_rows(ctx.client.config.paths, limit=12)
+        from ..agent.assistants import AssistantStore
+        store = AssistantStore(ctx.client.config.paths)
+        rows = [row for row in rows if ((store.for_session(row.get("session_id"), enabled=False) or {"id": "main"})["id"] == ctx.assistant_id)]
     except Exception as exc:
         return CommandOutcome(
             handled=True,
@@ -353,6 +357,13 @@ def _handle_session(spec: CommandSpec, ctx: CommandContext) -> CommandOutcome:
             reply_text=f"No session named `{target}`.",
             command=spec.name,
         )
+    from ..agent.assistants import AssistantStore, AssistantError
+    try:
+        profile = AssistantStore(ctx.client.config.paths).for_session(target, enabled=False)
+        if (profile or {"id": "main"})["id"] != ctx.assistant_id:
+            return CommandOutcome(handled=True, reply_text="This conversation belongs to another assistant. Select a conversation belonging to this assistant.", command=spec.name)
+    except AssistantError:
+        return CommandOutcome(handled=True, reply_text="The assistant for this conversation is unavailable.", command=spec.name)
     active = dict(ctx.state.get("active_sessions") or {}) if isinstance(ctx.state, Mapping) else {}
     active[str(ctx.session_key or ctx.chat_id)] = target
     ctx.update_state(active_sessions=active)

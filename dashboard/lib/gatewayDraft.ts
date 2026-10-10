@@ -15,6 +15,7 @@
 import type { GatewayChannelConfig, GatewayPlatformSpec } from "./clientApi";
 
 export type GatewayDraft = {
+  assistant_id: string;
   channel: string;
   kind: string;
   enabled: boolean;
@@ -41,6 +42,7 @@ export type GatewayDraft = {
 
 export function emptyGatewayDraft(kind = "telegram"): GatewayDraft {
   return {
+    assistant_id: "main",
     channel: kind === "telegram" ? "telegram" : `${kind}_ops`,
     kind,
     enabled: true,
@@ -119,6 +121,7 @@ export function gatewayDraftFromChannel(
   }
   return {
     ...emptyGatewayDraft(channel.kind),
+    assistant_id: cfgString(cfg, "assistant_id", "main"),
     channel: channel.channel,
     kind: channel.kind,
     enabled: channel.enabled,

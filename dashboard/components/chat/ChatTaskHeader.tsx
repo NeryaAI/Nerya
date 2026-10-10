@@ -6,7 +6,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {OPEN_CONVERSATION_FIND} from "./ConversationFind";
 import {SearchIcon,XIcon} from "../icons";
 import Link from "next/link";
-import { useLocale } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import type { ChatThread } from "../../lib/chat";
 import type { ChatResult } from "../../lib/chatResults";
@@ -20,7 +20,7 @@ import styles from "./ChatTaskHeader.module.css";
 import { shortTaskStatus } from "./taskStatusCopy";
 
 export function ChatTaskHeader({ thread, agents, results, sending, approvalCount, loading = false,
-  showTabs, tab, canvasVisible, onSelect, onToggleCanvas, onOpenResult, browserVisible = false, onToggleBrowser, workspaceAvailable = false, workStatus, connection,diagnostics }: {
+  showTabs, tab, canvasVisible, onSelect, onToggleCanvas, onOpenResult, browserVisible = false, onToggleBrowser, workspaceAvailable = false, workStatus, connection,diagnostics, onToggleReports }: {
   diagnostics?:ReactNode;
   workStatus?: TaskStatus; connection?: Connection;
   thread: ChatThread | null; agents: AgentWork[]; results: ChatResult[];
@@ -28,8 +28,10 @@ export function ChatTaskHeader({ thread, agents, results, sending, approvalCount
   tab: string; canvasVisible: boolean; onSelect: (tab: string) => void;
   onToggleCanvas: () => void; onOpenResult: (id: string) => void;
   browserVisible?: boolean; onToggleBrowser?: () => void; workspaceAvailable?: boolean;
+  onToggleReports?: () => void;
 }) {
   const zh = useLocale().startsWith("zh");
+  const tAssistants = useTranslations("assistants");
   const navigating = useRef(false);
   const [showDiagnostics,setShowDiagnostics]=useState(false);
   const state = workStatus || taskStatus(thread);
@@ -97,6 +99,11 @@ export function ChatTaskHeader({ thread, agents, results, sending, approvalCount
       <div className={styles.actions}>
         {thread?.messages.length ? <button type="button" className={styles.action} aria-label={zh?"在会话中查找":"Find in conversation"} title={zh?"在会话中查找 · ⌘/Ctrl F":"Find in conversation · ⌘/Ctrl F"} onClick={()=>window.dispatchEvent(new Event(OPEN_CONVERSATION_FIND))}><SearchIcon size={15}/></button> : null}
         <Link href="/chat" className={`${styles.action} ${styles.newChat}`} aria-label={i18nCopy(zh, "copy.components_chat_ChatTaskHeader.020")} title={i18nCopy(zh, "copy.components_chat_ChatTaskHeader.021")}><ComposeIcon size={16} /></Link>
+        {onToggleReports && <button type="button" id="assistant-results-toggle" data-testid="open-assistant-results" className={styles.action}
+          aria-label={tAssistants("reportsAndResults")} title={tAssistants("reportsAndResults")} aria-controls="task-dock-panel-reports"
+          aria-expanded={canvasVisible && tab === "reports"} onClick={onToggleReports}>
+          <FileIcon size={16}/><span className={styles.actionLabel}>{tAssistants("results")}</span>
+        </button>}
         {showTabs && workspaceAvailable ? <button type="button" id="task-workspace-toggle" className={styles.action} data-testid="open-workspace" aria-label={toggleLabel} title={toggleLabel}
           aria-controls="task-workspace" aria-expanded={canvasVisible} onClick={onToggleCanvas} disabled={loading}>
           <PanelLeftIcon size={16} className="rotate-180" /><span className={styles.actionLabel}>{i18nCopy(zh, "copy.components_chat_ChatTaskHeader.022")}</span>
