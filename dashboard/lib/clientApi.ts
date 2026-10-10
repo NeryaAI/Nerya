@@ -1477,6 +1477,7 @@ export type LlmTierConfig = {
 
 export type LlmProviderProfile = {
   provider: string;
+  kind?: string;
   base_url?: string;
   provider_key_ref?: string;
   provider_key?: string;
@@ -3389,6 +3390,16 @@ export const clientApi = {
       error?: string;
       detail?: string;
     }>("/llm/models/discover", body),
+  llmProviderModelsRefresh: (body: { provider: string }) =>
+    post<{
+      ok: boolean;
+      provider?: string;
+      models?: Array<Record<string, unknown>>;
+      count?: number;
+      updated_at?: string;
+      error?: string;
+      detail?: string;
+    }>("/llm/models/provider-refresh", body),
   llmModelsImport: (body: {
     provider: string;
     base_url?: string;

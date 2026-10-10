@@ -320,6 +320,7 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/llm/config", "write:config", ""),
     RouteRule("GET", "/llm/models", "read:runtime", ""),
     RouteRule("POST", "/llm/models/refresh", "write:config", ""),
+    RouteRule("POST", "/llm/models/provider-refresh", "write:config", ""),
     RouteRule("POST", "/llm/models/validate", "read:runtime", ""),
     RouteRule("GET", "/llm/provider_routing", "read:runtime", ""),
     RouteRule("POST", "/llm/provider_routing", "write:config", ""),

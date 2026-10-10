@@ -238,6 +238,16 @@ def routes():
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
 
+    def models_provider_refresh(client, payload):
+        body = payload or {}
+        try:
+            return _llm_ops.models_provider_refresh(
+                client.config, provider=str(body.get("provider") or ""),
+                vault_passphrase=body.get("vault_passphrase"),
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
     def validate_assignment(client, payload):
         return _llm_ops.validate_tier_assignment(
             client.config,
@@ -272,6 +282,7 @@ def routes():
         ("POST", "/llm/config", config_set),
         ("GET", "/llm/models", models_list),
         ("POST", "/llm/models/refresh", models_refresh),
+        ("POST", "/llm/models/provider-refresh", models_provider_refresh),
         ("POST", "/llm/models/discover", models_discover),
         ("POST", "/llm/models/import", models_import),
         ("POST", "/llm/models/validate", validate_assignment),
