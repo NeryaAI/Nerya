@@ -438,6 +438,7 @@ export function WalletProviderPanel({
     try {
       const res = await clientApi.walletAuthStart({
         provider: provider.id,
+        restart: Boolean(authResult?.restart_required),
         approve: true,
         install: !providerAuthInstalled(provider),
         email: authEmail.trim() || undefined,
@@ -451,6 +452,7 @@ export function WalletProviderPanel({
         ...collectAccountAutoArgs(),
       });
       if (!res.ok) {
+        if (res.restart_required) setAuthResult({ ...res, next_action: "auth_expired" });
         throw new Error(res.detail || res.error || res.auth?.stderr_tail || res.auth?.stdout_tail || "auth_start_failed");
       }
       const json = res.auth?.json || {};
@@ -500,6 +502,7 @@ export function WalletProviderPanel({
     try {
       const res = await clientApi.walletAuthVerify({
         provider: selected.id,
+        auth_session_id: firstString(authJson, ["authSessionId"]) || undefined,
         otp: authOtp.trim() || undefined,
         deviceCode: authDeviceCode || undefined,
         qrCodeId: authQrId.trim() || undefined,
@@ -512,6 +515,7 @@ export function WalletProviderPanel({
         ...collectAccountAutoArgs(),
       });
       if (!res.ok) {
+        if (res.restart_required) setAuthResult({ ...res, next_action: "auth_expired" });
         throw new Error(res.detail || res.error || res.auth?.stderr_tail || res.auth?.stdout_tail || "auth_verify_failed");
       }
       setAuthResult(res as unknown as Record<string, unknown>);

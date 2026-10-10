@@ -455,6 +455,8 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("POST", "/wallet/auth/start", "write:config", ""),
     RouteRule("POST", "/wallet/auth/verify", "write:config", ""),
     RouteRule("POST", "/wallet/auth/status", "read:runtime", ""),
+    RouteRule("GET", "/portfolio/sdk_accounts", "read:runtime", "SDK account observations"),
+    RouteRule("POST", "/portfolio/sdk_accounts/refresh", "read:runtime", "Read-only SDK account collection"),
     RouteRule(None, "/wallet/installed", "read:runtime", ""),
     RouteRule("POST", "/wallet/configure", "write:config", ""),
     RouteRule("POST", "/wallet/quote", "read:runtime", ""),

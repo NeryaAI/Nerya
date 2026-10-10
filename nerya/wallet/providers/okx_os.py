@@ -3,10 +3,9 @@
 Docs:
 https://web3.okx.com/zh-hans/onchainos/dev-docs/home/install-your-agentic-wallet
 
-The official Agentic Wallet quick-start login is email + verification
-code through the OnchainOS CLI. Nerya's direct quote/swap/K-line methods
-still call OKX Web3 Open API endpoints, so those API-backed methods need
-API key + secret + passphrase configured as vault refs.
+The installed CLI uses browser login followed by polling the original
+authSessionId. Candle reads can use that CLI session. Direct signed
+balance/quote/swap APIs need key + secret + passphrase as vault refs.
 """
 
 from __future__ import annotations
@@ -137,7 +136,7 @@ class OkxOsWallet(WalletProvider):
             exe = "onchainos.exe" if os.name == "nt" else "onchainos"
             candidates.append(Path(self.workspace) / "skills" / "_bin" / "onchainos" / exe)
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate)
         return shutil.which("onchainos")
 
@@ -183,22 +182,41 @@ class OkxOsWallet(WalletProvider):
                 f"onchainos {' '.join(args)} exited {proc.returncode}: {err[:512]}"
             )
         parsed = self._extract_json(proc.stdout or "")
-        return parsed if parsed is not None else {"raw": proc.stdout}
+        if isinstance(parsed, dict) and (parsed.get("ok") is False or parsed.get("success") is False):
+            raise WalletTransportError(f"onchainos request rejected: {parsed.get('error') or 'provider_error'}")
+        if parsed is None:
+            raise WalletTransportError("onchainos returned invalid JSON")
+        return parsed
 
     def readiness(self) -> WalletReadiness:
-        if self._have_creds() or self._onchainos_bin():
+        if self._have_creds():
             return WalletReadiness(provider=self.id, ready=True)
+        if self._onchainos_bin():
+            try:
+                status = self._run_onchainos(["wallet", "status"], timeout_s=5.0)
+                data = status.get("data") if isinstance(status, dict) else None
+                if isinstance(data, dict) and status.get("ok") is True and data.get("loggedIn") is True:
+                    return WalletReadiness(provider=self.id, ready=True,
+                                           reason="CLI login authenticated for OnchainOS reads; signed balance/quote/swap APIs still require advanced API credentials.")
+            except (WalletTransportError, OSError):
+                return WalletReadiness(provider=self.id, ready=False, missing=["status:onchainos"],
+                                       reason="OnchainOS login status could not be verified; inspect wallet_auth status before retrying.")
+            return WalletReadiness(
+                provider=self.id, ready=False, missing=["login:onchainos"],
+                install_hint="Use wallet_auth start, complete the browser login, then wallet_auth verify with the original session. CLI: onchainos wallet login --phase init; onchainos wallet login --phase poll --session-id <authSessionId>.",
+                reason="OnchainOS CLI is installed but its login session is not authenticated.",
+            )
         missing = [
             "bin:onchainos",
-            "login:onchainos wallet login <email>",
+            "login:onchainos",
         ]
         return WalletReadiness(
             provider=self.id,
             ready=False,
             missing=missing,
             install_hint=(
-                "Use `onchainos wallet login <email>` and "
-                "`onchainos wallet verify <code>` for Agentic Wallet login. "
+                "Use `onchainos wallet login --phase init` and "
+                "`onchainos wallet login --phase poll --session-id <authSessionId>` for Agentic Wallet login. "
                 "Advanced Open API keys are optional fallback credentials."
             ),
             reason="OnchainOS CLI is not installed and no advanced Open API fallback is configured.",
@@ -210,6 +228,9 @@ class OkxOsWallet(WalletProvider):
 
     # ------------------------------------------------------------------
     def _signed_get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        if not self._have_creds():
+            raise WalletDependencyError(self.id, ["cred:api_key/api_secret/api_passphrase"],
+                                        "Configure the advanced Web3 API credentials in vault references for signed balance/quote/swap APIs. Browser login only enables CLI reads; do not reinstall or repeat login.")
         from ...connectors.http import UrllibHttp
         from ...connectors.signing import okx_sign
         from urllib.parse import urlencode

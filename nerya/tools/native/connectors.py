@@ -991,10 +991,9 @@ def connector_list_handler(call: ToolCall, *, config_like: Any | None = None) ->
                 "op='schema'. Use concrete call shapes returned by those "
                 "tool results instead of guessing provider routes. Only "
                 "after connector and data_api surfaces are missing should "
-                "you follow the coding skill (extending-nerya.md) "
-                "to author a real Connector subclass under "
-                "nerya/connectors/<vendor>.py + register it via "
-                "_register_builtins. Do not mock the data and do not "
+                "you load the adapter Skill and stage a workspace provider "
+                "proposal. CEX providers must reuse CcxtConnector. "
+                "Do not inspect or edit host repository files from the workspace sandbox. Do not mock the data and do not "
                 "ship a temp script."
             ),
         },
@@ -1017,6 +1016,17 @@ def connector_view_handler(call: ToolCall, *, config_like: Any | None = None) ->
 
     spec = get_registry().find(raw)
     if spec is None:
+        from ...wallet import PROVIDERS, resolve_provider_name
+        wallet_provider = resolve_provider_name(raw)
+        if wallet_provider in PROVIDERS:
+            return ToolResult.from_json(tool_use_id=call.id, name=call.name, data={
+                "found": True, "id": wallet_provider, "kind": "wallet",
+                "label": PROVIDERS[wallet_provider]["label"],
+                "market_data_sources": PROVIDERS[wallet_provider].get("market_data_sources", []),
+                "next_required_action": {"tool": "data_api", "arguments": {
+                    "op": "call", "provider": "wallet", "action": "readiness", "args": {"provider": wallet_provider}}},
+                "hint": "This is a wallet provider, not a CCXT venue. Check wallet readiness and use its data_api actions; use wallet_auth to resume login.",
+            })
         return ToolResult.from_json(
             tool_use_id=call.id,
             name=call.name,
@@ -1029,9 +1039,9 @@ def connector_view_handler(call: ToolCall, *, config_like: Any | None = None) ->
                     "new code, check data_api providers for long-tail data: "
                     "use op='list' and op='schema' on relevant providers, "
                     "then call only concrete actions returned by the catalog. "
-                    "Only if those are missing, author a real Connector under "
-                    "nerya/connectors/<vendor>.py and register it in "
-                    "provider_spec._register_builtins. Read official docs "
+                    "Only if those are missing, load the adapter Skill and stage a workspace ExchangeProviderSpec "
+                    "proposal that reuses CcxtConnector for CEX. Do not inspect or edit host repository files. "
+                    "Read official docs "
                     "first; do not mock."
                 ),
             },

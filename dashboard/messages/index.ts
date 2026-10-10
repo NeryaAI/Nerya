@@ -1,3 +1,5 @@
+import enSdkAccounts from "./en/sdk-accounts.json";
+import zhSdkAccounts from "./zh/sdk-accounts.json";
 import enAccountConnection from "./en/account-connection.json";
 import zhAccountConnection from "./zh/account-connection.json";
 import enChatHistory from "./en/chat-history.json";
@@ -58,6 +60,7 @@ function mergeMessages(
 }
 
 export const en = {
+  ...enSdkAccounts,
   ...enAccountConnection,
   ...enChatHistory,
   ...enComposer,
@@ -80,6 +83,7 @@ export const en = {
 } as const;
 
 export const zh = {
+  ...zhSdkAccounts,
   ...zhAccountConnection,
   ...zhChatHistory,
   ...zhComposer,

@@ -664,6 +664,8 @@ def _wallet_specs() -> list[DataActionSpec]:
                         "default": True,
                         "description": "When true, also probes OnchainOS wallet status and redacts sensitive fields.",
                     },
+                    "include_details": {"type": "boolean", "default": False},
+                    "detail": {"type": "boolean", "default": False},
                     "timeout_s": {"type": "number", "default": 8},
                     "chain": {"type": "string", "default": "solana"},
                     "token": {"type": "string"},

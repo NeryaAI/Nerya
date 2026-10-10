@@ -254,12 +254,12 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "label": "OKX Agentic Wallet / Onchain OS",
         "description": (
             "Install the OKX OnchainOS CLI, log in to Agentic Wallet with "
-            "email + verification code, then use the local login session "
+            "a browser login, then use the local login session "
             "for wallet commands and OnchainOS market data."
         ),
         "install_hint": (
             "Install the checksum-verified OnchainOS release binary, run `onchainos wallet login "
-            "<email>` and `onchainos wallet verify <code>`, then store the "
+            "--phase init` and `onchainos wallet login --phase poll --session-id <authSessionId>`, then store the "
             "local session. Advanced OKX Open API keys are optional and "
             "only used for direct signed API fallback."
         ),
@@ -292,25 +292,25 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         },
         "auth_flows": [
             _auth_flow(
-                "okx_email_otp",
-                "email_otp",
-                "OKX Agentic Wallet email verification",
+                "okx_social_login",
+                "wallet_popup",
+                "OKX Agentic Wallet browser login",
                 (
-                    "Official quick-start login uses an email address and "
-                    "verification code through the OnchainOS CLI. Use the "
-                    "returned account id for Agentic Wallet skills."
+                    "Start the browser handoff once, complete Google/Apple/email login, "
+                    "then poll the original authSessionId to persist the CLI session. "
+                    "Use wallet_auth to resume across Agent turns."
                 ),
                 docs_url="https://web3.okx.com/zh-hans/onchainos/dev-docs/home/install-your-agentic-wallet",
                 commands=[
                     "install OnchainOS CLI release from okx/onchainos-skills",
-                    "onchainos wallet login <email>",
-                    "onchainos wallet verify <code>",
+                    "onchainos wallet login --phase init",
+                    "onchainos wallet login --phase poll --session-id <authSessionId>",
                     "onchainos wallet status",
                     "onchainos wallet balance",
                 ],
                 stores=["account_id", "api_project_id"],
                 notes=[
-                    "For Chinese Mainland email login, OKX documents the +86 locale flow.",
+                    "Reuse the same pending login; do not generate another URL when the operator says login is complete.",
                     "Advanced Open API keys are not part of the default login flow.",
                 ],
             ),
@@ -930,6 +930,8 @@ def resolve_provider_name(name: str) -> str | None:
     """
 
     candidate = (name or "").strip().lower()
+    if candidate in {"onchainos", "onchain_os", "okx_agentic_wallet"}:
+        return "okx_os"
     if not candidate:
         return None
     if candidate in PROVIDERS:
