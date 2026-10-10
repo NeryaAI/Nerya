@@ -15,9 +15,9 @@ def command(provider):
     raise WalletDependencyError(provider.id,['bin:baw'],'Install @binance/agentic-wallet; configure cli_path or its package entry. Docs: '+provider.repo+' / '+provider.subdir)
 
 
-def call(provider,args):
+def call(provider,args,*,timeout_s=45):
     try:
-        proc=subprocess.run(command(provider)+args+['--json'],capture_output=True,text=True,timeout=45,check=False)
+        proc=subprocess.run(command(provider)+args+['--json'],capture_output=True,text=True,timeout=timeout_s,check=False)
     except (OSError,subprocess.TimeoutExpired) as exc:raise WalletTransportError('baw invocation failed: '+type(exc).__name__) from exc
     if proc.returncode:raise WalletTransportError(f'baw exited {proc.returncode}')
     text=proc.stdout.strip()

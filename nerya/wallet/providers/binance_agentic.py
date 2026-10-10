@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..errors import WalletPolicyDenied
+from ..errors import WalletPolicyDenied, WalletTransportError
 from ..protocol import (
     WalletBalance,
     WalletCapabilities,
@@ -81,13 +81,21 @@ class BinanceAgenticWallet(WalletProvider):
 
     def readiness(self) -> WalletReadiness:
         if self.config.get('backend','baw')=='baw':
-            from .binance_cli import command
+            from .binance_cli import command, call
             from ..errors import WalletDependencyError
             try:
                 command(self)
-                return WalletReadiness(provider=self.id,ready=True,reason='CLI installed; session identity checked on each request')
+                status = call(self, ['wallet', 'status'], timeout_s=5.0)
+                if not isinstance(status, dict) or not any(status.get(key) is True for key in ('loggedIn', 'authenticated', 'isLoggedIn')):
+                    return WalletReadiness(provider=self.id, ready=False, missing=['login:baw'],
+                                           reason='CLI installed but login is not confirmed; use wallet_auth status/start/verify.',
+                                           install_hint='Complete the Binance wallet login before retrying authenticated reads.')
+                return WalletReadiness(provider=self.id,ready=True,reason='CLI login status confirmed; wallet identity is checked on each request')
             except WalletDependencyError as exc:
                 return WalletReadiness(provider=self.id,ready=False,missing=exc.missing,install_hint=exc.install_hint)
+            except (WalletTransportError, OSError):
+                return WalletReadiness(provider=self.id,ready=False,missing=['status:baw'],
+                                       reason='Binance wallet login status could not be verified.')
         ref = self._ref()
         ok, missing = ref.skill_ready()
         install_hint = ""

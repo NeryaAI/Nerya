@@ -9,6 +9,7 @@ the exact commands the operator should run.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ import shutil
 import socket
 import subprocess
 import time
+import threading
 from typing import Any
 
 from .. import wallet as wallet_mod
@@ -1006,8 +1008,10 @@ def _run_wallet_cli(
     stdout = _strip_ansi(proc.stdout or "")
     stderr = _strip_ansi(proc.stderr or "")
     parsed = _extract_json_output(stdout)
+    rejected = isinstance(parsed, dict) and (parsed.get("ok") is False or parsed.get("success") is False)
     return {
-        "ok": proc.returncode == 0,
+        "ok": proc.returncode == 0 and parsed is not None and not rejected,
+        "error": "auth_cli_rejected" if rejected else "",
         "provider": provider,
         "return_code": proc.returncode,
         "json": _redact_cli_value(parsed) if parsed is not None else None,
@@ -1043,11 +1047,11 @@ def _install_for_auth(client, provider: str, *, approve: bool) -> dict[str, Any]
 
 def _auth_start_args(provider: str, payload: dict[str, Any]) -> tuple[list[str] | None, str, list[str]]:
     email = str(payload.get("email") or "").strip()
-    locale = str(payload.get("locale") or "en-US").strip() or "en-US"
     if provider == "okx_os":
-        if not email:
-            return None, "email_required", ["email"]
-        return ["wallet", "login", email, "--locale", locale], "otp", ["otp"]
+        args = ["wallet", "login", "--phase", "init"]
+        if payload.get("chain"):
+            args.extend(["--chain", str(payload["chain"])])
+        return args, "wallet_popup_login", ["browser_login"]
     if provider == "coinbase":
         if not email:
             return None, "email_required", ["email"]
@@ -1064,9 +1068,10 @@ def _auth_start_args(provider: str, payload: dict[str, Any]) -> tuple[list[str] 
 def _auth_verify_args(provider: str, payload: dict[str, Any]) -> tuple[list[str] | None, str]:
     otp = str(payload.get("otp") or payload.get("code") or "").strip()
     if provider == "okx_os":
-        if not otp:
-            return None, "otp_required"
-        return ["wallet", "verify", otp], ""
+        session_id = str(payload.get("auth_session_id") or "").strip()
+        if not session_id:
+            return None, "auth_session_required"
+        return ["wallet", "login", "--phase", "poll", "--session-id", session_id], ""
     if provider == "coinbase":
         if not otp:
             return None, "otp_required"
@@ -1099,6 +1104,76 @@ def _cli_json_data(result: dict[str, Any] | None) -> dict[str, Any]:
     if isinstance(data, dict):
         return data
     return doc
+
+
+def _cli_authenticated(result: dict[str, Any]) -> bool:
+    if not result.get("ok"):
+        return False
+    data = _cli_json_data(result)
+    for key in ("loggedIn", "authenticated", "isAuthenticated", "isLoggedIn", "signedIn", "logged_in"):
+        if key in data:
+            return data[key] is True
+    return bool(data.get("currentAccountId") or data.get("address") or data.get("walletAddress"))
+
+
+# Login creation is infrequent; serialize it so double clicks cannot overwrite
+# the CLI's latest pending session. Persist only the browser handoff, no tokens.
+_OKX_LOGIN_LOCK = threading.Lock()
+
+
+def _okx_auth_path(client, body: dict[str, Any]) -> Path:
+    actor = str(getattr(client, "auth_actor_id", None) or "local")
+    context = str(body.get("wallet_id") or body.get("auth_context_id") or "default")
+    key = hashlib.sha256(f"{actor}\n{context}".encode()).hexdigest()
+    return client.config.paths.root / "runtime" / "wallet_auth" / f"okx-{key}.json"
+
+
+def _pending_okx_auth(client, body: dict[str, Any]) -> dict[str, Any]:
+    path = _okx_auth_path(client, body)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (ValueError, OSError):
+        return {}
+
+
+def _start_okx_auth(client, body: dict[str, Any]) -> dict[str, Any]:
+    with _OKX_LOGIN_LOCK:
+        status = _run_wallet_cli(client, "okx_os", ["wallet", "status"], timeout_s=5.0)
+        if _cli_authenticated(status):
+            _okx_auth_path(client, body).unlink(missing_ok=True)
+            return {"ok": True, "provider": "okx_os", "authenticated": True,
+                    "next_action": "authenticated", "required_inputs": [], "auth": status}
+        if not status.get("ok"):
+            return {"ok": False, "provider": "okx_os", "error": status.get("error") or "auth_status_unavailable",
+                    "auth": status, "next_action": "check_status_before_start"}
+        pending = _pending_okx_auth(client, body)
+        if pending.get("expired") and not body.get("restart"):
+            return {"ok": False, "provider": "okx_os", "error": "auth_session_expired", "restart_required": True}
+        if pending and not body.get("restart"):
+            return {**pending, "reused": True}
+        other_pending = list(_okx_auth_path(client, body).parent.glob("okx-*.json"))
+        if any(path != _okx_auth_path(client, body) for path in other_pending):
+            return {"ok": False, "provider": "okx_os", "error": "auth_pending_in_another_context",
+                    "next_action": "complete_the_original_login"}
+        args, action, required = _auth_start_args("okx_os", body)
+        result = _run_wallet_cli(client, "okx_os", args, timeout_s=30.0)
+        data = _cli_json_data(result)
+        session_id = str(data.get("authSessionId") or "")
+        out = {"ok": bool(result.get("ok")) and bool(session_id), "provider": "okx_os",
+               "authenticated": False, "auth_session_id": session_id,
+               "next_action": action, "required_inputs": required, "auth": result}
+        if out["ok"]:
+            path = _okx_auth_path(client, body)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            from ..core.atomic_write import atomic_write_text
+            atomic_write_text(path, json.dumps(out, ensure_ascii=False))
+            path.chmod(0o600)
+        else:
+            out["error"] = result.get("error") or "auth_session_missing"
+        return out
 
 
 def _first_auth_string(*records: dict[str, Any], keys: list[str]) -> str:
@@ -1698,6 +1773,20 @@ def routes():
                     "install": install_result,
                 }
         args, next_action, required_inputs = _auth_start_args(name, body)
+        if name == "okx_os":
+            out = _start_okx_auth(client, body)
+            out["install"] = install_result
+            if out.get("authenticated") and (body.get("wallet_id") or body.get("create_binding")):
+                account = _ensure_provider_account(client, name, out["auth"])
+                if account is None or account.get("ok"):
+                    binding = _maybe_save_auth_binding(client, name, body, account=account, install=install_result)
+                    if binding is not None:
+                        out["binding"] = binding
+                        out["bindings"] = binding.get("bindings", [])
+                else:
+                    out.update(ok=False, error=account.get("error") or "account_create_failed")
+                out["account"] = account
+            return out
         if args is None:
             if next_action == "no_login_required":
                 binding = _maybe_save_auth_binding(
@@ -1739,43 +1828,57 @@ def routes():
             "auth": result,
             "install": install_result,
         }
-        if (
-            result.get("ok")
-            and name == "binance_agentic"
-            and (body.get("wallet_id") or body.get("create_binding"))
-        ):
-            binding = _maybe_save_auth_binding(
-                client,
-                name,
-                body,
-                install=install_result,
-            )
-            if binding is not None:
-                out["binding"] = binding
-                out["bindings"] = binding.get("bindings", [])
         if not result.get("ok"):
             out["error"] = result.get("error") or "auth_start_failed"
         return out
 
     def auth_verify(client, payload):
-        body = payload or {}
+        body = dict(payload or {})
         name = str(body.get("provider") or "").strip().lower()
         if not name:
             return {"ok": False, "error": "provider_required"}
         if name not in wallet_mod.PROVIDERS:
             return {"ok": False, "error": "unknown_provider"}
+        if name == "okx_os":
+            pending = _pending_okx_auth(client, body)
+            session_id = str(pending.get("auth_session_id") or "")
+            if session_id and body.get("auth_session_id") and body["auth_session_id"] != session_id:
+                return {"ok": False, "provider": name, "error": "auth_session_mismatch"}
+            body["auth_session_id"] = body.get("auth_session_id") or session_id
+            if not body["auth_session_id"]:
+                status = _run_wallet_cli(client, name, ["wallet", "status"], timeout_s=5.0)
+                if _cli_authenticated(status):
+                    return auth_start(client, {**body, "install": False})
         args, error = _auth_verify_args(name, body)
         if args is None:
             return {"ok": False, "provider": name, "error": error}
-        result = _run_wallet_cli(client, name, args, timeout_s=300.0)
-        account = _ensure_provider_account(client, name, result) if result.get("ok") else None
+        result = _run_wallet_cli(client, name, args, timeout_s=30.0 if name == "okx_os" else 300.0)
+        if name == "okx_os" and not result.get("ok"):
+            text = json.dumps(result, ensure_ascii=False).lower()
+            if any(marker in text for marker in ("expired", "session not found", "invalid auth session")):
+                pending = _pending_okx_auth(client, body)
+                if pending:
+                    pending["expired"] = True
+                    from ..core.atomic_write import atomic_write_text
+                    atomic_write_text(_okx_auth_path(client, body), json.dumps(pending, ensure_ascii=False))
+                return {"ok": False, "provider": name, "error": "auth_session_expired", "restart_required": True, "auth": result}
+        if name == "okx_os" and result.get("ok"):
+            status = _run_wallet_cli(client, name, ["wallet", "status"], timeout_s=5.0)
+            if not _cli_authenticated(status):
+                return {"ok": False, "provider": name, "authenticated": False,
+                        "error": "login_not_confirmed", "auth": result, "status": status,
+                        "auth_session_id": body.get("auth_session_id")}
+            _okx_auth_path(client, body).unlink(missing_ok=True)
+        wants_binding = bool(body.get("wallet_id") or body.get("create_binding"))
+        account = _ensure_provider_account(client, name, result) if result.get("ok") and wants_binding else None
         binding = None
-        if result.get("ok") and (account is None or account.get("ok")):
+        if result.get("ok") and wants_binding and (account is None or account.get("ok")):
             binding = _maybe_save_auth_binding(client, name, body, account=account)
         out = {
             "ok": bool(result.get("ok")) and (account is None or bool(account.get("ok"))),
             "provider": name,
             "auth": result,
+            "authenticated": bool(result.get("ok")),
         }
         if account is not None:
             out["account"] = account
@@ -1806,10 +1909,11 @@ def routes():
             "ok": bool(result.get("ok")),
             "provider": name,
             "auth": result,
+            "authenticated": _cli_authenticated(result),
         }
-        if result.get("ok") and (body.get("wallet_id") or body.get("create_binding")):
+        if out["authenticated"] and (body.get("wallet_id") or body.get("create_binding")):
             account = _ensure_provider_account(client, name, result)
-            binding = _maybe_save_auth_binding(client, name, body, account=account)
+            binding = _maybe_save_auth_binding(client, name, body, account=account) if account is None or account.get("ok") else None
             if account is not None:
                 out["account"] = account
             if binding is not None:

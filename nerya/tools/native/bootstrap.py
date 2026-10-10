@@ -66,6 +66,7 @@ from .connectors import (
     market_data_handler,
 )
 from .data_api import DATA_API_SCHEMA, data_api_handler
+from .wallet_auth import WALLET_AUTH_SCHEMA, wallet_auth_handler
 from .data_sources import (
     DATA_SOURCE_STATUS_SCHEMA,
     DATA_SOURCE_SYNC_NOW_SCHEMA,
@@ -674,7 +675,9 @@ def _wrap_wallet_install(deps: NativeToolDeps):
         approve = bool(args.get("approve", False)) or deps.permission_mode == "yolo"
         try:
             from ...install.dep_installer import install as run_install
-            from ...wallet import PROVIDERS
+            from ...wallet import PROVIDERS, resolve_provider_name
+
+            provider = resolve_provider_name(provider) or provider
 
             entry = PROVIDERS.get(provider)
             if not entry:
@@ -2225,6 +2228,25 @@ def register_native_tools(
             ),
         ),
         make_native_descriptor(
+            name="wallet_auth",
+            description=(
+                "Check a wallet login status, start one browser handoff, or verify the original pending session. "
+                "When the operator says login is complete, use verify; never start another login. "
+                "Pending OKX sessions persist across turns. Status and login never install dependencies, "
+                "create wallet/accounts, save bindings, or send funds. OTP approvals stay in the operator UI."
+            ),
+            input_schema=WALLET_AUTH_SCHEMA,
+            handler=lambda call: wallet_auth_handler(call, config_like=deps.config,
+                                                    actor_id=deps.active_actor_id, session_id=deps.active_session_id),
+            risk=RiskLevel.EXEC,
+            permission_scope=PermissionScope.NETWORK,
+            read_only=False,
+            is_concurrency_safe=False,
+            tags=("wallet", "auth", "login"),
+            result_kind="json",
+            auto_approve_when=lambda payload: payload.get("op") == "status",
+        ),
+        make_native_descriptor(
             name="wallet_install",
             description=(
                 "Install a catalog-listed wallet provider dependency through "
@@ -3569,6 +3591,8 @@ def register_native_tools(
             ),
         ])
     registry.register_all(descriptors, replace=replace)
+    from .sdk_accounts import register_sdk_account_tools
+    register_sdk_account_tools(registry,deps,replace=replace)
     register_skill_tool(
         registry,
         skill_index=deps.skill_index,

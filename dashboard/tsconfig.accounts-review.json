@@ -14,7 +14,8 @@
     "lib/**/*.tsx",
     "messages/**/*.ts",
     "i18n/**/*.ts",
-    ".next-account-review/types/**/*.ts"
+    ".next-account-review/types/**/*.ts",
+    ".next-sdk-account-review/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

@@ -1137,10 +1137,11 @@ def _reduce_data_api(name: str, output: Any) -> Optional[CompactedResult]:
     }
     if kind == "table":
         rows = output.get("rows") if isinstance(output.get("rows"), list) else []
+        sample_limit = 20 if provider == "wallet" and action == "readiness" else 5
         kept.update({
             "row_count": output.get("row_count", len(rows)),
             "truncated": bool(output.get("truncated")),
-            "rows_sample": rows[:5],
+            "rows_sample": rows[:sample_limit],
         })
         summary = (
             f"data_api {provider}.{action}: table "
@@ -1193,6 +1194,22 @@ def _reduce_data_api(name: str, output: Any) -> Optional[CompactedResult]:
                 kept=kept,
                 original_bytes=_bytes_of(output),
             )
+
+    # Only the two workflow catalogs have the selected-route contract. Ordinary
+    # provider objects contain balances, pools or login state, not route hints.
+    if provider != "wallet" or action not in {"capability_catalog", "meme_strategy_guide"}:
+        kept["data"] = _compact_top_level_fields(data)
+        if isinstance(data.get("tokens"), list):
+            kept["data"]["tokens_sample"] = [
+                _compact_top_level_fields(row) for row in data["tokens"][:5]
+                if isinstance(row, dict)
+            ]
+        return CompactedResult(
+            rule_id="data_api.object_data",
+            summary=f"data_api {provider}.{action}: object fields={', '.join(kept['data'])}",
+            kept=kept,
+            original_bytes=_bytes_of(output),
+        )
 
     selected_route = data.get("selected_route") if isinstance(data.get("selected_route"), dict) else {}
     selection = data.get("selection") if isinstance(data.get("selection"), dict) else {}
@@ -1671,6 +1688,27 @@ def _reduce_generic_json(name: str, output: Any) -> Optional[CompactedResult]:
     )
 
 
+def _reduce_sdk_account(name: str, output: Any) -> Optional[CompactedResult]:
+    if name != 'sdk_account' or not isinstance(output, dict):
+        return None
+    def connection(row):
+        kept = {key: row.get(key) for key in ('connector_id','label','phase','error','collection_error','stale','live_verified')}
+        observed = row.get('observation')
+        if isinstance(observed, dict):
+            kept['observation'] = {key: observed.get(key) for key in ('as_of','source','summary','performance','coverage','usage')}
+            kept['observation']['balances_sample'] = (observed.get('balances') or [])[:5]
+            kept['observation']['positions_sample'] = (observed.get('positions') or [])[:3]
+        return kept
+    kept = {'ok': output.get('ok'), 'error': output.get('error')}
+    if isinstance(output.get('connector'), dict):
+        kept['connector'] = connection(output['connector'])
+    if isinstance(output.get('connectors'), list):
+        kept['count'] = output.get('count',len(output['connectors']))
+        kept['connectors_sample'] = [connection(row) for row in output['connectors'][:8] if isinstance(row,dict)]
+    return CompactedResult(rule_id='sdk_account.observation', summary='SDK account preparation / observation state',
+                           kept=kept, original_bytes=_bytes_of(output))
+
+
 def _reduce_generic_text(name: str, output: Any) -> Optional[CompactedResult]:
     if not isinstance(output, str):
         return None
@@ -1698,6 +1736,7 @@ _REDUCERS: tuple[Callable[[str, Any], Optional[CompactedResult]], ...] = (
     _reduce_script_run,
     _reduce_connector_list,
     _reduce_data_api,
+    _reduce_sdk_account,
     _reduce_team_run,
     _reduce_data_source_status,
     _reduce_generic_json,

@@ -179,6 +179,17 @@ def _strategy_intent_index(paths, strategy_id: str) -> dict[str, dict[str, Any]]
 
 
 def routes():
+    def sdk_accounts(client, _payload):
+        from ..install.sdk_runtime import list_connections
+        return list_connections(client.config)
+
+    def sdk_account_refresh(client, payload):
+        from ..install.sdk_runtime import collect, SDKError
+        try:
+            return collect(client.config, (payload or {}).get('connector_id'))
+        except (SDKError, ValueError) as exc:
+            return {'ok': False, 'error': str(exc) if isinstance(exc, SDKError) else 'sdk_collection_failed'}
+
     def summary(client, _payload):
         return portfolio_mod.get_portfolio_summary(client.config.paths)
 
@@ -309,6 +320,8 @@ def routes():
         return {"points": points, "equity_usd": round(equity, 4)}
 
     return [
+        ("GET", "/portfolio/sdk_accounts", sdk_accounts),
+        ("POST", "/portfolio/sdk_accounts/refresh", sdk_account_refresh),
         ("POST", "/portfolio/summary", summary),
         ("POST", "/portfolio/positions", positions),
         ("POST", "/portfolio/pnl", pnl),

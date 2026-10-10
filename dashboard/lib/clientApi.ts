@@ -720,6 +720,9 @@ export type WalletAutoCreateAccountWarning = {
 export type WalletAuthStartResponse = {
   ok: boolean;
   provider?: string;
+  authenticated?: boolean;
+  auth_session_id?: string;
+  restart_required?: boolean;
   next_action?: "otp" | "qr_approval" | "device_approval" | string;
   required_inputs?: string[];
   auth?: WalletAuthCliResult;
@@ -735,6 +738,8 @@ export type WalletAuthStartResponse = {
 export type WalletAuthVerifyResponse = {
   ok: boolean;
   provider?: string;
+  authenticated?: boolean;
+  restart_required?: boolean;
   auth?: WalletAuthCliResult;
   account?: WalletAutoCreateAccountResult | null;
   account_warning?: WalletAutoCreateAccountWarning | null;
@@ -1067,6 +1072,32 @@ export type AccountSnapshotData = {
   latency_ms?: number;
   source?: string;
   [key: string]: unknown;
+};
+
+export type SdkAccountObservation = {
+  schema_version: 1;
+  connector_id: string;
+  observation_id: string;
+  as_of: number;
+  collected_at: number;
+  usage: "display_only";
+  source: { kind: string; skill_id: string; script: string; revision: string; evidence_hash: string };
+  balances: Array<{ asset_id: string; chain: string; token: string; symbol: string; amount: string;
+    raw_amount: string | null; decimals: number | null; available: string | null; locked: string | null;
+    price_usd: string | null; value_usd: string | null }>;
+  positions: Array<{ id: string; kind: string; chain: string; protocol: string; label: string;
+    value_usd: string | null; unrealized_pnl_usd: string | null; claimable_rewards_usd: string | null }>;
+  performance: { realized_pnl_usd: string | null; unrealized_pnl_usd: string | null; income_usd: string | null;
+    fees_usd: string | null; period_start: string | null; period_end: string | null };
+  coverage: { balances: string; positions: string; performance: string };
+  summary: { priced_balance_value_usd: string | null; unpriced_balances: number; balance_count: number; position_count: number };
+};
+
+export type SdkAccountConnection = {
+  connector_id: string; label: string; runtime: string; requirements: string[]; revision: string;
+  skill_id: string; script: string; phase: "preparing" | "installation_required" | "ready" | "error";
+  error?: string | null; collection_error?: string | null; updated_at: number; last_attempt_at?: number;
+  observation: SdkAccountObservation | null; stale: boolean; live_verified: false;
 };
 
 export type ControlPlaneExecutor = {
@@ -2515,6 +2546,10 @@ export const clientApi = {
       error?: string;
       detail?: string;
     }>("/wallet/portfolio", body),
+  sdkAccounts: () => get<{ ok: boolean; connectors: SdkAccountConnection[]; count: number }>("/portfolio/sdk_accounts"),
+  sdkAccountRefresh: (connector_id: string) => post<{
+    ok: boolean; connector?: SdkAccountConnection; error?: string;
+  }>("/portfolio/sdk_accounts/refresh", { connector_id }),
   // Recent risk-gate decisions with fix
   // hints. Used by the strategy detail page to render a "why this
   // got rejected" panel that links to the right account / settings.
@@ -2910,6 +2945,7 @@ export const clientApi = {
     }>("/wallet/install", body),
   walletAuthStart: (body: {
     provider: string;
+    restart?: boolean;
     approve?: boolean;
     install?: boolean;
     email?: string;
@@ -2931,6 +2967,7 @@ export const clientApi = {
   }) => post<WalletAuthStartResponse>("/wallet/auth/start", body),
   walletAuthVerify: (body: {
     provider: string;
+    auth_session_id?: string;
     otp?: string;
     code?: string;
     deviceCode?: string;

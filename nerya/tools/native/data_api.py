@@ -119,8 +119,17 @@ def data_api_handler(
             payload_args = args.get("args")
             if payload_args is None:
                 payload_args = args.get("payload")
-            if not isinstance(payload_args, dict):
+            if payload_args is None:
                 payload_args = {}
+            if not isinstance(payload_args, dict):
+                raise DataApiError("data_api args must be an object", kind="schema_validation", retryable=False)
+            from ..executor import _validate_against_schema
+            schema = reg.schema(provider, action).get("input_schema") or {}
+            schema_error = _validate_against_schema(payload_args, schema)
+            if schema_error:
+                raise DataApiError(schema_error, kind="schema_validation", retryable=False,
+                                   detail={"field": next((field for field in schema.get("required", []) if field not in payload_args), None),
+                                           "input_schema": schema, "next_required_action": "Inspect data_api op='schema' and correct args; do not retry unchanged."})
             raw = reg.call(provider, action, payload_args, context=context)
             payload = compact_data_result(
                 provider,
@@ -153,6 +162,25 @@ def data_api_handler(
             retryable=exc.retryable,
         )
     except Exception as exc:
+        from ...wallet.errors import WalletDependencyError, WalletPolicyDenied, WalletProviderNotFound, WalletTransportError
+        if isinstance(exc, (WalletPolicyDenied, WalletProviderNotFound)):
+            return _error(call, ToolErrorKind.PERMISSION_DENIED if isinstance(exc, WalletPolicyDenied) else ToolErrorKind.NOT_FOUND,
+                          str(exc), retryable=False, detail={"provider": args.get("provider"), "action": args.get("action")},
+                          recovery_hint={"action": "inspect_configuration", "hint": "Correct the provider, RPC, binding or policy before retrying; do not resend unchanged."})
+        if isinstance(exc, WalletDependencyError):
+            recovery_action = ("configure_credentials" if any(item.startswith("cred:") for item in exc.missing)
+                               else "wallet_auth" if any(item.startswith(("login:", "status:")) for item in exc.missing)
+                               else "wallet_install")
+            return _error(call, ToolErrorKind.PROVIDER_ERROR, exc.args[0], retryable=False,
+                          detail={"provider": exc.provider, "missing": exc.missing, "install_hint": exc.install_hint},
+                          recovery_hint={"action": recovery_action, "provider": exc.provider,
+                                         "hint": exc.install_hint})
+        if isinstance(exc, WalletTransportError) and any(
+            marker in str(exc).lower() for marker in ("not logged in", "invalid authority", "login_required", "session expired")
+        ):
+            return _error(call, ToolErrorKind.PROVIDER_ERROR, "Wallet authentication is required; retrying the same read will not log in.",
+                          retryable=False, detail={"provider": provider, "action": action},
+                          recovery_hint={"action": "wallet_auth", "hint": "Check status, resume the pending login with verify, or start a login if none exists."})
         return _error(
             call,
             ToolErrorKind.PROVIDER_ERROR,

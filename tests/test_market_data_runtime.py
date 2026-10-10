@@ -736,11 +736,11 @@ def test_wallet_provider_catalog_declares_verified_login_flows() -> None:
     providers = {row["id"]: row for row in list_providers()}
 
     okx_flows = {row["id"]: row for row in providers["okx_os"]["auth_flows"]}
-    assert okx_flows["okx_email_otp"]["kind"] == "email_otp"
+    assert okx_flows["okx_social_login"]["kind"] == "wallet_popup"
     assert all(row["kind"] != "advanced_api_key" for row in providers["okx_os"]["auth_flows"])
     assert providers["okx_os"]["install_command"].startswith("github-release-bin:")
-    assert "onchainos wallet login <email>" in okx_flows["okx_email_otp"]["commands"]
-    assert "onchainos wallet verify <code>" in okx_flows["okx_email_otp"]["commands"]
+    assert "onchainos wallet login --phase init" in okx_flows["okx_social_login"]["commands"]
+    assert "onchainos wallet login --phase poll --session-id <authSessionId>" in okx_flows["okx_social_login"]["commands"]
     okx_fields = {row["name"]: row for row in providers["okx_os"]["credential_fields"]}
     assert okx_fields["account_id"]["required"] is False
     assert "api_key" not in okx_fields
@@ -793,8 +793,8 @@ def test_wallet_credential_schema_returns_auth_flows(tmp_path) -> None:
     res = handler(client, {"provider": "okx_os"})
 
     assert res["ok"] is True
-    assert res["auth_flows"][0]["id"] == "okx_email_otp"
-    assert "onchainos wallet login <email>" in res["auth_flows"][0]["commands"]
+    assert res["auth_flows"][0]["id"] == "okx_social_login"
+    assert "onchainos wallet login --phase init" in res["auth_flows"][0]["commands"]
     assert {row["name"] for row in res["credential_fields"]} == {
         "account_id",
         "api_project_id",
@@ -857,7 +857,7 @@ def test_wallet_auth_start_installs_and_returns_binance_qr(
     assert res["install"]["kind"] == "npm"
 
 
-def test_wallet_auth_start_binance_qr_creates_binding_for_market_data(
+def test_wallet_auth_start_binance_qr_defers_binding_until_authenticated(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -899,9 +899,9 @@ def test_wallet_auth_start_binance_qr_creates_binding_for_market_data(
     )
 
     assert res["ok"] is True
-    assert res["binding"]["ok"] is True
-    binding = cfg.data["wallet"]["providers"]["binance_agentic_main"]
-    assert binding["provider"] == "binance_agentic"
+    assert res["next_action"] == "qr_approval"
+    assert "binding" not in res
+    assert "binance_agentic_main" not in cfg.data.get("wallet", {}).get("providers", {})
 
 
 def test_wallet_auth_start_byreal_requires_no_login_and_creates_binding(
@@ -1034,9 +1034,11 @@ def test_wallet_auth_start_coinbase_returns_popup_when_window_runs(
     assert res["auth"]["json"]["walletWindow"]["running"] is True
 
 
-def test_wallet_auth_status_coinbase_uses_window_state_and_creates_binding(
+@pytest.mark.parametrize("authenticated", [False, True])
+def test_wallet_auth_status_coinbase_binds_only_authenticated_session(
     tmp_path,
     monkeypatch,
+    authenticated,
 ) -> None:
     from nerya.api import routes_wallet
     from nerya.api.routes_wallet import routes as wallet_routes
@@ -1055,6 +1057,7 @@ def test_wallet_auth_status_coinbase_uses_window_state_and_creates_binding(
             "provider": "coinbase",
             "return_code": None,
             "json": {
+                "loggedIn": authenticated,
                 "walletWindow": {"running": True, "pid": 1234},
                 "agenticSessionPath": str(tmp_path / "Electron"),
                 "agenticSessionExists": True,
@@ -1079,6 +1082,11 @@ def test_wallet_auth_status_coinbase_uses_window_state_and_creates_binding(
     )
 
     assert res["ok"] is True
+    assert res["authenticated"] is authenticated
+    if not authenticated:
+        assert "binding" not in res
+        assert "coinbase_main" not in cfg.data.get("wallet", {}).get("providers", {})
+        return
     assert res["binding"]["ok"] is True
     binding = cfg.data["wallet"]["providers"]["coinbase_main"]
     assert binding["provider"] == "coinbase"
@@ -1140,9 +1148,9 @@ def test_wallet_auth_verify_creates_okx_account_and_binding(
     def fake_run_cli(client_arg, provider, args, *, timeout_s=300.0):
         assert provider == "okx_os"
         calls.append(args)
-        if args == ["wallet", "verify", "123456"]:
+        if args == ["wallet", "login", "--phase", "poll", "--session-id", "original-session"]:
             return {"ok": True, "provider": provider, "return_code": 0, "json": {"ok": True, "data": {}}}
-        if args == ["wallet", "status"] and len(calls) == 2:
+        if args == ["wallet", "status"] and len(calls) in {2, 3}:
             return {
                 "ok": True,
                 "provider": provider,
@@ -1179,7 +1187,7 @@ def test_wallet_auth_verify_creates_okx_account_and_binding(
         client,
         {
             "provider": "okx_os",
-            "otp": "123456",
+            "auth_session_id": "original-session",
             "wallet_id": "okx_os_main",
             "label": "OKX Wallet",
             "create_binding": True,
@@ -1193,7 +1201,8 @@ def test_wallet_auth_verify_creates_okx_account_and_binding(
     assert binding["provider"] == "okx_os"
     assert binding["config"]["account_id"] == "okx-account-1"
     assert calls == [
-        ["wallet", "verify", "123456"],
+        ["wallet", "login", "--phase", "poll", "--session-id", "original-session"],
+        ["wallet", "status"],
         ["wallet", "status"],
         ["wallet", "add"],
         ["wallet", "status"],
@@ -1389,10 +1398,13 @@ def test_wallet_readiness_report_uses_binding_over_placeholder_legacy_config(
     assert bitget["readiness"]["ready"] is True
 
 
-def test_binance_readiness_detects_installed_npm_package(
+@pytest.mark.parametrize("authenticated", [False, True])
+def test_binance_readiness_checks_installed_cli_login(
     tmp_path,
     monkeypatch,
+    authenticated,
 ) -> None:
+    from nerya.wallet.providers import binance_cli
     from nerya.wallet.providers._node_skill import NodeSkillRef
     from nerya.wallet.registry import readiness_report
 
@@ -1412,10 +1424,14 @@ def test_binance_readiness_detects_installed_npm_package(
     cfg = _config(tmp_path)
     monkeypatch.setattr(NodeSkillRef, "node_available", lambda self: True)
 
+    monkeypatch.setattr(binance_cli, "call", lambda *a, **kw: {"loggedIn": authenticated})
+
     rows = readiness_report(cfg.data, workspace=tmp_path)
     binance = next(row for row in rows if row["id"] == "binance_agentic")
 
-    assert binance["readiness"]["ready"] is True
+    assert binance["readiness"]["ready"] is authenticated
+    if not authenticated:
+        assert binance["readiness"]["missing"] == ["login:baw"]
 
 
 def test_coinbase_readiness_prefers_agentic_wallet_binding_over_legacy_defaults(
@@ -1552,6 +1568,8 @@ def test_okx_wallet_market_data_can_use_onchainos_cli_without_api_keys(
     monkeypatch.setattr(wallet, "_onchainos_bin", lambda: "onchainos")
 
     def fake_run(args, *, timeout_s=30.0):
+        if args == ["wallet", "status"]:
+            return {"ok": True, "data": {"loggedIn": True}}
         assert args == [
             "market",
             "kline",

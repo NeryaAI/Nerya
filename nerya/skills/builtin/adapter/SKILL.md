@@ -7,6 +7,11 @@ version: 0.1.0
 
 # Adapter
 
+For SDK-dependent account reads or mapping balances/positions/income into the
+portfolio UI, read [references/sdk-account-observations.md](references/sdk-account-observations.md).
+Use sdk_account to prepare only the required components and collect validated
+observations; read-only account setup does not require financial execution readiness.
+
 For the integration checklist, read [references/full-playbook.md](references/full-playbook.md).
 
 Start with connector_list/connector_describe for venues or wallet capability

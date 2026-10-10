@@ -30,6 +30,7 @@ import {
 } from "../../components/Page";
 import { SectionTabs } from "../../components/SectionTabs";
 import { PortfolioDesk } from "../../components/finance/PortfolioDesk";
+import { SdkAccountsPortfolio } from "../../components/finance/SdkAccountsPortfolio";
 import { finiteNumber } from "../../lib/financeDisplay";
 import { ModePill } from "../../components/ModePill";
 import { formatTsShort } from "../../lib/format";
@@ -209,6 +210,7 @@ export default function PortfolioPage() {
     }>
   >([]);
   const [error, setError] = useState<string | null>(null);
+  const [sdkRefreshVersion, setSdkRefreshVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   // First-load gate: skeletons show only until the initial round lands, so
   // background 30s refreshes never flash placeholders over real values.
@@ -298,6 +300,7 @@ export default function PortfolioPage() {
     setWorstReport(reportsRes.worst_recent ?? null);
     setKillSwitch(killRes);
     setWalletPortfolio(walletPortfolioRes.accounts || []);
+    setSdkRefreshVersion(value => value + 1);
     setLoaded(true);
     setLoading(false);
   }
@@ -600,6 +603,7 @@ export default function PortfolioPage() {
           </Card>
         </div>
 
+        <SdkAccountsPortfolio refreshVersion={sdkRefreshVersion} />
         {walletPortfolio.length > 0 ? (
           <Card
             title={t("walletPortfolio", { count: walletPortfolio.length })}

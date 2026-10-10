@@ -47,6 +47,57 @@ def _state(**overrides):
     })
 
 
+def test_mixed_native_tool_read_receipts_are_not_treated_as_completed_writes():
+    executed=[]
+    def dispatch(calls):
+        executed.extend(calls)
+        results=[]
+        for call in calls:
+            result=_result(call)
+            result.metadata['read_only']=call.arguments.get('op')=='inspect'
+            results.append(result)
+        return BatchResult(results=results)
+    phase=_phase(dispatch,read_only=False);state=_state()
+    for index,op in enumerate(['inspect','prepare','inspect']):
+        phase.run([ToolCall(name='probe',id=str(index),arguments={'op':op})],state=state)
+    assert [call.arguments['op'] for call in executed]==['inspect','prepare','inspect']
+
+
+def test_non_retryable_failure_is_not_dispatched_again_without_changed_state():
+    executed = []
+    def dispatch(calls):
+        executed.extend(calls)
+        return BatchResult(results=[ToolResult.from_error(tool_use_id=call.id, name=call.name,
+            error=ToolError(kind=ToolErrorKind.PROVIDER_ERROR, message='login required', retryable=False))
+            for call in calls])
+    phase = _phase(dispatch)
+    state = _state()
+    phase.run([ToolCall(name='probe', id='first')], state=state)
+    result = phase.run([ToolCall(name='probe', id='second')], state=state).batch.results[0]
+    assert len(executed) == 1
+    assert result.error.kind == ToolErrorKind.DEDUPED
+
+
+def test_successful_setup_write_allows_a_fresh_read_after_non_retryable_error():
+    executed = []
+    def dispatch(calls):
+        executed.extend(calls)
+        return BatchResult(results=[ToolResult.from_error(tool_use_id=call.id, name=call.name,
+            error=ToolError(kind=ToolErrorKind.PROVIDER_ERROR, message='dependency missing', retryable=False))
+            if len(executed) == 1 else _result(call) for call in calls])
+    registry = ToolRegistry()
+    for name, readonly in [('probe', True), ('setup', False)]:
+        registry.register(ToolDescriptor(name=name, description=name, handler=_result,
+            input_schema={'type': 'object'}, risk=RiskLevel.READ if readonly else RiskLevel.EXEC,
+            permission_scope=PermissionScope.NONE, read_only=readonly))
+    phase = ToolBatchPhase(orchestrator=SimpleNamespace(run_batch=dispatch), registry=registry)
+    policy = ToolBatchPolicy(frozenset({'probe', 'setup'}), frozenset())
+    state = _state()
+    for name in ['probe', 'setup', 'probe']:
+        phase.run([ToolCall(name=name)], state=state, policy=policy)
+    assert [call.name for call in executed] == ['probe', 'setup', 'probe']
+
+
 def test_reordered_results_are_matched_by_call_id_not_position():
     calls = [ToolCall(name="probe", id="first"), ToolCall(name="probe", id="second")]
     state = _state()

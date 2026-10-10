@@ -51,6 +51,12 @@ _LOG = logging.getLogger(__name__)
 _FRESH_STATUS_TOOLS = frozenset({"task_get", "task_output"})
 
 
+def _cached_result_is_read_only(result: ToolResult, registry: ToolRegistry) -> bool:
+    descriptor = registry.find(result.name)
+    return bool(_tool_name_is_read_only(result.name, registry) or (
+        descriptor and descriptor.namespace == "native" and result.metadata.get("read_only") is True))
+
+
 def _is_fresh_status_poll(call: ToolCall, registry: ToolRegistry) -> bool:
     descriptor = registry.find(call.name)
     return bool(
@@ -489,9 +495,12 @@ class ToolBatchPhase:
                 (fingerprint in state.checkpointed_fingerprints
                  or (prior_result is not None and result_counts_as_success(prior_result)))
                 and not _tool_name_is_read_only(call.name, self.registry)
+                and not (prior_result is not None and _cached_result_is_read_only(prior_result, self.registry))
             )
             if prior_result is not None and (
                 checkpoint_replay_is_unsafe
+                or (prior_result.is_error and prior_result.error is not None
+                    and prior_result.error.retryable is False)
                 or (
                     not _is_fresh_status_poll(call, self.registry)
                     and repeat_count >= max(2, policy.repeated_tool_threshold)
@@ -584,6 +593,17 @@ class ToolBatchPhase:
                 semantic_success_names.discard(result.name)
             if result.name and not result.is_error:
                 semantic_success = result_counts_as_success(result)
+                if (semantic_success and index in executable_indices
+                        and not _tool_name_is_read_only(call.name, self.registry)
+                        and not result.metadata.get("read_only")):
+                    # Installation/login/configuration can repair a failed read.
+                    # Preserve write replay guards; invalidate read receipts.
+                    repaired = {key for key, cached in state.tool_result_by_fingerprint.items()
+                                if _cached_result_is_read_only(cached, self.registry)}
+                    for key in repaired:
+                        state.tool_result_by_fingerprint.pop(key, None)
+                        state.deduped_counts_by_fingerprint.pop(key, None)
+                    state.recent_tool_fingerprints[:] = [key for key in state.recent_tool_fingerprints if key not in repaired]
                 if result.name in self_required_next_tools or not semantic_success:
                     state.successful_tool_names.discard(result.name)
                 else:
