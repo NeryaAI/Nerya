@@ -28,6 +28,7 @@ from ..db.sqlite import connect
 from ..security.prompt_injection import flag_suspicious
 from .adapters.openai import DEFAULT_BASE_URLS as _OPENAI_DEFAULT_BASE_URLS
 from .adapters._base import wire_trace, io_control
+from .attempt_budget import claim_current_extra_attempt
 from .messages import (
     AnthropicMessagesBackend,
     BedrockAnthropicMessagesBackend,
@@ -43,7 +44,7 @@ from .messages import (
     normalise_reasoning_effort,
 )
 from .model_router import CallResult, ModelRouter
-from .provider_catalog import lookup as _provider_lookup
+from .provider_catalog import lookup as _provider_lookup, resolve_alias as _provider_alias
 from .redaction import scrub
 from .route_candidates import (
     RESOLVED_PROVIDER_KEY,
@@ -568,6 +569,8 @@ class LLMGateway:
                     schema=schema, caller=caller,
                     cfg_override=cfg_override,
                 )
+        except CancelledError:
+            raise
         except Exception as exc:  # pragma: no cover
             err = LLMError(f"router dispatch failed: {exc}")
             if context_full:
@@ -879,6 +882,10 @@ class LLMGateway:
         response: MessagesResponse | None = None
         last_exc: Exception | None = None
         for index, route_cfg in enumerate(route_cfgs or [tier_cfg]):
+            if index > 0 and not claim_current_extra_attempt("model_failover"):
+                if last_exc is not None:
+                    setattr(last_exc, "retry_exhausted", "attempt_budget")
+                break
             try:
                 from .model_registry import ModelRegistry, resolve_context_window
                 from .compression import estimate_tokens
@@ -969,7 +976,10 @@ class LLMGateway:
             except Exception as exc:
                 last_exc = exc
                 response = None
-                if isinstance(exc, CancelledError) or getattr(exc, "stream_interrupted", False):
+                if isinstance(exc, CancelledError) or (
+                    getattr(exc, "stream_interrupted", False)
+                    and getattr(exc, "stream_output_committed", True)
+                ):
                     break
                 if index < len(route_cfgs) - 1:
                     continue
@@ -1060,6 +1070,40 @@ class LLMGateway:
         provider_profiles = self._provider_profiles(self.config)
         base_cfg = dict(tiers.get(tier) or {})
         provider = str(provider_override or "").strip().lower()
+        model = str(model_override or "").strip()
+
+        # A model selected within this tier is a preference, so retain the
+        # tier's remaining routes with their own credentials and policy.
+        # Unlisted custom selections still use the pinned path below.
+        if provider or model:
+            routes = [self._apply_provider_profile(route, provider_profiles)
+                      for route in configured_routes(base_cfg)]
+            for index, route in enumerate(routes):
+                route_provider = str(route.get("provider") or "").lower()
+                if provider and (_provider_alias(route_provider) or route_provider) != (_provider_alias(provider) or provider):
+                    continue
+                models = configured_models(route)
+                if model and model not in models:
+                    continue
+                selected = dict(route)
+                remaining = list(routes)
+                if model:
+                    selected.update(model=model, models=[model])
+                    others = [value for value in models if value != model]
+                    if others:
+                        remaining[index] = {**route, "model": others[0], "models": others}
+                    else:
+                        remaining.pop(index)
+                else:
+                    remaining.pop(index)
+                connection = {key: selected[key] for key in (
+                    "provider", "model", "models", "base_url", "provider_key_ref", "provider_key_env", "kind",
+                ) if key in selected}
+                return {**base_cfg, **connection, "routes": [selected, *remaining]}
+            if model and not provider:
+                # An unlisted model belongs to the primary provider, rather
+                # than being sent with unrelated providers' credentials.
+                provider = str(routes[0].get("provider") or "").lower()
 
         if provider:
             provider_cfg: dict | None = None
@@ -1118,6 +1162,7 @@ class LLMGateway:
             cfg["provider"] = provider
             if model_override:
                 cfg["model"] = str(model_override).strip()
+                cfg["models"] = split_csv_values(model_override)
             return self._apply_provider_profile(cfg, provider_profiles)
 
         cfg = self._apply_provider_profile(base_cfg, provider_profiles)
@@ -1129,6 +1174,7 @@ class LLMGateway:
             if model_override:
                 for route in routes:
                     route["model"] = str(model_override).strip()
+                    route["models"] = split_csv_values(model_override)
             cfg["routes"] = routes
             if routes:
                 first_route = routes[0]
@@ -1142,6 +1188,7 @@ class LLMGateway:
 
         if model_override:
             cfg["model"] = str(model_override).strip()
+            cfg["models"] = split_csv_values(model_override)
         return cfg
 
     def _messages_route_cfgs(
@@ -1159,7 +1206,6 @@ class LLMGateway:
         return expand_tier_route_cfgs(
             cfg,
             keys_for_route=self._resolve_provider_keys,
-            model_override=model_override,
         )
 
     def _messages_api_mode(self, provider: str, cfg: dict) -> str:

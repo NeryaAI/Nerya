@@ -1,4 +1,21 @@
 {
+  "modelProbe": {
+    "unsupported_setting": "The model does not support the saved reasoning setting. Use an inherited or supported setting.",
+    "context_limit": "The test exceeded this model’s context limit.",
+    "missing_credentials": "No usable API key was found for the saved provider.",
+    "output_truncated": "The connection worked, but the output budget was exhausted before a reply was produced.",
+    "empty_response": "The connection worked, but the model returned no text or tool call.",
+    "tool_not_called": "The connection worked, but the model did not call the test tool.",
+    "task_not_allowed": "The selected tier does not allow this test task.",
+    "timeout": "The model test timed out. Check the provider or retry.",
+    "authentication": "The provider rejected authentication. Check the API key and permissions.",
+    "model_not_found": "The provider could not find this model. Check the model ID and endpoint.",
+    "rate_limit": "The provider is rate limited or has no remaining quota. Check quota or retry later.",
+    "provider_unavailable": "The provider is temporarily unavailable. Retry later.",
+    "invalid_request": "The provider rejected the model request. Check the saved API format and model settings.",
+    "unknown": "The test could not complete. Your settings remain saved; check the provider and try again.",
+    "configuration_changed": "Configuration changed. Refresh and test again."
+  },
   "home": {
     "greetingMorning": "Good morning",
     "greetingAfternoon": "Good afternoon",

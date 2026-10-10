@@ -1,9 +1,43 @@
 from __future__ import annotations
 
 from copy import copy, deepcopy
+import time
 
 from ..llm.gateway import LLMGateway
 from ..llm import ops as _llm_ops
+from ..core.errors import LLMTaskNotAllowed, LLMTierDenied
+
+
+def _probe_failure_kind(exc):
+    """Expose an actionable category without returning provider bodies or keys."""
+    message = str(exc).lower()
+    status = int(getattr(exc, "status_code", 0) or 0)
+    for marker, kind in (
+        ("reasoning_off_unsupported", "unsupported_setting"),
+        ("context_length_exceeded", "context_limit"),
+        ("missing_api_key", "missing_credentials"),
+        ("requires api_key", "missing_credentials"),
+        ("probe_output_truncated", "output_truncated"),
+        ("probe_empty_response", "empty_response"),
+        ("probe_tool_not_called", "tool_not_called"),
+    ):
+        if marker in message:
+            return kind
+    if isinstance(exc, (LLMTaskNotAllowed, LLMTierDenied)):
+        return "task_not_allowed"
+    if isinstance(exc, TimeoutError) or "timed out" in message or "deadline" in message:
+        return "timeout"
+    if status in (401, 403):
+        return "authentication"
+    if status == 404:
+        return "model_not_found"
+    if status == 429:
+        return "rate_limit"
+    if status >= 500:
+        return "provider_unavailable"
+    if status == 400 or status == 422:
+        return "invalid_request"
+    return "unknown"
 
 
 def _messages_probe(client, payload):
@@ -17,9 +51,8 @@ def _messages_probe(client, payload):
     revision = _llm_ops.config_revision(client.config)
     if body.get("revision") and body["revision"] != revision:
         return {"_status": 409, "ok": False, "error": "llm_config_changed", "revision": revision}
-    probe_config = client.config
-    if body.get("revision"):
-        probe_config = copy(client.config)
+    probe_config = copy(client.config)
+    if hasattr(client.config, "data"):
         probe_config.data = deepcopy(client.config.data)
     tier = str(body.get("tier") or _llm_ops._get_cfg(probe_config, "llm.default_tier", "medium")).strip() or "medium"
     model_provider = str(body.get("model_provider") or body.get("provider") or "").strip()
@@ -28,11 +61,13 @@ def _messages_probe(client, payload):
     prompt = str(body.get("prompt") or "Reply with E2E_READY only.").strip()
     if not prompt:
         prompt = "Reply with E2E_READY only."
-    # Some reasoning-style OpenAI-compatible models emit an empty
-    # ``max_tokens`` finish at 32 tokens even for the one-word readiness
-    # prompt. Keep this probe lightweight, but large enough to verify the
-    # real provider path instead of failing on probe truncation.
-    max_tokens = int(body.get("max_tokens") or 128)
+    # Reasoning consumes the output budget even for a one-word answer. Use
+    # the saved tier's normal policy rather than a synthetic 128-token/off
+    # request that working reasoning and unknown compatibility models reject.
+    max_tokens = int(body.get("max_tokens") or _llm_ops._get_cfg(
+        probe_config, f"llm.tiers.{tier}.max_tokens", 4096,
+    ) or 4096)
+    temperature = _llm_ops._get_cfg(probe_config, f"llm.tiers.{tier}.temperature")
     tools = []
     tool_choice = None
     system = "You are a readiness probe. Reply briefly and do not call tools."
@@ -64,12 +99,13 @@ def _messages_probe(client, payload):
             tools=tools,
             tool_choice=tool_choice,
             tier=tier,
-            max_tokens=max(1, min(max_tokens, 128)),
-            temperature=0.0,
-            reasoning_effort="none",
+            max_tokens=max(1, min(max_tokens, 8192)),
+            temperature=float(temperature if temperature is not None else 0.2),
+            reasoning_effort=None,
             reasoning_summary=None,
             model_provider=model_provider or None,
             model_id=model_id or None,
+            deadline=time.time() + 90,
         )
     except Exception as exc:  # noqa: BLE001 - expose provider readiness failure
         return {
@@ -80,11 +116,23 @@ def _messages_probe(client, payload):
             "message": f"{type(exc).__name__}: saved model connection test failed",
             "status_code": int(getattr(exc, "status_code", 0) or 0),
             "request_id": str(getattr(exc, "request_id", "") or ""),
+            "failure_kind": _probe_failure_kind(exc),
+            "connection_ok": False,
+            "tier": tier,
         }
     if _llm_ops.config_revision(client.config) != revision:
         return {"_status": 409, "ok": False, "error": "llm_config_changed", "revision": revision}
+    text = response.text()
+    tool_uses = response.tool_uses()
+    failure_kind = ""
+    if tool_probe and not any(tool.get("name") == "e2e_probe_tool" for tool in tool_uses):
+        failure_kind = "tool_not_called"
+    elif not text.strip() and not tool_uses:
+        failure_kind = "output_truncated" if response.stop_reason in {"max_tokens", "length", "max_output_tokens"} else "empty_response"
     return {
-        "ok": True,
+        **({"_status": 503, "error": "llm_messages_probe_failed", "failure_kind": failure_kind} if failure_kind else {}),
+        "ok": not bool(failure_kind),
+        "connection_ok": True,
         "revision": revision,
         "tier": tier,
         "provider": response.provider,
@@ -93,9 +141,9 @@ def _messages_probe(client, payload):
         "model_override": model_id,
         "stop_reason": response.stop_reason,
         "latency_ms": response.latency_ms,
-        "text_preview": response.text()[:200],
-        "tool_uses_count": len(response.tool_uses()),
-        "tool_uses_preview": response.tool_uses()[:3],
+        "text_preview": text[:200],
+        "tool_uses_count": len(tool_uses),
+        "tool_uses_preview": tool_uses[:3],
     }
 
 

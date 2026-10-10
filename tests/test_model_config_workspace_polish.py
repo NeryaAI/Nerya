@@ -67,7 +67,7 @@ def request(**kwargs):
     return MessagesRequest(system="fixture", messages=[{"role": "user", "content": "hi"}], **kwargs)
 
 
-def test_admission_keeps_default_unlocked_and_explicit_selection_locked(tmp_path, monkeypatch):
+def test_admission_keeps_selection_and_allows_same_tier_failover(tmp_path, monkeypatch):
     routes = [{"provider": "openai", "model": "o3", "reasoning_effort": "high"},
               {"provider": "other", "model": "backup", "reasoning_effort": "low"}]
     cfg = config(tmp_path, routes)
@@ -94,13 +94,8 @@ def test_admission_keeps_default_unlocked_and_explicit_selection_locked(tmp_path
         assert bool(payload.get("model_provider")) is explicit
         kwargs = {key: payload.get(key) for key in ("model_provider", "model_id")}
         attempts.clear()
-        if explicit:
-            with pytest.raises(LLMError, match="fixture rejection"):
-                call(LLMGateway(cfg), **kwargs)
-            assert attempts == [("openai", "o3", "high")]
-        else:
-            assert call(LLMGateway(cfg), **kwargs).model == "backup"
-            assert attempts == [("openai", "o3", "high"), ("other", "backup", "low")]
+        assert call(LLMGateway(cfg), **kwargs).model == "backup"
+        assert attempts == [("openai", "o3", "high"), ("other", "backup", "low")]
 
 
 def test_same_provider_exact_model_uses_own_endpoint_key_and_reasoning(tmp_path, monkeypatch):
@@ -114,7 +109,7 @@ def test_same_provider_exact_model_uses_own_endpoint_key_and_reasoning(tmp_path,
     monkeypatch.setattr("nerya.llm.messages.UrllibTransport.post_json_with_headers", transport.post_json_with_headers)
     gateway = LLMGateway(cfg)
     effective = gateway._messages_route_cfgs("medium", provider_override="openai", model_override="gpt-5.4")
-    assert len(effective) == 1
+    assert [route["model"] for route in effective] == ["gpt-5.4", "o3", "o3-mini"]
     assert effective[0]["_resolved_provider_key"] == "fixture-b"
     call(gateway, model_provider="openai", model_id="gpt-5.4", tools=[TOOL])
     assert transport.calls[0]["url"] == "https://b.invalid/v1/chat/completions"

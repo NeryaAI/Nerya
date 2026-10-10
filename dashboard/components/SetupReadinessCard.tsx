@@ -28,12 +28,15 @@ function titleCase(value: string): string {
 /** Readiness reads are local. Only this explicit click issues a model request. */
 export function SavedModelTest({ revision, dirty = false, disabled = false }: { revision?: string; dirty?: boolean; disabled?: boolean }) {
   const zh = useLocale().startsWith("zh");
+  const tFailure = useTranslations("modelProbe");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ revision: string; ok: boolean; detail: string } | null>(null);
   const current = result && (!revision || result.revision === revision) ? result : null;
   async function testSaved() {
     if (busy || dirty || disabled) return;
     setBusy(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 100_000);
     let testedRevision = revision || "";
     try {
       if (!testedRevision) {
@@ -44,6 +47,7 @@ export function SavedModelTest({ revision, dirty = false, disabled = false }: { 
       const response = await fetch("/api/proxy/llm/messages/probe", {
         method: "POST", headers: authHeaders({ "content-type": "application/json" }), cache: "no-store",
         body: JSON.stringify({ revision: testedRevision, caller: "settings:connection-test" }),
+        signal: controller.signal,
       });
       if (response.status === 401 || response.status === 403) {
         handleAuthFailure(response.status);
@@ -51,14 +55,21 @@ export function SavedModelTest({ revision, dirty = false, disabled = false }: { 
       }
       const body = await response.json();
       if (!response.ok || !body.ok || body.revision !== testedRevision) {
-        throw new Error(body.error === "llm_config_changed"
-          ? (zh ? "配置已变化，请刷新后重新测试。" : "Configuration changed. Refresh and test again.")
-          : (zh ? "连接测试失败；设置仍已保存。请检查 URL、凭据和模型。" : "Connection test failed; settings remain saved. Check URL, credentials and model."));
+        if (body.error === "llm_config_changed" || (body.ok && body.revision !== testedRevision)) {
+          throw new Error(tFailure("configuration_changed"));
+        }
+        const knownKinds = ["unsupported_setting", "context_limit", "missing_credentials", "output_truncated", "empty_response", "tool_not_called", "task_not_allowed", "timeout", "authentication", "model_not_found", "rate_limit", "provider_unavailable", "invalid_request"];
+        const kind = knownKinds.includes(body.failure_kind) ? body.failure_kind : "unknown";
+        const detail = [tFailure(kind),
+          body.status_code ? `HTTP ${Number(body.status_code)}` : "",
+          typeof body.request_id === "string" && /^[\w.:-]{1,160}$/.test(body.request_id) ? `Request ID: ${body.request_id}` : "",
+        ].filter(Boolean).join(" · ");
+        throw new Error(detail);
       }
       setResult({ revision: testedRevision, ok: true, detail: [body.provider, body.model].filter(Boolean).join(" · ") });
     } catch (error) {
-      setResult({ revision: testedRevision, ok: false, detail: error instanceof Error ? error.message : String(error) });
-    } finally { setBusy(false); }
+      setResult({ revision: testedRevision, ok: false, detail: controller.signal.aborted ? tFailure("timeout") : error instanceof Error ? error.message : tFailure("unknown") });
+    } finally { clearTimeout(timeout); setBusy(false); }
   }
   return <div className="my-3 space-y-2 rounded-lg border border-[color:var(--line)] p-3" data-testid="saved-model-test">
     <div className="flex flex-wrap items-center gap-2">

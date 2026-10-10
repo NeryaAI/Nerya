@@ -5,13 +5,14 @@ import { useLocale, useTranslations } from "next-intl";
 import { ChoiceSelect } from "../ChoiceSelect";
 import { Field } from "./SettingsFields";
 import type { ModelRouteState } from "./modelSettingsState";
+import { ModelRoutePriority } from "./ModelRoutePriority";
 
 type ModelChoice = { provider: string; model: string };
 const DEFAULT_MODEL_CONTEXT_WINDOW = 1_048_576;
 const MIN_MODEL_CONTEXT_WINDOW = 4_096;
 const MAX_MODEL_CONTEXT_WINDOW = 16_777_216;
 
-export function PrimaryModelSettings({ routes, catalog, disabled, onChange, onContextChange, onInheritConnection, primaryOnly = false }: {
+export function PrimaryModelSettings({ routes, catalog, disabled, onChange, onContextChange, onInheritConnection, onMove, onAdd, primaryOnly = false }: {
   primaryOnly?: boolean;
   routes: ModelRouteState[];
   catalog: Record<string, string[]>;
@@ -19,6 +20,8 @@ export function PrimaryModelSettings({ routes, catalog, disabled, onChange, onCo
   onChange: (index: number, choice: ModelChoice | null) => void;
   onContextChange: (index: number, contextWindow: number) => void;
   onInheritConnection?: (index: number) => void;
+  onMove: (from: number, to: number) => void;
+  onAdd?: () => void;
 }) {
   const zh = useLocale().startsWith("zh");
   const tModel = useTranslations("settings.modelCard");
@@ -30,17 +33,17 @@ export function PrimaryModelSettings({ routes, catalog, disabled, onChange, onCo
     if (route.provider && route.model) choices.set(JSON.stringify([route.provider, route.model]), route);
   }
   return <div className="space-y-3" data-testid="primary-model-settings">
-    <div className={primaryOnly ? "grid gap-3" : "grid gap-3 sm:grid-cols-2"}>
-      {(primaryOnly ? [0] : [0, 1]).map((index) => {
+    <div className="grid gap-3">
+      {(primaryOnly ? [0] : Array.from({ length: Math.max(2, routes.length) }, (_, index) => index)).map((index) => {
         const route = routes[index];
-        const label = index === 0 ? (i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.001")) : (i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.002"));
-        return <div key={index} className="space-y-2">
+        const label = index === 0 ? (i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.001")) : tModel("backupModelLabel", { index });
+        return <ModelRoutePriority key={index} group="primary-models" index={index} count={routes.length} disabled={disabled || primaryOnly || !route?.model} onMove={onMove} className="space-y-2">
           <Field label={label}>
-            <ChoiceSelect aria-label={label} className="w-full" searchable disabled={disabled || (index === 1 && !routes[0]?.model)}
+            <ChoiceSelect aria-label={label} className="w-full" searchable disabled={disabled || (index > 0 && !routes[0]?.model)}
               value={route?.provider && route.model ? JSON.stringify([route.provider, route.model]) : ""}
               placeholder={i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.003")}
               onValueChange={(value) => onChange(index, value ? choices.get(value) || null : null)}>
-              {index === 1 && <option value="">{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.004")}</option>}
+              {index > 0 && <option value="">{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.004")}</option>}
               {[...choices].map(([value, choice]) => <option key={value} value={value}>{choice.model} · {choice.provider}</option>)}
             </ChoiceSelect>
           </Field>
@@ -71,10 +74,10 @@ export function PrimaryModelSettings({ routes, catalog, disabled, onChange, onCo
             </dl>
             {onInheritConnection && <button type="button" className="btn btn-ghost mt-1" disabled={disabled || (!route.base_url && !route.provider_key_ref && !route.provider_key_env && !route.kind)} onClick={() => onInheritConnection(index)}>{zh ? "恢复连接继承" : "Inherit connection"}</button>}
           </details>}
-        </div>;
+        </ModelRoutePriority>;
       })}
     </div>
-    <p className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.005")}</p>
-    {routes.length > 2 && <p className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.006")}</p>}
+    {!primaryOnly && onAdd && routes.length >= 2 && <button type="button" className="btn btn-ghost" disabled={disabled || !routes[0]?.model} onClick={onAdd}>{tModel("addRoute")}</button>}
+    <p className="text-xs text-[color:var(--text-muted)]">{tModel("priorityHint")}</p>
   </div>;
 }

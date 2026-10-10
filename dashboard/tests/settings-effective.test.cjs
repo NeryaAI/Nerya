@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
 require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText, filename);
 const { editableRoute, explicitRoute, connectionPatch, tierPolicy } = require('../components/settings/modelSettingsState.ts');
 
@@ -52,12 +52,14 @@ function probeHarness(response) {
     require(name) {
       if (name === 'react') return react;
       if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx };
-      if (name === 'next-intl') return { useLocale: () => 'en', useTranslations: () => key => key };
+      if (name === 'next-intl') return { useLocale: () => 'en', useTranslations: namespace => key => require('../messages/index.ts').en[namespace]?.[key] || key };
+      if (name.endsWith('/i18n')) return require('../lib/i18n.ts');
       if (name.endsWith('/clientApi')) return { clientApi: { llmConfig: async () => ({ revision: 'r1' }) } };
       if (name.endsWith('/auth')) return { authHeaders: v => v, handleAuthFailure() {} };
       if (name === './Page') return { Pill: 'pill', Card: 'card' };
       return {};
     },
+    AbortController, setTimeout, clearTimeout,
     fetch: async (path, init) => { calls.push({ path, body: JSON.parse(init.body) }); return { ok: response.ok, status: response.ok ? 200 : 503, json: async () => response }; },
   });
   return { calls, render(props) { cursor = 0; return mod.exports.SavedModelTest(props); } };
@@ -90,4 +92,14 @@ test('failed probe keeps the saved revision and allows retry', async () => {
   assert.ok(nodes(view).includes('Test failed'));
   assert.ok(nodes(view).some(n => typeof n === 'string' && n.includes('settings remain saved')));
   assert.equal(nodes(view).find(n => n?.type === 'button').props.disabled, false);
+});
+
+test('failed probe displays the safe provider cause and request trace', async () => {
+  const h = probeHarness({ ok: false, revision: 'r1', error: 'llm_messages_probe_failed', failure_kind: 'rate_limit', status_code: 429, request_id: 'req-fixture' });
+  await nodes(h.render({ revision: 'r1' })).find(n => n?.type === 'button').props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  const details = nodes(h.render({ revision: 'r1' })).filter(n => typeof n === 'string').join(' ');
+  assert.match(details, /rate limited/);
+  assert.match(details, /HTTP 429/);
+  assert.match(details, /req-fixture/);
 });

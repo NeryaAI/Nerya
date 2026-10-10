@@ -37,7 +37,8 @@ import { DataServiceSettings } from "./settings/DataServiceSettings";
 import { InterfaceSettings } from "./settings/InterfaceSettings";
 import McpSettingsPanel from "./settings/McpSettingsPanel";
 import { PrimaryModelSettings } from "./settings/PrimaryModelSettings";
-import { editableRoute, explicitRoute, tierPolicy, connectionPatch, type ModelRouteState, type ModelProfileState } from "./settings/modelSettingsState";
+import { ModelRoutePriority } from "./settings/ModelRoutePriority";
+import { editableRoute, explicitRoute, tierPolicy, connectionPatch, moveModelRoute, type ModelRouteState, type ModelProfileState } from "./settings/modelSettingsState";
 import { SavedModelTest } from "./SetupReadinessCard";
 import { SearchSettings } from "./settings/SearchSettings";
 import { Field,Metric,Row,CompactSelect as Select } from "./settings/SettingsFields";
@@ -1403,6 +1404,16 @@ function SettingsWorkspaceContent({
     );
   }
 
+  function moveTierRoute(tierIndex: number, from: number, to: number) {
+    if (saving || loading) return;
+    setTierRows(rows => rows.map((row, index) => {
+      if (index !== tierIndex) return row;
+      const routes = routesOf(row);
+      if (![routes[from], routes[to]].every(route => route?.provider && route?.model)) return row;
+      return tierWithRoutes({ ...row, routes: moveModelRoute(routes, from, to) });
+    }));
+  }
+
   function removeTierRoute(tierIndex: number, routeIndex: number) {
     setTierRows((rows) =>
       rows.map((row, i) => {
@@ -2476,6 +2487,8 @@ function SettingsWorkspaceContent({
             <PrimaryModelSettings primaryOnly={setupMode} routes={routesOf(tierRows.find((row) => row.tier === defaultTier) || emptyTier(defaultTier))}
               catalog={modelCatalog} disabled={saving || loading} onChange={selectPrimaryModel}
               onContextChange={setPrimaryContextWindow}
+              onMove={(from, to) => moveTierRoute(tierRows.findIndex(row => row.tier === defaultTier), from, to)}
+              onAdd={() => addTierRoute(tierRows.findIndex(row => row.tier === defaultTier))}
               onInheritConnection={(routeIndex) => patchTierRoute(tierRows.findIndex(row => row.tier === defaultTier), routeIndex, { base_url: "", provider_key_ref: "", provider_key_refs: [], provider_key_env: "", provider_key: "", provider_keys: [], kind: "" })} />
             <SavedModelTest revision={savedRevision} dirty={dirty} disabled={saving || loading || discovering} />
             {!setupMode ? <div className="flex flex-wrap items-end gap-3 rounded-lg bg-ink-950/20 p-3">
@@ -2564,9 +2577,11 @@ function SettingsWorkspaceContent({
                           : models;
                         const canRemove = routes.length > 1;
                         return (
-                          <div
+                          <ModelRoutePriority
                             key={`${row.tier}-${routeIndex}`}
-                            className="rounded-lg border border-[color:var(--line)] bg-ink-950/20 p-3"
+                            group={`tier-${row.tier}`} index={routeIndex} count={routes.length}
+                            disabled={saving || loading || !route.provider || !route.model} onMove={(from, to) => moveTierRoute(index, from, to)}
+                            className="bg-ink-950/20"
                           >
                             <div className="mb-2.5 flex items-center justify-between gap-2">
                               <div className="flex min-w-0 items-center gap-2">
@@ -2674,7 +2689,7 @@ function SettingsWorkspaceContent({
                                 {zh ? "恢复连接继承" : "Inherit connection"}
                               </button>
                             </div>
-                          </div>
+                          </ModelRoutePriority>
                         );
                       })}
                       <div className="flex flex-wrap items-end gap-3">
