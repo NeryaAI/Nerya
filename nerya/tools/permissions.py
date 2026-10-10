@@ -28,7 +28,7 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 from .types import PermissionScope, RiskLevel, ToolDescriptor
 from .capability_policy import normalise_tool_policy, tool_policy_allows
@@ -190,6 +190,7 @@ class PermissionContext:
     session_rules: list[PermissionRule] = field(default_factory=list)
     deny_rules: list[PermissionRule] = field(default_factory=list)
     tool_policy: dict[str, Any] = field(default_factory=dict)
+    current_tool_policy: Callable[[], dict[str, Any]] | None = None
     plan_only: bool = False
 
 
@@ -215,7 +216,8 @@ class PermissionEngine:
         if context.plan_only and (not descriptor.read_only or risk is not RiskLevel.READ or scope is PermissionScope.SECRETS):
             return PermissionDecision(kind=PermissionDecisionKind.DENY,
                 reason="plan mode permits investigation only", risk=risk, scope=scope)
-        if not tool_policy_allows(normalise_tool_policy(context.tool_policy), descriptor.name):
+        policy = context.current_tool_policy() if context.current_tool_policy else context.tool_policy
+        if not tool_policy_allows(normalise_tool_policy(policy), descriptor.name):
             return PermissionDecision(kind=PermissionDecisionKind.DENY,
                 reason="tool outside configured capability scope", risk=risk, scope=scope)
 

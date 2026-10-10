@@ -131,6 +131,8 @@ def run(
         "attached_skills": list(payload.get("attached_skills") or []),
         "delivery_targets": delivery_targets,
         "session_ttl_seconds": payload.get("session_ttl_seconds"),
+        "execution": dict(payload.get("execution") or {}),
+        "owner_actor_id": str(payload.get("owner_actor_id") or "local:loopback"),
     }
     if cron:
         entry_kwargs["cron"] = cron

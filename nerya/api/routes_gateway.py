@@ -82,6 +82,7 @@ _SAFE_CONFIG_KEYS = all_safe_field_keys() | {
     "label",
     "description",
     "auto_reply",
+    "assistant_id",
     "allow_unknown_users",
     "allowed_chat_ids",
     "allowed_user_ids",
@@ -133,7 +134,7 @@ _GATEWAY_HEARTBEAT_LAST: dict[str, float] = {}
 _GATEWAY_HEARTBEAT_LOCK = threading.Lock()
 
 
-def _gateway_events_record(event: dict[str, Any]) -> dict[str, Any]:
+def _gateway_events_record(event: dict[str, Any], *, client: Any = None) -> dict[str, Any]:
     """Append a live-status event to the ring buffer.
 
     Returns the stamped event (with ``seq`` and ``ts_ms``) so callers can
@@ -160,7 +161,7 @@ def _gateway_events_record(event: dict[str, Any]) -> dict[str, Any]:
             from ..evidence import autoingest as _evidence_autoingest
 
             _evidence_autoingest.on_gateway_event(
-                None,
+                client,
                 channel=str(
                     stamped.get("channel") or stamped.get("platform") or "unknown"
                 ),
@@ -1116,7 +1117,7 @@ def _session_id_for_identity(platform: str, identity: dict[str, str],
         explicit_session_id
         or active_sessions.get(session_key)
         or active_sessions.get(f"{platform}:{chat_id}")
-        or active_sessions.get(str(chat_id))
+        or (active_sessions.get(str(chat_id)) if "_a" not in platform else None)
         or gateway_session_id(
             platform,
             chat_id=chat_id,
@@ -1304,6 +1305,7 @@ def _public_gateway_channel(channel: str, cfg: dict[str, Any]) -> dict[str, Any]
         for key in sorted(_SAFE_CONFIG_KEYS)
         if key in cfg
     }
+    safe_cfg["assistant_id"] = str(cfg.get("assistant_id") or "main")
     secret_refs: dict[str, dict[str, Any]] = {}
     for secret_key, ref_key in _SECRET_VALUE_TO_REF.items():
         ref = cfg.get(ref_key)
@@ -1453,6 +1455,10 @@ def gateway_config_upsert(client, payload: dict[str, Any]) -> dict[str, Any]:
     doc = _channels_doc(client)
     channels = doc.get("channels") if isinstance(doc.get("channels"), dict) else {}
     cfg = dict(channels.get(channel) or {})
+    from ..agent.assistants import AssistantStore, DEFAULT_ID
+    assistant_id = payload.get("assistant_id") or cfg.get("assistant_id") or DEFAULT_ID
+    AssistantStore(client.config.paths).get(assistant_id, enabled=True)
+    cfg["assistant_id"] = assistant_id
     cfg["kind"] = spec.id
     _apply_public_gateway_fields(cfg, payload)
     _apply_secret_gateway_fields(client, channel=channel, cfg=cfg, payload=payload)
@@ -2572,6 +2578,8 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
                       attachments: list[dict[str, Any]] | None = None,
                       update_id: int | None = None,
                       auto_reply: bool = False) -> dict[str, Any]:
+    def _record_event(event):
+        return _gateway_events_record(event, client=client)
     attachments = list(attachments or [])
     state = _load_state(client)
     active_sessions = state.get("active_sessions") if isinstance(state, dict) else {}
@@ -2582,8 +2590,12 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         {"chat_id": chat_id},
         platform=platform,
     )
+    from ..agent.assistants import AssistantStore, AssistantError, DEFAULT_ID, gateway_scope, assistant_config
+    assistant_id = str(cfg.get("assistant_id") or DEFAULT_ID)
+    channel_name = str(channel or cfg.get("channel") or platform)
+    scope = gateway_scope(platform, channel_name, assistant_id, legacy="assistant_id" not in cfg)
     session_key, session = _session_id_for_identity(
-        platform,
+        scope,
         identity,
         cfg,
         active_sessions,
@@ -2595,15 +2607,22 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         else (str(progress_cfg.get("channel")) if isinstance(progress_cfg, dict) and progress_cfg.get("channel") else platform)
     )
 
+    try:
+        assistant = AssistantStore(client.config.paths).bind(session, assistant_id, source=platform)
+    except AssistantError as exc:
+        _record_gateway_error(platform=platform, channel=channel_name, reason=exc.code, chat_id=str(chat_id))
+        return {"ok": False, "error": exc.code, "assistant_id": assistant_id, "_status": exc.status}
+
     if text.strip().startswith("/"):
         # Surface the slash-command interaction in the dashboard live
         # stream too — operators want to see what their bot is responding
         # to, even when the agent didn't run a full turn.
-        _gateway_events_record(
+        _record_event(
             {
                 "kind": "inbound",
                 "platform": platform,
                 "channel": channel_name,
+                "assistant_id": assistant_id,
                 "chat_id": str(chat_id),
                 "user_id": identity.get("user_id") or "",
                 "actor_id": identity.get("actor_id") or "",
@@ -2628,6 +2647,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
                 save_state=lambda new_state: _save_state(client, dict(new_state)),
                 delete_session=lambda sid: _delete_session(client, sid),
                 dashboard_url=resolve_dashboard_url(client.config),
+                assistant_id=assistant_id,
             ),
         )
         if outcome.handled:
@@ -2645,6 +2665,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
                 "kind": "outbound",
                 "platform": platform,
                 "channel": channel_name,
+                "assistant_id": assistant_id,
                 "chat_id": str(chat_id),
                 "session_id": session,
                 "session_key": session_key,
@@ -2653,7 +2674,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
             }
             if delivery is not None:
                 outbound_event["delivered"] = bool(delivery.get("delivered", False))
-            _gateway_events_record(
+            _record_event(
                 outbound_event
             )
             response = {
@@ -2669,7 +2690,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
                 response["delivery"] = delivery
             return response
 
-    kernel = AgentKernel(config=client.config, skills=client.skills)
+    kernel = AgentKernel(config=assistant_config(client.config, assistant, session_id=session), skills=client.skills)
     seen_phase_text: set[str] = set()
 
     def emit(ctx) -> None:
@@ -2683,11 +2704,12 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         # even when no status_webhook_url is configured. This is what gives
         # Slack/Feishu/Discord the same live "agent is thinking…"
         # surface that previously only Telegram had.
-        _gateway_events_record(
+        _record_event(
             {
                 "kind": "phase",
                 "platform": platform,
                 "channel": channel_name,
+                "assistant_id": assistant_id,
                 "chat_id": str(chat_id),
                 "session_id": session,
                 "session_key": session_key,
@@ -2733,6 +2755,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         "kind": "inbound",
         "platform": platform,
         "channel": channel_name,
+                "assistant_id": assistant_id,
         "chat_id": str(chat_id),
         "user_id": identity.get("user_id") or "",
         "actor_id": identity.get("actor_id") or "",
@@ -2750,7 +2773,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         session_id=session,
         payload=inbound_payload,
     )
-    _gateway_events_record(inbound_event)
+    _record_event(inbound_event)
     stop_typing = None
     if auto_reply and platform == "telegram":
         stop_typing = threading.Event()
@@ -2768,6 +2791,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
                 "payload": {
                     "text": redacted,
                     "channel": platform,
+                    "assistant_id": assistant_id,
                     "chat_id": str(chat_id),
                     "session_key": session_key,
                     "user_id": identity.get("user_id") or "",
@@ -2817,6 +2841,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         "kind": "outbound",
         "platform": platform,
         "channel": channel_name,
+                "assistant_id": assistant_id,
         "chat_id": str(chat_id),
         "session_id": session,
         "session_key": session_key,
@@ -2833,7 +2858,7 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         session_id=session,
         payload=outbound_payload,
     )
-    _gateway_events_record(outbound_event)
+    _record_event(outbound_event)
     state = _load_state(client)
     active_sessions = state.get("active_sessions") if isinstance(state, dict) else {}
     if not isinstance(active_sessions, dict):
@@ -2851,6 +2876,8 @@ def _run_gateway_turn(client, *, platform: str, chat_id: str, text: str,
         "session_key": session_key,
         "turn_id": result.turn_id,
         "reply_text": reply,
+        "assistant_id": assistant_id,
+        "assistant_name": assistant["name"],
         "attachments": result_attachments,
         "trace_text": trace_text,
         "events": events,

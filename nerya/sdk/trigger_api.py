@@ -114,6 +114,8 @@ class TriggerAPI:
                      session_mode: str | None = None,
                      session_id: str | None = None,
                      session_ids: list[str] | None = None,
+                     execution: dict[str, Any] | None = None,
+                     owner_actor_id: str = "local:loopback",
                      ) -> dict[str, Any]:
         """Register or update a schedule entry.
 
@@ -141,7 +143,9 @@ class TriggerAPI:
         """
         kwargs: dict[str, Any] = {"id": id, "kind": kind,
                                   "target": target,
-                                  "payload": payload or {}}
+                                  "payload": payload or {},
+                                  "execution": dict(execution or {}),
+                                  "owner_actor_id": owner_actor_id}
         if strategy_id is not None:
             kwargs["strategy_id"] = strategy_id
         if every_seconds is not None:
@@ -351,6 +355,8 @@ class TriggerAPI:
         out = {
             "id": entry.id,
             "kind": entry.kind,
+            "execution": dict(entry.execution),
+            "owner_actor_id": entry.owner_actor_id,
             "every_seconds": entry.every_seconds,
             "cron": entry.cron,
             "starts_at": entry.starts_at,

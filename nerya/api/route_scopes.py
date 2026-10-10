@@ -106,6 +106,16 @@ class RouteRule:
 # default to ``admin:ops`` if no rule matches them.
 
 _RULES: tuple[RouteRule, ...] = (
+    RouteRule("GET", "/assistants", "read:runtime", "assistant profiles and gateway bindings"),
+    RouteRule("GET", "/assistants/tasks", "read:sessions", "conversation-owned assistant tasks"),
+    RouteRule("GET", "/assistants/results", "read:sessions", "assistant task conclusions and reports"),
+    RouteRule("POST", "/assistants/home", "write:chat", "open the persistent assistant conversation"),
+    RouteRule("POST", "/assistants/tasks/stop", "write:chat", "stop a task owned by this conversation"),
+    RouteRule("GET", "/assistants/session", "read:sessions", "conversation assistant identity"),
+    RouteRule("GET", "/assistants/tools", "read:runtime", "native, skill and MCP tool inventory"),
+    RouteRule("GET", "/assistants/conversations", "read:sessions", "assistant conversations"),
+    RouteRule("POST", "/assistants/conversations", "write:chat", "start an assistant conversation"),
+    RouteRule("POST", "/assistants/", "write:config", "operator-owned assistant profile edits"),
     RouteRule("GET", "/strategies/runtime/tuning/history", "read:sessions", "recorded strategy review invocations"),
     RouteRule("GET", "/strategies/runtime/tuning/record", "read:sessions", "recorded review inputs, outputs and conversation"),
     RouteRule("POST", "/strategies/runtime/service/start", "admin:ops", "start a reviewed long-lived strategy; may submit orders within its policy"),

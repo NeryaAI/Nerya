@@ -183,7 +183,12 @@ class ScheduledSessionRunner:
         self._journal(entry, result, now_ts)
 
         try:
-            kernel = self.kernel_factory(self.config)
+            kernel_config = self.config
+            if entry.execution.get("assistant_id"):
+                from ..agent.assistants import AssistantStore, assistant_config
+                profile = AssistantStore(self.config.paths).bind(session_id, entry.execution["assistant_id"], source="scheduled_agent")
+                kernel_config = assistant_config(self.config, profile, session_id=session_id)
+            kernel = self.kernel_factory(kernel_config)
         except Exception as exc:
             result.execution_status = "failed"
             if entry.delivery_targets:

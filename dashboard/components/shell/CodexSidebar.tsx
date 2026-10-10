@@ -1,5 +1,5 @@
 "use client";
-import { TaskList } from "../chat/TaskList";
+import { AssistantSidebar } from "./AssistantSidebar";
 
 /** Destination rail and conversation tree. */
 import Link from "next/link";
@@ -269,12 +269,11 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
             <Link href="/chat" className="min-w-0 truncate text-[15px] font-semibold text-[color:var(--text-base)]">{t("brandName")}</Link>
             <SidebarHint label={t("search")}><button type="button" className="ui-icon-button ml-auto" aria-label={t("search")} onClick={() => palette.setOpen(true)}><SearchIcon size={16} /></button></SidebarHint>
           </div>
-          <div className="shrink-0 px-2 pb-4"><SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed={false} active={pathname === "/chat"} /></div>
         {/* Recent tasks and strategy folders share one scroll region. */}
         {!railCollapsed ? (
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="embedded-scroll min-h-0 flex-1 px-2 pb-6">
-              <TaskList />
+              <AssistantSidebar />
               <SidebarStrategies />
             </div>
           </div>

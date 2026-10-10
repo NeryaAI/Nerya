@@ -70,6 +70,14 @@ SUBAGENT_RUN_ASYNC_SCHEMA: dict[str, Any] = {
     "required": ["name"],
 }
 
+ASSISTANT_TASK_CREATE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"title": {"type": "string", "minLength": 1, "maxLength": 160},
+                   "kind": {"type": "string", "enum": ["research", "strategy", "general"]},
+                   "prompt": {"type": "string", "minLength": 1, "maxLength": 12000}},
+    "required": ["title", "prompt"],
+}
+
 TASK_CREATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -193,6 +201,7 @@ def _worker(
     trigger_event_id: Optional[str],
     strategy_id: Optional[str],
     session_id: Optional[str],
+    actor_id: str = "default",
 ) -> None:
     """Run one subagent in a daemon thread and persist its outcome.
 
@@ -218,6 +227,7 @@ def _worker(
         dispatcher = SubAgentDispatcher.for_workspace(
             config, skills, session_id=session_id, strategy_id=strategy_id,
             turn_id=task_id,
+            actor_id=actor_id,
         )
         envelope = dispatcher.dispatch(
             f"subagent:{name}",
@@ -330,21 +340,39 @@ def subagent_run_async_handler(
     )
 
 
+def assistant_task_create_handler(call: ToolCall, *, config, skills, store, session_id, actor_id="local") -> ToolResult:
+    """Delegate work to an independent native task conversation."""
+    from ...agent.assistant_work import AssistantWork
+    from ...agent.assistants import AssistantError
+    if not config or not session_id:
+        return _usage_error(call, "A conversation is required to create an assistant task.")
+    try:
+        result = AssistantWork(config.paths).create(config, call, session_id, actor_id)
+    except AssistantError as exc:
+        return _usage_error(call, exc.code)
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
+
+
 def task_list_handler(
     call: ToolCall,
     *,
     store: TaskStore,
+    owner_session_id: str | None = None,
 ) -> ToolResult:
     args = call.arguments or {}
     state = args.get("state") or None
-    session_id = args.get("session_id") or None
+    session_id = args.get("session_id") or owner_session_id
+    if owner_session_id and session_id != owner_session_id:
+        return _usage_error(call, "assistant_task_owner_mismatch")
     limit = max(1, int(args.get("limit") or 25))
     rows = store.list(state=state, parent_session_id=session_id, limit=limit)
+    from ...agent.assistant_work import AssistantWork
+    work = [row for row in AssistantWork(store.paths).tasks(sid=session_id) if not state or row["state"] == state][:limit]
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
         data={
-            "count": len(rows),
+            "count": len(rows) + len(work),
             "tasks": [
                 {
                     "task_id": r.task_id,
@@ -358,7 +386,7 @@ def task_list_handler(
                     "progress_count": len(r.progress),
                 }
                 for r in rows
-            ],
+            ] + work,
         },
     )
 
@@ -392,11 +420,18 @@ def task_get_handler(
     call: ToolCall,
     *,
     store: TaskStore,
+    owner_session_id: str | None = None,
 ) -> ToolResult:
     args = call.arguments or {}
     task_id = (args.get("task_id") or "").strip()
     if not task_id:
         return _usage_error(call, "task_id is required")
+    if task_id.startswith("awork_"):
+        from ...agent.assistant_work import AssistantWork
+        record = next(iter(AssistantWork(store.paths).tasks(task_id=task_id)), None)
+        if record and owner_session_id and owner_session_id not in {record["parent_session_id"], record["task_session_id"]}:
+            return _usage_error(call, "assistant_task_owner_mismatch")
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=record) if record else _usage_error(call, f"task not found: {task_id}")
     rec = store.load(task_id)
     if rec is None:
         return _usage_error(call, f"task not found: {task_id}")
@@ -411,11 +446,14 @@ def task_output_handler(
     call: ToolCall,
     *,
     store: TaskStore,
+    owner_session_id: str | None = None,
 ) -> ToolResult:
     args = call.arguments or {}
     task_id = (args.get("task_id") or "").strip()
     if not task_id:
         return _usage_error(call, "task_id is required")
+    if task_id.startswith("awork_"):
+        return task_get_handler(call, store=store, owner_session_id=owner_session_id)
     rec = store.load(task_id)
     if rec is None:
         return _usage_error(call, f"task not found: {task_id}")
@@ -436,11 +474,20 @@ def task_stop_handler(
     call: ToolCall,
     *,
     store: TaskStore,
+    config: Config | None = None,
+    session_id: str | None = None,
 ) -> ToolResult:
     args = call.arguments or {}
     task_id = (args.get("task_id") or "").strip()
     if not task_id:
         return _usage_error(call, "task_id is required")
+    if task_id.startswith("awork_"):
+        from ...agent.assistant_work import AssistantWork
+        from ...agent.assistants import AssistantError
+        if not config or not session_id: return _usage_error(call, "A conversation is required to stop this task.")
+        try: requested = AssistantWork(store.paths).stop(config, task_id, session_id)
+        except AssistantError as exc: return _usage_error(call, exc.code)
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data={"task_id": task_id, "cancel_requested": requested})
     found = store.request_stop(task_id)
     record = store.load(task_id)
     return ToolResult.from_json(
@@ -503,6 +550,7 @@ def task_summary_handler(
     call: ToolCall,
     *,
     store: TaskStore,
+    owner_session_id: str | None = None,
 ) -> ToolResult:
     """Return a *summary* of a task — state, recent progress notes,
     final outcome — without dumping the (potentially large) full
@@ -514,6 +562,14 @@ def task_summary_handler(
     task_id = (args.get("task_id") or "").strip()
     if not task_id:
         return _usage_error(call, "task_id is required")
+    if task_id.startswith("awork_"):
+        from ...agent.assistant_work import AssistantWork
+        record = next(iter(AssistantWork(store.paths).tasks(task_id=task_id)), None)
+        if not record: return _usage_error(call, f"task not found: {task_id}")
+        if owner_session_id and owner_session_id not in {record["parent_session_id"], record["task_session_id"]}:
+            return _usage_error(call, "assistant_task_owner_mismatch")
+        if record.get("output"): record["output"] = {"output":str(record["output"].get("output", ""))[:1200]}
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=record)
     rec = store.load(task_id)
     if rec is None:
         return _usage_error(call, f"task not found: {task_id}")

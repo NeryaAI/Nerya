@@ -48,7 +48,8 @@ def fork_session(paths, payload: dict) -> dict:
         now=time.time()
         repo.upsert_session(session_id=new_sid,source="user_chat",strategy_id=source.get("strategy_id"),
             title=(str(source.get("title") or "Conversation")[:65]+" · "+("分支" if payload.get("language")=="zh" else "Branch")),
-            meta={"strategy_proposal_id":source_meta.get("strategy_proposal_id"),
+            meta={"assistant_id":source_meta.get("assistant_id"), "assistant_name":source_meta.get("assistant_name"),
+                  "strategy_proposal_id":source_meta.get("strategy_proposal_id"),
                   "branch_of":{"session_id":sid,"message_id":mid,"request_hash":digest,"created_at":now},
                   "title_source":"operator"})
         # Do not copy active approval cards, tool executions, checkpoints,

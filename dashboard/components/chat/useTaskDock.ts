@@ -2,10 +2,10 @@
 import { useEffect, useState } from 'react';
 import { parseStrategyDetailId } from '../../lib/strategyDetail';
 import { getWorkspaceIdentity, useWorkspaceIdentity, workspaceGeneration, workspaceStorageKey } from '../../lib/workspaceIdentity';
-export type TaskDockTab = 'deliverables' | 'browser' | 'agents' | 'strategy' | `strategy:${string}` | 'files' | 'terminal' | `backtest:${string}` | 'charts' | `result:${string}` | `resource:${string}` | `file:${string}` | `snapshot:${string}` | `instrument:${string}`;
+export type TaskDockTab = 'deliverables' | 'reports' | 'browser' | 'agents' | 'strategy' | `strategy:${string}` | 'files' | 'terminal' | `backtest:${string}` | 'charts' | `result:${string}` | `resource:${string}` | `file:${string}` | `snapshot:${string}` | `instrument:${string}`;
 type Preference = { open: boolean; expanded: boolean; selected: string; tabs: TaskDockTab[]; dismissed: TaskDockTab[] };
 const KEY = 'nerya.chat.task-dock.v3:';
-const valid = (id: unknown): id is TaskDockTab => typeof id === 'string' && (['deliverables', 'browser', 'agents', 'strategy', 'files', 'terminal', 'charts'].includes(id) || ['backtest:', 'result:', 'resource:', 'file:', 'snapshot:', 'instrument:'].some(prefix => id.startsWith(prefix)) || parseStrategyDetailId(id) !== null);
+const valid = (id: unknown): id is TaskDockTab => typeof id === 'string' && (['deliverables', 'reports', 'browser', 'agents', 'strategy', 'files', 'terminal', 'charts'].includes(id) || ['backtest:', 'result:', 'resource:', 'file:', 'snapshot:', 'instrument:'].some(prefix => id.startsWith(prefix)) || parseStrategyDetailId(id) !== null);
 export function loadTaskDockPreferences(workspace: string | null): Record<string, Preference> {
   if (!workspace || workspace !== getWorkspaceIdentity()) return {};
   try {

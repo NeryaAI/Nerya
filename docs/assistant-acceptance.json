@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-11",
+  "branch": "codex/assistants-opendots-pr",
+  "base_commit": "126f2e028a5dceaed32a73b9dbc7d8b74b4c7ce4",
+  "scope": "Independent assistant identity/conversation, command-backed delegation, conclusions/results, gateway association and preset/upload avatars",
+  "backend_checks_passed": 99,
+  "browser_checks_passed": 15,
+  "browser_specs": [
+    "assistant-avatar.spec.ts (4)",
+    "assistant-overview.spec.ts (7)",
+    "assistant-results.spec.ts (4)"
+  ],
+  "typescript": "passed",
+  "i18n": "passed",
+  "runtime": "Clean PR checkout with an isolated copy of the QA workspace; no original workspace modified",
+  "real_llm_on_pr_port": false,
+  "previous_preview_real_llm": "agnes-ai / agnes-3.0-flash; prior preview evidence is not a claim of new LLM execution on this PR",
+  "compatibility": [
+    "Keep upstream task status presentation and task queue behavior",
+    "Use existing upstream schedule contract, without unpublished task-run SDK",
+    "Validate current assistant policy at each permission evaluation",
+    "Retain unconfirmed executions and operator holds"
+  ],
+  "out_of_scope": [
+    "Financial/task-workbench refactors",
+    "Voice",
+    "Independent assistant computers",
+    "Merge/deployment"
+  ],
+  "permission_queue_regression_checks_passed": 40,
+  "backend_checks_total": 139
+}

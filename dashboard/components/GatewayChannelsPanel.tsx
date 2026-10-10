@@ -36,6 +36,7 @@ import { Select as PortalSelect } from "./Select";
 import { Select } from "./Select";
 import { CheckIcon, RefreshIcon, SearchIcon, SettingsIcon, SparkIcon } from "./icons";
 import { clientApi } from "../lib/clientApi";
+import { assistantsApi, type AssistantProfile } from "../lib/assistants";
 import type {
   GatewayChannelConfig,
   GatewayPlatformSpec,
@@ -127,6 +128,8 @@ function enumLabel(
 
 export function GatewayChannelsPanel() {
   const t = useTranslations("settings.gatewayCard");
+  const tAssistants = useTranslations("assistants");
+  const [assistants, setAssistants] = useState<AssistantProfile[]>([]);
   const tCommon = useTranslations("common");
 
   const [platforms, setPlatforms] = useState<GatewayPlatformSpec[]>([]);
@@ -194,7 +197,8 @@ export function GatewayChannelsPanel() {
 
   const load = useCallback(async () => {
     try {
-      const cfg = await clientApi.gatewayConfig();
+      const [cfg, inventory] = await Promise.all([clientApi.gatewayConfig(), assistantsApi.list()]);
+      setAssistants(inventory.assistants);
       if (!cfg.ok) throw new Error(cfg.error || t("errorLoadFailed"));
       applyConfig(cfg);
     } catch (e) {
@@ -217,6 +221,7 @@ export function GatewayChannelsPanel() {
       const next = emptyGatewayDraft(kind);
       return {
         ...next,
+        assistant_id: current.assistant_id,
         channel:
           current.channel && current.channel !== "telegram"
             ? current.channel
@@ -241,6 +246,7 @@ export function GatewayChannelsPanel() {
     const channel = draft.channel.trim().toLowerCase();
     const body: GatewayUpsertRequest = {
       channel,
+      assistant_id: draft.assistant_id,
       kind: draft.kind,
       enabled: draft.enabled,
       mode: draft.mode,
@@ -459,6 +465,11 @@ export function GatewayChannelsPanel() {
         </div>
 
         <div className="grid grid-cols-1 gap-3">
+          <Field label={tAssistants("channelAssistant")} hint={tAssistants("channelAssistantHint")}>
+            <PortalSelect value={draft.assistant_id} onChange={assistant_id => setDraft(current => ({...current, assistant_id}))}
+              options={assistants.filter(row => row.enabled || row.id === draft.assistant_id).map(row => ({value: row.id, label: row.name + (row.enabled ? "" : ` (${tAssistants("disabled")})`)}))}
+              ariaLabel={tAssistants("channelAssistant")} size="sm" />
+          </Field>
           <Field
             label={t("platformLabel")}
             hint={
