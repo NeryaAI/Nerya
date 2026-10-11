@@ -184,9 +184,7 @@ function nodeForward(
           resolve({
             status: res.statusCode || 502,
             headers: res.headers,
-            // Buffer is a Uint8Array at runtime; newer Node typings model its
-            // backing ArrayBuffer more broadly than Buffer.concat expects.
-            body: Buffer.concat(chunks as unknown as Uint8Array[]),
+            body: Buffer.concat(chunks.map(chunk => new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength))),
           });
         });
       },

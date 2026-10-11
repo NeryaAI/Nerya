@@ -17,7 +17,7 @@ test('billing errors select translated settings guidance instead of RPM retry', 
   }
 });
 test('system interruption copy is translated and does not enable blind replay', () => {
-  for (const code of ['model_stream_interrupted','command_control_unavailable','command_lease_lost']) {
+  for (const code of ['model_stream_interrupted','command_control_unavailable','command_lease_lost','model_stream_connection_failed']) {
     for (const zh of [true,false]) {
       const error=conversationError(JSON.stringify({code}),zh);
       assert.equal(error.canRerun,false);
@@ -25,4 +25,9 @@ test('system interruption copy is translated and does not enable blind replay', 
       assert.ok(error.message.length>25);
     }
   }
+});
+test('real rate limits remain distinct and diagnostics remain redacted', () => {
+  const error=conversationError('HTTP 429 rpm exhausted Bearer example-secret',true);
+  assert.equal(error.code,'rate_limited');
+  assert.ok(!error.diagnostics.includes('example-secret'));
 });

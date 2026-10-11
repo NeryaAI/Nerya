@@ -348,8 +348,11 @@ class FinancialGateway:
         return self.store.get_action(aid,context)
 
     def reconcile(self,context,aid):
-        action=self.store.get_action(aid,context,internal=True,operator='api:all' in context.scopes or 'admin:ops' in context.scopes)
-        if action["state"] not in {"submitted","confirming","unconfirmed","needs_recovery"}:return action
+        operator = bool({'api:all', 'admin:ops'} & context.scopes)
+        action=self.store.get_action(aid,context,internal=True,operator=operator)
+        if action["state"] not in {"submitted","confirming","unconfirmed","needs_recovery"}:
+            # The internal quote is only for the status adapter, never the API.
+            return self.store.get_action(aid,context,operator=operator)
         try:
             result=self.adapter(action["request"],quote=action["quote"],recovery=True).status(action["request"],action["quote"],action["submission"])
         except FinancialError as exc:

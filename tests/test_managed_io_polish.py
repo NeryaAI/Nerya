@@ -301,10 +301,14 @@ def call(gw, **kwargs):
 def test_gateway_does_not_fallback_after_submitted_stream(tmp_path, monkeypatch):
     first = StreamTransport([delta(content='partial'), tool_chunks()[0]], fail=True)
     backup = StreamTransport([delta(content='backup'), finish()])
+    # Transport failures are now normalized to actionable LLMError metadata.
+    # A partial model output still forbids fallback to another provider.
     with pytest.raises(LLMError) as caught:
         call(gateway(tmp_path, monkeypatch, [first, backup]))
-    assert isinstance(caught.value.__cause__, OSError)
+    assert caught.value.stream_interrupted is True
     assert caught.value.stream_output_committed is True
+    assert caught.value.retryable is False
+    assert isinstance(caught.value.__cause__, OSError)
     assert len(first.calls) == 1 and backup.calls == []
 
 def test_gateway_can_fallback_after_explicit_pre_stream_rejection(tmp_path, monkeypatch):

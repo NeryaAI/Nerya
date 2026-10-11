@@ -79,11 +79,15 @@ def continue_agent(client: Any, *, session_id: str, agent_id: str,
     deps.active_actor_id = actor_id or "operator"
     deps.active_trigger_source = "dashboard"
     deps.permission_mode = kernel.permission_mode.value
+    from ..agent.assistants import current_assistant_policy
+    from ..sdk.task_execution import current_task_policy
+    current_policy = lambda: current_assistant_policy(
+        client.config, session_id, current_task_policy(client.config))
     executor = NativeToolExecutor(
         registry=kernel.tool_registry,
         permission_engine=PermissionEngine(),
         permission_context=child_permission_context(
-            client.config, parent=PermissionContext(mode=mode),
+            client.config, parent=PermissionContext(mode=mode, current_tool_policy=current_policy),
             saved=saved.get("permission_ceiling"), strategy_id=strategy_id),
         approval_resolver=ToolApprovalCoordinator(
             client.config, scope=ToolApprovalScope.from_values(

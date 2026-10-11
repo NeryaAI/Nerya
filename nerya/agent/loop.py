@@ -573,7 +573,13 @@ def _build_deterministic_final_summary(
         "task_poll_no_progress": "后台任务轮询未取得进展",
         "cancelled": "本轮任务已取消",
     }
-    description = descriptions.get(reason, f"执行中断（{reason}）")
+    system_stops = {
+        "cancelled:command_control_unavailable": "任务控制数据库暂时不可用，系统已停止执行，并非用户主动取消",
+        "cancelled:command_lease_lost": "执行租约已丢失，需要核对结果后再继续",
+        "cancelled:event_persistence_failed": "执行记录未能可靠保存，系统已停止执行以保护审计记录",
+        "cancelled:operator_cancel": "用户请求停止任务",
+    }
+    description = system_stops.get(abort_reason, descriptions.get(reason, f"执行中断（{reason}）"))
     lines = [
         f"本轮任务未完成：{description}。",
         f"执行情况：{iterations} 步，{tool_calls} 次工具调用"
@@ -590,7 +596,7 @@ def _build_deterministic_final_summary(
     if tool_calls:
         lines.append("已执行的工具调用不会自动重放；恢复前请核对已完成的写入或交易操作。")
     elif reason == "stream_interrupted":
-        lines.append("部分响应已开始传输，为避免重复执行上游操作，没有自动重试；可检查模型连接后重新发送。")
+        lines.append("部分响应已开始传输，为避免重复执行上游操作，没有自动重试；请先核对上游操作与已保存结果，再决定是否继续。")
     elif reason == "empty_model_response":
         lines.append("请检查模型的响应格式、输出 Token 限制及流式连接状态。")
     elif reason == "max_iterations":

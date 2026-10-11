@@ -181,6 +181,23 @@ def test_current_strategy_policy_intersects_saved_parent_policy(scope):
     assert scope.invoked == []
 
 
+def test_dashboard_continuation_observes_new_assistant_restrictions(scope, monkeypatch):
+    from nerya.agent.assistants import AssistantStore
+    assistants = AssistantStore(scope.config.paths)
+    profile = assistants.save({"name": "Review fixture"})
+    assistants.bind("session", profile["id"])
+    store = AgentThreadStore(scope.config.paths)
+    row = store.begin(spec=scope.role, payload={}, session_id="session", parent_call_id="parent",
+        strategy_id=None, turn_id="turn", context_scope="subagent")
+    store.finish(row, state="completed", transcript=[])
+    assistants.save({"tool_policy": {"deny": ["read_probe"]}}, aid=profile["id"], expected_revision=profile["revision"])
+    gateway = Gateway(call("read_probe"), final())
+    monkeypatch.setattr("nerya.subagents.dispatcher.LLMGateway", lambda _: gateway)
+    continue_agent(scope, session_id="session", agent_id=row["id"], message="continue", request_id="revoked")
+    assert gateway.calls
+    assert scope.invoked == []
+
+
 def test_legacy_role_snapshot_restores_native_tool_limits(scope):
     role = replace(scope.role, execution_policy=replace(scope.role.execution_policy,
         native_tool_allow=["read_probe"], native_tool_deny=["other_read"]))

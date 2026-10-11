@@ -1179,13 +1179,15 @@ def _openai_stream_event_error(provider: str, payload: Any) -> LLMError:
         )
     message = _raw_body_excerpt({"error": details}) or "unknown provider stream error"
     error = LLMError(f"{provider} stream error: {message[:260]}")
-    setattr(error, "code", "model_stream_provider_error")
+    quota_exhausted = is_quota_error({"error": details})
+    setattr(error, "code", "model_quota_exhausted" if quota_exhausted else "model_stream_provider_error")
+    setattr(error, "quota_exhausted", quota_exhausted)
     setattr(error, "request_id", request_id)
     code = str(details.get("code") or details.get("type") or "").lower()
     # An SSE error is a *provider response*, not an unexplained broken socket.
     # Only explicit temporary provider codes justify an automatic retry.
     transient_codes = {"rate_limit_exceeded", "rate_limit_error", "server_error", "overloaded_error"}
-    setattr(error, "retryable", code in transient_codes and not is_quota_error({"error": details}))
+    setattr(error, "retryable", code in transient_codes and not quota_exhausted and details.get("retryable") is not False)
     return error
 
 
@@ -1460,7 +1462,9 @@ class OpenAIMessagesBackend:
                         eligible = False
                     setattr(error, "stream_interrupted", True)
                     setattr(error, "stream_output_committed", committed)
-                    setattr(error, "retryable", bool(eligible) and not committed)
+                    # Retry only before output; native upstream capabilities
+                    # have independent effects and must never be replayed here.
+                    setattr(error, "retryable", bool(eligible) and not committed and not native_web_search.get("enabled"))
                     if error is exc:
                         raise
                     raise error from exc

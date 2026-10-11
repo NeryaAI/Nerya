@@ -412,6 +412,8 @@ class CommandRuntime:
         return receipt
 
     def _guides(self,sid: str,tid: str):
+        # Most control ticks have no steering input. Do not acquire a writer
+        # reservation twice a second just to discover an empty inbox.
         from ..db.sqlite import connect_readonly
         con = connect_readonly(self.config.paths.db)
         try:
