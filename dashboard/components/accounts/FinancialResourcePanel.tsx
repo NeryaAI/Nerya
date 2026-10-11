@@ -1,16 +1,22 @@
 "use client";
-import {useEffect,useState} from 'react';
+import {useEffect,useRef,useState} from 'react';
 import {useTranslations} from 'next-intl';
 import {financialApi,type FinancialCapability} from '../../lib/financial';
-import {useWorkspaceIdentity} from '../../lib/workspaceIdentity';
+import {useWorkspaceIdentity,workspaceGeneration} from '../../lib/workspaceIdentity';
+import {useActionScope} from '../../lib/useActionScope';
 
 export function FinancialResourcePanel({resourceId}:{resourceId:string}){
+  const workspace=useWorkspaceIdentity();
+  return <ScopedFinancialResourcePanel key={JSON.stringify([workspace,workspaceGeneration(),resourceId])} resourceId={resourceId}/>;
+}
+function ScopedFinancialResourcePanel({resourceId}:{resourceId:string}){
   const t=useTranslations("financial");const workspace=useWorkspaceIdentity();
+  const scope=useActionScope(resourceId);const lock=useRef(false);
   const [rows,setRows]=useState<FinancialCapability[]>([]);const [revision,setRevision]=useState('');const [permissions,setPermissions]=useState<Record<string,boolean>>({});
   const [limits,setLimits]=useState<Record<string,string>>({single_usd:'',rolling_24h_usd:''});const [error,setError]=useState('');const [busy,setBusy]=useState(false);const [editing,setEditing]=useState(false);const [enabled,setEnabled]=useState(false);
-  async function load(){const [a,b]=await Promise.all([financialApi.capabilities(),financialApi.resource(resourceId)]);setRows(a.capabilities.filter(r=>(r.resource_type==='wallet'?'wallet:':'')+r.resource_id===resourceId));setEnabled(a.enabled);setRevision(b.revision);setPermissions(b.permissions);setLimits({single_usd:'',rolling_24h_usd:'',...b.limits});}
-  useEffect(()=>{void load().catch(e=>setError(String(e)));setEditing(false);},[resourceId,workspace]);
-  async function save(event:React.FormEvent){event.preventDefault();setBusy(true);try{await financialApi.updateResource(resourceId,revision,permissions,limits);await load();setEditing(false);setError('');}catch(e){setError(String(e));}finally{setBusy(false);}}
+  async function load(current:()=>boolean){if(!current())return;const [a,b]=await Promise.all([financialApi.capabilities(),financialApi.resource(resourceId)]);if(!current())return;setRows(a.capabilities.filter(r=>(r.resource_type==='wallet'?'wallet:':'')+r.resource_id===resourceId));setEnabled(a.enabled);setRevision(b.revision);setPermissions(b.permissions);setLimits({single_usd:'',rolling_24h_usd:'',...b.limits});}
+  useEffect(()=>{let disposed=false;const valid=scope.capture();const current=()=>!disposed&&valid();void load(current).catch(e=>{if(current())setError(String(e));});return()=>{disposed=true;};},[resourceId,workspace]);
+  async function save(event:React.FormEvent){event.preventDefault();const current=scope.capture();if(!current()||lock.current||!revision)return;lock.current=true;setBusy(true);try{await financialApi.updateResource(resourceId,revision,permissions,limits);if(!current())return;await load(current);if(current()){setEditing(false);setError('');}}catch(e){if(current())setError(String(e));}finally{lock.current=false;if(current())setBusy(false);}}
   const actions=resourceId.startsWith('wallet:')?['wallet_transfer','contract_approval','swap','bridge_swap']:['transfer','withdraw'];
   return <section className="rounded-lg border border-[color:var(--line)] p-4" data-testid="financial-resource-panel">
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-medium">{t("resourceTitle")}</h3><button className="btn-ghost text-xs" disabled={!revision||busy} onClick={()=>setEditing(!editing)}>{editing?(t("cancel")):(t("configurePermissions"))}</button></div>

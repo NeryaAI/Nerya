@@ -82,6 +82,7 @@ import type {
   WorkspaceUiProposalResponse,
 } from "./workspaceUiTypes";
 import { authHeaders, handleAuthFailure } from "./auth";
+import { getWorkspaceIdentity, workspaceGeneration } from "./workspaceIdentity";
 
 const BASE = "/api/proxy";
 // Bumped from 1.5s -> 4s. Polled endpoints like
@@ -164,7 +165,9 @@ async function cachedRead<T>(
 
   const auth = authHeaders();
   const identity = auth.get("authorization") || auth.get("x-nerya-token") || "";
-  const key = `${identity}:${method}:${path}:${stableBody(body)}`;
+  const workspace = getWorkspaceIdentity();
+  const generation = workspaceGeneration();
+  const key = JSON.stringify([workspace, generation, identity, method, path, stableBody(body)]);
   const now = Date.now();
   const existing = readCache.get(key);
   if (existing?.promise) return existing.promise as Promise<T>;
@@ -174,7 +177,7 @@ async function cachedRead<T>(
   const promise = load()
     .then((value) => {
       // A slow pre-refresh request must not replace the fresh cache entry.
-      if (revision === readCacheRevision && readCache.get(key)?.promise === promise) {
+      if (generation === workspaceGeneration() && revision === readCacheRevision && readCache.get(key)?.promise === promise) {
         readCache.set(key, { expiresAt: Date.now() + READ_CACHE_TTL_MS, value, settled: true });
       }
       return value;

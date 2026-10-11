@@ -93,7 +93,9 @@ test("strategy compact flow, node side panel and personal layout do not create c
   await chooseOption(page.getByRole("combobox", { name: "Display mode" }), "auto");
   await page.getByRole("tab", { name: "Review", exact: true }).click();
   await expect(page.getByTestId("review-plan-panel")).toBeVisible();
-  await expect(compact.locator("li")).toHaveCount(2);
+  // The independent review scheduler is a real node, not a hidden setting.
+  await expect(compact.locator("li")).toHaveCount(3);
+  await expect(compact.locator("li").first()).toContainText("Review schedule");
   await captureWorkflow(page, info, "review-plan-desktop.png");
   expect(fixture.errors).toEqual([]);
 });

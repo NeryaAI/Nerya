@@ -1,29 +1,39 @@
 "use client";
-import {useEffect,useState} from 'react';
+import {useEffect,useRef,useState} from 'react';
 import {useLocale,useTranslations} from 'next-intl';
 import {financialApi,type FinancialGrant,type FinancialPolicy,type TaskDescriptor} from '../lib/financial';
 import type {RunOrigin} from '../lib/taskRuns';
-import {useWorkspaceIdentity} from '../lib/workspaceIdentity';
+import {useWorkspaceIdentity,workspaceGeneration} from '../lib/workspaceIdentity';
+import {useActionScope} from '../lib/useActionScope';
 import {confirm} from '../lib/dialogs';
 
 const actionKinds=['trade','swap','exchange_transfer','withdraw','wallet_transfer','contract_approval','bridge_swap'];
 export function TaskFinancialGrants({taskKind,taskId}:{taskKind:RunOrigin;taskId:string}){
+  const workspace=useWorkspaceIdentity();
+  return <ScopedTaskFinancialGrants key={JSON.stringify([workspace,workspaceGeneration(),taskKind,taskId])} taskKind={taskKind} taskId={taskId}/>;
+}
+function ScopedTaskFinancialGrants({taskKind,taskId}:{taskKind:RunOrigin;taskId:string}){
   const locale=useLocale();const t=useTranslations("financial");const workspace=useWorkspaceIdentity();
+  const scope=useActionScope(JSON.stringify([taskKind,taskId]));const lock=useRef(false);
   const [task,setTask]=useState<TaskDescriptor>();const [grants,setGrants]=useState<FinancialGrant[]>([]);const [open,setOpen]=useState(false);const [error,setError]=useState('');const [busy,setBusy]=useState(false);
   const [actions,setActions]=useState<string[]>(['trade']);const [resources,setResources]=useState<Record<string,string>>({});
   const [limits,setLimits]=useState({single_usd:'',rolling_24h_usd:'',total_usd:'',fee_usd:'',slippage_bps:'50',asset_amounts:'',hours:'24',trade_actions:'open_position,close_position,reduce_position',max_leverage:'1'});
-  async function load(){const [a,b]=await Promise.all([financialApi.task(taskKind,taskId),financialApi.grants(taskKind,taskId)]);setTask(a.task);setGrants(b.grants);}
-  useEffect(()=>{let disposed=false;void Promise.all([financialApi.task(taskKind,taskId),financialApi.grants(taskKind,taskId)]).then(([a,b])=>{if(!disposed){setTask(a.task);setGrants(b.grants);setError('');}}).catch(e=>{if(!disposed)setError(String(e));});return()=>{disposed=true;};},[taskKind,taskId,workspace]);
-  async function create(event:React.FormEvent){event.preventDefault();if(!task||busy)return;setBusy(true);try{
+  async function load(current:()=>boolean){if(!current())return;const [a,b]=await Promise.all([financialApi.task(taskKind,taskId),financialApi.grants(taskKind,taskId)]);if(!current())return;setTask(a.task);setGrants(b.grants);}
+  useEffect(()=>{let disposed=false;const valid=scope.capture();const current=()=>!disposed&&valid();void load(current).catch(e=>{if(current())setError(String(e));});return()=>{disposed=true;};},[taskKind,taskId,workspace]);
+  async function create(event:React.FormEvent){event.preventDefault();const current=scope.capture();if(!task||lock.current||!current())return;lock.current=true;setBusy(true);try{
     const quantities=Object.fromEntries(limits.asset_amounts.split(',').map(x=>x.trim()).filter(Boolean).map(x=>{const [asset,value,...rest]=x.split('=');if(!asset||!value||rest.length)throw new Error(t("quantityFormat"));return [asset.trim(),value.trim()];}));
     const policy:FinancialPolicy={actions,resources:Object.fromEntries(Object.entries(resources).map(([k,v])=>[k,v.split(',').map(x=>x.trim()).filter(Boolean)])),
       limits:{single_usd:limits.single_usd,rolling_24h_usd:limits.rolling_24h_usd,total_usd:limits.total_usd,fee_usd:limits.fee_usd,slippage_bps:Number(limits.slippage_bps),asset_amounts:quantities,
         trade_actions:limits.trade_actions.split(',').map(s=>s.trim()).filter(Boolean),max_leverage:limits.max_leverage}};
-    await financialApi.create(task,policy,Number(limits.hours));setOpen(false);await load();setError('');
-  }catch(e){setError(String(e));}finally{setBusy(false);}}
+    await financialApi.create(task,policy,Number(limits.hours));if(!current())return;setOpen(false);await load(current);if(current())setError('');
+  }catch(e){if(current())setError(String(e));}finally{lock.current=false;if(current())setBusy(false);}}
   async function decide(grant:FinancialGrant,action:'approve'|'revoke'){
-    if(action==='approve'&&!await confirm({title:t("approveTitle"),message:t("approveMessage"),okLabel:t("approve")}))return;
-    setBusy(true);try{await financialApi.decision(grant,action);await load();setError('');}catch(e){setError(String(e));}finally{setBusy(false);}
+    const current=scope.capture();if(lock.current||!current())return;lock.current=true;
+    try{
+      if(action==='approve'&&!await confirm({title:t("approveTitle"),message:t("approveMessage"),okLabel:t("approve")}))return;
+      if(!current())return;
+      setBusy(true);await financialApi.decision(grant,action);if(!current())return;await load(current);if(current())setError('');
+    }catch(e){if(current())setError(String(e));}finally{lock.current=false;if(current())setBusy(false);}
   }
   return <details className="mt-4 rounded-lg border border-[color:var(--line)] p-3" data-testid="task-financial-grants"><summary className="cursor-pointer text-sm font-medium">{t("authorization")}</summary>
     <p className="mt-3 text-xs text-[color:var(--text-muted)]">{t("bindingHint")}</p>

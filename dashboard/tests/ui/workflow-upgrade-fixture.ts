@@ -41,7 +41,7 @@ export function workflowFixture(): WorkflowView {
     manifest: { strategy_id: "alpha", title: "Alpha workflow", mode: "paper", tuning: config },
     source: { proposal_id: "prp_fixture", state: "draft", omitted_files: [] }, metadata: { version: 1, nodes: {}, edges: [] },
     strategy: { id: "strategy", nodes, edges: [edge("scheduler:trading", "script:main.py"), edge("script:main.py", "agent:runtime")] },
-    evolution: { id: "evolution", nodes: evolutionNodes, edges: [edge("evidence:review", "agent:tuner")] } };
+    evolution: { id: "evolution", nodes: evolutionNodes, edges: [edge("scheduler:tuning", "evidence:review"), edge("evidence:review", "agent:tuner")] } };
 }
 
 export async function workflowUpgradeFixture(page: Page, language = "en") {

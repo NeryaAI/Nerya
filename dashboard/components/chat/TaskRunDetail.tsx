@@ -12,11 +12,18 @@ import { AssistantBubble } from "./ChatMessage";
 import { ResourceNotice } from "../workflows/ResourceNotice";
 import { RunWorkspace } from "../workflows/RunWorkspace";
 import { RunAttention } from "../workflows/RunAttention";
+import { useActionScope } from "../../lib/useActionScope";
 
-export function TaskRunDetail({ runId, onClose, onOpenRun, taskKind, taskId }: {
+type DetailProps = {
   runId: string; onClose?: () => void; onOpenRun?: (id: string) => void;
   taskKind?: RunOrigin; taskId?: string;
-}) {
+};
+export function TaskRunDetail(props: DetailProps) {
+  const scope = useActionScope(JSON.stringify([props.runId, props.taskKind, props.taskId]));
+  return <ScopedTaskRunDetail key={scope.key} {...props}/>;
+}
+function ScopedTaskRunDetail({ runId, onClose, onOpenRun, taskKind, taskId }: DetailProps) {
+  const scope = useActionScope(JSON.stringify([runId, taskKind, taskId]));
   const locale = useLocale();
   const t = useTranslations("taskRuns"), w = useTranslations("workflowUpgrade"), tf = useTranslations("financial");
   const [error, setError] = useState("");
@@ -33,37 +40,46 @@ export function TaskRunDetail({ runId, onClose, onOpenRun, taskKind, taskId }: {
   useEffect(() => { setError(""); setSuccessor(undefined); }, [runId]);
 
   async function control(action: "stop" | "resume" | "rerun" | "reconcile") {
-    if (!run || lock.current) return;
+    const current = scope.capture();
+    if (!run || lock.current || !current()) return;
     lock.current = true;
     let runOnly = false;
     try {
       if (action === "rerun" && !await confirm({ title: w("rerunTitle"), message: w("rerunConfirm") })) return;
+      if (!current()) return;
       if (action === "resume" && run.queue?.paused && run.queue.pause_reason === "operator") {
         runOnly = await confirm({ title: t("resumeOnlyTitle"), message: t("resumeOnlyMessage") });
         if (!runOnly) return;
       }
+      if (!current()) return;
       setBusy(true); setError("");
       const extra: Record<string, unknown> = action === "resume" ? { run_only: runOnly } : {};
       if (action === "rerun") {
         const descriptor = await financialApi.task(run.task_kind, run.task_id);
+        if (!current()) return;
         extra.expected_task_revision = descriptor.task.source_revision;
       }
       const receipt = await taskRunApi.control(run, action, extra);
+      if (!current()) return;
       if (!receipt.ok) throw new Error("Run control was not accepted");
       if (action === "rerun" && receipt.run_id) setSuccessor({ id: receipt.run_id, session: receipt.session_id || run.session_id });
       resource.refresh();
-    } catch (reason) { setError(String(reason)); }
-    finally { lock.current = false; setBusy(false); }
+    } catch (reason) { if (current()) setError(String(reason)); }
+    finally { lock.current = false; if (current()) setBusy(false); }
   }
 
   async function reconcileFunds() {
-    if (!run || lock.current) return;
+    const current = scope.capture();
+    if (!run || lock.current || !current()) return;
     lock.current = true; setBusy(true); setError("");
     try {
-      for (const effect of run.result.effects || []) if (typeof effect.action_id === "string") await financialApi.reconcileAction(effect.action_id);
-      resource.refresh();
-    } catch (reason) { setError(String(reason)); }
-    finally { lock.current = false; setBusy(false); }
+      for (const effect of run.result.effects || []) {
+        if (!current()) return;
+        if (typeof effect.action_id === "string") await financialApi.reconcileAction(effect.action_id);
+      }
+      if (current()) resource.refresh();
+    } catch (reason) { if (current()) setError(String(reason)); }
+    finally { lock.current = false; if (current()) setBusy(false); }
   }
 
   const active = !!run && ["queued", "running", "stopping"].includes(run.execution_status);
