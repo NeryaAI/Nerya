@@ -124,17 +124,17 @@ class AssistantWork:
                     if not result:
                         answer = con.execute("SELECT meta_json FROM agent_messages WHERE session_id=? AND message_id=?", (work["task_session_id"], command["turn_id"]+":assistant")).fetchone()
                         result = (json.loads(answer[0] or "{}").get("turn") or {}) if answer else {}
-                    error = json.loads(command["error_json"] or "null")
-                    content = str(result.get("final_text") or (error or {}).get("message") or (error or {}).get("code") or command["state"])
+                    # 用户正文只来自 agent；状态与跳转交给 UI 的结构化回执和 i18n。
+                    content = result.get("reply_text") or result.get("final_text") or ""
+                    content = content if isinstance(content, str) else ""
                     summary = content[:1200] + ("…" if len(content) > 1200 else "")
                     con.execute("INSERT INTO assistant_results VALUES (?,?,?,?,?,?,?)", (command["command_id"], work["task_id"],
                                 command["state"], content, summary, json.dumps(result, ensure_ascii=False), time.time()))
                     deleted = con.execute("SELECT 1 FROM agent_deleted_sessions WHERE session_id=?", (work["parent_session_id"],)).fetchone()
                     if not deleted:
-                        status = {"succeeded": "已完成 / Completed", "failed": "执行失败 / Failed", "interrupted": "已停止 / Stopped", "removed": "已取消 / Cancelled"}[command["state"]]
-                        text = f"**{work['title']}** · {status}\n\n{summary}\n\n[查看任务对话 / Open task conversation](/chat/{work['task_session_id']})"
                         repo.record_message(message_id="assistant_result:" + command["command_id"], session_id=work["parent_session_id"],
-                                            role="assistant", content=text, meta={"assistant_task_id": work["task_id"],
+                                            role="assistant", content=content, meta={"source": "assistant_task_result",
+                                            "task_title": work["title"], "assistant_task_id": work["task_id"],
                                             "task_session_id": work["task_session_id"], "execution_status": command["state"]})
                         con.execute("UPDATE agent_sessions SET updated_at=? WHERE session_id=?", (time.time(), work["parent_session_id"]))
             con.commit()

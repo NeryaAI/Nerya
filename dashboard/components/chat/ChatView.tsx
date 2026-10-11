@@ -2,6 +2,7 @@
 import { useCallback } from "react";
 import { Icon as NeryaGlyph } from "../icons";
 import { copy as i18nCopy } from "../../lib/i18n";
+import { projectAssistantTaskMessage } from "../../lib/assistantTaskDelivery";
 
 import { StrategyWorkflowPanel } from "../workflows/StrategyWorkflowPanel";
 import { BacktestChart } from "../backtest/BacktestChart";
@@ -784,6 +785,12 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
           command_id: typeof turn.command_id === 'string' ? turn.command_id : undefined,
           command_revision: typeof m.meta?.command_revision === 'number' ? m.meta.command_revision : undefined,
           execution_status: typeof m.meta?.execution_status === 'string' ? m.meta.execution_status : undefined,
+          assistant_task: typeof m.meta?.assistant_task_id === "string" && typeof m.meta?.task_session_id === "string" ? {
+            task_id: m.meta.assistant_task_id, task_session_id: m.meta.task_session_id,
+            title: typeof m.meta.task_title === "string" ? m.meta.task_title : "",
+            state: typeof m.meta.execution_status === "string" ? m.meta.execution_status : "",
+            legacy: m.meta.source !== "assistant_task_result",
+          } : undefined,
           error: typeof m.meta?.error === 'string' ? m.meta.error : typeof turn.error === 'string' ? turn.error : undefined,
           ts,
           turn,
@@ -922,7 +929,10 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
 
 
   const active = useMemo(
-    () => projectExternalThread(sessionId ? threads.find((t) => t.id === sessionId) || null : null),
+    () => {
+      const thread = projectExternalThread(sessionId ? threads.find((t) => t.id === sessionId) || null : null);
+      return thread ? { ...thread, messages: thread.messages.map(message => message.role === "assistant" ? projectAssistantTaskMessage(message) : message) } : null;
+    },
     [threads, sessionId],
   );
   const externalView = isExternalSource(active?.source) || /^ext_(mcp|tunnel)_[0-9a-f]{32}$/.test(sessionId || '');

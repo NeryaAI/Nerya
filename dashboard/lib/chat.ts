@@ -210,6 +210,13 @@ export type LiveEvent = {
 };
 
 export type AssistantMessage = {
+  assistant_task?: {
+    task_id: string;
+    task_session_id: string;
+    title: string;
+    state: string;
+    legacy?: boolean;
+  };
   command_created_at?: number;
   command_id?: string;
   command_revision?: number;

@@ -71,6 +71,44 @@ def test_repeated_creation_and_completion_are_idempotent(setup):
     assert len(work.results("main")) == 1
 
 
+@pytest.mark.parametrize("state", ["succeeded", "failed", "interrupted", "removed"])
+def test_task_delivery_preserves_agent_reply_without_generated_copy(setup, monkeypatch, state):
+    import json
+    cfg, manager, _assistants, sid, work = setup
+    monkeypatch.setattr(manager, "kick", lambda _sid: None)
+    receipt = work.create(cfg, call(), sid, "owner", manager=manager)
+    answer = "Agent-authored conclusion.\n\n" + "Evidence and findings. " * 100
+    with manager.store.transaction() as con:
+        con.execute("UPDATE agent_commands SET state=?,result_json=? WHERE command_id=?",
+                    (state, json.dumps({"reply_text": answer}), receipt["command_id"]))
+    work.sync(sid); work.sync(sid)
+    with manager.store.transaction() as con:
+        messages = AgentSessionRepository(con).transcript(sid)
+    assert len(messages) == 1
+    assert messages[0]["content"] == answer
+    meta = json.loads(messages[0]["meta_json"])
+    assert meta["source"] == "assistant_task_result"
+    assert meta["task_title"] == "one"
+    assert meta["task_session_id"] == receipt["task_session_id"]
+    assert meta["execution_status"] == state
+    assert len(work.results("main")[0]["summary"]) <= 1201
+
+
+def test_task_without_agent_reply_delivers_state_without_fabricating_prose(setup, monkeypatch):
+    import json
+    cfg, manager, _assistants, sid, work = setup
+    monkeypatch.setattr(manager, "kick", lambda _sid: None)
+    receipt = work.create(cfg, call(), sid, "owner", manager=manager)
+    with manager.store.transaction() as con:
+        con.execute("UPDATE agent_commands SET state='failed',error_json=? WHERE command_id=?",
+                    (json.dumps({"code": "model_stream_tls_error"}), receipt["command_id"]))
+    work.sync(sid)
+    with manager.store.transaction() as con:
+        message = AgentSessionRepository(con).transcript(sid)[0]
+    assert message["content"] == ""
+    assert json.loads(message["meta_json"])["execution_status"] == "failed"
+
+
 def test_task_conversation_cannot_delegate_itself_and_other_assistant_is_isolated(setup):
     cfg, manager, assistants, sid, work = setup
     child = work.create(cfg, call(), sid, "owner", manager=manager)["task_session_id"]
