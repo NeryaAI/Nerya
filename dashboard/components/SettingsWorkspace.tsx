@@ -37,7 +37,9 @@ import { DataServiceSettings } from "./settings/DataServiceSettings";
 import { InterfaceSettings } from "./settings/InterfaceSettings";
 import McpSettingsPanel from "./settings/McpSettingsPanel";
 import { PrimaryModelSettings } from "./settings/PrimaryModelSettings";
-import { editableRoute, explicitRoute, tierPolicy, connectionPatch, type ModelRouteState, type ModelProfileState } from "./settings/modelSettingsState";
+import { ModelRoutePriority } from "./settings/ModelRoutePriority";
+import { ProviderManagementPanel } from "./settings/ProviderManagementPanel";
+import { editableRoute, explicitRoute, tierPolicy, connectionPatch, moveModelRoute, type ModelRouteState, type ModelProfileState } from "./settings/modelSettingsState";
 import { SavedModelTest } from "./SetupReadinessCard";
 import { SearchSettings } from "./settings/SearchSettings";
 import { Field,Metric,Row,CompactSelect as Select } from "./settings/SettingsFields";
@@ -456,6 +458,8 @@ function SettingsWorkspaceContent({
   const tProxy = useTranslations("networkProxy");
   const [providers, setProviders] = useState<ProviderOption[]>([]);
   const [providerProfiles, setProviderProfiles] = useState<LlmProviderProfile[]>([]);
+  const [providerManagementBusy, setProviderManagementBusy] = useState(false);
+  const [providerManagementDirty, setProviderManagementDirty] = useState(false);
   const [modelCatalog, setModelCatalog] = useState<Record<string, string[]>>({});
   const [defaultTier, setDefaultTier] = useState("medium");
   const [intentTier, setIntentTier] = useState("light");
@@ -1243,7 +1247,48 @@ function SettingsWorkspaceContent({
   const pendingConnection = connectionPatch({ ...connectionBaseline, provider: providerDraft }, providerDraft.trim().toLowerCase(), providerBaseUrlDraft, providerKeyDraft,
     CUSTOM_PROVIDER_KINDS.find(kind => kind.id === customProviderKind)?.api_mode);
   const connectionDirty = Object.keys(pendingConnection).length > 1;
-  const dirty = Boolean(loadedFingerprint && (currentFingerprint !== loadedFingerprint || connectionDirty || (setupMode && manualModelDraft.trim())));
+  const dirty = providerManagementDirty || Boolean(loadedFingerprint && (currentFingerprint !== loadedFingerprint || connectionDirty || (setupMode && manualModelDraft.trim())));
+
+  const managedProviders = useMemo(() => {
+    const profiles = new Map(providerProfiles.map(profile => [profile.provider, profile]));
+    for (const tier of tierRows) for (const route of routesOf(tier)) {
+      if (!route.provider || route.provider === "mock" || profiles.has(route.provider)) continue;
+      profiles.set(route.provider, { provider: route.provider, base_url: route.base_url,
+        provider_key_ref: route.provider_key_ref, has_key_ref: route.has_key_ref,
+        kind: route.kind });
+    }
+    return [...profiles.values()].sort((a, b) => a.provider.localeCompare(b.provider));
+  }, [providerProfiles, tierRows]);
+
+  function providerProfileSaved(profile: LlmProviderProfile, revision: string, savedTiers: LlmTierConfig[]) {
+    setProviderProfiles(previous => [...previous.filter(row => row.provider !== profile.provider), profile]
+      .sort((a, b) => a.provider.localeCompare(b.provider)));
+    setLoadedFingerprint(previous => {
+      if (!previous) return previous;
+      const baseline = JSON.parse(previous);
+      const savedProfile = JSON.parse(fingerprintConfig("", "", [], [profile])).provider_profiles[0];
+      baseline.provider_profiles = [...baseline.provider_profiles.filter((row: LlmProviderProfile) => row.provider !== profile.provider), savedProfile]
+        .sort((a: LlmProviderProfile, b: LlmProviderProfile) => a.provider.localeCompare(b.provider));
+      return JSON.stringify(baseline);
+    });
+    setSavedRevision(revision);
+    setTierRows(previous => previous.map(tier => {
+      const saved = savedTiers.find(row => row.tier === tier.tier);
+      if (!saved) return tier;
+      const savedRoutes = routesOf(saved);
+      return tierWithRoutes({ ...tier, routes: routesOf(tier).map(route => {
+        if (route.provider !== profile.provider) return route;
+        const match = savedRoutes.find(row => row.provider === route.provider && row.model === route.model);
+        return match ? { ...route, effective: match.effective || match, source: match.source || route.source } : route;
+      }) });
+    }));
+    if (providerDraft.trim().toLowerCase() === profile.provider) {
+      setProviderBaseUrlDraft(profile.base_url || "");
+      setProviderKeyDraft("");
+      setCustomProviderKind("");
+      setConnectionBaseline({ base_url: profile.base_url || "", provider_key_ref: profile.provider_key_ref || "", kind: profile.kind || "" });
+    }
+  }
 
   useEffect(() => {
     if (!dirty || setupMode) return;
@@ -1403,6 +1448,16 @@ function SettingsWorkspaceContent({
     );
   }
 
+  function moveTierRoute(tierIndex: number, from: number, to: number) {
+    if (saving || loading) return;
+    setTierRows(rows => rows.map((row, index) => {
+      if (index !== tierIndex) return row;
+      const routes = routesOf(row);
+      if (![routes[from], routes[to]].every(route => route?.provider && route?.model)) return row;
+      return tierWithRoutes({ ...row, routes: moveModelRoute(routes, from, to) });
+    }));
+  }
+
   function removeTierRoute(tierIndex: number, routeIndex: number) {
     setTierRows((rows) =>
       rows.map((row, i) => {
@@ -1428,7 +1483,7 @@ function SettingsWorkspaceContent({
   }
 
   async function saveModelConfig() {
-    if (loading || saving || discovering || sectionStates.models !== "ready") return;
+    if (loading || saving || discovering || providerManagementBusy || providerManagementDirty || sectionStates.models !== "ready") return;
     setSetupError("");
     let configuredRows = tierRows;
     const manualModel = setupMode ? manualModelDraft.trim() : "";
@@ -1539,7 +1594,7 @@ function SettingsWorkspaceContent({
       reportError(tProvider("providerRequired"));
       return;
     }
-    if (saving || discovering) return;
+    if (saving || discovering || providerManagementBusy || providerManagementDirty) return;
     setDiscovering(true);
     setDiscoveryError(null);
     try {
@@ -1660,6 +1715,7 @@ function SettingsWorkspaceContent({
   }
 
   async function importSelectedModels() {
+    if (providerManagementBusy || providerManagementDirty) return;
     const provider = discoveredProvider || providerDraft.trim().toLowerCase();
     const selected = discoveredModels.filter((row) => selectedModelIds.has(modelId(row)));
     if (!provider || selected.length === 0) {
@@ -1698,6 +1754,7 @@ function SettingsWorkspaceContent({
   }
 
   async function refreshModels() {
+    if (providerManagementBusy || providerManagementDirty || refreshing) return;
     setRefreshing(true);
     try {
       const res = await clientApi.llmModelsRefresh();
@@ -1931,7 +1988,7 @@ function SettingsWorkspaceContent({
               type="button"
               className="btn btn-ghost"
               onClick={() => void refreshCurrentSection()}
-              disabled={sectionBusy || (effectiveSettingsTab === "models" && (loading || saving))}
+              disabled={sectionBusy || (effectiveSettingsTab === "models" && (loading || saving || providerManagementBusy || providerManagementDirty))}
             >
               <RefreshIcon size={14} />
               {sectionBusy ? tCommon("loading") : tCommon("refresh")}
@@ -2235,6 +2292,12 @@ function SettingsWorkspaceContent({
               </div>
             ) : null}
 
+            {!setupMode && <ProviderManagementPanel profiles={managedProviders} catalog={modelCatalog}
+              defaultEndpoints={{ ...DEFAULT_PROVIDER_BASE_URLS, ...Object.fromEntries(providerCatalog.filter(provider => provider.base_url).map(provider => [provider.id, provider.base_url])) }}
+              disabled={saving || loading || discovering || refreshing || importing || connectionDirty}
+              onSaved={providerProfileSaved} onBusyChange={setProviderManagementBusy} onDirtyChange={setProviderManagementDirty}
+              onRefreshed={(provider, models) => setModelCatalog(previous => ({ ...previous, [provider]: models.map(modelId).filter(Boolean) }))} />}
+
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
               <Field label={tProvider("providerLabel")} hint={tProvider("providerHint")}>
                 <ChoiceSelect
@@ -2244,6 +2307,7 @@ function SettingsWorkspaceContent({
                   createOption={(value) => tProvider("createProvider", { value })}
                   aria-label={tProvider("providerLabel")}
                   className="w-full font-mono"
+                  disabled={providerManagementBusy || providerManagementDirty}
                 >
                   {providerOptions.map((provider) => {
                     const entry = catalogById.get(provider);
@@ -2266,6 +2330,7 @@ function SettingsWorkspaceContent({
                   aria-label={tProvider("apiKeyLabel")}
                   onChange={(e) => setProviderKeyDraft(e.target.value)}
                   type={providerKeyDraft.startsWith("vault://") ? "text" : "password"}
+                  disabled={providerManagementBusy || providerManagementDirty}
                   placeholder={tProvider("apiKeyPlaceholder")}
                 />
               </Field>
@@ -2274,7 +2339,7 @@ function SettingsWorkspaceContent({
                   type="button"
                   className={setupMode ? "btn btn-secondary" : "btn btn-primary"}
                   onClick={discoverProviderModels}
-                  disabled={discovering || !providerDraft.trim()}
+                  disabled={discovering || providerManagementBusy || providerManagementDirty || !providerDraft.trim()}
                 >
                   <SearchIcon size={14} />
                   {discovering ? tProvider("fetching") : (zh ? "获取模型并保存连接" : "Fetch models and save connection")}
@@ -2282,8 +2347,8 @@ function SettingsWorkspaceContent({
                 <TermTip term="fetchModels" />
                 <span className="text-xs text-[color:var(--text-muted)]">{zh ? "成功后保存 URL 和凭据；失败保留草稿，不保存连接。此操作不会验证模型回复。" : "Saves URL and credentials on success; failure keeps drafts without saving. This does not test a model response."}</span>
                 {!setupMode && <>
-                  <button type="button" className="btn btn-secondary" disabled={!dirty || saving} onClick={() => void saveModelConfig()}>{zh ? "保存设置" : "Save settings"}</button>
-                  <button type="button" className="btn btn-ghost" disabled={!dirty || saving} onClick={() => void refreshCurrentSection()}>{zh ? "放弃草稿" : "Discard drafts"}</button>
+                  <button type="button" className="btn btn-secondary" disabled={!dirty || saving || providerManagementBusy || providerManagementDirty} onClick={() => void saveModelConfig()}>{zh ? "保存设置" : "Save settings"}</button>
+                  <button type="button" className="btn btn-ghost" disabled={!dirty || saving || providerManagementBusy || providerManagementDirty} onClick={() => void refreshCurrentSection()}>{zh ? "放弃草稿" : "Discard drafts"}</button>
                   {dirty && <Pill tone="warn">{tModel("unsaved")}</Pill>}
                 </>}
               </div>
@@ -2314,6 +2379,7 @@ function SettingsWorkspaceContent({
                     className="input-dark font-mono"
                     value={providerBaseUrlDraft}
                     aria-label={tProvider("baseUrlLabel")}
+                    disabled={providerManagementBusy || providerManagementDirty}
                     onChange={(e) => setProviderBaseUrlDraft(e.target.value)}
                     placeholder={
                       customProviderKind
@@ -2326,6 +2392,7 @@ function SettingsWorkspaceContent({
                   <Field label={tProvider("customKindLabel")} hint={tProvider("customKindHint")}>
                     <PortalSelect<CustomProviderKind | "">
                       value={customProviderKind}
+                      disabled={providerManagementBusy || providerManagementDirty}
                       onChange={(next) => {
                         setCustomProviderKind(next);
                         if (next === "openai_compat" && !providerBaseUrlDraft) {
@@ -2409,7 +2476,7 @@ function SettingsWorkspaceContent({
                     type="button"
                     className="btn btn-primary"
                     onClick={importSelectedModels}
-                    disabled={importing || selectedModelIds.size === 0}
+                    disabled={importing || providerManagementBusy || providerManagementDirty || selectedModelIds.size === 0}
                   >
                     <CheckIcon size={14} />
                     {importing ? tProvider("importing") : tProvider("importSelectedCount", { count: selectedModelIds.size })}
@@ -2476,6 +2543,8 @@ function SettingsWorkspaceContent({
             <PrimaryModelSettings primaryOnly={setupMode} routes={routesOf(tierRows.find((row) => row.tier === defaultTier) || emptyTier(defaultTier))}
               catalog={modelCatalog} disabled={saving || loading} onChange={selectPrimaryModel}
               onContextChange={setPrimaryContextWindow}
+              onMove={(from, to) => moveTierRoute(tierRows.findIndex(row => row.tier === defaultTier), from, to)}
+              onAdd={() => addTierRoute(tierRows.findIndex(row => row.tier === defaultTier))}
               onInheritConnection={(routeIndex) => patchTierRoute(tierRows.findIndex(row => row.tier === defaultTier), routeIndex, { base_url: "", provider_key_ref: "", provider_key_refs: [], provider_key_env: "", provider_key: "", provider_keys: [], kind: "" })} />
             <SavedModelTest revision={savedRevision} dirty={dirty} disabled={saving || loading || discovering} />
             {!setupMode ? <div className="flex flex-wrap items-end gap-3 rounded-lg bg-ink-950/20 p-3">
@@ -2484,7 +2553,7 @@ function SettingsWorkspaceContent({
                 type="button"
                 className="btn btn-ghost"
                 onClick={refreshModels}
-                disabled={refreshing}
+                disabled={refreshing || providerManagementBusy || providerManagementDirty}
               >
                 <RefreshIcon size={14} />
                 {refreshing ? tCommon("refreshing") : tModel("refreshCatalog")}
@@ -2496,7 +2565,7 @@ function SettingsWorkspaceContent({
                 type="button"
                 className="btn btn-primary ml-auto"
                 onClick={saveModelConfig}
-                disabled={saving || loading || !dirty || tierRows.length === 0}
+                disabled={saving || loading || providerManagementBusy || providerManagementDirty || !dirty || tierRows.length === 0}
               >
                 <CheckIcon size={14} />
                 {saving ? tCommon("saving") : tModel("saveAssignments")}
@@ -2564,9 +2633,11 @@ function SettingsWorkspaceContent({
                           : models;
                         const canRemove = routes.length > 1;
                         return (
-                          <div
+                          <ModelRoutePriority
                             key={`${row.tier}-${routeIndex}`}
-                            className="rounded-lg border border-[color:var(--line)] bg-ink-950/20 p-3"
+                            group={`tier-${row.tier}`} index={routeIndex} count={routes.length}
+                            disabled={saving || loading || !route.provider || !route.model} onMove={(from, to) => moveTierRoute(index, from, to)}
+                            className="bg-ink-950/20"
                           >
                             <div className="mb-2.5 flex items-center justify-between gap-2">
                               <div className="flex min-w-0 items-center gap-2">
@@ -2674,7 +2745,7 @@ function SettingsWorkspaceContent({
                                 {zh ? "恢复连接继承" : "Inherit connection"}
                               </button>
                             </div>
-                          </div>
+                          </ModelRoutePriority>
                         );
                       })}
                       <div className="flex flex-wrap items-end gap-3">

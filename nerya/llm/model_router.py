@@ -31,6 +31,8 @@ from typing import Any
 from ..core.errors import LLMError
 from ..core.normalize import norm_key
 from ..core.truth import resolve_allow_mock
+from ..harness.cancellation import CancelledError
+from .attempt_budget import claim_current_extra_attempt
 from .provider_catalog import (
     default_base_url as _catalog_default_base_url,
     default_env_keys_for as _catalog_default_env_keys,
@@ -185,6 +187,10 @@ class ModelRouter:
         )
         last_error: LLMError | None = None
         for route_index, route_cfg in enumerate(routes):
+            if route_index > 0 and not claim_current_extra_attempt("model_failover"):
+                if last_error is not None:
+                    setattr(last_error, "retry_exhausted", "attempt_budget")
+                break
             route_reasoning_effort = _normalise_reasoning_effort(
                 route_cfg.get("reasoning_effort")
             )
@@ -289,6 +295,8 @@ class ModelRouter:
                     adapter_kwargs["reasoning_summary"] = reasoning_summary
             try:
                 res: ProviderResult = adapter(**adapter_kwargs)
+            except CancelledError:
+                raise
             except LLMError as exc:
                 last_error = exc
                 if route_index < len(routes) - 1:

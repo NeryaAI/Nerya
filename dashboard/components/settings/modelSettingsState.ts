@@ -11,6 +11,14 @@ export type ModelProfileState = LlmProviderProfile & {
   kind?: string;
 };
 
+export function moveModelRoute<T>(routes: T[], from: number, to: number): T[] {
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from === to ||
+      from < 0 || to < 0 || from >= routes.length || to >= routes.length) return routes;
+  const reordered = [...routes];
+  reordered.splice(to, 0, ...reordered.splice(from, 1));
+  return reordered;
+}
+
 // Keep the resolved connection as evidence, never as an editable override.
 export function editableRoute(route: ModelRouteState): ModelRouteState {
   if (!route.declared) return route; // Older servers keep their existing contract.

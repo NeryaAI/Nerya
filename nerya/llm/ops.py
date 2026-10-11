@@ -1036,11 +1036,12 @@ def models_discover(
     provider_key_ref: str | None = None,
     vault_passphrase: str | None = None,
     api_mode: str | None = None,
+    save_connection: bool = True,
 ) -> dict[str, Any]:
     """Call one provider's live model-list endpoint for onboarding.
 
-    ``api_mode`` is consulted only when ``provider`` is not in the
-    builtin / catalogue map — i.e. the operator typed a custom id.
+    Explicit ``api_mode`` and saved API-format overrides also control
+    discovery for builtin provider names used with compatibility endpoints.
     Allowed values: ``"chat_completions"`` (OpenAI-compat) or
     ``"anthropic_messages"`` (Anthropic-compat). The default falls
     back to ``chat_completions`` because the vast majority of
@@ -1057,6 +1058,9 @@ def models_discover(
         target_base_url.startswith("http://") or target_base_url.startswith("https://")
     ):
         raise ValueError("base_url must start with http:// or https://")
+    if not target_base_url:
+        return {"ok": False, "error": "provider_url_required", "provider": provider_id,
+                "detail": "set an API endpoint before discovering this provider's models"}
 
     key_ref = str(provider_key_ref or profile.get("provider_key_ref") or "").strip()
     one_time_key = str(provider_key or "").strip()
@@ -1080,6 +1084,11 @@ def models_discover(
 
     providers = builtin_providers()
     adapter = providers.get(provider_id)
+    mode = (api_mode or profile.get("kind") or "").strip().lower()
+    if mode == "anthropic_messages":
+        adapter = providers.get("anthropic-compat") or providers.get("anthropic")
+    elif mode == "chat_completions":
+        adapter = providers.get("compat")
     if adapter is None or not hasattr(adapter, "list_models"):
         # Custom provider id — pick a compat adapter from ``api_mode``.
         # The "compat" entry is always an OpenAICompatAdapter; the
@@ -1117,6 +1126,9 @@ def models_discover(
         row for row in (_model_info_to_dict(m, provider_id) for m in models)
         if row.get("id")
     ]
+    if not save_connection:
+        return {"ok": True, "provider": provider_id, "base_url": target_base_url,
+                "models": rows, "count": len(rows), "connection_saved": False}
     saved = llm_config_set(
         config,
         providers=[{
@@ -1140,6 +1152,46 @@ def models_discover(
         "models": rows,
         "count": len(rows),
     }
+
+
+def models_provider_refresh(
+    config: Config, *, provider: str, vault_passphrase: str | None = None,
+) -> dict[str, Any]:
+    """Replace one provider's model cache using its saved connection only."""
+    provider_id = str(provider or "").strip().lower()
+    if not provider_id or not _PROVIDER_RE.fullmatch(provider_id):
+        raise ValueError("valid provider is required")
+    profile = _provider_profiles(config).get(provider_id)
+    routes = [{"provider": provider_id, **profile}] if profile is not None else [
+        route for tier in effective_tiers(config).values()
+        for route in configured_routes(tier) if route.get("provider") == provider_id
+    ]
+    if not routes:
+        return {"ok": False, "error": "provider_not_configured", "provider": provider_id}
+    from .gateway import LLMGateway
+    gateway = LLMGateway(config)
+    result: dict[str, Any] = {"ok": False, "error": "provider_key_required", "provider": provider_id}
+    for route in routes:
+        keys = gateway.router._resolve_route_api_keys(route) or [""]
+        if vault_passphrase:
+            resolved = [_resolve_llm_key(config, ref, vault_passphrase=vault_passphrase)
+                        for ref in split_csv_values(route.get("provider_key_ref"))]
+            keys = split_csv_values([key for key in resolved if key] + keys) or [""]
+        for key in keys:
+            result = models_discover(
+                config, provider=provider_id, base_url=route.get("base_url"),
+                provider_key=key or None, api_mode=route.get("kind"),
+                vault_passphrase=vault_passphrase, save_connection=False,
+            )
+            if not result.get("ok"):
+                continue
+            doc = ModelCatalog(workspace=config.paths.root).import_models(
+                provider=provider_id, models=result["models"],
+                base_url=result.get("base_url"), merge=False,
+            )
+            return {**result, "models": doc["providers"][provider_id],
+                    "count": len(doc["providers"][provider_id]), "updated_at": doc.get("updated_at")}
+    return result
 
 
 def models_import(
@@ -1223,6 +1275,7 @@ __all__ = [
     "models_list",
     "models_refresh",
     "models_discover",
+    "models_provider_refresh",
     "models_import",
     "validate_tier_assignment",
     "provider_routing_get",

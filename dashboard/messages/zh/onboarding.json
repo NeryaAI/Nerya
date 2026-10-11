@@ -1,4 +1,21 @@
 {
+  "modelProbe": {
+    "unsupported_setting": "模型不支持已保存的思考设置，请使用继承或模型支持的设置。",
+    "context_limit": "测试请求超过了模型的上下文限制。",
+    "missing_credentials": "未找到已保存服务商的可用 API 密钥。",
+    "output_truncated": "连接已成功，但输出预算耗尽，模型还没有给出有效回复。",
+    "empty_response": "连接已成功，但模型没有返回文本或工具调用。",
+    "tool_not_called": "连接已成功，但模型没有调用测试工具。",
+    "task_not_allowed": "所选档位不允许执行此测试任务。",
+    "timeout": "模型测试超时，请检查服务商状态或重试。",
+    "authentication": "服务商拒绝了鉴权，请检查 API 密钥及权限。",
+    "model_not_found": "服务商未找到此模型，请检查模型 ID 和接口地址。",
+    "rate_limit": "服务商触发限流或额度不足，请检查额度或稍后重试。",
+    "provider_unavailable": "服务商暂时不可用，请稍后重试。",
+    "invalid_request": "服务商拒绝了模型请求，请检查已保存的 API 形态和模型设置。",
+    "unknown": "测试未能完成。配置仍然已保存，请检查服务商后重试。",
+    "configuration_changed": "配置已变化，请刷新后重新测试。"
+  },
   "home": {
     "greetingMorning": "早上好",
     "greetingAfternoon": "下午好",

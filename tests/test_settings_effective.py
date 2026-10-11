@@ -112,7 +112,8 @@ def test_probe_binds_results_to_saved_snapshot(config, monkeypatch, mode):
             assert received is not config
             assert received.data == snapshot
         def call_messages(self, **kwargs):
-            assert kwargs["max_tokens"] == 128
+            assert kwargs["max_tokens"] == 2000
+            assert kwargs["reasoning_effort"] is None
             if mode == "failure":
                 raise RuntimeError("never return fixture-secret")
             if mode == "changed":
