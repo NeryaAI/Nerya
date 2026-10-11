@@ -28,6 +28,8 @@ function readLocale(locale) {
   if (!files.length) throw new Error('No locale resources in ' + folder);
   const values = Object.fromEntries(files.map((name) => [name, JSON.parse(fs.readFileSync(path.join(folder, name), 'utf8'))]));
   function validateKeys(value, namespace, literalCopy = false) {
+    if (locale === 'en' && typeof value === 'string' && /\p{Script=Han}/u.test(value))
+      throw new Error('Chinese UI copy in English resources: ' + locale + '/' + namespace);
     if (typeof value === 'string' && !literalCopy) {
       try { parseMessage(value); }
       catch (error) { throw new Error('Invalid ICU message: ' + locale + '/' + namespace + ': ' + error.message); }

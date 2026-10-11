@@ -82,6 +82,8 @@
       "succeeded": "Completed",
       "failed": "Needs attention",
       "cancelled": "Stopped",
+      "interrupted": "Stopped",
+      "removed": "Cancelled",
       "scheduled": "Scheduled",
       "paused": "Paused",
       "awaiting_input": "Needs your input",

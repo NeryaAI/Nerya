@@ -82,6 +82,8 @@
       "succeeded": "已完成",
       "failed": "需要处理",
       "cancelled": "已停止",
+      "interrupted": "已停止",
+      "removed": "已取消",
       "scheduled": "已设定执行计划",
       "paused": "已暂停",
       "awaiting_input": "等待补充信息",

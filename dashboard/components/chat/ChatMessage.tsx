@@ -46,6 +46,7 @@ import { commandStateText } from '../../lib/commandCopy';
 import { ModelRetryStatus } from './ModelRetryStatus';
 import { interactionReceipt } from '../../lib/toolOutputPresentation';
 import { InteractionReceipt } from './InteractionReceipt';
+import { AssistantTaskReceipt } from './AssistantTaskReceipt';
 
 function formatTime(ts: number): string {
   try {
@@ -436,7 +437,7 @@ export function AssistantBubble({
     </div> : msg.loading && !msg.error ? <div role="status" className="flex items-center gap-2 py-2 text-xs text-[color:var(--text-muted)]" data-turn-section="pending">
       <StreamingDots />{i18nCopy(zh, "copy.components_chat_ChatMessage.007")}
     </div> : null}
-    {msg.execution_status && !msg.loading && !msg.error && msg.execution_status !== "succeeded" ? <p role="status" className="mb-3 text-xs text-[color:var(--text-muted)]">{commandStateText(msg.execution_status, zh)}</p> : null}
+    {msg.execution_status && !msg.assistant_task && !msg.loading && !msg.error && msg.execution_status !== "succeeded" ? <p role="status" className="mb-3 text-xs text-[color:var(--text-muted)]">{commandStateText(msg.execution_status, zh)}</p> : null}
     {attentionBlocks.length > 0 && <NativeBlocksTrack envelopes={attentionBlocks} live={Boolean(msg.loading)} pendingApprovals={pendingApprovals} onApprovalAction={onApprovalAction} resolvingApprovalIds={resolvingApprovalIds} suppressTopProposalHoist presentation="expanded"/>}
     {visualBlocks.length > 0 && <NativeBlocksTrack envelopes={visualBlocks} suppressTopProposalHoist presentation="expanded"/>}
     {modelRetry ? <ModelRetryStatus retry={modelRetry} /> : null}
@@ -463,9 +464,10 @@ export function AssistantBubble({
         <time className="ml-auto text-[11px]">{formatTime(msg.ts)}</time>
       </div>}
       </> : <p role="status" className="mt-2 text-xs text-[color:var(--text-muted)]">{msg.loading ? (i18nCopy(zh, "copy.components_chat_ChatMessage.025")) : (i18nCopy(zh, "copy.components_chat_ChatMessage.026"))}</p>}
-    </section> : !msg.loading && !msg.error && !hasTrace && !msg.execution_status ? <p className="py-2 text-xs text-[color:var(--text-muted)]" data-turn-section="empty-result">
+    </section> : !msg.loading && !msg.error && !hasTrace && !msg.execution_status && !msg.assistant_task ? <p className="py-2 text-xs text-[color:var(--text-muted)]" data-turn-section="empty-result">
       {i18nCopy(zh, "copy.components_chat_ChatMessage.011")}
     </p> : null}
 
+    <AssistantTaskReceipt task={msg.assistant_task} />
   </article>;
 }
