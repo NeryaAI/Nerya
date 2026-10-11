@@ -88,7 +88,12 @@ from .adapters._base import (
     io_control,
 )
 from .adapters.openai import _REASONING_MODEL_PREFIXES
-from .retry import is_quota_error, is_retryable_stream_transport_error, parse_retry_after, provider_retryable
+from .retry import (
+    is_quota_error,
+    is_retryable_stream_transport_error,
+    parse_retry_after,
+    provider_retryable,
+)
 
 
 _LOG = logging.getLogger(__name__)
@@ -1148,7 +1153,7 @@ def _split_visible_thinking(text: str) -> tuple[str, str]:
 
 
 def _openai_stream_event_error(provider: str, payload: Any) -> LLMError:
-    """Preserve SSE business errors and cooldowns instead of losing attribution."""
+    """Preserve a provider's SSE error instead of treating it as a network flap."""
     details = payload if isinstance(payload, dict) else {"message": str(payload)}
     raw_status = details.get("status_code") or details.get("status") or details.get("http_status")
     try:
@@ -1158,19 +1163,31 @@ def _openai_stream_event_error(provider: str, payload: Any) -> LLMError:
     request_id = str(details.get("request_id") or details.get("requestId") or "")[:160]
     if 400 <= status < 600:
         response_headers = {"x-request-id": request_id} if request_id else {}
-        for field, header in (("retry_after_ms", "retry-after-ms"), ("retryAfterMs", "retry-after-ms"), ("retry_after", "retry-after")):
+        # An SSE business-error event may include the provider cooldown even
+        # though its HTTP response already started with status 200.
+        for field, header in (("retry_after_ms", "retry-after-ms"),
+                              ("retryAfterMs", "retry-after-ms"),
+                              ("retry_after", "retry-after")):
             if details.get(field) is not None:
                 response_headers[header] = str(details[field])
         if details.get("retryable") is False:
             response_headers["x-should-retry"] = "false"
-        return _make_llm_error(provider=provider, status=status, doc={"error": details},
-                               resp_headers=response_headers, operation="stream")
+        return _make_llm_error(
+            provider=provider, status=status, doc={"error": details},
+            resp_headers=response_headers,
+            operation="stream",
+        )
     message = _raw_body_excerpt({"error": details}) or "unknown provider stream error"
     error = LLMError(f"{provider} stream error: {message[:260]}")
-    error.code = "model_quota_exhausted" if is_quota_error({"error": details}) else "model_stream_provider_error"
-    error.request_id = request_id
+    quota_exhausted = is_quota_error({"error": details})
+    setattr(error, "code", "model_quota_exhausted" if quota_exhausted else "model_stream_provider_error")
+    setattr(error, "quota_exhausted", quota_exhausted)
+    setattr(error, "request_id", request_id)
     code = str(details.get("code") or details.get("type") or "").lower()
-    error.retryable = code in {"rate_limit_exceeded", "rate_limit_error", "server_error", "overloaded_error"} and not is_quota_error({"error": details}) and details.get("retryable") is not False
+    # An SSE error is a *provider response*, not an unexplained broken socket.
+    # Only explicit temporary provider codes justify an automatic retry.
+    transient_codes = {"rate_limit_exceeded", "rate_limit_error", "server_error", "overloaded_error"}
+    setattr(error, "retryable", code in transient_codes and not quota_exhausted and details.get("retryable") is not False)
     return error
 
 
@@ -1189,6 +1206,7 @@ class _OpenAIStream:
 
     @property
     def output_committed(self) -> bool:
+        """A model payload was received; replaying may duplicate streamed work."""
         return bool(self.message["content"] or self.message["reasoning_content"] or self.tools)
 
     def emit(self, kind, **data):
@@ -1404,6 +1422,10 @@ class OpenAIMessagesBackend:
                 except Exception as exc:
                     if isinstance(exc, CancelledError):
                         raise
+                    # ZCode uses the emitted-stream boundary: before any
+                    # model payload, a transient connection failure may use
+                    # the *turn-owned* bounded retry policy. After a text,
+                    # thinking or tool fragment, never replay the request.
                     committed = accumulator.output_committed
                     if isinstance(exc, LLMError):
                         error = exc
@@ -1414,23 +1436,35 @@ class OpenAIMessagesBackend:
                                 "provider stream missing finish_reason",
                             }
                         if not getattr(error, "code", None) and not getattr(error, "status_code", None):
-                            error.code = "model_stream_connection_failed" if eligible else "model_stream_protocol_error"
+                            setattr(error, "code", (
+                                "model_stream_connection_failed" if eligible
+                                else "model_stream_protocol_error"
+                            ))
                     elif isinstance(exc, OSError):
                         eligible = is_retryable_stream_transport_error(exc)
-                        cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
-                        error = LLMError(f"{self.provider_name} stream connection interrupted ({type(exc).__name__})")
-                        error.code = ("model_stream_tls_error" if isinstance(cause, ssl.SSLError)
-                                      else "model_stream_connection_failed" if eligible
-                                      else "model_stream_network_config_error")
+                        root_cause = (
+                            exc.reason if isinstance(exc, urllib.error.URLError) else exc
+                        )
+                        error = LLMError(
+                            f"{self.provider_name} stream connection interrupted "
+                            f"({type(exc).__name__})"
+                        )
+                        setattr(error, "code", (
+                            "model_stream_tls_error" if isinstance(root_cause, ssl.SSLError)
+                            else "model_stream_connection_failed" if eligible
+                            else "model_stream_network_config_error"
+                        ))
                     else:
+                        # A parser/programming error is not a transient network
+                        # failure. Preserve its cause without a replay.
                         error = LLMError(f"{self.provider_name} stream processing failed ({type(exc).__name__})")
-                        error.code = "model_stream_protocol_error"
+                        setattr(error, "code", "model_stream_protocol_error")
                         eligible = False
-                    error.stream_interrupted = True
-                    error.stream_output_committed = committed
+                    setattr(error, "stream_interrupted", True)
+                    setattr(error, "stream_output_committed", committed)
                     # Retry only before output; native upstream capabilities
                     # have independent effects and must never be replayed here.
-                    error.retryable = bool(eligible) and not committed and not native_web_search.get("enabled")
+                    setattr(error, "retryable", bool(eligible) and not committed and not native_web_search.get("enabled"))
                     if error is exc:
                         raise
                     raise error from exc

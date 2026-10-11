@@ -81,11 +81,14 @@ class ScheduledSessionResult:
     cancellation_requested: bool = False
     late_outcome: bool = False
     final_text: str = ""
+    run_id: str | None = None
+    command_id: str | None = None
 
     def asdict(self) -> dict[str, Any]:
         return redact_display_dict({
             "receipt_id": self.turn_id,
-            "command_id": None,
+            "command_id": self.command_id,
+            "run_id": self.run_id,
             "source": "scheduled_session",
             "schedule_id": self.schedule_id,
             "session_id": self.session_id,

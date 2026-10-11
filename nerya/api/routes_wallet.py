@@ -1519,6 +1519,22 @@ def routes():
             return {"ok":False,"error":"quote_unavailable","reason":str(exc)}
 
     def swap(client, payload):
+        if (client.config.get('financial.enabled',False) or client.config.get('runtime.task_run_id')) and not client.config.get('runtime.financial_action_id'):
+            from ..financial.contracts import context_from_config,FinancialError
+            from ..financial.gateway import FinancialGateway
+            try:
+                context=context_from_config(client.config,actor_id=getattr(client,'auth_actor_id',None) or trusted_http_actor(payload),
+                    scopes=getattr(client,'auth_scopes',()) or payload.get('_auth_scopes',()))
+                request,_=prepare_swap(client.config,payload)
+                raw={'kind':'swap','wallet_id':request['wallet_id'],'chain':request['chain'],'asset':request['token_in'],
+                    'to_asset':request['token_out'],'amount':str(request['amount_in']),'recipient':request.get('receiver'),
+                    'slippage_bps':int(request.get('slippage_bps',50))}
+                gateway=FinancialGateway(client.config)
+                key=payload.get('client_request_id') or payload.get('tool_call_id')
+                if not key:raise FinancialError('financial_action_key_required',400)
+                action=gateway.prepare(context,raw,action_key='swap:'+str(key))
+                return gateway.execute(context,action['action_id'],quote_hash=action['quote_hash'])
+            except FinancialError as exc:return {'ok':False,'error':exc.code,'_status':exc.status}
         if not client.config.live_trading_enabled():
             return {"ok": False, "error": "live_trading_disabled",
                     "reason": "enable runtime.live_trading_enabled to run swaps"}

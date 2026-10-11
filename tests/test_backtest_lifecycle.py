@@ -175,14 +175,14 @@ def test_dependency_failure_is_actionable_and_engine_can_be_selected(tmp_path, m
     assert not out.is_error and out.content[0].data["engine"] == "native"
 
 
-def test_performance_failure_has_a_reason_without_changing_replay_success():
+def test_benchmark_underperformance_is_warning_without_changing_replay_success():
     cfg = load_config(markets=["MOCK:BTC"], overrides={"warmup_bars": 0})
     def run(ctx):
         if not ctx.portfolio.position("MOCK:BTC"):
             ctx.trading.open_position(market="MOCK:BTC", side="long", sizing={"method":"fixed_usd", "fixed_usd":10})
         return ctx.result.hold(reason="fixture")
     metrics = assemble_metrics(run_backtest(None, cfg, candles_by_market={"MOCK:BTC":bars()}, run_fn=run))
-    assert metrics["verdict"] == "FAIL"
+    assert metrics["verdict"] == "WARN"
     assert "benchmark_capture_below_threshold" in metrics["flags"]
     assert metrics["replay"]["errors"] == 0
     assert metrics["total_return_pct"] > 0

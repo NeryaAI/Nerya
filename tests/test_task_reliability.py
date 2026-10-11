@@ -159,4 +159,4 @@ def test_partial_stream_is_not_replayed_as_a_new_tool():
     result=_make_loop(Gateway(),config=LoopConfig(max_iterations=5)).run(system="fixture",user_message="Read status.")
     assert result.aborted and result.abort_reason=="stream_interrupted"
     assert result.tool_calls==0 and transport.calls==1
-    assert "stream was interrupted" in result.final_text
+    assert "模型流式响应中断" in result.final_text

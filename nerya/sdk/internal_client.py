@@ -31,6 +31,11 @@ class InternalClient:
     skill: SkillAPI
     agent: AgentAPI
 
+    @property
+    def financial(self):
+        from .financial_api import FinancialAPI
+        return FinancialAPI(self.config)
+
     @classmethod
     def boot(
         cls,

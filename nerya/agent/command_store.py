@@ -5,7 +5,7 @@ workers become unconfirmed; neither reads nor retries replay external effects.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import copy
 import hashlib
 import json
@@ -200,12 +200,14 @@ class CommandStore:
             con.close()
 
     def accept(self, *, cid: str, sid: str, actor: str, kind: str, request: dict,
-               context: dict, turn_id: str, continuation=False, identity_request=None):
+               context: dict, turn_id: str, continuation=False, identity_request=None,
+               connection=None):
         cid, sid = command_id(cid), _session_id(sid)
         digest = fingerprint(kind, identity_request if identity_request is not None else request)
         if len(encode(request).encode()) > 256_000:
             raise CommandError("command_too_large", 413)
-        with self.transaction() as con:
+        # Run 与 Command 必须在同一事务准入；普通聊天仍使用原有事务。
+        with (self.transaction() if connection is None else nullcontext(connection)) as con:
             queue = self._queue(con, sid)
             old = con.execute("SELECT * FROM agent_commands WHERE command_id=?", (cid,)).fetchone()
             if old:
@@ -258,6 +260,8 @@ class CommandStore:
                         (cid,sid,actor,kind,digest,encode(request),encode(context),state,turn_id,position,now,now))
             con.execute("UPDATE agent_command_queues SET revision=revision+1,updated_at=? WHERE session_id=?", (now,sid))
             row = con.execute("SELECT * FROM agent_commands WHERE command_id=?", (cid,)).fetchone()
+            from .task_runs import TaskRuns
+            TaskRuns.link_continuation(cid, request, connection=con, context=context)
             return {"ok": True, "duplicate": False, "command": self.public(row)}
 
     def _projection(self, con, row, *, full=False):
@@ -273,8 +277,8 @@ class CommandStore:
 
     def snapshot(self, sid: str, cid: str | None = None):
         sid = _session_id(sid)
-        # Polling a healthy queue is a read, not a heartbeat or admission.
-        # Only missing/expired queues need the serialized recovery path.
+        # Healthy state polling does not acquire a writer lock. Serialize only
+        # queue creation/recovery, retaining the expired-lease safety contract.
         con = connect(self.paths.db)
         try:
             con.execute("BEGIN")
@@ -365,7 +369,7 @@ class CommandStore:
                 return False  # A lost lease cannot manufacture a new authority state.
             now = time.time()
             current=con.execute("SELECT state FROM agent_commands WHERE command_id=?",(cid,)).fetchone()
-            if current and current[0]=="stopping" and state=="succeeded":
+            if current and current[0]=="stopping" and state!='unconfirmed':
                 # An in-flight reply can finish after stop admission. Preserve its
                 # evidence while reporting the operator's accepted stop outcome.
                 state="interrupted"
@@ -523,7 +527,8 @@ class CommandStore:
                     raise CommandError("command_not_running")
                 context = {**json.loads(row["context_json"]), "stop_requested": True}
                 con.execute("UPDATE agent_commands SET state='stopping',context_json=?,revision=revision+1,updated_at=? WHERE command_id=?", (encode(context),now,cid))
-                con.execute("UPDATE agent_command_queues SET paused=1,pause_reason='stopping',revision=revision+1 WHERE session_id=?", (sid,))
+                con.execute("UPDATE agent_command_queues SET paused=1,pause_reason=?,revision=revision+1 WHERE session_id=?",
+                    ('operator' if queue['paused'] and queue['pause_reason']=='operator' else 'stopping',sid))
             elif action in ("edit","remove","move"):
                 if not row or row["state"]!="queued" or row["kind"]=="guide":
                     raise CommandError("command_already_claimed")

@@ -250,13 +250,18 @@ class ReconciliationStore:
     for the RiskGate's halt-on-severity check.
     """
 
-    def __init__(self, paths: WorkspacePaths):
+    def __init__(self, paths: WorkspacePaths, *, readonly=False):
         self.paths = paths
+        self.readonly = readonly
         self._con = None
 
     def _con_lazy(self):
         if self._con is None:
-            self._con = connect(self.paths.db)
+            if self.readonly:
+                from ..db.sqlite import connect_preview
+                self._con = connect_preview(self.paths.db)
+            else:
+                self._con = connect(self.paths.db)
         return self._con
 
     def record(self, report: ReconciliationReport) -> None:

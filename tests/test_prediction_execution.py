@@ -198,38 +198,43 @@ def test_agent_and_script_prediction_orders_reach_approval_and_fill(tmp_path,mon
     assert len([c for c in calls if c[0]=='post'])==1
 
 
-def test_real_v2_sdk_signs_eip712_and_authenticates_post_without_network(monkeypatch,tmp_path):
-    pytest.importorskip('py_clob_client_v2')
+def test_unified_sdk_signs_and_authenticates_without_provisioning_or_network(monkeypatch,tmp_path):
+    pytest.importorskip('polymarket')
+    import json
+    import httpx
     from eth_account import Account
     from eth_account.messages import encode_typed_data
-    from py_clob_client_v2.config import get_contract_config
-    from py_clob_client_v2.order_utils import ExchangeOrderBuilderV2
+    from polymarket._internal.actions.orders.types import OrderDraft
+    from polymarket._internal.environment import PRODUCTION_CONFIG
     key='11'*32;owner=Account.from_key(key).address
     creds=CEXCredentials(api_key='fixed-test-api',api_secret='dGVzdA==',api_passphrase='fixed-test-pass',extras={'privateKey':key})
     p=PolymarketConnector(live=True,credentials=creds,workspace=tmp_path,transport=FakePolymarketHttp())
-    client=p._sdk();client._ClobClient__cached_version=2;client._ClobClient__tick_sizes[TOKEN_ID]='.01'
-    captured=[]
-    def post(url,**kw):
-        body=json.loads(kw['data']);captured.append((body,kw['headers']))
-        row=p._load_send('real-sdk')
-        assert row and row['order_id']
-        return {'success':True,'orderID':row['order_id'],'status':'live'}
-    import json
-    monkeypatch.setattr(client,'_post',post)
-    original=client.create_order
-    signed=[]
-    def create(*a,**kw):
-        result=original(*a,**kw);signed.append(result);return result
-    monkeypatch.setattr(client,'create_order',create)
+    bridge=p._sdk();client=bridge.client;typed=[];captured=[]
+    original_sign=client._ctx.signer.sign_typed_data
+    def sign(**kwargs):
+        typed.append(kwargs['full_message']);return original_sign(**kwargs)
+    monkeypatch.setattr(client._ctx.signer,'sign_typed_data',sign)
+    def draft(**kwargs):
+        return client._sign_order(OrderDraft(chain_id=137,exchange_address=PRODUCTION_CONFIG.standard_exchange,
+            expiration=0,funder_address=owner,offered_amount=5000000,requested_amount=10000000,
+            order_type='GTC',side=kwargs['side'],signer=owner,asset_id=TOKEN_ID),post_only=kwargs.get('post_only',False))
+    monkeypatch.setattr(client,'_prepare_and_sign_limit_order',draft)
+    def request(method,path,**kwargs):
+        body=json.loads(kwargs['content']);captured.append((method,path,body,kwargs['headers']))
+        row=p._load_send('real-sdk');assert row and row['order_id']
+        assert method=='POST' and path=='/order'
+        return httpx.Response(200,json={'success':True,'errorMsg':'','orderID':row['order_id'],'status':'live',
+            'makingAmount':'0','takingAmount':'0','tradeIDs':[],'transactionsHashes':[]},request=httpx.Request(method,'https://clob.example/order'))
+    monkeypatch.setattr(client._ctx.secure_clob._client,'request',request)
     ack=p.place_order(market=TOKEN_ID,side='buy',order_type='limit',size=10,price=.5,client_order_id='real-sdk')
-    wire,headers=captured[0]
-    assert wire['orderType']=='GTC' and wire['order']['tokenId']==TOKEN_ID
-    assert wire['order']['makerAmount']=='5000000' and wire['order']['takerAmount']=='10000000'
+    body,headers=captured[0][2:]
+    assert body['orderType']=='GTC' and str(body['order']['tokenId'])==TOKEN_ID
+    assert int(body['order']['makerAmount'])==5000000 and int(body['order']['takerAmount'])==10000000
     assert headers['POLY_ADDRESS']==owner and headers['POLY_API_KEY']=='fixed-test-api' and headers['POLY_SIGNATURE']
-    builder=ExchangeOrderBuilderV2(get_contract_config(137).exchange_v2,137,client.signer)
-    typed=builder.build_order_typed_data(signed[0])
-    assert Account.recover_message(encode_typed_data(full_message=typed),signature=signed[0].signature)==owner
-    assert ack.order_id==builder.build_order_hash(typed)
+    assert Account.recover_message(encode_typed_data(full_message=typed[0]),signature=body['order']['signature'])==owner
+    assert ack.order_id==p._load_send('real-sdk')['order_id']
+    assert len(captured)==1
+    bridge.close()
 
 
 def test_unsettled_matched_trade_is_not_booked(monkeypatch,tmp_path):

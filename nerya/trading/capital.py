@@ -31,6 +31,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal
 from typing import Any, Literal
 
 from ..core.errors import TradingError
@@ -91,14 +92,35 @@ class CapitalReservation:
 
     @property
     def total_blocked_usd(self) -> float:
-        """Notional + fee buffer + margin draw."""
-        return float(self.notional_usd + self.estimated_fee_usd + self.estimated_margin_usd)
+        """Actual collateral plus fees; notional is an exposure measure."""
+        if self.meta.get("reduce_only"):
+            return float(self.estimated_fee_usd)
+        collateral = self.estimated_margin_usd or self.notional_usd
+        return float(Decimal(str(collateral)) + Decimal(str(self.estimated_fee_usd)))
 
     def is_active(self) -> bool:
         return self.state in ("proposed", "reserved")
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def check_owned_exit(con,*,account_id,strategy_id,market,position_side,quantity,excluded_reservation_id=None):
+    """Run inside the caller's reservation transaction, across both gateways."""
+    share=con.execute("SELECT size_share_base FROM position_shares WHERE account_id=? AND strategy_id=? "
+                      "AND market=? AND position_side=? AND closed_at IS NULL",(account_id,strategy_id,market,position_side)).fetchone()
+    quantity=Decimal(str(quantity))
+    if share is None or quantity<=0:raise TradingError("close_position_quantity_unavailable")
+    outstanding=Decimal(0)
+    pending=con.execute("SELECT reservation_id,meta_json FROM capital_reservations WHERE account_id=? "
+                        "AND strategy_id=? AND market=? AND state IN ('proposed','reserved')",(account_id,strategy_id,market)).fetchall()
+    for item in pending:
+        if item["reservation_id"]==excluded_reservation_id:continue
+        data=json.loads(item["meta_json"])
+        if not data.get("reduce_only") or data.get("position_side","net")!=position_side:continue
+        filled=con.execute("SELECT COALESCE(SUM(filled_size),0) FROM orders WHERE reservation_id=?",(item["reservation_id"],)).fetchone()[0]
+        outstanding+=max(Decimal(0),Decimal(str(data.get("quantity_base",0)))-Decimal(str(filled)))
+    if quantity+outstanding>abs(Decimal(str(share[0]))):raise TradingError("close_quantity_already_reserved")
 
 
 # ---------------------------------------------------------------------------
@@ -116,13 +138,19 @@ class CapitalReservationStore:
     no opportunity for split-brain state.
     """
 
-    def __init__(self, paths: WorkspacePaths):
+    def __init__(self, paths: WorkspacePaths, *, excluded_reservation_id: str | None = None, readonly=False):
         self.paths = paths
+        self.readonly = readonly
         self._con = None
+        self.excluded_reservation_id=excluded_reservation_id
 
     def _con_lazy(self):
         if self._con is None:
-            self._con = connect(self.paths.db)
+            if self.readonly:
+                from ..db.sqlite import connect_preview
+                self._con = connect_preview(self.paths.db)
+            else:
+                self._con = connect(self.paths.db)
         return self._con
 
     # -- create -----------------------------------------------------------------
@@ -186,6 +214,53 @@ class CapitalReservationStore:
         return rsv
 
     # -- transitions ------------------------------------------------------------
+    def reserve_checked(
+        self, *, candidate: OrderCandidate, profile: AccountProfile,
+        snapshot: AccountSnapshot, ttl_seconds: float = 300,
+    ) -> CapitalReservation:
+        """Atomically admit the frozen candidate against current reservations.
+
+        A caller's earlier budget result is advisory. BEGIN IMMEDIATE fences
+        other writers between this fresh collateral check and the INSERT.
+        """
+        con = self._con_lazy()
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            if candidate.account_id != profile.id or snapshot.account_id != profile.id:
+                raise TradingError("budget_resource_mismatch")
+            if not candidate.reduce_only and (snapshot.health != "ok" or snapshot.is_stale()):
+                raise TradingError("budget_snapshot_unavailable")
+            blocked = Decimal(str(self.total_blocked_usd(profile.id)))
+            margin = Decimal(str((candidate.required_collateral or {}).get(profile.base_currency.upper(), 0)))
+            from .instruments import position_bucket
+            bucket = position_bucket(candidate.meta)
+            if candidate.reduce_only:
+                check_owned_exit(con, account_id=candidate.account_id, strategy_id=candidate.strategy_id,
+                                 market=candidate.market, position_side=bucket, quantity=candidate.size_base or 0,
+                                 excluded_reservation_id=self.excluded_reservation_id)
+            if not candidate.reduce_only:
+                collateral = margin or Decimal(str(candidate.notional_usd))
+                required = collateral + Decimal(str(candidate.estimated_fee_usd))
+                available = Decimal(str(free_usd_for_account(snapshot, profile.base_currency)))
+                if blocked + required > available:
+                    raise TradingError("budget_changed_before_reservation")
+                if available - blocked - required < Decimal(str(snapshot.nav_usd)) * Decimal(str(profile.limits.min_free_balance_pct or 0)):
+                    raise TradingError("budget_free_balance_floor_changed")
+            row = self.reserve(
+                account_id=candidate.account_id, strategy_id=candidate.strategy_id,
+                market=candidate.market, side=candidate.side, notional_usd=candidate.notional_usd,
+                estimated_fee_usd=candidate.estimated_fee_usd, estimated_margin_usd=float(margin),
+                risk_evaluation_id=candidate.risk_evaluation_id, intent_id=candidate.intent_id,
+                plan_id=candidate.plan_id, ttl_seconds=ttl_seconds,
+                meta={"collateral_by_asset": candidate.required_collateral, "reduce_only": candidate.reduce_only,
+                      "quantity_base": str(candidate.size_base or 0), "position_side": bucket},
+            )
+            con.commit()
+            return row
+        except BaseException:
+            con.rollback()
+            raise
+
     def _set_state(self, reservation_id: str, new_state: ReservationState) -> None:
         con = self._con_lazy()
         con.execute(
@@ -248,6 +323,16 @@ class CapitalReservationStore:
              WHERE state IN ('proposed', 'reserved')
                AND expires_at IS NOT NULL
                AND expires_at <= ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM orders o
+                    WHERE o.reservation_id = capital_reservations.reservation_id
+                      AND o.state NOT IN ('filled', 'canceled', 'rejected', 'expired', 'failed')
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM executor_runs e
+                    WHERE e.executor_id = capital_reservations.executor_id
+                      AND e.state NOT IN ('done', 'failed', 'canceled', 'rejected')
+               )
             """,
             (ts, ts),
         )
@@ -261,7 +346,8 @@ class CapitalReservationStore:
         return _row_to_reservation(row) if row else None
 
     def active_for_account(self, account_id: str) -> list[CapitalReservation]:
-        self.expire_due()
+        if not self.readonly:
+            self.expire_due()
         rows = self._con_lazy().execute(
             """
             SELECT * FROM capital_reservations
@@ -270,7 +356,7 @@ class CapitalReservationStore:
             """,
             (account_id,),
         ).fetchall()
-        return [_row_to_reservation(r) for r in rows]
+        return [_row_to_reservation(r) for r in rows if r["reservation_id"]!=self.excluded_reservation_id]
 
     def total_blocked_usd(self, account_id: str) -> float:
         return float(sum(r.total_blocked_usd for r in self.active_for_account(account_id)))
@@ -418,12 +504,14 @@ class BudgetChecker:
 
         # 0. Snapshot freshness
         if self.snapshot.is_stale(max_age_s=self.max_snapshot_age_s):
-            reasons.append("snapshot_stale")
-            verdict = "reject"
+            reasons.append("snapshot_stale_exempt" if reduce_only else "snapshot_stale")
+            if not reduce_only:
+                verdict = "reject"
 
         if self.snapshot.health != "ok":
-            reasons.append(f"snapshot_health_{self.snapshot.health}")
-            verdict = "reject"
+            reasons.append(f"snapshot_health_{self.snapshot.health}" + ("_exempt" if reduce_only else ""))
+            if not reduce_only:
+                verdict = "reject"
 
         # 1. Resolve target notional from sizing policy.
         try:
@@ -448,7 +536,8 @@ class BudgetChecker:
         max_order = float(self.profile.limits.max_order_notional_usd or 0.0)
         if not reduce_only and max_order > 0 and notional > max_order:
             notional = max_order
-            verdict = "resize"
+            if verdict != "reject":
+                verdict = "resize"
             reasons.append(f"resized_to_max_order_notional:{max_order:.2f}")
 
         # 3. Apply max account NAV cap (don't open more than the
@@ -489,7 +578,8 @@ class BudgetChecker:
                 estimated_margin = new_notional / leverage
                 if estimated_fee + estimated_margin <= available:
                     notional = new_notional
-                    verdict = "resize"
+                    if verdict != "reject":
+                        verdict = "resize"
                     reasons.append(
                         f"resized_to_available:{notional:.2f}/{available:.2f}"
                     )

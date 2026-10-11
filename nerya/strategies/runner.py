@@ -550,6 +550,9 @@ class StrategyRunner:
                 ctx=ctx,
                 max_run_seconds=manifest.policy.max_run_seconds,
             )
+            if ctx.trading.config.get("runtime.strategy_financial_run_id"):
+                from ..financial.strategy_runtime import finish_run
+                finish_run(ctx.trading.config, rid)
 
             # In ``shadow`` mode, demote any submitted intent to a
             # bookkeeping result. The trading kernel itself doesn't know

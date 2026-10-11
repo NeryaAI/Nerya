@@ -1,10 +1,11 @@
 """Composer follow-ups exercise the real store in temporary SQLite workspaces."""
 from copy import deepcopy
+import json
 
 import pytest
 
 from nerya.agent.command_runtime import CommandRuntime
-from nerya.agent.command_store import CommandError
+from nerya.agent.command_store import CommandError, encode
 from nerya.agent.interactions import create_interaction, respond
 from nerya.core.config import Config, DEFAULT_CONFIG
 from nerya.core.paths import WorkspacePaths
@@ -81,6 +82,97 @@ def test_successful_continuation_allows_next_ordinary_send(runtime, kind):
     assert claimed["command_id"] == "command-followup"
 
 
+def _run_only_question_or_plan(runtime, kind):
+    """User sent one isolated run from a paused session, then the Agent asked."""
+    send(runtime, "command-single", run_only=True)
+    original = runtime.store.claim(SID, "owner")
+    assert original is not None
+    payload = {"title": "Continue the work?", "steps": ["Read"]} if kind == "plan" else {"title": "Which RPC?"}
+    interaction = create_interaction(runtime.config, sid=SID, tid=original["turn_id"],
+        call_id="single-run-decision", kind=kind, payload=payload)
+    if kind == "question":
+        with runtime.store.transaction() as con:
+            AgentSessionRepository(con).save_turn_checkpoint(session_id=SID,
+                turn_id=original["turn_id"], checkpoint={"resumable": True})
+    runtime.store.finish("command-single", SID, "owner", "awaiting_input",
+                         {"stopped_reason": "user_input_pending"})
+    answer = {"session_id": SID, "interaction_id": interaction["interaction_id"],
+        "response_id": "run-only-answer", "expected_revision": interaction["revision"],
+        "_auth_actor_id": "operator", "action": "answer" if kind == "question" else "accept",
+        "text": "Use a public RPC first"}
+    return interaction, answer
+
+
+@pytest.mark.parametrize("kind", ["question", "plan"])
+def test_interaction_from_run_only_resumes_without_illegal_run_only_flag(runtime, kind):
+    """A response continuation owns run_once; run_only is only for new sends."""
+    _, answer = _run_only_question_or_plan(runtime, kind)
+    receipt = respond(runtime, answer)
+    resumed = runtime.store.claim(SID, "continuation-owner")
+    assert resumed is not None and resumed["command_id"] == receipt["command"]["command_id"]
+    with runtime.store.transaction() as con:
+        request = json.loads(con.execute("SELECT request_json FROM agent_commands WHERE command_id=?",
+            (resumed["command_id"],)).fetchone()[0])
+        assert not request.get("run_only", False)
+        assert con.execute("SELECT state FROM agent_interactions WHERE interaction_id=?",
+            (answer["interaction_id"],)).fetchone()[0] == "resolved"
+    runtime.store.finish(resumed["command_id"], SID, "continuation-owner", "succeeded")
+    send(runtime, "command-followup")
+    assert runtime.store.claim(SID, "followup-owner")["command_id"] == "command-followup"
+
+
+def test_answered_interaction_can_reconcile_from_saved_response(runtime):
+    """A failed admission must not strand the accepted answer after reload."""
+    interaction, answer = _run_only_question_or_plan(runtime, "question")
+    with runtime.store.transaction() as con:
+        con.execute("UPDATE agent_interactions SET state='answered',response_id=?,response_json=?,actor_id=?,revision=revision+1 WHERE interaction_id=?",
+            (answer["response_id"], encode({"action": "answer", "text": answer["text"], "selected": []}),
+             "operator", interaction["interaction_id"]))
+    with pytest.raises(CommandError, match="interaction_response_required"):
+        send(runtime, "must-not-bypass")
+    recovery = {"session_id": SID, "interaction_id": interaction["interaction_id"],
+                "_auth_actor_id": "operator", "action": "reconcile"}
+    receipt = respond(runtime, recovery)
+    assert receipt["ok"]
+    assert respond(runtime, recovery)["duplicate"]
+    assert runtime.store.claim(SID, "continuation-owner")["command_id"] == receipt["command"]["command_id"]
+
+
+def test_failed_answer_admission_is_recoverable_without_reanswering(runtime, monkeypatch):
+    """Exercise the actual answered-before-admission failure boundary."""
+    interaction, answer = _run_only_question_or_plan(runtime, "question")
+    submit_original = runtime.submit
+    def fail_once(payload, *, start=True):
+        if payload.get("command_type") == "resume":
+            raise CommandError("invalid_command_request", 400)
+        return submit_original(payload, start=start)
+    monkeypatch.setattr(runtime, "submit", fail_once)
+    with pytest.raises(CommandError, match="invalid_command_request"):
+        respond(runtime, answer)
+    with runtime.store.transaction() as con:
+        assert con.execute("SELECT state FROM agent_interactions WHERE interaction_id=?",
+            (interaction["interaction_id"],)).fetchone()[0] == "answered"
+        assert con.execute("SELECT count(*) FROM agent_commands WHERE command_id=?",
+            ("response_" + interaction["interaction_id"],)).fetchone()[0] == 0
+    monkeypatch.setattr(runtime, "submit", submit_original)
+    receipt = respond(runtime, {"session_id": SID, "interaction_id": interaction["interaction_id"],
+                               "action": "reconcile", "_auth_actor_id": "operator"})
+    assert receipt["ok"]
+    assert runtime.store.claim(SID, "resume-owner")["command_id"] == receipt["command"]["command_id"]
+
+
+def test_answered_interaction_reconcile_requires_same_authenticated_actor(runtime):
+    interaction, answer = _run_only_question_or_plan(runtime, "question")
+    with runtime.store.transaction() as con:
+        con.execute("UPDATE agent_interactions SET state='answered',response_id=?,response_json=?,actor_id=?,revision=revision+1 WHERE interaction_id=?",
+            (answer["response_id"], encode({"action": "answer", "text": answer["text"], "selected": []}),
+             "operator", interaction["interaction_id"]))
+    with pytest.raises(CommandError, match="interaction_response_owner_mismatch"):
+        respond(runtime, {"session_id": SID, "interaction_id": interaction["interaction_id"],
+                          "_auth_actor_id": "different", "action": "reconcile"})
+    assert runtime.store.snapshot(SID)["queue"]["paused"]
+
+
 @pytest.mark.parametrize("kind", ["question", "plan", "approval"])
 def test_successful_continuation_preserves_held_queue(runtime, kind):
     continuation(runtime, kind, held=True)
@@ -121,6 +213,31 @@ def test_explicit_run_only_keeps_operator_pause_and_older_queue(runtime, held):
     runtime.store.finish("command-explicit", SID, "owner", "succeeded")
     assert runtime.store.claim(SID, "next-owner") is None
     assert runtime.store.snapshot(SID)["queue"]["pause_reason"] == "operator"
+
+
+@pytest.mark.parametrize("hold_reason", ["operator", "restarted", "failed", "interrupted", "unknown"])
+def test_followup_runs_without_clearing_empty_held_queue(runtime, hold_reason):
+    """Composer sends one new turn, never implicitly resumes old queue work."""
+    send(runtime)
+    original = runtime.store.claim(SID, "original-owner")
+    runtime.store.finish(original["command_id"], SID, "original-owner", "succeeded")
+    with runtime.store.transaction() as con:
+        con.execute("UPDATE agent_command_queues SET paused=1,pause_reason=? WHERE session_id=?",
+                    (hold_reason, SID))
+
+    first = send(runtime, "followup-one", run_only=True)
+    assert first["state"] == "queued"
+    admitted = runtime.store.claim(SID, "followup-owner")
+    assert admitted is not None and admitted["command_id"] == "followup-one"
+    runtime.store.finish(admitted["command_id"], SID, "followup-owner", "succeeded")
+    # The original hold remains authoritative. A new click starts *only* the
+    # new follow-up; no operator pause or orphan queue is silently cleared.
+    queue = runtime.store.snapshot(SID)["queue"]
+    assert queue["paused"] and queue["pause_reason"] == hold_reason
+    assert runtime.store.claim(SID, "other-owner") is None
+
+    second = send(runtime, "followup-two", run_only=True)
+    assert runtime.store.claim(SID, "second-owner")["command_id"] == second["command_id"]
 
 
 @pytest.mark.parametrize("reason", ["operator", "unknown", "restarted", "unconfirmed"])

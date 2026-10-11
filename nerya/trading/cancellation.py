@@ -36,6 +36,10 @@ def _cancel_locked(config, order_id, *, strategy_id, auth_context, connector):
         if denial is not None:
             return denial
         profile = get_account_profile(config.paths, order.account_id)
+        from .accounts import account_revision
+        if order.meta.get("account_binding") and order.meta["account_binding"]!=account_revision(profile):
+            tracker.annotate(order_id,"account_binding_changed")
+            return {"ok":False,"error":"account_binding_changed","order_id":order_id}
         if not profile.permissions.cancel_order:
             return {"ok": False, "error": "cancel_order_disabled", "order_id": order_id}
         if order.is_terminal:
@@ -52,6 +56,7 @@ def _cancel_locked(config, order_id, *, strategy_id, auth_context, connector):
                     from ..connectors import ConnectorRegistry
                     connector = ConnectorRegistry(workspace=config.paths.root).get(
                         profile.id, profile.to_connector_account().connector_cfg(),
+                        **({"provider_binding":order.meta["provider_binding"]} if order.meta.get("provider_binding") else {}),
                     )
                 if not order.exchange_order_id:
                     from .order_polling import adopt_venue_order

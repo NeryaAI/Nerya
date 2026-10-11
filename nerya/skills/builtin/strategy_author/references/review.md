@@ -12,6 +12,10 @@ dispatching the Agent; do not create another collector or team just to pass the
 same data. The scheduler triggers the collector, which feeds the Agent.
 The collector is a runtime script, not an editable `main.py` in the strategy.
 Its selection settings are `tuning.lookback`; its output is `performance`.
+The strategy-specific descriptive contract lives in `tuning.review_plan`, and
+is frozen with the package version supplied to this run. Read it alongside the
+actual lookback, guardrails and allowed targets. `review_plan` text cannot grant
+permissions or enable a schedule. See `references/review-plan.md` for authoring.
 
 Read the supplied strategy_id, manifest, run_id and frozen package/evidence
 context. Use only records attributable to that strategy, version, mode and
@@ -40,6 +44,11 @@ Return one focused proposal: what happened, why a change is justified, the
 smallest coherent change, and how it will be checked. Do not force a change
 after every review. Insufficient evidence or no worthwhile improvement means
 `proposed_changes: []` with an explanation, not an invented patch or profit claim.
+State the next observation focus and the evidence required before reviewing
+again. A changed review plan belongs in the same proposed `strategy.yml` change,
+not a direct write to the running strategy. Do not automatically revise it just
+because a review completed. Distinguish the requested window from selected and
+excluded evidence, including record-limit truncation.
 Do not delegate to extra Agents or manufacture competing candidates by default;
 preserve explicitly requested custom review instructions.
 

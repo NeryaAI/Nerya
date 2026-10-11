@@ -48,11 +48,17 @@ def _read_approvals(client) -> list[dict[str, Any]]:
     p = getattr(client.config.paths, "approvals_pending", None)
     if not p or not p.exists():
         return []
-    return [
-        rec
-        for rec in jsonl.read_all(p)
-        if not rec.get("state") or rec["state"] == "pending"
-    ]
+    from ..db.sqlite import connect
+    con=connect(client.config.paths.db)
+    try:
+        result=[]
+        for rec in jsonl.read_all(p):
+            aid=rec.get('approval_id') or rec.get('id')
+            row=con.execute('SELECT state FROM approvals WHERE id=?',(aid,)).fetchone()
+            state=row['state'] if row else rec.get('state','pending')
+            if state=='pending':result.append(rec)
+        return result
+    finally:con.close()
 
 
 def _read_proposals(client) -> list[dict[str, Any]]:
@@ -329,6 +335,29 @@ def _collect_items(
         items.extend(_proposal_item(p) for p in _read_proposals(client))
     if "failed_task" in type_set:
         items.extend(_failed_task_item(s) for s in _read_open_turns(client))
+        if getattr(client, "config", None) is not None:
+            from ..agent.task_runs import task_runs
+            actor=getattr(client,'auth_actor_id',None)
+            scopes=set(getattr(client,'auth_scopes',()))
+            for state in ('unconfirmed','blocked','failed'):
+                for run in task_runs(client.config).list(actor=actor,operator='api:all' in scopes or 'admin:ops' in scopes,state=state,limit=100)['runs']:
+                    href='/chat/'+run['session_id']+'?run='+run['run_id']
+                    items.append({'id':'run:'+run['run_id'],'raw_id':run['run_id'],'type':'failed_task','severity':'danger' if state=='failed' else 'warn',
+                        'status':'pending','title':run['snapshot'].get('title') or run['task_id'],'summary':state,'requires_action':True,
+                        'created_at':run['created_at'],'source_refs':[source_ref('session',run['session_id'],href=href)],
+                        'actions':[action(id='open',label='Inspect this run',href=href)],'data':{'run_id':run['run_id'],'execution_status':state}})
+    if 'notification' in type_set and getattr(client, 'config', None) is not None:
+        from ..agent.task_runs import task_runs
+        from ..financial.store import FinancialStore
+        from ..financial.contracts import FinancialContext
+        context=FinancialContext(getattr(client,'auth_actor_id',None) or 'local:loopback',frozenset(getattr(client,'auth_scopes',())))
+        for fund in FinancialStore(client.config).list_actions(context,operator='api:all' in context.scopes or 'admin:ops' in context.scopes):
+            if fund['state'] not in {'unconfirmed','needs_recovery'} or not fund.get('run_id'):continue
+            run=task_runs(client.config).get(fund['run_id']);href='/chat/'+run['session_id']+'?run='+run['run_id']
+            items.append({'id':'funds:'+fund['action_id'],'raw_id':fund['action_id'],'type':'notification','severity':'warn','status':'pending',
+                'title':'Funds receipt requires reconciliation','summary':fund['state'],'requires_action':True,'created_at':fund['updated_at'],
+                'source_refs':[source_ref('session',run['session_id'],href=href)],'actions':[action(id='open',label='Reconcile in task',href=href)],
+                'data':{'run_id':fund['run_id'],'action_id':fund['action_id'],'financial_state':fund['state']}})
     if "notification" in type_set and getattr(client,"config",None) is not None:
         from ..db.sqlite import connect
         from ..agent.workbench import record, session_view
@@ -473,7 +502,8 @@ def _resolve_one(client, pid: str, decision: str, actor_id: str) -> dict[str, An
                 callback_data = f"{normalised}:{raw}"
                 outcome = _ra._callback(
                     client,
-                    {"callback_data": callback_data, "actor_id": actor_id},
+                    {"callback_data": callback_data, "actor_id": actor_id,
+                     **({'_auth_actor_id':client.auth_actor_id,'_auth_scopes':list(client.auth_scopes)} if getattr(client,'auth_actor_id',None) else {})},
                 )
             else:
                 # "dismiss" / unsupported -> just record the audit trail
@@ -540,7 +570,7 @@ def _resolve_handler(client, payload):
 
     body = payload or {}
     decision = str(body.get("decision") or "").strip().lower()
-    actor_id = str(body.get("actor_id") or "operator")
+    actor_id = str(getattr(client,'auth_actor_id',None) or body.get("_auth_actor_id") or body.get("actor_id") or "operator")
     ids = [
         str(v).strip()
         for v in (body.get("ids") or [])

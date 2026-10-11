@@ -411,7 +411,7 @@ def _credential_missing_payload(
     config_like: Any | None,
     capability: str,
 ) -> dict[str, Any] | None:
-    spec = get_registry().find(venue)
+    spec = get_registry(getattr(getattr(config_like,"paths",None),"root",None)).find(venue)
     if spec is None:
         return None
     status = _credential_status(spec, config_like=config_like)
@@ -536,7 +536,7 @@ def _public_connector(
         return MockExchange()
     if not venue_l:
         return None
-    spec = get_registry().find(venue_l)
+    spec = get_registry(getattr(getattr(config_like,"paths",None),"root",None)).find(venue_l)
     if spec is None or spec.id in {"mock", "mock_chain", "paper", "paper_chain"}:
         return None
     cfg, workspace, vault_passphrase = _resolve_account_for_venue(
@@ -938,7 +938,7 @@ def connector_list_handler(call: ToolCall, *, config_like: Any | None = None) ->
     include_source = bool(args.get("include_source", False))
 
     rows: list[dict[str, Any]] = []
-    for spec in get_registry().list_specs():
+    for spec in get_registry(getattr(getattr(config_like,"paths",None),"root",None)).list_specs():
         if kind and spec.kind.lower() != kind:
             continue
         if query:
@@ -1014,7 +1014,7 @@ def connector_view_handler(call: ToolCall, *, config_like: Any | None = None) ->
     if max_bytes < 0:
         return _usage_error(call, "max_source_bytes must be >= 0.")
 
-    spec = get_registry().find(raw)
+    spec = get_registry(getattr(getattr(config_like,"paths",None),"root",None)).find(raw)
     if spec is None:
         from ...wallet import PROVIDERS, resolve_provider_name
         wallet_provider = resolve_provider_name(raw)

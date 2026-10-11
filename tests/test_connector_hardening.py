@@ -462,6 +462,7 @@ def test_solana_quote_scales_amount_in_exactly() -> None:
 
     sc = SelfCustodyWallet(
         rpc_urls={"solana": "http://sol-fake"}, transport=_T(),
+        config={"jupiter_url": "https://api.jup.ag/swap/v1"},
     )
     quote = sc.quote(
         chain="solana", token_in="0x" + "a" * 20, token_out="0x" + "b" * 20,

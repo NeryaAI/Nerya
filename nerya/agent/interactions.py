@@ -73,6 +73,11 @@ def create_interaction(config, *, sid, tid, call_id, kind, payload):
 
 
 def respond(manager, body):
+    if body.get("action") == "reconcile":
+        # The answer may have been persisted before continuation admission
+        # failed. Recover that exact saved response on an explicit user click;
+        # never invent a new answer or automatically replay completed tools.
+        return _reconcile_saved_answer(manager, body)
     sid = _session_id(body.get("session_id"))
     iid = command_id(body.get("interaction_id"))
     rid = command_id(body.get("response_id"))
@@ -145,6 +150,11 @@ def respond(manager, body):
     if "questions" in payload:
         feedback += " Questions: " + encode(payload["questions"]) + " Omitted answers are unknown. Continue using best judgment within existing permissions. This is not approval for trading or other gated actions."
     request["interaction_id"] = iid
+    # run_only is only an isolated *new send*. A question/plan continuation
+    # already has its own run_once authority; copying this flag from the
+    # original command makes resume validation fail with HTTP 400 and leaves
+    # an answered interaction permanently blocking normal follow-ups.
+    request.pop("run_only", None)
     if row["kind"] == "question":
         request.update(resume_turn_id=row["turn_id"], continuation_feedback=feedback)
         request["payload"] = {"text": ""}
@@ -158,13 +168,52 @@ def respond(manager, body):
         request["payload"] = {"text": instruction + "\n" + encode(payload) + "\n" + feedback}
         kind = "send"
     result = manager.submit({"command_id": "response_"+iid, "session_id":sid,"command_type":kind,"request":request,
-                             **{key:body.get(key) for key in ("_auth_actor_id","_auth_scope","_auth_scopes")}},start=False)
+                             **{key:body[key] for key in ("_auth_actor_id","_auth_scope","_auth_scopes") if body.get(key) is not None}},start=False)
     with manager.store.transaction() as con:
         con.execute("UPDATE agent_interactions SET state='resolved',revision=revision+1,updated_at=? WHERE interaction_id=? AND response_id=?", (time.time(),iid,rid))
         if row["kind"] == "plan":
             manager.store.end_decision(con, decision_command, "plan_revised" if action == "revise" else "plan_accepted", state="succeeded")
     manager.kick(sid)
     return {"ok": True, "interaction_id": iid, "command":result["command"]}
+
+
+def _reconcile_saved_answer(manager, body):
+    """Explicit, actor-scoped recovery of a saved answer without re-answering."""
+    sid = _session_id(body.get("session_id"))
+    iid = command_id(body.get("interaction_id"))
+    actor = str(body.get("_auth_actor_id") or "local")
+    with manager.store.transaction() as con:
+        row = con.execute("SELECT state,response_id,response_json,actor_id,revision "
+                          "FROM agent_interactions WHERE interaction_id=? AND session_id=?",
+                          (iid, sid)).fetchone()
+        if row is None:
+            raise CommandError("interaction_not_found", 404)
+        if row["state"] not in ("answered", "resolved"):
+            raise CommandError("interaction_not_answered")
+        if row["actor_id"] != actor:
+            raise CommandError("interaction_response_owner_mismatch", 403)
+        try:
+            saved = json.loads(row["response_json"] or "null")
+        except (TypeError, ValueError) as exc:
+            raise CommandError("invalid_interaction_answer", 400) from exc
+        if not isinstance(saved, dict) or saved.get("action") not in ("answer", "accept", "revise", "reject"):
+            raise CommandError("invalid_interaction_answer", 400)
+        response = {
+            "session_id": sid,
+            "interaction_id": iid,
+            "response_id": row["response_id"],
+            "expected_revision": row["revision"],
+            "action": saved["action"],
+            "text": saved.get("text", ""),
+            "selected": saved.get("selected", []),
+        }
+        response.update({key:body[key] for key in ("_auth_actor_id", "_auth_scope", "_auth_scopes")
+                         if body.get(key) is not None})
+        if "answers" in saved:
+            response["answers"] = saved["answers"]
+    # This is the same admission path and deterministic response_ command ID
+    # as the original click, so duplicate/reconnect retries stay idempotent.
+    return respond(manager, response)
 
 
 def validate_answers(payload, answers):

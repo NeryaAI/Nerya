@@ -46,6 +46,8 @@ class StrategyAgentTaskExecutionResult:
     route_id: str | None = None
     result: dict[str, Any] = field(default_factory=dict)
     error: dict[str, Any] | None = None
+    run_id: str | None = None
+    command_id: str | None = None
 
     def asdict(self) -> dict[str, Any]:
         return {
@@ -59,6 +61,8 @@ class StrategyAgentTaskExecutionResult:
             "route_id": self.route_id,
             "result": dict(self.result or {}),
             "error": self.error,
+            "run_id": self.run_id,
+            "command_id": self.command_id,
         }
 
 
@@ -78,6 +82,9 @@ class StrategyAgentTaskExecutor:
         prepared_inputs: dict[str, Any] | None = None,
         expected_hash: str = "",
         cancel_token: Any = None,
+        execution_session_id: str | None = None,
+        execution_turn_id: str | None = None,
+        execution_task_id: str | None = None,
     ) -> StrategyAgentTaskExecutionResult:
         target = route_result.target or event.target
         strategy_id = (
@@ -85,7 +92,7 @@ class StrategyAgentTaskExecutor:
             or event.strategy_id
             or (event.payload or {}).get("strategy_id")
         )
-        task_id = "agent_task_" + uuid.uuid4().hex[:12]
+        task_id = execution_task_id or "agent_task_" + uuid.uuid4().hex[:12]
         if target != TARGET:
             return StrategyAgentTaskExecutionResult(
                 event_id=event.event_id,
@@ -131,22 +138,25 @@ class StrategyAgentTaskExecutor:
             from ..strategies.input_context import context_prompt
             scoped_config = execution_config(self.config, package.manifest)
             if prepared_task is None:
-                task = self._build_task(package, event, task_id)
+                task = self._build_task(package, event, task_id,cancel_token=cancel_token)
             else:
                 ctx = build_strategy_context(config=scoped_config, package=package, skills=self.skills,
                     run_id=task_id, connector_registry=self.connector_registry, trigger_event=event)
                 from ..strategies.input_context import safe_data
                 ctx.inputs._values = safe_data(prepared_inputs or {})
+                ctx.cancel_token=cancel_token
                 task = self._call_task_builder(package, lambda _: prepared_task, ctx)
             if task.status == "dispatch" and task.prompt.strip():
                 task.prompt = context_prompt(task, package, task_id)
         except Exception as exc:
+            from ..core.errors import StrategyTimeoutError
+            uncertain=isinstance(exc,StrategyTimeoutError) and bool(self.config.get('runtime.task_run_id'))
             return self._failed(
                 event,
                 target=target,
                 strategy_id=strategy_id,
                 task_id=task_id,
-                code="task_build_failed",
+                code='script_preparation_unconfirmed' if uncertain else "task_build_failed",
                 message=f"{type(exc).__name__}: {exc}",
                 route_id=route_result.route_id,
                 trace=traceback.format_exc(limit=8),
@@ -198,6 +208,7 @@ class StrategyAgentTaskExecutor:
             session_key=session_key,
             policy=policy,
         )
+        session_id = execution_session_id or session_id
         profile = self._profile_for(package)
         profile_record = session_profile.ensure_strategy_agent_profile(
             paths=self.config.paths,
@@ -240,9 +251,13 @@ class StrategyAgentTaskExecutor:
                 "trigger_event_id": event.event_id,
             },
         }
+        actor=self.config.get("runtime.task_actor_id")
+        if actor:
+            trigger_for_agent["actor_id"]=actor
+            trigger_for_agent["payload"]["actor_id"]=actor
         started_at = now_iso()
         started_clock = time.monotonic()
-        execution_turn_id = "turn_" + uuid.uuid4().hex
+        execution_turn_id = execution_turn_id or "turn_" + uuid.uuid4().hex
         running = self._task_row(
             event=event, package=package, task=task, task_id=task_id,
             session_id=session_id, turn_id=execution_turn_id, status="running",
@@ -357,6 +372,7 @@ class StrategyAgentTaskExecutor:
         package: StrategyPackage,
         event: TriggerEvent,
         task_id: str,
+        cancel_token:Any=None,
     ) -> StrategyAgentTask:
         from ..strategies.agent_execution import execution_config
         ctx = build_strategy_context(
@@ -368,6 +384,7 @@ class StrategyAgentTaskExecutor:
             connector_registry=self.connector_registry,
             trigger_event=event,
         )
+        ctx.cancel_token=cancel_token
         from ..strategies.runner import StrategyRunner
         fn = StrategyRunner._load_entrypoint(package, prefer_agent_builder=True)
         raw = self._call_task_builder(package, fn, ctx)
@@ -376,13 +393,23 @@ class StrategyAgentTaskExecutor:
     def _call_task_builder(self, package: StrategyPackage, fn: Any, ctx: Any) -> Any:
         def _call() -> Any:
             from ..strategies.agent_task import prepare_agent_task
-            return prepare_agent_task(fn(ctx), ctx,
+            token=getattr(ctx,'cancel_token',None)
+            if token is not None:token.raise_if_cancelled()
+            value=fn(ctx)
+            if token is not None:token.raise_if_cancelled()
+            return prepare_agent_task(value, ctx,
                 context_config=package.manifest.extras.get("agent_context", {}),
                 roles=package.manifest.subagents)
 
+        seconds=float(package.manifest.policy.max_run_seconds or 0)
+        token=getattr(ctx,'cancel_token',None)
+        if token is not None and token.deadline_s is not None:
+            remaining=max(0.001,token.deadline_s-time.time())
+            seconds=min(seconds,remaining) if seconds>0 else remaining
         return _run_with_timeout(
             _call,
-            seconds=float(package.manifest.policy.max_run_seconds or 0),
+            seconds=seconds,
+            on_timeout=lambda:ctx.run_deadline.trigger('strategy_agent_preparation_deadline'),
         )
 
     def _load_strategy_module(self, package: StrategyPackage):

@@ -337,7 +337,14 @@ def _build_protected_scope_rejection_final_text(items: list[dict[str, str]]) -> 
         if item.get("message"):
             lines.append(f"  reason: {item.get('message')}")
     lines.append("")
-    lines.append("Next: 按工具返回的原因完成所需审批或人工评审后，再重试同一操作。")
+    if any("nerya.yml:mcp" in item.get("message", "") for item in items):
+        lines.append(
+            "下一步：这属于 Agent 配置变更的保护拒绝，不是 MCP 连接或 OAuth 授权请求。"
+            "请仅重新提交实际要改动的非保护配置字段；如需接入 MCP 服务，"
+            "应独立使用 MCP 连接/使用流程。普通工具权限不会解除配置保护。"
+        )
+    else:
+        lines.append("下一步：此范围不支持通过普通工具授权直接解锁。请按对应的配置安全策略处理，勿绕过保护。")
     return "\n".join(lines)
 
 
@@ -546,33 +553,60 @@ def _build_deterministic_final_summary(
     abort_reason: str = "",
     failure_detail: str = "",
 ) -> str:
-    detail = f"I ran {iterations} step(s) and {tool_calls} tool call(s)"
-    if error_count:
-        detail += f", {error_count} of which hit an error"
-    detail += "."
+    # An aborted turn is a real failure, not an invitation to blindly retry
+    # the whole task. Keep the cause visible, especially on a first-turn SSE
+    # failure with no completed tool evidence.
+    reason = (abort_reason or "aborted").split(":", 1)[0]
+    descriptions = {
+        "stream_interrupted": "模型流式响应中断，已有输出不保证完整",
+        "empty_model_response": "模型连续返回空响应，没有有效文本或工具调用",
+        "model_output_truncated": "模型输出达到长度限制，回答未完整生成",
+        "provider_content_filtered": "模型服务过滤了本轮输出，未获得完整答复",
+        "interrupted_max_tokens": "模型输出达到长度限制，工具参数未完整生成",
+        "interrupted_length": "模型输出达到长度限制，工具参数未完整生成",
+        "interrupted_content_filter": "模型服务过滤了尚未完成的工具调用",
+        "timeout": "模型请求或任务超过执行时限",
+        "max_iterations": "达到本轮最大执行步数",
+        "token_budget_exceeded": "达到本轮 Token 预算",
+        "diminishing_returns": "执行持续缺乏有效进展",
+        "repeated_tool_call": "工具调用重复且未取得进展",
+        "task_poll_no_progress": "后台任务轮询未取得进展",
+        "cancelled": "本轮任务已取消",
+    }
+    system_stops = {
+        "cancelled:command_control_unavailable": "任务控制数据库暂时不可用，系统已停止执行，并非用户主动取消",
+        "cancelled:command_lease_lost": "执行租约已丢失，需要核对结果后再继续",
+        "cancelled:event_persistence_failed": "执行记录未能可靠保存，系统已停止执行以保护审计记录",
+        "cancelled:operator_cancel": "用户请求停止任务",
+    }
+    description = system_stops.get(abort_reason, descriptions.get(reason, f"执行中断（{reason}）"))
     lines = [
-        "This task did not complete. " + {
-            "stream_interrupted": "The model response stream was interrupted; partial output is not a completed result.",
-            "cancelled:command_control_unavailable": "The task-control database was unavailable; this was not an operator stop.",
-            "cancelled:event_persistence_failed": "Execution events could not be saved reliably; work was stopped to protect its audit trail.",
-            "cancelled:command_lease_lost": "The execution lease was lost; the outcome must be checked before continuing.",
-            "cancelled:operator_cancel": "The operator requested a stop.",
-            "timeout": "The model request or task reached its time limit.",
-        }.get(abort_reason, f"Execution stopped ({abort_reason or 'incomplete_response'})."),
-        detail,
+        f"本轮任务未完成：{description}。",
+        f"执行情况：{iterations} 步，{tool_calls} 次工具调用"
+        + (f"，其中 {error_count} 次报错。" if error_count else "。"),
     ]
     if failure_detail:
-        lines.append("Connection detail: " + redact_text(failure_detail)[:240])
+        lines.append(f"错误详情：{redact_text(failure_detail)[:240]}")
     if had_model_text:
-        lines.append("I'd started writing one but didn't reach a reliable result.")
+        lines.append("此前生成的内容仅供参考，本轮没有获得可靠的完整结果。")
     else:
-        lines.append("I didn't get to write one after the last step ran.")
+        lines.append("本轮尚未形成有效的最终答复。")
     for snippet in evidence_snippets or []:
-        lines.append(f"- found: {snippet}")
-    lines.append(
-        "Completed evidence is retained. Previously executed tools were not automatically replayed. "
-        "Check saved outputs and any submitted actions before starting another run."
-    )
+        lines.append(f"- 已有证据：{snippet}")
+    if tool_calls:
+        lines.append("已执行的工具调用不会自动重放；恢复前请核对已完成的写入或交易操作。")
+    elif reason == "stream_interrupted":
+        lines.append("部分响应已开始传输，为避免重复执行上游操作，没有自动重试；请先核对上游操作与已保存结果，再决定是否继续。")
+    elif reason == "empty_model_response":
+        lines.append("请检查模型的响应格式、输出 Token 限制及流式连接状态。")
+    elif reason == "max_iterations":
+        lines.append("可在运行设置中检查本轮步数上限，或从当前检查点继续。")
+    elif reason == "model_output_truncated":
+        lines.append("请检查模型输出 Token 限制，或将请求拆分；截断内容不能视作已完成。")
+    elif reason == "provider_content_filtered":
+        lines.append("请查看模型服务的内容策略和提示词；本轮不会自动重放已执行操作。")
+    elif reason != "cancelled":
+        lines.append("请检查错误详情及运行限制，再决定是否从当前状态继续。")
     return "\n".join(lines)
 
 
@@ -2208,18 +2242,24 @@ class WorkspaceNativeAgentLoop:
                         break
                     if getattr(exc, "stream_interrupted", False):
                         if not getattr(exc, "stream_output_committed", True):
+                            # ZCode retries *before* the model-output boundary.
+                            # Reuse our existing bounded backoff, shared attempt
+                            # budget and cancellation checks; never repeat a
+                            # tool batch from an earlier loop iteration.
                             if not _is_transient_llm_error(exc):
                                 raise
-                            # Fall through to the existing turn-owned retry
-                            # budget; the preceding tool batch is not replayed.
                         else:
+                            # Once a model delta was received we cannot prove
+                            # that the upstream has not produced a side effect.
+                            # Preserve any partial text and expose the failure,
+                            # but never replay this ambiguous stream.
                             stream_failure_detail = str(exc)
                             aborted_reason = transition_reason = "stream_interrupted"
                             final_text = "".join(streamed_text)
                             response = MessagesResponse(content=[], stop_reason="stream_interrupted")
                             emit("assistant", {"kind": "model_transport", "stream_id": stream_id,
                                                "stream_mode": "stream", "status": "interrupted",
-                                               "retryable": False})
+                                               "reason": "stream_interrupted", "retryable": False})
                             break
                     if total_tool_calls == 0 and _is_llm_safety_rejection(exc):
                         final_text = _build_llm_initial_safety_rejection_text(
@@ -2682,8 +2722,10 @@ class WorkspaceNativeAgentLoop:
                         and attempt_budget.claim("transient_retry")
                     )
                     if not retry_budget_available:
-                        if getattr(exc,"stream_interrupted",False):
-                            setattr(exc,"retry_exhausted","attempt_limit" if llm_attempt >= llm_max else "turn_budget")
+                        if getattr(exc, "stream_interrupted", False):
+                            setattr(exc, "retry_exhausted", (
+                                "attempt_limit" if llm_attempt >= llm_max else "turn_budget"
+                            ))
                         if _is_rate_limit_error(exc):
                             setattr(exc, "retry_exhausted", "attempt_budget")
                             raise
@@ -3406,6 +3448,16 @@ class WorkspaceNativeAgentLoop:
                     transition_reason = "next_required_action_retry"
                     final_text = ""
                     continue
+                if stop_reason in {"max_tokens", "length", "content_filter"}:
+                    # An interrupted answer without tool calls is not success.
+                    # After the bounded truncation retry, report the provider's
+                    # actual terminal reason instead of returning empty prose.
+                    aborted_reason = (
+                        "provider_content_filtered" if stop_reason == "content_filter"
+                        else "model_output_truncated"
+                    )
+                    transition_reason = aborted_reason
+                    break
                 if transition_reason not in {
                     "llm_safety_final_synthesis_fallback",
                     "llm_safety_final_synthesis_retry",

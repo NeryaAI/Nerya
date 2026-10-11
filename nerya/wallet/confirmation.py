@@ -34,6 +34,7 @@ def read_transaction(provider, config, request, transaction, *, transport=None):
         source='transaction_meta'
         if token.upper() in ('SOL','NATIVE'):token='So11111111111111111111111111111111111111112'
         actual=conn.transaction_output(tx_hash,owner,token) if owner else None
+        result.extra['network_fee'] = conn.transaction_fee(tx_hash, owner) if owner else {'status': 'unavailable'}
     elif chain in EVM_CHAIN_IDS:
         if not rpc:
             result.reason='configure chain RPC for independent receipt verification'
@@ -47,6 +48,9 @@ def read_transaction(provider, config, request, transaction, *, transport=None):
         if receipt.get('status') not in ('0x1',1):
             result.reason='receipt success status unavailable'
             return result
+        from .fees import evm_network_fee
+        from ..connectors.chains import ChainRegistry
+        result.extra['network_fee'] = evm_network_fee(receipt, tx_hash, ChainRegistry().get(chain).native_symbol)
         if transaction.get('phase')=='approval':
             result.extra['status']='failed'; result.reason='allowance_only_requires_fresh_swap_approval'
             return result

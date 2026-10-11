@@ -636,7 +636,7 @@ def test_snapshot_freshness_gate_exempts_position_reducing_intents(tmp_path, mon
     # Now stub fresh_snapshot so risk sees a stale + unhealthy snapshot
     # at evaluation time (we can't rely on the on-demand refresh path
     # because it always brings a paper snapshot back to ts=now).
-    def _stale_snap(config, account_id, *, max_age_s=None, profile=None):
+    def _stale_snap(config, account_id, *, max_age_s=None, profile=None, persist=True):
         return AccountSnapshot(
             snapshot_id="stale-test",
             account_id=account_id,

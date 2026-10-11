@@ -690,9 +690,7 @@ coincurve==21.0.0 ; python_full_version < '3.14' \
 colorama==0.4.6 ; sys_platform == 'win32' \
     --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \
     --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
-    # via
-    #   pytest
-    #   typer
+    # via typer
 courlan==1.4.0 \
     --hash=sha256:ad1dbdefd912ca7238d4607dc855df5df097f56bac175dd662c84eed3802f49e \
     --hash=sha256:fbbac7b7fcde2195ea08e707609503c81cf39c891e8d26cdb1fed4585782d63d
@@ -927,27 +925,26 @@ dateparser==1.4.3 \
     --hash=sha256:bab8c43a746266e68142f4926e69438ce551441aa88e54e78bb6410bf3ee7000 \
     --hash=sha256:cbce86c64e0cea5c54c84c015d34c903d46c51bfad50632bf2f05a6141d10c05
     # via htmldate
-eth-abi==6.0.0 \
-    --hash=sha256:05ad63b50bd5448cfac0079b3cc5464de7464b4336a2496bf368d5808c7f9e9f \
-    --hash=sha256:e83a0ed91f2dadeeb50236d673736fe2edc6fcc0a1c1e13d461192d4b23d5bcc
+eth-abi==5.2.0 \
+    --hash=sha256:178703fa98c07d8eecd5ae569e7e8d159e493ebb6eeb534a8fe973fbc4e40ef0 \
+    --hash=sha256:17abe47560ad753f18054f5b3089fcb588f3e3a092136a416b6c1502cb7e8877
     # via
     #   nerya (pyproject.toml)
     #   eth-account
-    #   py-clob-client-v2
-eth-account==0.14.0 \
-    --hash=sha256:2c8291b1a8fcbd29a55b07f75f0a0aaffd04704d3ec28d1396587f18a5541c6d \
-    --hash=sha256:efdcb57f32f133e9152510e44772a4bcfe519317dfd8f7e7c5ead8189f73a2b6
+    #   polymarket-client
+eth-account==0.13.7 \
+    --hash=sha256:39727de8c94d004ff61d10da7587509c04d2dc7eac71e04830135300bdfc6d24 \
+    --hash=sha256:5853ecbcbb22e65411176f121f5f24b8afeeaf13492359d254b16d8b18c77a46
     # via
     #   nerya (pyproject.toml)
-    #   py-clob-client-v2
-    #   py-order-utils
+    #   polymarket-client
 eth-hash==0.8.0 \
     --hash=sha256:523718a51b369ab89866b929a5c93c52978cd866ea309192ad980dd8271f9fac \
     --hash=sha256:b009752b620da2e9c7668014849d1f5fadbe4f138603f1871cc5d4ca706896b1
     # via eth-utils
-eth-keyfile==0.10.0 \
-    --hash=sha256:3003b20000d68203e8fbf45456851a524f859a7432d2fae73be4a9aebeb4b8e1 \
-    --hash=sha256:6b8b1e2528ecd3c53f9f733c061a8ddc7aa40b689f15c2f38b73ee6fc5d274fd
+eth-keyfile==0.8.1 \
+    --hash=sha256:65387378b82fe7e86d7cb9f8d98e6d639142661b2f6f490629da09fddbef6d64 \
+    --hash=sha256:9708bc31f386b52cca0969238ff35b1ac72bd7a7186f2a84b86110d3c973bec1
     # via eth-account
 eth-keys==0.8.0 \
     --hash=sha256:11549b251876fccd7caedd6905e494ea2309aec352ec2579b00ef9978017a964 \
@@ -966,20 +963,16 @@ eth-typing==6.0.0 \
     #   eth-abi
     #   eth-keys
     #   eth-utils
-    #   py-ecc
-eth-utils==6.0.0 \
-    --hash=sha256:63cf48ee32c45541cb5748751909a8345c470432fb6f0fed4bd7c53fd6400469 \
-    --hash=sha256:eb54b2f82dd300d3142c49a89da195e823f5e5284d43203593f87c67bad92a96
+eth-utils==5.3.1 \
+    --hash=sha256:1f5476d8f29588d25b8ae4987e1ffdfae6d4c09026e476c4aad13b32dda3ead0 \
+    --hash=sha256:c94e2d2abd024a9a42023b4ddc1c645814ff3d6a737b33d5cfd890ebf159c2d1
     # via
     #   eth-abi
     #   eth-account
     #   eth-keyfile
     #   eth-keys
     #   eth-rlp
-    #   poly-eip712-structs
-    #   py-clob-client-v2
-    #   py-ecc
-    #   py-order-utils
+    #   polymarket-client
     #   rlp
 fastapi==0.141.1 \
     --hash=sha256:bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3 \
@@ -1234,7 +1227,7 @@ httpx==0.28.1 \
     # via
     #   nerya (pyproject.toml)
     #   mcp
-    #   py-clob-client-v2
+    #   polymarket-client
 httpx-sse==0.4.3 \
     --hash=sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc \
     --hash=sha256:9b1ed0127459a66014aec3c56bebd93da3c1bc8bb6618c8082039a44889a755d
@@ -1251,10 +1244,6 @@ idna==3.20 \
     #   httpx
     #   requests
     #   yarl
-iniconfig==2.3.0 \
-    --hash=sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730 \
-    --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
-    # via pytest
 jsonschema==4.26.0 \
     --hash=sha256:0c26707e2efad8aa1bfc5b7ce170f3fccc2e4918ff85989ba9ffa9facb2be326 \
     --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
@@ -1560,7 +1549,9 @@ msgpack==1.2.2 \
     --hash=sha256:f466049b8e1ec0854287bbe9a074316826fe0e08dcf707245f98b1ae49e92650 \
     --hash=sha256:f80361592c13d7226b4379c8941529b63fe1a9d0e05d2de8f3306b70e522b53f \
     --hash=sha256:ffdd2f4950daf7815490f23087963e3420175b9609520b7ff5df64d351159c22
-    # via nerya (pyproject.toml)
+    # via
+    #   nerya (pyproject.toml)
+    #   polymarket-client
 multidict==6.9.1 \
     --hash=sha256:006c4478de0a1876f4834e14255776286f09b9846b505fe63f67f9d173a9487c \
     --hash=sha256:024123f0ab402ab33828e24eb80fa8f25167d0d3783ba5f287e39ed741e6abf9 \
@@ -1806,10 +1797,6 @@ numpy==2.5.3 \
     # via
     #   nerya (pyproject.toml)
     #   pandas
-packaging==26.3 \
-    --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
-    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-    # via pytest
 pandas==3.0.6 \
     --hash=sha256:0704044b676496b8350e023b09f174a26772456c974a2b11c36bebb558c9490d \
     --hash=sha256:085e3786ae6b2e82b406266bce36690f72b9dc1421903ba9296b2981a9fcf586 \
@@ -1884,16 +1871,10 @@ playwright==1.63.0 \
     --hash=sha256:c89fc4736502a1f0fac2c8ca5d10c0cbc1c669f1f4774a2d8507a43140e4d53f \
     --hash=sha256:fd1aa00631d44d55e56e0975bf3f3f285fac4a9fd2813183f0c12a488f1a1b24
     # via nerya (pyproject.toml)
-pluggy==1.6.0 \
-    --hash=sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3 \
-    --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
-    # via pytest
-poly-eip712-structs==0.0.1 \
-    --hash=sha256:11e714e8c25c64d22dcb8a606c87cf052e7154caf701652d29687ddaf7dee342 \
-    --hash=sha256:d9193766fde497b1ee01c79a50092733a34b7a94bed090deb5d3c1b1e41f6d8c
-    # via
-    #   py-clob-client-v2
-    #   py-order-utils
+polymarket-client==0.12.0 \
+    --hash=sha256:b563c6f487f86c1f7ac459feb29b438d48c1df3261d75975249c02618d03fb48 \
+    --hash=sha256:f5a56c635aefe23f59dfee9dc0eb778e065027b37d0232f32f9dce18ef8269af
+    # via nerya (pyproject.toml)
 propcache==0.5.4 \
     --hash=sha256:004e685b315646c410771836e72a44f143bbe624f29653a42687815069a303d5 \
     --hash=sha256:02c0a34f16889cf800f10f0247a564d8ce6eeab6ffcd7c87198f769067eb8432 \
@@ -2036,18 +2017,6 @@ propcache==0.5.4 \
     # via
     #   aiohttp
     #   yarl
-py-clob-client-v2==1.2.0 \
-    --hash=sha256:c549a801ae39af47e57c8c04546d3d365b3dc2fd5638e22b563e875a44814043 \
-    --hash=sha256:e9781fd3655d1d8c90b7fcd666f05d4facc48b588b5d53f70a35992839634db2
-    # via nerya (pyproject.toml)
-py-ecc==8.0.0 \
-    --hash=sha256:56aca19e5dc37294f60c1cc76666c03c2276e7666412b9a559fa0145d099933d \
-    --hash=sha256:c0b2dfc4bde67a55122a392591a10e851a986d5128f680628c80b405f7663e13
-    # via eth-keyfile
-py-order-utils==0.3.2 \
-    --hash=sha256:4c0ecb939f4ce0313cd8a4ca32f2ba9a72449a6fc9ee17b9ce1937f594662988 \
-    --hash=sha256:5ab780e61ed532ddda852a6a12d470be7bbdaae01213ced3ebc6c887cedb1d3e
-    # via py-clob-client-v2
 pycares==5.0.1 \
     --hash=sha256:07260c6c0eff8aa809d6cd64010303098c7d0fe79176aba207d747c9ffc7a95a \
     --hash=sha256:07711acb0ef75758f081fb7436acaccc91e8afd5ae34fd35d4edc44297e81f27 \
@@ -2181,9 +2150,7 @@ pycryptodome==3.23.0 \
     --hash=sha256:dea827b4d55ee390dc89b2afe5927d4308a8b538ae91d9c6f7a5090f397af1aa \
     --hash=sha256:e3f2d0aaf8080bda0587d58fc9fe4766e012441e2eed4269a77de6aea981c8be \
     --hash=sha256:eb8f24adb74984aa0e5d07a2368ad95276cf38051fe2dc6605cbcf482e04f2a7
-    # via
-    #   eth-keyfile
-    #   poly-eip712-structs
+    # via eth-keyfile
 pydantic==2.13.5 \
     --hash=sha256:346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73 \
     --hash=sha256:51a9c5f7b2f8e636f04c6cada605d9b6a3bf1348fdf945a3d8869b19bba0ee08
@@ -2193,6 +2160,7 @@ pydantic==2.13.5 \
     #   eth-utils
     #   fastapi
     #   mcp
+    #   polymarket-client
     #   pydantic-settings
 pydantic-core==2.46.5 \
     --hash=sha256:013d6f3483d81e02e7c328831808f336c8596ee33b4bd4026b9ffb1e960b8942 \
@@ -2327,9 +2295,7 @@ pyee==13.0.1 \
 pygments==2.21.0 \
     --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9 \
     --hash=sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c
-    # via
-    #   pytest
-    #   rich
+    # via rich
 pyjwt==2.15.0 \
     --hash=sha256:7a3742debf6b879e912dbb9819ceec1594be812452b78c5f2e2dfc56564954f8 \
     --hash=sha256:b11c5f9791d7bf51c2b39a81ed669f6b2dbbd669df2942f6c60167e9e3d1abe4
@@ -2365,12 +2331,6 @@ pypdf==6.19.0 \
     --hash=sha256:7e5d6e730e7dae87d560a2cee218b852f6498c8be61966f3cd02ead971e48d14 \
     --hash=sha256:bbc43aca292369ccc6cbc8a921991ecf2538a3587ab5a116eff06c321d647155
     # via nerya (pyproject.toml)
-pytest==9.1.1 \
-    --hash=sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313 \
-    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
-    # via
-    #   poly-eip712-structs
-    #   py-order-utils
 python-dateutil==2.9.0.post0 \
     --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \
     --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
@@ -2823,6 +2783,7 @@ typing-extensions==4.16.0 \
     #   eth-typing
     #   fastapi
     #   mcp
+    #   polymarket-client
     #   pydantic
     #   pydantic-core
     #   pyee
@@ -2931,7 +2892,9 @@ websockets==15.0.1 \
     --hash=sha256:f29d80eb9a9263b8d109135351caf568cc3f80b9928bccde535c235de55c22d9 \
     --hash=sha256:f7a866fbc1e97b5c617ee4116daaa09b722101d4a3c170c787450ba409f9736f \
     --hash=sha256:fcd5cf9e305d7b8338754470cf69cf81f420459dbae8a3b40cee57417f4614a7
-    # via nerya (pyproject.toml)
+    # via
+    #   nerya (pyproject.toml)
+    #   polymarket-client
 yarl==1.25.1 \
     --hash=sha256:0136d640dfa9b0523853e411430a99f8a91eca85774c6420285a33b755bc6de3 \
     --hash=sha256:03dd38de09bc213e9a8b29761eec33ee1d5318dac0e49d8af36e4d27830e23a7 \

@@ -47,7 +47,7 @@ class TriggerRuntime:
     def boot(cls, config: Config) -> "TriggerRuntime":
         return cls(config=config, router=TriggerRouter(config))
 
-    def emit(self, event: TriggerEvent) -> Any:
+    def emit(self, event: TriggerEvent, *, actor_id: str | None = None) -> Any:
         if event.dry_run:
             return self.router.dry_run(event)
         routed = self.router.route(event)
@@ -55,7 +55,10 @@ class TriggerRuntime:
             routed.status == "routed"
             and (routed.target or event.target) == "skill:strategy.agent_task"
         ):
-            return self._agent_task_executor().execute(event, routed)
+            if self.agent_task_executor_factory is not None:
+                return self._agent_task_executor().execute(event,routed)
+            import importlib
+            return importlib.import_module("nerya.sdk.task_dispatch").admit_strategy(self.config,event,routed,actor_id=actor_id)
         if (
             routed.status == "routed"
             and (routed.target or event.target)
@@ -81,7 +84,10 @@ class TriggerRuntime:
             routed.status == "routed"
             and (routed.target or event.target) == "skill:strategy.agent_task"
         ):
-            return self._agent_task_executor().execute(event, routed)
+            if self.agent_task_executor_factory is not None:
+                return self._agent_task_executor().execute(event,routed)
+            import importlib
+            return importlib.import_module("nerya.sdk.task_dispatch").admit_strategy(self.config,event,routed)
         if (
             routed.status == "routed"
             and (routed.target or event.target)

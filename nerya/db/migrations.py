@@ -1133,6 +1133,167 @@ def _v14_user_interactions(con):
     con.execute("CREATE INDEX IF NOT EXISTS idx_interactions_session ON agent_interactions(session_id,state)")
 
 
+def _v15_task_runs(con):
+    con.execute("""CREATE TABLE agent_runs (
+        run_id TEXT PRIMARY KEY, task_kind TEXT NOT NULL, task_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL, session_id TEXT NOT NULL, source_revision TEXT NOT NULL,
+        trigger_kind TEXT NOT NULL, trigger_id TEXT NOT NULL, scheduled_at REAL,
+        client_request_id TEXT, dedupe_key TEXT NOT NULL UNIQUE, fingerprint TEXT NOT NULL,
+        admission_status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+        snapshot_json TEXT NOT NULL, trigger_json TEXT NOT NULL,
+        delivery_json TEXT NOT NULL DEFAULT '{}', result_json TEXT NOT NULL DEFAULT '{}',
+        retry_of_run_id TEXT, revision INTEGER NOT NULL DEFAULT 1,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL
+    )""")
+    con.execute("CREATE INDEX idx_run_task ON agent_runs(task_kind,task_id,created_at DESC,run_id)")
+    con.execute("CREATE INDEX idx_run_session ON agent_runs(session_id,created_at DESC,run_id)")
+    con.execute("""CREATE TABLE agent_run_commands (
+        run_id TEXT NOT NULL REFERENCES agent_runs(run_id),
+        command_id TEXT PRIMARY KEY REFERENCES agent_commands(command_id),
+        created_at REAL NOT NULL
+    )""")
+    con.execute("""CREATE TABLE task_schedule_state (
+        task_id TEXT PRIMARY KEY, source_revision TEXT NOT NULL,
+        next_due REAL, last_due REAL, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        paused_reason TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
+    )""")
+    con.execute("""CREATE TABLE agent_run_imports (
+        source_key TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(run_id)
+    )""")
+
+
+def _v16_run_request_aliases(con):
+    con.execute("""CREATE TABLE agent_run_requests (
+        request_key TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(run_id),
+        fingerprint TEXT NOT NULL, actor_id TEXT NOT NULL, client_request_id TEXT NOT NULL
+    )""")
+    con.execute("CREATE INDEX idx_run_request_actor ON agent_run_requests(actor_id,client_request_id)")
+
+
+def _v17_financial_authorization(con):
+    con.execute("""CREATE TABLE financial_grants (
+        grant_id TEXT PRIMARY KEY, family_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+        task_kind TEXT NOT NULL, task_id TEXT NOT NULL, security_revision TEXT NOT NULL,
+        state TEXT NOT NULL, policy_json TEXT NOT NULL, approval_id TEXT,
+        valid_from REAL NOT NULL, expires_at REAL NOT NULL, approved_by TEXT,
+        revision INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL, updated_at REAL NOT NULL
+    )""")
+    con.execute("CREATE INDEX idx_grants_task ON financial_grants(task_kind,task_id,state)")
+    con.execute("""CREATE TABLE financial_actions (
+        action_id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, run_id TEXT REFERENCES agent_runs(run_id),
+        parent_action_id TEXT REFERENCES financial_actions(action_id), action_key TEXT NOT NULL,
+        kind TEXT NOT NULL, request_json TEXT NOT NULL, fingerprint TEXT NOT NULL,
+        context_json TEXT NOT NULL, quote_json TEXT NOT NULL, quote_hash TEXT NOT NULL,
+        state TEXT NOT NULL, grant_id TEXT, approval_id TEXT, submission_json TEXT NOT NULL DEFAULT '{}',
+        receipt_json TEXT NOT NULL DEFAULT '{}', error_code TEXT, revision INTEGER NOT NULL DEFAULT 1,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL, UNIQUE(actor_id,action_key)
+    )""")
+    con.execute("CREATE INDEX idx_financial_run ON financial_actions(run_id,state)")
+    con.execute("""CREATE TABLE financial_usage (
+        action_id TEXT PRIMARY KEY REFERENCES financial_actions(action_id), grant_id TEXT NOT NULL,
+        family_id TEXT NOT NULL, account_id TEXT NOT NULL, kind TEXT NOT NULL,
+        amount_usd TEXT NOT NULL, fee_usd TEXT NOT NULL, asset_amounts_json TEXT NOT NULL,
+        state TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL
+    )""")
+    con.execute("CREATE INDEX idx_financial_usage ON financial_usage(family_id,state,created_at)")
+    con.execute("""CREATE TABLE financial_steps (
+        action_id TEXT NOT NULL REFERENCES financial_actions(action_id), step_id TEXT NOT NULL,
+        state TEXT NOT NULL, plan_json TEXT NOT NULL, submission_json TEXT NOT NULL DEFAULT '{}',
+        receipt_json TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL,
+        PRIMARY KEY(action_id,step_id)
+    )""")
+
+
+def _v18_run_effect_jobs(con):
+    con.execute("""CREATE TABLE run_deliveries (
+        delivery_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(run_id),
+        target_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
+        lease_until REAL NOT NULL DEFAULT 0, receipt_json TEXT NOT NULL DEFAULT '{}',
+        updated_at REAL NOT NULL
+    )""")
+    con.execute("""CREATE TABLE financial_resource_leases (
+        resource_key TEXT PRIMARY KEY, action_id TEXT NOT NULL REFERENCES financial_actions(action_id),
+        created_at REAL NOT NULL
+    )""")
+
+
+def _v19_run_control_receipts(con):
+    con.execute("""CREATE TABLE run_controls (
+        actor_id TEXT NOT NULL, client_request_id TEXT NOT NULL, run_id TEXT NOT NULL,
+        action TEXT NOT NULL, fingerprint TEXT NOT NULL, command_id TEXT,
+        response_json TEXT, created_at REAL NOT NULL,
+        PRIMARY KEY(actor_id,client_request_id)
+    )""")
+
+
+def _v20_account_collection_evidence(con):
+    con.execute("ALTER TABLE account_snapshots ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'")
+
+
+def _v21_strategy_financial_runs(con):
+    con.execute("""CREATE TABLE strategy_financial_runs (
+        run_id TEXT PRIMARY KEY, strategy_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+        security_revision TEXT NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL,
+        lease_until REAL NOT NULL, session_id TEXT, scopes_json TEXT NOT NULL,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL
+    )""")
+
+
+def _v22_position_buckets(con):
+    con.execute("ALTER TABLE positions ADD COLUMN position_side TEXT NOT NULL DEFAULT 'net'")
+    con.execute("ALTER TABLE position_shares ADD COLUMN position_side TEXT NOT NULL DEFAULT 'net'")
+    con.execute("DROP INDEX IF EXISTS idx_positions_open_unique")
+    con.execute("CREATE UNIQUE INDEX idx_positions_open_unique ON positions(account_id,market,position_side) WHERE closed_at IS NULL")
+
+
+def _v23_trading_guard_lease(con):
+    con.execute("CREATE TABLE trading_guard_lease (name TEXT PRIMARY KEY, owner TEXT NOT NULL, lease_until REAL NOT NULL, heartbeat REAL NOT NULL)")
+
+
+def _v24_financial_strategy_producer(con):
+    con.execute("ALTER TABLE financial_actions ADD COLUMN strategy_run_id TEXT REFERENCES strategy_financial_runs(run_id)")
+
+
+def _v25_protocol_positions(con):
+    con.execute("""CREATE TABLE protocol_positions (
+        position_key TEXT PRIMARY KEY, wallet_id TEXT NOT NULL, chain TEXT NOT NULL,
+        protocol TEXT NOT NULL, kind TEXT NOT NULL, owner_address TEXT NOT NULL,
+        state_json TEXT NOT NULL, block_number INTEGER NOT NULL, block_hash TEXT NOT NULL,
+        updated_at REAL NOT NULL)""")
+    con.execute("""CREATE TABLE protocol_position_claims (
+        position_key TEXT NOT NULL REFERENCES protocol_positions(position_key),
+        owner_id TEXT NOT NULL, units_json TEXT NOT NULL, updated_at REAL NOT NULL,
+        PRIMARY KEY(position_key,owner_id))""")
+    con.execute("""CREATE TABLE protocol_position_events (
+        action_id TEXT PRIMARY KEY REFERENCES financial_actions(action_id),
+        position_key TEXT NOT NULL, owner_id TEXT NOT NULL, delta_json TEXT NOT NULL,
+                proof_json TEXT NOT NULL, created_at REAL NOT NULL)""")
+
+
+def _v26_financial_grant_issuer(con):
+    con.execute("ALTER TABLE financial_grants ADD COLUMN issued_by TEXT")
+
+
+def _v27_unique_protocol_effect(con):
+    con.execute("""CREATE UNIQUE INDEX idx_protocol_receipt_effect ON protocol_position_events (
+        json_extract(proof_json,'$.transaction_hash'),json_extract(proof_json,'$.log_index'))
+        WHERE json_extract(proof_json,'$.transaction_hash') IS NOT NULL
+          AND json_extract(proof_json,'$.log_index') IS NOT NULL""")
+
+
+def _v28_lp_rebalances(con):
+    con.execute("""CREATE TABLE lp_rebalances (
+        rebalance_id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, client_key TEXT NOT NULL,
+        task_kind TEXT, task_id TEXT, security_revision TEXT, resource_key TEXT NOT NULL,
+        plan_hash TEXT NOT NULL, plan_json TEXT NOT NULL, action_ids_json TEXT NOT NULL,
+        cursor INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'prepared',
+        reason TEXT, revision INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+        UNIQUE(actor_id, client_key))""")
+    con.execute("""CREATE UNIQUE INDEX idx_active_lp_rebalance ON lp_rebalances(resource_key)
+        WHERE state NOT IN ('completed','stopped')""")
+
+
 # Append new migrations to the end of this list. Never renumber; new
 # work always becomes a *new* version. The registry validator above
 # enforces a contiguous 1..N sequence at startup.
@@ -1163,6 +1324,20 @@ MIGRATIONS: list[Migration] = [
     Migration(version=12, name="chat_history_tombstones", up=_v12_chat_history_tombstones),
     Migration(version=13, name="conversation_commands", up=_v13_conversation_commands),
     Migration(version=14, name="user_interactions", up=_v14_user_interactions),
+    Migration(version=15, name="task_runs", up=_v15_task_runs),
+    Migration(version=16, name="run_request_aliases", up=_v16_run_request_aliases),
+    Migration(version=17, name="financial_authorization", up=_v17_financial_authorization),
+    Migration(version=18, name="run_effect_jobs", up=_v18_run_effect_jobs),
+    Migration(version=19, name="run_control_receipts", up=_v19_run_control_receipts),
+    Migration(version=20, name="account_collection_evidence", up=_v20_account_collection_evidence),
+    Migration(version=21, name="strategy_financial_runs", up=_v21_strategy_financial_runs),
+    Migration(version=22, name="position_buckets", up=_v22_position_buckets),
+    Migration(version=23, name="trading_guard_lease", up=_v23_trading_guard_lease),
+    Migration(version=24, name="financial_strategy_producer", up=_v24_financial_strategy_producer),
+    Migration(version=25, name="protocol_positions", up=_v25_protocol_positions),
+    Migration(version=26, name="financial_grant_issuer", up=_v26_financial_grant_issuer),
+    Migration(version=27, name="unique_protocol_receipt_effect", up=_v27_unique_protocol_effect),
+    Migration(version=28, name="lp_rebalances", up=_v28_lp_rebalances),
 ]
 
 

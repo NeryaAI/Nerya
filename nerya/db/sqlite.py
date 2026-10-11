@@ -65,6 +65,18 @@ def connect(path: Path) -> sqlite3.Connection:
         raise
 
 
+def connect_preview(path: Path) -> sqlite3.Connection:
+    """Read existing state, or an empty schema in memory without creating files."""
+    if Path(path).exists():
+        return connect_readonly(path)
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.row_factory = sqlite3.Row
+    from .migrations import apply_migrations
+    apply_migrations(con)
+    con.execute("PRAGMA query_only=ON")
+    return con
+
+
 def connect_readonly(path: Path) -> sqlite3.Connection:
     """Open a WAL-aware query-only connection without journal negotiation."""
     path = Path(path)

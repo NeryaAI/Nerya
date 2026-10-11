@@ -223,7 +223,8 @@ def _agent_request(client, payload, action: str):
             )}
         from ..subagents.control import continue_agent
         return continue_agent(client, session_id=session_id, agent_id=agent_id,
-                              message=str(p.get("message") or ""), request_id=str(p.get("request_id") or ""))
+                              message=str(p.get("message") or ""), request_id=str(p.get("request_id") or ""),
+                              actor_id=str(p.get("_auth_actor_id") or ""))
     except (ValueError, OSError) as exc:
         return {"ok": False, "error": redact_text(str(exc))}
 

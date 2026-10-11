@@ -27,8 +27,14 @@ _TRANSIENT_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 522, 52
 
 
 def is_retryable_stream_transport_error(error: BaseException) -> bool:
-    """Temporary connection failures only; never retry TLS or local setup errors."""
+    """Retry temporary transport failure only; never mask TLS or local config errors.
+
+    ZCode distinguishes network/timeout from invalid configuration and TLS.
+    This predicate is used only before a model stream has emitted a payload;
+    the caller must independently enforce the output-commit boundary.
+    """
     if isinstance(error, urllib.error.HTTPError):
+        # HTTP responses must be classified by status and Retry-After instead.
         return False
     if isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
         if error.reason is not error:
@@ -194,6 +200,7 @@ def retry_call(
 __all__ = [
     "jittered_backoff",
     "is_retryable_status",
+    "is_retryable_stream_transport_error",
     "retry_call",
     "retry_delay",
     "parse_retry_after",

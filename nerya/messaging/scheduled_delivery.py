@@ -69,7 +69,9 @@ def _render_summary(result: Any, entry: Any) -> str:
         script_result = None
 
     msg: str | None = None
-    if isinstance(decision, dict):
+    final_text=result.get('final_text') if isinstance(result,dict) else getattr(result,'final_text',None)
+    if isinstance(final_text,str) and final_text.strip():msg=final_text.strip()
+    if msg is None and isinstance(decision, dict):
         for key in ("message", "summary", "text", "headline", "note"):
             v = decision.get(key)
             if isinstance(v, str) and v.strip():
@@ -167,6 +169,7 @@ def _deliver_messages(config: Config, entry: Any,
             context={
                 "schedule_id": entry.id,
                 "session_kind": entry.session_kind,
+                "delivery_id": target.get('delivery_id'),
             },
         )
     except Exception as exc:  # pragma: no cover - defensive
@@ -175,6 +178,7 @@ def _deliver_messages(config: Config, entry: Any,
             "kind": kind or "messages",
             "channel": channel,
             "error": f"{type(exc).__name__}: {exc}",
+            "uncertain": True,
         }
     return {
         "ok": bool(out.get("delivered")),
@@ -197,6 +201,7 @@ def _deliver_webhook(config: Config, entry: Any,
             "error": "webhook target missing http(s) url",
         }
     headers = {"Content-Type": "application/json"}
+    if target.get('delivery_id'):headers['Idempotency-Key']=target['delivery_id']
     for k, v in (target.get("headers") or {}).items():
         headers[str(k)] = str(v)
     body = _result_envelope(result, entry)
@@ -209,6 +214,7 @@ def _deliver_webhook(config: Config, entry: Any,
             "kind": "webhook",
             "url": url,
             "error": f"{type(exc).__name__}: {exc}",
+            "uncertain": True,
         }
     ok = 200 <= int(status) < 300
     resp_snippet: Any = resp

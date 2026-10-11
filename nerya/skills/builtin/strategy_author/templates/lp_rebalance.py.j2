@@ -1,0 +1,26 @@
+"""Strategy-local helper; call from main.py::run after deterministic gates.
+
+plan_key and plan must be immutable for a cycle (old NFT + reviewed policy
+revision), not a random UUID or a newly calculated deadline on every retry.
+This helper does not activate a strategy, sign a grant or synthesize a quote.
+"""
+
+
+def rebalance_tick(ctx, *, plan, plan_key):
+    if ctx.mode != 'live':
+        return ctx.result.hold(reason='LP execution disabled in paper/shadow; use explicitly labelled protocol replay',
+                               metadata={'plan_key':plan_key,'funds_sent':False})
+    key='lp_rebalance:'+plan_key
+    identity=ctx.state.get(key)
+    if identity:
+        row=ctx.financial.get_rebalance(identity)
+    else:
+        row=ctx.financial.prepare_rebalance(plan,client_request_id=plan_key)
+        ctx.state.set(key,row['rebalance_id'])
+    if row['state'] not in {'completed','stopped'}:
+        row=ctx.financial.advance_rebalance(row['rebalance_id'],expected_revision=row['revision'])
+    metadata={'rebalance_id':row['rebalance_id'],'state':row['state'],'step':row['cursor'],
+              'action_ids':row['action_ids'],'reason':row.get('reason')}
+    if row['state']=='completed':
+        return ctx.result.ok(reason='LP range adjustment confirmed',metadata=metadata)
+    return ctx.result.hold(reason='LP '+row['state'],metadata=metadata)

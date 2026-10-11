@@ -285,7 +285,7 @@ def _ensure_account_tradable(paths: WorkspacePaths, account_id: str) -> None:
     try:
         from ..connectors.provider_spec import get_registry
 
-        spec = get_registry().find(venue)
+        spec = get_registry(paths.root).find(venue)
     except Exception:
         spec = None
     if spec is not None and bool((spec.supports or {}).get("place_order")):

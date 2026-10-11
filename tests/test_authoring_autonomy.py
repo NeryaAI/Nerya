@@ -84,8 +84,8 @@ def test_typed_manifest_replay_preserves_card_sources(tmp_path):
     assert typed.markets == tuple(raw['markets'])
 
 
-def test_trading_default_retains_its_profit_gate_and_rejects_returned_errors():
-    assert assemble_metrics(replay(['ok'], mode='trading'))['verdict'] == 'FAIL'
+def test_trading_default_reviews_weak_performance_and_rejects_returned_errors():
+    assert assemble_metrics(replay(['ok'], mode='trading'))['verdict'] == 'WARN'
     metrics = assemble_metrics(replay(['error'], mode='trading'))
     assert metrics['verdict'] == 'FAIL'
     assert 'strategy_returned_errors' in metrics['flags']

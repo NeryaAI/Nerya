@@ -312,6 +312,44 @@ def _repair_arguments_before_validation(
         return
     args = _repair_raw_json_object_argument(call.arguments)
     args = _repair_json_string_containers(args, schema)
+    if (
+        call.name == "evolve_core_config_patch"
+        and isinstance(schema, dict)
+        and isinstance(schema.get("properties"), dict)
+        and schema["properties"].get("config_after", {}).get("type") == "object"
+        and isinstance(args.get("config_after"), str)
+        and 0 < len(args["config_after"]) <= 64_000
+    ):
+        # Some OpenAI-compatible models return a valid YAML mapping as a
+        # *string*, especially after context compaction. Permit only this
+        # schema-owned YAML object. Never guess a truncated JSON/YAML blob or
+        # broaden JSON-string coercion for arbitrary executable tools.
+        from ..core import yaml_io
+
+        try:
+            parsed = yaml_io.loads(args["config_after"])
+            seen: set[int] = set()
+
+            def plain(value: Any, depth: int = 0) -> bool:
+                if depth > 24:
+                    return False
+                if type(value) in (str, int, float, bool, type(None)):
+                    return True
+                if not isinstance(value, (dict, list)) or id(value) in seen:
+                    return False
+                seen.add(id(value))
+                if len(value) > 2000:
+                    return False
+                if isinstance(value, dict):
+                    return all(isinstance(k, str) and plain(v, depth + 1) for k, v in value.items())
+                return all(plain(child, depth + 1) for child in value)
+
+            if isinstance(parsed, dict) and plain(parsed):
+                args = {**args, "config_after": parsed}
+        except Exception:
+            # Malformed/incomplete documents remain strings and fail schema
+            # validation visibly. A retry must emit the whole mapping.
+            pass
     args = _repair_schema_array_item_wrappers(args, schema)
     args = _repair_schema_numeric_strings(args, schema)
     if args is not call.arguments:

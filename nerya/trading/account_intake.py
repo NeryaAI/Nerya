@@ -254,7 +254,7 @@ def _load(paths: WorkspacePaths, intake_id: str) -> AccountIntake | None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_schema(account_kind: str, venue: str) -> tuple[list[AccountIntakeField], str]:
+def _resolve_schema(account_kind: str, venue: str,*,workspace=None) -> tuple[list[AccountIntakeField], str]:
     """Return ``(fields, provider_label)`` for an intake target.
 
     Supports:
@@ -291,7 +291,7 @@ def _resolve_schema(account_kind: str, venue: str) -> tuple[list[AccountIntakeFi
         fields_raw.extend(list(entry.get("advanced_credential_fields") or []))
         fields = [AccountIntakeField.from_dict(dict(f)) for f in fields_raw]
         return fields, str(entry.get("label") or v)
-    spec = get_registry().find(v)
+    spec = get_registry(workspace).find(v)
     if spec is None:
         raise AccountIntakeError(
             f"unknown venue {venue!r}; ask /exchanges/providers for the "
@@ -332,7 +332,7 @@ def open_intake(
         raise AccountIntakeError("account_id is required")
     if not aid.replace("-", "").replace("_", "").isalnum():
         raise AccountIntakeError(f"invalid account id {aid!r}")
-    schema, label = _resolve_schema(account_kind, venue)
+    schema, label = _resolve_schema(account_kind, venue,workspace=paths.root)
     pid = proposal_id()
     created = now_iso()
     expiry_seconds = max(60, int(ttl_seconds or DEFAULT_TTL_SECONDS))
@@ -604,7 +604,7 @@ def submit_intake(
     # failed at order time (E4).
     if not payload.get("mode"):
         try:
-            spec = get_registry().find(intake.venue)
+            spec = get_registry(paths.root).find(intake.venue)
         except Exception:
             spec = None
         place_order = (

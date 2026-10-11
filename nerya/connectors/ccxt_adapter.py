@@ -186,6 +186,26 @@ class CcxtConnector(CEXConnectorBase):
             self._client = self._build_client()
         return self._client
 
+    def funds_capabilities(self) -> dict[str,bool]:
+        client=self.client
+        return {name:client.has.get(name) is True for name in ("transfer","withdraw","fetchTransfers","fetchWithdrawals")}
+
+    def transfer_assets(self,code:str,amount:str,from_account:str,to_account:str,*,params=None):
+        self._check_live_and_keys()
+        if not self.funds_capabilities()["transfer"]:raise TradingError("venue does not support internal transfers")
+        return self.client.transfer(code,amount,from_account,to_account,params or {})
+
+    def withdraw_assets(self,code:str,amount:str,address:str,*,memo=None,network=None,params=None):
+        self._check_live_and_keys()
+        if not self.funds_capabilities()["withdraw"]:raise TradingError("venue does not support withdrawals")
+        return self.client.withdraw(code,amount,address,memo,{**(params or {}),**({"network":network} if network else {})})
+
+    def funds_status(self,kind:str,code:str,reference:dict):
+        client=self.client;method="fetchWithdrawals" if kind=="withdraw" else "fetchTransfers"
+        if not self.funds_capabilities().get(method):raise TradingError("venue cannot query this funds operation")
+        rows=(client.fetch_withdrawals if kind=="withdraw" else client.fetch_transfers)(code,reference.get("since"))
+        return next((row for row in rows if str(row.get("id"))==str(reference.get("id"))),None)
+
     @property
     def markets(self) -> dict[str, Any]:
         """Lazily-loaded ccxt ``markets`` map (per-symbol precision, contract
@@ -229,6 +249,13 @@ class CcxtConnector(CEXConnectorBase):
             return None
         market = self.markets.get(sym) or {}
         value = float(amount)
+        if self.exchange_id=="deribit" and market.get("contract"):
+            if market.get("inverse") and not market.get("option"):
+                if not price or price<=0:
+                    if value==0:return 0.0
+                    raise TradingError("inverse_order_execution_price_required")
+                return value/price
+            return value
         if market.get("contract") or market.get("swap") or market.get("future"):
             value *= self._contract_size(sym)
             if market.get("inverse"):
@@ -238,6 +265,26 @@ class CcxtConnector(CEXConnectorBase):
                     raise TradingError("inverse order amount requires an execution price")
                 value /= price
         return value
+
+    def deribit_rpc(self,method,api,params):
+        from .ccxt_deribit import rpc
+        return rpc(self,method,api,params)
+
+    def deribit_option_terms(self,symbol,contracts,premium=None):
+        from .ccxt_deribit import option_terms
+        return option_terms(self,symbol,contracts,premium)
+
+    def deribit_simulate_portfolio(self,currency,quantities,*,add_positions=True):
+        from .ccxt_deribit import simulate_portfolio
+        return simulate_portfolio(self,currency,quantities,add_positions=add_positions)
+
+    def deribit_combo_order(self,quantities,*,max_debit_quote,label,valid_until,authorize):
+        from .ccxt_deribit import combo_order
+        return combo_order(self,quantities,max_debit_quote=max_debit_quote,label=label,valid_until=valid_until,authorize=authorize)
+
+    def deribit_send(self,side,wire,*,authorize,persist_before_send):
+        from .ccxt_deribit import send
+        return send(self,side,wire,authorize=authorize,persist_before_send=persist_before_send)
 
     def _round_amount(self, sym: str, size: float, price: float | None = None) -> float:
         """Round an order amount down without exceeding the approved size,
@@ -774,9 +821,17 @@ class CcxtConnector(CEXConnectorBase):
         protection_kind: str | None = None,
         protection_mode: str = "hybrid",
         managed_protection: bool = False,
+        max_slippage_bps: int | None = None,
     ) -> OrderAck:
         self._check_live_and_keys()
         sym = self._normalise_symbol(market)
+        protected_params = {
+            "symbol", "market", "side", "type", "orderType", "quantity", "qty", "amount", "size", "price",
+            "clientOrderId", "orderLinkId", "reduceOnly", "timeInForce", "leverage", "category",
+            "triggerPrice", "stopLoss", "takeProfit", "accountId", "subAccountId", "vaultAddress", "subAccountAddress",
+        }
+        if protected_params.intersection(extra_params or {}):
+            raise TradingError("connector parameters cannot override authorized order or account fields")
         # F2: fail closed when instrument metadata can't be loaded —
         # an empty markets map would silently drop reduceOnly /
         # positionSide / bracket params and contract-size conversion.
@@ -789,6 +844,8 @@ class CcxtConnector(CEXConnectorBase):
                 f"silently degrade"
             )
         is_deriv = self._is_derivatives(sym)
+        if (markets.get(sym) or {}).get("option"):
+            raise TradingError("options require the typed financial execution path")
         if (markets.get(sym) or {}).get("inverse"):
             raise TradingError("inverse contract execution is not supported by the base-sized trading pipeline")
         requested_type = order_type.lower()
@@ -797,6 +854,19 @@ class CcxtConnector(CEXConnectorBase):
         if requested_type in ("stop", "stop_limit") and trigger_price is None:
             raise TradingError(f"{requested_type} requires trigger_price")
         order_type = {"stop": "market", "stop_limit": "limit"}.get(requested_type, requested_type)
+        bounded_market = requested_type == "market" and max_slippage_bps is not None
+        if bounded_market:
+            from decimal import Decimal
+            if isinstance(max_slippage_bps, bool) or not 0 <= max_slippage_bps <= 10000 or not reference_price:
+                raise TradingError("bounded market order requires valid slippage and reference price")
+            reference = Decimal(str(reference_price))
+            tolerance = Decimal(max_slippage_bps) / 10000
+            boundary = reference * (1 + tolerance if side.lower() == "buy" else 1 - tolerance)
+            if boundary <= 0 or not boundary.is_finite():
+                raise TradingError("invalid bounded market price")
+            price = float(boundary)
+            order_type = "limit"
+            time_in_force = "IOC"
         if order_type == "limit" and price is None:
             raise TradingError("limit order requires price")
         from .ccxt_protection import protection_routes
@@ -827,6 +897,9 @@ class CcxtConnector(CEXConnectorBase):
             # ccxt amounts for swaps are in *contracts*; convert from base.
             amount = amount / float(contract_size or 1.0)
         px = self._round_price(sym, price)
+        if bounded_market and (px is None or (side.lower() == "buy" and Decimal(str(px)) > boundary)
+                               or (side.lower() == "sell" and Decimal(str(px)) < boundary)):
+            raise TradingError("price precision would exceed the market slippage bound")
         # R3T6: market orders have no order price, which used to skip the
         # min-notional guard entirely and let sub-min orders die at the
         # venue with a cryptic upstream error. Fall back to the caller's
@@ -863,7 +936,17 @@ class CcxtConnector(CEXConnectorBase):
             if reduce_only:
                 params["reduceOnly"] = True
             if position_side:
-                params["positionSide"] = str(position_side)
+                selected_side = str(position_side).lower()
+                if selected_side not in {"long", "short"}:
+                    raise TradingError("invalid position side")
+                if self.exchange_id == "bybit":
+                    params["positionIdx"] = 1 if selected_side == "long" else 2
+                elif self.exchange_id in {"binance", "binanceusdm", "binancecoinm"}:
+                    params["positionSide"] = selected_side.upper()
+                elif self.exchange_id in {"okx", "okxus"}:
+                    params["posSide"] = selected_side
+                else:
+                    raise TradingError("position-side execution has not been verified for this venue")
             if position_idx is not None:
                 params["positionIdx"] = int(position_idx)
         # CCXT's *Price scalars describe standalone closing triggers, not
@@ -1014,9 +1097,13 @@ class CcxtConnector(CEXConnectorBase):
     # ------------------------------------------------------------------
     def fetch_positions(self, *, symbols: list[str] | None = None) -> list[ContractPosition]:
         self._check_live_and_keys()
+        if getattr(self.client, "has", {}).get("fetchPositions") is False:
+            raise NotImplementedError(f"{self.venue} does not expose contract positions")
         try:
             raw_positions = self.client.fetch_positions(symbols)
         except Exception as exc:
+            if type(exc).__name__ == "NotSupported":
+                raise NotImplementedError(f"{self.venue} does not expose contract positions") from exc
             raise TradingError(f"{self.venue} fetch_positions failed: {exc}") from exc
         out: list[ContractPosition] = []
         for r in raw_positions or []:

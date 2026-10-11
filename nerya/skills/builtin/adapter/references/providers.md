@@ -3,13 +3,13 @@
 Use scripts/inspect_adapter.py for configured capability truth. SDK or CLI
 installation alone is not Nerya JSON-adapter compatibility.
 
-- self_custody: native Solana Jupiter and BSC Pancake V2. dex_routes allows
+- self_custody: native Solana Jupiter v2 (vault-backed API key required) and BSC Pancake V2. dex_routes allows
   other Router02-compatible EVM DEX deployments. MetaMask reuses the same route
   while preserving its vault-backed seed/key derivation.
 - evm_v2: chain,router,wrapped_native,native_symbol,rpc_urls,signer_ref. This is
   Router02 exact-input ABI, not Uniswap V3/UniversalRouter, Curve or Balancer.
   Token contracts are explicit; native and wrapped assets remain distinct.
-- Byreal: official AMM/RFQ, explicit signer. Pair K lines are not USD prices;
+- Byreal (existing compatibility only, not a default for new strategies): official AMM/RFQ, explicit signer. Pair K lines are not USD prices;
   execution risk uses token USD data. pool@mint keeps market and asset distinct.
 - OKX OS: v6 exactIn, chainIndex, slippagePercent=bps/100, autoSlippage=false,
   base58 Solana tx. Existing EVM/Solana signer and RPC verification apply.

@@ -446,6 +446,7 @@ class StrategyTuningConfig:
         "live_trading_enabled",
     )
     tuning_prompt: str = ""
+    review_plan: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: Optional[dict[str, Any]], *, where: str) -> "StrategyTuningConfig":
@@ -453,6 +454,12 @@ class StrategyTuningConfig:
             return cls(enabled=False)
         if not isinstance(raw, dict):
             raise TradingError(f"{where}: tuning must be a mapping")
+        plan = raw.get("review_plan", {})
+        if not isinstance(plan, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) or len(value) > 12000
+            for key, value in plan.items()
+        ) or len(plan) > 20:
+            raise TradingError(f"{where}: review_plan must be a bounded mapping of text fields")
         enabled = bool(raw.get("enabled", False))
         schedule_raw = raw.get("schedule") or None
         schedule = (
@@ -538,6 +545,7 @@ class StrategyTuningConfig:
             allowed_targets=allowed_targets,
             forbidden_targets=forbidden_targets,
             tuning_prompt=str(raw.get("tuning_prompt") or "").strip(),
+            review_plan=dict(plan),
         )
 
     def asdict(self) -> dict[str, Any]:
@@ -566,6 +574,7 @@ class StrategyTuningConfig:
                 "forbidden_targets": list(self.forbidden_targets),
             },
             "tuning_prompt": self.tuning_prompt,
+            "review_plan": dict(self.review_plan),
         }
         if self.schedule is not None:
             out["schedule"] = self.schedule.asdict()

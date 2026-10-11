@@ -155,12 +155,17 @@ def assemble_metrics(result: BacktestResult) -> dict[str, Any]:
             metrics["flags"].append("observation_order_attempt")
         if not activity:
             metrics["flags"].append("no_observation_or_dispatch_exercised")
-    elif result.execution_mode == "script" and metrics["verdict"] == "FAIL" and not errors:
-        # Explain a failed performance gate without mislabelling a successful
-        # replay as an engine error. Preserve the existing scoring policy.
-        if metrics["total_return_pct"] < 0:
-            metrics["flags"].append("negative_net_return")
-        if not metrics["flags"]:
+    elif result.execution_mode == "script" and not errors:
+        if metrics["verdict"] == "FAIL":
+            # FAIL is reserved for explicit hard economic/risk gates here,
+            # not for merely trailing the buy-and-hold benchmark.
+            if metrics["total_return_pct"] < 0:
+                metrics["flags"].append("negative_net_return")
+        elif (
+            metrics["verdict"] == "WARN"
+            and metrics["total_return_pct"] <= metrics["benchmark_buy_hold_return_pct"]
+            and "benchmark_capture_below_threshold" not in metrics["flags"]
+        ):
             metrics["flags"].append("benchmark_capture_below_threshold")
     if evidence["sdk_errors"] or not evidence["order_accounting_ok"]:
         metrics["verdict"] = "FAIL"
@@ -182,9 +187,9 @@ def verdict(
         return "FAIL"
     if max_dd_pct <= max_dd_limit and missed_pct < 30.0 and (upside_capture or 0.0) > 50.0:
         return "PASS"
-    if total_return_pct > benchmark_return_pct:
-        return "WARN"
-    return "FAIL"
+    # A completed strategy can underperform buy-and-hold without the replay or
+    # strategy being a failure. Benchmark underperformance is a review warning.
+    return "WARN"
 
 
 def detect_drawdown_episodes(equity_series: list[tuple[int, float]], min_pct: float) -> list[dict[str, Any]]:

@@ -103,7 +103,9 @@ def _self_custody(signer_ref: str = "", rpc_urls: dict | None = None,
 
     return SelfCustodyWallet(
         signer_ref=signer_ref, rpc_urls=rpc_urls or {}, transport=transport,
-        config={"signer_ref": signer_ref},
+        # This suite retains the explicitly configured legacy v1 contract.
+        # Current v2 quote/sign/execute behavior is covered by test_jupiter_v2.
+        config={"signer_ref": signer_ref, "jupiter_url": _JUP},
     )
 
 
@@ -172,13 +174,16 @@ def test_send_raw_transaction_confirms_receipt() -> None:
     from eth_account import Account
 
     acct = Account.create()
-    t = FakeRpcTransport(_eth_script("0x" + "beef" * 16))
+    from eth_utils import keccak
+    scripted=_eth_script('computed-from-signed-bytes')
+    scripted['eth_sendRawTransaction']=lambda body:'0x'+keccak(bytes.fromhex(body['params'][0][2:])).hex()
+    t = FakeRpcTransport(scripted)
     conn = EVMNative(chain="ethereum", chain_id=1, rpc_url=_ETH_RPC,
                      live=True, transport=t)
     out = conn.send_raw_transaction(
         to=acct.address, value=1, signer_private_key=acct.key.hex(),
     )
-    assert out["tx_hash"] == "0x" + "beef" * 16
+    assert out['tx_hash'].startswith('0x') and len(out['tx_hash'])==66
     assert out["confirmed"] is True
     assert out["nonce"] == 7
     assert out["gas_price_gwei"] == 2.0
@@ -391,7 +396,7 @@ def test_solana_swap_end_to_end_with_fake_rpc(tmp_path) -> None:
         "getTokenSupply": {"value": {"decimals": 6, "uiAmount": 1.0}},
         "getTransaction": {"meta":{"err":None,"preTokenBalances":[],"postTokenBalances":[
             {"owner":__import__("base58").b58encode(pubkey).decode(),"mint":_USDC_SOL,"uiTokenAmount":{"uiAmountString":"4"}}]}},
-        "sendTransaction": "SIG" + "1" * 20,
+        "sendTransaction": lambda body: __import__('base58').b58encode(base64.b64decode(body['params'][0])[1:65]).decode(),
         "getSignatureStatuses": {"value": [{"confirmationStatus": "finalized",
                                             "slot": 42, "err": None}]},
     })
@@ -404,7 +409,7 @@ def test_solana_swap_end_to_end_with_fake_rpc(tmp_path) -> None:
                      amount_in=1.0, slippage_bps=50, live=True)
 
     assert result.ok is True
-    assert result.tx_hash.startswith("SIG")
+    assert len(__import__('base58').b58decode(result.tx_hash)) == 64
     assert result.extra["confirmed"] is True
     assert result.amount_out == pytest.approx(4.0)
 

@@ -18,7 +18,9 @@ def resolve_binding(config, payload):
     if account_id:
         from ..trading.accounts import get_account_profile
         account = get_account_profile(config.paths, account_id)
-        if account.kind not in ('chain', 'dex') or not account.wallet_id:
+        settlement = (account.kind == 'prediction_market' and body.get('kind') == 'redeem'
+                      and body.get('protocol') == 'polymarket_ctf' and body.get('chain') == 'polygon')
+        if (account.kind not in ('chain', 'dex') and not settlement) or not account.wallet_id:
             raise WalletPolicyDenied('account has no on-chain wallet binding')
         if wallet_id and wallet_id != account.wallet_id:
             raise WalletPolicyDenied('account_id/wallet_id mismatch')

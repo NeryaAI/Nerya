@@ -99,10 +99,32 @@ class ScheduleEntry:
     session_mode: str = "reuse"
     session_id: str | None = None
     session_ids: list[str] = field(default_factory=list)
+    overlap_policy: str = "skip"
     execution: dict[str, Any] = field(default_factory=dict)
     owner_actor_id: str = "local:loopback"
+    anchor_at: float | None = None
+    run_at: str | None = None
+    archived: bool = False
 
     def __post_init__(self) -> None:
+        if self.overlap_policy not in {"skip", "coalesce", "queue"}:
+            raise TriggerValidationError("invalid overlap policy")
+        if not isinstance(self.execution,dict):
+            raise TriggerValidationError("execution must be an object")
+        if self.every_seconds is not None and (type(self.every_seconds) is not int or self.every_seconds<=0):
+            raise TriggerValidationError("interval must be a positive integer")
+        stamps={}
+        for key in ("run_at","starts_at","ends_at"):
+            value=getattr(self,key)
+            if value:
+                try:
+                    stamp=datetime.fromisoformat(value.replace("Z","+00:00"))
+                    if stamp.tzinfo is None:raise ValueError("timezone required")
+                    stamps[key]=stamp
+                except (ValueError,TypeError,AttributeError) as exc:
+                    raise TriggerValidationError(key+" requires an ISO timestamp with timezone") from exc
+        if "starts_at" in stamps and "ends_at" in stamps and stamps["starts_at"]>=stamps["ends_at"]:
+            raise TriggerValidationError("schedule end must follow start")
         self.session_kind = str(self.session_kind or "trigger").strip().lower()
         self.session_mode = _normalise_session_mode(self.session_mode)
         self.session_ids = [
@@ -112,11 +134,11 @@ class ScheduleEntry:
         if self.session_id is not None:
             sid = str(self.session_id).strip()
             self.session_id = sid or None
-        if self.every_seconds is None and not self.cron:
+        if self.every_seconds is None and not self.cron and not self.run_at:
             raise TriggerValidationError(
                 f"schedule {self.id!r} must set either every_seconds or cron"
             )
-        if self.every_seconds is not None and self.cron:
+        if sum(value is not None and value!="" for value in (self.every_seconds,self.cron,self.run_at))>1:
             raise TriggerValidationError(
                 f"schedule {self.id!r} cannot set both every_seconds and cron"
             )
@@ -174,7 +196,7 @@ class ScheduleEntry:
     # ---------------------------------------------------------- windowing
     def in_window(self, now: datetime) -> bool:
         """Return True iff the schedule is live at ``now``."""
-        if not self.enabled:
+        if not self.enabled or self.archived:
             return False
         if self.starts_at:
             try:
@@ -203,6 +225,9 @@ class ScheduleEntry:
         """
         if not self.in_window(now):
             return False
+        if self.run_at:
+            target=datetime.fromisoformat(self.run_at.replace("Z","+00:00"))
+            return target<=now and last_fired is None
         if self.every_seconds is not None:
             if last_fired is None:
                 return True
@@ -247,6 +272,12 @@ def load_schedules(paths: WorkspacePaths) -> list[ScheduleEntry]:
             "session_mode": row.get("session_mode") or "reuse",
             "session_id": row.get("session_id"),
             "session_ids": list(row.get("session_ids") or []),
+            "overlap_policy": row.get("overlap_policy", "skip"),
+            "execution": row.get("execution") or {},
+            "owner_actor_id": str(row.get("owner_actor_id") or "local:loopback"),
+            "anchor_at": row.get("anchor_at"),
+            "run_at": row.get("run_at"),
+            "archived": bool(row.get("archived",False)),
         }
         ttl = row.get("session_ttl_seconds")
         if ttl is not None:
@@ -258,7 +289,9 @@ def load_schedules(paths: WorkspacePaths) -> list[ScheduleEntry]:
                 f"schedule {row.get('id')!r} cannot set both "
                 f"every_seconds and cron"
             )
-        if has_cron:
+        if row.get("run_at"):
+            pass
+        elif has_cron:
             kwargs["cron"] = str(row["cron"]).strip()
         else:
             # Default interval mirrors the old behaviour (60s) only when
@@ -318,6 +351,9 @@ def save_schedules(paths: WorkspacePaths, entries: list[ScheduleEntry]) -> None:
             row["session_id"] = e.session_id
         if e.session_ids:
             row["session_ids"] = list(e.session_ids)
+        for name in ("overlap_policy","execution","owner_actor_id","anchor_at","run_at","archived"):
+            value=getattr(e,name)
+            if value is not None:row[name]=value
         rows.append(row)
     paths.triggers_schedules_file.parent.mkdir(parents=True, exist_ok=True)
     yaml_io.dump(paths.triggers_schedules_file, {"schedules": rows})

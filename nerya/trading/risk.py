@@ -86,7 +86,7 @@ def _venue_family(venue: str) -> str:
     return family
 
 
-def _venues_compatible(market: str, account_venue: str) -> bool:
+def _venues_compatible(market: str, account_venue: str, *, workspace=None) -> bool:
     """Whether a market's venue prefix may execute on ``account_venue``.
 
     The connector strips everything before ':' from the market string, so
@@ -115,7 +115,7 @@ def _venues_compatible(market: str, account_venue: str) -> bool:
     try:
         from ..connectors.provider_spec import get_registry
 
-        registry = get_registry()
+        registry = get_registry(workspace)
         spec_a = registry.find(a)
         spec_b = registry.find(b)
         if spec_a is not None and spec_b is not None and spec_a.id == spec_b.id:
@@ -173,7 +173,7 @@ def _market_has_contract_suffix(market: str) -> bool:
     return "/" in symbol and ":" in symbol
 
 
-def _venue_supports_derivatives(account_venue: str) -> bool:
+def _venue_supports_derivatives(account_venue: str, *, workspace=None) -> bool:
     """Whether ``account_venue`` can trade contract-suffixed symbols.
 
     Resolution order (R2C3):
@@ -195,7 +195,7 @@ def _venue_supports_derivatives(account_venue: str) -> bool:
     try:
         from ..connectors.provider_spec import get_registry
 
-        spec = get_registry().find(raw)
+        spec = get_registry(workspace).find(raw)
     except Exception:
         spec = None
     if spec is None:
@@ -246,13 +246,18 @@ class RiskDecision:
 
 
 class RiskGate:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, readonly=False):
         self.config = config
+        self.readonly = readonly
         self._con = None
 
     def _con_lazy(self):
         if self._con is None:
-            self._con = connect(self.config.paths.db)
+            if self.readonly:
+                from ..db.sqlite import connect_preview
+                self._con = connect_preview(self.config.paths.db)
+            else:
+                self._con = connect(self.config.paths.db)
         return self._con
 
     def evaluate(
@@ -264,7 +269,13 @@ class RiskGate:
         preview: bool = False,
         wallet_swap: bool = False,
     ) -> RiskDecision:
+        if preview and not self.readonly:
+            return RiskGate(self.config, readonly=True).evaluate(intent, market_snapshot=market_snapshot,
+                                                                 resume=resume, preview=True, wallet_swap=wallet_swap)
         paths = self.config.paths
+        persist = self._persist if not preview else lambda *args, **kwargs: None
+        from .instruments import position_bucket
+        selected_bucket = position_bucket(intent.meta)
         reasons: list[str] = []
         decision: str = "allow"
 
@@ -350,7 +361,7 @@ class RiskGate:
         if (
             not wallet_swap
             and _venue_family(str(account_profile.venue or "")) != "mock"
-            and not _venues_compatible(intent.market, str(account_profile.venue or ""))
+            and not _venues_compatible(intent.market, str(account_profile.venue or ""), workspace=paths.root)
         ):
             reasons.append(
                 f"market_venue_account_mismatch:{intent.market}"
@@ -377,7 +388,7 @@ class RiskGate:
         if (
             _market_has_contract_suffix(intent.market)
             and _venue_family(str(account_profile.venue or "")) != "mock"
-            and not _venue_supports_derivatives(str(account_profile.venue or ""))
+            and not _venue_supports_derivatives(str(account_profile.venue or ""), workspace=paths.root)
         ):
             reasons.append(f"market_instrument_unsupported:{intent.market}")
             return RiskDecision(
@@ -512,9 +523,9 @@ class RiskGate:
         # contributed. Fall back to the virtual ledger when the book is
         # empty (e.g. a fresh account before any fill has landed) so
         # paper-only tests that pre-populated the ledger keep passing.
-        ledger = open_ledger(paths, account.id, account.initial_balance_usd)
+        ledger = open_ledger(paths, account.id, account.initial_balance_usd, persist_init=not preview)
         ledger_snapshot = ledger.snapshot()
-        book = PositionBook(paths)
+        book = PositionBook(paths, readonly=preview)
         try:
             book_open = book.open_positions(account_id=account.id)
         except Exception:
@@ -528,8 +539,9 @@ class RiskGate:
                 avg = float(pos.avg_entry_price or 0.0)
                 mark = float(pos.mark_price or avg or 0.0)
                 current_exposure += abs(size * mark)
-                current_merged_size_by_market[pos.market] = size
-                current_merged_avg_by_market[pos.market] = avg
+                if pos.position_side == selected_bucket:
+                    current_merged_size_by_market[pos.market] = size
+                    current_merged_avg_by_market[pos.market] = avg
         else:
             current_exposure = sum(
                 abs(p.get("size", 0) * p.get("avg_price", 0))
@@ -608,9 +620,29 @@ class RiskGate:
         snapshot_payload: dict[str, Any] = {}
         reservation_blocked_usd = 0.0
         max_age_s = float(self.config.get("trading.snapshot.max_age_seconds", 60))
-        snap = fresh_snapshot(self.config, intent.account_id, max_age_s=0.0 if wallet_swap and resume else max_age_s)
+        snap = fresh_snapshot(self.config, intent.account_id, max_age_s=0.0 if wallet_swap and resume else max_age_s, persist=not preview)
         if snap is not None:
             snapshot_payload = snap.asdict()
+            mode = str(self.config.get("trading.risk_mode", "normal"))
+            if mode not in {"normal", "halt_new_risk", "reduce_only", "freeze_all"} or mode == "freeze_all" or (
+                mode in {"halt_new_risk", "reduce_only"} and not position_reducing
+            ):
+                reasons.append("trading_risk_mode_blocks_action")
+                decision = "reject"
+            drawdown_caps = [value for value in (
+                strategy.limits.max_drawdown_pct, account_profile.limits.max_drawdown_pct
+            ) if value > 0]
+            if drawdown_caps and not position_reducing:
+                from .portfolio_risk import drawdown
+                row = self._con_lazy().execute(
+                    "SELECT MAX(nav_usd) FROM account_snapshots WHERE account_id=? AND source=?",
+                    (intent.account_id, snap.source),
+                ).fetchone()
+                high_water = max(float(row[0] or snap.nav_usd), snap.nav_usd)
+                actual_dd = drawdown(snap.nav_usd, high_water)
+                if actual_dd > min(drawdown_caps):
+                    reasons.append(f"max_drawdown_exceeded:{actual_dd}>{min(drawdown_caps)}")
+                    decision = "reject"
             # Position-reducing intents (close/reduce plan actions OR
             # sells that mathematically shrink the merged position)
             # bypass the freshness/health rejection: the operator needs
@@ -636,7 +668,7 @@ class RiskGate:
                     reasons.append(f"account_snapshot_health_{snap.health}")
                     decision = "reject"
             try:
-                reservation_blocked_usd = CapitalReservationStore(paths).total_blocked_usd(
+                reservation_blocked_usd = CapitalReservationStore(paths, readonly=preview).total_blocked_usd(
                     intent.account_id
                 )
             except Exception:
@@ -659,7 +691,7 @@ class RiskGate:
         # open is rejected until an operator runs a clean pass.
         try:
             recon_lookback = float(self.config.get("trading.reconciliation.halt_window_s", 1800))
-            worst = ReconciliationStore(paths).worst_recent(
+            worst = ReconciliationStore(paths, readonly=preview).worst_recent(
                 account_id=intent.account_id,
                 within_seconds=recon_lookback,
             )
@@ -818,7 +850,7 @@ class RiskGate:
             fix_hints=derive_fix_hints(reasons, intent=intent),
         )
         try:
-            self._persist(decision_obj, intent=intent)
+            persist(decision_obj, intent=intent)
         except Exception:
             # For paper accounts persistence stays advisory — a
             # bookkeeping hiccup must not block simulated trading. For

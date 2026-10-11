@@ -41,7 +41,7 @@ def _price(config, market):
     return {'price':price,'age_s':age,'_envelope':row['_envelope']}
 
 
-def submit_plan(config, plan):
+def submit_plan(config, plan, *, quote_only=False):
     from ..trading.accounts import get_account_profile
     from ..trading.submit import _plan_to_intent, _resolve_position_sized_plan
     from ..trading.risk import RiskGate
@@ -94,7 +94,7 @@ def submit_plan(config, plan):
         if not share or token_size>abs(share.size_share_base)+1e-12:
             raise WalletPolicyDenied('swap sell exceeds the strategy-owned token position')
     intent=_plan_to_intent(plan)
-    risk=RiskGate(config).evaluate(intent,market_snapshot=snapshot,wallet_swap=True)
+    risk=RiskGate(config).evaluate(intent,market_snapshot=snapshot,wallet_swap=True,preview=quote_only)
     if risk.decision=='reject':
         return {'status':'rejected','risk_decision':risk.asdict(),'intent':intent.asdict()}
     if profile.mode=='shadow':
@@ -109,6 +109,9 @@ def submit_plan(config, plan):
         'slippage_bps':slippage,
     }
     request,quote=prepare_swap(config,request)
+    if quote_only:
+        return {"status":"quoted","wallet_request":request,"wallet_quote":quote,"plan":plan.asdict(),
+                "risk_decision":risk.asdict(),"quantity_base":token_size,"notional_usd":notional,"market_snapshot":snapshot}
     if profile.mode=='paper':
         result={'provider':provider,'chain':chain,'ok':True,'amount_in':request['amount_in'],
                 'amount_out':quote['expected_out'],'tx_hash':'','extra':{'confirmed':True,'amount_out_source':'paper_quote'}}
@@ -173,6 +176,12 @@ def _record_fill_locked(config,request,result,execution_id,*,source):
     dollars=float(request['amount_in'] if side=='buy' else result['amount_out'])
     if size<=0 or dollars<=0:
         raise WalletPolicyDenied('cannot book a swap without observed execution quantities')
+    from .fees import price_network_fee
+    extra = result.get('extra') or {}
+    costs = {'status': 'paper', 'fee_usd': 0.0} if source == 'paper' else price_network_fee(extra.get('network_fee'))
+    # Reuse the persisted valuation on recovery rather than repricing a historical
+    # gas cost or counting a net-of-router-fees swap output twice.
+    fee_usd = float(costs.get('fee_usd', 0.0))
     with closing(OrderTracker(config.paths)) as tracker:
         cid='wallet_'+execution_id
         order=tracker.get_by_client_order_id(cid)
@@ -180,18 +189,21 @@ def _record_fill_locked(config,request,result,execution_id,*,source):
             order=tracker.register(client_order_id=cid,account_id=request['account_id'],strategy_id=request['strategy_id'],
                 market=request['market'],side=side,order_type='market',size_base=size,notional_usd=dollars,
                 intent_id=request.get('intent_id'),meta={'wallet_swap':True,'tx_hash':result.get('tx_hash'),
-                    'fee_status':'unpriced_gas' if source=='live' else 'paper',
+                    'fee_status':costs['status'], 'cost_evidence':costs,
                     'amount_out_source':(result.get('extra') or {}).get('amount_out_source')})
         tracker.mark_submitted(order.order_id,exchange_order_id=result.get('tx_hash') or None)
-        fill=tracker.record_fill(order_id=order.order_id,price=dollars/size,size_base=size,fee_usd=0,source=source,cumulative_filled=size,
-            meta={'fee_status':'unpriced_gas' if source=='live' else 'paper',
+        if (order.meta or {}).get('cost_evidence'):
+            costs = order.meta['cost_evidence']
+            fee_usd = float(costs.get('fee_usd', 0.0))
+        fill=tracker.record_fill(order_id=order.order_id,price=dollars/size,size_base=size,fee_usd=fee_usd,source=source,cumulative_filled=size,
+            meta={'fee_status':costs['status'], 'cost_evidence':costs,
                   'amount_out_source':(result.get('extra') or {}).get('amount_out_source')})
         if fill is None:
             fill=next((f for f in tracker.fills_for_order(order.order_id) if abs(f.size_base-size)<1e-12),None)
         if fill is not None:
             with closing(PositionBook(config.paths)) as book:
                 book.apply_fill(account_id=request['account_id'],strategy_id=request['strategy_id'],market=request['market'],
-                    side=side,price=dollars/size,size_base=size,source=source,order_id=order.order_id,fill_id=fill.fill_id)
+                    side=side,price=dollars/size,size_base=size,fee_usd=fill.fee_usd,source=source,order_id=order.order_id,fill_id=fill.fill_id)
         if source=='paper':
             from ..trading.virtual_ledger import open_ledger
             from ..trading.accounts import get_account_profile

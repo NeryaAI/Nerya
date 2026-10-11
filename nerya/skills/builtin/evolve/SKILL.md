@@ -47,6 +47,14 @@ or shell edit; surface the advisory reject plainly (the change is
 refused / rejected as advisory-only) and point the operator to the
 dashboard approval path that owns that scope.
 
+For `nerya.yml:mcp`, do not treat omitted MCP settings in a nonempty
+provider-only proposal as a requested deletion. The proposal tool retains
+the existing MCP block. An *explicit* MCP config mutation is protected and
+does not grant any MCP connection rights. MCP setup/consent happens only
+through a separate connector setup or use flow, **never** via an Agent
+configuration or tool-permission dialog. Other protected fields remain
+blocked regardless of the normal tool permission mode.
+
 ## Lazy References
 
 - `references/full-playbook.md` for the detailed evolve rules.

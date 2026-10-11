@@ -16,6 +16,7 @@ evolution proposal for an operator to approve.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from ..core import yaml_io
@@ -533,6 +534,21 @@ def propose_core_config_patch(
         before = current_config if current_config is not None else (
             yaml_io.load(paths.root / target, default={}) or {}
         )
+        # Agent models often send only the section they are changing (for
+        # example {"providers": ...}) even though this tool accepts a full
+        # document. Interpreting that omission as deletion used to reset the
+        # protected MCP settings to defaults and trigger a false approval
+        # rejection for an unrelated, safe change. Preserve omitted sections
+        # from the existing on-disk YAML, or from the supplied baseline in
+        # isolated tests. An empty document remains a destructive reset.
+        if config_after and "mcp" not in config_after:
+            disk_before = yaml_io.load(paths.root / target, default={}) or {}
+            baseline = disk_before if isinstance(disk_before, dict) and disk_before else before
+            if not isinstance(baseline, dict):
+                raise ValueError("existing nerya.yml must be a mapping")
+            config_after = _merge(baseline, config_after)
+        else:
+            config_after = deepcopy(config_after)
         # Compare effective transport policy, including omitted/reset keys. This
         # permits preserving a partial on-disk MCP block but rejects deleting a
         # restriction to fall back to a more permissive default.

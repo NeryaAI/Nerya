@@ -158,8 +158,13 @@ EVOLVE_CORE_CONFIG_PATCH_SCHEMA: dict[str, Any] = {
         "config_after": {
             "type": "object",
             "description": (
-                "Full parsed YAML object for the target file after the proposed "
-                "change. The live file is not mutated. For messages/channels.yml "
+                "Parsed YAML object after the proposed change. For nerya.yml, "
+                "you may provide only the non-protected sections being changed; "
+                "omitted top-level sections are preserved from the existing "
+                "file, not reset. MCP exposure/OAuth connection management "
+                "is separate from Agent chat and never authorized by this tool; "
+                "risk/signers/secrets "
+                "remain blocked. The live file is not mutated. For messages/channels.yml "
                 "or messages/channels.yaml, use the canonical shape "
                 "`channels: {<id>: {kind: telegram|discord|webhook, ...}}` plus "
                 "top-level `severity_routes: {info: [telegram], critical: "
@@ -624,6 +629,10 @@ def evolve_core_config_patch_handler(call: ToolCall, *, config: Config) -> ToolR
         )
     except ProtectedScopeViolation as exc:
         target = str(args.get("target") or "")
+        # A rejected config proposal is not an MCP connection request, nor a
+        # native tool ASK. Do not manufacture an OAuth/admin approval action
+        # inside an ordinary Agent conversation. The separate MCP setup and
+        # connector-use flows own their own credentials and consent.
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,

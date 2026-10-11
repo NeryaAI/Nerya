@@ -12,6 +12,7 @@ from nerya.core import yaml_io
 from nerya.core.config import Config
 from nerya.core.paths import WorkspacePaths
 from nerya.subagents.control import continue_agent
+from nerya.subagents.control import session_permission_mode
 from nerya.subagents.dispatcher import SubAgentDispatcher, SubAgentResult
 from nerya.subagents.permissions import child_permission_context
 from nerya.subagents.threads import AgentThreadStore
@@ -24,6 +25,42 @@ from nerya.tools.registry import ToolRegistry
 from nerya.tools.types import RiskLevel, ToolCall, ToolResult
 from nerya.agent.streaming import get_default_bus
 from test_subagent_native_runtime import Gateway, call, descriptor, final, spec
+
+
+def test_subagent_continuation_keeps_latest_operator_permission_after_compaction(tmp_path):
+    """YOLO is a command fact, not a line from an LLM-compacted transcript."""
+    from copy import deepcopy
+    from nerya.agent.command_runtime import CommandRuntime
+    from nerya.core.config import DEFAULT_CONFIG
+
+    config = Config(paths=WorkspacePaths(tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    config.data["runtime"]["permission_mode"] = "auto"
+    rt = CommandRuntime(config, lambda *_: {}, epoch="permissions-test")
+
+    def submit(cid: str, mode: str):
+        return rt.submit({
+            "command_id": cid, "session_id": "session-yolo",
+            "_auth_actor_id": "local:loopback", "request": {
+                "payload": {"text": "Continue this task"}, "permission_mode": mode,
+            },
+        }, start=False)
+
+    submit("command-grant-yolo", "yolo")
+    assert session_permission_mode(config, "session-yolo", "local:loopback") == PermissionMode.YOLO
+    # Same actor only. An unrelated token must not inherit another person's
+    # ordinary native-tool permissions after reading their conversation.
+    assert session_permission_mode(config, "session-yolo", "another-actor") == PermissionMode.AUTO
+    assert session_permission_mode(config, "session-yolo", "") == PermissionMode.AUTO
+
+    # Compaction may discard the entire text transcript, but not the durable
+    # accepted command's mode or its actor binding.
+    with rt.store.transaction() as con:
+        con.execute("UPDATE agent_messages SET content='[context checkpoint]' "
+                    "WHERE session_id=?", ("session-yolo",))
+    assert session_permission_mode(config, "session-yolo", "local:loopback") == PermissionMode.YOLO
+
+    submit("command-revoke-yolo", "auto")
+    assert session_permission_mode(config, "session-yolo", "local:loopback") == PermissionMode.AUTO
 
 
 @pytest.fixture
@@ -141,6 +178,23 @@ def test_current_strategy_policy_intersects_saved_parent_policy(scope):
                                   permission_context=context)
     for name in ["read_probe", "other_read", "write_probe"]:
         assert executor.execute(ToolCall(name=name, arguments={})).is_error
+    assert scope.invoked == []
+
+
+def test_dashboard_continuation_observes_new_assistant_restrictions(scope, monkeypatch):
+    from nerya.agent.assistants import AssistantStore
+    assistants = AssistantStore(scope.config.paths)
+    profile = assistants.save({"name": "Review fixture"})
+    assistants.bind("session", profile["id"])
+    store = AgentThreadStore(scope.config.paths)
+    row = store.begin(spec=scope.role, payload={}, session_id="session", parent_call_id="parent",
+        strategy_id=None, turn_id="turn", context_scope="subagent")
+    store.finish(row, state="completed", transcript=[])
+    assistants.save({"tool_policy": {"deny": ["read_probe"]}}, aid=profile["id"], expected_revision=profile["revision"])
+    gateway = Gateway(call("read_probe"), final())
+    monkeypatch.setattr("nerya.subagents.dispatcher.LLMGateway", lambda _: gateway)
+    continue_agent(scope, session_id="session", agent_id=row["id"], message="continue", request_id="revoked")
+    assert gateway.calls
     assert scope.invoked == []
 
 

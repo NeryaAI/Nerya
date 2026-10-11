@@ -26,8 +26,8 @@ def routes():
     def list_all(client, _payload):
         ws = Path(client.config.paths.root)
         # Make sure any workspace/providers/* are hot-loaded too.
-        get_registry().reload_workspace(ws)
-        providers = list_providers()
+        get_registry(ws).reload_workspace(ws)
+        providers = list_providers(ws)
         return {
             "providers": providers,
             "ccxt_supported": supported_exchanges(),
@@ -38,20 +38,20 @@ def routes():
         venue = str(payload.get("venue") or "").lower().strip()
         if not venue:
             return {"ok": False, "error": "venue_required"}
-        spec = get_registry().find(venue)
+        spec = get_registry(client.config.paths.root).find(venue)
         if spec is None:
             return {"ok": False, "error": "unknown_venue",
-                    "known": sorted({s["id"] for s in list_providers()})}
+                    "known": sorted({s["id"] for s in list_providers(client.config.paths.root)})}
         return {"ok": True, "venue": venue, "spec": spec.to_info()}
 
-    def credential_schema(_client, payload):
+    def credential_schema(client, payload):
         venue = str((payload or {}).get("venue") or "").lower().strip()
         if not venue:
             return {"ok": False, "error": "venue_required"}
-        spec = get_registry().find(venue)
+        spec = get_registry(client.config.paths.root).find(venue)
         if spec is None:
             return {"ok": False, "error": "unknown_venue",
-                    "known": sorted({s["id"] for s in list_providers()})}
+                    "known": sorted({s["id"] for s in list_providers(client.config.paths.root)})}
         fields = [f.to_dict() for f in spec.credential_fields]
         return {
             "ok": True,
@@ -70,7 +70,7 @@ def routes():
         approve = bool(body.get("approve", False))
         if not venue:
             return {"ok": False, "error": "venue_required"}
-        spec = get_registry().find(venue)
+        spec = get_registry(client.config.paths.root).find(venue)
         if spec is None:
             return {"ok": False, "error": "unknown_venue"}
         cmd = (spec.install_command or "").strip()

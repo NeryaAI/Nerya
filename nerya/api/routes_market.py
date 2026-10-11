@@ -50,7 +50,6 @@ def _public_venues(config_like=None) -> list[dict]:
     CEX providers, Polymarket, and any user-authored provider the
     operator hot-loaded, without having to edit this list.
     """
-    reg = get_registry()
     # Ensure workspace-authored providers are reflected even if the
     # registry hasn't been touched yet in this process.
     workspace = None
@@ -58,6 +57,7 @@ def _public_venues(config_like=None) -> list[dict]:
         paths = getattr(config_like, "paths", None)
         if paths is not None:
             workspace = getattr(paths, "root", None)
+    reg = get_registry(workspace)
     if workspace is not None:
         try:
             reg.reload_workspace(workspace)
@@ -175,12 +175,13 @@ def _public_connector(venue: str, *, config_like=None):
         if allow_mock:
             return MockExchange()
         return None
-    reg = get_registry()
+    workspace = getattr(getattr(config_like, "paths", None), "root", None)
+    reg = get_registry(workspace)
     spec = reg.find(venue_l)
     if spec is None or spec.id in _MOCK_REGISTRY_IDS:
         return None
     try:
-        return build_connector({"venue": venue_l, "live": False})
+        return build_connector({"venue": venue_l, "live": False}, workspace=workspace)
     except Exception:
         return MockExchange() if allow_mock else None
 

@@ -110,7 +110,8 @@ def test_pending_interaction_rejects_direct_command_and_history_edit(tmp_path):
     ("execute","request_user_input",{"title":"Strategy inputs","questions":[{"id":"market","question":"Which market?","options":["BTC","ETH"]},{"id":"period","question":"Which period?"}]}),
     ("plan","propose_plan",{"title":"Read and report","steps":["Read the evidence","Write the report"],"deliverables":["Report"]}),
 ])
-def test_real_http_kernel_question_and_plan_resume(tmp_path,monkeypatch,mode,tool,payload):
+@pytest.mark.parametrize("isolated", [False, True])
+def test_real_http_kernel_question_and_plan_resume(tmp_path,monkeypatch,mode,tool,payload,isolated):
     from nerya.api.local_server import build_server
     from nerya.llm.messages import MessagesResponse
     import nerya.agent.kernel as kernel_module
@@ -144,7 +145,7 @@ def test_real_http_kernel_question_and_plan_resume(tmp_path,monkeypatch,mode,too
     try:
         info=http("/runtime/info");assert "plan_mode" in info["capabilities"] and "goal_mode" in info["capabilities"]
         assert info["build_id"] and "root" not in info
-        http("/agent/commands",{"command_id":"command-workbench","session_id":"session-test","request":{"payload":{"text":"Help with this task"},"work_mode":mode}})
+        http("/agent/commands",{"command_id":"command-workbench","session_id":"session-test","request":{"payload":{"text":"Help with this task"},"work_mode":mode,"run_only":isolated}})
         first=settled("command-workbench")
         assert first["state"]=="awaiting_input", first
         view=http("/agent/sessions/view?session_id=session-test")
@@ -158,6 +159,9 @@ def test_real_http_kernel_question_and_plan_resume(tmp_path,monkeypatch,mode,too
         assert final["state"]=="succeeded", final
         assert (final["turn_id"]==first["turn_id"]) == (mode=="execute")
         assert http("/agent/interactions/respond",answer)["duplicate"]
+        # Recovering the same durable response after reload does not re-run tools.
+        assert http("/agent/interactions/respond", {"action":"reconcile", "session_id":"session-test",
+            "interaction_id":item["interaction_id"]})["duplicate"]
         assert len(calls)==2
         if "questions" in payload:
             resumed=json.dumps(calls[-1])

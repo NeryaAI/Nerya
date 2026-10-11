@@ -67,7 +67,7 @@ def _venues_snapshot(_client) -> list[dict[str, Any]]:
     """Real venue catalog as seen by the runtime connector registry."""
     from .routes_market import _MOCK_REGISTRY_IDS  # type: ignore[attr-defined]
 
-    specs = get_registry().list_specs()
+    specs = get_registry(_client.config.paths.root).list_specs()
     out: list[dict[str, Any]] = []
     for spec in specs:
         info = spec.to_info()

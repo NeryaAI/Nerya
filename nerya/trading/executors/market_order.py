@@ -27,6 +27,7 @@ from typing import Any
 from ..accounts import get_account_profile
 from ..capital import CapitalReservationStore
 from ..order_intents import OrderCandidate
+from ..instruments import position_bucket
 from ..order_tracker import OrderTracker, make_client_order_id
 from ..position_book import PositionBook
 from ..protection_store import ProtectionStore
@@ -158,6 +159,9 @@ class MarketOrderExecutor(Executor):
                 reservation_id=candidate.reservation_id or None,
                 executor_id=self.run.executor_id,
                 meta={"resized": candidate.resized, "fee_estimate_usd": candidate.estimated_fee_usd,
+                      "position_side": position_bucket(candidate.meta),
+                      "account_binding":candidate.meta.get("account_binding"),
+                      "provider_binding":candidate.meta.get("provider_binding"),
                       "order_query": dict(candidate.meta.get("order_query") or {}),
                       "protects_rule": candidate.meta.get("protects_rule")},
             )
@@ -309,6 +313,17 @@ class MarketOrderExecutor(Executor):
             return "runtime_config_unavailable"
         if config.kill_switch():
             return "kill_switch_enabled"
+        from ..accounts import account_revision
+        from ...connectors.provider_spec import get_registry
+        candidate=self._candidate()
+        if candidate.meta.get("account_binding") and candidate.meta["account_binding"]!=account_revision(profile):
+            return "account_binding_changed"
+        if candidate.meta.get("provider_binding"):
+            spec=get_registry(self.paths.root).find(profile.venue)
+            if spec is None or spec.binding()!=candidate.meta["provider_binding"]:return "provider_revision_changed"
+        risk_mode = str(config.get("trading.risk_mode", "normal"))
+        if risk_mode == "freeze_all" or (risk_mode in {"halt_new_risk", "reduce_only"} and not self._candidate().reduce_only):
+            return "trading_risk_mode_blocks_action"
         if not config.live_trading_enabled():
             return "live_trading_disabled_runtime"
         if not bool(getattr(profile, "live_trading_enabled", False)):
@@ -443,6 +458,7 @@ class MarketOrderExecutor(Executor):
             executor_id=self.run.executor_id,
             order_id=order_id,
             fill_id=fill.fill_id,
+            position_side=position_bucket(candidate.meta),
         )
 
         # Sync the legacy virtual ledger so existing dashboards keep working.
@@ -525,6 +541,9 @@ class MarketOrderExecutor(Executor):
         # bracket ids come back on the ack (``attached_bracket_order_ids``)
         # and are recorded by ``_maybe_attach_protection`` for accounting.
         sl_price, tp_price = self._native_bracket_levels(candidate)
+        if getattr(conn, "kind", "") == "prediction_market":
+            sl_price, tp_price = None, None
+            self.run.result_json["protection_routes"] = {"stop_loss": "local", "take_profit": "local"}
         protection_kwargs = {}
         if hasattr(conn, "protection_capabilities"):
             protection_kwargs = {
@@ -564,6 +583,8 @@ class MarketOrderExecutor(Executor):
                 # mark the BudgetChecker stashed; connectors that don't
                 # accept the kwarg never see it (signature-filtered).
                 reference_price=_reference_mark(candidate),
+                max_slippage_bps=candidate.meta.get("max_slippage_bps"),
+                position_side=position_bucket(candidate.meta) if position_bucket(candidate.meta) != "net" else None,
                 **protection_kwargs,
             )
         except NotImplementedError as exc:
@@ -691,10 +712,16 @@ class MarketOrderExecutor(Executor):
         order = tracker.get(order_id)
         if order is None:
             return None
+        from ..accounts import account_revision
+        if order.meta.get("account_binding") and order.meta["account_binding"]!=account_revision(profile):
+            tracker.annotate(order_id,"account_binding_changed")
+            return None
         registry = ConnectorRegistry(workspace=self.paths.root)
         legacy_account = profile.to_connector_account()
         try:
-            conn = registry.get(profile.id, legacy_account.connector_cfg())
+            if order.meta.get("provider_binding"):
+                conn=registry.get(profile.id,legacy_account.connector_cfg(),provider_binding=order.meta["provider_binding"])
+            else:conn = registry.get(profile.id, legacy_account.connector_cfg())
         except Exception:
             # Registry/transport trouble is not venue not-found evidence —
             # never advance the lost counter for it.
@@ -807,6 +834,7 @@ class MarketOrderExecutor(Executor):
                 executor_id=self.run.executor_id,
                 order_id=order_id,
                 fill_id=getattr(fill, "fill_id", None),
+                position_side=position_bucket(candidate.meta),
             )
             self._maybe_attach_protection()
         except Exception:
@@ -930,6 +958,7 @@ class MarketOrderExecutor(Executor):
             account_id=candidate.account_id,
             strategy_id=candidate.strategy_id,
             market=candidate.market,
+            position_side=position_bucket(candidate.meta),
         )
         if position is None:
             book.close()
@@ -953,7 +982,8 @@ class MarketOrderExecutor(Executor):
         # evaluates locally on each tick.
         exchange_brackets = dict((self.run.result_json or {}).get("exchange_bracket_order_ids") or {})
         declared_mode = str(plan_protection.get("mode") or "soft_runtime")
-        share = book.get_share(account_id=candidate.account_id, strategy_id=candidate.strategy_id, market=candidate.market)
+        share = book.get_share(account_id=candidate.account_id, strategy_id=candidate.strategy_id, market=candidate.market,
+                               position_side=position_bucket(candidate.meta))
         rule = ProtectionRule(
             position_id=position.position_id,
             executor_id=self.run.executor_id,

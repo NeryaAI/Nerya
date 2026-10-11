@@ -25,25 +25,8 @@ from .dex_base import NativeDEXConnector
 #: Canonical chain-name -> EIP-155 chain-id map. Single source of truth
 #: for the connectors layer (self_custody re-uses it; provider_spec
 #: defaults ``chain_id`` from it when the operator row omits it).
-EVM_CHAIN_IDS: dict[str, int] = {
-    "ethereum": 1,
-    "bsc": 56,
-    "polygon": 137,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "avalanche": 43114,
-    "base": 8453,
-    "linea": 59144,
-    "zksync": 324,
-    "blast": 81457,
-    "scroll": 534352,
-    "mantle": 5000,
-    "fantom": 250,
-    "celo": 42220,
-    "gnosis": 100,
-    "sepolia": 11155111,
-    "base-sepolia": 84532,
-}
+from .chains import CHAIN_IDS
+EVM_CHAIN_IDS: dict[str, int] = dict(CHAIN_IDS)
 
 #: Sanity floor used only when the RPC cannot be asked for a gas price.
 #: A stale fallback below a chain's real floor produces a tx that never
@@ -216,6 +199,7 @@ class EVMNative(NativeDEXConnector):
         value: int = 0,
         signer_private_key: str,
         gas_price_gwei: float | None = None,
+        gas_price_wei: int | None = None,
         gas_limit: int = 250_000,
         confirm: bool = True,
         on_broadcast: Any = None,
@@ -237,11 +221,13 @@ class EVMNative(NativeDEXConnector):
             ) from exc
         from_addr = Account.from_key(signer_private_key).address
         nonce = self.get_nonce(from_addr)
-        gp_gwei = self.gas_price_or_fallback(gas_price_gwei)
+        gp_gwei = self.gas_price_or_fallback(gas_price_gwei) if gas_price_wei is None else gas_price_wei / 1e9
+        if gas_price_wei is not None and (type(gas_price_wei) is not int or gas_price_wei<=0):
+            raise TradingError('gas_price_wei must be a positive integer')
         tx = {
             "to": to, "value": int(value),
             "gas": int(gas_limit),
-            "gasPrice": int(gp_gwei * 1e9),
+            "gasPrice": gas_price_wei if gas_price_wei is not None else int(gp_gwei * 1e9),
             "nonce": nonce,
             "chainId": self.chain_id,
             "data": data if data.startswith("0x") else "0x" + data,
@@ -259,6 +245,8 @@ class EVMNative(NativeDEXConnector):
         tx_hash = self._rpc("eth_sendRawTransaction", [raw_hex])
         if not tx_hash:
             raise TradingError("evm eth_sendRawTransaction returned empty result")
+        if str(tx_hash).lower()!=expected_hash.lower():
+            raise TradingError('evm broadcast hash differs from the signed transaction identity')
         out = {"tx_hash": tx_hash, "from": from_addr, "to": to,
                "value": value, "nonce": nonce, "gas_price_gwei": gp_gwei,
                "chain": self.chain, "chain_id": self.chain_id,

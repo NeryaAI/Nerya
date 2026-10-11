@@ -2529,7 +2529,13 @@ def register_native_tools(
                     "routing, reasoning_effort, max_parallel, custom RSS "
                     "feeds, outbound channel/webhook config, severity-based "
                     "notification routing, trade notification fan-out, or "
-                    "other agent/runtime defaults. Dashboard, page, widget, and "
+                    "other agent/runtime defaults. For nerya.yml, sending only "
+                    "the changed non-protected top-level sections preserves "
+                    "omitted existing sections and avoids accidental MCP resets. "
+                    "MCP integration connection and OAuth are separate from "
+                    "normal Agent chat; this proposal tool cannot request "
+                    "MCP access or change protected MCP connection settings. "
+                    "Dashboard, page, widget, and "
                     "menu requests must use workspace_ui_inspect followed by "
                     "workspace_ui_propose instead of this full-document tool. "
                     "For messages/channels.yml "
@@ -3612,6 +3618,8 @@ def register_native_tools(
             ),
         ])
     registry.register_all(descriptors, replace=replace)
+    from .financial import register_financial_tools
+    register_financial_tools(registry,deps,replace=replace)
     from .sdk_accounts import register_sdk_account_tools
     register_sdk_account_tools(registry,deps,replace=replace)
     register_skill_tool(

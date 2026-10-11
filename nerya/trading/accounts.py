@@ -19,6 +19,7 @@ row) rather than replacing :class:`Account`. That means:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from ..core import yaml_io
@@ -39,16 +40,14 @@ class AccountPermissions:
     read_balances: bool = True
     place_order: bool = False
     cancel_order: bool = False
-    withdraw: bool = False  # always false — Nerya never touches withdrawals
+    withdraw: bool = False  # Explicit operator configuration; grants never enable it.
 
     def asdict(self) -> dict[str, Any]:
         return {
             "read_balances": self.read_balances,
             "place_order": self.place_order,
             "cancel_order": self.cancel_order,
-            # Force False on the wire so a misconfigured YAML row can't
-            # silently advertise withdraw capability.
-            "withdraw": False,
+            "withdraw": bool(self.withdraw),
         }
 
 
@@ -264,7 +263,7 @@ def _parse_permissions(row: dict[str, Any]) -> AccountPermissions:
         read_balances=bool(raw.get("read_balances", True)),
         place_order=bool(raw.get("place_order", False)),
         cancel_order=bool(raw.get("cancel_order", False)),
-        withdraw=False,  # hard-coded — Nerya never opts in to withdraw.
+        withdraw=raw.get("withdraw") is True,
     )
 
 
@@ -572,6 +571,7 @@ def _missing_required_connection_fields(
     provider_config: dict[str, Any],
     raw_account: dict[str, Any],
     wallet_bound_account: bool,
+    workspace: Path | None = None,
 ) -> list[str]:
     """Return provider-required fields missing from a real account row."""
 
@@ -586,7 +586,7 @@ def _missing_required_connection_fields(
     try:
         from ..connectors.provider_spec import get_registry
 
-        spec = get_registry().find(venue)
+        spec = get_registry(workspace).find(venue)
     except Exception:  # pragma: no cover - provider registry is best effort here
         spec = None
     if spec is None:
@@ -710,6 +710,7 @@ def upsert_account(
         provider_config=provider_config,
         raw_account=account,
         wallet_bound_account=wallet_bound_account,
+        workspace=paths.root,
     )
     if missing_connection_fields:
         raise TradingError(

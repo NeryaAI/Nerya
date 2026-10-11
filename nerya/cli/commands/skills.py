@@ -143,6 +143,28 @@ def cmd_trading_submit(args) -> int:
     return 0
 
 
+def cmd_trading_components(args) -> int:
+    from ...trading.components import trading_components
+    client = _client(args.workspace, getattr(args, "profile", None))
+    report = trading_components(client.config).describe()
+    _print(report)
+    return 1 if report["errors"] else 0
+
+
+def cmd_trading_guard(args) -> int:
+    from ...trading.guard import TradingGuard
+    client = _client(args.workspace, getattr(args, "profile", None))
+    worker = TradingGuard(client.config, interval=args.interval)
+    if args.once:
+        try:
+            _print(worker.run_once())
+        finally:
+            worker.release()
+    else:
+        worker.run()
+    return 0
+
+
 # ----------------------------------------------------------------- review
 def cmd_review_strategy(args) -> int:
     from ...strategy_history import session_writer
@@ -204,6 +226,14 @@ def register(sub) -> None:
 
     # trading
     trad = sub.add_parser("trading").add_subparsers(dest="rcmd", required=True)
+    p = trad.add_parser("components", help="reload and inspect workspace trading components")
+    _add_ws(p)
+    p.set_defaults(func=cmd_trading_components)
+    p = trad.add_parser("guard", help="durable protection and receipt recovery worker")
+    _add_ws(p)
+    p.add_argument("--interval", type=float, default=5)
+    p.add_argument("--once", action="store_true")
+    p.set_defaults(func=cmd_trading_guard)
     p = trad.add_parser("submit"); _add_ws(p)
     p.add_argument("--file", required=True); p.set_defaults(func=cmd_trading_submit)
 

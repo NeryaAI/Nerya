@@ -552,11 +552,20 @@ def poll_active_live_orders(
                 out.per_order.append(per)
                 continue
 
+            if order.meta.get("account_binding"):
+                from .accounts import account_revision
+                if profile is None or account_revision(profile)!=order.meta["account_binding"]:
+                    tracker.annotate(order.order_id,"account_binding_changed")
+                    out.skipped+=1;per["state"]="account_binding_changed";out.per_order.append(per)
+                    continue
+
             try:
                 if connector_factory is not None:
                     connector = connector_factory(account.id, account.connector_cfg())
                 else:
-                    connector = registry.get(account.id, account.connector_cfg())
+                    if order.meta.get("provider_binding"):
+                        connector=registry.get(account.id,account.connector_cfg(),provider_binding=order.meta["provider_binding"])
+                    else:connector = registry.get(account.id, account.connector_cfg())
             except Exception as exc:
                 # Connector construction / auth problems are not venue
                 # not-found evidence — skip this round (B7b).
@@ -705,6 +714,7 @@ def poll_active_live_orders(
                             "intent_id": order.intent_id,
                             "exchange_order_id": order.exchange_order_id,
                             'fee_status':(getattr(ack,'raw',{}) or {}).get('fee_status','reported'),
+                            'fee_evidence':(getattr(ack,'raw',{}) or {}).get('fee_evidence'),
                         },
                     )
                     if fill is not None:
@@ -723,6 +733,7 @@ def poll_active_live_orders(
                                 executor_id=order.executor_id,
                                 order_id=order.order_id,
                                 fill_id=fill.fill_id,
+                                position_side=order.meta.get("position_side", "net"),
                             )
                         except Exception:
                             # Don't let a PositionBook hiccup wedge the poll loop.
