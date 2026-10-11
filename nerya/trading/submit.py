@@ -36,7 +36,7 @@ from typing import Any, Optional
 
 from ..core import jsonl
 from ..core.config import Config
-from ..core.errors import ApprovalPending, IntentValidationError
+from ..core.errors import ApprovalPending, IntentValidationError, TradingError
 from ..core.redaction import redact_dict
 from ..core.time import now_iso
 from ..core.truth import (

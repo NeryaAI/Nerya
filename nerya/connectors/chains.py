@@ -1,6 +1,5 @@
 """Reviewed EVM identities and protocol deployments, independent of wallets."""
 from dataclasses import dataclass
-from typing import Any
 
 from ..core.errors import TradingError
 

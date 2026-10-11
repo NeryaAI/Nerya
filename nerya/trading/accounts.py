@@ -19,6 +19,7 @@ row) rather than replacing :class:`Account`. That means:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from ..core import yaml_io

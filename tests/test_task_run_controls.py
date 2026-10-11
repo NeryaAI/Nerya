@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-import json
 
 import pytest
 

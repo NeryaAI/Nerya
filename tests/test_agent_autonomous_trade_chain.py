@@ -50,8 +50,12 @@ def test_research_submit_and_verify_share_one_loop_and_real_paper_ledger(tmp_pat
             actual = tracker.get(receipts[0]["order_id"])
         assert actual is not None and actual.state == "filled"
         assert actual.filled_size > 0 and actual.avg_price > 0
-        assert receipts[0]["order"] == actual.asdict()
-        assert receipts[0]["orders"] == [actual.asdict()]
+        # Public receipts redact account-binding identifiers; the durable
+        # ledger keeps the full internal binding for reconciliation.
+        public_order = actual.asdict()
+        public_order["meta"]["account_binding"] = "***REDACTED***"
+        assert receipts[0]["order"] == public_order
+        assert receipts[0]["orders"] == [public_order]
         position = PositionBook(cfg.paths).get_open(
             account_id="paper_main", strategy_id="paper_agent", market="mock:BTC/USDT")
         assert position is not None

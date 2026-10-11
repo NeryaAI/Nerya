@@ -4,7 +4,7 @@ import pytest
 
 from nerya.trading.guard import TradingGuard, active
 from nerya.db.sqlite import connect
-from test_trading_kernel_safety import cfg
+from test_trading_kernel_safety import cfg as cfg
 
 pytestmark = pytest.mark.smoke
 

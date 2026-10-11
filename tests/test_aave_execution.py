@@ -13,7 +13,7 @@ from nerya.financial.contracts import FinancialContext,FinancialError
 from nerya.financial.gateway import FinancialGateway
 from nerya.financial.defi.aave import AaveFunds,RAY
 from nerya.financial.defi.book import ProtocolBook
-from nerya.financial.defi.calls import ZERO,calldata,topic_address
+from nerya.financial.defi.calls import ZERO,topic_address
 
 pytestmark=pytest.mark.smoke
 SENDER="0x"+"1"*40

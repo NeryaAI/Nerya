@@ -1,5 +1,4 @@
 """Immutable parent/allowance lineage; only fake funds transports."""
-from dataclasses import replace
 from types import SimpleNamespace
 import time
 

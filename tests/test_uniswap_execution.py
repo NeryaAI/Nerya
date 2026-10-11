@@ -1,4 +1,3 @@
-from decimal import Decimal
 from dataclasses import replace
 import time
 
@@ -10,7 +9,7 @@ from nerya.financial.contracts import FinancialError
 from nerya.financial.defi.uniswap import UniswapFunds
 from nerya.financial.defi.calls import ZERO,POOL_KEY,topic_address
 from nerya.financial.gateway import FinancialGateway
-from test_aave_execution import setup as aave_setup,Rpc,SENDER,ASSET,POOL,DATA,ORACLE,ATOKEN,DEBT,FEED,CODE,CODE_HASH,BLOCK_HASH,TX_HASH
+from test_aave_execution import setup as aave_setup,Rpc,SENDER,ASSET,POOL,DATA,ORACLE,ATOKEN,DEBT,FEED,CODE_HASH,BLOCK_HASH,TX_HASH
 
 pytestmark=pytest.mark.smoke
 TOKEN1=POOL

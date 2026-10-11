@@ -1,6 +1,5 @@
 """Non-blocking producer adapters; execution stays in CommandRuntime."""
 from dataclasses import replace
-from types import SimpleNamespace
 import time
 
 from ..agent.task_runs import task_runs

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 
-from .contracts import FinancialError, FinancialContext, amount, digest, normalize_request, action_fingerprint
+from .contracts import FinancialError, amount, digest, normalize_request, action_fingerprint
 from .store import FinancialStore, encode
 
 
