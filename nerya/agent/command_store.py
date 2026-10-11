@@ -273,29 +273,48 @@ class CommandStore:
 
     def snapshot(self, sid: str, cid: str | None = None):
         sid = _session_id(sid)
+        # Polling a healthy queue is a read, not a heartbeat or admission.
+        # Only missing/expired queues need the serialized recovery path.
+        con = connect(self.paths.db)
+        try:
+            con.execute("BEGIN")
+            if is_session_deleted(con, sid):
+                raise CommandError("session_deleted", 410)
+            row = con.execute("SELECT * FROM agent_command_queues WHERE session_id=?", (sid,)).fetchone()
+            if row is not None:
+                queue = dict(row)
+                expired = bool(queue["worker_owner"] and queue["lease_until"] < time.time())
+                restarted = queue["runtime_epoch"] != self.epoch and not queue["worker_owner"]
+                if not expired and not restarted:
+                    return self._snapshot(con, sid, cid, queue)
+        finally:
+            con.close()
         with self.transaction() as con:
             queue = self._queue(con, sid)
-            if cid:
-                row = con.execute("SELECT * FROM agent_commands WHERE command_id=? AND session_id=?", (command_id(cid),sid)).fetchone()
-                if not row:
-                    raise CommandError("command_not_found", 404)
-                return {"ok": True, "command": self._projection(con,row, full=True)}
-            rows = con.execute("SELECT * FROM agent_commands WHERE session_id=? AND "
-                               "(state IN ('queued','delivering','delivered','running','stopping','unconfirmed') OR command_id IN "
-                               "(SELECT command_id FROM agent_commands WHERE session_id=? ORDER BY created_at DESC LIMIT 30)) ORDER BY position", (sid,sid)).fetchall()
-            from ..db.repositories import AgentSessionRepository
-            checkpoint = AgentSessionRepository(con).peek_turn_checkpoint(sid)
-            safe_checkpoint = None
-            if checkpoint and not checkpoint.get("claim_id"):
-                cp = checkpoint.get("checkpoint") or {}
-                if isinstance(cp, dict) and cp.get("resumable"):
-                    safe_checkpoint = {"turn_id": checkpoint["turn_id"], "resumable": True,
-                                       "resume_count": cp.get("resume_count",0)}
-            session = AgentSessionRepository(con).get_session(sid)
-            branch = json.loads(session.get("meta_json") or "{}").get("branch_of") if session else None
-            return {"ok": True, "branch_of":branch, "commands": [self._projection(con,row) for row in rows],
-                    "queue": {k: queue[k] for k in ("paused","pause_reason","revision")},
-                    "checkpoint": safe_checkpoint, "server_time": time.time()}
+            return self._snapshot(con, sid, cid, queue)
+
+    def _snapshot(self, con, sid, cid, queue):
+        if cid:
+            row = con.execute("SELECT * FROM agent_commands WHERE command_id=? AND session_id=?", (command_id(cid),sid)).fetchone()
+            if not row:
+                raise CommandError("command_not_found", 404)
+            return {"ok": True, "command": self._projection(con,row, full=True)}
+        rows = con.execute("SELECT * FROM agent_commands WHERE session_id=? AND "
+                           "(state IN ('queued','delivering','delivered','running','stopping','unconfirmed') OR command_id IN "
+                           "(SELECT command_id FROM agent_commands WHERE session_id=? ORDER BY created_at DESC LIMIT 30)) ORDER BY position", (sid,sid)).fetchall()
+        from ..db.repositories import AgentSessionRepository
+        checkpoint = AgentSessionRepository(con).peek_turn_checkpoint(sid)
+        safe_checkpoint = None
+        if checkpoint and not checkpoint.get("claim_id"):
+            cp = checkpoint.get("checkpoint") or {}
+            if isinstance(cp, dict) and cp.get("resumable"):
+                safe_checkpoint = {"turn_id": checkpoint["turn_id"], "resumable": True,
+                                   "resume_count": cp.get("resume_count",0)}
+        session = AgentSessionRepository(con).get_session(sid)
+        branch = json.loads(session.get("meta_json") or "{}").get("branch_of") if session else None
+        return {"ok": True, "branch_of":branch, "commands": [self._projection(con,row) for row in rows],
+                "queue": {k: queue[k] for k in ("paused","pause_reason","revision")},
+                "checkpoint": safe_checkpoint, "server_time": time.time()}
 
     def claim(self, sid: str, owner: str):
         with self.transaction() as con:
@@ -449,9 +468,16 @@ class CommandStore:
         return bool(changed)
 
     def record_event(self, cid: str, event: dict):
+        self.record_events(cid, [event])
+
+    def record_events(self, cid: str, events: list[dict]):
+        # One transaction per small replay batch, never one per model token.
+        # Serialize outside the lock and preserve order for pagination/replay.
+        rows = [(cid, str(event["event_id"]), encode(event)) for event in events]
+        if not rows:
+            return
         with self.transaction() as con:
-            con.execute("INSERT OR IGNORE INTO agent_command_events(command_id,event_id,payload_json) VALUES (?,?,?)",
-                        (cid,str(event["event_id"]),encode(event)))
+            con.executemany("INSERT OR IGNORE INTO agent_command_events(command_id,event_id,payload_json) VALUES (?,?,?)", rows)
 
     def events(self, sid: str, cid: str, after: int = 0, limit: int = 500):
         sid, cid = _session_id(sid), command_id(cid)

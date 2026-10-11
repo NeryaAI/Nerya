@@ -18,12 +18,24 @@ from urllib.parse import urlencode
 
 from ..core.config import Config
 from ..harness.cancellation import signal_cancel, signal_steer
-from .command_store import CommandError, CommandStore, command_id, encode, input_context, validate_command_request
+from .command_store import LEASE_SECONDS, CommandError, CommandStore, command_id, encode, input_context, validate_command_request
+from .command_event_buffer import CommandEventBuffer
 from .history_mutations import _session_id
 from .streaming import get_default_bus
 
 _LOG = logging.getLogger(__name__)
 EPOCH = uuid.uuid4().hex
+
+
+def _control_busy_can_retry(exc: BaseException, last_success: float, now: float) -> bool:
+    """A brief SQLite writer collision is not a lost worker or operator stop."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    busy = (code & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} if isinstance(code, int) else str(exc).lower() in {"database is locked", "database table is locked"}
+    return busy and now - last_success < min(10.0, LEASE_SECONDS / 2)
+
+
 _FIELDS = ("source", "kind", "payload", "assistant_id", "conversation_kind", "strategy_id", "strategy_proposal_id", "reasoning_effort",
            "reasoning_summary", "permission_mode", "model_tier", "model_provider", "model_id",
            "model_context_window", "max_iterations", "max_total_tool_calls", "max_wall_seconds",
@@ -176,11 +188,12 @@ class CommandRuntime:
         event_failure=threading.Event()
         bus=get_default_bus()
         head=bus.latest_seq()
+        event_buffer=CommandEventBuffer(self.store,cid)
         def capture(event):
             if event.get("session_id")!=sid or event.get("turn_id")!=tid or int(event.get("seq") or 0)<=head:
                 return
             try:
-                self.store.record_event(cid,event)
+                event_buffer.append(event)
             except Exception:
                 event_failure.set()
                 signal_cancel(tid,reason="event_persistence_failed")
@@ -188,6 +201,7 @@ class CommandRuntime:
         unsubscribe=bus.subscribe(capture)
         def watch():
             renewed=0.0
+            last_control_success=time.monotonic()
             while not done.wait(0.4):
                 try:
                     if time.monotonic()-renewed>3:
@@ -199,9 +213,14 @@ class CommandRuntime:
                     if current["state"]=="stopping":
                         signal_cancel(tid,reason="operator_cancel")
                     self._guides(sid,tid)
-                except Exception:
+                    last_control_success=time.monotonic()
+                except Exception as exc:
+                    if _control_busy_can_retry(exc,last_control_success,time.monotonic()):
+                        _LOG.warning("command control briefly busy; retrying within the worker lease")
+                        continue
                     signal_cancel(tid,reason="command_control_unavailable")
                     _LOG.exception("command control failed")
+                    return
         watcher=threading.Thread(target=watch,name="nerya-command-control",daemon=True)
         watcher.start()
         result,error,state=None,None,"failed"
@@ -231,6 +250,13 @@ class CommandRuntime:
             result = _json_safe(result)
             if result.get("ok") is False:
                 error={"code":str(result.get("error") or "turn_rejected"),"retrying":False}
+            reason=str(result.get("stopped_reason") or (result.get("budget") or {}).get("abort_reason") or "")
+            code = {"stream_interrupted":"model_stream_interrupted",
+                    "cancelled:command_control_unavailable":"command_control_unavailable",
+                    "cancelled:command_lease_lost":"command_lease_lost",
+                    "cancelled:event_persistence_failed":"event_persistence_failed"}.get(reason)
+            if code:
+                error={"code":code,"retrying":False,"reason":reason}
             if event_failure.is_set():
                 state="blocked"
                 error={"code":"event_persistence_failed","retrying":False}
@@ -239,11 +265,22 @@ class CommandRuntime:
             error={"code":getattr(exc,"code",None) or ("rate_limited" if status==429 else "turn_failed"),
                    "status_code":status,"type":type(exc).__name__,"retrying":False,
                    "request_id":str(getattr(exc,"request_id","") or "")[:160]}
+            if getattr(exc,"stream_interrupted",False):
+                error.update(stream_output_committed=bool(getattr(exc,"stream_output_committed",True)),
+                             retry_exhausted=str(getattr(exc,"retry_exhausted","not_retryable")))
             _LOG.warning("conversation command %s failed: type=%s code=%s", cid, type(exc).__name__, error["code"])
         finally:
             done.set()
             watcher.join(timeout=5)
             unsubscribe()
+            try:
+                event_buffer.close()  # Commit final deltas before the command is terminal.
+            except Exception:
+                event_failure.set()
+                _LOG.exception("command final event flush failed")
+        if event_failure.is_set():
+            state="blocked"
+            error={"code":"event_persistence_failed","retrying":False}
         self.store.save_outcome(cid,sid,tid,state,result,error)
         self.store.finish(cid,sid,owner,state,result,error)
         try:
@@ -317,6 +354,15 @@ class CommandRuntime:
         return receipt
 
     def _guides(self,sid: str,tid: str):
+        # Most control ticks have no steering input. Do not acquire a writer
+        # reservation twice a second just to discover an empty inbox.
+        from ..db.sqlite import connect_readonly
+        con = connect_readonly(self.config.paths.db)
+        try:
+            if not con.execute("SELECT 1 FROM agent_commands WHERE session_id=? AND turn_id=? AND kind='guide' AND state='queued' LIMIT 1", (sid,tid)).fetchone():
+                return
+        finally:
+            con.close()
         with self.store.transaction() as con:
             rows=con.execute("SELECT command_id,request_json FROM agent_commands WHERE session_id=? AND turn_id=? AND kind='guide' AND state='queued' ORDER BY position",(sid,tid)).fetchall()
             for row in rows:

@@ -67,6 +67,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -87,7 +88,7 @@ from .adapters._base import (
     io_control,
 )
 from .adapters.openai import _REASONING_MODEL_PREFIXES
-from .retry import is_quota_error, parse_retry_after, provider_retryable
+from .retry import is_quota_error, is_retryable_stream_transport_error, parse_retry_after, provider_retryable
 
 
 _LOG = logging.getLogger(__name__)
@@ -288,6 +289,8 @@ def _make_llm_error(
     setattr(err, "provider", provider)
     setattr(err, "retry_after_s", parse_retry_after(resp_headers))
     setattr(err, "quota_exhausted", is_quota_error(doc))
+    if err.quota_exhausted:
+        setattr(err, "code", "model_quota_exhausted")
     # Compatibility gateways can surface a transient backend failure as 400.
     transient_400 = status == 400 and "backend request failed" in body.lower()
     retryable = provider_retryable(status, doc, resp_headers) or transient_400
@@ -1144,17 +1147,49 @@ def _split_visible_thinking(text: str) -> tuple[str, str]:
     return thinking, visible
 
 
+def _openai_stream_event_error(provider: str, payload: Any) -> LLMError:
+    """Preserve SSE business errors and cooldowns instead of losing attribution."""
+    details = payload if isinstance(payload, dict) else {"message": str(payload)}
+    raw_status = details.get("status_code") or details.get("status") or details.get("http_status")
+    try:
+        status = int(raw_status)
+    except (TypeError, ValueError):
+        status = 0
+    request_id = str(details.get("request_id") or details.get("requestId") or "")[:160]
+    if 400 <= status < 600:
+        response_headers = {"x-request-id": request_id} if request_id else {}
+        for field, header in (("retry_after_ms", "retry-after-ms"), ("retryAfterMs", "retry-after-ms"), ("retry_after", "retry-after")):
+            if details.get(field) is not None:
+                response_headers[header] = str(details[field])
+        if details.get("retryable") is False:
+            response_headers["x-should-retry"] = "false"
+        return _make_llm_error(provider=provider, status=status, doc={"error": details},
+                               resp_headers=response_headers, operation="stream")
+    message = _raw_body_excerpt({"error": details}) or "unknown provider stream error"
+    error = LLMError(f"{provider} stream error: {message[:260]}")
+    error.code = "model_quota_exhausted" if is_quota_error({"error": details}) else "model_stream_provider_error"
+    error.request_id = request_id
+    code = str(details.get("code") or details.get("type") or "").lower()
+    error.retryable = code in {"rate_limit_exceeded", "rate_limit_error", "server_error", "overloaded_error"} and not is_quota_error({"error": details}) and details.get("retryable") is not False
+    return error
+
+
 class _OpenAIStream:
     """Accumulate transport deltas; only a complete response yields tool uses."""
 
-    def __init__(self, request):
+    def __init__(self, request, provider_name: str = "openai"):
         self.request = request
+        self.provider_name = provider_name
         self.message = {"content": "", "reasoning_content": "", "tool_calls": []}
         self.tools = {}
         self.usage = {}
         self.finish_reason = None
         self.pending = ""
         self.content_mode = "prefix"
+
+    @property
+    def output_committed(self) -> bool:
+        return bool(self.message["content"] or self.message["reasoning_content"] or self.tools)
 
     def emit(self, kind, **data):
         raise_if_cancelled(self.request.cancel_token, self.request.deadline)
@@ -1195,7 +1230,7 @@ class _OpenAIStream:
     def feed(self, event):
         raise_if_cancelled(self.request.cancel_token, self.request.deadline)
         if event.get("error"):
-            raise LLMError(f"provider stream error: {_raw_body_excerpt(event)}")
+            raise _openai_stream_event_error(self.provider_name, event["error"])
         if event.get("usage"):
             self.usage = dict(event["usage"])
             self.emit("usage", usage={
@@ -1354,7 +1389,7 @@ class OpenAIMessagesBackend:
             if request.stream and callable(getattr(self.transport, "stream_json", None)):
                 body["stream"] = True
                 body["stream_options"] = {"include_usage": True}
-                accumulator = _OpenAIStream(request)
+                accumulator = _OpenAIStream(request, self.provider_name)
                 try:
                     with io_control(request.cancel_token, request.deadline):
                         status, doc, response_headers = self.transport.stream_json(
@@ -1367,11 +1402,38 @@ class OpenAIMessagesBackend:
                         doc = accumulator.finish()
                     return status, doc, response_headers
                 except Exception as exc:
-                    # Submission/partial output is not safe to replay, even
-                    # when an upstream native capability had side effects.
-                    exc.stream_interrupted = True
-                    exc.retryable = False
-                    raise
+                    if isinstance(exc, CancelledError):
+                        raise
+                    committed = accumulator.output_committed
+                    if isinstance(exc, LLMError):
+                        error = exc
+                        eligible = getattr(error, "retryable", None)
+                        if eligible is None:
+                            eligible = str(error) in {
+                                "provider stream ended before [DONE]",
+                                "provider stream missing finish_reason",
+                            }
+                        if not getattr(error, "code", None) and not getattr(error, "status_code", None):
+                            error.code = "model_stream_connection_failed" if eligible else "model_stream_protocol_error"
+                    elif isinstance(exc, OSError):
+                        eligible = is_retryable_stream_transport_error(exc)
+                        cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+                        error = LLMError(f"{self.provider_name} stream connection interrupted ({type(exc).__name__})")
+                        error.code = ("model_stream_tls_error" if isinstance(cause, ssl.SSLError)
+                                      else "model_stream_connection_failed" if eligible
+                                      else "model_stream_network_config_error")
+                    else:
+                        error = LLMError(f"{self.provider_name} stream processing failed ({type(exc).__name__})")
+                        error.code = "model_stream_protocol_error"
+                        eligible = False
+                    error.stream_interrupted = True
+                    error.stream_output_committed = committed
+                    # Retry only before output; native upstream capabilities
+                    # have independent effects and must never be replayed here.
+                    error.retryable = bool(eligible) and not committed and not native_web_search.get("enabled")
+                    if error is exc:
+                        raise
+                    raise error from exc
             result = None
             try:
                 with io_control(request.cancel_token, request.deadline):

@@ -1170,11 +1170,25 @@ def apply_migrations(con: sqlite3.Connection) -> list[int]:
     """Apply pending migrations; return the list of versions newly applied."""
 
     _validate_registry(MIGRATIONS)
-    _ensure_schema_table(con)
+    # Normal repository connections must remain readers while another worker
+    # writes. Rechecking every already-applied migration under BEGIN IMMEDIATE
+    # serializes reads and can deadlock nested repository access.
+    try:
+        applied = _applied_versions(con)
+    except sqlite3.OperationalError as exc:
+        if "no such table: schema_version" not in str(exc):
+            raise
+        _ensure_schema_table(con)
+        applied = set()
+    pending = [mig for mig in MIGRATIONS if mig.version not in applied]
+    if not pending:
+        return []
     con.commit()
     applied_now: list[int] = []
-    for mig in MIGRATIONS:
+    for mig in pending:
         try:
+            # A competing initializer may finish after the read-only check.
+            # Recheck each pending version while holding the migration lock.
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
                 "SELECT 1 FROM schema_version WHERE version = ?", (mig.version,),

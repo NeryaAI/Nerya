@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import math
 import random
+import errno
+import socket
+import ssl
 import threading
 import time
+import urllib.error
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Mapping
 
@@ -20,6 +24,26 @@ _jitter_lock = threading.Lock()
 # HTTP statuses that should be retried. ``529`` is a non-standard provider
 # overload/peak-busy status used by some OpenAI-compatible endpoints.
 _TRANSIENT_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 522, 524, 529})
+
+
+def is_retryable_stream_transport_error(error: BaseException) -> bool:
+    """Temporary connection failures only; never retry TLS or local setup errors."""
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    if isinstance(error, urllib.error.URLError) and isinstance(error.reason, BaseException):
+        if error.reason is not error:
+            return is_retryable_stream_transport_error(error.reason)
+    if isinstance(error, ssl.SSLError):
+        return False
+    if isinstance(error, socket.gaierror):
+        return error.errno == socket.EAI_AGAIN
+    if not isinstance(error, OSError):
+        return False
+    if isinstance(error, (PermissionError, FileNotFoundError, IsADirectoryError)):
+        return False
+    if error.errno in {errno.EACCES, errno.EPERM, errno.ENOENT, errno.EINVAL, errno.EBADF}:
+        return False
+    return True
 
 
 def jittered_backoff(
@@ -63,11 +87,22 @@ _QUOTA_CODES = frozenset({
 
 
 def is_quota_error(doc: Mapping[str, Any] | None) -> bool:
-    data = doc or {}
-    error = data.get("error")
-    error = error if isinstance(error, dict) else {}
-    return any(str(value).lower() in _QUOTA_CODES for value in (
+    data = doc if isinstance(doc, Mapping) else {}
+    raw_error = data.get("error")
+    error = raw_error if isinstance(raw_error, Mapping) else {}
+    if any(str(value).lower() in _QUOTA_CODES for value in (
         data.get("code"), error.get("code"), error.get("type"),
+    )):
+        return True
+    # Some compatible providers return only a billing message with HTTP 429.
+    # Do not match generic quota/RPM/token limits: those can recover after a wait.
+    message = " ".join(str(value or "") for value in (
+        data.get("message"), error.get("message"),
+        raw_error if isinstance(raw_error, str) else "",
+    )).lower()
+    return any(phrase in message for phrase in (
+        "insufficient balance", "insufficient credit", "credit balance is too low",
+        "no resource package", "billing hard limit", "余额不足", "账户欠费",
     ))
 
 
