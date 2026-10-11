@@ -1119,5 +1119,29 @@
     "on": "ON",
     "off": "OFF",
     "setFailed": "Could not update flag"
+  },
+  "copy": {
+    "components_SettingsWorkspace": {
+      "003": "Connection saved; model list fetched. Model response remains untested.",
+      "004": "Fetch models and save connection",
+      "005": "Saves URL and credentials on success; failure keeps drafts without saving. This does not test a model response.",
+      "006": "Save settings",
+      "007": "Discard drafts",
+      "008": "Connection overrides: ",
+      "009": "URL inherited",
+      "010": "Route credentials",
+      "011": "Credentials inherited",
+      "012": "Inherit connection"
+    },
+    "components_settings_PrimaryModelSettings": {
+      "007": "Effective connection and source",
+      "008": "Declared URL: ",
+      "009": "Inherit",
+      "010": "Saved effective URL: ",
+      "011": "Credential source: ",
+      "012": "Route override",
+      "013": "Inherited",
+      "014": "Inherit connection"
+    }
   }
 }

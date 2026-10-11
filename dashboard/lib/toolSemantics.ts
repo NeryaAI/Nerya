@@ -1,23 +1,24 @@
+import { copy as i18nCopy } from "./i18n";
 /** Presentation of actual tool inputs/results only; never infer trading outcomes. */
 export type ToolFamily = "skill" | "shell" | "search" | "read" | "edit" | "plan" | "message" | "backtest" | "strategy" | "market" | "research" | "portfolio" | "agent" | "browser" | "mcp" | "tool";
 const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
-const labels: Record<ToolFamily, [string, string]> = {
-  skill:["加载技能","Load skill"], shell:["执行命令","Run command"], search:["搜索资料","Search"],
-  read:["读取内容","Read"], edit:["修改文件","Edit file"], plan:["更新任务","Update tasks"],
-  message:["发送消息","Send message"], backtest:["运行回测","Run backtest"], strategy:["策略操作","Strategy"],
-  market:["获取行情","Fetch market data"], research:["投研分析","Research"], portfolio:["查看账户与持仓","Inspect portfolio"],
-  agent:["协作执行","Delegate work"], browser:["操作浏览器","Use browser"], mcp:["调用外部工具","Call external tool"], tool:["调用工具","Run tool"],
+const labels: Record<ToolFamily, string> = {
+  skill:"copy.lib_toolSemantics.001", shell:"copy.lib_toolSemantics.002", search:"copy.lib_toolSemantics.003",
+  read:"copy.lib_toolSemantics.004", edit:"copy.lib_toolSemantics.005", plan:"copy.lib_toolSemantics.006",
+  message:"copy.lib_toolSemantics.007", backtest:"copy.lib_toolSemantics.008", strategy:"copy.lib_toolSemantics.009",
+  market:"copy.lib_toolSemantics.010", research:"copy.lib_toolSemantics.011", portfolio:"copy.lib_toolSemantics.012",
+  agent:"copy.lib_toolSemantics.013", browser:"copy.lib_toolSemantics.014", mcp:"copy.lib_toolSemantics.015", tool:"copy.lib_toolSemantics.016",
 };
-const actions: Record<string, [string, string]> = {
-  strategy_view:["查看策略","Inspect strategy"], strategy_list:["列出策略","List strategies"],
-  strategy_create:["创建策略","Create strategy"], strategy_update:["更新策略","Update strategy"],
-  strategy_backtest:["运行回测","Run backtest"],
-  strategy_validate:["验证策略","Validate strategy"], strategy_run_tick:["执行策略轮次","Run strategy tick"],
-  strategy_run_history:["读取策略记录","Read strategy history"], strategy_history:["读取策略历史","Read strategy history"],
-  research_publish_visuals:["发布投研图表","Publish research visuals"], web_fetch:["读取网页","Read webpage"],
-  skill_view:["读取技能","Read skill"], script_run:["运行技能脚本","Run skill script"],
-  team_run:["运行 Agent 团队","Run agent team"], subagent_run:["委派 Agent","Delegate to agent"],
-  read_file:["读取文件","Read file"], write_file:["写入文件","Write file"], edit_file:["编辑文件","Edit file"],
+const actions: Record<string, string> = {
+  strategy_view:"copy.lib_toolSemantics.017", strategy_list:"copy.lib_toolSemantics.018",
+  strategy_create:"copy.lib_toolSemantics.019", strategy_update:"copy.lib_toolSemantics.020",
+  strategy_backtest:"copy.lib_toolSemantics.021",
+  strategy_validate:"copy.lib_toolSemantics.022", strategy_run_tick:"copy.lib_toolSemantics.023",
+  strategy_run_history:"copy.lib_toolSemantics.024", strategy_history:"copy.lib_toolSemantics.025",
+  research_publish_visuals:"copy.lib_toolSemantics.026", web_fetch:"copy.lib_toolSemantics.027",
+  skill_view:"copy.lib_toolSemantics.028", script_run:"copy.lib_toolSemantics.029",
+  team_run:"copy.lib_toolSemantics.030", subagent_run:"copy.lib_toolSemantics.031",
+  read_file:"copy.lib_toolSemantics.032", write_file:"copy.lib_toolSemantics.033", edit_file:"copy.lib_toolSemantics.034",
 };
 
 export function toolSemantics(rawName: string, payload: Record<string, unknown>, zh: boolean) {
@@ -36,7 +37,7 @@ export function toolSemantics(rawName: string, payload: Record<string, unknown>,
     : /search|grep|glob/.test(name) ? "search" : /read|fetch|view|list_dir/.test(name) ? "read"
     : /edit|write|patch|create/.test(name) ? "edit" : /shell|bash|exec|command|script_run/.test(name) ? "shell" : "tool";
   const specific = actions[name];
-  const title = (specific && !(name === "script_run" && family !== "shell") ? specific : labels[family])[zh ? 0 : 1];
+  const title = i18nCopy(zh, (specific && !(name === "script_run" && family !== "shell") ? specific : labels[family]) ?? "");
   const target = text(payload.strategy_id || payload.market || payload.symbol || payload.path || payload.file_path || payload.query || payload.search_query || payload.url || payload.command || payload.cmd || payload.pattern || payload.task || payload.goal || payload.description);
   const subject = family === "mcp" ? [text(payload.namespace || payload.server), text(payload.tool || payload.name)].filter(Boolean).join(" / ") || target || name
     : family === "skill" ? skill || text(payload.name) || name
@@ -50,10 +51,10 @@ export function toolResultSummary(value: Record<string, unknown>, zh: boolean): 
     if (typeof value[key] === "string" && value[key]) return String(value[key]).replace(/\s+/g," ").slice(0,160);
   }
   for (const key of ["candles", "sources", "matches", "items", "results", "rows"]) {
-    if (Array.isArray(value[key])) return `${(value[key] as unknown[]).length} ${key === "candles" ? (zh ? "条 K 线" : "candles") : key === "sources" ? (zh ? "项来源" : "sources") : (zh ? "项结果" : "results")}`;
+    if (Array.isArray(value[key])) return `${(value[key] as unknown[]).length} ${key === "candles" ? (i18nCopy(zh, "copy.lib_toolSemantics.035")) : key === "sources" ? (i18nCopy(zh, "copy.lib_toolSemantics.036")) : (i18nCopy(zh, "copy.lib_toolSemantics.037"))}`;
   }
-  if (typeof value.exit_code === "number") return `${zh ? "退出码" : "Exit"} ${value.exit_code}`;
-  if (typeof value.count === "number") return `${value.count} ${zh ? "项结果" : "results"}`;
+  if (typeof value.exit_code === "number") return `${i18nCopy(zh, "copy.lib_toolSemantics.038")} ${value.exit_code}`;
+  if (typeof value.count === "number") return `${value.count} ${i18nCopy(zh, "copy.lib_toolSemantics.039")}`;
   return "";
 }
 

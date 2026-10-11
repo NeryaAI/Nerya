@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { useMemo, useState } from 'react';
 import { useLocale } from 'next-intl';
 import type { ExternalCallNode, ExternalCallTrace } from '../../lib/externalCalls';
@@ -16,12 +18,12 @@ import { recordOf } from "../../lib/externalCalls";
 import styles from './ExternalConversation.module.css';
 
 export function externalStatus(status: string, zh: boolean) {
-  const labels: Record<string, [string, string]> = {
-    running: ['执行中', 'Running'], succeeded: ['完成', 'Completed'], failed: ['失败', 'Failed'],
-    awaiting_approval: ['等待审批', 'Awaiting approval'], interrupted: ['已中断', 'Interrupted'],
-    completed: ['任务完成 · 客户端上报', 'Task complete · client reported'], blocked: ['受阻', 'Blocked'],
+  const labels: Record<string, string> = {
+    running: "copy.components_chat_ExternalCallMessage.001", succeeded: "copy.components_chat_ExternalCallMessage.002", failed: "copy.components_chat_ExternalCallMessage.003",
+    awaiting_approval: "copy.components_chat_ExternalCallMessage.004", interrupted: "copy.components_chat_ExternalCallMessage.005",
+    completed: "copy.components_chat_ExternalCallMessage.006", blocked: "copy.components_chat_ExternalCallMessage.007",
   };
-  return labels[status]?.[zh ? 0 : 1] || status;
+  return i18nCopy(zh, labels[status] ?? "") || status;
 }
 export type ExternalApprovalProps = {
   pendingApprovals?: Map<string, ApprovalCard>;
@@ -56,10 +58,10 @@ export function ExternalCallMessage({ trace, node = trace, depth = 0, mirroredId
     <div className={styles.body}>
       <details className={styles.toolDetails} open={expanded} onToggle={event=>{const open=event.currentTarget.open;if(open!==expanded)setDisclosure({status:node.status,open});}}>
         <summary className={styles.toolSummary}><Icon name={kind==="shell"?"terminal":"document"} size={14}/><span className={styles.toolSubject}>{toolTitle(node,zh)}{target?" · "+target:""}</span><span role="status" data-state={node.status} className={styles.status}>{externalStatus(node.status, zh)}</span>{typeof node.elapsed_ms==="number"&&<span className={styles.duration}>{node.elapsed_ms}ms</span>}</summary>
-        {expanded&&<>{needsPermission ? <NativeBlocksTrack envelopes={message.turn?.blocks || []} live={Boolean(message.loading)} presentation="expanded" {...approvals}/> : <div className="max-h-80 overflow-auto py-2 text-xs">{kind==="shell"?<><pre className="whitespace-pre-wrap break-words text-xs">{typeof command==="string"?"$ "+command+String.fromCharCode(10):""}{rawOutput.stdout}{rawOutput.stderr?String.fromCharCode(10)+rawOutput.stderr:""}</pre>{typeof rawOutput.data.exit_code==="number"&&<p className="mt-2 text-[color:var(--text-muted)]">exit {rawOutput.data.exit_code}</p>}</>:kind==="read"?<><p className="mb-2 text-[color:var(--text-muted)]">{zh?"文件内容":"File contents"}{range.start!==null&&range.end!==null?" · "+range.start+"–"+range.end:""}</p><pre className="whitespace-pre-wrap break-words text-xs">{fileBody(node,rawOutput)}</pre></>:<StreamedMarkdown text={output || (message.loading ? (zh ? "等待工具返回…" : "Waiting for tool output…") : (zh ? "没有正文输出。" : "No text output."))}/>}</div>}
+        {expanded&&<>{needsPermission ? <NativeBlocksTrack envelopes={message.turn?.blocks || []} live={Boolean(message.loading)} presentation="expanded" {...approvals}/> : <div className="max-h-80 overflow-auto py-2 text-xs">{kind==="shell"?<><pre className="whitespace-pre-wrap break-words text-xs">{typeof command==="string"?"$ "+command+String.fromCharCode(10):""}{rawOutput.stdout}{rawOutput.stderr?String.fromCharCode(10)+rawOutput.stderr:""}</pre>{typeof rawOutput.data.exit_code==="number"&&<p className="mt-2 text-[color:var(--text-muted)]">exit {rawOutput.data.exit_code}</p>}</>:kind==="read"?<><p className="mb-2 text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_ExternalCallMessage.008")}{range.start!==null&&range.end!==null?" · "+range.start+"–"+range.end:""}</p><pre className="whitespace-pre-wrap break-words text-xs">{fileBody(node,rawOutput)}</pre></>:<StreamedMarkdown text={output || (message.loading ? (i18nCopy(zh, "copy.components_chat_ExternalCallMessage.009")) : (i18nCopy(zh, "copy.components_chat_ExternalCallMessage.010")))}/>}</div>}
           {rawOutput.error&&<p role="status" className="py-2 text-xs text-danger">{rawOutput.error}</p>}
           {!needsPermission && visualBlocks.length>0&&<NativeBlocksTrack envelopes={visualBlocks} presentation="expanded" {...approvals}/>}
-          <details data-testid="external-technical-details" className={styles.raw} onToggle={event=>setRawOpen(event.currentTarget.open)}><summary>{zh?"原始调用数据":"Raw call data"}</summary>{rawOpen&&<pre>{JSON.stringify({session_id:trace.remote_session_id,turn_id:trace.turn_id,call_id:node.call_id,tool:node.tool,input:node.arguments,output:node.result},null,2)}</pre>}</details>
+          <details data-testid="external-technical-details" className={styles.raw} onToggle={event=>setRawOpen(event.currentTarget.open)}><summary>{i18nCopy(zh, "copy.components_chat_ExternalCallMessage.011")}</summary>{rawOpen&&<pre>{JSON.stringify({session_id:trace.remote_session_id,turn_id:trace.turn_id,call_id:node.call_id,tool:node.tool,input:node.arguments,output:node.result},null,2)}</pre>}</details>
         </>}
       </details>
       {proposals.length>0&&<div className="my-4"><StrategyProposalsHoist proposals={proposals}/></div>}

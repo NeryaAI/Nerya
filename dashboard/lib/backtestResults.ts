@@ -15,6 +15,24 @@ export type BacktestResultRef = {
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
 const timestamp = (value: string) => /^(?:[A-Za-z][A-Za-z0-9-]*_)?\d{8}_\d{6}$/.test(value);
+const hardFailureFlag = (flag: string) =>
+  flag === "negative_net_return" ||
+  flag === "strategy_returned_errors" ||
+  flag === "sdk_order_errors" ||
+  flag === "order_accounting_mismatch" ||
+  flag === "observation_order_attempt" ||
+  flag.startsWith("risk_breach:");
+
+/** Old reports may persist FAIL solely because they trailed buy-and-hold. */
+export function effectiveBacktestVerdict(verdict: string, flags: string[]): string {
+  const normalized = verdict.trim().toUpperCase();
+  if (
+    normalized === "FAIL" &&
+    flags.includes("benchmark_capture_below_threshold") &&
+    !flags.some(hardFailureFlag)
+  ) return "WARN";
+  return normalized;
+}
 
 function locator(path: string): { strategyId: string; proposalId: string; ts: string } | null {
   if (!path || /[\r\n"<>]/.test(path)) return null;
@@ -79,11 +97,13 @@ export function extractBacktestResults(value: unknown, seenAt = 0, action = ""):
       const reason = text(row.reason) || text(error.kind);
       const id = explicitFailure ? `error:${proposalId}:${strategyId}:${reason || message}` : `${proposalId ? proposalId + ":" : ""}${strategyId}:${ts}`;
       const old = results.get(id);
+      const flags = Array.isArray(row.flags) ? row.flags.filter((v): v is string => typeof v === "string") : old?.flags || [];
+      const rawVerdict = text(row.verdict) || old?.verdict || "";
       results.set(id, {
         id, strategyId, proposalId: proposalId || null, ts: explicitFailure ? "" : ts,
         title: text(row.title) || old?.title || strategyId || proposalId || "Backtest", seenAt,
         status: explicitFailure ? (row.backtest_status === "blocked" || ["no_historical_data", "backtest_sdk_unsupported", "backtest_dependency_missing"].includes(reason) ? "blocked" : "failed") : "completed",
-        verdict: text(row.verdict) || old?.verdict || "",
+        verdict: effectiveBacktestVerdict(rawVerdict, flags),
         metrics: { ...old?.metrics, ...object(row.metrics), ...object(row.metrics_display) },
         message: message || old?.message || "",
         dataKind: text(object(row.provenance).data_kind) || old?.dataKind || "",
@@ -98,7 +118,7 @@ export function extractBacktestResults(value: unknown, seenAt = 0, action = ""):
         coverage: { ...old?.coverage, ...Object.fromEntries(["requested_window_days", "requested_window_complete", "data_manifest", "tf", "backtest_days"].filter(key => row[key] !== undefined).map(key => [key, row[key]])) },
         start: text(row.start_utc || object(row.metrics_display).start_utc || object(row.metrics).start_utc) || old?.start || "",
         end: text(row.end_utc || object(row.metrics_display).end_utc || object(row.metrics).end_utc) || old?.end || "",
-        flags: Array.isArray(row.flags) ? row.flags.filter((v): v is string => typeof v === "string") : old?.flags || [],
+        flags,
         nextAction: text(object(row.next_required_action).message) || old?.nextAction || "",
         equityPreview: Array.isArray(row.equity_preview) ? row.equity_preview.flatMap(value => {
           const p = object(value);
@@ -123,7 +143,8 @@ export function collectBacktestResults(thread: Pick<ChatThread, "messages"> | nu
     ];
     for (const value of values) for (const result of extractBacktestResults(value, message.ts)) {
       const old = results.get(result.id);
-      results.set(result.id, { ...result, verdict: result.verdict || old?.verdict || "",
+      const flags = result.flags.length ? result.flags : old?.flags || [];
+      results.set(result.id, { ...result, verdict: effectiveBacktestVerdict(result.verdict || old?.verdict || "", flags),
         title: result.title === result.strategyId && old?.title ? old.title : result.title,
         message: result.message || old?.message || "", dataKind: result.dataKind || old?.dataKind || "",
         metrics: { ...old?.metrics, ...result.metrics },
@@ -134,7 +155,7 @@ export function collectBacktestResults(thread: Pick<ChatThread, "messages"> | nu
         biasChecks: { ...old?.biasChecks, ...result.biasChecks },
         researchChecks: { ...old?.researchChecks, ...result.researchChecks },
         start: result.start || old?.start || "", end: result.end || old?.end || "", engine: result.engine || old?.engine || "",
-        flags: result.flags.length ? result.flags : old?.flags || [], nextAction: result.nextAction || old?.nextAction || "",
+        flags, nextAction: result.nextAction || old?.nextAction || "",
         equityPreview: result.equityPreview.length ? result.equityPreview : old?.equityPreview || [] });
     }
   }

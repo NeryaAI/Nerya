@@ -41,7 +41,7 @@ export function WorkspaceFiles({ onOpenFile }: { onOpenFile?: (path: string) => 
   return <div className="flex h-full min-h-0 flex-col" data-testid="workspace-files">
     <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-[color:var(--line)] px-3 text-xs">
       <button type="button" className="btn-ghost shrink-0" disabled={!selected && directory === '.'} onClick={() => selected ? setSelected('') : setDirectory(directory.split('/').slice(0,-1).join('/') || '.')}>{i18nCopy(zh, "copy.components_chat_WorkspaceFiles.002")}</button>
-      <span className="min-w-0 flex-1 truncate" title={selected || directory}>{selected || (directory === '.' ? (zh ? '全部工作区文件' : 'All workspace files') : directory)}</span>
+      <span className="min-w-0 flex-1 truncate" title={selected || directory}>{selected || (directory === '.' ? (i18nCopy(zh, "copy.components_chat_WorkspaceFiles.009")) : directory)}</span>
       <button type="button" className="btn-ghost" onClick={() => setRevision(r => r+1)}>{i18nCopy(zh, "copy.components_chat_WorkspaceFiles.004")}</button>
     </header>
     <div className="min-h-0 flex-1 overflow-auto p-3">

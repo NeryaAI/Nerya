@@ -619,6 +619,37 @@
       "direct011": "No reviews yet",
       "direct012": "Run a reflection to see its results here.",
       "direct013": "Automatic review settings"
+    },
+    "components_LearningMemoryPanel": {
+      "055": "Session · ",
+      "056": "No keyword matches — browse recent records in this scope",
+      "057": "View all records in this scope",
+      "058": "View source turn",
+      "059": "Applies to: ",
+      "060": "Memory changed. Refresh and review before editing again.",
+      "061": "Pinned memory shares version checks with records. Changes apply to the next context snapshot; completed turns retain the versions used then.",
+      "062": "File and records differ. Review external file changes before editing.",
+      "063": "Use memory (injection and tool recall)",
+      "064": "Automatically save turn and session summaries",
+      "065": "Applies to subsequent calls. Viewing, correction and deletion remain available when use is off. Existing context is retained.",
+      "066": "Over budget",
+      "067": "Memory use disabled",
+      "068": "Notebook unreadable",
+      "069": "File/record conflict",
+      "070": "Actual memory use in this session",
+      "071": "Refresh usage",
+      "072": "No recorded injection events. Historical turns may still have used memory.",
+      "073": "characters",
+      "074": "Policy at this turn: ",
+      "075": "use enabled",
+      "076": "use disabled",
+      "077": "auto save enabled",
+      "078": "auto save disabled",
+      "079": "Injected",
+      "080": "Omitted",
+      "081": "Partial content",
+      "082": "Version: ",
+      "083": "View source turn"
     }
   }
 }

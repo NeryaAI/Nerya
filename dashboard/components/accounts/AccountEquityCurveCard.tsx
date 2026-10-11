@@ -1,12 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  createChart,
-  type IChartApi,
-  type ISeriesApi,
-  type Time,
-} from "lightweight-charts";
+import { useEffect, useMemo, useState } from "react";
+import { createVelaChart } from "../../lib/velaChart";
 import { useTranslations } from "next-intl";
 import { Card, Empty, ErrorBanner } from "../Page";
 import { clientApi, type AccountEquityPoint } from "../../lib/clientApi";
@@ -75,7 +70,7 @@ function fmtPctChange(start: number, end: number): {
  * Pulls per-account snapshot history from ``/accounts/equity_curve``
  * (backed by the same ``account_snapshots`` SQLite table that the
  * background refresh loop writes into). Renders an area + line chart
- * via lightweight-charts and lets the operator switch range buckets
+ * via Vela and lets the operator switch range buckets
  * (1H / 24H / 7D / 30D / ALL).
  *
  * The card is intentionally self-contained: it fetches its own data
@@ -97,8 +92,6 @@ export function AccountEquityCurveCard({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [node, setNode] = useState<HTMLDivElement | null>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const areaRef = useRef<ISeriesApi<"Area"> | null>(null);
 
   const config = useMemo<RangeConfig>(
     () => RANGE_CONFIGS.find((r) => r.id === range) ?? RANGE_CONFIGS[1],
@@ -143,75 +136,12 @@ export function AccountEquityCurveCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId, range]);
 
-  // Mount/dispose the chart whenever the host node or range changes.
   useEffect(() => {
     if (!node) return;
-    const api = createChart(node, {
-      height: 260,
-      layout: {
-        background: { color: "transparent" },
-        textColor: chartTheme.text,
-        attributionLogo: false,
-      },
-      grid: {
-        vertLines: { color: chartTheme.grid },
-        horzLines: { color: chartTheme.grid },
-      },
-      rightPriceScale: { borderColor: chartTheme.grid },
-      timeScale: {
-        borderColor: chartTheme.grid,
-        timeVisible: true,
-        secondsVisible: range === "1h",
-      },
-      crosshair: { mode: 1 },
-    });
-    chartRef.current = api;
-    const series = api.addAreaSeries({
-      lineColor: "#22c55e",
-      topColor: "rgba(34,197,94,.28)",
-      bottomColor: "rgba(34,197,94,.02)",
-      lineWidth: 2,
-      priceFormat: { type: "price", precision: 2, minMove: 0.01 },
-    });
-    areaRef.current = series;
-    const ro = new ResizeObserver(() => {
-      api.applyOptions({ width: Math.max(320, node.clientWidth) });
-    });
-    ro.observe(node);
-    api.applyOptions({ width: Math.max(320, node.clientWidth) });
-    return () => {
-      ro.disconnect();
-      api.remove();
-      chartRef.current = null;
-      areaRef.current = null;
-    };
-  }, [chartTheme, node, range]);
-
-  // Push fresh data into the area series whenever `points` changes.
-  useEffect(() => {
-    const series = areaRef.current;
-    const api = chartRef.current;
-    if (!series || !api) return;
-    if (points.length === 0) {
-      series.setData([]);
-      return;
-    }
-    // Lightweight-charts requires strictly-increasing timestamps; the
-    // backend already returns ASC order but we de-dup on the boundary
-    // here to be safe (bucket boundaries on the SQL side can land on
-    // the same epoch second under fast refresh cadences).
-    const sorted = [...points].sort((a, b) => a.ts - b.ts);
-    const data: { time: Time; value: number }[] = [];
-    let prevTs = -Infinity;
-    for (const row of sorted) {
-      const sec = Math.floor(row.ts);
-      if (sec <= prevTs) continue;
-      prevTs = sec;
-      data.push({ time: sec as Time, value: row.nav_usd });
-    }
-    series.setData(data);
-    api.timeScale().fitContent();
-  }, [points]);
+    const chart = createVelaChart(node, { height: 260, theme: chartTheme, series: [{ type: "area", name: "NAV", color: "#22c55e",
+      top_color: "rgba(34,197,94,.28)", bottom_color: "rgba(34,197,94,.02)", data: points.map(point => ({ time: point.ts, value: point.nav_usd })) }] });
+    return () => chart.destroy();
+  }, [chartTheme, node, points, range]);
 
   const stats = useMemo(() => {
     if (points.length === 0) return null;

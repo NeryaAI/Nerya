@@ -1,4 +1,6 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import {useLocale} from "next-intl";
 import {useEffect,useMemo,useRef,useState} from "react";
 import type {ToolStep} from "../../lib/agentConversation";
@@ -17,7 +19,7 @@ function ExploreGroup({steps,state,choices,onChoice}:{steps:ToolStep[];state:str
   const [choice,setOpen]=useState<boolean|null>(null);
   const open=choice??steps.some(step=>choices[step.key]===true);
   return <details open={open} onToggle={e=>{if(e.currentTarget.open!==open)setOpen(e.currentTarget.open);}} className={styles.group} data-testid="execution-explore-group">
-    <summary className={styles.summary}><ChevronRightIcon size={12}/><SearchIcon size={14}/><span>{zh?"查看了 ":"Explored "}{steps.length}{zh?" 项来源":" sources"}</span><CheckIcon size={13}/></summary>
+    <summary className={styles.summary}><ChevronRightIcon size={12}/><SearchIcon size={14}/><span>{i18nCopy(zh, "copy.components_chat_ExecutionTimeline.001")}{steps.length}{i18nCopy(zh, "copy.components_chat_ExecutionTimeline.002")}</span><CheckIcon size={13}/></summary>
     {open&&<div className={styles.groupBody}>{steps.map(step=><ToolActivity key={step.key} step={step} state={state} open={choices[step.key]} onOpenChange={value=>onChoice(step.key,value)}/>)}</div>}
   </details>;
 }
@@ -29,7 +31,7 @@ function ReasoningActivity({entry}:{entry:Extract<ExecutionEntry,{kind:"thinking
   const text=String(entry.block.text||"");
   const summary=entry.active?reasoningPreview(text):String(entry.block.summary||reasoningPreview(text));
   const duration=typeof entry.block.elapsed_ms==="number"&&entry.block.elapsed_ms>0?Math.max(1,Math.round(entry.block.elapsed_ms/1000)):null;
-  const label=entry.active?(zh?"正在思考":"Thinking"):(zh?"思考":"Thought process");
+  const label=entry.active?(i18nCopy(zh, "copy.components_chat_ExecutionTimeline.003")):(i18nCopy(zh, "copy.components_chat_ExecutionTimeline.004"));
   useEffect(()=>{
     const node=previewRef.current;if(!node)return;
     const sync=()=>{
@@ -82,10 +84,10 @@ export function ExecutionTimeline({steps,state,members=[],blocks=[]}:{steps:Tool
     const explore=(item:ExecutionEntry)=>item.kind==="tool"&&Boolean(item.step.result)&&!toolPresentation(item.step,state,zh).failed&&["read","search"].includes(toolPresentation(item.step,state,zh).family);
     if(explore(entry)&&previous?.every(explore))previous.push(entry);else groups.push([entry]);
   }
-  const labels:Record<string,string>={running:zh?"执行中":"Running",queued:zh?"等待启动":"Queued",pending:zh?"等待启动":"Queued",planned:zh?"待启动":"Planned",blocked:zh?"等待依赖":"Blocked",completed:zh?"已完成":"Completed",succeeded:zh?"已完成":"Completed",failed:zh?"失败":"Failed",timeout:zh?"超时":"Timed out",cancelled:zh?"已停止":"Stopped",interrupted:zh?"已中断":"Interrupted"};
+  const labels:Record<string,string>={running:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.005"),queued:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.006"),pending:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.007"),planned:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.008"),blocked:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.009"),completed:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.010"),succeeded:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.011"),failed:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.012"),timeout:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.013"),cancelled:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.014"),interrupted:i18nCopy(zh, "copy.components_chat_ExecutionTimeline.015")};
   return <div className={styles.timeline} data-testid="execution-timeline">
     {groups.flatMap(group=>group.length>=3&&group.every(entry=>entry.kind==="tool")?[<ExploreGroup key={group[0].key} steps={group.map(entry=>(entry as Extract<ExecutionEntry,{kind:"tool"}>).step)} state={state} choices={choices} onChoice={onChoice}/>]:group.map(entry=>entry.kind==="tool"?<ToolActivity key={entry.key} step={entry.step} state={state} open={choices[entry.step.key]} onOpenChange={value=>onChoice(entry.step.key,value)}/>:entry.kind==="thinking"?<ReasoningActivity key={entry.key} entry={entry}/>:<Narration key={entry.key} entry={entry}/>))}
-    {members.length>0&&<div className={styles.members} aria-label={zh?"团队执行进度":"Team progress"}>{members.map(member=><div key={member.id} className={styles.member} data-state={member.status}>
+    {members.length>0&&<div className={styles.members} aria-label={i18nCopy(zh, "copy.components_chat_ExecutionTimeline.016")}>{members.map(member=><div key={member.id} className={styles.member} data-state={member.status}>
       <span className={styles.memberDot}/><span>{member.name}</span><span className={styles.subject} title={member.task}>{member.task}</span><span className={styles.state}>{labels[member.status]||member.status}</span>
     </div>)}</div>}
   </div>;

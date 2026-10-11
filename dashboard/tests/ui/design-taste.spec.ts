@@ -190,6 +190,6 @@ test("direct entry to a secondary destination reveals its active navigation", as
   await page.goto("/accounts");
   await expect(page.getByRole("link", { name: "Trading", exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Trading", exact: true })).toHaveAttribute("aria-current", "page");
-  await expect(page.getByRole("button", { name: "More", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("button", { name: "More", exact: true })).toHaveAttribute("aria-expanded", "false");
   expect(state.errors).toEqual([]);
 });

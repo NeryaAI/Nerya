@@ -1,0 +1,16 @@
+.workspace { min-width: 0; color: var(--text-base); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; overflow: clip; }
+.header { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; padding: 18px 20px 12px; }
+.heading { flex: 1; min-width: min(180px,100%); }
+.heading h3 { font-size: 16px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.subtitle { margin-top: 4px; font-size: 12px; color: var(--text-muted); line-height: 1.7; }
+.status { font-size: 12px; color: var(--text-muted); }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 0 20px 14px; }
+.tabs { display: flex; gap: 24px; padding: 0 20px; border-block: 1px solid var(--line); }
+.tabs button { padding: 11px 0; color: var(--text-muted); border-bottom: 2px solid transparent; font-size: 13px; }
+.tabs button[aria-selected=true] { color: var(--text-base); border-color: var(--violet-2); }
+.content { padding: 18px 20px; min-width: 0; overflow-wrap: anywhere; }
+.provenance { padding: 14px 20px; border-top: 1px solid var(--line); color: var(--text-muted); font-size: 12px; }
+.provenance summary { cursor: pointer; min-height: 24px; }
+.provenance[open] > summary { margin-bottom: 12px; }
+.workspace :where(button,a,summary):focus-visible { outline: 2px solid var(--violet-2); outline-offset: 3px; }
+@media(max-width:600px) { .header,.content { padding: 14px; } .tabs,.actions,.provenance { padding-inline: 14px; } .actions button,.actions a { min-height: 36px; } }

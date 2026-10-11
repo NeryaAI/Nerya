@@ -16,7 +16,7 @@ export function TaskDockHeader({ tabs, choices, selected, onSelect, onRemove, ex
     document.getElementById('task-dock-tab-' + selected)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [selected, tabs.length]);
   const quiet = 'inline-flex h-9 min-w-8 shrink-0 items-center justify-center rounded text-[color:var(--text-muted)] hover:bg-[color:var(--panel-bg)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--text-muted)]';
-  const closeLabel = compact || expanded ? (zh ? '返回对话' : 'Back to chat') : i18nCopy(zh, "copy.components_chat_TaskDockHeader.007");
+  const closeLabel = compact || expanded ? (i18nCopy(zh, "copy.components_chat_TaskDockHeader.009")) : i18nCopy(zh, "copy.components_chat_TaskDockHeader.007");
   return <header className="flex min-h-11 shrink-0 items-center gap-1 border-b border-[color:var(--line)] px-1" data-testid="task-dock-header">
     <div role="tablist" aria-label={i18nCopy(zh, "copy.components_chat_TaskDockHeader.001")} className="flex min-w-0 flex-1 overflow-x-auto">
       {tabs.map((tab, index) => <div key={tab.id} className={'flex shrink-0 items-center border-b-2 ' + (selected === tab.id ? 'border-[color:var(--text-base)]' : 'border-transparent')}>

@@ -60,11 +60,11 @@ export function ToolActivity({ step, state, open, onOpenChange }: { step: ToolSt
       <span className={`shrink-0 text-xs ${p.failed ? "text-danger" : p.waiting ? "text-warn" : "text-[color:var(--text-muted)]"}`} role={p.pending?"status":undefined}>{p.pending ? <span aria-hidden className={styles.activeDot} /> : null}{p.failed || p.pending || p.waiting || !step.result ? p.state : <CheckIcon size={12} aria-label={p.state}/>}</span>
       </span>
       {!expanded&&p.summary&&<span className={styles.outcome} title={p.summary}>{p.summary}</span>}
-      {p.pending&&(progressMessage||percent!==undefined)&&<span className={styles.progress} role="status"><span>{progressMessage}</span>{percent!==undefined&&<progress max={100} value={percent} aria-label={zh?"工具执行进度":"Tool progress"}/>}</span>}
+      {p.pending&&(progressMessage||percent!==undefined)&&<span className={styles.progress} role="status"><span>{progressMessage}</span>{percent!==undefined&&<progress max={100} value={percent} aria-label={i18nCopy(zh, "copy.components_chat_ReadableExecution.005")}/>}</span>}
     </summary>
     {expanded&&<div className={styles.toolBody}>
       {snapshot ? <PortfolioSnapshot accounts={snapshot} /> : command || output.text || errorOutput.text ? <div className={styles.terminal}>
-        <div className={styles.terminalHeader}><span>{zh?"执行输出":"Execution output"}</span>{typeof out.exit_code==="number"&&<span>{zh?"退出码":"Exit"} {out.exit_code}</span>}</div>
+        <div className={styles.terminalHeader}><span>{i18nCopy(zh, "copy.components_chat_ReadableExecution.006")}</span>{typeof out.exit_code==="number"&&<span>{i18nCopy(zh, "copy.components_chat_ReadableExecution.007")} {out.exit_code}</span>}</div>
         <pre tabIndex={0}>{command?`$ ${command}\n`:""}{output.text}{errorOutput.text&&<span className="text-danger">{`\n${errorOutput.text}`}</span>}</pre>
       </div> : diff ? <CodeOutput diff text={diff} path={String(p.payload.path||out.path||"")}/>
         : value!=null ? <ToolResultContent value={displayValue} family={p.family} path={String(p.payload.path||p.payload.file_path||"")}/>

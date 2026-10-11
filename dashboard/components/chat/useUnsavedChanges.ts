@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { useEffect } from "react";
 import { useLocale } from "next-intl";
 import { confirm } from "../../lib/dialogs";
@@ -18,9 +20,9 @@ export function useUnsavedChanges(dirty: boolean) {
       event.preventDefault(); event.stopPropagation();
       if (asking) return;
       asking = true;
-      void confirm({ title: zh ? "离开未保存的编辑？" : "Leave this unsaved edit?",
-        message: zh ? "草稿会保留在本机，返回后可继续编辑。已经保存或执行的内容不会被撤销。" : "The draft is retained locally and can be restored when you return. Saved or executed actions will not be undone.",
-        okLabel: zh ? "保留草稿并离开" : "Keep draft and leave", cancelLabel: zh ? "继续编辑" : "Keep editing" }).then(ok => {
+      void confirm({ title: i18nCopy(zh, "copy.components_chat_useUnsavedChanges.001"),
+        message: i18nCopy(zh, "copy.components_chat_useUnsavedChanges.002"),
+        okLabel: i18nCopy(zh, "copy.components_chat_useUnsavedChanges.003"), cancelLabel: i18nCopy(zh, "copy.components_chat_useUnsavedChanges.004") }).then(ok => {
           asking = false;
           if (ok && !disposed) { window.removeEventListener("beforeunload",beforeUnload); window.location.assign(anchor.href); }
         });

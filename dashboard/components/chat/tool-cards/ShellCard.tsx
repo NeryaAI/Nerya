@@ -1,4 +1,6 @@
 "use client";
+import { copy as i18nCopy } from "../../../lib/i18n";
+
 import { Icon as NeryaGlyph } from "../../icons";
 
 import { useLocale } from 'next-intl';
@@ -48,7 +50,7 @@ export function ShellCard({
   const script = block.action === 'script_run';
   const command = script ? `${String(payload.skill_id || block.skill_id || '')}/${String(payload.name || '')}${Array.isArray(payload.args) ? ' ' + payload.args.map(String).join(' ') : ''}` : String(payload.command || "");
   const structuredScript = script && recordOf(block.result).stdout_json != null;
-  const label = script ? (zh ? '运行脚本' : 'Run script') : 'Ran command';
+  const label = script ? (i18nCopy(zh, "copy.components_chat_tool-cards_ShellCard.001")) : 'Ran command';
   const description = String(payload.description || "");
   const cwd = String(payload.cwd || "");
   const isResult = variant === "result";
@@ -120,7 +122,7 @@ export function ShellCard({
             <span className="text-ink-500 select-none">$ </span>
             <span className="text-ink-100">{command}</span>
           </div>
-          {isResult && stdout ? (structuredScript ? <details className="mt-2" data-testid="script-structured-output"><summary className="cursor-pointer py-2 text-[color:var(--text-muted)]">{zh ? '已返回结构化结果 · 展开脚本输出' : 'Structured result returned · expand script output'}</summary><pre className="text-ink-200 whitespace-pre-wrap mt-2">{stdout}</pre></details> :
+          {isResult && stdout ? (structuredScript ? <details className="mt-2" data-testid="script-structured-output"><summary className="cursor-pointer py-2 text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_tool-cards_ShellCard.002")}</summary><pre className="text-ink-200 whitespace-pre-wrap mt-2">{stdout}</pre></details> :
             <pre className="text-ink-200 whitespace-pre-wrap mt-2">{stdout}</pre>
           ) : null}
           {isResult && stderr ? (

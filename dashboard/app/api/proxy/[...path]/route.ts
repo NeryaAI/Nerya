@@ -184,7 +184,9 @@ function nodeForward(
           resolve({
             status: res.statusCode || 502,
             headers: res.headers,
-            body: Buffer.concat(chunks),
+            // Buffer is a Uint8Array at runtime; newer Node typings model its
+            // backing ArrayBuffer more broadly than Buffer.concat expects.
+            body: Buffer.concat(chunks as unknown as Uint8Array[]),
           });
         });
       },
@@ -432,7 +434,7 @@ async function forward(req: NextRequest, path: string[], method: string) {
   if (!respHeaders.has("content-type")) {
     respHeaders.set("content-type", "application/json");
   }
-  return new NextResponse(upstream.body, {
+  return new NextResponse(new Uint8Array(upstream.body), {
     status: upstream.status,
     headers: respHeaders,
   });

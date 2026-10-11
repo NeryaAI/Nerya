@@ -1,4 +1,6 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useLocale } from "next-intl";
 import { ConversationFind } from "./ConversationFind";
@@ -86,7 +88,7 @@ export const ConversationTimeline=memo(function ConversationTimeline({messages,s
     publicOnly ? finalReplyText(message) : publicReplyText(message,message.loading?liveEventsToBlocks(message.live_events||message.turn?.activity_events||[]):message.turn?.blocks||[])})),[messages,publicOnly]);
   return <div key={session} ref={scopeRef} data-timeline-session={session}>
     <ConversationFind key={session} session={session} entries={findEntries} scrollRef={scrollRef} onCancelReveal={cancel} onReveal={(id,match,signal)=>reveal({session,id,match,focus:false},signal)} hasMore={hasMore} onOlder={onOlder} loadingOlder={loadingOlder}/>
-    {hasMore&&<div className="flex justify-center pb-4"><button type="button" className="min-h-9 px-3 text-xs text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]" disabled={loadingOlder} onClick={onOlder}>{loadingOlder?(zh?"加载中…":"Loading…"):(zh?"加载更早记录":"Load older history")}</button></div>}
+    {hasMore&&<div className="flex justify-center pb-4"><button type="button" className="min-h-9 px-3 text-xs text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]" disabled={loadingOlder} onClick={onOlder}>{loadingOlder?(i18nCopy(zh, "copy.components_chat_ConversationTimeline.001")):(i18nCopy(zh, "copy.components_chat_ConversationTimeline.002"))}</button></div>}
     {units.map(unit=><TurnWindow key={unit.messages[0].id} unit={unit} root={scrollRef} session={session} forced={forced===unit.id}>{unit.messages.map(m=><div key={m.id} data-find-entry={m.backend_message_id||m.id}>{renderMessage(m,indexes.get(m.id)!)}</div>)}</TurnWindow>)}
   </div>;
 });

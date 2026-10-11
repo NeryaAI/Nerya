@@ -29,6 +29,63 @@ test('rerun is explicit, preserves composer draft and sends run_only',async({pag
  await expect.poll(()=>f.requests.length).toBe(2);expect(f.requests[1].request.run_only).toBe(true);expect(f.requests[1].request.payload.text).toBe('Original task');await expect(input(page)).toHaveValue('Unsent draft');expect(f.queue.paused).toBe(true);
 });
 
+test('a normal follow-up to an empty paused queue sends immediately without a confirmation modal',async({page})=>{
+ const f=await parityFixture(page,{complete:true});
+ f.queue.paused=true;f.queue.pause_reason='restarted';
+ await start(page);
+ await input(page).fill('请启用公共 Solana RPC 并继续');
+ await page.getByTestId('native-command-send').click();
+ await expect.poll(()=>f.requests.length).toBe(1);
+ expect(f.requests[0].request.payload.text).toBe('请启用公共 Solana RPC 并继续');
+ expect(f.requests[0].request.run_only).toBe(true);
+ await expect(page.getByRole('dialog')).toHaveCount(0);
+ await expect(input(page)).toHaveValue('');
+ expect(f.queue.paused).toBe(true);
+ expect(f.queue.pause_reason).toBe('restarted');
+ expect(f.errors).toEqual([]);
+});
+
+test('follow-up during queued work does not bypass FIFO or ask to run only',async({page})=>{
+ const f=await parityFixture(page);
+ await start(page);
+ await input(page).fill('First turn');await page.getByTestId('native-command-send').click();
+ await expect.poll(()=>f.requests.length).toBe(1);
+ f.queue.paused=true;f.queue.pause_reason='operator';
+ await input(page).fill('Queued behind first');await page.getByTestId('native-command-send').click();
+ await expect.poll(()=>f.requests.length).toBe(2);
+ expect(f.requests[1].request.run_only).not.toBe(true);
+ await expect(page.getByRole('dialog')).toHaveCount(0);
+ expect(f.queue.paused).toBe(true);
+ expect(f.errors).toEqual([]);
+});
+
+test('stale idle snapshot safely falls back to FIFO when the backend already owns a turn',async({page})=>{
+ const f=await parityFixture(page);
+ f.queue.paused=true;f.queue.pause_reason='restarted';
+ const requests:any[]=[];
+ await page.route('**/api/proxy/agent/commands',async route=>{
+   if(route.request().method()!== 'POST'){await route.fallback();return;}
+   const body=route.request().postDataJSON();requests.push(body);
+   if(body.request.run_only===true){
+     await route.fulfill({status:409,json:{ok:false,error:'session_turn_in_progress'}});
+     return;
+   }
+   await route.fallback();
+ });
+ await start(page);
+ await input(page).fill('Keep this follow-up queued safely');
+ await page.getByTestId('native-command-send').click();
+ await expect.poll(()=>requests.length).toBe(2);
+ expect(requests[0].request.run_only).toBe(true);
+ expect(requests[1].request.run_only).toBeUndefined();
+ expect(requests[0].command_id).not.toBe(requests[1].command_id);
+ await expect.poll(()=>f.requests.length).toBe(1);
+ await expect(page.getByRole('dialog')).toHaveCount(0);
+ await expect(input(page)).toHaveValue('');
+ expect(f.queue.paused).toBe(true);
+ expect(f.errors).toEqual([]);
+});
+
 test('waiting user decision disables queue resume and unknown outcome never reruns',async({page})=>{
  const f=await parityFixture(page);await start(page);await input(page).fill('Task requiring a decision');await page.getByTestId('native-command-send').click();await expect.poll(()=>f.commands.size).toBe(1);await input(page).fill('Later task');await page.getByTestId('native-command-send').click();
  const first=[...f.commands.values()][0];f.setState(first.command_id,'awaiting_input');f.queue.paused=true;f.queue.pause_reason='awaiting_input';

@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.json","include":["next-env.d.ts","**/*.ts","**/*.tsx",".next-task-runs-qa/types/**/*.ts"],"exclude":["node_modules","tests/e2e","playwright.config.ts"]}

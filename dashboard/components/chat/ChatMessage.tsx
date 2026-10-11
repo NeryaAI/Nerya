@@ -215,12 +215,12 @@ function MessageActions({
     <div className={`mt-1 flex items-center gap-1.5 text-[10px] transition-opacity duration-150 ${persistent ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"}`}>
       <CopyButton text={text} />
       {onEdit ? (
-        <IconButton label={zh ? "修改记录（不重新执行）" : "Edit record (no rerun)"} onClick={onEdit} disabled={disabled}>
+        <IconButton label={i18nCopy(zh, "copy.components_chat_ChatMessage.013")} onClick={onEdit} disabled={disabled}>
           <EditIcon size={14} />
         </IconButton>
       ) : null}
       {onDelete ? (
-        <IconButton label={zh ? "删除记录（不撤销操作）" : "Delete record (does not undo actions)"} onClick={onDelete} tone="danger" disabled={disabled}>
+        <IconButton label={i18nCopy(zh, "copy.components_chat_ChatMessage.014")} onClick={onDelete} tone="danger" disabled={disabled}>
           <TrashIcon size={14} />
         </IconButton>
       ) : null}
@@ -347,14 +347,14 @@ export function UserBubble({
           ) : (
             null
           )}
-          {editing && <p className="mt-2 text-left text-xs leading-5 text-[color:var(--text-muted)]">{zh ? "这里只修改记录，不会重新生成回答或撤销已执行操作。保存后，已完成任务基于旧输入的续跑断点将失效。" : "This edits the record only; it does not regenerate answers or undo actions. Saving invalidates a completed task's continuation snapshot based on the old input."}</p>}
+          {editing && <p className="mt-2 text-left text-xs leading-5 text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_ChatMessage.015")}</p>}
           <MessageAttachmentList attachments={msg.attachments} />
         </div>
         <div data-testid="user-message-meta" className="mt-1 flex min-h-7 items-center justify-end gap-2 text-[10px] text-[color:var(--text-muted)]">
           {!editing ? <MessageActions text={msg.text} onEdit={msg.text ? onEdit : undefined} onDelete={onDelete} disabled={actionsDisabled} /> : null}
           {msg.external_request ? <ExternalMessageReceipt state={msg.external_request.state} /> : null}
-          {!editing && onFork ? <button type="button" onClick={onFork} disabled={!msg.backend_message_id || saving || actionsDisabled} data-testid="fork-from-message" title={zh ? "修改后放入新分支草稿，不会自动发送或撤销原操作。" : "Place edits in a new branch draft; no automatic send or undo."} className="rounded px-1 py-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">{zh ? "编辑并建分支" : "Edit and branch"}</button> : null}
-          {msg.edited_at ? <span title={zh ? "只修改历史记录，原回答及已执行操作不会重新生成或撤销。" : "History was edited; previous answers and executed actions were not regenerated or undone."}>{th("edited")}</span> : null}
+          {!editing && onFork ? <button type="button" onClick={onFork} disabled={!msg.backend_message_id || saving || actionsDisabled} data-testid="fork-from-message" title={i18nCopy(zh, "copy.components_chat_ChatMessage.016")} className="rounded px-1 py-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">{i18nCopy(zh, "copy.components_chat_ChatMessage.017")}</button> : null}
+          {msg.edited_at ? <span title={i18nCopy(zh, "copy.components_chat_ChatMessage.018")}>{th("edited")}</span> : null}
           <time>{formatTime(msg.ts)}</time>
         </div>
       </div>
@@ -364,9 +364,9 @@ export function UserBubble({
 
 function ExternalMessageReceipt({ state }: { state: NonNullable<UserMessage['external_request']>['state'] }) {
   const zh = useLocale().startsWith('zh');
-  const labels = { queued: zh ? '已保存 · 等待外部 Agent 读取' : 'Saved · waiting for external Agent',
-    delivered: zh ? '已随工具结果送达 · 等待确认' : 'Delivered with tool result · awaiting acknowledgement',
-    acknowledged: zh ? '外部 Agent 已确认接收' : 'Acknowledged by external Agent' };
+  const labels = { queued: i18nCopy(zh, "copy.components_chat_ChatMessage.019"),
+    delivered: i18nCopy(zh, "copy.components_chat_ChatMessage.020"),
+    acknowledged: i18nCopy(zh, "copy.components_chat_ChatMessage.021") };
   return <span role="status" data-testid="external-message-receipt" data-state={state}>{labels[state]}</span>;
 }
 
@@ -440,10 +440,10 @@ export function AssistantBubble({
     {attentionBlocks.length > 0 && <NativeBlocksTrack envelopes={attentionBlocks} live={Boolean(msg.loading)} pendingApprovals={pendingApprovals} onApprovalAction={onApprovalAction} resolvingApprovalIds={resolvingApprovalIds} suppressTopProposalHoist presentation="expanded"/>}
     {visualBlocks.length > 0 && <NativeBlocksTrack envelopes={visualBlocks} suppressTopProposalHoist presentation="expanded"/>}
     {modelRetry ? <ModelRetryStatus retry={modelRetry} /> : null}
-    {msg.turn?.attachments?.some(item => item.model_sent === false) && <p role="status" className="mb-3 text-xs text-warn">{zh ? "部分附件未发送给模型，请查看本轮详情。" : "Some attachments were not sent to the model. See turn details."}</p>}
+    {msg.turn?.attachments?.some(item => item.model_sent === false) && <p role="status" className="mb-3 text-xs text-warn">{i18nCopy(zh, "copy.components_chat_ChatMessage.022")}</p>}
     <ContextCompactionStatus events={events}/>
     {msg.error ? <ErrorCard error={msg.error} onRetry={onRetry} onContinue={onContinue} /> : null}
-    {msg.error && onContinue ? <p className="mb-3 text-xs text-[color:var(--text-muted)]">{zh ? "继续会从已保存的断点恢复本轮；不会修改历史记录，后续操作仍需通过风险与审批检查。" : "Continue resumes this turn from its saved checkpoint. History stays unchanged; subsequent actions still require risk and approval checks."}</p> : null}
+    {msg.error && onContinue ? <p className="mb-3 text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_ChatMessage.023")}</p> : null}
 
     <BacktestReplyCards message={msg} />
     {proposals.length ? <div data-turn-section="proposal-actions" className="mb-5"><StrategyProposalsHoist proposals={proposals} /></div> : null}
@@ -455,14 +455,14 @@ export function AssistantBubble({
       {finalReply ? <>
       {<div data-testid="result-actions" className="mt-5 flex flex-wrap items-center gap-3 border-t border-[color:var(--line)] pt-3 text-xs text-[color:var(--text-muted)]">
         <MessageActions text={reply} persistent /><ConversationContext message={msg}/>
-        {conversationId&&browserOperations.length>0&&onOpenBrowser&&<button type="button" className="inline-flex h-8 items-center gap-1 rounded px-2 text-xs" onClick={onOpenBrowser} data-testid="show-browser-sidebar"><NeryaGlyph name="globe" size={14}/>{zh?"浏览器":"Browser"}</button>}
+        {conversationId&&browserOperations.length>0&&onOpenBrowser&&<button type="button" className="inline-flex h-8 items-center gap-1 rounded px-2 text-xs" onClick={onOpenBrowser} data-testid="show-browser-sidebar"><NeryaGlyph name="globe" size={14}/>{i18nCopy(zh, "copy.components_chat_ChatMessage.024")}</button>}
         {onOpenResult ? <button type="button" onClick={onOpenResult} data-testid="open-result-tab"
           className="inline-flex min-h-9 items-center gap-2 rounded-lg border border-[color:var(--line)] bg-[color:var(--card)] px-3 text-xs text-[color:var(--text-base)] hover:border-[color:var(--line-hi)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
           <FileIcon size={13} />{i18nCopy(zh, "copy.components_chat_ChatMessage.012")}
         </button> : null}
         <time className="ml-auto text-[11px]">{formatTime(msg.ts)}</time>
       </div>}
-      </> : <p role="status" className="mt-2 text-xs text-[color:var(--text-muted)]">{msg.loading ? (zh ? "正文正在生成…" : "Reply in progress…") : (zh ? "保留的正文片段，尚未形成最终结果。" : "Retained reply fragment; no final result yet.")}</p>}
+      </> : <p role="status" className="mt-2 text-xs text-[color:var(--text-muted)]">{msg.loading ? (i18nCopy(zh, "copy.components_chat_ChatMessage.025")) : (i18nCopy(zh, "copy.components_chat_ChatMessage.026"))}</p>}
     </section> : !msg.loading && !msg.error && !hasTrace && !msg.execution_status ? <p className="py-2 text-xs text-[color:var(--text-muted)]" data-turn-section="empty-result">
       {i18nCopy(zh, "copy.components_chat_ChatMessage.011")}
     </p> : null}

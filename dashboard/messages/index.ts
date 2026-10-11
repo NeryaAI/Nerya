@@ -12,6 +12,10 @@ import enResearchWorkspace from "./en/research-workspace.json";
 import zhResearchWorkspace from "./zh/research-workspace.json";
 import enWorkflowExperience from "./en/workflow-experience.json";
 import zhWorkflowExperience from "./zh/workflow-experience.json";
+import enTaskRuns from "./en/task-runs.json";
+import zhTaskRuns from "./zh/task-runs.json";
+import enFinancial from "./en/financial.json";
+import zhFinancial from "./zh/financial.json";
 import enDesktop from "./en/desktop.json";
 import zhDesktop from "./zh/desktop.json";
 import enBrowser from "./en/browser.json";
@@ -36,6 +40,8 @@ import enTrading from "./en/trading.json";
 import zhTrading from "./zh/trading.json";
 import enWorkflows from "./en/workflows.json";
 import zhWorkflows from "./zh/workflows.json";
+import enWorkflowUpgrade from "./en/workflow-upgrade.json";
+import zhWorkflowUpgrade from "./zh/workflow-upgrade.json";
 
 type MessageValue = string | { [key: string]: MessageValue };
 
@@ -64,11 +70,14 @@ function mergeMessages(
 export const en = {
   ...enAssistants,
   ...enSdkAccounts,
+  ...enWorkflowUpgrade,
   ...enAccountConnection,
   ...enChatHistory,
   ...enComposer,
   ...enResearchWorkspace,
   ...enWorkflowExperience,
+  ...enTaskRuns,
+  ...enFinancial,
   ...enDesktop,
   ...enBrowser,
   ...enChat,
@@ -81,18 +90,21 @@ export const en = {
   ...enStrategies,
   ...enTrading,
   ...enWorkflows,
-  copy: [enBrowser, enChat, enCore, enEvolution, enMisc, enOnboarding, enSettings, enSkills, enStrategies, enTrading, enWorkflows]
+  copy: [enResearchWorkspace, enBrowser, enChat, enCore, enEvolution, enMisc, enOnboarding, enSettings, enSkills, enStrategies, enTrading, enWorkflows]
     .reduce<Record<string, MessageValue>>((copy, resource) => mergeMessages(copy, copyOf(resource)), {}),
 } as const;
 
 export const zh = {
   ...zhAssistants,
   ...zhSdkAccounts,
+  ...zhWorkflowUpgrade,
   ...zhAccountConnection,
   ...zhChatHistory,
   ...zhComposer,
   ...zhResearchWorkspace,
   ...zhWorkflowExperience,
+  ...zhTaskRuns,
+  ...zhFinancial,
   ...zhDesktop,
   ...zhBrowser,
   ...zhChat,
@@ -105,6 +117,6 @@ export const zh = {
   ...zhStrategies,
   ...zhTrading,
   ...zhWorkflows,
-  copy: [zhBrowser, zhChat, zhCore, zhEvolution, zhMisc, zhOnboarding, zhSettings, zhSkills, zhStrategies, zhTrading, zhWorkflows]
+  copy: [zhResearchWorkspace, zhBrowser, zhChat, zhCore, zhEvolution, zhMisc, zhOnboarding, zhSettings, zhSkills, zhStrategies, zhTrading, zhWorkflows]
     .reduce<Record<string, MessageValue>>((copy, resource) => mergeMessages(copy, copyOf(resource)), {}),
 } as const;

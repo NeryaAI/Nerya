@@ -109,6 +109,7 @@ export type NativeBlockEnvelope = {
 };
 
 export type TurnPayload = {
+  run_id?: string;
   error?: string;
   execution_status?: string;
   command_id?: string;
@@ -269,6 +270,39 @@ export type ChatRunSettings = {
   max_wall_seconds: number;
   evidence_contract?: Record<string, unknown>;
 };
+
+/** Presets select the configured tier route, not a particular provider/model.
+ * Preserve a separately chosen thinking level across tier switches. */
+export type QuickModelTier = "" | "light" | "medium" | "high";
+export function applyModelTierPreset(settings: ChatRunSettings, tier: QuickModelTier): ChatRunSettings {
+  return {
+    ...settings,
+    model_tier: tier,
+    model_provider: "",
+    model_id: "",
+    model_context_window: 0,
+  };
+}
+
+/** A quick thinking change must also update an active model's saved override,
+ * otherwise reopening the specific model would silently restore an old level. */
+export function applyReasoningPreset(
+  settings: ChatRunSettings,
+  effort: ReasoningEffort,
+  activeModelKey?: string,
+): ChatRunSettings {
+  if (!activeModelKey || !activeModelKey.startsWith("tier:") && !activeModelKey.startsWith("catalog:")) {
+    return { ...settings, reasoning_effort: effort };
+  }
+  return {
+    ...settings,
+    reasoning_effort: effort,
+    model_overrides: {
+      ...settings.model_overrides,
+      [activeModelKey]: { ...settings.model_overrides?.[activeModelKey], reasoning_effort: effort },
+    },
+  };
+}
 
 export type ChatModelOption = {
   key: string;
@@ -1606,6 +1640,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           elapsed_ms: ev.elapsed_ms ?? null,
           result: (ev as Record<string, unknown>).result,
           display_result: ev.display_result,
+          recovery: (ev as Record<string, unknown>).recovery,
           compaction: ev.compaction,
           attempt: ev.attempt,
           index: out.length,

@@ -14,7 +14,10 @@ export type ComposerDelivery = {
     "connection_unavailable" | "delivery_unconfirmed" | "execution_unconfirmed" |
     "awaiting_input" | "awaiting_approval";
   canSubmit: boolean;
-  requiresRunOnlyConfirmation: boolean;
+  /** One explicit send may run while an *empty* session queue remains held.
+   * This is only a per-message intent; it does not resume the queue or bypass
+   * server-side decision, unknown-execution, lease, or approval guards. */
+  runOnly: boolean;
 };
 
 /** Presentation only. The store owns admission; never resume a queue from this result. */
@@ -24,7 +27,7 @@ export function composerDelivery(input: ComposerDeliveryInput): ComposerDelivery
   const queued = work.some(command => command.state === "queued");
   const mode = active || queued ? "queue" : "send";
   const blocked = (reason: ComposerDelivery["reason"]): ComposerDelivery => ({
-    mode, reason, canSubmit: false, requiresRunOnlyConfirmation: false,
+    mode, reason, canSubmit: false, runOnly: false,
   });
   if (input.connection !== "online") return blocked("connection_unavailable");
   if (input.pendingCount) return blocked("delivery_unconfirmed");
@@ -41,8 +44,11 @@ export function composerDelivery(input: ComposerDeliveryInput): ComposerDelivery
     mode,
     reason: active ? "active" : queued ? (paused ? "held_queue" : "queued") : paused ? "paused_empty" : "idle",
     canSubmit: true,
-    // Legacy operator holds cannot be distinguished from old system residues.
-    // Offer explicit run_only for this new message; do not clear the pause.
-    requiresRunOnlyConfirmation: !active && !queued && paused,
+    // ZCode's held-queue confirmation is for choosing what to do with actual
+    // queued messages, not for sending a follow-up to an empty queue. A send
+    // is already the user's explicit per-message action; use the existing
+    // backend run_once lane rather than asking a second time. Preserve the
+    // hold and never leapfrog queued work or a running turn.
+    runOnly: !active && !queued && paused,
   };
 }

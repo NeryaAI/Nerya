@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { useEffect, useRef, useState } from "react";
 import { NextIntlClientProvider, useLocale, useMessages } from "next-intl";
 import { clientApi } from "../../lib/clientApi";
@@ -56,17 +58,17 @@ export function QueueEnvelopeEditor({ command, current, onSave, onClose }: {
       if (mounted.current && workspace === getWorkspaceIdentity() && generation === workspaceGeneration()) setError(commandErrorText(commandErrorCode(reason), zh));
     } finally { if (mounted.current) setBusy(false); }
   }
-  const saveLabel = zh ? "保存队列更改" : "Save queue changes";
+  const saveLabel = i18nCopy(zh, "copy.components_chat_QueueEnvelopeEditor.001");
   return <div className="space-y-2 py-3" data-testid="queue-envelope-editor">
-    <p className="text-sm font-medium">{zh ? "编辑排队消息" : "Edit queued message"}</p>
+    <p className="text-sm font-medium">{i18nCopy(zh, "copy.components_chat_QueueEnvelopeEditor.002")}</p>
     {conflict && <div role="alert" className="text-sm text-[color:var(--warn)]">
-      <p>{zh ? "消息版本已变化或已开始执行。完整编辑草稿已保留。" : "This message changed or started running. Your complete draft is retained."}</p>
+      <p>{i18nCopy(zh, "copy.components_chat_QueueEnvelopeEditor.003")}</p>
       {current?.state === "queued" && current.queue_editable !== false && <button type="button" disabled={busy} className="btn btn-ghost" onClick={() => {
         setBase(current); update({ ...draft, revision: current.revision }); setError("");
-      }}>{zh ? "保留草稿，基于当前版本继续编辑" : "Keep draft and edit against current version"}</button>}
+      }}>{i18nCopy(zh, "copy.components_chat_QueueEnvelopeEditor.004")}</button>}
     </div>}
     {command.kind === "resume" ? <>
-      <label className="block text-sm">{zh ? "继续本轮的补充说明" : "Continuation feedback"}
+      <label className="block text-sm">{i18nCopy(zh, "copy.components_chat_QueueEnvelopeEditor.005")}
         <textarea className="w-full" value={draft.text} disabled={busy} onChange={event => update({ ...draft, text: event.target.value })} />
       </label>
       <ComposerModelMenu settings={draft.settings} onSettingsChange={settings => update({ ...draft, settings })} modelOptions={models} disabled={busy} />
@@ -74,12 +76,12 @@ export function QueueEnvelopeEditor({ command, current, onSave, onClose }: {
     </> : <NextIntlClientProvider locale={locale} messages={{ ...messages, chat: { ...(messages.chat as Record<string, string>), send: saveLabel } }}>
       <ChatInput value={draft.text} onChange={text => update({ ...draft, text })} onSend={() => void save()}
         sending={false} submitting={busy} draftLocked={busy} locked={conflict}
-        lockMessage={zh ? "当前版本不可保存；可以继续编辑草稿。" : "This version cannot be saved; you can keep editing the draft."}
-        placeholder={zh ? "编辑此次排队输入…" : "Edit this queued input…"}
+        lockMessage={i18nCopy(zh, "copy.components_chat_QueueEnvelopeEditor.006")}
+        placeholder={i18nCopy(zh, "copy.components_chat_QueueEnvelopeEditor.007")}
         settings={draft.settings} onSettingsChange={settings => update({ ...draft, settings })} modelOptions={models}
         attachments={draft.attachments} onAttachmentsChange={attachments => update({ ...draft, attachments })} sessionId={command.session_id} />
     </NextIntlClientProvider>}
-    <button type="button" className="btn btn-ghost" disabled={busy} onClick={onClose}>{zh ? "关闭（保留草稿）" : "Close (keep draft)"}</button>
+    <button type="button" className="btn btn-ghost" disabled={busy} onClick={onClose}>{i18nCopy(zh, "copy.components_chat_QueueEnvelopeEditor.008")}</button>
     {error && <p role="alert" className="text-sm text-[color:var(--danger)]">{error}</p>}
   </div>;
 }

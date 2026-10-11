@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import type { SVGProps } from "react";
+import * as Menu from "@radix-ui/react-dropdown-menu";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import styles from "./CodexSidebar.module.css";
 
@@ -47,7 +48,6 @@ function SidebarHint({ label, children }: { label: string; children: React.React
 }
 
 const COLLAPSE_KEY = "nerya.sidebar.collapsed";
-const ADVANCED_OPEN_KEY = "nerya.sidebar.advanced-open";
 
 /** Destinations already surfaced explicitly — kept out of the "More" list. */
 const COVERED_HREFS = new Set([
@@ -174,13 +174,11 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
   const [collapsed, setCollapsed] = useState(false);
   const [isNarrow, setIsNarrow] = useState(false);
   const [hydrated, setHydrated] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
 
 
   useEffect(() => {
     try {
       if (localStorage.getItem(COLLAPSE_KEY) === "1") setCollapsed(true);
-      if (localStorage.getItem(ADVANCED_OPEN_KEY) === "1") setAdvancedOpen(true);
     } catch {
       /* ignore */
     }
@@ -204,15 +202,6 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
     }
   }, [collapsed, hydrated]);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    try {
-      localStorage.setItem(ADVANCED_OPEN_KEY, advancedOpen ? "1" : "0");
-    } catch {
-      /* ignore */
-    }
-  }, [advancedOpen, hydrated]);
-
   const advancedItems = useMemo(() => {
     const seen = new Set<string>();
     const out: NavEntry[] = [];
@@ -230,11 +219,9 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
     return out;
   }, [nav.data]);
 
-  const advancedActive = isActive(pathname, "/portfolio", ["/accounts", "/orders", "/incidents", "/workflows"])
+  const moreActive = isActive(pathname, "/factors")
+    || isActive(pathname, "/workflows")
     || advancedItems.some((item) => isActive(pathname, item.href, item.match_hrefs));
-  useEffect(() => {
-    if (advancedActive) setAdvancedOpen(true);
-  }, [pathname, advancedActive]);
 
   const railCollapsed = !inDrawer && (collapsed || isNarrow);
   const width = railCollapsed ? "w-14" : "w-[280px]";
@@ -254,11 +241,72 @@ export function CodexSidebar({ inDrawer = false }: { inDrawer?: boolean }) {
             <SideRow icon={ComposeIcon} label={t("newChat")} href="/chat" collapsed active={pathMatches(pathname,"/chat")} />
             <SideRow icon={AgentsIcon} label={t("agents")} href="/agents" collapsed active={isActive(pathname,"/agents",["/skills","/tasks"])} />
             <SideRow icon={StrategiesIcon} label={t("strategies")} href="/strategies" collapsed active={isActive(pathname,"/strategies")} />
-            <SideRow icon={SkillsIcon} label={t("factors")} href="/factors" collapsed active={isActive(pathname,"/factors")} />
             <SideRow icon={PortfolioIcon} label={t("trading")} href="/portfolio" collapsed active={isActive(pathname,"/portfolio",["/accounts","/orders","/incidents"])} />
-            <SideRow icon={TriggersIcon} label={t("automation")} href="/workflows" collapsed active={isActive(pathname,"/workflows")} />
-            {advancedItems.length > 0 && <SidebarHint label={t("sectionAdvanced")}><button type="button" className="sidebar-item sidebar-item-idle w-full justify-center px-0" aria-label={t("sectionAdvanced")} aria-expanded={advancedOpen} aria-controls="sidebar-additional-destinations" onClick={() => setAdvancedOpen(value => !value)}><MoreIcon size={18} /></button></SidebarHint>}
-            {advancedOpen && <div id="sidebar-additional-destinations" className="space-y-2">{advancedItems.map(item => <SideRow key={item.href} icon={resolveNavIcon(item) ?? OverviewIcon} label={safeNavTranslate(tNav,item.href,item.label)} href={item.href} collapsed active={isActive(pathname,item.href,item.match_hrefs)} />)}</div>}
+            <Menu.Root>
+              <SidebarHint label={t("sectionAdvanced")}>
+                <Menu.Trigger asChild>
+                  <button
+                    type="button"
+                    className={`sidebar-item w-full justify-center px-0 ${moreActive ? "sidebar-item-active" : "sidebar-item-idle"}`}
+                    aria-label={t("sectionAdvanced")}
+                    aria-current={moreActive ? "page" : undefined}
+                  >
+                    <MoreIcon size={18} />
+                  </button>
+                </Menu.Trigger>
+              </SidebarHint>
+              <Menu.Portal>
+                <Menu.Content
+                  className={`ui-select-menu ${styles.moreMenu}`}
+                  side="right"
+                  align="start"
+                  sideOffset={10}
+                  collisionPadding={8}
+                >
+                  <Menu.Item asChild>
+                    <Link
+                      href="/factors"
+                      className={`ui-select-option ${styles.moreMenuItem}`}
+                      data-current={isActive(pathname, "/factors") || undefined}
+                      aria-current={isActive(pathname, "/factors") ? "page" : undefined}
+                    >
+                      <SkillsIcon size={16} className={styles.moreMenuIcon} />
+                      <span className="truncate">{t("factors")}</span>
+                    </Link>
+                  </Menu.Item>
+                  <Menu.Item asChild>
+                    <Link
+                      href="/workflows"
+                      className={`ui-select-option ${styles.moreMenuItem}`}
+                      data-current={isActive(pathname, "/workflows") || undefined}
+                      aria-current={isActive(pathname, "/workflows") ? "page" : undefined}
+                    >
+                      <TriggersIcon size={16} className={styles.moreMenuIcon} />
+                      <span className="truncate">{t("automation")}</span>
+                    </Link>
+                  </Menu.Item>
+                  {advancedItems.length > 0 ? <Menu.Separator className={styles.moreMenuSeparator} /> : null}
+                  {advancedItems.map((item) => {
+                    const ItemIcon = resolveNavIcon(item) ?? OverviewIcon;
+                    const active = isActive(pathname, item.href, item.match_hrefs);
+                    return (
+                      <Menu.Item key={item.href} asChild>
+                        <Link
+                          href={item.href}
+                          className={`ui-select-option ${styles.moreMenuItem}`}
+                          data-current={active || undefined}
+                          aria-current={active ? "page" : undefined}
+                          title={item.tagline || undefined}
+                        >
+                          <ItemIcon size={16} className={styles.moreMenuIcon} />
+                          <span className="truncate">{safeNavTranslate(tNav, item.href, item.label)}</span>
+                        </Link>
+                      </Menu.Item>
+                    );
+                  })}
+                </Menu.Content>
+              </Menu.Portal>
+            </Menu.Root>
           </div>
           {railCollapsed && <SideRow icon={SearchIcon} label={t("search")} collapsed onClick={() => palette.setOpen(true)} />}
           {!inDrawer && !isNarrow && <div className={railCollapsed ? undefined : styles.collapseControl}><SideRow icon={PanelLeftIcon} label={t(railCollapsed ? "expand" : "collapse")} collapsed onClick={() => setCollapsed(value => !value)} /></div>}

@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { useMemo,useRef,type RefObject } from 'react';
 import { useLocale } from 'next-intl';
 import { ConversationFind } from './ConversationFind';
@@ -42,18 +44,18 @@ export function ExternalSessionTimeline({ traces, userMessages = [], expandTools
   const findEntries=useMemo(()=>entries.map(entry=>({id:entry.id,text:entry.kind==='user'?entry.message.text:entry.kind==='message'?entry.text:JSON.stringify({tool:entry.node.tool,input:entry.node.arguments})})),[entries]);
   const toolCount = entries.filter(entry => entry.kind === 'tool').length;
   const running = traces.some(trace => trace.status === 'running');
-  const labels: Record<string, [string, string]> = {
-    intent: ['工作目标', 'Goal'], hypothesis: ['待验证方向', 'Tentative direction'], evidence: ['新发现', 'Observation'],
-    conclusion: ['结论', 'Conclusion'], next: ['下一步', 'Next step'], status: ['工作状态', 'Work status'],
-    purpose: ['操作说明', 'Action note'], progress: ['工作进展', 'Progress'], result: ['结果说明', 'Reported result'],
+  const labels: Record<string, string> = {
+    intent: "copy.components_chat_ExternalSessionTimeline.001", hypothesis: "copy.components_chat_ExternalSessionTimeline.002", evidence: "copy.components_chat_ExternalSessionTimeline.003",
+    conclusion: "copy.components_chat_ExternalSessionTimeline.004", next: "copy.components_chat_ExternalSessionTimeline.005", status: "copy.components_chat_ExternalSessionTimeline.006",
+    purpose: "copy.components_chat_ExternalSessionTimeline.007", progress: "copy.components_chat_ExternalSessionTimeline.008", result: "copy.components_chat_ExternalSessionTimeline.009",
   };
-  if (!entries.length) return <p className={styles.empty}>{zh ? '会话已建立，等待第一条调用。' : 'Session opened. Waiting for the first call.'}</p>;
-  return <div key={session} ref={scopeRef} data-timeline-session={session} data-testid="external-timeline" className={styles.conversation} aria-label={zh ? '外部会话工作过程' : 'External conversation activity'}>
+  if (!entries.length) return <p className={styles.empty}>{i18nCopy(zh, "copy.components_chat_ExternalSessionTimeline.010")}</p>;
+  return <div key={session} ref={scopeRef} data-timeline-session={session} data-testid="external-timeline" className={styles.conversation} aria-label={i18nCopy(zh, "copy.components_chat_ExternalSessionTimeline.011")}>
     {scrollRef&&<ConversationFind key={session} session={session} scrollRef={scrollRef} entries={findEntries} onCancelReveal={cancel} onReveal={(id,match,signal)=>reveal({session,id,match,focus:false},signal)} hasMore={hasMore} onOlder={onOlder} loadingOlder={loadingOlder}/>}
-    <div className={styles.feedHeader}><span>{zh ? '工作过程' : 'Conversation activity'}</span>
-      <span aria-live="polite">{running ? (zh ? '正在执行' : 'Running') : (zh ? `${toolCount} 条工具记录` : `${toolCount} tool entries`)}</span>
+    <div className={styles.feedHeader}><span>{i18nCopy(zh, "copy.components_chat_ExternalSessionTimeline.012")}</span>
+      <span aria-live="polite">{running ? (i18nCopy(zh, "copy.components_chat_ExternalSessionTimeline.013")) : (i18nCopy(zh, "copy.components_chat_ExternalSessionTimeline.014", { value0: toolCount }))}</span>
     </div>
-    {hasMore&&<button type="button" disabled={loadingOlder} onClick={onOlder} className="min-h-9 text-xs">{loadingOlder?(zh?'加载中…':'Loading…'):(zh?'加载更早记录':'Load older history')}</button>}
+    {hasMore&&<button type="button" disabled={loadingOlder} onClick={onOlder} className="min-h-9 text-xs">{loadingOlder?(i18nCopy(zh, "copy.components_chat_ExternalSessionTimeline.015")):(i18nCopy(zh, "copy.components_chat_ExternalSessionTimeline.016"))}</button>}
     {entries.map(entry => <TurnWindow key={entry.id} unit={{id:entry.id,live:entry.kind==='tool'&&['running','awaiting_approval','waiting_approval','pending_approval','blocked'].includes(entry.node.status)}} root={root} session={session} forced={!scrollRef||forced===entry.id}>
       <div data-find-entry={entry.id}>
       {entry.kind === 'user' ? <UserBubble msg={entry.message}/> : entry.kind === 'tool' ?
@@ -62,7 +64,7 @@ export function ExternalSessionTimeline({ traces, userMessages = [], expandTools
         className={`${styles.entry} ${styles.messageEntry}`}>
         <div className={`${styles.symbol} ${styles.agentSymbol}`}><ConversationSourceIcon source={entry.trace.source} size={16} /></div>
         <div className={styles.body}>
-          <header className={styles.messageHeader}><span>{labels[entry.label]?.[zh ? 0 : 1] || entry.label}</span>
+          <header className={styles.messageHeader}><span>{i18nCopy(zh, labels[entry.label] ?? "") || entry.label}</span>
             {entry.state && <span className={styles.status} data-state={entry.state}>{externalStatus(entry.state, zh)}</span>}
           </header>
           <div data-find-text data-testid={entry.label === 'result' ? 'external-progress-results' : undefined}><StreamedMarkdown text={entry.text} /></div>

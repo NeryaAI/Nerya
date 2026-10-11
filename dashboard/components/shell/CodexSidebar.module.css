@@ -21,6 +21,37 @@
   pointer-events: auto;
 }
 
+.moreMenu {
+  width: min(236px, calc(100vw - 20px));
+  padding: 6px;
+}
+
+.moreMenuItem {
+  min-width: 0;
+  text-decoration: none;
+}
+
+.moreMenuItem[data-current="true"] {
+  background: rgb(139 92 246 / 12%);
+  color: var(--text-base);
+  font-weight: 600;
+}
+
+.moreMenuIcon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.moreMenuItem[data-current="true"] .moreMenuIcon {
+  color: rgb(var(--brand-readable));
+}
+
+.moreMenuSeparator {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--line);
+}
+
 @media (hover: none) {
   .collapseControl {
     opacity: 1;

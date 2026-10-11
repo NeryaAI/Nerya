@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 /**
  * ⌘K command palette — the Codex-style "搜索" surface.
  *
@@ -334,7 +336,7 @@ function CommandPalette() {
           <Dialog.Close className="ui-icon-button text-xs" aria-label={tUi("close")}>ESC</Dialog.Close>
         </div>
 
-        {searching&&query&&<div className="px-4 pt-2 text-xs text-[color:var(--text-muted)]" role="status">{zh?"搜索中…":"Searching…"}</div>}
+        {searching&&query&&<div className="px-4 pt-2 text-xs text-[color:var(--text-muted)]" role="status">{i18nCopy(zh, "copy.components_shell_CommandPalette.001")}</div>}
         <div ref={listRef} id={listId} role="listbox" aria-label={t("jumpTo")} className="embedded-scroll max-h-[60dvh] py-2">
           {filtered.length === 0 ? (
             <div className="px-4 py-10 text-center text-[13px] text-[color:var(--text-muted)]">

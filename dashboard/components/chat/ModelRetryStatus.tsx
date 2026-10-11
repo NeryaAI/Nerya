@@ -1,4 +1,6 @@
 'use client';
+import { copy as i18nCopy } from "../../lib/i18n";
+
 
 import { useEffect, useState } from 'react';
 import { useLocale } from 'next-intl';
@@ -16,11 +18,11 @@ export function ModelRetryStatus({ retry }: { retry: ModelRetry }) {
   const remaining = Math.max(0, Math.ceil(retry.retry_at - now / 1000));
   const waiting = retry.state === 'waiting' && remaining > 0;
   const reason = retry.status_code === 429
-    ? (zh ? '模型暂时限流' : 'Model rate limit')
-    : (zh ? '模型服务暂不可用' : 'Model temporarily unavailable');
+    ? (i18nCopy(zh, "copy.components_chat_ModelRetryStatus.001"))
+    : (i18nCopy(zh, "copy.components_chat_ModelRetryStatus.002"));
   const action = waiting
-    ? (zh ? `${remaining} 秒后自动重试` : `Retrying automatically in ${remaining}s`)
-    : (zh ? '正在重试' : 'Retrying');
+    ? (i18nCopy(zh, "copy.components_chat_ModelRetryStatus.003", { value0: remaining }))
+    : (i18nCopy(zh, "copy.components_chat_ModelRetryStatus.004"));
   return <div role="status" aria-live="polite" data-testid="model-retry-status"
     className="mb-2 flex flex-wrap items-center gap-2 py-1 text-xs text-[color:var(--text-muted)]">
     <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-current motion-safe:animate-pulse" />

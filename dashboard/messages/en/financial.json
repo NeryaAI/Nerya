@@ -1,0 +1,78 @@
+{
+  "financial": {
+    "actions": {
+      "trade": "Trade",
+      "swap": "Swap",
+      "exchange_transfer": "Internal transfer",
+      "transfer": "Internal transfer",
+      "withdraw": "Withdraw",
+      "wallet_transfer": "Wallet transfer",
+      "contract_approval": "Finite allowance",
+      "bridge_swap": "Bridge swap"
+    },
+    "resources": {
+      "accounts": "Accounts",
+      "wallets": "Wallets",
+      "assets": "Assets",
+      "markets": "Markets",
+      "chains": "Chains and networks",
+      "recipients": "Recipients",
+      "spenders": "Spenders",
+      "routers": "Routers",
+      "account_types": "Account types",
+      "memos": "Memo / Tag"
+    },
+    "limits": {
+      "single_usd": "Single USD",
+      "rolling_24h_usd": "Rolling 24h USD",
+      "total_usd": "Total USD",
+      "fee_usd": "Total fee USD",
+      "slippage_bps": "Maximum slippage bps",
+      "asset_amounts": "Asset=quantity, comma separated",
+      "hours": "Valid hours"
+    },
+    "grantStates": {
+      "draft": "Draft",
+      "active": "Active",
+      "revoked": "Revoked",
+      "expired": "Expired"
+    },
+    "authorization": "Finite funds authorization",
+    "bindingHint": "Grants bind to this task and its approved security revision. Account permissions and live mode are configured separately.",
+    "quantityFormat": "Use asset=quantity",
+    "approveTitle": "Approve this finite grant",
+    "approveMessage": "Review the resources, limits and expiry below. Approval permits unattended execution within this scope.",
+    "approve": "Approve",
+    "approveGrant": "Approve grant",
+    "revoke": "Revoke",
+    "cancel": "Cancel",
+    "createDraft": "Create grant draft",
+    "saveDraft": "Save draft for approval",
+    "limitsSummary": "Single / 24h / total USD: {single} / {rolling} / {total}",
+    "feesSummary": "Fee limit / slippage: {fee} USD / {slippage} bps",
+    "tradeSummary": "Trade actions / maximum leverage: {actions} / {leverage}",
+    "assetQuantities": "Asset quantities: {quantities}",
+    "usageSummary": "Used / 24h used / reserved: {used} / {rolling} / {reserved} USD",
+    "allowanceExposure": "Finite allowance exposure is counted separately: {amount} USD",
+    "approvedBy": "Approved by: {actor}",
+    "currentRevision": "Current revision",
+    "revisionChanged": "Security revision changed",
+    "exactIds": "Exact IDs, comma separated",
+    "tradeActions": "Allowed trade actions, comma separated",
+    "maximumLeverage": "Maximum leverage",
+    "resourceTitle": "Funds capabilities and account permissions",
+    "configurePermissions": "Configure permissions",
+    "moduleEnabled": "Funds module enabled; each action still needs valid authorization.",
+    "moduleDisabled": "Funds module disabled. Grants do not enable live mode or provider permissions.",
+    "verificationPending": "Configured; live funds verification pending",
+    "permissionDisabled": "Account permission disabled",
+    "notReady": "Not ready",
+    "noProvider": "No queryable managed funds provider is configured.",
+    "accountLimits": {
+      "single_usd": "Account single-action limit USD",
+      "rolling_24h_usd": "Account rolling 24h limit USD"
+    },
+    "auditHint": "Changes are audited. They do not change API key permissions, enable live trading or approve task grants.",
+    "savePermissions": "Save account funds permissions"
+  }
+}

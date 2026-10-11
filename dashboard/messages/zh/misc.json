@@ -1,5 +1,9 @@
 {
   "approvals": {
+    "dialogTitle": "需要你的工具权限确认",
+    "dialogDescription": "请检查本次工具调用及参数。允许或拒绝只针对当前待审批请求，已执行的工具不会自动重放。",
+    "dialogOneTime": "仅对当前待审批请求有效。",
+    "dialogLater": "稍后处理",
     "needsPermission": "此工具调用需要操作员授权。",
     "approved": "授权通过",
     "rejected": "授权拒绝",

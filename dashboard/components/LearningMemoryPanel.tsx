@@ -154,7 +154,7 @@ export function LearningMemoryPanel() {
 
   function domainLabel(item: Domain) {
     if (item.scope === "global") return text("copy.components_LearningMemoryPanel.015");
-    if (item.scope === "session") return (zh ? "会话 · " : "Session · ") + item.session_id;
+    if (item.scope === "session") return (i18nCopy(zh, "copy.components_LearningMemoryPanel.055")) + item.session_id;
     if (item.scope === "strategy") return text("copy.components_LearningMemoryPanel.016") + item.strategy_id;
     const workflow = item.workflow_id === "execution" ? text("copy.components_LearningMemoryPanel.017") : item.workflow_id === "evolution" ? text("copy.components_LearningMemoryPanel.018") : item.workflow_id;
     return [item.strategy_id || text("copy.components_LearningMemoryPanel.019"), workflow].join(" / ");
@@ -202,9 +202,9 @@ export function LearningMemoryPanel() {
     </form>}
 
     {!loading && !error && !domainError && !records.length && recent.length > 0 && <details className={ui.source}>
-      <summary>{zh ? "没有词项命中，浏览此范围最近记录" : "No keyword matches — browse recent records in this scope"}</summary>
+      <summary>{i18nCopy(zh, "copy.components_LearningMemoryPanel.056")}</summary>
       {recent.map((record) => <p key={record.memory_id}>{record.content}</p>)}
-      <button className={ui.textButton} onClick={() => setQuery("")}>{zh ? "查看此范围全部记录" : "View all records in this scope"}</button>
+      <button className={ui.textButton} onClick={() => setQuery("")}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.057")}</button>
     </details>}
     {domain.scope === "session" && domain.session_id && <MemoryUsage key={domain.session_id} sessionId={domain.session_id} />}
     <div className={ui.list} aria-busy={loading || domainsLoading}>
@@ -230,8 +230,8 @@ export function LearningMemoryPanel() {
             <summary>{text("copy.components_LearningMemoryPanel.041")}</summary>
             <p>{record.source_ref || text("copy.components_LearningMemoryPanel.042")}</p>
             {record.evidence_refs.map((ref) => <p key={ref}>{ref}</p>)}
-            {record.source_session_id && <a className="inline-flex min-h-11 items-center underline" href={"/chat/" + encodeURIComponent(record.source_session_id) + (record.source_turn_id ? "#turn-" + encodeURIComponent(record.source_turn_id) : "")}>{zh ? "查看来源回合" : "View source turn"}</a>}
-            <p>{zh?"适用范围：":"Applies to: "}{record.scope}{record.strategy_id?" · "+record.strategy_id:""}{record.workflow_id?" · "+record.workflow_id:""}</p>
+            {record.source_session_id && <a className="inline-flex min-h-11 items-center underline" href={"/chat/" + encodeURIComponent(record.source_session_id) + (record.source_turn_id ? "#turn-" + encodeURIComponent(record.source_turn_id) : "")}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.058")}</a>}
+            <p>{i18nCopy(zh, "copy.components_LearningMemoryPanel.059")}{record.scope}{record.strategy_id?" · "+record.strategy_id:""}{record.workflow_id?" · "+record.workflow_id:""}</p>
             <p>{text("copy.components_LearningMemoryPanel.043")}{record.stable_key || record.memory_id}</p>
           </details>
         </div>
@@ -277,7 +277,7 @@ function GlobalNotes() {
         target, action, content, old_text: entry, expected_revision: notes?.[target].revision,
       } });
       if (!result.ok) throw new Error(result.error === "update_conflict"
-        ? (zh ? "记忆已被其他操作更新，请刷新后核对再修改。" : "Memory changed. Refresh and review before editing again.")
+        ? (i18nCopy(zh, "copy.components_LearningMemoryPanel.060"))
         : result.error || "notebook_update_failed");
       await load();
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
@@ -286,13 +286,13 @@ function GlobalNotes() {
 
   return <>
     {error && <ErrorBanner error={error} onRetry={() => void load().catch((e) => setError(String(e)))} />}
-    <p className={ui.pinnedIntro}>{zh ? "固定记忆与记录共用版本校验。改动从下一次上下文快照开始生效，已经生成的回合保留当时版本。" : "Pinned memory shares version checks with records. Changes apply to the next context snapshot; completed turns retain the versions used then."}</p>
+    <p className={ui.pinnedIntro}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.061")}</p>
     {notes ? <div className={ui.notes}>{(["agent", "operator"] as const).map((target) => <section key={target}>
       <div className={ui.noteHeader}>
         <h3>{target === "agent" ? (i18nCopy(zh, "copy.components_LearningMemoryPanel.049")) : (i18nCopy(zh, "copy.components_LearningMemoryPanel.050"))}</h3>
         <button className={ui.textButton} disabled={busy || notes[target].sync_error} onClick={() => void mutate(target, "add")}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.051")}</button>
       </div>
-      {notes[target].sync_error && <ErrorBanner error={zh ? "文件与记录不同步。请先核对外部文件修改，当前写入已暂停。" : "File and records differ. Review external file changes before editing."} />}
+      {notes[target].sync_error && <ErrorBanner error={i18nCopy(zh, "copy.components_LearningMemoryPanel.062")} />}
       {notes[target].entries.length ? notes[target].entries.map((entry, i) => <div key={i} className={ui.note}>
         <p>{entry}</p>
         <div className={ui.actions}>
@@ -330,10 +330,10 @@ function MemoryPolicy() {
   return <section className={ui.pinned}>
     {error && <ErrorBanner error={error} onRetry={() => void load().catch((e) => setError(String(e)))} />}
     {policy && <div className={ui.actions}>
-      <label><input type="checkbox" checked={policy.use_enabled} disabled={busy} onChange={() => void toggle("use_enabled")} /> {zh ? "使用记忆（自动注入与工具召回）" : "Use memory (injection and tool recall)"}</label>
-      <label><input type="checkbox" checked={policy.auto_save_enabled} disabled={busy} onChange={() => void toggle("auto_save_enabled")} /> {zh ? "自动保存回合与会话总结" : "Automatically save turn and session summaries"}</label>
+      <label><input type="checkbox" checked={policy.use_enabled} disabled={busy} onChange={() => void toggle("use_enabled")} /> {i18nCopy(zh, "copy.components_LearningMemoryPanel.063")}</label>
+      <label><input type="checkbox" checked={policy.auto_save_enabled} disabled={busy} onChange={() => void toggle("auto_save_enabled")} /> {i18nCopy(zh, "copy.components_LearningMemoryPanel.064")}</label>
     </div>}
-    <p className={ui.hint}>{zh ? "下次调用起生效；关闭使用后仍可查看、纠错和删除。已生成的上下文不会被改写。" : "Applies to subsequent calls. Viewing, correction and deletion remain available when use is off. Existing context is retained."}</p>
+    <p className={ui.hint}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.065")}</p>
   </section>;
 }
 
@@ -355,25 +355,25 @@ function MemoryUsage({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
   useEffect(() => { void load(); }, [load]);
   const reasons: Record<string, string> = {
-    budget: zh ? "超出预算" : "Over budget", use_disabled: zh ? "已关闭使用" : "Memory use disabled",
-    notebook_unreadable: zh ? "固定记忆无法读取" : "Notebook unreadable",
-    notebook_sync_conflict: zh ? "文件与记录不同步" : "File/record conflict",
+    budget: i18nCopy(zh, "copy.components_LearningMemoryPanel.066"), use_disabled: i18nCopy(zh, "copy.components_LearningMemoryPanel.067"),
+    notebook_unreadable: i18nCopy(zh, "copy.components_LearningMemoryPanel.068"),
+    notebook_sync_conflict: i18nCopy(zh, "copy.components_LearningMemoryPanel.069"),
   };
   return <details className={ui.source}>
-    <summary>{zh ? "本会话实际记忆使用" : "Actual memory use in this session"}</summary>
-    <button className={ui.textButton} disabled={loading} onClick={() => void load()}>{zh ? "刷新使用记录" : "Refresh usage"}</button>
+    <summary>{i18nCopy(zh, "copy.components_LearningMemoryPanel.070")}</summary>
+    <button className={ui.textButton} disabled={loading} onClick={() => void load()}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.071")}</button>
     {error && <ErrorBanner error={error} onRetry={() => void load()} />}
-    {loading ? <LoadingState rows={1} /> : !error && !events.length ? <p>{zh ? "暂无已记录的注入事件；这不代表历史回合未使用记忆。" : "No recorded injection events. Historical turns may still have used memory."}</p> : [...events].reverse().map((event, i) => <details key={event.extra.turn_id + i}>
-      <summary>{event.extra.turn_id} · {event.extra.used_chars}/{event.extra.budget_chars} {zh ? "字符" : "characters"}</summary>
-      {event.extra.policy && <p>{zh ? "当时策略：" : "Policy at this turn: "}{event.extra.policy.use_enabled ? (zh ? "使用开启" : "use enabled") : (zh ? "使用关闭" : "use disabled")} · {event.extra.policy.auto_save_enabled ? (zh ? "自动保存开启" : "auto save enabled") : (zh ? "自动保存关闭" : "auto save disabled")}</p>}
+    {loading ? <LoadingState rows={1} /> : !error && !events.length ? <p>{i18nCopy(zh, "copy.components_LearningMemoryPanel.072")}</p> : [...events].reverse().map((event, i) => <details key={event.extra.turn_id + i}>
+      <summary>{event.extra.turn_id} · {event.extra.used_chars}/{event.extra.budget_chars} {i18nCopy(zh, "copy.components_LearningMemoryPanel.073")}</summary>
+      {event.extra.policy && <p>{i18nCopy(zh, "copy.components_LearningMemoryPanel.074")}{event.extra.policy.use_enabled ? (i18nCopy(zh, "copy.components_LearningMemoryPanel.075")) : (i18nCopy(zh, "copy.components_LearningMemoryPanel.076"))} · {event.extra.policy.auto_save_enabled ? (i18nCopy(zh, "copy.components_LearningMemoryPanel.077")) : (i18nCopy(zh, "copy.components_LearningMemoryPanel.078"))}</p>}
       {event.extra.reason && <p>{reasons[event.extra.reason] || event.extra.reason}</p>}
       {(["included", "omitted"] as const).map((kind) => <div key={kind}>
-        <h3>{kind === "included" ? (zh ? "实际注入" : "Injected") : (zh ? "省略" : "Omitted")} · {event.extra[kind].length}</h3>
+        <h3>{kind === "included" ? (i18nCopy(zh, "copy.components_LearningMemoryPanel.079")) : (i18nCopy(zh, "copy.components_LearningMemoryPanel.080"))} · {event.extra[kind].length}</h3>
         {event.extra[kind].map((item, index) => <div key={(item.memory_id || "") + index} className={ui.note}>
-          <p>{item.category} {item.reason ? reasons[item.reason] || item.reason : item.truncated ? (zh ? "仅注入部分内容" : "Partial content") : ""}</p>
-          <p>{zh ? "版本：" : "Version: "}{item.version || item.memory_id}</p>
+          <p>{item.category} {item.reason ? reasons[item.reason] || item.reason : item.truncated ? (i18nCopy(zh, "copy.components_LearningMemoryPanel.081")) : ""}</p>
+          <p>{i18nCopy(zh, "copy.components_LearningMemoryPanel.082")}{item.version || item.memory_id}</p>
           <p>{item.source_ref}</p>
-          {item.source_session_id && <a className="inline-flex min-h-11 items-center underline" href={"/chat/" + encodeURIComponent(item.source_session_id) + (item.source_turn_id ? "#turn-" + encodeURIComponent(item.source_turn_id) : "")}>{zh ? "查看来源回合" : "View source turn"}</a>}
+          {item.source_session_id && <a className="inline-flex min-h-11 items-center underline" href={"/chat/" + encodeURIComponent(item.source_session_id) + (item.source_turn_id ? "#turn-" + encodeURIComponent(item.source_turn_id) : "")}>{i18nCopy(zh, "copy.components_LearningMemoryPanel.083")}</a>}
         </div>)}
       </div>)}
     </details>)}

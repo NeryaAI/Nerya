@@ -1,3 +1,4 @@
+import { copy as i18nCopy } from "./i18n";
 /** Versioned UI locators, never execution commands or authority to trade. */
 export type StrategyDetailTarget =
   | { kind: "strategy"; strategyId: string; proposalId?: string | null; title?: string }
@@ -25,6 +26,6 @@ export function parseStrategyDetailId(id: string): StrategyDetailTarget | null {
 
 export function strategyDetailLabel(target: StrategyDetailTarget, zh: boolean): string {
   const name = target.title || target.strategyId;
-  return target.kind === "strategy" ? `${zh ? "策略" : "Strategy"} · ${name}`
-    : `${zh ? "回测" : "Backtest"} · ${name} · ${target.ts}`;
+  return target.kind === "strategy" ? `${i18nCopy(zh, "copy.lib_strategyDetail.001")} · ${name}`
+    : `${i18nCopy(zh, "copy.lib_strategyDetail.002")} · ${name} · ${target.ts}`;
 }

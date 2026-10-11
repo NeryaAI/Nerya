@@ -191,9 +191,12 @@ test('CSV trade values are readable without losing tiny quantities or order iden
   assert.match(rendered, /2026-09-25 23:00:00/);
 });
 
-test('economic FAIL explains the performance gate, not a failed computation', () => {
+test('benchmark underperformance is a review warning, not a failed backtest', () => {
+  // Legacy reports may have persisted FAIL solely because they trailed buy-and-hold.
   const rendered = html(reply('evaluated', { ...result, verdict:'FAIL', flags:['benchmark_capture_below_threshold'] }));
-  assert.match(rendered, /Replay completed, but the benchmark-capture gate/);
+  assert.match(rendered, /Review limitations/);
+  assert.match(rendered, /underperformed buy-and-hold/);
+  assert.doesNotMatch(rendered, /failed|failure/i);
   assert.match(rendered, /View equity curve and trades/);
 });
 

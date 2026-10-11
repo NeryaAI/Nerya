@@ -1,0 +1,78 @@
+{
+  "financial": {
+    "actions": {
+      "trade": "交易",
+      "swap": "换币",
+      "exchange_transfer": "内部转账",
+      "transfer": "内部转账",
+      "withdraw": "提现",
+      "wallet_transfer": "钱包转账",
+      "contract_approval": "有限链上授权",
+      "bridge_swap": "跨链换币"
+    },
+    "resources": {
+      "accounts": "账户",
+      "wallets": "钱包",
+      "assets": "资产",
+      "markets": "市场",
+      "chains": "链与网络",
+      "recipients": "接收方",
+      "spenders": "被授权合约",
+      "routers": "路由",
+      "account_types": "账户类型",
+      "memos": "Memo / Tag"
+    },
+    "limits": {
+      "single_usd": "单笔 USD",
+      "rolling_24h_usd": "滚动24小时 USD",
+      "total_usd": "授权总额度 USD",
+      "fee_usd": "手续费总额度 USD",
+      "slippage_bps": "最大滑点 bps",
+      "asset_amounts": "资产=数量，逗号分隔",
+      "hours": "有效小时"
+    },
+    "grantStates": {
+      "draft": "草稿",
+      "active": "已生效",
+      "revoked": "已撤销",
+      "expired": "已到期"
+    },
+    "authorization": "有限资金授权",
+    "bindingHint": "授权仅适用于本任务及已批准的安全版本。账户权限和实盘开关需单独配置。",
+    "quantityFormat": "数量请使用 资产=数量",
+    "approveTitle": "批准这份有限授权",
+    "approveMessage": "请核对下方资源、额度和到期时间。批准后，任务可在这些范围内无人值守执行。",
+    "approve": "批准",
+    "approveGrant": "批准授权",
+    "revoke": "撤销",
+    "cancel": "取消",
+    "createDraft": "创建授权草稿",
+    "saveDraft": "保存草稿，等待批准",
+    "limitsSummary": "单笔 / 24小时 / 总额度 USD：{single} / {rolling} / {total}",
+    "feesSummary": "手续费额度 / 滑点：{fee} USD / {slippage} bps",
+    "tradeSummary": "交易动作 / 最大杠杆：{actions} / {leverage}",
+    "assetQuantities": "资产数量上限：{quantities}",
+    "usageSummary": "已用 / 24小时已用 / 待确认占用：{used} / {rolling} / {reserved} USD",
+    "allowanceExposure": "有限 Allowance 风险单独计量：{amount} USD",
+    "approvedBy": "批准者：{actor}",
+    "currentRevision": "版本一致",
+    "revisionChanged": "安全版本已变化",
+    "exactIds": "明确 ID，逗号分隔",
+    "tradeActions": "允许的交易动作，逗号分隔",
+    "maximumLeverage": "最大杠杆",
+    "resourceTitle": "资金能力与账户权限",
+    "configurePermissions": "配置权限",
+    "moduleEnabled": "资金模块已开启；每笔动作仍需有效授权。",
+    "moduleDisabled": "资金模块尚未开启。授权不会自动开启实盘或提供方权限。",
+    "verificationPending": "已配置，真实资金验证待进行",
+    "permissionDisabled": "账户权限未开启",
+    "notReady": "尚未就绪",
+    "noProvider": "未发现可查询的受控资金提供方。",
+    "accountLimits": {
+      "single_usd": "账户单笔上限 USD",
+      "rolling_24h_usd": "账户滚动24小时上限 USD"
+    },
+    "auditHint": "修改会写入权限审计。不会修改 API Key 权限、启用实盘或批准任务授权。",
+    "savePermissions": "保存账户资金权限"
+  }
+}

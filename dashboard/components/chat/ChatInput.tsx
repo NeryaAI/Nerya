@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import type { ReactNode } from "react";
 
 import { useLocale, useTranslations } from "next-intl";
@@ -85,7 +87,7 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
   const identityGeneration = workspaceGeneration();
   const editingLocked = draftLocked || (external && locked);
   const busy = submitting || (external && sending);
-  const sendLabel = assistant ? t("send") : (submitMode ? submitMode === "queue" : sending||queued) && !external ? (zh ? "排队发送" : "Queue message") : t("send");
+  const sendLabel = assistant ? t("send") : (submitMode ? submitMode === "queue" : sending||queued) && !external ? i18nCopy(zh, "copy.components_chat_ChatInput.001") : t("send");
   const fieldId = useId();
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const pickerRef = useRef<HTMLInputElement>(null);
@@ -105,9 +107,9 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
   const composerPlaceholder = basePlaceholder;
   const canSend = !busy && !locked && !editingLocked && (external || (Boolean(workspaceId) && !uploading && !uploadError)) && Boolean(value.trim() || (!external && attachments.length)) && !attachments.some(file=>file.reason==="reselect_required");
 
-  const sendStatus = locked ? (lockMessage || (zh ? "发送暂不可用；可以继续撰写草稿。" : "Sending is unavailable. You can keep drafting."))
-    : busy ? (zh ? "正在等待发送确认；可以继续编辑，Enter 换行。" : "Waiting for confirmation. Keep editing; Enter adds a line.")
-    : !external && !workspaceId ? (zh ? "正在确认工作区；可以先撰写草稿。" : "Identifying the workspace. You can draft now.") : "";
+  const sendStatus = locked ? (lockMessage || (i18nCopy(zh, "copy.components_chat_ChatInput.002")))
+    : busy ? (i18nCopy(zh, "copy.components_chat_ChatInput.003"))
+    : !external && !workspaceId ? (i18nCopy(zh, "copy.components_chat_ChatInput.004")) : "";
 
   useEffect(() => {
     if (!textareaRef.current) return;
@@ -211,7 +213,7 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
       onDrop={event => { if (!external && event.dataTransfer.types.includes("Files")) { event.preventDefault(); dragDepth.current = 0; setDragging(false); suggestions.dismiss(); pickFiles(Array.from(event.dataTransfer.files)); } }}
       className={`relative min-w-0 ${taskHeader ? "rounded-b-2xl" : "rounded-2xl"} border border-[color:var(--line-hi)] bg-[color:var(--card-hi)] p-3 transition-colors focus-within:border-brand-500/60 sm:p-4`}>
       {dragging ? <div role="status" className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-brand-500 bg-[color:var(--card-hi)] text-sm">{tc("drop")}</div> : null}
-      {!external&&Object.entries(fileStates).filter(([,f])=>f.state!=="ready").map(([id,file])=><div key={id} className="mb-2 flex items-center gap-2 text-xs" role="status" data-testid="attachment-progress"><span className="min-w-0 flex-1 truncate">{file.name}</span><span>{file.state==="failed"?(zh?"上传失败":"Upload failed"):(zh?"准备发送…":"Preparing…")}</span>{file.state==="failed"&&<button type="button" className="min-h-11 underline" disabled={uploading} onClick={()=>{const value=failedFiles.current.get(id);if(value)void uploadPrepared(async()=>[value]);}}>{zh?"重试此文件":"Retry this file"}</button>}{file.state==="failed"&&<button type="button" className="ui-icon-button" disabled={uploading || editingLocked} aria-label={`${t("removeAttachment")}: ${file.name}`} onClick={()=>removeAttachment(id)}><XIcon size={14}/></button>}</div>)}
+      {!external&&Object.entries(fileStates).filter(([,f])=>f.state!=="ready").map(([id,file])=><div key={id} className="mb-2 flex items-center gap-2 text-xs" role="status" data-testid="attachment-progress"><span className="min-w-0 flex-1 truncate">{file.name}</span><span>{file.state==="failed"?(i18nCopy(zh, "copy.components_chat_ChatInput.005")):(i18nCopy(zh, "copy.components_chat_ChatInput.006"))}</span>{file.state==="failed"&&<button type="button" className="min-h-11 underline" disabled={uploading} onClick={()=>{const value=failedFiles.current.get(id);if(value)void uploadPrepared(async()=>[value]);}}>{i18nCopy(zh, "copy.components_chat_ChatInput.007")}</button>}{file.state==="failed"&&<button type="button" className="ui-icon-button" disabled={uploading || editingLocked} aria-label={`${t("removeAttachment")}: ${file.name}`} onClick={()=>removeAttachment(id)}><XIcon size={14}/></button>}</div>)}
       {!external && attachments.length ? (
         <div className="mb-3 flex max-h-28 flex-wrap gap-2 overflow-y-auto">
           {attachments.map((file) => (
@@ -223,7 +225,7 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
                 <img src={file.data_url} alt="" className="h-6 w-6 rounded object-cover" />
               ) : <FileIcon size={15} />}
               {file.reference ? <ReferenceSnapshot attachment={file} className="min-w-0 max-w-[180px] truncate text-left hover:underline">{file.reference.label}</ReferenceSnapshot> : <span className="min-w-0 max-w-[180px] truncate">{file.name}</span>}
-              {file.reason==="reselect_required"&&<span className="text-warn">{zh?"请重新选择文件":"Select this file again"}</span>}
+              {file.reason==="reselect_required"&&<span className="text-warn">{i18nCopy(zh, "copy.components_chat_ChatInput.008")}</span>}
               <span className="shrink-0 text-[color:var(--text-muted)]">{file.reference ? (file.reference.truncated ? "…" : "@") : formatBytes(file.size)}</span>
               <button type="button" onClick={() => removeAttachment(file.id)} disabled={editingLocked}
                 className="ui-icon-button shrink-0 disabled:opacity-40" aria-label={file.reference ? tc("remove", { name: file.reference.label }) : `${t("removeAttachment")}: ${file.name}`}>
@@ -270,16 +272,16 @@ export function ChatInput({ value, onChange, onSend, onCancel, onGuide, sending,
         {!assistant && <div data-composer-options>
           <ComposerPermissionMenu settings={settings} onSettingsChange={onSettingsChange} disabled={editingLocked} size={variant} compact/>
         </div>}
-        <div data-composer-models title={sending ? (zh ? "模型与权限更改只用于下一条消息，不改变正在执行的任务。" : "Model and permission changes apply to the next message, not the running task.") : undefined} className="ml-auto flex min-w-0 items-center gap-1.5">
+        <div data-composer-models title={sending ? i18nCopy(zh, "copy.components_chat_ChatInput.009") : undefined} className="ml-auto flex min-w-0 items-center gap-1.5">
           {!external && !assistant && <ComposerModelMenu settings={settings} onSettingsChange={onSettingsChange} modelOptions={modelOptions} disabled={editingLocked} size={variant} />}
           {!assistant && contextControl}
         </div>
         <div data-composer-actions>
           {sending && value.trim() && onGuide ? <button type="button" onClick={onGuide} data-testid="guide-current-turn" disabled={!canSend || attachments.length > 0}
-            title={zh ? "将文字补充到当前轮次的下一次模型调用；附件请排队发送。" : "Add text to this turn's next model call. Queue attachments separately."}
-            className="min-h-9 shrink-0 rounded-lg px-2 text-xs hover:bg-brand-500/10 disabled:opacity-40">{zh ? "指导本轮" : "Guide this turn"}</button> : null}
+            title={i18nCopy(zh, "copy.components_chat_ChatInput.010")}
+            className="min-h-9 shrink-0 rounded-lg px-2 text-xs hover:bg-brand-500/10 disabled:opacity-40">{i18nCopy(zh, "copy.components_chat_ChatInput.011")}</button> : null}
           {sending && onCancel ? <button type="button" onClick={onCancel} disabled={stopping} aria-busy={stopping} data-testid="stop-current-command"
-            className="ui-icon-button border border-[color:var(--line-hi)] disabled:opacity-40" title={zh?"请求停止当前轮次；已完成的外部操作不会撤销。":"Request this turn to stop. Completed external actions remain."} aria-label={stopping ? (zh ? "正在停止" : "Stopping") : t("cancelTurn")}><StopIcon size={17} /></button> : null}
+            className="ui-icon-button border border-[color:var(--line-hi)] disabled:opacity-40" title={i18nCopy(zh, "copy.components_chat_ChatInput.012")} aria-label={stopping ? (i18nCopy(zh, "copy.components_chat_ChatInput.013")) : t("cancelTurn")}><StopIcon size={17} /></button> : null}
           {(!sending||Boolean(value.trim()||attachments.length))&&<button type="button" onClick={submit} disabled={!canSend} aria-label={sendLabel} title={locked ? lockMessage : sendLabel} aria-busy={busy}
             data-testid="native-command-send" className={`inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-full bg-brand-500 text-white transition-colors hover:bg-brand-400 disabled:cursor-not-allowed disabled:opacity-40 ${sending && !assistant ? "px-3" : "w-9"}`}><SendIcon size={17} />{sending && !assistant ? <span className="text-xs">{sendLabel}</span> : null}</button>}
         </div>

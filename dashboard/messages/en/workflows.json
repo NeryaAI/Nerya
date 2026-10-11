@@ -760,9 +760,28 @@
         "014": "Configuration checked. Replay evidence still has gaps.",
         "015": "Verify this strategy version. Fix concrete issues, then complete runnable branch tests and real-data replay. Allow simulated replay fills only, not account orders, active schedules or live mode. Preserve the strategy's intended trading behavior.\n\nStrategy: {value0}\nCandidate: {value1}\nSource revision checked in the UI: {value2}\nFindings: {value3}{value4}\n\nRead the target files and confirm this version first; continue the same candidate. Report missing real data without replacing it with samples. Distinguish configuration checks, branch behavior, replay and actual Agent execution. Observation strategies are not judged by trading counts or returns. For trading include costs, slippage, coverage, out-of-sample checks and risks. Use built-in strategy_author for strategy logic changes."
       }
-    }
+    },
+    "taskDetail": "Task detail",
+    "tabs": {
+      "settings": "Settings",
+      "history": "History"
+    },
+    "cadenceOnce": "One-time timestamp",
+    "fieldRunAt": "Execution time (local timezone)",
+    "fieldBusyPolicy": "When busy",
+    "busySkip": "Skip occurrence",
+    "busyQueue": "Queue, up to 32 occurrences",
+    "busyCoalesce": "Keep latest input",
+    "fieldModelProvider": "Model provider",
+    "fieldModelId": "Model ID",
+    "fieldPermissionMode": "Tool permission mode",
+    "fieldRequiredFiles": "Required output files (one workspace path per line)",
+    "budgetHint": "Permission mode does not expand funds authorization. The default deadline is 30 minutes; explicit zero preserves the historical unlimited deadline.",
+    "errRunAtRequired": "Choose a valid one-time execution timestamp"
   },
   "cadence": {
+    "weekdaysAt": "Weekdays at {time}",
+    "weeklyAt": "Every {weekday, select, 0 {Sunday} 1 {Monday} 2 {Tuesday} 3 {Wednesday} 4 {Thursday} 5 {Friday} 6 {Saturday} other {week}} at {time}",
     "everyMinute": "Every minute",
     "everyNMinutes": "Every {n} min",
     "everyNHours": "Every {n} h",
@@ -1019,6 +1038,76 @@
       "configuration": "Configuration",
       "currentVersion": "Current version",
       "issues": "\nIssues:\n{issues}"
+    },
+    "components_workflows_StrategyChatReference": {
+      "004": "Strategy workflow",
+      "005": "View strategy workflow",
+      "scheduler": "Scheduled trigger"
+    },
+    "components_workflows_StrategyVersionContext": {
+      "001": "Unconfirmed",
+      "002": "Viewing a candidate",
+      "003": "Viewing published configuration",
+      "004": "Unsaved draft",
+      "005": "Saving a candidate does not apply or start it",
+      "006": "Edits create a candidate; they do not directly change a running version",
+      "007": "Versions and activation",
+      "008": "Editor revision",
+      "009": "Proposal",
+      "010": "Published package",
+      "011": "Running package",
+      "012": "No continuous instance running",
+      "013": "The running instance differs from the published package. The editor is not proof of what is executing.",
+      "014": "Save candidate → inspect differences → review and apply → start or await a trigger. Approval, application and execution are separate states; editor revisions and package hashes are different identifiers.",
+      "015": "Script annotations describe intent. The corresponding run log determines actual order and results.",
+      "016": "Refresh versions",
+      "017": "Review proposal and differences"
+    },
+    "components_workflows_StrategyWorkflowPanel": {
+      "072": "Candidate saved. It has not been applied or started.",
+      "073": "A local draft uses an older revision. It was not applied over the latest configuration; inspect it and merge deliberately.",
+      "074": "Inspect old draft",
+      "075": "Discard old draft"
+    },
+    "components_workflows_WorkflowPromotionReceipt": {
+      "001": "Could not verify the latest schedule state. Refresh to check again.",
+      "002": "Not recorded",
+      "003": "Verification failed. Try again later.",
+      "004": "Synchronization completed, but its receipt could not be saved. Verify state after refreshing.",
+      "005": "Schedules are still unsynced; the version is applied. Check timer configuration and retry only synchronization.",
+      "006": "Applied",
+      "007": "Failed",
+      "008": "Not applied",
+      "009": "Synced",
+      "010": "Not attempted",
+      "011": "Not applicable",
+      "012": "Stopped",
+      "013": "Running",
+      "014": "Starting",
+      "015": "Stopping",
+      "016": "Restarting",
+      "017": "Interrupted",
+      "018": "Unresponsive; verify state",
+      "019": "Finished",
+      "020": "Unconfirmed",
+      "021": "Not checked",
+      "022": "Sync failed; verify state",
+      "023": "Configuration synced",
+      "024": "Not configured",
+      "025": "Candidate validation",
+      "026": "Passed",
+      "027": "Failed",
+      "028": "Version application",
+      "029": "Trading timer",
+      "030": "Review timer",
+      "031": "Continuous service",
+      "032": "A newer application receipt exists. Inspect the current version and schedules on the strategy page.",
+      "033": "Version applied; schedules need synchronization. Check timer configuration, then retry synchronization.",
+      "034": "Schedule sync failed. Verify the version application state separately.",
+      "035": "Synced configuration is not proof of execution. Continuous services require a separate start; live trading still requires risk and approval checks.",
+      "036": "Retry schedule sync only",
+      "037": "Refresh status",
+      "038": "Inspect configuration and runtime"
     }
   }
 }

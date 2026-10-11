@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { useRef, useState } from "react";
 import { useLocale } from "next-intl";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -32,19 +34,19 @@ export function ForkMessageDialog({ sessionId, message, onClose, onCreated }: {
       if (!result.ok || !/^branch_[a-f0-9]{32}$/.test(result.session_id)) throw new Error(result.error || "fork_failed");
       writeChatDraft(result.session_id,{ text,attachments:message.attachments || [] });
       writeEditDraft(scope,null); onCreated(result.session_id);
-    } catch { setError(zh ? "分支尚未确认，草稿已保留。重试会复用同一请求，不重复创建分支。" : "The branch is not confirmed. Your draft is retained; retry uses the same request ID."); }
+    } catch { setError(i18nCopy(zh, "copy.components_chat_ForkMessageDialog.001")); }
     finally { active.current = false; setBusy(false); }
   }
   return <Dialog.Root open onOpenChange={open => { if (!open && !busy) onClose(); }}><Dialog.Portal>
     <Dialog.Overlay className="ui-modal-overlay" /><Dialog.Content className="ui-dialog" onEscapeKeyDown={event => { if (busy) event.preventDefault(); }}>
-      <Dialog.Title className="text-base font-semibold">{zh ? "编辑并创建分支" : "Edit and create a branch"}</Dialog.Title>
-      <Dialog.Description className="mt-2 text-sm leading-6 text-[color:var(--text-muted)]">{zh ? "复制此消息之前的对话，并把修改后的消息放入新分支输入框。不会自动发送，不复制审批状态，也不撤销或重新执行原操作。" : "Copy the conversation before this message and place your edited message in the new branch's input. Nothing is sent automatically; approvals and executed actions are not copied or undone."}</Dialog.Description>
+      <Dialog.Title className="text-base font-semibold">{i18nCopy(zh, "copy.components_chat_ForkMessageDialog.002")}</Dialog.Title>
+      <Dialog.Description className="mt-2 text-sm leading-6 text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_ForkMessageDialog.003")}</Dialog.Description>
       <form onSubmit={event => { event.preventDefault(); void create(); }}>
-        <textarea autoFocus aria-label={zh ? "新分支消息" : "New branch message"} className="input-dark mt-4 min-h-36 w-full" value={text} disabled={busy}
+        <textarea autoFocus aria-label={i18nCopy(zh, "copy.components_chat_ForkMessageDialog.004")} className="input-dark mt-4 min-h-36 w-full" value={text} disabled={busy}
           onChange={event => { setText(event.target.value); writeEditDraft(scope,{ text:event.target.value,requestId:key.current,original:message.text }); }} />
         {error && <p role="alert" className="mt-2 text-xs text-danger">{error}</p>}
-        <div className="mt-4 flex justify-end gap-2"><button type="button" className="btn btn-ghost" disabled={busy} onClick={onClose}>{zh ? "保留草稿并关闭" : "Keep draft and close"}</button>
-          <button type="submit" data-testid="create-history-branch" className="btn btn-primary" disabled={busy || !text.trim()} aria-busy={busy}>{zh ? "创建分支" : "Create branch"}</button></div>
+        <div className="mt-4 flex justify-end gap-2"><button type="button" className="btn btn-ghost" disabled={busy} onClick={onClose}>{i18nCopy(zh, "copy.components_chat_ForkMessageDialog.005")}</button>
+          <button type="submit" data-testid="create-history-branch" className="btn btn-primary" disabled={busy || !text.trim()} aria-busy={busy}>{i18nCopy(zh, "copy.components_chat_ForkMessageDialog.006")}</button></div>
       </form>
     </Dialog.Content></Dialog.Portal></Dialog.Root>;
 }

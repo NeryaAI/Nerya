@@ -1,28 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
-import { useTranslations } from "next-intl";
+import { blankDraft, buildDraftFromSchedule, buildSchedulePayload, cadenceFor, deliverySummary, isPaused, scheduleKind, statusTone, STATUS_DOT_CLASS, titleFor, type ScheduleDraft, type ScheduleFilter, type ScheduleKind, type Translate } from "../../lib/automationDraft";
+import { AutomationTaskEditor as ScheduleEditor } from "../../components/workflows/AutomationTaskEditor";
+import { usePolledResource } from "../../lib/usePolledResource";
+import { ResourceNotice } from "../../components/workflows/ResourceNotice";
+import { validateSchedule } from "../../lib/scheduleEditor";
+import { TaskRunDetail } from "../../components/chat/TaskRunDetail";
+import { useUnsavedChanges } from "../../components/chat/useUnsavedChanges";
+
+
+import { useCallback, useMemo, useRef, useState } from "react";
+import { useLocale, useTranslations } from "next-intl";
 import {
-  Advanced,
-  Card,
-  Empty,
   ErrorBanner,
   Json,
   PageBody,
   PageHeader,
   Pill,
 } from "../../components/Page";
-import { Select } from "../../components/Select";
-import { SwitchControl } from "../../components/SwitchControl";
-import { SectionTabs } from "../../components/SectionTabs";
 import {
   PauseIcon,
   PlusIcon,
   RefreshIcon,
   SendIcon,
-  TrashIcon,
-  WrenchIcon,
 } from "../../components/icons";
 import { confirm as confirmDialog, toast } from "../../lib/dialogs";
 import {
@@ -30,421 +30,87 @@ import {
   describeIntervalSeconds,
   formatTsShort,
 } from "../../lib/format";
-import { clientApi } from "../../lib/clientApi";
+import { ApiError, callApi, clientApi } from "../../lib/clientApi";
 import type {
-  TriggerDeliveryTarget,
   TriggerRoute,
   TriggerSchedule,
 } from "../../lib/clientApi";
-import { useCadenceHint } from "../../lib/useStrategyLifecycle";
 import { ScheduledExecutionReceipt } from "../../components/workflows/ScheduledExecutionReceipt";
+import { TaskRunHistory } from "../../components/chat/TaskRunHistory";
+import {TaskFinancialGrants} from '../../components/TaskFinancialGrants';
 
-type ScheduleKind = "agent" | "script" | "trigger";
-type CadenceKind = "cron" | "interval";
-type DeliveryKind = "none" | "gateway" | "messages" | "webhook";
-type ScheduleFilter = "all" | "agent" | "script" | "trigger" | "active" | "paused";
-type Translate = (key: string, values?: Record<string, string | number>) => string;
-
-type ScheduleDraft = {
-  id: string;
-  kind: string;
-  enabled: boolean;
-  cadence: CadenceKind;
-  cron: string;
-  everySeconds: string;
-  timezone: string;
-  sessionKind: ScheduleKind;
-  sessionMode: "ephemeral" | "reuse" | "fanout";
-  sessionId: string;
-  sessionIds: string;
-  attachedSkills: string;
-  sourceRequest: string;
-  generatedPrompt: string;
-  scriptId: string;
-  scriptArgsJson: string;
-  triggerPayloadJson: string;
-  target: string;
-  deliveryKind: DeliveryKind;
-  deliveryPlatform: string;
-  deliveryChannel: string;
-  deliveryUrl: string;
-  /** Targets beyond the first, kept verbatim as a JSON array so an
-      edit-save cycle never silently drops them (P0 data-loss fix). */
-  extraDeliveryJson: string;
-  ttlSeconds: string;
-};
-
-const EMPTY_OBJECT = "{}";
-
-function blankDraft(): ScheduleDraft {
-  return {
-    id: "",
-    kind: "agent.task",
-    enabled: true,
-    cadence: "cron",
-    cron: "0 11 * * *",
-    everySeconds: "3600",
-    timezone: "Asia/Shanghai",
-    sessionKind: "agent",
-    sessionMode: "reuse",
-    sessionId: "",
-    sessionIds: "",
-    attachedSkills: "",
-    sourceRequest: "",
-    generatedPrompt: "",
-    scriptId: "",
-    scriptArgsJson: EMPTY_OBJECT,
-    triggerPayloadJson: EMPTY_OBJECT,
-    target: "",
-    deliveryKind: "none",
-    deliveryPlatform: "telegram",
-    deliveryChannel: "telegram",
-    deliveryUrl: "",
-    extraDeliveryJson: "",
-    ttlSeconds: "",
-  };
-}
-
-function scheduleKind(schedule: TriggerSchedule): ScheduleKind {
-  const raw = String(schedule.session_kind || "").toLowerCase();
-  if (raw === "agent" || raw === "script") return raw;
-  return "trigger";
-}
-
-function isPaused(schedule: TriggerSchedule): boolean {
-  return Boolean(schedule.paused ?? schedule.enabled === false);
-}
-
-function parseJsonObject(text: string, label: string): Record<string, unknown> {
-  const raw = text.trim();
-  if (!raw) return {};
-  const value = JSON.parse(raw) as unknown;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be a JSON object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function parseCsv(text: string): string[] {
-  return text
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function titleFor(schedule: TriggerSchedule): string {
-  const payload = schedule.payload || {};
-  const title = payload.title || payload.source_request || schedule.description || schedule.title;
-  return String(title || schedule.id);
-}
-
-function cadenceFor(schedule: TriggerSchedule): string {
-  if (schedule.cron) return schedule.cron;
-  if (schedule.every_seconds != null) return `${schedule.every_seconds}s`;
-  if (schedule.interval != null) return String(schedule.interval);
-  return "-";
-}
-
-/**
- * Translated human label for a schedule's cadence ("Every 5 min")
- * with the raw cron / interval as fallback for shapes the
- * describer doesn't cover.
- */
 function useCadenceLabel(): (schedule: TriggerSchedule) => string {
   const t = useTranslations("cadence");
+  const locale = useLocale();
   return (schedule) => {
     const desc = schedule.cron
       ? describeCron(String(schedule.cron))
       : schedule.every_seconds != null
         ? describeIntervalSeconds(Number(schedule.every_seconds))
         : null;
-    if (!desc) return cadenceFor(schedule);
+    if (!desc) return cadenceFor(schedule, locale);
     return t(desc.key, (desc.params ?? {}) as Record<string, string | number>);
   };
 }
 
-function deliverySummary(schedule: TriggerSchedule): string {
-  const targets = schedule.delivery_targets || [];
-  if (!targets.length) return "-";
-  return targets
-    .map((target) => {
-      const kind = String(target.kind || "?");
-      const platform = String(target.platform || target.channel || target.url || "");
-      return platform ? `${kind}:${platform}` : kind;
-    })
-    .join(", ");
-}
-
-function statusTone(schedule: TriggerSchedule): "ok" | "brand" | "warn" {
-  if (isPaused(schedule)) return "brand";
-  return schedule.last_fired_ts ? "ok" : "warn";
-}
-
-/** Single source of truth for status colors: list dots and detail pills
- * both derive from statusTone() so one state never renders two colors.
- * Token classes only (bg-ok / bg-warn), no raw emerald/amber. */
-const STATUS_DOT_CLASS: Record<"ok" | "brand" | "warn", string> = {
-  ok: "bg-ok",
-  brand: "bg-brand-300",
-  warn: "bg-warn",
-};
-
-function buildDraftFromSchedule(schedule: TriggerSchedule): ScheduleDraft {
-  const kind = scheduleKind(schedule);
-  const payload = schedule.payload || {};
-  const allTargets = schedule.delivery_targets || [];
-  const firstDelivery = allTargets[0] || null;
-  const deliveryKind = firstDelivery
-    ? String(firstDelivery.kind || "none") === "webhook"
-      ? "webhook"
-      : String(firstDelivery.kind || "none") === "messages"
-      ? "messages"
-      : "gateway"
-    : "none";
-  const scriptId =
-    String(payload.script_id || "") ||
-    (String(schedule.target || "").startsWith("script:")
-      ? String(schedule.target).slice("script:".length)
-      : "");
-  return {
-    ...blankDraft(),
-    id: schedule.id,
-    kind: schedule.kind || `${kind}.task`,
-    enabled: !isPaused(schedule),
-    cadence: schedule.cron ? "cron" : "interval",
-    cron: schedule.cron || "0 11 * * *",
-    everySeconds: String(schedule.every_seconds ?? 3600),
-    timezone: schedule.timezone || "Asia/Shanghai",
-    sessionKind: kind,
-    sessionMode: schedule.session_mode || "reuse",
-    sessionId: schedule.session_id || "",
-    sessionIds: (schedule.session_ids || []).join(", "),
-    attachedSkills: (schedule.attached_skills || []).join(", "),
-    sourceRequest: String(payload.source_request || ""),
-    generatedPrompt: String(payload.prompt || ""),
-    scriptId,
-    scriptArgsJson: JSON.stringify(payload.args || {}, null, 2),
-    triggerPayloadJson: JSON.stringify(
-      kind === "trigger" ? payload : withoutTaskPayloadFields(payload),
-      null,
-      2,
-    ),
-    target:
-      kind === "script" && scriptId
-        ? `script:${scriptId}`
-        : schedule.target || (kind === "agent" ? "agent" : "main"),
-    deliveryKind,
-    deliveryPlatform: String(firstDelivery?.platform || firstDelivery?.channel || "telegram"),
-    deliveryChannel: String(firstDelivery?.channel || firstDelivery?.platform || "telegram"),
-    deliveryUrl: String(firstDelivery?.url || ""),
-    extraDeliveryJson:
-      allTargets.length > 1 ? JSON.stringify(allTargets.slice(1), null, 2) : "",
-    ttlSeconds: schedule.session_ttl_seconds == null ? "" : String(schedule.session_ttl_seconds),
-  };
-}
-
-function withoutTaskPayloadFields(payload: Record<string, unknown>): Record<string, unknown> {
-  const out = { ...payload };
-  delete out.prompt;
-  delete out.source_request;
-  delete out.prompt_source;
-  delete out.script_id;
-  delete out.args;
-  return out;
-}
-
-function buildSchedulePayload(draft: ScheduleDraft): TriggerSchedule {
-  const id = draft.id.trim();
-  if (!id) throw new Error("schedule id is required");
-  const sessionKind = draft.sessionKind;
-  const base: TriggerSchedule = {
-    id,
-    kind: draft.kind.trim() || `${sessionKind}.task`,
-    enabled: draft.enabled,
-    target: draft.target.trim() || (sessionKind === "script" ? "" : sessionKind === "agent" ? "agent" : "main"),
-    timezone: draft.timezone.trim() || undefined,
-    session_kind: sessionKind,
-  };
-
-  if (draft.cadence === "cron") {
-    const cron = draft.cron.trim();
-    if (!cron) throw new Error("cron is required");
-    base.cron = cron;
-  } else {
-    const seconds = Number(draft.everySeconds);
-    if (!Number.isFinite(seconds) || seconds <= 0) {
-      throw new Error("interval seconds must be positive");
-    }
-    base.every_seconds = Math.floor(seconds);
-  }
-
-  const delivery = buildDeliveryTargets(draft);
-  if (delivery.length) base.delivery_targets = delivery;
-  const ttl = draft.ttlSeconds.trim();
-  if (ttl) {
-    const parsed = Number(ttl);
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      throw new Error("ttl seconds must be zero or positive");
-    }
-    base.session_ttl_seconds = Math.floor(parsed);
-  }
-
-  if (sessionKind === "agent") {
-    const sourceRequest = draft.sourceRequest.trim();
-    const generatedPrompt = draft.generatedPrompt.trim();
-    const prompt = generatedPrompt || sourceRequest;
-    if (!prompt) throw new Error("agent prompt is required");
-    const payload = parseJsonObject(draft.triggerPayloadJson, "payload");
-    payload.prompt = prompt;
-    if (sourceRequest) payload.source_request = sourceRequest;
-    payload.prompt_source = generatedPrompt ? "agent_generated" : "prompt_fallback";
-    base.payload = payload;
-    base.target = draft.target.trim() || "agent";
-    base.session_mode = draft.sessionMode;
-    base.attached_skills = parseCsv(draft.attachedSkills);
-    if (draft.sessionMode === "reuse" && draft.sessionId.trim()) {
-      base.session_id = draft.sessionId.trim();
-    }
-    if (draft.sessionMode === "fanout") {
-      const ids = parseCsv(draft.sessionIds);
-      if (!ids.length) throw new Error("fanout session ids are required");
-      base.session_ids = ids;
-    }
-    return base;
-  }
-
-  if (sessionKind === "script") {
-    const scriptId = draft.scriptId.trim();
-    if (!scriptId) throw new Error("script id is required");
-    base.target = draft.target.trim() || `script:${scriptId}`;
-    base.payload = {
-      script_id: scriptId,
-      args: parseJsonObject(draft.scriptArgsJson, "script args"),
-    };
-    return base;
-  }
-
-  base.payload = parseJsonObject(draft.triggerPayloadJson, "payload");
-  base.target = draft.target.trim() || "main";
-  return base;
-}
-
-function buildDeliveryTargets(draft: ScheduleDraft): NonNullable<TriggerSchedule["delivery_targets"]> {
-  const extras = parseDeliveryExtras(draft.extraDeliveryJson);
-  const primary: TriggerDeliveryTarget[] = [];
-  if (draft.deliveryKind === "webhook") {
-    const url = draft.deliveryUrl.trim();
-    if (!url) throw new Error("webhook URL is required");
-    primary.push({ kind: "webhook", url });
-  } else if (draft.deliveryKind === "messages") {
-    const channel = draft.deliveryChannel.trim() || "ops";
-    primary.push({ kind: "messages", channel });
-  } else if (draft.deliveryKind === "gateway") {
-    const platform = draft.deliveryPlatform.trim() || draft.deliveryChannel.trim() || "telegram";
-    primary.push({ kind: "gateway", platform, channel: draft.deliveryChannel.trim() || platform });
-  }
-  // Primary target first, then every pre-existing target carried through
-  // untouched — an edit never shrinks the target list behind the user's back.
-  return [...primary, ...extras];
-}
-
-function parseDeliveryExtras(text: string): TriggerDeliveryTarget[] {
-  const raw = text.trim();
-  if (!raw) return [];
-  const value = JSON.parse(raw) as unknown;
-  if (!Array.isArray(value)) {
-    throw new Error("extra delivery targets must be a JSON array");
-  }
-  return value as TriggerDeliveryTarget[];
-}
-
-/** Translated inline error for the extra-delivery-targets JSON field. */
-function deliveryExtrasError(text: string, t: Translate): string | null {
-  const raw = text.trim();
-  if (!raw) return null;
-  try {
-    if (!Array.isArray(JSON.parse(raw))) return t("errDeliveryExtraArray");
-    return null;
-  } catch {
-    return t("errJsonInvalid");
-  }
-}
-
-/** Translated inline error for a JSON textarea; empty input is valid. */
-function jsonFieldError(text: string, t: Translate): string | null {
-  const raw = text.trim();
-  if (!raw) return null;
-  try {
-    JSON.parse(raw);
-    return null;
-  } catch {
-    return t("errJsonInvalid");
-  }
-}
-
 export default function WorkflowsPage() {
   const t = useTranslations("workflows") as Translate;
+  const w = useTranslations("workflowUpgrade");
   const tCommon = useTranslations("common") as Translate;
-  const [routes, setRoutes] = useState<TriggerRoute[]>([]);
-  const [schedules, setSchedules] = useState<TriggerSchedule[]>([]);
-  const [statusRows, setStatusRows] = useState<TriggerSchedule[]>([]);
+  const routesRead = usePolledResource<TriggerRoute[]>("automation:routes", async signal => {
+    const response = await callApi<{ routes: TriggerRoute[] } | TriggerRoute[]>("/triggers/routes", { signal });
+    const list = Array.isArray(response) ? response : response.routes;
+    if (!Array.isArray(list)) throw new Error("Event routes unavailable");
+    return list;
+  });
+  const schedulesRead = usePolledResource<TriggerSchedule[]>("automation:schedules", async signal => {
+    const response = await callApi<{ schedules: TriggerSchedule[] }>("/triggers/schedules", { signal });
+    if (!Array.isArray(response.schedules)) throw new Error("Schedule definitions unavailable");
+    return response.schedules;
+  });
+  const statusRead = usePolledResource<TriggerSchedule[]>("automation:status", async signal => {
+    const response = await callApi<{ ok: boolean; schedules: TriggerSchedule[] }>("/triggers/schedules/status", { signal });
+    if (!response.ok || !Array.isArray(response.schedules)) throw new Error("Schedule status unavailable");
+    return response.schedules;
+  });
+  const routes = routesRead.data || [], schedules = schedulesRead.data || [], statusRows = statusRead.data || [];
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const loading = schedulesRead.loading;
   const [busy, setBusy] = useState<string | null>(null);
   const [filter, setFilter] = useState<ScheduleFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draftOpen, setDraftOpen] = useState(false);
   const [draftMode, setDraftMode] = useState<"create" | "edit">("create");
   const [draft, setDraft] = useState<ScheduleDraft>(() => blankDraft());
-
-  const load = useCallback(async () => {
-    try {
-      const [r, s, st] = await Promise.all([
-        clientApi.triggerRoutes().catch(() => ({ routes: [] })),
-        clientApi.triggerSchedules().catch(() => ({ schedules: [] })),
-        clientApi.scheduleStatuses().catch(() => ({ schedules: [] })),
-      ]);
-      const routes_ = Array.isArray(r) ? r : (r as { routes?: TriggerRoute[] }).routes ?? [];
-      const schedules_ = s.schedules ?? [];
-      const status_ = st.schedules ?? [];
-      setRoutes(routes_);
-      setSchedules(schedules_);
-      setStatusRows(status_);
-      setSelectedId((prev) => {
-        if (prev && schedules_.some((row) => row.id === prev)) return prev;
-        return schedules_[0]?.id ?? null;
-      });
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), 30_000);
-    return () => clearInterval(timer);
-  }, [load]);
+  const [baseline, setBaseline] = useState("");
+  const [query, setQuery] = useState("");
+  const saving = useRef(false);
+  const mutating = useRef(false);
+  const [openedRun, setOpenedRun] = useState<{ taskId: string; runId: string }>();
+  const dirty = draftOpen && baseline !== JSON.stringify(draft);
+  const load = useCallback(async () => { routesRead.refresh(); schedulesRead.refresh(); statusRead.refresh(); }, [routesRead.refresh, schedulesRead.refresh, statusRead.refresh]);
+  useUnsavedChanges(dirty);
+  async function leaveDraft() { return !dirty || await confirmDialog({ title: w("discardTitle"), message: w("discardDraft"), tone: "warning" }); }
 
   const rows = useMemo(() => {
     const statusById = new Map(statusRows.map((row) => [row.id, row]));
-    return schedules.map((row) => ({ ...row, ...(statusById.get(row.id) || {}) }));
+    return schedules.filter(row => !row.archived).map((row) => ({ ...(statusById.get(row.id) || {}), ...row }));
   }, [schedules, statusRows]);
 
   const filteredRows = useMemo(() => {
     return rows.filter((row) => {
+      if(row.archived)return false;
+      if (query.trim() && !`${titleFor(row)} ${row.id}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) return false;
       if (filter === "all") return true;
       if (filter === "active") return !isPaused(row);
       if (filter === "paused") return isPaused(row);
       return scheduleKind(row) === filter;
     });
-  }, [rows, filter]);
+  }, [rows, filter, query]);
 
   const selected = useMemo(
-    () => rows.find((row) => row.id === selectedId) ?? filteredRows[0] ?? rows[0] ?? null,
-    [filteredRows, rows, selectedId],
+    () => filteredRows.find((row) => row.id === selectedId) ?? filteredRows[0] ?? null,
+    [filteredRows, selectedId],
   );
 
   const counts = useMemo(() => {
@@ -460,9 +126,11 @@ export default function WorkflowsPage() {
     );
   }, [rows]);
 
-  function openCreate(kind: ScheduleKind = "agent") {
+  async function openCreate(kind: ScheduleKind = "agent", template?: "morning" | "risk" | "data") {
+    if (!await leaveDraft()) return;
     const next = blankDraft();
-    next.id = `task_${Date.now().toString(36)}`;
+    next.id = `task_${crypto.randomUUID().slice(0, 8)}`;
+    if (template) { next.title = w(`${template}Title`); next.sourceRequest = w(`${template}Goal`); }
     next.sessionKind = kind;
     next.kind = `${kind}.task`;
     if (kind === "script") {
@@ -475,67 +143,83 @@ export default function WorkflowsPage() {
       next.target = "agent";
     }
     setDraft(next);
+    setBaseline(JSON.stringify(next));
     setDraftMode("create");
     setDraftOpen(true);
   }
 
-  function openEdit(schedule: TriggerSchedule) {
-    setDraft(buildDraftFromSchedule(schedule));
+  async function openEdit(schedule: TriggerSchedule) {
+    if (!await leaveDraft()) return;
+    const next = buildDraftFromSchedule(schedule);
+    setDraft(next); setBaseline(JSON.stringify(next));
     setDraftMode("edit");
     setDraftOpen(true);
   }
 
   async function saveDraft() {
+    if (saving.current || mutating.current) return;
+    saving.current = true;
     setBusy("save");
+    setError(null);
     try {
-      const payload = buildSchedulePayload(draft);
+      const calendar = await validateSchedule(draft);
+      const payload = buildSchedulePayload({ ...draft, runAtInstant: calendar.schedule.run_at || undefined }, t);
       if (draftMode === "edit") {
-        await clientApi.scheduleUpdate(payload.id, payload);
+        const result = await clientApi.scheduleUpdate(payload.id, payload);
+        if (!result.ok) throw new Error("Schedule update was not accepted");
         toast({ message: t("savedSchedule", { id: payload.id }), tone: "ok" });
       } else {
-        await clientApi.scheduleAdd(payload);
+        const result = await clientApi.scheduleAdd(payload);
+        if (!result.ok) throw new Error("Schedule creation was not accepted");
         toast({ message: t("createdSchedule", { id: payload.id }), tone: "ok" });
       }
       setDraftOpen(false);
       setSelectedId(payload.id);
+      setFilter("all"); setQuery("");
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const code = e instanceof ApiError && e.payload && typeof e.payload === "object" ? String((e.payload as Record<string, unknown>).error || "") : "";
+      setError(code && w.has(code) ? w(code) : e instanceof Error ? e.message : String(e));
     } finally {
+      saving.current = false;
       setBusy(null);
     }
   }
 
   async function toggleSchedule(schedule: TriggerSchedule) {
+    if (mutating.current || saving.current) return;
+    mutating.current = true;
     setBusy(`toggle:${schedule.id}`);
     try {
-      if (isPaused(schedule)) {
-        await clientApi.scheduleResume(schedule.id);
-      } else {
-        await clientApi.schedulePause(schedule.id);
-      }
+      const result = isPaused(schedule) ? await clientApi.scheduleResume(schedule.id) : await clientApi.schedulePause(schedule.id);
+      if (!result.ok) throw new Error("Schedule state change was not accepted");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      mutating.current = false;
       setBusy(null);
     }
   }
 
   async function runSchedule(schedule: TriggerSchedule) {
-    if (isStrategySchedule(schedule)) {
+    if (mutating.current || saving.current) return;
+    mutating.current = true;
+    try {
       const ok = await confirmDialog({
-        title: t("runStrategyTitle"),
-        message: t("runStrategyConfirm", { id: schedule.id }),
+        title: w("rerunTitle"),
+        message: isStrategySchedule(schedule) ? t("runStrategyConfirm", { id: schedule.id }) : w("rerunConfirm"),
         okLabel: t("runNow"),
         cancelLabel: tCommon("cancel"),
         tone: "warning",
       });
       if (!ok) return;
-    }
-    setBusy(`run:${schedule.id}`);
-    try {
+      setBusy(`run:${schedule.id}`);
       const result = await clientApi.scheduleRunNow(schedule.id);
+      if (result.ok && result.run_id) {
+        setOpenedRun({ taskId: schedule.id, runId: result.run_id });
+        setSelectedId(schedule.id);
+      }
       toast({
         message: result.ok
           ? t("runQueued", { id: schedule.id })
@@ -546,44 +230,33 @@ export default function WorkflowsPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      mutating.current = false;
       setBusy(null);
     }
   }
 
   async function removeSchedule(schedule: TriggerSchedule) {
-    const ok = await confirmDialog({
+    if (mutating.current || saving.current) return;
+    mutating.current = true;
+    try {
+      const ok = await confirmDialog({
       title: t("deleteTitle"),
       message: t("deleteConfirm", { id: schedule.id }),
       okLabel: tCommon("delete"),
       cancelLabel: tCommon("cancel"),
       tone: "danger",
     });
-    if (!ok) return;
-    setBusy(`delete:${schedule.id}`);
-    try {
-      await clientApi.scheduleRemove(schedule.id);
+      if (!ok) return;
+      setBusy(`delete:${schedule.id}`);
+      const result = await clientApi.scheduleRemove(schedule.id);
+      if (!result.ok) throw new Error("Schedule removal was not accepted");
       if (selectedId === schedule.id) setSelectedId(null);
       await load();
       toast({ message: t("deletedSchedule", { id: schedule.id }), tone: "ok" });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(null);
-    }
-  }
-
-  async function tickSchedules() {
-    setBusy("tick");
-    try {
-      const result = await clientApi.scheduleTick();
-      toast({
-        message: t("tickResult", { count: Array.isArray(result.fired) ? result.fired.length : 0 }),
-        tone: "brand",
-      });
-      await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
+      mutating.current = false;
       setBusy(null);
     }
   }
@@ -597,169 +270,56 @@ export default function WorkflowsPage() {
     { id: "paused", label: t("paused"), count: counts.paused },
   ];
 
-  return (
-    <div>
-      {error ? <ErrorBanner error={error} /> : null}
-      <PageBody>
-        <PageHeader
-          eyebrow={t("eyebrow")}
-          title={t("title")}
-          description={t("description")}
-          actions={
-            <div className="flex items-center gap-2">
-              {/* "+ New task" was removed here — the Scheduled-tasks card
-                  already offers the typed entry points (+ Agent / + Script /
-                  + Trigger), and two create paths for one action doubled the
-                  learning cost. "Run scheduler tick" is a debug affordance,
-                  so it renders icon-only and quiet. */}
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => void load()}
-              >
-                <RefreshIcon size={14} />
-                {tCommon("refresh")}
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                disabled={busy === "tick"}
-                onClick={() => void tickSchedules()}
-                title={t("tickNow")}
-                aria-label={t("tickNow")}
-              >
-                <WrenchIcon size={14} />
-                {busy === "tick" ? tCommon("working") : null}
-              </button>
-            </div>
-          }
-        />
-        <SectionTabs section="strategy" />
-
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(360px,0.95fr)_minmax(0,1.35fr)]">
-          <Card
-            title={t("schedulesTitle")}
-            description={t("schedulesDesc")}
-            actions={
-              <div className="flex flex-wrap items-center gap-1">
-                {(["agent", "script", "trigger"] as ScheduleKind[]).map((kind) => (
-                  <button
-                    key={kind}
-                    type="button"
-                    className="btn-ghost px-2 py-1 text-[11px]"
-                    onClick={() => openCreate(kind)}
-                  >
-                    <PlusIcon size={12} />
-                    {kindLabel(kind, t)}
-                  </button>
-                ))}
-              </div>
-            }
-            padded={false}
-          >
-            <div className="border-b border-brand-500/10 px-3 py-2">
-              <div className="flex flex-wrap items-center gap-1">
-                {filters.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    aria-pressed={filter === item.id}
-                    onClick={() => setFilter(item.id)}
-                    className={[
-                      "rounded-md border px-2.5 py-1 text-[12px] transition",
-                      filter === item.id
-                        ? "border-brand-500/40 bg-brand-500/15 text-brand-100"
-                        : "border-transparent text-ink-400 hover:border-brand-500/20 hover:text-ink-200",
-                    ].join(" ")}
-                  >
-                    {item.label}
-                    <span className="ml-1 tabular-nums text-ink-500">{item.count}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {loading && !rows.length ? (
-              <div className="space-y-2 p-3">
-                {[0, 1, 2, 3].map((i) => (
-                  <div key={i} className="skeleton h-10" />
-                ))}
-              </div>
-            ) : filteredRows.length === 0 ? (
-              <Empty label={t("noSchedules")} />
-            ) : (
-              <ul className="embedded-list-scroll-lg">
-                {filteredRows.map((schedule) => (
-                  <ScheduleListItem
-                    key={schedule.id}
-                    schedule={schedule}
-                    active={selected?.id === schedule.id}
-                    busy={busy}
-                    onSelect={() => setSelectedId(schedule.id)}
-                    onRun={() => void runSchedule(schedule)}
-                    onToggle={() => void toggleSchedule(schedule)}
-                  />
-                ))}
-              </ul>
-            )}
-          </Card>
-
-          <div className="space-y-4">
-            {draftOpen ? (
-              <ScheduleEditor
-                mode={draftMode}
-                draft={draft}
-                busy={busy}
-                t={t}
-                tCommon={tCommon}
-                onChange={setDraft}
-                onCancel={() => setDraftOpen(false)}
-                onSave={() => void saveDraft()}
-              />
-            ) : selected ? (
-              <ScheduleDetail
-                schedule={selected}
-                busy={busy}
-                routes={routes}
-                t={t}
-                tCommon={tCommon}
-                onEdit={() => openEdit(selected)}
-                onRun={() => void runSchedule(selected)}
-                onToggle={() => void toggleSchedule(selected)}
-                onDelete={() => void removeSchedule(selected)}
-              />
-            ) : (
-              <Card title={t("selectSchedule")}>
-                <Empty label={t("selectScheduleHint")} />
-              </Card>
-            )}
-
-            <Card
-              title={t("routesTitle")}
-              description={`${t("routesDesc")} · ${t("routesCount", { count: routes.length })}`}
-              padded={false}
-            >
-              {loading && routes.length === 0 ? (
-                <div className="space-y-2 p-3">
-                  {[0, 1, 2].map((i) => (
-                    <div key={i} className="skeleton h-9" />
-                  ))}
-                </div>
-              ) : routes.length === 0 ? (
-                <Empty label={t("noRoutes")} />
-              ) : (
-                <ul className="embedded-list-scroll">
-                  {routes.map((route) => (
-                    <RouteListItem key={route.id} route={route} t={t} />
-                  ))}
-                </ul>
-              )}
-            </Card>
-          </div>
+  async function reuseTask(schedule: TriggerSchedule) {
+    if (!await leaveDraft()) return;
+    const original = buildDraftFromSchedule(schedule), next = blankDraft();
+    next.id = `task_${crypto.randomUUID().slice(0, 8)}`;
+    next.title = w("reuseTitle", { title: titleFor(schedule) });
+    next.sourceRequest = original.usePromptOverride ? original.generatedPrompt : original.sourceRequest;
+    next.cadence = original.cadence;
+    next.cron = original.cron; next.everySeconds = original.everySeconds; next.timezone = original.timezone;
+    next.sessionKind = original.sessionKind; next.kind = original.kind;
+    next.scriptId = original.scriptId; next.scriptArgsJson = original.scriptArgsJson;
+    next.target = original.sessionKind === "script" ? `script:${original.scriptId}` : original.sessionKind === "agent" ? "agent" : "main";
+    // A reusable definition is not a copy of account grants, delivery recipients,
+    // bound sessions, or runtime execution policy. The new definition stays paused.
+    setDraft(next); setBaseline(JSON.stringify(next)); setDraftMode("create"); setDraftOpen(true);
+  }
+  return <PageBody>
+    <PageHeader title={w("automationTitle")} description={w("automationDescription")} actions={<div className="flex flex-wrap gap-2">
+      <button type="button" className="btn-ghost" onClick={() => void load()}><RefreshIcon size={15}/>{w("refresh")}</button>
+      <button type="button" className="btn-primary" onClick={() => void openCreate()}><PlusIcon size={15}/>{w("createAutomation")}</button>
+    </div>}/>
+    {error && <ErrorBanner error={error}/>}
+    <ResourceNotice error={schedulesRead.error} updatedAt={schedulesRead.updatedAt} onRetry={schedulesRead.refresh}/>
+    <ResourceNotice error={statusRead.error} updatedAt={statusRead.updatedAt} onRetry={statusRead.refresh}/>
+    <div className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-[minmax(240px,0.7fr)_minmax(0,2fr)]">
+      <aside className="min-w-0 self-start rounded-lg border border-[color:var(--line)]" aria-label={t("schedulesTitle")}>
+        <div className="space-y-3 border-b border-[color:var(--line)] p-3">
+          <input className="input-dark w-full" type="search" value={query} aria-label={w("searchTasks")} placeholder={w("searchTasks")} onChange={event => setQuery(event.target.value)}/>
+          <select className="input-dark w-full text-sm" value={filter} aria-label={t("filterAll")} onChange={event => setFilter(event.target.value as ScheduleFilter)}>{filters.map(item => <option value={item.id} key={item.id}>{item.label} · {item.count}</option>)}</select>
         </div>
-      </PageBody>
+        {loading && !schedulesRead.data ? <div role="status" className="p-4 text-sm">{w("loading")}</div> : !filteredRows.length ? (!schedulesRead.error && <div className="p-4 text-sm leading-7 text-[color:var(--text-muted)]">{rows.length ? t("noSchedules") : w("noAutomations")}</div>) : <ul className="max-h-[65vh] overflow-auto">
+          {filteredRows.map(schedule => <ScheduleListItem key={schedule.id} schedule={schedule} active={selected?.id === schedule.id} busy={busy}
+            onSelect={() => { void leaveDraft().then(ok => { if (ok) { setSelectedId(schedule.id); setDraftOpen(false); } }); }}
+            onRun={() => void runSchedule(schedule)} onToggle={() => void toggleSchedule(schedule)}/>)}</ul>}
+      </aside>
+      <section className="min-w-0" aria-label={w("definition")}>
+        {draftOpen ? <ScheduleEditor mode={draftMode} draft={draft} busy={busy} t={t} tCommon={tCommon} onChange={setDraft}
+          onCancel={() => { void leaveDraft().then(ok => { if(ok)setDraftOpen(false); }); }} onSave={() => void saveDraft()}/>
+          : selected ? <ScheduleDetail key={selected.id} schedule={selected} busy={busy} routes={routes} t={t} tCommon={tCommon}
+            onEdit={() => void openEdit(selected)} onRun={() => void runSchedule(selected)} onToggle={() => void toggleSchedule(selected)} onDelete={() => void removeSchedule(selected)} onReuse={() => void reuseTask(selected)}/>
+          : !schedulesRead.error && <section className="py-5"><h2 className="text-lg font-semibold">{w("templates")}</h2><p className="mt-2 text-sm leading-7 text-[color:var(--text-muted)]">{w("emptyAutomationHint")}</p>
+            <div className="mt-5 flex flex-col divide-y divide-[color:var(--line)]">{(["morning","risk","data"] as const).map(template => <button type="button" key={template} className="py-4 text-left hover:text-[color:var(--violet-2)]" onClick={() => void openCreate("agent",template)}><strong className="block text-sm">{w(`${template}Title`)}</strong><span className="mt-1 block text-sm leading-7 text-[color:var(--text-muted)]">{w(`${template}Goal`)}</span></button>)}</div>
+          </section>}
+        {!draftOpen && selected && openedRun?.taskId === selected.id && <div className="mt-5"><TaskRunDetail key={openedRun.runId} runId={openedRun.runId} taskKind="scheduled_agent" taskId={selected.id} onOpenRun={runId => setOpenedRun({ taskId: selected.id, runId })} /></div>}
+      </section>
     </div>
-  );
+    <details className="mt-8 border-t border-[color:var(--line)] py-4 text-sm"><summary className="cursor-pointer text-[color:var(--text-muted)]">{w("routes")} · {routes.length}</summary>
+      <ResourceNotice error={routesRead.error} updatedAt={routesRead.updatedAt} onRetry={routesRead.refresh}/>
+      {!routes.length && !routesRead.error ? <p className="py-3 text-[color:var(--text-muted)]">{routesRead.loading ? w("loading") : t("noRoutes")}</p> : <ul className="mt-3 max-h-64 overflow-auto">{routes.map(route => <RouteListItem key={route.id} route={route} t={t}/>)}</ul>}
+    </details>
+  </PageBody>;
 }
 
 function isStrategySchedule(schedule: TriggerSchedule): boolean {
@@ -803,22 +363,17 @@ function ScheduleListItem({
       <button type="button" onClick={onSelect} className="block w-full min-w-0 text-left">
         <div className="flex min-w-0 items-center gap-2">
           <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT_CLASS[tone]}`} />
-          <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">
+          <span className="min-w-0 flex-1 truncate text-sm text-[color:var(--text-base)]" title={schedule.id}>
             {titleFor(schedule)}
           </span>
           <Pill tone={tone}>{paused ? t("paused") : t("active")}</Pill>
         </div>
-        <div className="mt-1 flex min-w-0 items-center gap-2 text-[10.5px] text-ink-500">
-          <span className="font-mono truncate">{schedule.id}</span>
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[color:var(--text-muted)]">
+          <span>{cadenceLabel(schedule)}</span>
           <span>·</span>
-          <span className="shrink-0">{cadenceLabel(schedule)}</span>
-          <span>·</span>
-          <span className="shrink-0">{kind}</span>
-          {nextRun !== "–" ? (
-            <>
-              <span>·</span>
-              <span className="shrink-0">{nextRun}</span>
-            </>
+          <span>{kindLabel(kind, t)}</span>
+          {!paused && schedule.next_due_at != null ? (
+            <span className="w-full">{t("metricNextRun")} · {nextRun}</span>
           ) : null}
         </div>
       </button>
@@ -826,7 +381,7 @@ function ScheduleListItem({
         <button
           type="button"
           className="btn-ghost px-2 py-0.5 text-[11px]"
-          disabled={busy === `run:${schedule.id}`}
+          disabled={!!busy}
           onClick={onRun}
           title={t("runNow")}
         >
@@ -835,7 +390,7 @@ function ScheduleListItem({
         <button
           type="button"
           className="btn-ghost px-2 py-0.5 text-[11px]"
-          disabled={busy === `toggle:${schedule.id}`}
+          disabled={!!busy}
           onClick={onToggle}
           title={paused ? t("resume") : t("pause")}
         >
@@ -846,507 +401,50 @@ function ScheduleListItem({
   );
 }
 
-function ScheduleDetail({
-  schedule,
-  busy,
-  routes,
-  t,
-  tCommon,
-  onEdit,
-  onRun,
-  onToggle,
-  onDelete,
-}: {
-  schedule: TriggerSchedule;
-  busy: string | null;
-  routes: TriggerRoute[];
-  t: Translate;
-  tCommon: Translate;
-  onEdit: () => void;
-  onRun: () => void;
-  onToggle: () => void;
-  onDelete: () => void;
+function ScheduleDetail({ schedule,busy,t,tCommon,onEdit,onRun,onToggle,onDelete,onReuse }: {
+  schedule:TriggerSchedule;busy:string|null;routes:TriggerRoute[];t:Translate;tCommon:Translate;
+  onEdit:()=>void;onRun:()=>void;onToggle:()=>void;onDelete:()=>void;onReuse:()=>void;
 }) {
-  const kind = scheduleKind(schedule);
-  const paused = isPaused(schedule);
-  const cadenceLabel = useCadenceLabel();
-  const matchingRoutes = routes.filter((route) => {
-    const matchKind = typeof route.match?.kind === "string" ? route.match.kind : "";
-    return matchKind === schedule.kind || matchKind === "*";
-  });
-  return (
-    <Card
-      title={titleFor(schedule)}
-      description={schedule.id}
-      actions={
-        <div className="flex flex-wrap items-center gap-2">
-          <Pill tone={statusTone(schedule)}>{paused ? t("paused") : t("active")}</Pill>
-          <button type="button" className="btn-ghost text-xs" onClick={onEdit}>
-            <WrenchIcon size={13} />
-            {tCommon("edit")}
-          </button>
-          <button
-            type="button"
-            className="btn-ghost text-xs"
-            disabled={busy === `run:${schedule.id}`}
-            onClick={onRun}
-          >
-            <SendIcon size={13} />
-            {t("runNow")}
-          </button>
-          <button
-            type="button"
-            className="btn-ghost text-xs"
-            disabled={busy === `toggle:${schedule.id}`}
-            onClick={onToggle}
-          >
-            <PauseIcon size={13} />
-            {paused ? t("resume") : t("pause")}
-          </button>
-          <button
-            type="button"
-            className="btn-ghost text-xs text-danger"
-            disabled={busy === `delete:${schedule.id}`}
-            onClick={onDelete}
-          >
-            <TrashIcon size={13} />
-            {tCommon("delete")}
-          </button>
-        </div>
-      }
-    >
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Metric label={t("metricKind")} value={kindLabel(kind, t)} />
-        <Metric label={t("metricCadence")} value={cadenceLabel(schedule)} />
-        <Metric label={t("metricTimezone")} value={schedule.timezone || "-"} mono />
-        <Metric label={t("metricLastRun")} value={formatTsShort(schedule.last_fired_ts ?? undefined)} />
-        <Metric label={t("metricNextRun")} value={formatTsShort(schedule.next_due_at ?? undefined)} />
-        <Metric label={t("metricTarget")} value={schedule.target || "-"} mono />
-        <Metric label={t("metricDelivery")} value={deliverySummary(schedule)} mono />
-        <Metric label={t("metricSession")} value={schedule.session_mode || "-"} mono />
-        <Metric
-          label={t("metricRoutes")}
-          value={matchingRoutes.length ? String(matchingRoutes.length) : "-"}
-        />
-      </div>
-
-      <ScheduledExecutionReceipt receipt={(schedule as TriggerSchedule & { latest_execution?: import("../../components/workflows/ScheduledExecutionReceipt").ScheduledReceipt }).latest_execution}/>
-      {kind === "agent" ? (
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          <TextBlock label={t("sourceRequest")} value={String(schedule.payload?.source_request || "-")} />
-          <TextBlock label={t("agentPrompt")} value={String(schedule.payload?.prompt || "-")} />
-        </div>
-      ) : null}
-
-      {kind === "script" ? (
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          <Metric label={t("scriptId")} value={String(schedule.payload?.script_id || "-")} mono />
-          <PayloadTable value={(schedule.payload?.args || {}) as Record<string, unknown>} />
-        </div>
-      ) : null}
-
-      <Advanced title={t("rawSchedule")} defaultOpen={false}>
-        <Json value={schedule} />
-      </Advanced>
-    </Card>
-  );
-}
-
-function ScheduleEditor({
-  mode,
-  draft,
-  busy,
-  t,
-  tCommon,
-  onChange,
-  onCancel,
-  onSave,
-}: {
-  mode: "create" | "edit";
-  draft: ScheduleDraft;
-  busy: string | null;
-  t: Translate;
-  tCommon: Translate;
-  onChange: (draft: ScheduleDraft) => void;
-  onCancel: () => void;
-  onSave: () => void;
-}) {
-  const patch = (next: Partial<ScheduleDraft>) => onChange({ ...draft, ...next });
-  const cadenceHint = useCadenceHint();
-
-  // Live, per-field validation — errors render under their input instead
-  // of only surfacing as a save-time toast (Save still re-validates).
-  const cronError =
-    draft.cadence === "cron" && !draft.cron.trim() ? t("errCronRequired") : null;
-  const intervalSeconds = Number(draft.everySeconds);
-  const intervalError =
-    draft.cadence === "interval" && (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0)
-      ? t("errIntervalInvalid")
-      : null;
-  // Human cadence preview from the shared useCadenceHint hook.
-  const cadencePreview =
-    draft.cadence === "cron"
-      ? cadenceHint(draft.cron.trim() || null, null)
-      : cadenceHint(null, Number.isFinite(intervalSeconds) && intervalSeconds > 0 ? intervalSeconds : null);
-  // describeCron returns null both for invalid input and for valid but
-  // uncovered shapes (day-of-week lists etc.); only 5-field-shaped input
-  // counts as "valid but undescribed", anything else gets a warning.
-  const cronUnparseable =
-    draft.cadence === "cron" &&
-    !cronError &&
-    !cadencePreview &&
-    draft.cron.trim().split(/\s+/).length !== 5
-      ? t("errCronUnparseable")
-      : null;
-  const extraDeliveryError = deliveryExtrasError(draft.extraDeliveryJson, t);
-  const extraDeliveryCount = (() => {
-    try {
-      return parseDeliveryExtras(draft.extraDeliveryJson).length;
-    } catch {
-      return 0;
-    }
-  })();
-
-  return (
-    <Card
-      title={mode === "create" ? t("createTitle") : t("editTitle")}
-      description={mode === "edit" ? draft.id : t("createDesc")}
-      actions={
-        <div className="flex items-center gap-2">
-          <button type="button" className="btn-ghost text-xs" onClick={onCancel}>
-            {tCommon("cancel")}
-          </button>
-          <button
-            type="button"
-            className="btn-primary text-xs"
-            disabled={busy === "save"}
-            onClick={onSave}
-          >
-            {busy === "save" ? tCommon("saving") : tCommon("save")}
-          </button>
-        </div>
-      }
-    >
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center gap-1 rounded-lg border border-brand-500/10 bg-ink-950/25 p-1">
-          {(["agent", "script", "trigger"] as ScheduleKind[]).map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              disabled={mode === "edit"}
-              onClick={() =>
-                patch({
-                  sessionKind: kind,
-                  kind: `${kind}.task`,
-                  target: kind === "script" ? "script:" : kind === "agent" ? "agent" : "main",
-                })
-              }
-              className={[
-                "rounded-md px-3 py-1.5 text-[12px] transition disabled:cursor-not-allowed disabled:opacity-60",
-                draft.sessionKind === kind
-                  ? "bg-brand-500/20 text-brand-100"
-                  : "text-ink-400 hover:bg-brand-500/10 hover:text-ink-100",
-              ].join(" ")}
-            >
-              {kindLabel(kind, t)}
-            </button>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <Field label={t("fieldId")}>
-            <input
-              className="input-dark font-mono text-xs"
-              value={draft.id}
-              disabled={mode === "edit"}
-              onChange={(e) => patch({ id: e.target.value })}
-            />
-          </Field>
-          <Field label={t("fieldKind")}>
-            <input
-              className="input-dark font-mono text-xs"
-              value={draft.kind}
-              onChange={(e) => patch({ kind: e.target.value })}
-            />
-          </Field>
-          <Field label={t("fieldCadence")}>
-            <Select<CadenceKind>
-              value={draft.cadence}
-              onChange={(value) => patch({ cadence: value })}
-              options={[
-                { value: "cron", label: t("cadenceCron") },
-                { value: "interval", label: t("cadenceInterval") },
-              ]}
-              size="sm"
-              ariaLabel={t("fieldCadence")}
-            />
-          </Field>
-          <Field
-            label={draft.cadence === "cron" ? t("fieldCron") : t("fieldEverySeconds")}
-            error={cronError ?? intervalError ?? cronUnparseable}
-          >
-            <input
-              className="input-dark font-mono text-xs"
-              value={draft.cadence === "cron" ? draft.cron : draft.everySeconds}
-              onChange={(e) =>
-                draft.cadence === "cron"
-                  ? patch({ cron: e.target.value })
-                  : patch({ everySeconds: e.target.value })
-              }
-            />
-            {cadencePreview ? (
-              <span className="mt-1 block text-[11px] text-ink-400">{cadencePreview}</span>
-            ) : null}
-          </Field>
-          <Field label={t("fieldTimezone")}>
-            <input
-              className="input-dark font-mono text-xs"
-              value={draft.timezone}
-              onChange={(e) => patch({ timezone: e.target.value })}
-            />
-          </Field>
-          <Field label={t("fieldTarget")}>
-            <input
-              className="input-dark font-mono text-xs"
-              value={draft.target}
-              onChange={(e) => patch({ target: e.target.value })}
-            />
-          </Field>
-        </div>
-
-        {draft.sessionKind === "agent" ? (
-          <AgentFields draft={draft} patch={patch} t={t} />
-        ) : null}
-        {draft.sessionKind === "script" ? (
-          <ScriptFields draft={draft} patch={patch} t={t} />
-        ) : null}
-        {draft.sessionKind === "trigger" ? (
-          <Field
-            label={t("fieldPayload")}
-            error={jsonFieldError(draft.triggerPayloadJson, t)}
-          >
-            <textarea
-              className="input-dark min-h-[160px] w-full font-mono text-xs"
-              value={draft.triggerPayloadJson}
-              onChange={(e) => patch({ triggerPayloadJson: e.target.value })}
-            />
-          </Field>
-        ) : null}
-
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <Field label={t("fieldDeliveryKind")}>
-            <Select<DeliveryKind>
-              value={draft.deliveryKind}
-              onChange={(value) => patch({ deliveryKind: value })}
-              options={[
-                { value: "none", label: t("deliveryNone") },
-                { value: "gateway", label: t("deliveryGateway") },
-                { value: "messages", label: t("deliveryMessages") },
-                { value: "webhook", label: t("deliveryWebhook") },
-              ]}
-              size="sm"
-              ariaLabel={t("fieldDeliveryKind")}
-            />
-          </Field>
-          {draft.deliveryKind === "gateway" ? (
-            <Field label={t("fieldDeliveryPlatform")}>
-              <input
-                className="input-dark font-mono text-xs"
-                value={draft.deliveryPlatform}
-                onChange={(e) => patch({ deliveryPlatform: e.target.value })}
-              />
-            </Field>
-          ) : null}
-          {draft.deliveryKind === "messages" || draft.deliveryKind === "gateway" ? (
-            <Field label={t("fieldDeliveryChannel")}>
-              <input
-                className="input-dark font-mono text-xs"
-                value={draft.deliveryChannel}
-                onChange={(e) => patch({ deliveryChannel: e.target.value })}
-              />
-            </Field>
-          ) : null}
-          {draft.deliveryKind === "webhook" ? (
-            <Field label={t("fieldDeliveryUrl")}>
-              <input
-                className="input-dark font-mono text-xs"
-                value={draft.deliveryUrl}
-                onChange={(e) => patch({ deliveryUrl: e.target.value })}
-              />
-            </Field>
-          ) : null}
-        </div>
-
-        {/* Targets beyond the first one, loaded verbatim from the schedule
-            and written back untouched — editing must never drop them. */}
-        <Field
-          label={t("fieldDeliveryExtra")}
-          error={extraDeliveryError}
-        >
-          <textarea
-            className="input-dark min-h-[72px] w-full font-mono text-xs"
-            value={draft.extraDeliveryJson}
-            placeholder="[]"
-            onChange={(e) => patch({ extraDeliveryJson: e.target.value })}
-          />
-          {extraDeliveryError ? null : extraDeliveryCount > 0 ? (
-            <span className="mt-1 block text-[11px] text-ink-500">
-              {t("deliveryExtraCount", { count: extraDeliveryCount })}
-            </span>
-          ) : null}
-        </Field>
-
-        <Advanced title={t("advancedTitle")} defaultOpen={false}>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Field label={t("fieldTtl")}>
-              <input
-                type="number"
-                min={0}
-                className="input-dark font-mono text-xs"
-                value={draft.ttlSeconds}
-                placeholder="86400"
-                onChange={(e) => patch({ ttlSeconds: e.target.value })}
-              />
-            </Field>
-          </div>
-        </Advanced>
-
-        <div className="flex items-center gap-2 text-[12px] text-ink-300">
-          <SwitchControl
-            checked={draft.enabled}
-            onCheckedChange={(checked) => patch({ enabled: checked })}
-            label={t("fieldEnabled")}
-            size="sm"
-          />
-          {t("fieldEnabled")}
-        </div>
-      </div>
-    </Card>
-  );
-}
-
-function AgentFields({
-  draft,
-  patch,
-  t,
-}: {
-  draft: ScheduleDraft;
-  patch: (next: Partial<ScheduleDraft>) => void;
-  t: Translate;
-}) {
-  return (
-    <div className="space-y-3">
-      <Advanced title={t("advancedTitle")} defaultOpen={draft.sessionMode !== "reuse"}><div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        <Field label={t("fieldSessionMode")}>
-          <Select<ScheduleDraft["sessionMode"]>
-            value={draft.sessionMode}
-            onChange={(value) => patch({ sessionMode: value })}
-            options={[
-              { value: "ephemeral", label: t("sessionEphemeral") },
-              { value: "reuse", label: t("sessionReuse") },
-              { value: "fanout", label: t("sessionFanout") },
-            ]}
-            size="sm"
-            ariaLabel={t("fieldSessionMode")}
-          />
-        </Field>
-        {draft.sessionMode === "reuse" ? (
-          <Field label={t("fieldSessionId")}>
-            <input
-              className="input-dark font-mono text-xs"
-              value={draft.sessionId}
-              onChange={(e) => patch({ sessionId: e.target.value })}
-            />
-          </Field>
-        ) : null}
-        {draft.sessionMode === "fanout" ? (
-          <Field label={t("fieldSessionIds")}>
-            <input
-              className="input-dark font-mono text-xs"
-              value={draft.sessionIds}
-              onChange={(e) => patch({ sessionIds: e.target.value })}
-            />
-          </Field>
-        ) : null}
-        <Field label={t("fieldAttachedSkills")}>
-          <input
-            className="input-dark font-mono text-xs"
-            value={draft.attachedSkills}
-            onChange={(e) => patch({ attachedSkills: e.target.value })}
-          />
-        </Field>
-      </div></Advanced>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <Field label={t("sourceRequest")}>
-          <textarea
-            className="input-dark min-h-[140px] w-full text-xs"
-            value={draft.sourceRequest}
-            onChange={(e) => patch({ sourceRequest: e.target.value })}
-          />
-        </Field>
-        <Field label={t("agentPrompt")}>
-          <textarea
-            className="input-dark min-h-[140px] w-full font-mono text-xs"
-            value={draft.generatedPrompt}
-            onChange={(e) => patch({ generatedPrompt: e.target.value })}
-          />
-        </Field>
-      </div>
-      <Field
-        label={t("fieldPayloadExtra")}
-        error={jsonFieldError(draft.triggerPayloadJson, t)}
-      >
-        <textarea
-          className="input-dark min-h-[120px] w-full font-mono text-xs"
-          value={draft.triggerPayloadJson}
-          onChange={(e) => patch({ triggerPayloadJson: e.target.value })}
-        />
-      </Field>
+  const w=useTranslations("workflowUpgrade");
+  const kind=scheduleKind(schedule), paused=isPaused(schedule);
+  const [tab,setTab]=useState<"settings"|"history">("settings");
+  const cadenceLabel=useCadenceLabel();
+  return <section className="min-w-0" data-testid="automation-task-detail" data-task-id={schedule.id}>
+    <header className="flex flex-wrap items-start justify-between gap-4 border-b border-[color:var(--line)] pb-4">
+      <div className="min-w-0 flex-1"><h2 className="break-words text-xl font-semibold">{titleFor(schedule)}</h2><p className="mt-2 text-sm text-[color:var(--text-muted)]">{cadenceLabel(schedule)} · {schedule.timezone||"UTC"} · {paused?t("paused"):t("active")}</p></div>
+      <div className="flex flex-wrap items-center gap-2"><button type="button" className="btn-ghost text-sm" onClick={onEdit}>{tCommon("edit")}</button><button type="button" className="btn-ghost text-sm" disabled={!!busy} onClick={onToggle}>{paused?t("resume"):t("pause")}</button><button type="button" className="btn-primary text-sm" disabled={!!busy} onClick={onRun}>{t("runNow")}</button></div>
+    </header>
+    <div className="flex flex-wrap items-center gap-5 border-b border-[color:var(--line)]" role="tablist" aria-label={t("taskDetail")}>
+      {(["settings","history"] as const).map(value=><button type="button" key={value} role="tab" aria-selected={tab===value} className={`border-b-2 py-3 text-sm ${tab===value?"border-[color:var(--violet-2)]":"border-transparent text-[color:var(--text-muted)]"}`} onClick={()=>setTab(value)}>{w(value==="settings"?"definition":"history")}</button>)}
     </div>
-  );
-}
-
-function ScriptFields({
-  draft,
-  patch,
-  t,
-}: {
-  draft: ScheduleDraft;
-  patch: (next: Partial<ScheduleDraft>) => void;
-  t: Translate;
-}) {
-  return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-      <Field label={t("scriptId")}>
-        <input
-          className="input-dark font-mono text-xs"
-          value={draft.scriptId}
-          onChange={(e) => patch({ scriptId: e.target.value })}
-        />
-      </Field>
-      <Field label={t("scriptArgs")} error={jsonFieldError(draft.scriptArgsJson, t)}>
-        <textarea
-          className="input-dark min-h-[120px] w-full font-mono text-xs"
-          value={draft.scriptArgsJson}
-          onChange={(e) => patch({ scriptArgsJson: e.target.value })}
-        />
-      </Field>
-    </div>
-  );
+    {tab==="settings" ? <div className="space-y-5 py-5">
+      <p className="text-xs text-[color:var(--text-muted)]">{w("configuredNotHealthy")}</p>
+      <dl className="grid grid-cols-2 gap-4 text-sm"><div><dt className="text-[color:var(--text-muted)]">{t("metricLastRun")}</dt><dd className="mt-1">{formatTsShort(schedule.last_fired_ts??undefined)}</dd></div><div><dt className="text-[color:var(--text-muted)]">{t("metricNextRun")}</dt><dd className="mt-1">{formatTsShort(schedule.next_due_at??undefined)}</dd></div></dl>
+      {kind==="agent" && <section><h3 className="text-sm font-medium">{w("effectivePrompt")}</h3><p className="mt-3 whitespace-pre-wrap break-words text-sm leading-7">{String(schedule.payload?.prompt||schedule.payload?.source_request||"")}</p></section>}
+      {kind==="script"&&<section className="text-sm"><h3 className="font-medium">{t("scriptId")}</h3><p className="mt-2">{String(schedule.payload?.script_id||"")}</p><PayloadTable value={(schedule.payload?.args||{}) as Record<string,unknown>}/></section>}
+      <p className="text-sm text-[color:var(--text-muted)]">{w("delivery")} · {deliverySummary(schedule)}</p>
+      {kind!=="trigger"&&<TaskFinancialGrants taskKind="scheduled_agent" taskId={schedule.id}/>}
+      <details className="text-sm"><summary className="cursor-pointer text-[color:var(--text-muted)]">{w("advanced")}</summary><div className="mt-3 space-y-3"><p className="text-xs">{schedule.id} · {schedule.kind}</p><Json value={schedule}/><button type="button" className="btn-ghost text-danger" disabled={!!busy} onClick={onDelete}>{tCommon("delete")}</button></div></details>
+      {kind!=="trigger"&&<div className="border-t border-[color:var(--line)] pt-4"><button type="button" className="btn-ghost text-sm" onClick={onReuse}>{w("saveReusable")}</button><p className="mt-2 text-xs leading-6 text-[color:var(--text-muted)]">{w("reuseHint")}</p></div>}
+    </div> : kind!=="trigger" ? <TaskRunHistory taskKind="scheduled_agent" taskId={schedule.id}/>
+      : <ScheduledExecutionReceipt receipt={(schedule as TriggerSchedule & {latest_execution?:import("../../components/workflows/ScheduledExecutionReceipt").ScheduledReceipt}).latest_execution}/>}
+  </section>;
 }
 
 function RouteListItem({ route, t }: { route: TriggerRoute; t: Translate }) {
+  const w = useTranslations("workflowUpgrade");
   const matchKind = typeof route.match?.kind === "string" ? route.match.kind : "any";
-  const skill = typeof route.action?.skill_id === "string" ? route.action.skill_id : "?";
+  const skill = String(route.action?.skill_id || route.action?.target || route.target || w("unresolvedTarget"));
+  const paused = route.paused || route.enabled === false;
   return (
     <li className="border-b border-brand-500/5 px-3 py-2.5 last:border-b-0">
       <div className="flex min-w-0 items-center gap-2">
-        <span className={`h-2 w-2 shrink-0 rounded-full ${route.paused ? "bg-ink-500" : "bg-ok"}`} />
+        <span className={`h-2 w-2 shrink-0 rounded-full ${paused ? "bg-ink-500" : "bg-brand-300"}`} />
         <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-100">
           {route.title || route.id}
         </span>
-        <Pill tone={route.paused ? "brand" : "ok"}>
-          {route.paused ? t("paused") : t("active")}
+        <Pill tone="brand">
+          {paused ? t("paused") : t("active")}
         </Pill>
       </div>
       <div className="mt-1 text-[10.5px] font-mono text-ink-500">
@@ -1356,59 +454,11 @@ function RouteListItem({ route, t }: { route: TriggerRoute; t: Translate }) {
   );
 }
 
-function Field({
-  label,
-  error,
-  children,
-}: {
-  label: string;
-  error?: string | null;
-  children: ReactNode;
-}) {
-  return (
-    <label className="block min-w-0 text-[12px] text-ink-400">
-      <span className="mb-1 block text-ink-300">{label}</span>
-      {children}
-      {error ? <span className="mt-1 block text-[11px] text-danger">{error}</span> : null}
-    </label>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  mono,
-}: {
-  label: string;
-  value: ReactNode;
-  mono?: boolean;
-}) {
-  return (
-    <div className="min-w-0 rounded-lg border border-brand-500/10 bg-ink-950/20 px-3 py-2">
-      <div className="text-[11px] text-ink-500">{label}</div>
-      <div className={`mt-1 truncate text-[12px] text-ink-100 ${mono ? "font-mono" : ""}`}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function TextBlock({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0 rounded-lg border border-brand-500/10 bg-ink-950/20 px-3 py-2">
-      <div className="text-[11px] text-ink-500">{label}</div>
-      <div className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-[12px] leading-relaxed text-ink-200">
-        {value}
-      </div>
-    </div>
-  );
-}
-
 function PayloadTable({ value }: { value: Record<string, unknown> }) {
   const entries = Object.entries(value);
-  if (!entries.length) return <Metric label="args" value="-" mono />;
+  if (!entries.length) return null;
   return (
-    <div className="overflow-hidden rounded-lg border border-brand-500/10">
+    <div className="mt-3 overflow-auto rounded-lg border border-[color:var(--line)]">
       <table className="w-full text-left text-[12px]">
         <tbody>
           {entries.map(([key, raw]) => (
@@ -1416,7 +466,7 @@ function PayloadTable({ value }: { value: Record<string, unknown> }) {
               <th className="w-36 bg-ink-950/30 px-3 py-2 font-mono font-normal text-ink-500">
                 {key}
               </th>
-              <td className="px-3 py-2 font-mono text-ink-200">
+              <td className="break-words px-3 py-2 font-mono text-[color:var(--text-base)]">
                 {typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean"
                   ? String(raw)
                   : JSON.stringify(raw)}

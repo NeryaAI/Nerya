@@ -1,4 +1,6 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { memo, useMemo, useState } from "react";
 import { useLocale } from "next-intl";
 import { diffLines } from "../../lib/toolOutputPresentation";
@@ -15,16 +17,16 @@ export const CodeOutput = memo(function CodeOutput({ text, path = "", diff = fal
   const target = path || /^\+\+\+ (?:b\/)?([^\n]+)/m.exec(text)?.[1] || "";
   return <div className={styles.codeOutput} data-testid={diff ? "tool-diff-preview" : "tool-code-preview"}>
     <div className={styles.codeHeader}>
-      <FileIcon size={13}/><span className={styles.codeTitle} title={target}>{target.split("/").pop() || label || (diff ? (zh ? "文件变更" : "File changes") : (zh ? "输出" : "Output"))}</span>
-      {diff && <span className={styles.diffStats} aria-label={zh ? `新增 ${added} 行，删除 ${removed} 行` : `${added} added, ${removed} removed`}><span>+{added}</span><span>−{removed}</span></span>}
-      <button type="button" onClick={() => setLarge(!large)} aria-expanded={large} className={styles.textButton}>{large ? (zh ? "收起" : "Collapse") : (zh ? "展开" : "Expand")}</button>
+      <FileIcon size={13}/><span className={styles.codeTitle} title={target}>{target.split("/").pop() || label || (diff ? (i18nCopy(zh, "copy.components_chat_CodeOutput.001")) : (i18nCopy(zh, "copy.components_chat_CodeOutput.002")))}</span>
+      {diff && <span className={styles.diffStats} aria-label={i18nCopy(zh, "copy.components_chat_CodeOutput.003", { value0: added, value1: removed })}><span>+{added}</span><span>−{removed}</span></span>}
+      <button type="button" onClick={() => setLarge(!large)} aria-expanded={large} className={styles.textButton}>{large ? (i18nCopy(zh, "copy.components_chat_CodeOutput.004")) : (i18nCopy(zh, "copy.components_chat_CodeOutput.005"))}</button>
       <CopyButton text={text}/>
     </div>
-    <div className={styles.codeViewport} data-expanded={large} tabIndex={0} aria-label={label || (diff ? (zh ? "代码差异" : "Code diff") : (zh ? "代码输出" : "Code output"))}>
+    <div className={styles.codeViewport} data-expanded={large} tabIndex={0} aria-label={label || (diff ? (i18nCopy(zh, "copy.components_chat_CodeOutput.006")) : (i18nCopy(zh, "copy.components_chat_CodeOutput.007")))}>
       {diff ? <table className={styles.diffTable}><tbody>{rows.map((row, index) => <tr key={index} data-line-kind={row.kind}>
         <td aria-hidden="true">{row.oldLine}</td><td aria-hidden="true">{row.newLine}</td><td><code>{row.text || " "}</code></td>
       </tr>)}</tbody></table> : <pre>{preview}</pre>}
     </div>
-    {text.length > preview.length && <p className={styles.caption}>{zh ? "显示前 64,000 个字符；复制可获取当前收到的完整内容。" : "Showing the first 64,000 characters. Copy includes all received content."}</p>}
+    {text.length > preview.length && <p className={styles.caption}>{i18nCopy(zh, "copy.components_chat_CodeOutput.008")}</p>}
   </div>;
 });

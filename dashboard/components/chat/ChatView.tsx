@@ -53,6 +53,7 @@ import {
 import { AssistantBubble, UserBubble } from "./ChatMessage";
 import { AssistantReplyBubble } from "./AssistantReplyBubble";
 import { ExternalCallMessage } from "./ExternalCallMessage";
+import { PendingToolApprovalDialog } from "./PendingToolApprovalDialog";
 import { ExternalSessionTimeline } from "./ExternalSessionTimeline";
 import { requestConversationReveal } from "./timelineReveal";
 import { composerDelivery } from "../../lib/composerDelivery";
@@ -65,13 +66,14 @@ import { useWorkbench } from "./useWorkbench";
 import { ConversationTimeline,hasReadingAnchor,clearReadingAnchor } from "./ConversationTimeline";
 import { ComposerContextSummary } from "./ComposerContextSummary";
 import { TaskProvenance } from "./TaskProvenance";
+import { TaskRunDetail } from "./TaskRunHistory";
 import { InteractionPanel } from "./InteractionPanel";
 import { RuntimeNotice } from "./RuntimeNotice";
 import { taskStatus } from "../../lib/workbench";
 import { useConversationCommands } from "./useConversationCommands";
 import { ConversationControls } from "./ConversationControls";
 import { ForkMessageDialog } from "./ForkMessageDialog";
-import { submitCommand, projectCommand, CommandClientError, commandErrorCode } from "../../lib/conversationCommands";
+import { submitCommand, projectCommand, CommandClientError, commandErrorCode, type ConversationCommand } from "../../lib/conversationCommands";
 import { commandErrorText } from "../../lib/commandCopy";
 import { useChatDraft } from "./useChatDraft";
 import { useMessageHistory } from "./useMessageHistory";
@@ -403,6 +405,8 @@ function AssistantScopedChatView({ sessionId }: { sessionId?: string }) {
 }
 
 function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: string; preferredAssistantId: string }) {
+  const [focusedTaskRun, setFocusedTaskRun] = useState<string | null>(null);
+  useEffect(() => { setFocusedTaskRun(new URLSearchParams(window.location.search).get("run")); }, [sessionId]);
   const [assistantIdentity, setAssistantIdentity] = useState<AssistantProfile | null>(null);
   const [assistantConversation, setAssistantConversation] = useState<{sessionId?: string; kind?: string; parentSessionId?: string}>({});
   const onAssistantIdentity = useCallback((profile: AssistantProfile, kind?: string, parentSessionId?: string) => {
@@ -1060,6 +1064,22 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     [active, pendingApprovals],
   );
   const activeApprovalKey = activeApprovalIds.join("|");
+  const [dismissedNativeApprovals, setDismissedNativeApprovals] = useState<{session: string; ids: string[]}>({session:"",ids:[]});
+  const dismissedApprovalIds = dismissedNativeApprovals.session === active?.id ? dismissedNativeApprovals.ids : [];
+  const nativeApprovalId = activeApprovalIds.find(id => {
+    const card = pendingApprovals.get(id);
+    if (!card || dismissedApprovalIds.includes(id) || externalView) return false;
+    const kind = String(card.record?.kind || "");
+    return kind === "tool_permission" || kind === "tool_permission_batch";
+  }) || "";
+  const nativeApprovalCard = pendingApprovals.get(nativeApprovalId);
+  const dismissNativeApproval = (id: string) => {
+    if (!id) return;
+    setDismissedNativeApprovals(current => ({
+      session: active?.id || "",
+      ids: [...new Set([...(current.session === active?.id ? current.ids : []), id])].slice(-40),
+    }));
+  };
   const isAssistantConversation = !active?.strategy_id && !externalView && (
     assistantConversation.sessionId === sessionId && assistantConversation.kind
       ? assistantConversation.kind === "assistant"
@@ -1155,7 +1175,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     ...snapshots.map((item, index) => ({ id: item.id as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.018", { index: index + 1 }) })),
     ...(agentWork.rows.length ? [{ id: 'agents' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.004") }] : []),
   ];
-  const toolTabs = [{ id: 'deliverables' as TaskDockTab, label: zh ? "任务产物" : "Task deliverables" }, { id: 'files' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.005") }, { id: 'browser' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.006") }, { id: 'terminal' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.007") }];
+  const toolTabs = [{ id: 'deliverables' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.020") }, { id: 'files' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.005") }, { id: 'browser' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.006") }, { id: 'terminal' as TaskDockTab, label: i18nCopy(zh, "copy.components_chat_ChatView.007") }];
   const reportTabs = !active?.strategy_id && !externalView ? [{id: "reports" as TaskDockTab, label: tAssistants("reportsAndResults")}] : [];
   const dockChoices = [...new Map([...toolTabs, ...reportTabs, ...automaticTabs, ...instrumentTabs].map(tab => [tab.id, tab])).values()];
   // On compact layouts the workspace replaces, rather than sits beside, chat.
@@ -1394,7 +1414,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
 
   async function resolveApproval(callbackData: string) {
     const approvalId = approvalIdFromCallback(callbackData);
-    if (!approvalId) return;
+    if (!approvalId) return false;
     setResolvingApprovalIds((prev) => new Set(prev).add(approvalId));
     try {
       const res = await clientApi.approvalCallback({
@@ -1421,10 +1441,12 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
       commandEngine.refresh();
       workbench.refresh();
       if (state === "approved" && res.resume?.ok === false) {
-        toast({tone:'warn',message:zh ? "授权已保存，续跑任务尚未恢复，请查看任务状态。无需重复授权。" : "Permission saved; continuation is not yet confirmed. Check task status; do not grant permission again."});
+        toast({tone:'warn',message:i18nCopy(zh, "copy.components_chat_ChatView.021")});
       }
+      return state === "approved" || state === "rejected";
     } catch (error) {
-      toast({tone:'error',message:zh ? `授权处理失败：${String(error)}` : `Approval failed: ${String(error)}`});
+      toast({tone:'error',message:i18nCopy(zh, "copy.components_chat_ChatView.022", { value0: String(error) })});
+      return false;
     } finally {
       setResolvingApprovalIds((prev) => {
         const next = new Set(prev);
@@ -1475,7 +1497,25 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     // This cache is navigation scaffolding only, never evidence of admission.
     if (!active) saveThreads(upsertThread(loadThreads(), thread));
     try {
-      const command = await submitCommand(sid, commandKind, body);
+      let command: ConversationCommand;
+      try {
+        command = await submitCommand(sid, commandKind, body);
+      } catch (error) {
+        const code = commandErrorCode(error);
+        // The browser's last snapshot can race another window or a worker
+        // claiming the session. The run_only admission is definitively
+        // rejected *before persistence* for these two codes. Fall back to a
+        // normal FIFO send, never to a second run_once that could overtake
+        // another turn. Unknown admission/delivery remains unconfirmed and
+        // must never be retried with a new command id.
+        const safeQueueFallback = options.runOnly && commandKind === "send" &&
+          (code === "session_turn_in_progress" || code === "queue_pause_required") &&
+          submitWorkspace === getWorkspaceIdentity() && submitGeneration === workspaceGeneration();
+        if (!safeQueueFallback) throw error;
+        const queuedBody = { ...body };
+        delete queuedBody.run_only;
+        command = await submitCommand(sid, commandKind, queuedBody);
+      }
       if (submitWorkspace !== getWorkspaceIdentity() || submitGeneration !== workspaceGeneration()) return;
       keepRoute = true;
       setThreads(previous => {
@@ -1506,9 +1546,9 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     const failed = active.messages[index], previous = active.messages[index-1];
     if (failed?.role !== "assistant" || failed.execution_status === "unconfirmed" || previous?.role !== "user") return;
     const accepted = isAssistantConversation || await confirmDialog({
-      title: zh ? "重新运行任务" : "Run the task again",
-      message: zh ? "这会新建一轮，可能重新获取数据或执行动作。原失败记录和已完成操作会保留；有可用断点时优先使用“从断点继续”。" : "This starts a new turn and may fetch data or execute actions again. The previous record and completed actions remain. Prefer a checkpoint when available.",
-      okLabel: zh ? "新建一轮运行" : "Start a new turn", cancelLabel: zh ? "取消" : "Cancel",
+      title: i18nCopy(zh, "copy.components_chat_ChatView.023"),
+      message: i18nCopy(zh, "copy.components_chat_ChatView.024"),
+      okLabel: i18nCopy(zh, "copy.components_chat_ChatView.025"), cancelLabel: i18nCopy(zh, "copy.components_chat_ChatView.026"),
     });
     if (accepted) await runAgentTurn(previous.text, { attachments: previous.attachments ?? [],runOnly:true,visibleUser:false });
   }
@@ -1518,7 +1558,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
       if (!active) return;
       const sid = active.id, clean = text.trim();
       if (!clean || externalSendBusy.current) return;
-      if (clean.length > 8000) { toast({ tone: 'warn', message: zh ? '消息最多 8000 字符。' : 'Messages are limited to 8000 characters.' }); return; }
+      if (clean.length > 8000) { toast({ tone: 'warn', message: i18nCopy(zh, "copy.components_chat_ChatView.027") }); return; }
       externalSendBusy.current = true;
       setExternalSending(true);
       const previous = externalMessageAttempt.current;
@@ -1534,23 +1574,17 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         if (externalSnapshot.current.sessionId === sid) setInput(value => value.trim() === clean ? '' : value);
         externalMessageAttempt.current = null;
       } catch {
-        toast({ tone: 'warn', message: zh ? '消息未确认保存，草稿已保留。再次发送将核对同一个请求。' : 'Message not confirmed saved. The draft and original request ID are retained.' });
+        toast({ tone: 'warn', message: i18nCopy(zh, "copy.components_chat_ChatView.028") });
       } finally { externalSendBusy.current = false; setExternalSending(false); }
       return;
     }
     const delivery = currentDelivery();
     if (!delivery.canSubmit) return;
-    let runOnly = false;
-    if (delivery.requiresRunOnlyConfirmation) {
-      const scope = getWorkspaceIdentity(), generation = workspaceGeneration(), route = sessionId;
-      const accepted = await confirmDialog({
-        title: zh ? "仅运行这条追问" : "Run this follow-up only",
-        message: zh ? "此会话的队列仍处于暂停状态。仅运行这条消息，并保持队列暂停？" : "This conversation's queue is paused. Run only this message and leave the queue paused?",
-      });
-      if (!accepted || scope !== getWorkspaceIdentity() || generation !== workspaceGeneration() || externalSnapshot.current.sessionId !== route) return;
-      runOnly = true;
-    }
-    await runAgentTurn(text, { visibleUser: true, attachments, runOnly });
+    // Sending a follow-up to an empty but paused queue is one deliberate
+    // per-message action. The backend run_only lane preserves the existing
+    // queue hold and guards; an extra confirmation here only blocks normal
+    // conversation. Active turns/queued work still use FIFO admission.
+    await runAgentTurn(text, { visibleUser: true, attachments, runOnly: delivery.runOnly });
   }
 
   async function cancel() {
@@ -1562,7 +1596,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
   }
 
   function continueCheckpoint(turnId: string) {
-    void runAgentTurn(zh ? "从已保存的断点继续，保留已完成步骤，不要重新执行已经完成的外部操作。" : "Continue from the saved checkpoint. Preserve completed work and do not repeat completed external actions.",
+    void runAgentTurn(i18nCopy(zh, "copy.components_chat_ChatView.031"),
       { visibleUser: false, resumeTurnId: turnId, attachments: [] });
   }
 
@@ -1626,8 +1660,8 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     queued: !externalView && delivery.mode === "queue",
     locked: externalView ? !active : !delivery.canSubmit || history.pending || Boolean(history.edit),
     external: externalView,
-    placeholder: isAssistantConversation ? tAssistants("messageAssistant", {name: assistantIdentity?.name || "Nerya"}) : externalView ? (zh ? '向此会话追加消息…' : 'Add a message to this session…') : delivery.mode === 'queue' ? (zh ? '补充消息，加入队列…' : 'Add a follow-up to the queue…') : (zh ? '继续追问…' : 'Ask a follow-up…'),
-    lockMessage: awaitingApproval ? t("approvalPaused") : workbench.view?.pending_interactions.length ? (zh ? "请先处理上方问题或计划；可以继续撰写草稿。" : "Resolve the question or plan above before sending. You can keep drafting.") : history.edit ? th("editLabel") : workbench.connection==="connecting" ? (zh?"正在连接…":"Connecting…") : (zh?"连接暂不可用":"Connection unavailable"),
+    placeholder: isAssistantConversation ? tAssistants("messageAssistant", {name: assistantIdentity?.name || "Nerya"}) : externalView ? i18nCopy(zh, "copy.components_chat_ChatView.032") : delivery.mode === 'queue' ? i18nCopy(zh, "copy.components_chat_ChatView.033") : i18nCopy(zh, "copy.components_chat_ChatView.034"),
+    lockMessage: awaitingApproval ? t("approvalPaused") : workbench.view?.pending_interactions.length ? (i18nCopy(zh, "copy.components_chat_ChatView.035")) : history.edit ? th("editLabel") : workbench.connection==="connecting" ? (i18nCopy(zh, "copy.components_chat_ChatView.036")) : (i18nCopy(zh, "copy.components_chat_ChatView.037")),
     settings,
     assistant: isAssistantConversation,
     contextControl:externalView?undefined:<ComposerContextSummary thread={active} settings={settings}/>,
@@ -1646,6 +1680,11 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     } }}>
     {forkTarget?.sessionId === active?.id && forkTarget && <ForkMessageDialog key={forkTarget.sessionId+forkTarget.message.id} sessionId={forkTarget.sessionId} message={forkTarget.message}
       onClose={() => setForkTarget(null)} onCreated={id => { setForkTarget(null); router.push(`/chat/${id}`); }} />}
+    {nativeApprovalCard && nativeApprovalId && <PendingToolApprovalDialog key={`${active?.id}:${nativeApprovalId}`}
+      approvalId={nativeApprovalId} card={nativeApprovalCard}
+      busy={resolvingApprovalIds.has(nativeApprovalId)}
+      onDismiss={() => dismissNativeApproval(nativeApprovalId)}
+      onAction={async callbackData => { if (await resolveApproval(callbackData)) dismissNativeApproval(nativeApprovalId); }} />}
     <ResearchVisualContext.Provider value={openResearchVisual}>
     <ResearchInstrumentContext.Provider value={openResearchInstrument}>
     <StrategyDetailContext.Provider value={{ open: openStrategyDetail, active: canvasVisible ? taskDock.selected : '' }}>
@@ -1665,8 +1704,8 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         onToggleReports={reportTabs.length ? ()=>{setRequestedReport(null);if(canvasVisible && taskDock.selected === "reports") closeCanvas(); else selectWorkspace("reports",true);} : undefined}/>}
 
       {commandEngine.data?.branch_of && <div className="shrink-0 border-b border-[color:var(--line)] px-5 py-2 text-xs text-[color:var(--text-muted)]" data-testid="branch-origin">
-        {zh ? '此分支保留了原会话上下文，不包含原操作的可执行副本。' : 'This branch retains conversation context, not executable copies of prior actions.'}
-        <a className="ml-2 underline" href={`/chat/${encodeURIComponent(commandEngine.data.branch_of.session_id)}?message=${encodeURIComponent(commandEngine.data.branch_of.message_id)}`}>{zh ? '查看原会话' : 'View original conversation'}</a>
+        {i18nCopy(zh, "copy.components_chat_ChatView.038")}
+        <a className="ml-2 underline" href={`/chat/${encodeURIComponent(commandEngine.data.branch_of.session_id)}?message=${encodeURIComponent(commandEngine.data.branch_of.message_id)}`}>{i18nCopy(zh, "copy.components_chat_ChatView.039")}</a>
       </div>}
       {!showHero && awaitingApproval && hideSource ? <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b border-warn/25 bg-warn/10 px-4 py-2 text-xs text-warn">
         <span>{t("approvalPausedCount", { count: activeApprovalIds.length })}</span>
@@ -1674,7 +1713,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
       </div> : null}
       {externalView && hideSource && <div className="flex shrink-0 items-center border-b border-[color:var(--line)] px-4 py-2">
         <button type="button" data-testid="return-to-external-conversation" className="inline-flex min-h-9 items-center gap-2 rounded-lg px-3 text-sm hover:bg-[color:var(--panel-bg)]" onClick={() => selectWorkspace('conversation')}>
-          <ConversationSourceIcon source={active?.source} size={16} />{zh ? '返回对话与工具记录' : 'Back to conversation and tools'}
+          <ConversationSourceIcon source={active?.source} size={16} />{i18nCopy(zh, "copy.components_chat_ChatView.040")}
         </button>
       </div>}
       <div ref={layoutRef} className="flex min-h-0 min-w-0 flex-1" data-testid="workspace-split" data-compact={compact ? "true" : "false"}>
@@ -1708,7 +1747,9 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
                 lastScrollTop.current = el.scrollTop;
                 setReadingHistory(!followLatest.current && !near);
               }}>
-              {showLoadFailure ? (
+              {focusedTaskRun ? <div className="mx-auto w-full max-w-4xl px-4 py-5"><TaskRunDetail runId={focusedTaskRun} onClose={()=>{
+                setFocusedTaskRun(null);const url=new URL(window.location.href);url.searchParams.delete("run");window.history.replaceState(window.history.state,"",url);
+              }}/></div> : showLoadFailure ? (
                 <div className="max-w-xl mx-auto px-6 py-16 text-center">
                   <h2 className="text-lg text-white font-semibold mb-2">
                     {t("transcriptLoadFailed")}
@@ -1818,8 +1859,8 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
                 </div>
               </div>
             ) : null}
-            {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[800px] flex-wrap items-center gap-2 px-4 text-xs" role="status"><span>{zh?"找到其他窗口保存的草稿":"Saved drafts from other windows"}</span>{draft.recovery.slice(0,3).map(row=><button type="button" key={row.key} className="min-h-11 underline" onClick={()=>draft.restore(row)}>{zh?"恢复：":"Restore: "}{row.draft.text.slice(0,40)||row.draft.attachments[0]?.name}</button>)}<button type="button" className="min-h-11" onClick={draft.dismissRecovery}>{zh?"忽略":"Dismiss"}</button></div>}
-            {draft.storageError&&<p role="status" className="mx-auto max-w-[800px] px-4 text-xs text-warn">{zh?"持久化草稿暂不可用，当前输入仍保留在此窗口。":"Persistent draft storage is unavailable. Current input remains in this window."}</p>}
+            {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[800px] flex-wrap items-center gap-2 px-4 text-xs" role="status"><span>{i18nCopy(zh, "copy.components_chat_ChatView.041")}</span>{draft.recovery.slice(0,3).map(row=><button type="button" key={row.key} className="min-h-11 underline" onClick={()=>draft.restore(row)}>{i18nCopy(zh, "copy.components_chat_ChatView.042")}{row.draft.text.slice(0,40)||row.draft.attachments[0]?.name}</button>)}<button type="button" className="min-h-11" onClick={draft.dismissRecovery}>{i18nCopy(zh, "copy.components_chat_ChatView.043")}</button></div>}
+            {draft.storageError&&<p role="status" className="mx-auto max-w-[800px] px-4 text-xs text-warn">{i18nCopy(zh, "copy.components_chat_ChatView.044")}</p>}
             {workbench.view?.pending_interactions.length ? <InteractionPanel items={workbench.view.pending_interactions} onResolved={()=>{workbench.refresh();commandEngine.refresh();}} /> : null}
             {!externalView && (!isAssistantConversation || commandEngine.pending.length > 0 || commandEngine.commands.some(command => command.state === "unconfirmed") || commandEngine.connection === "offline" || commandEngine.data?.checkpoint?.resumable || commandEngine.data?.queue.pause_reason === "operator" || Boolean(commandEngine.data?.queue.paused && commandEngine.commands.some(command => command.state === "queued"))) && <ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+"\n"+text : text)} />}
             {!externalView && <ChatInput {...composerProps} variant="docked" taskHeader={!isAssistantConversation && agentWork.rows.length ? (
@@ -1848,7 +1889,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
           {target.kind === 'strategy' ? <StrategyWorkflowPanel embedded strategyId={target.strategyId} proposalId={target.proposalId}
             onDirtyChange={dirty => setDetailDirty(old => old[id] === dirty ? old : { ...old, [id]: dirty })}
             onSaved={view => { setDetailDirty(old => ({ ...old, [id]: false })); if (view.source.proposal_id !== target.proposalId) openStrategyDetail({ ...target, proposalId: view.source.proposal_id }); strategyReports.retry(); }} />
-            : canvasVisible && taskDock.selected === id && <div className="p-4 sm:p-5"><header className="mb-5 border-b border-[color:var(--line)] pb-4"><h2 className="text-base font-semibold break-words">{target.title || target.strategyId}</h2><p className="mt-1 text-xs text-[color:var(--text-muted)]">{zh ? '历史回测' : 'Historical backtest'} · {target.ts}</p></header><BacktestChart strategyId={target.strategyId} ts={target.ts} proposalId={target.proposalId} /></div>}
+            : canvasVisible && taskDock.selected === id && <div className="p-4 sm:p-5"><header className="mb-5 border-b border-[color:var(--line)] pb-4"><h2 className="text-base font-semibold break-words">{target.title || target.strategyId}</h2><p className="mt-1 text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_ChatView.045")} · {target.ts}</p></header><BacktestChart strategyId={target.strategyId} ts={target.ts} proposalId={target.proposalId} /></div>}
         </section>)}
         {taskDock.tabs.includes('deliverables') && <section id="task-dock-panel-deliverables" role="tabpanel" aria-labelledby="task-dock-tab-deliverables" hidden={taskDock.selected !== 'deliverables'} className={taskDock.selected === 'deliverables' ? 'min-h-0 flex-1' : 'hidden'}>
           <TaskDeliverables items={[...automaticTabs, ...instrumentTabs].filter(item => item.id !== 'browser')} files={workbench.view?.result_refs || []} onSelect={id => selectWorkspace(id, true)} onOpenFile={path => { taskDock.select(('file:' + path) as TaskDockTab); focusDock('file:' + path); }} onBrowseFiles={() => selectWorkspace('files', true)}/>

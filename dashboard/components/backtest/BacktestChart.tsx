@@ -4,7 +4,7 @@ import { copy as i18nCopy } from "../../lib/i18n";
 import { useEffect, useId, useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
 import { WorkspaceTabs } from "../chat/WorkspaceTabs";
-import { createChart, type IChartApi } from "lightweight-charts";
+import { createVelaChart, type VelaSeries, type VelaMarker } from "../../lib/velaChart";
 import {
   clientApi,
   type BacktestChartData,
@@ -55,7 +55,7 @@ export function BacktestChart({
           return;
         }
         if (res.strategy_id !== strategyId || res.ts !== ts || (res.proposal_id || null) !== (proposalId || null)) {
-          setError(zh ? "报告版本不匹配，已停止显示。请重试。" : "Report identity mismatch. Display was stopped; retry the request.");
+          setError(i18nCopy(zh, "copy.components_backtest_BacktestChart.009"));
           return;
         }
         setChart(res.chart);
@@ -68,7 +68,7 @@ export function BacktestChart({
     };
   }, [strategyId, ts, proposalId, retry]);
 
-  if (error) return <div className="space-y-3" role="status"><ErrorBanner error={error} /><button type="button" className="btn btn-ghost" onClick={() => setRetry(value => value + 1)}>{zh ? "重新载入报告" : "Reload report"}</button></div>;
+  if (error) return <div className="space-y-3" role="status"><ErrorBanner error={error} /><button type="button" className="btn btn-ghost" onClick={() => setRetry(value => value + 1)}>{i18nCopy(zh, "copy.components_backtest_BacktestChart.010")}</button></div>;
   if (!chart) return <Card title={t("chartTitle")}><Empty label={t("chartLoading")} /></Card>;
   if (chart.meta.performance_evidence === false || chart.meta.evaluation_mode === "observation") {
     const replay = (chart.meta.replay || {}) as Record<string, unknown>;
@@ -77,17 +77,17 @@ export function BacktestChart({
     return <div className="min-w-0 space-y-5" data-testid="backtest-report" data-report-kind="observation">
       <BacktestCoverage meta={chart.meta}/>
       <BacktestBiasChecks compact meta={chart.meta}/>
-      <WorkspaceTabs id={id} label={zh ? "观察回放详情" : "Observation replay details"} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "事件与诊断" : "Events & diagnostics" }, { id: "trades", label: zh ? "行情与信号" : "Market & signals" }]}/>
+      <WorkspaceTabs id={id} label={i18nCopy(zh, "copy.components_backtest_BacktestChart.011")} value={view} onChange={setView} tabs={[{ id: "overview", label: i18nCopy(zh, "copy.components_backtest_BacktestChart.012") }, { id: "trades", label: i18nCopy(zh, "copy.components_backtest_BacktestChart.013") }]}/>
       <section role="tabpanel" id={`${id}-panel-overview`} aria-labelledby={`${id}-tab-overview`} hidden={view !== "overview"} className={view === "overview" ? "space-y-5" : "hidden"}>
-      <div><h4 className="text-sm font-semibold">{zh ? "历史事件与分支验证" : "Historical event and branch verification"}</h4>
-        <p className="mt-2 text-xs leading-6 text-[color:var(--text-muted)]">{zh ? "已回放脚本入口与输入传递，未执行 Agent 模型。下方是触发记录，不是交易收益或实盘执行记录。" : "Replayed the entrypoint and input collection without executing the Agent model. These are dispatch records, not trading returns or live fills."}</p></div>
-      <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">{[["decisions",zh ? "历史事件" : "Events"],["dispatches",zh ? "触发" : "Dispatches"],["skipped",zh ? "跳过" : "Skipped"],["errors",zh ? "错误" : "Errors"]].map(([key,label]) => <div key={key}><dt className="text-xs text-[color:var(--text-muted)]">{label}</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{typeof replay[key] === "number" ? String(replay[key]) : "—"}</dd></div>)}</dl>
-      {Object.keys(reasons).length > 0 && <section><h5 className="mb-2 text-xs font-medium">{zh ? "分支原因" : "Branch reasons"}</h5><dl className="space-y-2 text-xs">{Object.entries(reasons).map(([reason,count])=><div key={reason} className="flex justify-between gap-4 border-b border-[color:var(--line)] pb-2"><dt className="break-words">{reason}</dt><dd className="tabular-nums">{String(count)}</dd></div>)}</dl></section>}
-      <p className="text-xs text-[color:var(--text-muted)]">{zh ? "最多展示前 500 条；完整事件保存在本次回测的 decisions.csv。" : "Showing up to 500 rows; decisions.csv retains the full replay."}</p>
+      <div><h4 className="text-sm font-semibold">{i18nCopy(zh, "copy.components_backtest_BacktestChart.014")}</h4>
+        <p className="mt-2 text-xs leading-6 text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_backtest_BacktestChart.015")}</p></div>
+      <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">{[["decisions",i18nCopy(zh, "copy.components_backtest_BacktestChart.016")],["dispatches",i18nCopy(zh, "copy.components_backtest_BacktestChart.017")],["skipped",i18nCopy(zh, "copy.components_backtest_BacktestChart.018")],["errors",i18nCopy(zh, "copy.components_backtest_BacktestChart.019")]].map(([key,label]) => <div key={key}><dt className="text-xs text-[color:var(--text-muted)]">{label}</dt><dd className="mt-1 text-lg font-semibold tabular-nums">{typeof replay[key] === "number" ? String(replay[key]) : "—"}</dd></div>)}</dl>
+      {Object.keys(reasons).length > 0 && <section><h5 className="mb-2 text-xs font-medium">{i18nCopy(zh, "copy.components_backtest_BacktestChart.020")}</h5><dl className="space-y-2 text-xs">{Object.entries(reasons).map(([reason,count])=><div key={reason} className="flex justify-between gap-4 border-b border-[color:var(--line)] pb-2"><dt className="break-words">{reason}</dt><dd className="tabular-nums">{String(count)}</dd></div>)}</dl></section>}
+      <p className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_backtest_BacktestChart.021")}</p>
       <BacktestTables tables={decisions} compact />
       </section>
       <section role="tabpanel" id={`${id}-panel-trades`} aria-labelledby={`${id}-tab-trades`} hidden={view !== "trades"} className={view === "trades" ? "space-y-4" : "hidden"}>
-        <p className="text-xs text-warn">{zh ? "观察回放未执行 Agent 模型，行情图不构成 Agent 交易收益证据。" : "The observation replay did not execute the Agent model. Market charts are not Agent performance evidence."}</p>
+        <p className="text-xs text-warn">{i18nCopy(zh, "copy.components_backtest_BacktestChart.022")}</p>
         {view === "trades" && <BacktestMarketExplorer panels={(chart.panels || []).filter(isPricePanel)} tables={[]} meta={chart.meta}/>}
       </section>
     </div>;
@@ -110,7 +110,7 @@ export function BacktestChart({
       <BacktestBiasChecks compact meta={chart.meta}/>
       <BacktestExecutionEvidence replay={(chart.meta.replay || {}) as Record<string, unknown>} legacyBenchmark={chart.meta.engine_version === "backtest_skill_v2_closed_bar" && Array.isArray(chart.meta.markets) && chart.meta.markets.length > 1}/>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[color:var(--text-muted)]"><span className="font-medium text-warn">{i18nCopy(zh, "copy.components_backtest_BacktestChart.001")}</span><span>{i18nCopy(zh, "copy.components_backtest_BacktestChart.002")}</span></div>
-      <WorkspaceTabs id={id} label={i18nCopy(zh, "copy.components_backtest_BacktestChart.003")} value={view} onChange={setView} tabs={[{ id: "overview", label: zh ? "概览" : "Overview" }, { id: "trades", label: zh ? "行情与成交" : "Market & executions" }, { id: "factors", label: zh ? "因子研究" : "Factor research" }, { id: "diagnostics", label: zh ? "诊断" : "Diagnostics" }]} />
+      <WorkspaceTabs id={id} label={i18nCopy(zh, "copy.components_backtest_BacktestChart.003")} value={view} onChange={setView} tabs={[{ id: "overview", label: i18nCopy(zh, "copy.components_backtest_BacktestChart.023") }, { id: "trades", label: i18nCopy(zh, "copy.components_backtest_BacktestChart.024") }, { id: "factors", label: i18nCopy(zh, "copy.components_backtest_BacktestChart.025") }, { id: "diagnostics", label: i18nCopy(zh, "copy.components_backtest_BacktestChart.026") }]} />
       <section role="tabpanel" id={`${id}-panel-factors`} aria-labelledby={`${id}-tab-factors`} hidden={view !== "factors"} className={view === "factors" ? "space-y-5" : "hidden"}>
         {view === "factors" && <BacktestFactors strategyId={strategyId} ts={ts} proposalId={proposalId}/>}
       </section>
@@ -179,31 +179,17 @@ function ChartPanel({
 
   useEffect(() => {
     if (!node) return;
-    const api = createChart(node, {
-      height: resolvedHeight,
-      // Embedded reports must not trap the conversation's vertical scroll.
-      // Drag/axis scaling and pinch remain available for chart exploration.
-      handleScroll: { mouseWheel: false, vertTouchDrag: false },
-      handleScale: { mouseWheel: false },
-      layout: {
-        background: { color: "transparent" },
-        textColor: chartTheme.text,
-        attributionLogo: false,
-      },
-      grid: { vertLines: { color: chartTheme.grid }, horzLines: { color: chartTheme.grid } },
-      rightPriceScale: { borderColor: chartTheme.grid },
-      timeScale: { borderColor: chartTheme.grid, timeVisible: true },
+    const series: VelaSeries[] = (panel.series || []).flatMap((row, index) => {
+      if (row.kind === "markers") return [];
+      return [{ type: row.kind === "candles" ? "candlestick" : row.kind === "area" ? "area" : "line", name: row.name || String(index),
+        color: colorForSeries(panel, row, index), top_color: areaTopColor(panel, row), bottom_color: areaBottomColor(panel, row),
+        data: normalizeSeriesData(row.data || []) as VelaSeries["data"] }];
     });
-    renderSeries(api, panel);
-    const ro = new ResizeObserver(() => {
-      api.applyOptions({ width: Math.max(1, node.clientWidth) });
-    });
-    ro.observe(node);
-    api.applyOptions({ width: Math.max(1, node.clientWidth) });
-    return () => {
-      ro.disconnect();
-      api.remove();
-    };
+    const markers = (panel.series || []).filter(row => row.kind === "markers").flatMap(row => (row.data || []).flatMap(point => {
+      const time = replayTime(point.time); return time === null ? [] : [{ ...point, time } as VelaMarker];
+    }));
+    const chart = createVelaChart(node, { height: resolvedHeight, theme: chartTheme, series, markers, embedded: true });
+    return () => chart.destroy();
   }, [chartTheme, node, panel, resolvedHeight]);
 
   if (panel.type === "overlay_spans") {
@@ -246,50 +232,6 @@ const CHART_FLUID = "#22d3ee"; // --fluid
 const CHART_BRAND = "#a78bfa"; // brand-400
 const CHART_WARN = "#f5a524"; // --warn
 const CHART_MAGENTA = "#f472b6"; // magenta-400
-
-function renderSeries(api: IChartApi, panel: BacktestPanel) {
-  let markerHost: { setMarkers(markers: never[]): void } | null = null;
-  const markers: Array<Record<string, unknown>> = [];
-
-  for (const series of panel.series ?? []) {
-    if (series.kind === "markers") {
-      markers.push(...(series.data || []).flatMap(row => { const time = replayTime(row.time); return time === null ? [] : [{ ...row, time }]; }));
-      continue;
-    }
-    const data = normalizeSeriesData(series.data ?? []);
-    if (!data.length) continue;
-    if (series.kind === "candles") {
-      const s = api.addCandlestickSeries({
-        upColor: CHART_OK,
-        downColor: CHART_DANGER,
-        borderVisible: false,
-        wickUpColor: CHART_OK,
-        wickDownColor: CHART_DANGER,
-      });
-      s.setData(data as never);
-      markerHost = s as unknown as { setMarkers(markers: never[]): void };
-    } else if (series.kind === "area") {
-      const s = api.addAreaSeries({
-        lineColor: colorForSeries(panel, series, 0),
-        topColor: areaTopColor(panel, series),
-        bottomColor: areaBottomColor(panel, series),
-      });
-      s.setData(data as never);
-      if (!markerHost) markerHost = s as unknown as { setMarkers(markers: never[]): void };
-    } else if (series.kind === "line") {
-      const s = api.addLineSeries({
-        color: colorForSeries(panel, series, panel.series.indexOf(series)),
-        lineWidth: 2,
-        priceLineVisible: false,
-      });
-      s.setData(data as never);
-      if (!markerHost) markerHost = s as unknown as { setMarkers(markers: never[]): void };
-    }
-  }
-  markers.sort((a, b) => Number(a.time) - Number(b.time));
-  if (markerHost && markers.length > 0) markerHost.setMarkers(markers as never[]);
-  api.timeScale().fitContent();
-}
 
 function buildEquityBenchmarkPanel(
   chart: BacktestChartData,

@@ -9,45 +9,24 @@ import { WorkflowRunCanvas } from "./WorkflowRunCanvas";
 import { ReplayEvidence } from "./ReplayEvidence";
 import { ReviewExplanation } from "./ReviewExplanation";
 import styles from "./WorkflowReplay.module.css";
+import { usePolledResource } from "../../lib/usePolledResource";
+import { ResourceNotice } from "./ResourceNotice";
+import { RunWorkspace } from "./RunWorkspace";
 
 type Facts = Record<string, unknown>;
-function useRecordedResource(path: string, refresh: number) {
-  const [response, setResponse] = useState<{ path: string; data: Facts } | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    setError("");
-    if (!path) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    let active: AbortController | undefined;
-    async function poll() {
-      if (disposed) return;
-      if (document.hidden) { timer = setTimeout(poll, 10000); return; }
-      const controller = new AbortController(); active = controller;
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      setLoading(true);
-      try {
-        const data = await callApi<Facts>(path, { signal: controller.signal });
-        if (data.ok === false) throw new Error(String(data.error || "Record unavailable"));
-        if (!disposed) { setResponse({ path, data }); setError(""); }
-      } catch (reason) { if (!disposed) { setError(String(reason)); setResponse((previous) => previous?.path === path ? null : previous); } }
-      finally {
-        clearTimeout(timeout);
-        if (!disposed) { setLoading(false); timer = setTimeout(poll, 10000); }
-      }
-    }
-    void poll();
-    return () => { disposed = true; clearTimeout(timer); active?.abort(); };
-  }, [path, refresh]);
-  return { data: response?.path === path ? response.data : null, error, loading };
+function useRecordedResource(path: string) {
+  return usePolledResource<Facts>(path || null, async signal => {
+    const data = await callApi<Facts>(path, { signal });
+    if (data.ok === false) throw new Error(String(data.error || "Record unavailable"));
+    return data;
+  }, { intervalMs: 10000 });
 }
 
 export function WorkflowReviewActivity({ strategyId }: { strategyId: string }) {
   const t = useTranslations("workflowExperience");
   const [selected, setSelected] = useState("");
   const [offset, setOffset] = useState(0);
-  const [refresh, setRefresh] = useState(0);
+  const w = useTranslations("workflowUpgrade");
   const pageSize = 50;
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -55,8 +34,8 @@ export function WorkflowReviewActivity({ strategyId }: { strategyId: string }) {
   }, []);
   const base = `/strategies/runtime/tuning`;
   const query = `strategy_id=${encodeURIComponent(strategyId)}`;
-  const history = useRecordedResource(`${base}/history?${query}&limit=${pageSize}&offset=${offset}`, refresh);
-  const detail = useRecordedResource(selected ? `${base}/record?${query}&run_id=${encodeURIComponent(selected)}` : "", refresh);
+  const history = useRecordedResource(`${base}/history?${query}&limit=${pageSize}&offset=${offset}`);
+  const detail = useRecordedResource(selected ? `${base}/record?${query}&run_id=${encodeURIComponent(selected)}` : "");
   const historyMatches = history.data?.strategy_id === strategyId;
   const rows = historyMatches && Array.isArray(history.data?.runs) ? history.data.runs.map(asObject) : [];
   useEffect(() => {
@@ -76,8 +55,8 @@ export function WorkflowReviewActivity({ strategyId }: { strategyId: string }) {
   const output = audit.subagent_output ?? record.subagent_output ?? record.error;
   const error = history.error || detail.error || (history.data && !historyMatches || detail.data && !matches ? t("recordError") : "");
   return <section className="space-y-5 p-5 sm:p-7" data-testid="workflow-review-activity">
-    <header className={styles.replayHeader}><h3>{t("reviewLogs")}</h3><button type="button" disabled={history.loading || detail.loading} onClick={() => setRefresh((value) => value + 1)}>{t("refresh")}</button></header>
-    {error && <p role="alert">{t("recordError")} {error}</p>}
+    <header className={styles.replayHeader}><h3>{t("reviewLogs")}</h3><button type="button" disabled={history.loading || detail.loading} onClick={() => { history.refresh(); detail.refresh(); }}>{t("refresh")}</button></header>
+    <ResourceNotice error={error || undefined} updatedAt={detail.updatedAt || history.updatedAt} onRetry={() => { history.refresh(); detail.refresh(); }} />
     {history.data?.partial === true && <p className={styles.note}>{t("partialHistory")}</p>}
     <div className={styles.records} aria-label={t("selectInvocation")}>
       {rows.map((row) => <button type="button" className={styles.record} key={String(row.run_id)} aria-pressed={selected === row.run_id} onClick={() => choose(String(row.run_id))}>
@@ -86,19 +65,22 @@ export function WorkflowReviewActivity({ strategyId }: { strategyId: string }) {
         <small>{String(row.reason || row.run_id)}</small>
       </button>)}
     </div>
-    {!rows.length && <p role="status">{history.loading && !history.data ? t("loading") : t("noReviewLogs")}</p>}
+    {!rows.length && !history.error && <p role="status">{history.loading && !history.data ? t("loading") : t("noReviewLogs")}</p>}
     {(offset > 0 || history.data?.has_more === true) && <nav className="flex items-center gap-4" aria-label={t("reviewLogs")}>
       <button type="button" disabled={!offset || history.loading} onClick={() => setOffset(Math.max(0, offset - pageSize))}>{t("previousPage")}</button>
       <span>{Math.floor(offset / pageSize) + 1}</span>
       <button type="button" disabled={!history.data?.has_more || history.loading} onClick={() => setOffset(offset + pageSize)}>{t("nextPage")}</button>
     </nav>}
     {selected && !matches && !detail.error && <p role="status">{t("loading")}</p>}
-    {matches && <ReviewExplanation record={record} output={output} status={String(record.status || "")} />}
-    {matches && <details key={`${strategyId}:${selected}`} className={styles.technicalDetails} data-testid="review-technical-details"><summary>{t("technicalDetails")}</summary><WorkflowRunCanvas invocation={{
-      id: selected, kind: "agent", title: t("review"), status: status(record.status),
-      input: audit.payload ?? record.request, output: output ?? record,
-      calls: replay.calls.map((call) => ({ ...call, status: status(call.status) })),
-    }} prompt={prompt} reply={output} messages={replay.messages} partial={detail.data?.partial === true || !Array.isArray(audit.conversation)} /></details>}
-    {matches && <details><summary>{t("recordedSteps")}</summary><ReplayEvidence value={{ result: record, steps: audit.steps, model_calls: audit.model_calls, missing: detail.data?.missing }} /></details>}
+    {matches && <RunWorkspace key={`${strategyId}:${selected}`} title={t("review")} subtitle={String(record.started_at || record.ts || selected)} status={status(record.status)}
+      result={<ReviewExplanation record={{...record,strategy_id:strategyId}} output={output} status={String(record.status || "")} />}
+      activity={<WorkflowRunCanvas invocation={{
+        id: selected, kind: "agent", title: t("review"), status: status(record.status),
+        input: audit.payload ?? record.request, output: output ?? record,
+        calls: replay.calls.map(call => ({...call,status:status(call.status)})),
+      }} prompt={prompt} reply={output} messages={replay.messages} partial={detail.data?.partial===true || !Array.isArray(audit.conversation)}/>}
+      provenance={<><p className="mb-3">{w("readOnlyHistory")}</p><details><summary>{t("recordedSteps")}</summary><ReplayEvidence value={{result:record,steps:audit.steps,model_calls:audit.model_calls,missing:detail.data?.missing}}/></details></>}
+    />}
+
   </section>;
 }

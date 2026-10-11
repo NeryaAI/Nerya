@@ -58,28 +58,28 @@ test('compact status preserves the waiting owner ahead of an old external comple
 
 test('first list failure shows only its error; loading and a successful empty response remain distinct', () => {
   for (const [error, loading, expected, absent] of [
-    [true, false, 'Unable to refresh', ['No matching tasks', 'Loading tasks']],
-    [false, true, 'Loading tasks', ['Unable to refresh', 'No matching tasks']],
-    [false, false, 'No matching tasks', ['Unable to refresh', 'Loading tasks']],
+    [true, false, 'Unable to refresh', ['No chats yet', 'Loading chats']],
+    [false, true, 'Loading chats', ['Unable to refresh', 'No chats yet']],
+    [false, false, 'No chats yet', ['Unable to refresh', 'Loading chats']],
   ]) {
-    const { TaskList } = component('TaskList.tsx', [false, 'all', [], error, loading]);
+    const { TaskList } = component('TaskList.tsx', [false, [], error, loading]);
     const html = render(TaskList);
     assert.ok(html.includes(expected));
     for (const text of absent) assert.ok(!html.includes(text));
   }
 });
 
-test('a cached task keeps its title, visible waiting status and navigation when refresh fails', () => {
+test('a cached task keeps its title and navigation when refresh fails', () => {
   const title = 'Research '.repeat(60);
   const row = { session_id: 'task-1', title, workbench_status: status({ waiting_for: 'approval', needs_attention: true }) };
-  const { TaskList } = component('TaskList.tsx', [false, 'all', [row], true, false]);
+  const { TaskList } = component('TaskList.tsx', [false, [row], true, false]);
   const html = render(TaskList);
   assert.match(html, /Unable to refresh/);
-  assert.doesNotMatch(html, /No matching tasks/);
+  assert.doesNotMatch(html, /No chats yet/);
   assert.ok(html.includes('href="/chat/task-1"'));
   assert.match(html, /class="taskTitle"/);
   assert.ok(html.includes(title));
-  assert.ok(html.includes('class="taskStatus" data-attention="true">Awaiting approval</span>'));
+  assert.doesNotMatch(html, /class="taskStatus"/);
   assert.doesNotMatch(html, /class="sr-only"/);
 });
 

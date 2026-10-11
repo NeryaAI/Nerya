@@ -83,8 +83,8 @@ export function AgentWorkPanel({ source, active = true, onOpenResult, focusReque
       {groups.map(([id, title]) => <option key={id} value={id}>{title || text("copy.components_chat_AgentWorkspace.007")}</option>)}
     </ChoiceSelect></div> : null}
     {source.error ? <div role="status" className="px-4 py-3 text-xs text-warn">{text("copy.components_chat_AgentWorkspace.008")}<button type="button" onClick={source.refresh} className={quiet}>{text("copy.components_chat_AgentWorkspace.009")}</button></div> : null}
-    {groupMembers.length > 0 && <div className="flex flex-wrap gap-1 border-b border-[color:var(--line)] px-3 py-2" role="group" aria-label={zh ? "成员状态" : "Member states"}>
-      {([["all",zh?"全部":"All"],["attention",zh?"需要处理":"Needs attention"],["active",zh?"执行与等待":"Running and waiting"],["ended",zh?"已结束":"Ended"]] as const).map(([value,label]) => <button key={value} type="button" aria-pressed={memberFilter===value} onClick={()=>setMemberFilter(value)} className={"min-h-11 rounded px-3 text-xs " + (memberFilter===value?"bg-[color:var(--panel-bg)] text-[color:var(--text-base)]":"text-[color:var(--text-muted)]")}>
+    {groupMembers.length > 0 && <div className="flex flex-wrap gap-1 border-b border-[color:var(--line)] px-3 py-2" role="group" aria-label={i18nCopy(zh, "copy.components_chat_AgentWorkspace.046")}>
+      {([["all",i18nCopy(zh, "copy.components_chat_AgentWorkspace.047")],["attention",i18nCopy(zh, "copy.components_chat_AgentWorkspace.048")],["active",i18nCopy(zh, "copy.components_chat_AgentWorkspace.049")],["ended",i18nCopy(zh, "copy.components_chat_AgentWorkspace.050")]] as const).map(([value,label]) => <button key={value} type="button" aria-pressed={memberFilter===value} onClick={()=>setMemberFilter(value)} className={"min-h-11 rounded px-3 text-xs " + (memberFilter===value?"bg-[color:var(--panel-bg)] text-[color:var(--text-base)]":"text-[color:var(--text-muted)]")}>
         {label} · {value==="all"?groupMembers.length:groupMembers.filter(a=>section(a.state)===value).length}
       </button>)}
     </div>}

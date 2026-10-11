@@ -22,6 +22,7 @@
 .manageMenu button:disabled { opacity: .45; }
 .workspace { min-width: 0; }
 .panel { border: 0; border-radius: 0; display: flex; flex-direction: column; min-height: 760px; }
+.panel { min-height: 0; }
 .header { display: flex; align-items: flex-start; gap: 18px; padding: 26px 30px 20px; }
 .title { flex: 1; min-width: 0; }
 .title h2 { font-size: 22px; font-weight: 600; line-height: 1.4; letter-spacing: -.02em; overflow-wrap: anywhere; }
@@ -68,6 +69,9 @@
 .editorDialog .inspectorBody { padding: 22px 28px; overscroll-behavior: contain; }
 .editorFooter { display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--line); padding: 14px 24px; flex: none; background: var(--overlay-surface); }
 .editorFooter button { min-height: 36px; }
+.editorDialog.editorSidePanel { position: fixed; top: 0; right: 0; left: auto; bottom: 0; transform: none; width: min(600px,calc(100vw - 100px)); max-height: 100dvh; height: 100dvh; margin: 0; border-radius: 0; border-block: 0; }
+.editorSidePanel .inspectorBody { flex: 1; }
+.editorSidePanel > .inspector { flex: 1; min-height: 0; }
 
 .inspectorHeader { display: flex; align-items: center; gap: 9px; padding: 20px 20px 10px; }
 .inspectorHeader h3 { font-size: 15px; font-weight: 600; line-height: 1.5; min-width: 0; overflow-wrap: anywhere; flex: 1; }
@@ -118,6 +122,7 @@
 .embeddedPanel .body { min-height: 0; }
 .embeddedPanel [data-testid="workflow-canvas"] { height: 340px; }
 @media (max-width: 760px) {
+  .editorDialog.editorSidePanel { width: 100vw; max-height: 100dvh; }
   .toolbar { flex-wrap: wrap; padding: 0 16px; gap: 8px; }
   .header { flex-wrap: wrap; padding: 18px 16px; }
   .embeddedPanel [data-testid="workflow-canvas"] { height: 300px; }

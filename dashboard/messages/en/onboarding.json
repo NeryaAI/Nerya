@@ -245,5 +245,25 @@
     "signIn": "Sign in",
     "signingIn": "Signing in...",
     "localNote": "You are on a local address; the local API still allows loopback access in local mode."
+  },
+  "copy": {
+    "components_SetupReadinessCard": {
+      "001": "Refresh settings to load the saved revision.",
+      "002": "Please sign in again.",
+      "003": "Configuration changed. Refresh and test again.",
+      "004": "Connection test failed; settings remain saved. Check URL, credentials and model.",
+      "005": "Unsaved changes",
+      "006": "Testing",
+      "007": "Test passed",
+      "008": "Test failed",
+      "009": "Saved · Untested",
+      "010": "Untested",
+      "011": "Test saved connection",
+      "012": "Sends a short model request when clicked; a small charge may apply. Reading readiness and saving settings do not run this test."
+    },
+    "components_home_CommandHome": {
+      "001": "Opening conversation…",
+      "002": "Send when the workspace connects. You can draft now."
+    }
   }
 }
