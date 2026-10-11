@@ -4,7 +4,7 @@
 // Renders fixture ChartBlock envelopes through the same TurnBlocks
 // dispatcher real chat sessions use, so we exercise the full pipeline
 // (envelope → unwrap → kind switch → ChartBlock card → ChartCanvas →
-// lightweight-charts) without needing the Nerya daemon running.
+// Vela) without needing the Nerya daemon running.
 //
 // We also stub ``window.fetch`` for ``/api/proxy/charts/get`` so the
 // bulk fixture exercises ``useChartData`` end-to-end without spinning

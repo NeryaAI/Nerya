@@ -1,4 +1,6 @@
 "use client";
+import { copy as i18nCopy } from "../../../lib/i18n";
+
 import { SkillsIcon } from "../../icons";
 
 import { useLocale, useTranslations } from "next-intl";
@@ -71,7 +73,7 @@ export function SkillLoadCard({
       }
       title={
         <span className="inline-flex min-w-0 items-center gap-1.5">
-          <span>{isResult && !ok ? (zh ? "Skill 加载失败" : "Skill failed to load") : isResult ? t("loaded") : t("loading")}</span>
+          <span>{isResult && !ok ? (i18nCopy(zh, "copy.components_chat_tool-cards_SkillLoadCard.001")) : isResult ? t("loaded") : t("loading")}</span>
           {pending ? (
             <span className="inline-flex items-center gap-1 text-[10px] text-fluid-400">
               <span className="typing-dot" />

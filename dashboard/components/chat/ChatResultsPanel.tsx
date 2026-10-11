@@ -97,11 +97,11 @@ export function ChatResultsPanel({ results, focusRequest, onReveal, selectedId, 
           </Popover.Content></Popover.Portal>
         </Popover.Root>
         <CopyButton text={result.text} />
-        <button type="button" onClick={download} aria-label={zh ? "下载 Markdown 正文" : "Download Markdown body"} title={zh ? "仅下载正文，不含证据、文件或验证记录" : "Body only; excludes evidence, files and validation records"} aria-describedby={exportDescriptionId}><SaveIcon size={14} /></button>
+        <button type="button" onClick={download} aria-label={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.025")} title={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.026")} aria-describedby={exportDescriptionId}><SaveIcon size={14} /></button>
         {onReveal ? <button type="button" onClick={() => onReveal(result.id)} aria-label={revealLabel} title={revealLabel}><MessagesIcon size={14} /></button> : null}
       </div>
     </div>
-    <p id={exportDescriptionId} className="px-4 py-2 text-xs text-[color:var(--text-muted)]">{zh ? "Markdown 下载仅包含正文，不是证据包；文件、验证失败和未验证事项请查看下方交付与验证。" : "Markdown download contains the body only, not an evidence bundle. Files, failed checks and unverified work are listed in Delivery and verification."}</p>
+    <p id={exportDescriptionId} className="px-4 py-2 text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_ChatResultsPanel.027")}</p>
     {exportError ? <p role="alert" className="px-4 py-2 text-xs text-danger">{exportError}</p> : null}
     <div ref={scrollRef} hidden={view !== "preview"} role="region" aria-label={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.021")} className={view === "preview" ? styles.body : "hidden"}>
       <article className={styles.article} data-result-id={result.id}>

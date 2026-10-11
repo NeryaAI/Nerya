@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
+const workflowCopy = require('../messages/zh/workflows.json').copy;
 
 function fixture({ initial, syncFails = false, saved } = {}) {
   const slots = []; let index = 0; const calls = [];
@@ -21,6 +22,10 @@ function fixture({ initial, syncFails = false, saved } = {}) {
     }};
     if (name === 'next-intl') return { useLocale: () => 'zh' };
     if (name === 'next/link') return { default: 'a' };
+    if (name === '../../lib/i18n') return { copy(_zh, key) {
+      const [, group, entry] = key.split('.');
+      return workflowCopy[group]?.[entry] ?? key;
+    } };
     if (name.endsWith('clientApi')) return { clientApi: {
       async strategyRuntimeSchedule(id) { calls.push(['sync', id]); if (syncFails) throw new Error('fixture');
         return { ok: true, trading_id: 'timer', tuning_id: null }; },

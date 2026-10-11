@@ -1655,7 +1655,7 @@ function SettingsWorkspaceContent({
         });
         return next.sort((a, b) => a.provider.localeCompare(b.provider));
       });
-      reportOk(zh ? "连接已保存；模型列表已获取。尚未测试模型回复。" : "Connection saved; model list fetched. Model response remains untested.");
+      reportOk(i18nCopy(zh, "copy.components_SettingsWorkspace.003"));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Mirror the failure both to the global banner (for visibility)
@@ -2342,13 +2342,13 @@ function SettingsWorkspaceContent({
                   disabled={discovering || providerManagementBusy || providerManagementDirty || !providerDraft.trim()}
                 >
                   <SearchIcon size={14} />
-                  {discovering ? tProvider("fetching") : (zh ? "获取模型并保存连接" : "Fetch models and save connection")}
+                  {discovering ? tProvider("fetching") : (i18nCopy(zh, "copy.components_SettingsWorkspace.004"))}
                 </button>
                 <TermTip term="fetchModels" />
-                <span className="text-xs text-[color:var(--text-muted)]">{zh ? "成功后保存 URL 和凭据；失败保留草稿，不保存连接。此操作不会验证模型回复。" : "Saves URL and credentials on success; failure keeps drafts without saving. This does not test a model response."}</span>
+                <span className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_SettingsWorkspace.005")}</span>
                 {!setupMode && <>
-                  <button type="button" className="btn btn-secondary" disabled={!dirty || saving || providerManagementBusy || providerManagementDirty} onClick={() => void saveModelConfig()}>{zh ? "保存设置" : "Save settings"}</button>
-                  <button type="button" className="btn btn-ghost" disabled={!dirty || saving || providerManagementBusy || providerManagementDirty} onClick={() => void refreshCurrentSection()}>{zh ? "放弃草稿" : "Discard drafts"}</button>
+                  <button type="button" className="btn btn-secondary" disabled={!dirty || saving || providerManagementBusy || providerManagementDirty} onClick={() => void saveModelConfig()}>{i18nCopy(zh, "copy.components_SettingsWorkspace.006")}</button>
+                  <button type="button" className="btn btn-ghost" disabled={!dirty || saving || providerManagementBusy || providerManagementDirty} onClick={() => void refreshCurrentSection()}>{i18nCopy(zh, "copy.components_SettingsWorkspace.007")}</button>
                   {dirty && <Pill tone="warn">{tModel("unsaved")}</Pill>}
                 </>}
               </div>
@@ -2739,10 +2739,10 @@ function SettingsWorkspaceContent({
                               </Field>
                             </div>
                             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[color:var(--text-muted)]">
-                              <span>{zh ? "连接覆盖：" : "Connection overrides: "}{route.base_url || (zh ? "URL 继承" : "URL inherited")} · {route.provider_key_ref ? (zh ? "路由凭据" : "Route credentials") : (zh ? "凭据继承" : "Credentials inherited")}</span>
+                              <span>{i18nCopy(zh, "copy.components_SettingsWorkspace.008")}{route.base_url || (i18nCopy(zh, "copy.components_SettingsWorkspace.009"))} · {route.provider_key_ref ? (i18nCopy(zh, "copy.components_SettingsWorkspace.010")) : (i18nCopy(zh, "copy.components_SettingsWorkspace.011"))}</span>
                               <button type="button" className="btn btn-ghost" disabled={!route.base_url && !route.provider_key_ref && !route.provider_key_env && !route.kind}
                                 onClick={() => patchTierRoute(index, routeIndex, { base_url: "", provider_key_ref: "", provider_key_refs: [], provider_key_env: "", provider_key: "", provider_keys: [], kind: "" })}>
-                                {zh ? "恢复连接继承" : "Inherit connection"}
+                                {i18nCopy(zh, "copy.components_SettingsWorkspace.012")}
                               </button>
                             </div>
                           </ModelRoutePriority>

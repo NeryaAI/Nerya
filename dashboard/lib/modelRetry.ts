@@ -1,3 +1,4 @@
+import { copy as i18nCopy } from "./i18n";
 import type { NativeBlockEnvelope } from './chat';
 
 export type ModelRetry = {
@@ -31,11 +32,11 @@ export function rateLimitError(raw: string, zh: boolean) {
   return {
     kind: 'HTTP 429',
     message: quota
-      ? (zh ? '模型服务额度不足。' : 'Provider quota exhausted.')
-      : (zh ? '模型服务请求过于频繁。' : 'The model provider is rate-limiting requests.'),
+      ? (i18nCopy(zh, "copy.lib_modelRetry.001"))
+      : (i18nCopy(zh, "copy.lib_modelRetry.002")),
     hint: quota
-      ? (zh ? '请检查模型账户的额度或计费设置。' : 'Check the model account quota or billing settings.')
-      : (zh ? '本轮自动重试已结束，请稍后重试。' : 'Automatic retries for this turn have ended. Please retry later.'),
+      ? (i18nCopy(zh, "copy.lib_modelRetry.003"))
+      : (i18nCopy(zh, "copy.lib_modelRetry.004")),
     showRawByDefault: false,
   };
 }

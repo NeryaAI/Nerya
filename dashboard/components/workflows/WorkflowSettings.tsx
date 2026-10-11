@@ -12,6 +12,7 @@ import { WorkflowHelp } from "./WorkflowNative";
 import { sourceErrors } from "../../lib/workflowSources";
 import { WorkflowSourceSettings } from "./WorkflowSourceSettings";
 import styles from "./WorkflowStudio.module.css";
+import { ScheduleFields } from "./ScheduleFields";
 
 type FieldSpec = { path: string; label: string; type?: "number" | "boolean" | "lines" | "text" | "long"; min?: number; max?: number; options?: string[] };
 const FIELDS: Record<string, FieldSpec[]> = {
@@ -38,6 +39,12 @@ export function configurationErrors(node: WorkflowNode, value: unknown, t: Workf
     if (objectives !== undefined && objectives !== null) {
       if (!Array.isArray(objectives) && typeof objectives !== "object") errors.push(t("copy.components_workflows_WorkflowSettings.004"));
       else if (objectiveValues(objectives).some((id) => !Object.hasOwn(OBJECTIVES, id))) errors.push(t("copy.components_workflows_WorkflowSettings.005"));
+    }
+  }
+  if (node.id === "evidence:review") {
+    for (const spec of FIELDS.evidence || []) {
+      const n = at(value, spec.path.split("."));
+      if (spec.type === "number" && n !== undefined && typeof n === "number" && !Number.isInteger(n)) errors.push(t(spec.label) + t("copy.components_workflows_WorkflowSettings.001"));
     }
   }
   if (node.kind === "scheduler" && asObject(value).type === "interval") {
@@ -108,19 +115,22 @@ export function CommonSettings({ node, config, disabled, onChange, markets = [] 
 }
 function ScheduleSettings({ config, disabled, onChange }: { config: Record<string, unknown>; disabled: boolean; onChange: (value: Record<string, unknown>) => void }) {
   const t = useWorkflowText();
-  const cron = String(config.cron || "");
-  const daily = cron.match(/^(\d{1,2}) (\d{1,2}) \* \* \*$/);
-  const hourlyMatch = cron.match(/^0 \*\/(1|2|3|4|6|8|12) \* \* \*$/);
-  const [custom, setCustom] = useState(config.type === "cron" && !daily && !hourlyMatch);
-  const mode = config.type === "interval" ? "interval" : custom ? "custom" : hourlyMatch ? "hourly" : daily ? "daily" : "custom";
+  const value = {
+    cadence: config.type === "interval" ? "interval" as const : "cron" as const,
+    cron: String(config.cron || "0 9 * * *"), everySeconds: String(config.every_seconds ?? 300),
+    timezone: String(config.timezone || "UTC"), runAt: "",
+    startsAt: typeof config.starts_at === "string" ? config.starts_at : null,
+    endsAt: typeof config.ends_at === "string" ? config.ends_at : null,
+  };
   return <div className={styles.settingsStack}>
-    <label className={styles.field}>{t("copy.components_workflows_WorkflowSettings.017")}<ChoiceSelect aria-label={t("copy.components_workflows_WorkflowSettings.018")} value={mode} disabled={disabled} onValueChange={(choiceValue) => {
-      const value = choiceValue; setCustom(value === "custom");
-      onChange(value === "interval" ? { ...config, type: "interval", every_seconds: typeof config.every_seconds === "number" ? config.every_seconds : 300 } : { ...config, type: "cron", cron: value === "daily" ? "0 9 * * *" : value === "hourly" ? "0 */6 * * *" : cron || "0 9 * * *" });
-    }}><option value="interval">{t("copy.components_workflows_WorkflowSettings.019")}</option><option value="daily">{t("copy.components_workflows_WorkflowSettings.020")}</option><option value="hourly">{t("copy.components_workflows_WorkflowSettings.021")}</option><option value="custom">{t("copy.components_workflows_WorkflowSettings.022")}</option></ChoiceSelect></label>
-    {mode === "hourly" ? <label className={styles.field}>{t("copy.components_workflows_WorkflowSettings.023")}<ChoiceSelect aria-label={t("copy.components_workflows_WorkflowSettings.024")} disabled={disabled} value={hourlyMatch?.[1] || "6"} onValueChange={(choiceValue) => onChange({ ...config, cron: `0 */${choiceValue} * * *` })}>{[1, 2, 3, 4, 6, 8, 12].map((hour) => <option key={hour} value={hour}>{t("copy.components_workflows_WorkflowSettings.025", { value0: hour })}</option>)}</ChoiceSelect></label> : mode === "interval" ? <><div className={styles.quickChoices}>{[60, 300, 900, 3600].map((n) => <button type="button" key={n} disabled={disabled} aria-pressed={config.every_seconds === n} onClick={() => onChange({ ...config, every_seconds: n })}>{n < 3600 ? t("copy.components_workflows_WorkflowSettings.026", { value0: n / 60 }) : t("copy.components_workflows_WorkflowSettings.027")}</button>)}</div><Field spec={{ path: "every_seconds", label: "copy.workflowSettings.fields.schedule.every_seconds", type: "number", min: 1 }} value={config.every_seconds} disabled={disabled} onChange={(value) => onChange({ ...config, every_seconds: value })} /></> : mode === "daily" ? <label className={styles.field}>{t("copy.components_workflows_WorkflowSettings.028")}<input type="time" disabled={disabled} value={daily ? `${daily[2].padStart(2, "0")}:${daily[1].padStart(2, "0")}` : "09:00"} onChange={(event) => { const [hour, minute] = event.target.value.split(":"); if (hour && minute) onChange({ ...config, cron: `${Number(minute)} ${Number(hour)} * * *` }); }} /></label> : <Field spec={{ path: "cron", label: "copy.workflowSettings.fields.schedule.cron" }} value={cron} disabled={disabled} onChange={(value) => onChange({ ...config, cron: value })} />}
-    {mode !== "interval" && <Field spec={{ path: "timezone", label: "copy.workflowSettings.fields.schedule.timezone", options: ["UTC", "Asia/Shanghai", "Asia/Hong_Kong", "America/New_York", "Europe/London"] }} value={config.timezone || "UTC"} disabled={disabled} onChange={(value) => onChange({ ...config, timezone: value })} />}
-    <Field spec={{ path: "enabled", label: "copy.workflowSettings.fields.schedule.enabled", type: "boolean" }} value={config.enabled} disabled={disabled} onChange={(value) => onChange({ ...config, enabled: value })} />
+    <ScheduleFields value={value} disabled={disabled} allowOnce={false} showOverlap={false} onChange={patch => {
+      const next = { ...value, ...patch };
+      const updated: Record<string, unknown> = { ...config, type: next.cadence, timezone: next.timezone };
+      if (next.cadence === "cron") { updated.cron = next.cron; delete updated.every_seconds; }
+      else { updated.every_seconds = Number(next.everySeconds); delete updated.cron; }
+      onChange(updated);
+    }}/>
+    <Field spec={{ path: "enabled", label: "copy.workflowSettings.fields.schedule.enabled", type: "boolean" }} value={config.enabled} disabled={disabled} onChange={enabled => onChange({ ...config, enabled })} />
     <p className={styles.helper}>{t("copy.components_workflows_WorkflowSettings.029")}</p>
   </div>;
 }

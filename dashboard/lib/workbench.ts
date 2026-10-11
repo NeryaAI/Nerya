@@ -1,3 +1,4 @@
+import { copy as i18nCopy } from "./i18n";
 import type { ChatThread, TurnPayload } from "./chat";
 import type { ConversationCommand } from "./conversationCommands";
 import { recordOf } from "./externalCalls";
@@ -69,13 +70,13 @@ export function taskStatus(thread: ChatThread | null, commands: ConversationComm
 }
 
 export function statusLabel(status: TaskStatus, zh: boolean): string {
-  if (status.waiting_for === "user") return zh ? "等待你的回答" : "Waiting for your answer";
-  if (status.waiting_for === "approval") return zh ? "等待审批" : "Awaiting approval";
-  if (status.completion === "external_reported") return zh ? "外部 Agent 已报告完成" : "Completion reported by external Agent";
-  const labels: Record<string, [string,string]> = {
-    idle: ["就绪","Ready"], running:["执行中","Running"], stopping:["停止中","Stopping"],
-    queued:["排队中","Queued"], succeeded:["本轮已结束","Turn finished"], failed:["执行失败","Failed"],
-    interrupted:["已停止","Stopped"], blocked:["需要处理","Needs attention"], unconfirmed:["执行结果待确认","Execution outcome unconfirmed"],
+  if (status.waiting_for === "user") return i18nCopy(zh, "copy.lib_workbench.001");
+  if (status.waiting_for === "approval") return i18nCopy(zh, "copy.lib_workbench.002");
+  if (status.completion === "external_reported") return i18nCopy(zh, "copy.lib_workbench.003");
+  const labels: Record<string, string> = {
+    idle: "copy.lib_workbench.004", running:"copy.lib_workbench.005", stopping:"copy.lib_workbench.006",
+    queued:"copy.lib_workbench.007", succeeded:"copy.lib_workbench.008", failed:"copy.lib_workbench.009",
+    interrupted:"copy.lib_workbench.010", blocked:"copy.lib_workbench.011", unconfirmed:"copy.lib_workbench.012",
   };
-  return labels[status.execution]?.[zh ? 0 : 1] || (zh ? "状态待确认" : "Status unconfirmed");
+  return i18nCopy(zh, labels[status.execution] ?? "") || (i18nCopy(zh, "copy.lib_workbench.013"));
 }

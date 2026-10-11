@@ -17,7 +17,7 @@ export function truncate(text: string, n = 120): string {
  * Human-readable schedule cadence. Raw cron strings (`*\/5 * * * *`)
  * mean nothing to most users, so the common shapes get a translation
  * key + params the caller feeds into next-intl. Anything fancier
- * (day-of-week, lists, ranges) returns null and the caller falls back
+ * (complex lists or ranges) returns null and the caller falls back
  * to the raw expression.
  */
 export type CadenceDescription = {
@@ -27,7 +27,9 @@ export type CadenceDescription = {
     | "everyNHours"
     | "everyNDays"
     | "everyNSeconds"
-    | "dailyAt";
+    | "dailyAt"
+    | "weekdaysAt"
+    | "weeklyAt";
   params?: Record<string, string | number>;
 };
 
@@ -35,7 +37,13 @@ export function describeCron(cron: string): CadenceDescription | null {
   const parts = cron.trim().split(/\s+/);
   if (parts.length !== 5) return null;
   const [min, hour, dom, mon, dow] = parts;
-  if (dom !== "*" || mon !== "*" || dow !== "*") return null;
+  if (dom !== "*" || mon !== "*") return null;
+  if (/^\d+$/.test(min) && /^\d+$/.test(hour) && Number(min) < 60 && Number(hour) < 24) {
+    const time = `${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+    if (dow === "1-5") return { key: "weekdaysAt", params: { time } };
+    if (/^[0-7]$/.test(dow)) return { key: "weeklyAt", params: { time, weekday: String(Number(dow) % 7) } };
+  }
+  if (dow !== "*") return null;
   if (min === "*" && hour === "*") return { key: "everyMinute" };
   const stepMin = /^\*\/(\d+)$/.exec(min);
   if (stepMin && hour === "*") {

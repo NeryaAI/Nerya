@@ -1,4 +1,6 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { Icon as NeryaGlyph } from "../icons";
 
 import Link from "next/link";
@@ -269,9 +271,9 @@ export function StrategyProposalApprovalCard({
   const manifest = snapshot ? { ...recordOf(snapshot.manifest.extras), ...snapshot.manifest } : {};
   const agentMode = recordOf(manifest.agent_task).enabled === true;
   const gated = snapshot?.strategy.nodes.some(node => node.kind === "script" && node.control?.can_stop);
-  const typeLabel = snapshot ? agentMode ? gated ? (zh ? "脚本驱动 Agent" : "Script-gated Agent") : (zh ? "事件驱动 Agent" : "Event-driven Agent") : (zh ? "纯脚本策略" : "Script strategy") : "";
+  const typeLabel = snapshot ? agentMode ? gated ? (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.001")) : (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.002")) : (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.003")) : "";
   const displayTitle = stringValue(manifest.title) || stringValue(normalized.summary) || strategyId || proposalId;
-  const states: Record<string, string> = zh ? { draft:"草稿", pending_review:"待审核", proposed:"待审核", approved:"已批准", applied:"已应用", rejected:"已拒绝", rolled_back:"已回滚", superseded:"已有新版本" } : { draft:"Draft", pending_review:"Awaiting review", proposed:"Awaiting review", approved:"Approved", applied:"Applied", rejected:"Rejected", rolled_back:"Rolled back", superseded:"Superseded" };
+  const states: Record<string, string> = { draft: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.004"), pending_review: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.005"), proposed: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.006"), approved: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.007"), applied: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.008"), rejected: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.009"), rolled_back: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.010"), superseded: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.011") };
   const canApprove =
     proposalId &&
     !TERMINAL_STATES.has(state) && state !== "draft" &&
@@ -354,7 +356,7 @@ export function StrategyProposalApprovalCard({
       setAppliedStrategyId(nextStrategyId || null);
       setStateOverride("applied");
       const msg = promotionReceiptFacts(out).syncFailed
-        ? (zh ? "版本已应用，调度待同步。请查看下方回执并仅重试同步。" : "Version applied; schedules need synchronization. Review the receipt below and retry sync only.")
+        ? (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.012"))
         : t("appliedNotice", { strategy: nextStrategyId || proposalId });
       setLocalNotice(t("appliedNotice", { strategy: nextStrategyId || proposalId }));
       onNotice?.(msg);
@@ -430,7 +432,7 @@ export function StrategyProposalApprovalCard({
       <div className={cardStyles.layout}>
         <div className={cardStyles.identity}>
           <div className={cardStyles.heading}>
-            <div className={cardStyles.kind}><StrategiesIcon size={15}/>{typeLabel || (zh ? "策略候选" : "Strategy candidate")}</div>
+            <div className={cardStyles.kind}><StrategiesIcon size={15}/>{typeLabel || (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.013"))}</div>
             <h3 className={cardStyles.title}>{displayTitle}</h3>
           </div>
           <div className={cardStyles.states}>
@@ -440,14 +442,14 @@ export function StrategyProposalApprovalCard({
                 {t("backtestVerdict", { verdict: backtestVerdict })}
               </span>
             ) : null}
-            {validationOk ? <span className="inline-flex items-center gap-1"><ShieldCheckIcon size={13}/>{zh ? "结构校验通过" : "Structure validated"}</span> : null}
+            {validationOk ? <span className="inline-flex items-center gap-1"><ShieldCheckIcon size={13}/>{i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.014")}</span> : null}
             {validating ? <Pill tone="brand">{t("validating")}</Pill> : null}
             {hasBlockers ? <Pill tone="danger">{t("blocked")}</Pill> : null}
           </div>
           <div className={cardStyles.facts} data-testid="strategy-card-facts">
             {Array.isArray(manifest.markets) && <span>{manifest.markets.map(String).join(" · ")}</span>}
-            {Boolean(manifest.mode) && <span>{manifest.mode === "paper" ? (zh ? "模拟交易" : "Paper mode") : String(manifest.mode)}</span>}
-            {recordOf(manifest.schedule).enabled === false && <span>{zh ? "定时任务未启动" : "Schedule inactive"}</span>}
+            {Boolean(manifest.mode) && <span>{manifest.mode === "paper" ? (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.015")) : String(manifest.mode)}</span>}
+            {recordOf(manifest.schedule).enabled === false && <span>{i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.016")}</span>}
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[color:var(--text-muted)]">
             {normalized.ts ? <span>{formatTsShort(String(normalized.ts))}</span> : null}
@@ -467,8 +469,8 @@ export function StrategyProposalApprovalCard({
         </div>
 
         <div className={cardStyles.actions}>
-          {details && strategyId && <button type="button" className={cardStyles.expand} title={zh ? "在右侧标签页查看" : "Open in a detail tab"} aria-label={zh ? "在对话中展开策略详情" : "Open strategy details in conversation"} aria-expanded={details.active === strategyDetailId({ kind: "strategy", strategyId, proposalId })} aria-controls={'task-dock-panel-' + strategyDetailId({ kind: "strategy", strategyId, proposalId })} onClick={() => details.open({ kind: "strategy", strategyId, proposalId, title: displayTitle })} data-testid="expand-strategy-details"><NeryaGlyph name="arrowUpRight" size={18}/></button>}
-          {validationPending && <button type="button" className="btn btn-ghost text-xs" disabled={validating} onClick={() => void validateProposal()}>{zh ? "检查候选" : "Validate candidate"}</button>}
+          {details && strategyId && <button type="button" className={cardStyles.expand} title={i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.017")} aria-label={i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.018")} aria-expanded={details.active === strategyDetailId({ kind: "strategy", strategyId, proposalId })} aria-controls={'task-dock-panel-' + strategyDetailId({ kind: "strategy", strategyId, proposalId })} onClick={() => details.open({ kind: "strategy", strategyId, proposalId, title: displayTitle })} data-testid="expand-strategy-details"><NeryaGlyph name="arrowUpRight" size={18}/></button>}
+          {validationPending && <button type="button" className="btn btn-ghost text-xs" disabled={validating} onClick={() => void validateProposal()}>{i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.019")}</button>}
           {!packageProposal && !details && <Link className="btn btn-ghost text-xs" href={"/self-evolution?tab=proposals&proposal_id=" + encodeURIComponent(proposalId)}>{t("detailsToggle")} <NeryaGlyph name="arrowUpRight" size={16} /></Link>}
           {state === "applied" && strategyId && !details ? (
             <Link

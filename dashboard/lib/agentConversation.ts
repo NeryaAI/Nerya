@@ -140,7 +140,7 @@ export function toolPresentation(step: ToolStep, runState: string, zh: boolean) 
   const waiting = !failed && (/awaiting_(approval|input)|pending_approval|requires_approval/.test(status) || !step.result && ["awaiting_approval","awaiting_input","blocked"].includes(runState));
   const pending = !step.result && working(runState) && !failed && !waiting;
   const preparing = pending && d.phase === "input_streaming";
-  const state = failed ? (i18nCopy(zh, "copy.lib_agentConversation.005")) : waiting ? (zh ? "等待确认" : "Awaiting confirmation") : preparing ? (zh ? "准备参数" : "Preparing input") : pending ? (i18nCopy(zh, "copy.lib_agentConversation.006"))
+  const state = failed ? (i18nCopy(zh, "copy.lib_agentConversation.005")) : waiting ? (i18nCopy(zh, "copy.lib_agentConversation.010")) : preparing ? (i18nCopy(zh, "copy.lib_agentConversation.011")) : pending ? (i18nCopy(zh, "copy.lib_agentConversation.006"))
     : step.result ? (d.ok === true ? (i18nCopy(zh, "copy.lib_agentConversation.007")) : (i18nCopy(zh, "copy.lib_agentConversation.008"))) : (i18nCopy(zh, "copy.lib_agentConversation.009"));
   const semantic = toolSemantics(name, payload, zh);
   return { name, ...semantic, state, failed, pending, waiting, preparing, payload, result, summary: toolResultSummary(result, zh) };

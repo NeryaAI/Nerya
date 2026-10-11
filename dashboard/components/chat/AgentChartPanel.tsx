@@ -9,15 +9,7 @@ import { instrumentId } from "../../lib/researchVisuals";
 import { collectBacktestResults } from "../../lib/backtestResults";
 import { FinancialChart } from "../finance/FinancialChart";
 import { cleanSeries } from "../../lib/financialChart";
-import {
-  ColorType,
-  CrosshairMode,
-  LineStyle,
-  createChart,
-  type IChartApi,
-  type Time,
-  type UTCTimestamp,
-} from "lightweight-charts";
+import { createVelaChart, type VelaSeries } from "../../lib/velaChart";
 
 import { clientApi } from "../../lib/clientApi";
 import type { Candle } from "../../lib/api";
@@ -36,7 +28,7 @@ import {
   type NativeBlockEnvelope,
 } from "../../lib/chat";
 import { useChartData } from "../../lib/useChartData";
-import { useChartTheme, type ChartTheme } from "../../lib/chartTheme";
+import { useChartTheme } from "../../lib/chartTheme";
 import { BacktestChart } from "../backtest/BacktestChart";
 import {
   ChartIcon,
@@ -345,64 +337,20 @@ function AgentKlineCanvas({
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
-    const chart = createBaseChart(node, height, {
-      bottom: indicators.volume ? 0.24 : 0.08,
-      timeVisible: true,
-    }, chartTheme);
-    const candle = chart.addCandlestickSeries({
-      upColor: THEME.up,
-      downColor: THEME.down,
-      borderVisible: false,
-      wickUpColor: THEME.up,
-      wickDownColor: THEME.down,
-    });
-    candle.setData(payload.candles.map((c) => ({
-      time: toTime(c.time),
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    })));
-
-    if (indicators.volume) {
-      const volume = chart.addHistogramSeries({
-        priceFormat: { type: "volume" },
-        priceScaleId: "volume",
-        lastValueVisible: false,
-        priceLineVisible: false,
-      });
-      volume.setData(payload.candles.map((c) => ({
-        time: toTime(c.time),
-        value: c.volume ?? 0,
-        color: c.close >= c.open ? THEME.histogramUp : THEME.histogramDown,
-      })));
-      chart.priceScale("volume").applyOptions({
-        scaleMargins: { top: 0.82, bottom: 0 },
-      });
-    }
-
-    addLine(chart, "MA20", payload.sma20, THEME.ma, "solid", 1);
-    addLine(chart, "EMA50", payload.ema50, THEME.ema, "solid", 1);
-    addLine(chart, "BB upper", payload.bands.upper, THEME.band, "dashed", 1);
-    addLine(chart, "BB lower", payload.bands.lower, THEME.band, "dashed", 1);
-    addLine(chart, "VWAP", payload.vwap, THEME.vwap, "solid", 2);
-    payload.priceSeries.forEach((series, idx) => {
-      addLine(
-        chart,
-        series.name,
-        series.data,
-        series.color || palette(idx),
-        series.style,
-        series.width ?? 1,
-      );
-    });
-
-    chart.timeScale().fitContent();
-    const ro = observeChart(node, chart, height);
-    return () => {
-      ro.disconnect();
-      chart.remove();
-    };
+    const lines: SeriesLine[] = [
+      { name: "MA20", data: payload.sma20, color: THEME.ma },
+      { name: "EMA50", data: payload.ema50, color: THEME.ema },
+      { name: "BB upper", data: payload.bands.upper, color: THEME.band, style: "dashed" },
+      { name: "BB lower", data: payload.bands.lower, color: THEME.band, style: "dashed" },
+      { name: "VWAP", data: payload.vwap, color: THEME.vwap }, ...payload.priceSeries,
+    ];
+    const series: VelaSeries[] = [{ type: "candlestick", name: "OHLC", data: payload.candles },
+      ...lines.filter(row => row.data.length).map(row => ({ type: "line" as const, name: row.name, data: row.data, color: row.color, line_style: row.style, line_width: row.width })),
+      ...(indicators.volume ? [{ type: "histogram" as const, name: "Volume", price_format: "volume" as const,
+        data: payload.candles.map(c => ({ time: c.time, value: c.volume ?? 0, color: c.close >= c.open ? THEME.histogramUp : THEME.histogramDown })) }] : []),
+    ];
+    const chart = createVelaChart(node, { height, theme: chartTheme, series, embedded: true });
+    return () => chart.destroy();
   }, [chartTheme, height, indicators.volume, payload]);
 
   if (!payload.candles.length) {
@@ -471,52 +419,13 @@ function MiniSeriesCanvas({
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
-    const chart = createBaseChart(node, height, {
-      bottom: 0.1,
-      timeVisible: false,
-    }, chartTheme);
-    let host: ReturnType<IChartApi["addLineSeries"]> | null = null;
-    for (const row of series) {
-      if (row.histogram) {
-        const s = chart.addHistogramSeries({
-          color: row.color,
-          priceLineVisible: false,
-          lastValueVisible: false,
-        });
-        s.setData(row.data.map((p) => ({
-          time: toTime(p.time),
-          value: p.value,
-          color: p.value >= 0 ? THEME.histogramUp : THEME.histogramDown,
-        })));
-        continue;
-      }
-      const s = chart.addLineSeries({
-        color: row.color,
-        lineWidth: row.width ?? 1,
-        lineStyle: lineStyle(row.style),
-        priceLineVisible: false,
-      });
-      s.setData(row.data.map((p) => ({ time: toTime(p.time), value: p.value })));
-      if (!host) host = s;
-    }
-    if (host) {
-      for (const price of priceLines) {
-        host.createPriceLine({
-          price,
-          color: "rgba(255,255,255,0.24)",
-          lineStyle: LineStyle.Dashed,
-          lineWidth: 1,
-          axisLabelVisible: true,
-          title: String(price),
-        });
-      }
-    }
-    chart.timeScale().fitContent();
-    const ro = observeChart(node, chart, height);
-    return () => {
-      ro.disconnect();
-      chart.remove();
-    };
+    const chart = createVelaChart(node, { height, theme: chartTheme, embedded: true,
+      series: series.map(row => ({ type: row.histogram ? "histogram" : "line", name: row.name,
+        color: row.color, line_width: row.width, line_style: row.style,
+        data: row.data.map(point => ({ ...point, ...(row.histogram ? { color: point.value >= 0 ? THEME.histogramUp : THEME.histogramDown } : {}) })) })),
+      overlays: priceLines.map(price => ({ type: "price_line", price, color: "rgba(255,255,255,.24)", line_style: "dashed", title: String(price) })),
+    });
+    return () => chart.destroy();
   }, [chartTheme, height, priceLines, series]);
 
   return <div ref={ref} className="w-full" style={{ height }} />;
@@ -826,74 +735,6 @@ function blockFromCandles({
   };
 }
 
-function createBaseChart(
-  node: HTMLDivElement,
-  height: number,
-  opts: { bottom: number; timeVisible: boolean },
-  theme: ChartTheme,
-): IChartApi {
-  return createChart(node, {
-    width: Math.max(1, node.clientWidth),
-    height,
-    layout: {
-      background: { type: ColorType.Solid, color: THEME.background },
-      textColor: theme.text,
-      fontSize: 11,
-      attributionLogo: false,
-    },
-    grid: {
-      vertLines: { color: theme.grid },
-      horzLines: { color: theme.grid },
-    },
-    crosshair: { mode: CrosshairMode.Magnet },
-    rightPriceScale: {
-      borderColor: theme.grid,
-      scaleMargins: { top: 0.08, bottom: opts.bottom },
-    },
-    timeScale: {
-      borderColor: theme.grid,
-      timeVisible: opts.timeVisible,
-      secondsVisible: false,
-    },
-    handleScale: { axisPressedMouseMove: false },
-  });
-}
-
-function observeChart(node: HTMLDivElement, chart: IChartApi, height: number): ResizeObserver {
-  const ro = new ResizeObserver(() => {
-    const width = Math.max(1, node.clientWidth);
-    chart.applyOptions({ width, height });
-  });
-  ro.observe(node);
-  return ro;
-}
-
-function addLine(
-  chart: IChartApi,
-  name: string,
-  data: TimeValue[],
-  color: string,
-  style: "solid" | "dashed" | "dotted" = "solid",
-  width: 1 | 2 | 3 = 1,
-) {
-  if (!data.length) return;
-  const s = chart.addLineSeries({
-    title: name,
-    color,
-    lineWidth: width,
-    lineStyle: lineStyle(style),
-    priceLineVisible: false,
-    lastValueVisible: false,
-  });
-  s.setData(data.map((p) => ({ time: toTime(p.time), value: p.value })));
-}
-
-function lineStyle(style?: "solid" | "dashed" | "dotted"): LineStyle {
-  if (style === "dashed") return LineStyle.Dashed;
-  if (style === "dotted") return LineStyle.Dotted;
-  return LineStyle.Solid;
-}
-
 function computeSma(candles: CandlePoint[], period: number): TimeValue[] {
   const out: TimeValue[] = [];
   let sum = 0;
@@ -1057,14 +898,6 @@ function isVolumeLike(series: ChartSeries): boolean {
 
 function normalizeTimeNumber(value: number): number {
   return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
-}
-
-function toTime(value: number | string): Time {
-  if (typeof value === "number") return normalizeTimeNumber(value) as UTCTimestamp;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value as Time;
-  const ms = Date.parse(value);
-  if (!Number.isNaN(ms)) return Math.floor(ms / 1000) as UTCTimestamp;
-  return 0 as UTCTimestamp;
 }
 
 function numericTime(value: number | string): number {

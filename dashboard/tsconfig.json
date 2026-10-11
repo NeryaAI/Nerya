@@ -37,7 +37,8 @@
     ".next-desktop-dev/types/**/*.ts",
     ".next-desktop-build/types/**/*.ts",
     ".next-research-live/types/**/*.ts",
-    ".next-local-18580/types/**/*.ts"
+    ".next-local-18580/types/**/*.ts",
+    ".next-local-18480/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

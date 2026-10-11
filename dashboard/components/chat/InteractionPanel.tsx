@@ -1,4 +1,6 @@
 "use client";
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { useRef, useState } from "react";
 import { useLocale } from "next-intl";
 import { callApi, ApiError } from "../../lib/clientApi";
@@ -23,16 +25,19 @@ function InteractionCard({item,onResolved}:{item:Interaction;onResolved:()=>void
   const lock=useRef(false);
   const [expanded,setExpanded]=useState(item.state!=="deferred");
   function change(next:Partial<typeof draft>){const value={...draft,...next};setDraft(value);writeEditDraft(key,value);}
-  async function respond(action:"answer"|"accept"|"revise"|"reject"|"defer", value:Draft=draft) {
+  async function respond(action:"answer"|"accept"|"revise"|"reject"|"defer"|"reconcile", value:Draft=draft) {
     if(lock.current)return;lock.current=true;setBusy(true);setError("");
     try {
-      const result=await callApi<{ok:boolean;error?:string}>("/agent/interactions/respond",{method:"POST",body:{text:value.text,selected:value.selected,...(structured?{answers:Object.fromEntries(Object.entries(value.answers || {}).filter(([,a])=>a.text.trim()||a.selected.length))}:{}),response_id:value.response_id,session_id:item.session_id,interaction_id:item.interaction_id,expected_revision:item.revision,action}});
+      const body=action==="reconcile"
+        ? {session_id:item.session_id,interaction_id:item.interaction_id,action}
+        : {text:value.text,selected:value.selected,...(structured?{answers:Object.fromEntries(Object.entries(value.answers || {}).filter(([,a])=>a.text.trim()||a.selected.length))}:{}),response_id:value.response_id,session_id:item.session_id,interaction_id:item.interaction_id,expected_revision:item.revision,action};
+      const result=await callApi<{ok:boolean;error?:string}>("/agent/interactions/respond",{method:"POST",body});
       if(!result.ok)throw new Error(result.error);
       if(action!=="defer")writeEditDraft(key,null);else {setExpanded(false);change({response_id:crypto.randomUUID()});}
       onResolved();
     } catch(reason) {
       const conflict=reason instanceof ApiError&&reason.status===409;
-      setError(conflict?(zh?"任务状态已变化或断点仍在保存。刷新状态后重试，回答已保留。":"The task changed or its checkpoint is still saving. Refresh and retry; your answer is retained."):(zh?"回答尚未确认送达，可用同一请求重试。":"Delivery is unconfirmed. Retry the same response."));
+      setError(conflict?(i18nCopy(zh, "copy.components_chat_InteractionPanel.001")):(i18nCopy(zh, "copy.components_chat_InteractionPanel.002")));
       onResolved();
     } finally {lock.current=false;setBusy(false);}
   }
@@ -46,40 +51,46 @@ function InteractionCard({item,onResolved}:{item:Interaction;onResolved:()=>void
     }
   }
   function continueAnswer(){if(structured&&index<questions.length-1)change({index:index+1});else void respond(item.kind==="plan"?"accept":"answer");}
+  if(item.state==="answered")return <section className="rounded-lg border border-[color:var(--line)] bg-[color:var(--card)] p-4" data-testid="user-interaction" aria-labelledby={item.interaction_id}>
+    <strong id={item.interaction_id}>{item.payload.title}</strong>
+    <p className="mt-2 text-sm text-[color:var(--text-muted)]">{i18nCopy(zh,"copy.components_chat_InteractionPanel.023")}</p>
+    <button type="button" className="btn btn-primary mt-3 min-h-11" disabled={busy} onClick={()=>void respond("reconcile")}>{busy?i18nCopy(zh,"copy.components_chat_InteractionPanel.015"):i18nCopy(zh,"copy.components_chat_InteractionPanel.024")}</button>
+    {error&&<p role="alert" className="mt-2 text-sm text-danger">{error}</p>}
+  </section>;
   return <section className="rounded-lg border border-[color:var(--line)] bg-[color:var(--card)] p-4" data-testid="user-interaction" aria-labelledby={item.interaction_id}>
     <button type="button" className="flex min-h-11 w-full items-center justify-between gap-3 text-left" onClick={()=>setExpanded(!expanded)} aria-expanded={expanded}>
-      <strong id={item.interaction_id}>{item.payload.title}</strong><span className="text-xs text-[color:var(--text-muted)]">{item.kind==="plan"?(zh?"计划待确认":"Plan to review"):(zh?"需要你的回答":"Your answer needed")}</span>
+      <strong id={item.interaction_id}>{item.payload.title}</strong><span className="text-xs text-[color:var(--text-muted)]">{item.kind==="plan"?(i18nCopy(zh, "copy.components_chat_InteractionPanel.003")):(i18nCopy(zh, "copy.components_chat_InteractionPanel.004"))}</span>
     </button>
     {expanded&&<form onSubmit={e=>{e.preventDefault();continueAnswer();}} className="space-y-3">
       {item.payload.message&&<p className="whitespace-pre-wrap text-sm">{item.payload.message}</p>}
       {item.payload.steps&&<ol className="list-decimal space-y-1 pl-5 text-sm">{item.payload.steps.map((step,i)=><li key={i}>{step}</li>)}</ol>}
-      {item.payload.deliverables?.length ? <p className="text-sm">{zh?"交付物：":"Deliverables: "}{item.payload.deliverables.join(" · ")}</p>:null}
-      {item.payload.constraints?.length ? <p className="text-sm">{zh?"约束：":"Constraints: "}{item.payload.constraints.join(" · ")}</p>:null}
+      {item.payload.deliverables?.length ? <p className="text-sm">{i18nCopy(zh, "copy.components_chat_InteractionPanel.005")}{item.payload.deliverables.join(" · ")}</p>:null}
+      {item.payload.constraints?.length ? <p className="text-sm">{i18nCopy(zh, "copy.components_chat_InteractionPanel.006")}{item.payload.constraints.join(" · ")}</p>:null}
       {structured&&question&&answer&&<fieldset disabled={busy} className="space-y-3" key={question.id}>
         <legend className="text-base font-medium">{question.question}</legend>
         <div className="flex items-center justify-between text-sm text-[color:var(--text-muted)]">
           <span aria-live="polite">{index+1} / {questions.length}</span>
           <div className="flex gap-2">
-            <button type="button" className="btn btn-secondary" disabled={busy||index===0} onClick={()=>change({index:index-1})}>{zh?"上一题":"Previous question"}</button>
-            <button type="button" className="btn btn-secondary" disabled={busy||index===questions.length-1} onClick={()=>change({index:index+1})}>{zh?"下一题":"Next question"}</button>
+            <button type="button" className="btn btn-secondary" disabled={busy||index===0} onClick={()=>change({index:index-1})}>{i18nCopy(zh, "copy.components_chat_InteractionPanel.007")}</button>
+            <button type="button" className="btn btn-secondary" disabled={busy||index===questions.length-1} onClick={()=>change({index:index+1})}>{i18nCopy(zh, "copy.components_chat_InteractionPanel.008")}</button>
           </div>
         </div>
         {question.options.map(option=><label key={option} className="flex min-h-11 cursor-pointer items-center gap-3 rounded border border-[color:var(--line)] p-3 hover:bg-[color:var(--panel-bg)]">
           <input type={question.multiple?"checkbox":"radio"} name={item.interaction_id+question.id} checked={answer.selected.includes(option)} onChange={e=>updateAnswer({text:question.multiple?answer.text:"",selected:question.multiple?(e.target.checked?[...answer.selected,option]:answer.selected.filter(v=>v!==option)):[option]},!question.multiple)}/>
           <span>{option}</span>
         </label>)}
-        <label className="block text-sm">{question.options.length?(zh?"其他回答":"Custom answer"):(zh?"你的回答":"Your answer")}
+        <label className="block text-sm">{question.options.length?(i18nCopy(zh, "copy.components_chat_InteractionPanel.009")):(i18nCopy(zh, "copy.components_chat_InteractionPanel.010"))}
           <textarea className="input-dark mt-1 min-h-20 w-full" value={answer.text} onChange={e=>updateAnswer({text:e.target.value,selected:question.multiple?answer.selected:[]})}/>
         </label>
-        <p className="text-xs text-[color:var(--text-muted)]">{zh?"可以跳过不确定的问题；未填写的内容不会被视为确认。":"You may skip questions. Unanswered items are not confirmation."}</p>
+        <p className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_InteractionPanel.011")}</p>
       </fieldset>}
       {!structured&&item.payload.choices?.map(choice=><label key={choice} className="flex min-h-11 items-center gap-3 rounded px-2 hover:bg-[color:var(--panel-bg)]"><input type={item.payload.multiple?"checkbox":"radio"} name={item.interaction_id} checked={draft.selected.includes(choice)} disabled={busy}
         onChange={e=>change({selected:item.payload.multiple ? e.target.checked?[...draft.selected,choice]:draft.selected.filter(v=>v!==choice):[choice]})}/><span>{choice}</span></label>)}
-      {!structured&&<label className="block text-sm">{item.kind==="plan"?(zh?"修改意见或补充说明":"Revision feedback or additional details"):(zh?"补充说明":"Additional details")}<textarea className="input-dark mt-1 min-h-20 w-full" value={draft.text} disabled={busy} onChange={e=>change({text:e.target.value})}/></label>}
-      {item.kind==="plan"&&<p className="text-xs text-[color:var(--text-muted)]">{zh?"接受后开始执行这一版计划，原有工具和资金审批仍然有效。":"Accepting starts this plan version. Existing tool and financial approvals still apply."}</p>}
-      <div className="flex flex-wrap gap-2"><button type="submit" disabled={busy||(!structured&&item.kind==="question"&&!draft.text.trim()&&!draft.selected.length)} className="btn btn-primary min-h-11">{busy?(zh?"发送中…":"Sending…"):item.kind==="plan"?(zh?"接受计划并开始":"Accept plan and start"):structured?(index<questions.length-1?(zh?"继续":"Continue"):(zh?"提交回答":"Submit answers")):(zh?"回答并继续":"Answer and continue")}</button>
-      {item.kind==="plan"&&<><button type="button" className="btn btn-secondary min-h-11" disabled={busy||!draft.text.trim()} onClick={()=>void respond("revise")}>{zh?"修改计划":"Revise plan"}</button><button type="button" className="btn btn-secondary min-h-11" disabled={busy} onClick={()=>void respond("reject")}>{zh?"拒绝计划":"Reject plan"}</button></>}
-      <button type="button" className="btn btn-secondary min-h-11" disabled={busy} onClick={()=>void respond("defer")}>{zh?"稍后处理":"Handle later"}</button></div>
+      {!structured&&<label className="block text-sm">{item.kind==="plan"?(i18nCopy(zh, "copy.components_chat_InteractionPanel.012")):(i18nCopy(zh, "copy.components_chat_InteractionPanel.013"))}<textarea className="input-dark mt-1 min-h-20 w-full" value={draft.text} disabled={busy} onChange={e=>change({text:e.target.value})}/></label>}
+      {item.kind==="plan"&&<p className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_InteractionPanel.014")}</p>}
+      <div className="flex flex-wrap gap-2"><button type="submit" disabled={busy||(!structured&&item.kind==="question"&&!draft.text.trim()&&!draft.selected.length)} className="btn btn-primary min-h-11">{busy?(i18nCopy(zh, "copy.components_chat_InteractionPanel.015")):item.kind==="plan"?(i18nCopy(zh, "copy.components_chat_InteractionPanel.016")):structured?(index<questions.length-1?(i18nCopy(zh, "copy.components_chat_InteractionPanel.017")):(i18nCopy(zh, "copy.components_chat_InteractionPanel.018"))):(i18nCopy(zh, "copy.components_chat_InteractionPanel.019"))}</button>
+      {item.kind==="plan"&&<><button type="button" className="btn btn-secondary min-h-11" disabled={busy||!draft.text.trim()} onClick={()=>void respond("revise")}>{i18nCopy(zh, "copy.components_chat_InteractionPanel.020")}</button><button type="button" className="btn btn-secondary min-h-11" disabled={busy} onClick={()=>void respond("reject")}>{i18nCopy(zh, "copy.components_chat_InteractionPanel.021")}</button></>}
+      <button type="button" className="btn btn-secondary min-h-11" disabled={busy} onClick={()=>void respond("defer")}>{i18nCopy(zh, "copy.components_chat_InteractionPanel.022")}</button></div>
     </form>}
     {error&&<p role="alert" className="mt-2 text-sm text-danger">{error}</p>}
   </section>;

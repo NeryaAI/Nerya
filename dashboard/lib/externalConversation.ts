@@ -1,3 +1,4 @@
+import { copy as i18nCopy } from "./i18n";
 import { callDepth, publicProgress, recordOf, type ExternalCallNode, type ExternalCallTrace } from './externalCalls';
 
 import type { UserMessage } from './chat';
@@ -145,25 +146,25 @@ export function targetsOf(node: ExternalCallNode, data: Record<string, unknown> 
 }
 
 export function toolTitle(node: ExternalCallNode, zh: boolean): string {
-  const nativeTitles: Record<string, [string, string]> = {
-    skill: ['加载 Skill', 'Load Skill'], skill_view: ['阅读 Skill', 'Read Skill'],
-    strategy_draft_proposal: ['创建策略草稿', 'Draft strategy'],
-    strategy_generate_proposal: ['生成策略提案', 'Generate strategy proposal'],
-    strategy_validate: ['验证策略', 'Validate strategy'],
-    strategy_submit_proposal: ['提交策略候选', 'Submit strategy candidate'],
-    strategy_backtest: ['回测策略', 'Backtest strategy'],
-    strategy_run_tick: ['执行策略单轮', 'Run strategy tick'],
+  const nativeTitles: Record<string, string> = {
+    skill: "copy.lib_externalConversation.001", skill_view: "copy.lib_externalConversation.002",
+    strategy_draft_proposal: "copy.lib_externalConversation.003",
+    strategy_generate_proposal: "copy.lib_externalConversation.004",
+    strategy_validate: "copy.lib_externalConversation.005",
+    strategy_submit_proposal: "copy.lib_externalConversation.006",
+    strategy_backtest: "copy.lib_externalConversation.007",
+    strategy_run_tick: "copy.lib_externalConversation.008",
   };
   const native = nativeTitles[toolName(node.tool).toLowerCase()];
-  if (native) return native[zh ? 0 : 1];
+  if (native) return i18nCopy(zh, native ?? "");
   const kind = toolKind(node);
-  const labels: Record<ToolKind, [string, string]> = {
-    read: ['读取文件', 'Read file'], files: ['浏览文件', 'Browse files'], search: ['搜索文件', 'Search files'],
-    edit: ['修改文件', 'Edit file'], shell: ['执行命令', 'Run command'], script: ['运行脚本', 'Run script'],
-    web: ['访问网页', 'Web request'], tool: ['调用工具', 'Tool call'],
+  const labels: Record<ToolKind, string> = {
+    read: "copy.lib_externalConversation.009", files: "copy.lib_externalConversation.010", search: "copy.lib_externalConversation.011",
+    edit: "copy.lib_externalConversation.012", shell: "copy.lib_externalConversation.013", script: "copy.lib_externalConversation.014",
+    web: "copy.lib_externalConversation.015", tool: "copy.lib_externalConversation.016",
   };
-  if (toolName(node.tool) === 'write_file') return zh ? '写入文件' : 'Write file';
-  return labels[kind][zh ? 0 : 1];
+  if (toolName(node.tool) === 'write_file') return i18nCopy(zh, "copy.lib_externalConversation.017");
+  return i18nCopy(zh, labels[kind] ?? "");
 }
 
 /** Native read_file offsets are zero-based. Returned range beats requested range. */

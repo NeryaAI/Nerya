@@ -66,13 +66,13 @@ export function PrimaryModelSettings({ routes, catalog, disabled, onChange, onCo
             />
           </Field> : null}
           {route?.model && <details className="text-xs text-[color:var(--text-muted)]">
-            <summary className="cursor-pointer">{zh ? "连接生效值与来源" : "Effective connection and source"}</summary>
+            <summary className="cursor-pointer">{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.007")}</summary>
             <dl className="mt-2 space-y-1 break-all">
-              <div><dt className="inline">{zh ? "声明 URL：" : "Declared URL: "}</dt><dd className="inline">{route.base_url || (zh ? "继承" : "Inherit")}</dd></div>
-              <div><dt className="inline">{zh ? "已保存生效 URL：" : "Saved effective URL: "}</dt><dd className="inline">{route.effective?.base_url || "—"} · {route.source?.base_url || "—"}</dd></div>
-              <div><dt className="inline">{zh ? "凭据来源：" : "Credential source: "}</dt><dd className="inline">{route.provider_key_ref ? (zh ? "路由覆盖" : "Route override") : (zh ? "继承" : "Inherited")} · {route.source?.provider_key_ref || "—"}</dd></div>
+              <div><dt className="inline">{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.008")}</dt><dd className="inline">{route.base_url || (i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.009"))}</dd></div>
+              <div><dt className="inline">{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.010")}</dt><dd className="inline">{route.effective?.base_url || "—"} · {route.source?.base_url || "—"}</dd></div>
+              <div><dt className="inline">{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.011")}</dt><dd className="inline">{route.provider_key_ref ? (i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.012")) : (i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.013"))} · {route.source?.provider_key_ref || "—"}</dd></div>
             </dl>
-            {onInheritConnection && <button type="button" className="btn btn-ghost mt-1" disabled={disabled || (!route.base_url && !route.provider_key_ref && !route.provider_key_env && !route.kind)} onClick={() => onInheritConnection(index)}>{zh ? "恢复连接继承" : "Inherit connection"}</button>}
+            {onInheritConnection && <button type="button" className="btn btn-ghost mt-1" disabled={disabled || (!route.base_url && !route.provider_key_ref && !route.provider_key_env && !route.kind)} onClick={() => onInheritConnection(index)}>{i18nCopy(zh, "copy.components_settings_PrimaryModelSettings.014")}</button>}
           </details>}
         </ModelRoutePriority>;
       })}

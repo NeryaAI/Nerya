@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../lib/i18n";
+
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
@@ -43,7 +45,7 @@ export function SavedModelTest({ revision, dirty = false, disabled = false }: { 
         const config = await clientApi.llmConfig() as Awaited<ReturnType<typeof clientApi.llmConfig>> & { revision?: string };
         testedRevision = config.revision || "";
       }
-      if (!testedRevision) throw new Error(zh ? "请刷新设置以获取已保存版本。" : "Refresh settings to load the saved revision.");
+      if (!testedRevision) throw new Error(i18nCopy(zh, "copy.components_SetupReadinessCard.001"));
       const response = await fetch("/api/proxy/llm/messages/probe", {
         method: "POST", headers: authHeaders({ "content-type": "application/json" }), cache: "no-store",
         body: JSON.stringify({ revision: testedRevision, caller: "settings:connection-test" }),
@@ -51,7 +53,7 @@ export function SavedModelTest({ revision, dirty = false, disabled = false }: { 
       });
       if (response.status === 401 || response.status === 403) {
         handleAuthFailure(response.status);
-        throw new Error(zh ? "请重新登录。" : "Please sign in again.");
+        throw new Error(i18nCopy(zh, "copy.components_SetupReadinessCard.002"));
       }
       const body = await response.json();
       if (!response.ok || !body.ok || body.revision !== testedRevision) {
@@ -74,12 +76,12 @@ export function SavedModelTest({ revision, dirty = false, disabled = false }: { 
   return <div className="my-3 space-y-2 rounded-lg border border-[color:var(--line)] p-3" data-testid="saved-model-test">
     <div className="flex flex-wrap items-center gap-2">
       <Pill tone={dirty ? "warn" : current ? (current.ok ? "ok" : "danger") : "warn"}>
-        {dirty ? (zh ? "有未保存更改" : "Unsaved changes") : busy ? (zh ? "测试中" : "Testing") : current ? (current.ok ? (zh ? "测试成功" : "Test passed") : (zh ? "测试失败" : "Test failed")) : (revision ? (zh ? "已保存 · 未测试" : "Saved · Untested") : (zh ? "未测试" : "Untested"))}
+        {dirty ? (i18nCopy(zh, "copy.components_SetupReadinessCard.005")) : busy ? (i18nCopy(zh, "copy.components_SetupReadinessCard.006")) : current ? (current.ok ? (i18nCopy(zh, "copy.components_SetupReadinessCard.007")) : (i18nCopy(zh, "copy.components_SetupReadinessCard.008"))) : (revision ? (i18nCopy(zh, "copy.components_SetupReadinessCard.009")) : (i18nCopy(zh, "copy.components_SetupReadinessCard.010")))}
       </Pill>
-      <button type="button" className="btn btn-secondary" disabled={disabled || dirty || busy} onClick={() => void testSaved()}>{zh ? "测试已保存连接" : "Test saved connection"}</button>
+      <button type="button" className="btn btn-secondary" disabled={disabled || dirty || busy} onClick={() => void testSaved()}>{i18nCopy(zh, "copy.components_SetupReadinessCard.011")}</button>
       {(revision || current?.revision) && <code className="text-xs text-[color:var(--text-muted)]">{(revision || current?.revision || "").slice(0, 10)}</code>}
     </div>
-    <p className="text-xs text-[color:var(--text-muted)]">{zh ? "点击后发送一条短模型请求，可能产生少量费用。读取就绪状态和保存设置不会自动测试。" : "Sends a short model request when clicked; a small charge may apply. Reading readiness and saving settings do not run this test."}</p>
+    <p className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_SetupReadinessCard.012")}</p>
     {current && !dirty && <p role="status" className="break-words text-xs">{current.detail}</p>}
   </div>;
 }

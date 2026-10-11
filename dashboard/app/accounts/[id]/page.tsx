@@ -18,6 +18,7 @@ import {
 } from "../../../components/Page";
 import { SectionTabs } from "../../../components/SectionTabs";
 import { AccountEquityCurveCard } from "../../../components/accounts/AccountEquityCurveCard";
+import {FinancialResourcePanel} from '../../../components/accounts/FinancialResourcePanel';
 import { AddAccountForm } from "../../../components/accounts/AddAccountForm";
 import { clientApi } from "../../../lib/clientApi";
 import { alert as alertDialog, confirm as confirmDialog, prompt as promptDialog, toast } from "../../../lib/dialogs";
@@ -814,6 +815,7 @@ export default function AccountDetailPage({
               accountId={accountId}
               currency={profile.base_currency || "USDT"}
             />
+            <FinancialResourcePanel resourceId={profile.wallet_id?'wallet:'+profile.wallet_id:accountId}/>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <Card

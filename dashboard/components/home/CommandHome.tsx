@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { useEffect, useRef, useState } from "react";
@@ -68,11 +70,10 @@ export function CommandHome() {
 
   return <div className="command-home-root flex min-h-0 flex-1 flex-col">
     <RuntimeNotice workbench={workbench}/>
-    {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[860px] flex-wrap gap-2 px-4 py-2 text-xs">{draft.recovery.slice(0,3).map(row=><button type="button" className="min-h-11 underline" key={row.key} onClick={()=>draft.restore(row)}>{row.draft.text.slice(0,60)||row.draft.attachments[0]?.name} ↩</button>)}<button type="button" className="min-h-11" aria-label="Dismiss recovered drafts" onClick={draft.dismissRecovery}>×</button></div>}
     <AgentStart value={text} onChange={setText} disabled={navigating} composer={
       <ChatInput variant="hero" inputRef={inputRef} value={text} onChange={setText} onSend={submit}
         sending={navigating} locked={!draft.ready||navigating||workbench.connection!=="online"} draftLocked={navigating} placeholder={t("placeholder")}
-        lockMessage={navigating ? (zh ? "正在打开会话…" : "Opening conversation…") : (zh ? "连接工作区后即可发送；可以先撰写草稿。" : "Send when the workspace connects. You can draft now.")}
+        lockMessage={navigating ? (i18nCopy(zh, "copy.components_home_CommandHome.001")) : (i18nCopy(zh, "copy.components_home_CommandHome.002"))}
         settings={settings} onSettingsChange={next=>{setSettings(next);draft.setSettings(next);}} modelOptions={modelOptions}
         attachments={attachments} onAttachmentsChange={setAttachments} />
     } />

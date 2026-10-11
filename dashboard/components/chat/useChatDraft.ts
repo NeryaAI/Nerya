@@ -42,7 +42,7 @@ export function useChatDraft(scope: string) {
         const restored = writeChatDraft(scope, own.draft, workspaceId);
         setSnapshot({ workspace: workspaceId, generation, scope, draft: restored });
       }
-      setRecovery(rows.filter(row => row.windowId !== draftWindowId()));
+      setRecovery(rows.filter(row => row.windowId !== draftWindowId() && hasChatDraft(row.draft)));
     }).catch(() => { if (!disposed) setStorageError(true); });
     return () => { disposed = true; };
   }, [scope, workspaceId, generation]);

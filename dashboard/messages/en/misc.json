@@ -1,5 +1,9 @@
 {
   "approvals": {
+    "dialogTitle": "Permission required",
+    "dialogDescription": "Review the exact tools and their arguments. Approve or deny this request; previous tool actions are not repeated.",
+    "dialogOneTime": "Applies to this pending request only.",
+    "dialogLater": "Review later",
     "needsPermission": "This tool call needs operator permission.",
     "approved": "Permission approved",
     "rejected": "Permission rejected",

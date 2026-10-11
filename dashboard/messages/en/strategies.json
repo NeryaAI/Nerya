@@ -555,5 +555,38 @@
     "rawShow": "Show",
     "rawHide": "Hide",
     "rawHint": "Hidden by default: expand when reproducing a bug."
+  },
+  "copy": {
+    "components_strategies_StrategyProposalApprovalCard": {
+      "001": "Script-gated Agent",
+      "002": "Event-driven Agent",
+      "003": "Script strategy",
+      "004": "Draft",
+      "005": "Awaiting review",
+      "006": "Awaiting review",
+      "007": "Approved",
+      "008": "Applied",
+      "009": "Rejected",
+      "010": "Rolled back",
+      "011": "Superseded",
+      "012": "Version applied; schedules need synchronization. Review the receipt below and retry sync only.",
+      "013": "Strategy candidate",
+      "014": "Structure validated",
+      "015": "Paper mode",
+      "016": "Schedule inactive",
+      "017": "Open in a detail tab",
+      "018": "Open strategy details in conversation",
+      "019": "Validate candidate"
+    },
+    "components_strategies_StrategyRunsCard": {
+      "001": "Executed package: ",
+      "002": "Open source task",
+      "003": "View strategy orders",
+      "004": "Orders submitted. Fill status depends on the order receipts."
+    },
+    "lib_strategyDetail": {
+      "001": "Strategy",
+      "002": "Backtest"
+    }
   }
 }

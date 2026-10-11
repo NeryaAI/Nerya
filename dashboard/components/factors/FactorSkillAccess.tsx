@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import { useEffect, useState } from "react";
 import { useLocale } from "next-intl";
 import { callApi } from "../../lib/clientApi";
@@ -20,7 +22,7 @@ export function FactorSkillAccess(){
   const skill=catalog?.skills.find(item=>item.id==="factor_library");
   if(skill?.enabled)return null;
   if(!catalog&&!error)return null;
-  return <div className={`${styles.source} mt-4`}><div><p className="text-sm">{zh?"因子挖掘 Skill":"Factor research Skill"}</p><p className={styles.muted}>{skill ? (zh?"当前工作区尚未启用新 Skill。启用后，Agent 可按统一流程提取、验证和复用因子。":"This workspace has not enabled the new Skill. Enable it for Agent-led extraction, validation and reuse.") : (zh?"运行中的后端尚未提供因子 Skill，请更新并重启 Nerya 服务。":"The runtime has not exposed the factor Skill. Update and restart Nerya.")}</p>{error&&<ErrorBanner error={error}/>}</div>
-    {skill&&!skill.enabled&&<button className="btn btn-secondary" disabled={busy} onClick={async()=>{setBusy(true);setError("");try{const latest=await load();const result=await callApi<{ok:boolean;error?:string}>("/skills/manage",{method:"POST",body:{action:"enable",skill_id:"factor_library",scope:"builtin",revision:latest.enabled_revision,summary:"Enable factor research from the factor library page"}});if(!result.ok)throw new Error(result.error||"Enable failed");await load();}catch(e){setError(String(e));}finally{setBusy(false);}}}>{busy?(zh?"启用中…":"Enabling…"):(zh?"启用因子 Skill":"Enable factor Skill")}</button>}
+  return <div className={`${styles.source} mt-4`}><div><p className="text-sm">{i18nCopy(zh, "copy.components_factors_FactorSkillAccess.001")}</p><p className={styles.muted}>{skill ? (i18nCopy(zh, "copy.components_factors_FactorSkillAccess.002")) : (i18nCopy(zh, "copy.components_factors_FactorSkillAccess.003"))}</p>{error&&<ErrorBanner error={error}/>}</div>
+    {skill&&!skill.enabled&&<button className="btn btn-secondary" disabled={busy} onClick={async()=>{setBusy(true);setError("");try{const latest=await load();const result=await callApi<{ok:boolean;error?:string}>("/skills/manage",{method:"POST",body:{action:"enable",skill_id:"factor_library",scope:"builtin",revision:latest.enabled_revision,summary:"Enable factor research from the factor library page"}});if(!result.ok)throw new Error(result.error||"Enable failed");await load();}catch(e){setError(String(e));}finally{setBusy(false);}}}>{busy?(i18nCopy(zh, "copy.components_factors_FactorSkillAccess.004")):(i18nCopy(zh, "copy.components_factors_FactorSkillAccess.005"))}</button>}
   </div>;
 }

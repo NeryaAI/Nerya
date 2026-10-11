@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 /**
- * lightweight-charts cannot read CSS variables, so chart axis/grid
+ * Canvas charts cannot read CSS variables, so chart axis/grid
  * colors must be passed as concrete values. This hook resolves the
  * palette for the active theme and re-renders when the <html> "light"
  * class toggles (see ThemeApplier), letting chart effects rebuild

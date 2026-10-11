@@ -82,6 +82,7 @@ import type {
   WorkspaceUiProposalResponse,
 } from "./workspaceUiTypes";
 import { authHeaders, handleAuthFailure } from "./auth";
+import { getWorkspaceIdentity, workspaceGeneration } from "./workspaceIdentity";
 
 const BASE = "/api/proxy";
 // Bumped from 1.5s -> 4s. Polled endpoints like
@@ -112,6 +113,7 @@ export function invalidateReadCache(): void {
 }
 
 const READONLY_POST_PATHS = new Set([
+  "/triggers/schedules/preview",
   "/accounts/list",
   "/control/reconciliation/reports",
   "/executors/list",
@@ -163,7 +165,9 @@ async function cachedRead<T>(
 
   const auth = authHeaders();
   const identity = auth.get("authorization") || auth.get("x-nerya-token") || "";
-  const key = `${identity}:${method}:${path}:${stableBody(body)}`;
+  const workspace = getWorkspaceIdentity();
+  const generation = workspaceGeneration();
+  const key = JSON.stringify([workspace, generation, identity, method, path, stableBody(body)]);
   const now = Date.now();
   const existing = readCache.get(key);
   if (existing?.promise) return existing.promise as Promise<T>;
@@ -173,7 +177,7 @@ async function cachedRead<T>(
   const promise = load()
     .then((value) => {
       // A slow pre-refresh request must not replace the fresh cache entry.
-      if (revision === readCacheRevision && readCache.get(key)?.promise === promise) {
+      if (generation === workspaceGeneration() && revision === readCacheRevision && readCache.get(key)?.promise === promise) {
         readCache.set(key, { expiresAt: Date.now() + READ_CACHE_TTL_MS, value, settled: true });
       }
       return value;
@@ -3600,9 +3604,11 @@ export const clientApi = {
       "/triggers/schedules/resume",
       { id },
     ),
-  scheduleRunNow: (id: string) =>
+  scheduleRunNow: (id: string,clientRequestId:string=crypto.randomUUID()) =>
     post<{
       ok: boolean;
+      run_id?: string;
+      session_id?: string;
       schedule_id?: string;
       fired?: boolean;
       event_id?: string;
@@ -3613,7 +3619,7 @@ export const clientApi = {
       error?: string;
     }>(
       "/triggers/schedules/run_now",
-      { id },
+      { id,client_request_id:clientRequestId },
     ),
   scheduleRemove: (id: string) =>
     post<{ ok: boolean }>("/triggers/schedules/remove", { id }),
@@ -4299,9 +4305,9 @@ export type TriggerSchedule = {
   source?: string;
   kind?: string;
   target?: string;
-  cron?: string;
+  cron?: string|null;
   interval?: string | number;
-  every_seconds?: number;
+  every_seconds?: number|null;
   starts_at?: string | null;
   ends_at?: string | null;
   payload?: Record<string, unknown>;
@@ -4319,6 +4325,7 @@ export type TriggerSchedule = {
   session_mode?: "ephemeral" | "reuse" | "fanout";
   session_id?: string | null;
   session_ids?: string[];
+  overlap_policy?:'skip'|'coalesce'|'queue';execution?:Record<string,unknown>;run_at?:string|null;anchor_at?:number;archived?:boolean;source_revision?:string;paused_reason?:string;
 };
 
 export type ClientApi = typeof clientApi;

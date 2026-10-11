@@ -1,8 +1,15 @@
 "use client";
-import {useLocale} from "next-intl";
-export type ScheduledReceipt={turn_id?:string;session_id?:string;execution_status?:string;delivery_status?:string;ttl_exceeded?:boolean;late_outcome?:boolean};
+import {useTranslations} from "next-intl";
+import {runLabel} from '../../lib/taskRuns';
+export type ScheduledReceipt={run_id?:string;turn_id?:string;session_id?:string;execution_status?:string;business_status?:string;delivery_status?:string;ttl_exceeded?:boolean;late_outcome?:boolean};
 export function ScheduledExecutionReceipt({receipt}:{receipt?:ScheduledReceipt|null}){
- const zh=useLocale().startsWith("zh");if(!receipt)return null;
- const labels:Record<string,string>={running:zh?"执行中":"Running",running_unconfirmed:zh?"执行仍未确认结束":"Execution end unconfirmed",completed:zh?"执行完成":"Execution completed",needs_approval:zh?"等待审批":"Awaiting approval",cancelled:zh?"已取消":"Cancelled",failed:zh?"执行失败":"Execution failed",returned:zh?"已返回，完成情况待核对":"Returned; completion needs review"};
- return <div className="mt-4 rounded border border-[color:var(--line)] p-3 text-sm" data-testid="scheduled-execution-receipt"><p>{labels[receipt.execution_status||""]||(zh?"状态未记录":"State not recorded")}</p><p className="mt-1 text-xs text-[color:var(--text-muted)]">{zh?"通知投递：":"Notification delivery: "}{receipt.delivery_status|| (zh?"未记录":"Not recorded")}</p>{receipt.ttl_exceeded&&<p className="mt-1 text-xs text-warn">{zh?"曾超过执行时限；超时本身不代表已停止。":"The execution deadline was exceeded; a timeout alone does not confirm a stop."}</p>}{receipt.late_outcome&&<p className="mt-1 text-xs">{zh?"已收到迟到的终态回执。":"A late terminal receipt was received."}</p>}{receipt.session_id&&<a className="mt-2 inline-flex min-h-11 items-center underline" href={"/chat/"+encodeURIComponent(receipt.session_id)+(receipt.turn_id?"#turn-"+encodeURIComponent(receipt.turn_id):"")}>{zh?"查看执行会话":"View execution conversation"}</a>}</div>;
+ const t=useTranslations("taskRuns");if(!receipt)return null;
+ return <div className="mt-4 rounded border border-[color:var(--line)] p-3 text-sm" data-testid="scheduled-execution-receipt">
+   <p>{runLabel(receipt.execution_status||'not_started',t)}</p>
+   {receipt.business_status&&<p className="mt-1 text-xs">{runLabel(receipt.business_status,t)}</p>}
+   <p className="mt-1 text-xs text-[color:var(--text-muted)]">{t("notificationDelivery",{status:runLabel('delivery:'+(receipt.delivery_status||'not_recorded'),t)})}</p>
+   {receipt.ttl_exceeded&&<p className="mt-1 text-xs text-warn">{t("deadlineExceeded")}</p>}
+   {receipt.late_outcome&&<p className="mt-1 text-xs">{t("lateReceipt")}</p>}
+   {receipt.session_id&&<a className="mt-2 inline-flex min-h-11 items-center underline" href={"/chat/"+encodeURIComponent(receipt.session_id)+(receipt.run_id?'?run='+encodeURIComponent(receipt.run_id):receipt.turn_id?"#turn-"+encodeURIComponent(receipt.turn_id):"")}>{t("viewConversation")}</a>}
+ </div>;
 }

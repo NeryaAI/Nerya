@@ -83,6 +83,7 @@ export async function parityFixture(page:Page,options:{language?:string;theme?:s
     else if(path === "/llm/providers")body={providers:[]};
     else if(path === "/llm/catalog")body={providers:[],reasoning_levels:[]};
     else if(path === "/agent/sessions")body={sessions,has_more:false};
+    else if(path === "/agent/runs")body={ok:true,runs:[],next_cursor:null};
     else if(path === "/agent/session")body={...sessions[0],session_id:url.searchParams.get("session_id")};
     else if(path === "/agent/session/transcript")body={ok:true,...sessions[0],session_id:url.searchParams.get("session_id"),messages:history,count:history.length};
     else if(path === "/agent/open_turns")body={open_turns:[]};

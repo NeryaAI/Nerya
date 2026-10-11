@@ -1,5 +1,7 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
+
 import {useCallback,useEffect,useMemo,useRef,useState,type RefObject} from "react";
 import {createPortal} from "react-dom";
 import {useLocale} from "next-intl";
@@ -48,17 +50,17 @@ export function ConversationFind({entries,scrollRef,onReveal,onCancelReveal,hasM
   };
   const host=scrollRef.current?.parentElement;
   if(!open||!host)return null;
-  return createPortal(<section className={styles.find} role="dialog" aria-modal="false" aria-label={zh?"在会话中查找":"Find in conversation"} data-testid="conversation-find">
+  return createPortal(<section className={styles.find} role="dialog" aria-modal="false" aria-label={i18nCopy(zh, "copy.components_chat_ConversationFind.001")} data-testid="conversation-find">
     <div className={styles.findRow}>
-      <SearchIcon size={15}/><input ref={input} autoFocus type="search" aria-label={zh?"在会话中查找":"Find in conversation"} placeholder={zh?"在会话中查找":"Find in conversation"} value={query}
+      <SearchIcon size={15}/><input ref={input} autoFocus type="search" aria-label={i18nCopy(zh, "copy.components_chat_ConversationFind.002")} placeholder={i18nCopy(zh, "copy.components_chat_ConversationFind.003")} value={query}
         onChange={event=>{cancel();setQuery(event.target.value);setIndex(-1);}}
         onKeyDown={event=>{if(event.nativeEvent.isComposing)return;if(event.key==="Enter"){event.preventDefault();if(event.shiftKey)move(-1);else move(1);}}}/>
       <span className={styles.findCount} aria-live="polite">{hits.length&&index>=0?Math.min(index+1,hits.length):0}/{hits.length}</span>
-      <button type="button" disabled={!hits.length} onClick={()=>move(-1)} aria-label={zh?"上一处":"Previous match"} title={zh?"上一处 · Shift Enter":"Previous · Shift Enter"}><Icon name="arrowDown" className="rotate-180" size={14}/></button>
-      <button type="button" disabled={!hits.length} onClick={()=>move(1)} aria-label={zh?"下一处":"Next match"} title={zh?"下一处 · Enter":"Next · Enter"}><Icon name="arrowDown" size={14}/></button>
-      <button type="button" onClick={close} aria-label={zh?"关闭查找":"Close find"} title="Esc"><XIcon size={15}/></button>
+      <button type="button" disabled={!hits.length} onClick={()=>move(-1)} aria-label={i18nCopy(zh, "copy.components_chat_ConversationFind.004")} title={i18nCopy(zh, "copy.components_chat_ConversationFind.005")}><Icon name="arrowDown" className="rotate-180" size={14}/></button>
+      <button type="button" disabled={!hits.length} onClick={()=>move(1)} aria-label={i18nCopy(zh, "copy.components_chat_ConversationFind.006")} title={i18nCopy(zh, "copy.components_chat_ConversationFind.007")}><Icon name="arrowDown" size={14}/></button>
+      <button type="button" onClick={close} aria-label={i18nCopy(zh, "copy.components_chat_ConversationFind.008")} title="Esc"><XIcon size={15}/></button>
     </div>
-    {(locating||missed)&&<p className={styles.findFooter} role="status">{locating?(zh?"正在定位…":"Locating match…"):(zh?"未能定位正文中的这一处命中。记录已显示。":"Could not locate this occurrence in rendered text. The entry is shown.")}</p>}
-    {query&&hasMore&&<div className={styles.findFooter}><span>{zh?"仅查找已加载记录":"Searching loaded messages"}</span><button type="button" disabled={loadingOlder} onClick={onOlder}>{zh?"加载更早记录":"Load older history"}</button></div>}
+    {(locating||missed)&&<p className={styles.findFooter} role="status">{locating?(i18nCopy(zh, "copy.components_chat_ConversationFind.009")):(i18nCopy(zh, "copy.components_chat_ConversationFind.010"))}</p>}
+    {query&&hasMore&&<div className={styles.findFooter}><span>{i18nCopy(zh, "copy.components_chat_ConversationFind.011")}</span><button type="button" disabled={loadingOlder} onClick={onOlder}>{i18nCopy(zh, "copy.components_chat_ConversationFind.012")}</button></div>}
   </section>,host);
 }
