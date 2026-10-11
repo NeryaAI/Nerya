@@ -3,7 +3,7 @@ import pytest
 from nerya.trading.position_book import PositionBook
 from nerya.trading.instruments import position_bucket
 from nerya.core.errors import TradingError
-from test_trading_kernel_safety import cfg
+from test_trading_kernel_safety import cfg as cfg
 
 pytestmark = pytest.mark.smoke
 

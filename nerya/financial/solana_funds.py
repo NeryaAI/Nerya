@@ -45,7 +45,7 @@ def associated_address(owner,mint):
 
 
 def message(payer,blockhash,instructions):
-    flags={payer:True};readonly=[]
+    flags={payer:True}
     for instruction in instructions:
         for key,writable in instruction["accounts"]:
             if key==payer:continue

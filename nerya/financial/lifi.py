@@ -1,12 +1,11 @@
 """LI.FI quote → decoded immutable plan → owned signer → two-chain receipts."""
 from __future__ import annotations
 from decimal import Decimal
-import copy
 import time
 from urllib.parse import urlencode
 
 from .contracts import FinancialError,amount,digest
-from .adapters import EvmFunds,owned_wallet,validate_evm_address,units
+from .adapters import EvmFunds,validate_evm_address,units
 
 BRIDGE_DATA="(bytes32,string,string,address,address,address,uint256,uint256,bool,bool)"
 SWAP_DATA="(address,address,address,address,uint256,bytes,bool)[]"

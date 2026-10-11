@@ -9,7 +9,7 @@ import time
 import uuid
 
 from .contracts import FinancialError, amount, digest, normalize_policy, action_fingerprint, ALLOWANCE_ACTIONS
-from ..core.redaction import redact_display_dict,redact_public_record
+from ..core.redaction import redact_public_record
 from ..db.sqlite import connect
 
 
@@ -297,7 +297,7 @@ class FinancialStore:
                               'financial_sender':sender if request.get('wallet_id') else None,'chain':request.get('chain')}
             strategy_id=context.task_id or "manual_funds"
             if candidate:
-                from ..trading.capital import check_owned_exit,CapitalReservation,_row_to_reservation
+                from ..trading.capital import check_owned_exit,_row_to_reservation
                 from ..trading.instruments import position_bucket
                 from ..core.errors import TradingError
                 bucket=position_bucket(candidate.get("meta"));strategy_id=candidate["strategy_id"]

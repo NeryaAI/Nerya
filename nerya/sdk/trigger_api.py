@@ -360,7 +360,6 @@ class TriggerAPI:
             row["latest_execution"] = latest_receipts.get(entry.id)
             if entry.session_kind in {'agent','script'}:
                 from ..agent.task_runs import task_runs
-                from .task_execution import schedule_spec
                 run_store=task_runs(self.config)
                 latest=run_store.list(task_kind="scheduled_agent",task_id=entry.id,limit=1)["runs"]
                 if latest:row["latest_execution"]=latest[0]
@@ -395,8 +394,6 @@ class TriggerAPI:
         out = {
             "id": entry.id,
             "kind": entry.kind,
-            "execution": dict(entry.execution),
-            "owner_actor_id": entry.owner_actor_id,
             "every_seconds": entry.every_seconds,
             "cron": entry.cron,
             "starts_at": entry.starts_at,

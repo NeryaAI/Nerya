@@ -16,7 +16,6 @@ from nerya.connectors.solana_native import SolanaNative,_pubkey_from_signer,_rea
 from nerya.financial.adapters import EvmFunds,CexFunds
 from nerya.financial.solana_funds import SolanaFunds,message
 from nerya.financial.credit import verify_credit
-from nerya.financial.contracts import FinancialError
 
 pytestmark=pytest.mark.smoke
 KEY='0x'+'07'*32  # Published deterministic test vector, never a configured key.

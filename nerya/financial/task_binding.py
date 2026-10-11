@@ -5,7 +5,6 @@ from .contracts import FinancialError,security_revision
 
 def strategy_security_revision(config,sid):
     from ..strategies.workflow_service import source_files
-    from ..core import yaml_io
     files,source=source_files(config.paths,sid)
     values={}
     for name,text in files.items():

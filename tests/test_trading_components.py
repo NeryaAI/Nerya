@@ -1,6 +1,5 @@
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -28,6 +27,7 @@ def plugin(root, version="1", *, timeout=False, action="wallet_transfer"):
     directory = root / "plugins" / "venue"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "codec.py").write_text("VERSION = " + repr(version) + "\n")
+    execute_result = 'raise TimeoutError()' if timeout else 'return {"state": "confirmed", "version": VERSION}'
     (directory / "trading.py").write_text(f'''
 import time
 from .codec import VERSION
@@ -40,7 +40,7 @@ class Adapter:
     def validate(self, request, quote): pass
     def execute(self, request, quote, submitted):
         submitted({{"transaction_hash": "0x" + "a" * 64}})
-        {"raise TimeoutError()" if timeout else "return {\"state\": \"confirmed\", \"version\": VERSION}"}
+        {execute_result}
     def status(self, request, quote, submission):
         return {{"state": "confirmed", "version": VERSION, "observed": True}}
 TRADING_COMPONENTS = (TradingComponentSpec("funds", VERSION, ({action!r},), ("transfer",), lambda c, r: Adapter()),)

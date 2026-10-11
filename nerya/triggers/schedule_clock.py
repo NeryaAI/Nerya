@@ -1,5 +1,5 @@
 """Calendar occurrences: stable identity, explicit timezone and bounded catch-up."""
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import math
 

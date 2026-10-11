@@ -1,12 +1,11 @@
 from types import SimpleNamespace
-from copy import deepcopy
 
 import pytest
 from eth_utils import keccak
 
 from nerya.connectors.chains import ChainRegistry
 from nerya.core.errors import TradingError
-from test_trading_kernel_safety import cfg
+from test_trading_kernel_safety import cfg as cfg
 
 pytestmark = pytest.mark.smoke
 

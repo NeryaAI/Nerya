@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import copy
-import threading
 import time
 from dataclasses import asdict
-from types import SimpleNamespace
 
 from ..agent.command_store import CommandError
-from ..agent.task_runs import TaskSpec, TaskRuns, revision, task_runs
+from ..agent.task_runs import TaskSpec, revision, task_runs
 from ..core.config import Config
 from ..db.sqlite import connect
 
@@ -130,7 +128,6 @@ def current_task_policy(config):
 
 
 def execute_task_run(config,request):
-    import json
     rid=request["_task_run_id"]
     runs=task_runs(config)
     run=runs.get(rid)

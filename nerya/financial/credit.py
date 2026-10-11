@@ -1,6 +1,6 @@
 """Transaction-specific destination credit. Never infer credit from prose."""
 from .contracts import FinancialError
-from .adapters import units,validate_evm_address
+from .adapters import validate_evm_address
 
 
 def verify_credit(settings,*,receiver,transaction_hash,minimum_base,transport=None):

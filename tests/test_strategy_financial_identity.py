@@ -7,7 +7,7 @@ from nerya.core import yaml_io
 from nerya.financial.contracts import FinancialError, context_from_config
 from nerya.financial.strategy_runtime import bind_run, finish_run, validate_context
 from nerya.sdk.financial_api import FinancialAPI
-from test_trading_kernel_safety import cfg
+from test_trading_kernel_safety import cfg as cfg
 
 pytestmark = pytest.mark.smoke
 

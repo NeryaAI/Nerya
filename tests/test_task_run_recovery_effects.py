@@ -1,11 +1,10 @@
 import json
 import time
-from types import SimpleNamespace
 
 import pytest
 
 from test_task_run_admission import runs,admit,spec
-from nerya.sdk.run_effects import enqueue_delivery,delivery_tick,financial_tick
+from nerya.sdk.run_effects import enqueue_delivery,delivery_tick
 from nerya.sdk.run_migration import import_legacy_runs
 from nerya.agent.command_runtime import runtime
 from nerya.agent.task_runs import TaskRuns
@@ -106,7 +105,7 @@ def test_failed_task_releases_system_hold_until_third_failure_pauses_plan(tmp_pa
     store=TaskRuns(runtime(runs(tmp_path).config));entry=ScheduleEntry(id='daily',kind='agent.task',session_kind='agent',every_seconds=60,payload={'prompt':'Read data'})
     save_schedules(store.config.paths,[entry]);task=schedule_spec(store.config,entry)
     for index in range(3):
-        receipt=store.admit(task,actor='operator',trigger={},trigger_id=str(index),start=False)
+        store.admit(task,actor='operator',trigger={},trigger_id=str(index),start=False)
         row=store.store.claim(task.session_id,'worker');assert row
         store.store.finish(row['command_id'],task.session_id,'worker','failed',{'ok':False})
         complete_task_run(store.config,row['command_id'],{'ok':False},'failed')
@@ -131,7 +130,7 @@ def test_continuation_cannot_reset_run_budget(tmp_path):
     from dataclasses import replace
     from nerya.sdk.task_execution import scoped_task_config
     store=runs(tmp_path);task=replace(spec(),request={'payload':{'text':'Work with a bounded budget'},'max_wall_seconds':10,'max_iterations':3,'max_total_tool_calls':4})
-    first=store.admit(task,actor='operator',trigger={},trigger_id='bounded',start=False)
+    store.admit(task,actor='operator',trigger={},trigger_id='bounded',start=False)
     command=store.store.claim(task.session_id,'worker')
     store.store.finish(command['command_id'],task.session_id,'worker','succeeded',{'stopped_reason':'completed','execution_elapsed_ms':4000,'iterations':1,'tool_trace':[{}]})
     follow=store.manager.submit({'command_id':'bounded-follow','session_id':task.session_id,'_auth_actor_id':'operator',
