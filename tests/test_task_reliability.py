@@ -1,10 +1,8 @@
 """Regression cases from the 18780 multi-agent interruption incident. Offline only."""
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
-import json
 import sqlite3
 import ssl
-import time
 
 import pytest
 
