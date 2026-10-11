@@ -47,6 +47,7 @@ def business_result(result: dict) -> dict:
                 effects.append(redact_display_dict(output))
     states = {row.get("status", row.get("state")) for row in effects}
     status = ("unconfirmed" if "unconfirmed" in states else "submitted" if states & {"submitted", "pending"}
+              else "partial" if states & {"filled", "confirmed"} and states & {"failed", "rejected"}
               else "confirmed" if states & {"filled", "confirmed"} else "failed" if states & {"failed", "rejected"}
               else "no_action" if result.get("no_action") else "reported")
     return {"status": status, "effects": effects, "final_text": result.get("final_text", "")}
@@ -203,9 +204,12 @@ class TaskRuns:
                 observed=[{"action_id":r["action_id"],"kind":r["kind"],"state":r["state"],"request":json.loads(r['request_json']),"submission":json.loads(r["submission_json"]),"receipt":json.loads(r["receipt_json"])} for r in effects]
                 states={r["state"] for r in effects}
                 status="unconfirmed" if "unconfirmed" in states else "needs_recovery" if "needs_recovery" in states else "submitted" if states & {"reserved","submitting","submitted","confirming"} else "confirmed" if states=={"confirmed"} else "awaiting_approval" if "awaiting_approval" in states else "reported"
-                if states & {'failed_before_submission','rejected'}:status='partial' if 'confirmed' in states else 'failed'
-                if any(effect['receipt'].get('partial') for effect in observed):status='partial'
-                if 'awaiting_prerequisite' in states:status='needs_recovery'
+                # Pending/ambiguous submissions outrank a sibling's terminal
+                # failure. They still need reconciliation, not another run.
+                if status not in {'unconfirmed','needs_recovery','submitted'}:
+                    if states & {'failed_before_submission','rejected'}:status='partial' if 'confirmed' in states else 'failed'
+                    if any(effect['receipt'].get('partial') for effect in observed):status='partial'
+                if 'awaiting_prerequisite' in states and status != 'unconfirmed':status='needs_recovery'
                 data["result"].update(effects=observed,status=status)
                 data["updated_at"]=max(data["updated_at"],max(r["updated_at"] for r in effects))
             data["error"] = json.loads(command["error_json"] or "null")

@@ -21,7 +21,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    branches: [main, master]
+    # Stacked PRs need the same checks before their base becomes main.
 
 permissions:
   contents: read
@@ -88,9 +88,9 @@ jobs:
       - name: Translation contracts
         run: npm run check:i18n --workspace @nerya/dashboard
 
-      - name: Chat cache and workspace recovery regressions
+      - name: Dashboard unit regressions
         working-directory: dashboard
-        run: node --test tests/workspace-history-cache.test.cjs tests/workspace-drafts.test.cjs tests/external-native.test.cjs
+        run: node --test tests/*.test.cjs
 
       - name: Lint
         run: npm run lint --workspace @nerya/dashboard

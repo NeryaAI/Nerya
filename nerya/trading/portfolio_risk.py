@@ -45,6 +45,15 @@ def reduces_risk(before: RiskMetrics, after: RiskMetrics) -> bool:
     if after.debt_usd and (after.health_factor is None or before.health_factor is None
                           or after.health_factor < before.health_factor):
         return False
+    if after.initial_margin_usd or after.maintenance_margin_usd:
+        # Less notional does not prove safer collateralization. A withdrawal
+        # can reduce exposure while raising margin utilization/liquidation risk.
+        if before.equity_usd <= 0 or after.equity_usd <= 0:
+            return False
+        if after.initial_margin_usd * before.equity_usd > before.initial_margin_usd * after.equity_usd:
+            return False
+        if after.equity_usd - after.maintenance_margin_usd < before.equity_usd - before.maintenance_margin_usd:
+            return False
     return all(new <= old for old, new in pairs) and any(new < old for old, new in pairs)
 
 

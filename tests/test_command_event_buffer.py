@@ -32,10 +32,12 @@ def test_token_storm_is_batched_but_replay_text_and_receipts_remain_exact(tmp_pa
             event["stream_id"] = "t:1:2"
         original.append(event)
         stream.append(event)
+    # Non-delta receipts are durable immediately and never merged.
     stream.append({"event_id": "tool-start", "kind": "tool.start", "action": "read_status"})
     stream.append({"event_id": "tool-done", "kind": "tool.complete", "action": "read_status", "ok": True})
     stream.close()
     stream.close()
+
     records = []
     cursor = 0
     while True:
@@ -46,9 +48,9 @@ def test_token_storm_is_batched_but_replay_text_and_receipts_remain_exact(tmp_pa
             break
     deltas = [item for item in records if item["kind"] == "turn.step"]
     assert "".join(event["step"]["detail"]["text"] for event in deltas) == "字" * 12000
-    assert len(deltas) < 100
+    assert len(deltas) < 100, "the 12k fragments must not become 12k write transactions"
     assert [item["event_id"] for item in records[-2:]] == ["tool-start", "tool-done"]
-    assert original[0]["step"]["detail"]["text"] == "字"
+    assert original[0]["step"]["detail"]["text"] == "字", "bus event must not be mutated"
 
 
 def test_live_text_and_interleaved_receipts_preserve_stream_boundaries(tmp_path):

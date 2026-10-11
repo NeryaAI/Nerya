@@ -335,9 +335,15 @@ class FinancialStore:
             if not row:raise FinancialError("financial_action_not_found",404)
             if expected_state and row["state"]!=expected_state:return False
             if row["state"]=="confirmed" and state!="confirmed":return False
+            submitted = submission or json.loads(row["submission_json"] or "{}")
+            if state == "failed_before_submission" and submitted:
+                # A provider's late error cannot erase a recorded transaction
+                # or release its capital/quota for a duplicate submission.
+                state = "unconfirmed"
+                error_code = "financial_submission_state_conflict"
             con.execute("""UPDATE financial_actions SET state=?,submission_json=?,receipt_json=?,error_code=?,
                 revision=revision+1,updated_at=? WHERE action_id=?""",
-                (state,encode(redact_public_record(submission,identity_fields=self.PUBLIC_IDENTITIES)) if submission is not None else row["submission_json"],
+                (state,encode(redact_public_record(submission,identity_fields=self.PUBLIC_IDENTITIES)) if submission else row["submission_json"],
                  encode(redact_public_record(receipt,identity_fields=self.PUBLIC_IDENTITIES)) if receipt is not None else row["receipt_json"],error_code,time.time(),aid))
             if state in {"confirmed","failed_before_submission","rejected"}:
                 target="consumed" if state=="confirmed" else "released"
