@@ -13,6 +13,7 @@ import pytest
 
 from nerya.agent.loop import LoopConfig, WorkspaceNativeAgentLoop
 from nerya.core.config import Config, DEFAULT_CONFIG
+from nerya.core.errors import LLMError
 from nerya.core.paths import WorkspacePaths
 from nerya.core.sandbox import sandbox_exec
 from nerya.harness.cancellation import CancelToken, CancelledError
@@ -203,8 +204,13 @@ def call(gw, **kwargs):
 def test_gateway_does_not_fallback_after_submitted_stream(tmp_path, monkeypatch):
     first = StreamTransport([delta(content='partial'), tool_chunks()[0]], fail=True)
     backup = StreamTransport([delta(content='backup'), finish()])
-    with pytest.raises(OSError):
+    # Transport failures are now normalized to actionable LLMError metadata.
+    # A partial model output still forbids fallback to another provider.
+    with pytest.raises(LLMError) as caught:
         call(gateway(tmp_path, monkeypatch, [first, backup]))
+    assert caught.value.stream_interrupted is True
+    assert caught.value.stream_output_committed is True
+    assert caught.value.retryable is False
     assert len(first.calls) == 1 and backup.calls == []
 
 def test_gateway_can_fallback_after_explicit_pre_stream_rejection(tmp_path, monkeypatch):

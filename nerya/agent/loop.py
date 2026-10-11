@@ -543,15 +543,26 @@ def _build_deterministic_final_summary(
     error_count: int,
     had_model_text: bool,
     evidence_snippets: list[str] | None = None,
+    abort_reason: str = "",
+    failure_detail: str = "",
 ) -> str:
     detail = f"I ran {iterations} step(s) and {tool_calls} tool call(s)"
     if error_count:
         detail += f", {error_count} of which hit an error"
     detail += "."
     lines = [
-        "I couldn't put together a clear final answer on this turn.",
+        "This task did not complete. " + {
+            "stream_interrupted": "The model response stream was interrupted; partial output is not a completed result.",
+            "cancelled:command_control_unavailable": "The task-control database was unavailable; this was not an operator stop.",
+            "cancelled:event_persistence_failed": "Execution events could not be saved reliably; work was stopped to protect its audit trail.",
+            "cancelled:command_lease_lost": "The execution lease was lost; the outcome must be checked before continuing.",
+            "cancelled:operator_cancel": "The operator requested a stop.",
+            "timeout": "The model request or task reached its time limit.",
+        }.get(abort_reason, f"Execution stopped ({abort_reason or 'incomplete_response'})."),
         detail,
     ]
+    if failure_detail:
+        lines.append("Connection detail: " + redact_text(failure_detail)[:240])
     if had_model_text:
         lines.append("I'd started writing one but didn't reach a reliable result.")
     else:
@@ -559,8 +570,8 @@ def _build_deterministic_final_summary(
     for snippet in evidence_snippets or []:
         lines.append(f"- found: {snippet}")
     lines.append(
-        "Ask me to continue and I'll pull the finished results together, "
-        "or narrow the request and I'll try again."
+        "Completed evidence is retained. Previously executed tools were not automatically replayed. "
+        "Check saved outputs and any submitted actions before starting another run."
     )
     return "\n".join(lines)
 
@@ -1708,6 +1719,7 @@ class WorkspaceNativeAgentLoop:
         transition_reason = state.transition_reason
         final_text = state.final_text
         aborted_reason = state.aborted_reason
+        stream_failure_detail = ""
         completed_tool_results = state.completed_tool_results
         attempted_tool_names = state.attempted_tool_names
         successful_tool_names = state.successful_tool_names
@@ -2195,16 +2207,20 @@ class WorkspaceNativeAgentLoop:
                         aborted_reason = stop_reason = transition_reason = "timeout"
                         break
                     if getattr(exc, "stream_interrupted", False):
-                        # The request may already have performed upstream
-                        # work. Preserve partial text but never replay it or
-                        # execute a tool assembled from an incomplete stream.
-                        aborted_reason = transition_reason = "stream_interrupted"
-                        final_text = "".join(streamed_text)
-                        response = MessagesResponse(content=[], stop_reason="stream_interrupted")
-                        emit("assistant", {"kind": "model_transport", "stream_id": stream_id,
-                                           "stream_mode": "stream", "status": "interrupted",
-                                           "retryable": False})
-                        break
+                        if not getattr(exc, "stream_output_committed", True):
+                            if not _is_transient_llm_error(exc):
+                                raise
+                            # Fall through to the existing turn-owned retry
+                            # budget; the preceding tool batch is not replayed.
+                        else:
+                            stream_failure_detail = str(exc)
+                            aborted_reason = transition_reason = "stream_interrupted"
+                            final_text = "".join(streamed_text)
+                            response = MessagesResponse(content=[], stop_reason="stream_interrupted")
+                            emit("assistant", {"kind": "model_transport", "stream_id": stream_id,
+                                               "stream_mode": "stream", "status": "interrupted",
+                                               "retryable": False})
+                            break
                     if total_tool_calls == 0 and _is_llm_safety_rejection(exc):
                         final_text = _build_llm_initial_safety_rejection_text(
                             original_user_text=original_user_text,
@@ -2666,6 +2682,8 @@ class WorkspaceNativeAgentLoop:
                         and attempt_budget.claim("transient_retry")
                     )
                     if not retry_budget_available:
+                        if getattr(exc,"stream_interrupted",False):
+                            setattr(exc,"retry_exhausted","attempt_limit" if llm_attempt >= llm_max else "turn_budget")
                         if _is_rate_limit_error(exc):
                             setattr(exc, "retry_exhausted", "attempt_budget")
                             raise
@@ -3751,6 +3769,8 @@ class WorkspaceNativeAgentLoop:
                 error_count=error_count,
                 had_model_text=bool(existing_text),
                 evidence_snippets=_collect_abort_evidence_snippets(transcript),
+                abort_reason=aborted_reason,
+                failure_detail=stream_failure_detail,
             )
             final_text = (
                 f"{existing_text}\n\n{summary}"
