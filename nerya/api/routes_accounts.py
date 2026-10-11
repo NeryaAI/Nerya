@@ -381,7 +381,7 @@ def _vaultify_plaintext_credentials(
     field_scopes: dict[str, str] = {}
     if venue:
         try:
-            spec = get_registry().find(venue)
+            spec = get_registry(client.config.paths.root).find(venue)
         except Exception:
             spec = None
         if spec is not None:

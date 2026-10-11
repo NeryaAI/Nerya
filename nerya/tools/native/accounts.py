@@ -104,18 +104,18 @@ def _journal(paths: Any, event: dict[str, Any]) -> None:
         return None
 
 
-def _normalize_venue(raw: str) -> tuple[str, dict[str, Any]]:
+def _normalize_venue(raw: str,*,workspace=None) -> tuple[str, dict[str, Any]]:
     venue = (raw or "").strip().lower()
     provider_config: dict[str, Any] = {}
     if venue.startswith("ccxt:"):
         ccxt_id = venue.split(":", 1)[1].strip()
         if ccxt_id:
             provider_config["ccxt_id"] = ccxt_id
-            direct = get_registry().find(ccxt_id)
+            direct = get_registry(workspace).find(ccxt_id)
             if direct is not None:
                 return direct.id, provider_config
         return "ccxt", provider_config
-    spec = get_registry().find(venue)
+    spec = get_registry(workspace).find(venue)
     if spec is not None:
         return spec.id, provider_config
     return venue, provider_config
@@ -197,10 +197,10 @@ def account_upsert_handler(
                 "account_upsert only applies non-live paper accounts; use the "
                 "dashboard intake/proposal flow for live, shadow, or canary accounts"
             )
-        venue, provider_config = _normalize_venue(str(args.get("venue") or ""))
+        venue, provider_config = _normalize_venue(str(args.get("venue") or ""),workspace=config_like.paths.root)
         if not venue:
             raise TradingError("venue is required")
-        if get_registry().find(venue) is None:
+        if get_registry(config_like.paths.root).find(venue) is None:
             raise TradingError(f"unknown venue/provider: {venue}")
         provided_config = args.get("provider_config")
         if isinstance(provided_config, dict):

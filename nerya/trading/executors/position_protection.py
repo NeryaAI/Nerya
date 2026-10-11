@@ -108,7 +108,7 @@ class PositionProtectionExecutor(Executor):
 
         book = PositionBook(self.paths)
         position = book.get_by_id(self.run.position_id or "")
-        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market, position_side=(book.get_by_id(rule.position_id).position_side if book.get_by_id(rule.position_id) else "net"))
         if (position is None or not position.is_open or share is None
                 or not share.is_open or share.position_id != position.position_id
                 or share.side != rule.side):
@@ -118,7 +118,7 @@ class PositionProtectionExecutor(Executor):
                 return False
             # A cancellation can discover a final entry fill after a native
             # stop flattened the prior share. Re-read on the next tick.
-            remaining = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+            remaining = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market, position_side=(book.get_by_id(rule.position_id).position_side if book.get_by_id(rule.position_id) else "net"))
             if rule.native.get("exit_trigger") and remaining is not None and remaining.is_open:
                 if remaining.side != rule.side:
                     store.set_status(rule.protection_id, "failed")
@@ -200,7 +200,7 @@ class PositionProtectionExecutor(Executor):
             return False
         # Cancellation may have observed additional fills. Exit the current
         # strategy share, not the stale size from the start of this tick.
-        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market, position_side=(book.get_by_id(rule.position_id).position_side if book.get_by_id(rule.position_id) else "net"))
         if share is None or not share.is_open or share.side != rule.side:
             store.set_status(rule.protection_id, "released")
             self.transition("done", close_type="filled")
@@ -208,7 +208,7 @@ class PositionProtectionExecutor(Executor):
         if not self._sync_native(rule, share, cancel=True):
             self.store_result({"reason": "awaiting_native_protection_cancellation"})
             return False
-        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market, position_side=(book.get_by_id(rule.position_id).position_side if book.get_by_id(rule.position_id) else "net"))
         if share is None or not share.is_open:
             store.set_status(rule.protection_id, "triggered", triggered_kind=trigger.kind)
             self.transition("done", close_type=_trigger_to_close_type(trigger.kind))
@@ -244,6 +244,7 @@ class PositionProtectionExecutor(Executor):
             size_base=close_size,
             notional_usd=close_size * current_price,
             reduce_only=True,
+            meta={"position_side": position.position_side, "mark_price": current_price, "max_slippage_bps": 25},
         )
         try:
             runtime_config = load_config(self.paths.root)
@@ -386,7 +387,7 @@ class PositionProtectionExecutor(Executor):
         })
 
         book = PositionBook(self.paths)
-        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market, position_side=(book.get_by_id(rule.position_id).position_side if book.get_by_id(rule.position_id) else "net"))
         remaining = abs(share.size_share_base) if share is not None and share.is_open else 0.0
 
         # Drop the executed level from the rule so ``evaluate`` cannot
@@ -492,6 +493,8 @@ class PositionProtectionExecutor(Executor):
                 live=profile.is_real_money
             )
             conn = registry.get(profile.id, legacy_account.connector_cfg())
+            if getattr(conn, "kind", "") == "prediction_market":
+                return float(conn.get_ticker(rule.market).bid or 0.0)
             return float(conn.get_mark_price(rule.market) or 0.0)
         except Exception:
             return 0.0

@@ -151,7 +151,9 @@ standard OHLCV engine.
 
 - `PASS`: drawdown stays within policy, missed profit is controlled, and upside
   capture is acceptable.
-- `WARN`: one gate is weak but return beats benchmark.
-- `FAIL`: negative return or risk breach.
+- `WARN`: one or more economic gates are weak, including when strategy return
+  trails buy-and-hold. Benchmark underperformance alone is not a backtest or
+  strategy failure.
+- `FAIL`: negative return or an explicit risk breach.
 
 Live promotion should not proceed automatically on `WARN` or `FAIL`.

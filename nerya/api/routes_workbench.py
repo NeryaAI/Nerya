@@ -15,7 +15,7 @@ _STARTED, _BUILD = STARTED_AT, BUILD_ID
 def runtime_info(client, _query):
     return {"ok": True, "protocol_version": 1, "build_id": _BUILD, "sdk_build_id": SDK_BUILD_ID, "started_at": _STARTED,
             "workspace_id": hashlib.sha256(str(client.config.paths.root.resolve()).encode()).hexdigest()[:24],
-            "capabilities": ["conversation_commands", "session_view", "evidence_delivery", "user_interactions", "plan_mode", "goal_mode"]}
+            "capabilities": ["conversation_commands", "session_view", "evidence_delivery", "user_interactions", "plan_mode", "goal_mode",'task_runs','finite_funds_authorization','funds_receipt_reconciliation']}
 
 
 def view(client, query):

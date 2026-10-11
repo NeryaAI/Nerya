@@ -437,7 +437,7 @@ def routes():
                 "total_return_pct": metrics.get("total_return_pct"),
                 "max_dd_pct": metrics.get("max_drawdown_pct"),
                 "sharpe_ratio": metrics.get("sharpe_ratio"),
-                "verdict": metrics.get("verdict"),
+                "verdict": _effective_backtest_verdict(metrics),
                 "start_utc": metrics.get("start_utc"),
                 "end_utc": metrics.get("end_utc"),
             })
@@ -459,7 +459,16 @@ def routes():
             from ..skills.builtin.backtest.scripts.chart_artifacts import hydrate_market_details
             chart = hydrate_market_details(chart, run_dir)
             metrics = _load_json(run_dir / "metrics.json")
-            chart = {**chart, "meta": {**chart.get("meta", {}),
+            display_verdict = _effective_backtest_verdict(metrics)
+            summary_cards = [
+                {**card, "value": display_verdict}
+                if str(card.get("label") or "").strip().lower() == "verdict"
+                else card
+                for card in chart.get("summary_cards", [])
+                if isinstance(card, dict)
+            ]
+            chart = {**chart, "summary_cards": summary_cards, "meta": {**chart.get("meta", {}),
+                "verdict": display_verdict,
                 **{key: metrics[key] for key in ("engine_version", "replay", "flags", "execution_limits") if key in metrics}}}
             return {
                 "ok": True,
@@ -928,6 +937,26 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _effective_backtest_verdict(metrics: dict[str, Any]) -> str:
+    verdict = str(metrics.get("verdict") or "").strip().upper()
+    flags = {
+        str(flag)
+        for flag in metrics.get("flags", [])
+        if isinstance(flag, str)
+    }
+    hard_failure = (
+        "negative_net_return" in flags
+        or "strategy_returned_errors" in flags
+        or "sdk_order_errors" in flags
+        or "order_accounting_mismatch" in flags
+        or "observation_order_attempt" in flags
+        or any(flag.startswith("risk_breach:") for flag in flags)
+    )
+    if verdict == "FAIL" and "benchmark_capture_below_threshold" in flags and not hard_failure:
+        return "WARN"
+    return verdict
 
 
 __all__ = ["routes"]

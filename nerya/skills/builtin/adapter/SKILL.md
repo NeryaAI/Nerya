@@ -12,6 +12,12 @@ portfolio UI, read [references/sdk-account-observations.md](references/sdk-accou
 Use sdk_account to prepare only the required components and collect validated
 observations; read-only account setup does not require financial execution readiness.
 
+Mainstream execution starts with financial_readiness: Jupiter v2 swaps,
+Uniswap v3/v4 and PancakeSwap v3 LP, Aave v3 and Polymarket CLOB/standard CTF.
+Load financial_ops/references/mainstream-defi.md through that Skill for the
+exact supported actions. Byreal remains an existing compatibility route, not
+the preferred integration target. Router aggregation does not add native LP.
+
 For the integration checklist, read [references/full-playbook.md](references/full-playbook.md).
 
 Start with connector_list/connector_describe for venues or wallet capability

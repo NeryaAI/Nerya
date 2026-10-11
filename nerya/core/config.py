@@ -352,6 +352,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+DEFAULT_CONFIG['financial']={
+    'enabled':False,'account_permissions':{},'wallet_permissions':{},'account_limits':{},
+    'confirmations':{},'lifi':{'allowed_bridges':[],'allowed_routers':{},'selectors':{}},
+}
+
+
 @dataclass
 class Config:
     paths: WorkspacePaths

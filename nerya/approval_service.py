@@ -17,7 +17,8 @@ from .core.time import now_iso
 
 
 _NATIVE_TOOL_KINDS = frozenset({"tool_permission", "tool_permission_batch"})
-_FINANCIAL_KINDS = frozenset({"trade_intent", "wallet_swap"})
+_FINANCIAL_KINDS = frozenset({"trade_intent", "wallet_swap", "financial_action_trade", "financial_grant_trade"})
+_FUNDS_KINDS = frozenset({"financial_action", "financial_grant"})
 
 
 @contextmanager
@@ -37,6 +38,10 @@ class ApprovalService:
 
     @staticmethod
     def required_scope(record: dict[str, Any]) -> str:
+        kind=str(record.get("kind") or "").strip()
+        if kind in _FUNDS_KINDS:return "approve:funds"
+        if kind.startswith("financial_") and kind not in _FINANCIAL_KINDS:
+            raise ValueError("unknown financial approval kind")
         return (
             "approve:trade"
             if str(record.get("kind") or "").strip() in _FINANCIAL_KINDS
@@ -155,7 +160,7 @@ class ApprovalService:
             for record in jsonl.read_all(path):
                 if ((record.get("requester_session_id") or record.get("session_id")) != sid
                         or record.get("turn_id") not in turns
-                        or record.get("kind") in _FINANCIAL_KINDS):
+                        or record.get("kind") in _FINANCIAL_KINDS | _FUNDS_KINDS):
                     continue
                 aid = str(record.get("approval_id") or record.get("id") or "")
                 if record.get("state", "pending") == "pending":
@@ -275,7 +280,13 @@ class ApprovalService:
             pass
 
         kind = str(resolved.get("kind") or "").strip()
-        if kind not in _FINANCIAL_KINDS:
+        if kind in {"financial_action","financial_action_trade"}:
+            if state!='approved':
+                from .agent.command_runtime import runtime
+                return runtime(self.config).financial_decision(resolved,{'state':state})
+            from .financial.approval_resume import resume_financial_approval
+            return resume_financial_approval(self.config,approval_id)
+        if kind not in _FINANCIAL_KINDS | _FUNDS_KINDS:
             try:
                 from .agent.command_runtime import runtime
                 manager = runtime(self.config)

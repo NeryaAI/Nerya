@@ -2,5 +2,6 @@
 
 from ..trading.intents import TradeIntent
 from ..triggers.event import TriggerEvent
+from ..agent.run_contracts import TaskRun,RunOrigin,RunStage,RunResult,FinancialGrant,FinancialAction,FinancialCapabilities
 
-__all__ = ["TradeIntent", "TriggerEvent"]
+__all__ = ["TradeIntent", "TriggerEvent",'TaskRun','RunOrigin','RunStage','RunResult','FinancialGrant','FinancialAction','FinancialCapabilities']

@@ -473,6 +473,20 @@ class StrategyAPI:
         note: str = "",
         mode_override: Optional[str] = None,
     ) -> dict[str, Any]:
+        from ..strategies.agent_task_mode import agent_task_requested
+        package=load_package(self.config.paths,strategy_id)
+        if agent_task_requested(package.manifest):
+            if mode_override and mode_override!=package.manifest.mode:
+                from ..agent.command_store import CommandError
+                raise CommandError('agent_task_mode_override_requires_isolated_debug',403)
+            from ..triggers.event import TriggerEvent
+            from ..triggers.router import RouterResult
+            from .task_dispatch import admit_strategy
+            event=TriggerEvent.new(source='user_command',kind='strategy.manual',target='skill:strategy.agent_task',
+                strategy_id=strategy_id,payload=dict(trigger_payload or {}),**({'event_id':trigger_event_id} if trigger_event_id else {}))
+            route=RouterResult(event.event_id,'routed',event.target,None,strategy_id)
+            result=admit_strategy(self.config,event,route,actor_id=operator or self.config.get('runtime.financial_actor_id'))
+            return {**result.result,'status':result.status,'admission_only':True}
         runner = StrategyRunner(config=self.config, skills=self.skills)
         record = runner.run_tick(
             strategy_id,

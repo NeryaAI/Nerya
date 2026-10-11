@@ -29,16 +29,28 @@ HOT (immediate, no proposal):
 - Paper accounts: `account_upsert` (paper mode only).
 - Durable behaviour facts: `memory_remember`.
 
-PROPOSAL via `evolve_core_config_patch` (draft the full post-change file
-under `evolution/proposals/` with `write_file` first — that prefix is
-writable):
+PROPOSAL via `evolve_core_config_patch` (submit a parsed `config_after`;
+the tool stages the proposal and leaves live files unchanged):
 - `nerya.yml` non-protected keys: LLM tiers/models/providers (`llm.*`),
   market defaults (`workspace_preferences.*`), harness caps (`agent.*`),
-  memory/research/mcp/integration blocks, dashboard/api hosts.
+  memory/research/integration blocks, dashboard/api hosts. Existing top-level
+  sections omitted from a nonempty partial `nerya.yml` request are preserved;
+  do not copy or reset protected MCP settings in unrelated proposals.
 - `agents.yml`, `workspace.yml` — agent & workspace defaults, prompt wiring.
 - `policies/planner.yml`, `policies/tier_policy.yml` — decision logic.
 - `news_feeds.yml`, `messages/channels.yml` (secrets as `*_ref` only), `triggers/routes.yml`.
 - Skill enable/disable/delete — use `skill_manage`; do not edit `skills/enabled.yml` manually.
+
+SEPARATE MCP INTEGRATION (not an Agent tool approval):
+- `nerya.yml:mcp` connection, exposure and OAuth are outside ordinary Agent
+  chat and cannot be changed or authorised via `evolve_core_config_patch`.
+  Treat protected configuration rejection as a validation outcome, **not**
+  an invitation to launch an MCP consent dialog from the conversation.
+- MCP connection or OAuth consent belongs to the explicit MCP integration
+  setup/use flow. No MCP access request is created by editing unrelated
+  providers, wallet or agent settings.
+- Protected risk, signer, credentials and approval policy cannot be unlocked
+  by normal tool permissions either.
 
 PROPOSAL via dedicated generators:
 - Strategy parameters / strategy subagent prompts: `strategy_tuning_generate`

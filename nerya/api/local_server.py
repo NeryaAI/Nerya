@@ -103,6 +103,8 @@ _TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
     "/executors/cancel",
     "/trading/submit",
     "/wallet/swap",
+    "/inbox/resolve",
+    '/strategies/runtime/run_tick',
 })
 _DASHBOARD_INTERNAL_HEADER = "x-nerya-dashboard-internal"
 
@@ -110,6 +112,11 @@ _DASHBOARD_INTERNAL_HEADER = "x-nerya-dashboard-internal"
 def _memory_request_client(config: Config, auth: auth_mod.AuthResult, path: str) -> InternalClient:
     """Memory routes use a request-local authenticated identity, never body ids."""
     client = _client_for_current_thread(config)
+    if path.startswith(("/agent/runs", "/agent/tasks", "/financial/", "/triggers/",'/inbox/','/approvals/','/wallet/','/strategies/runtime/')):
+        from copy import copy
+        client = copy(client)
+        client.auth_actor_id = auth.actor
+        client.auth_scopes = auth.scopes
     if path.startswith("/memory/"):
         from copy import copy
         client = copy(client)
@@ -481,8 +488,10 @@ def _start_live_order_poller(client: InternalClient) -> None:
             try:
                 from contextlib import closing
                 from ..trading.executors import ExecutorOrchestrator
-                with closing(ExecutorOrchestrator(client.config)) as orchestrator:
-                    orchestrator.run_once()
+                from ..trading.guard import active as guard_active
+                if not guard_active(client.config):
+                    with closing(ExecutorOrchestrator(client.config)) as orchestrator:
+                        orchestrator.run_once()
             except Exception:
                 log.exception("trading executor tick failed")
             try:
@@ -584,6 +593,7 @@ class _LocalHTTPServer(ThreadingHTTPServer):
     continuous_supervisor = None
 
     def server_close(self) -> None:
+        if getattr(self,"run_effects_stop",None) is not None:self.run_effects_stop.set()
         if self.continuous_supervisor is not None:
             self.continuous_supervisor.shutdown()
         if getattr(self, "mcp_config", None) is not None:
@@ -760,8 +770,8 @@ def build_server(
             try:
                 payload = self._read_body()
                 if path_params:
-                    payload = {**path_params, **payload}
-                if path_only in _TRUSTED_AUTH_PAYLOAD_PATHS:
+                    payload = {**payload, **path_params}
+                if path_only in _TRUSTED_AUTH_PAYLOAD_PATHS or path_only.startswith(("/agent/runs", "/agent/tasks", "/financial/")):
                     payload = _stamp_trusted_auth(payload, auth)
                 result = handler(
                     _memory_request_client(config, auth, path_only),
@@ -792,6 +802,9 @@ def build_server(
 
     server = _LocalHTTPServer((host, port), Handler)
     server.mcp_config = config
+    if start_cron:
+        from ..sdk.run_effects import start
+        server.run_effects_stop=start(config)
     from ..mcp.openai_tunnel import restore
     restore(config, api_port=server.server_address[1])
     from ..strategies.continuous import get_continuous_supervisor

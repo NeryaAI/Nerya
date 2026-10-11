@@ -495,10 +495,12 @@ class TradingAPI:
         else:
             profiles = load_account_profiles(self.config.paths)
 
+        snapshots = {} if account_id else {
+            snap.account_id: snap for snap in latest_snapshots(self.config.paths)
+        }
         out_accounts = []
         for aid, profile in profiles.items():
-            snap = latest_snapshot(self.config.paths, aid) if account_id else \
-                   latest_snapshots(self.config.paths).get(aid)
+            snap = latest_snapshot(self.config.paths, aid) if account_id else snapshots.get(aid)
             entry: dict[str, Any] = {
                 "account_id": aid,
                 "mode": profile.mode,
@@ -537,7 +539,7 @@ class TradingAPI:
 
         executors = []
         try:
-            for run in ExecutorOrchestrator(self.config).list_active():
+            for run in ExecutorOrchestrator(self.config).list_active(account_id=account_id):
                 executors.append({
                     "executor_id": run.executor_id,
                     "kind": run.kind,
@@ -584,7 +586,7 @@ class TradingAPI:
             ti = TradeIntent(**dict(intent or {})) if "intent_id" in (intent or {}) \
                  else TradeIntent.new(**dict(intent or {}))
 
-        decision = RiskGate(self.config).evaluate(ti, market_snapshot=market_snapshot)
+        decision = RiskGate(self.config).evaluate(ti, market_snapshot=market_snapshot, preview=True)
         return {
             "intent": ti.asdict(),
             "risk_decision": decision.asdict(),

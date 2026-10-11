@@ -202,7 +202,7 @@ def _activate_locked(config, rule):
 
     validate_supported_specs(rule)
     with closing(PositionBook(config.paths)) as book:
-        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market)
+        share = book.get_share(strategy_id=rule.strategy_id, account_id=rule.account_id, market=rule.market, position_side=(book.get_by_id(rule.position_id).position_side if book.get_by_id(rule.position_id) else "net"))
         if share is None or not share.is_open:
             raise IntentValidationError("protection requires an open strategy position")
         if rule.position_id and rule.position_id != share.position_id:

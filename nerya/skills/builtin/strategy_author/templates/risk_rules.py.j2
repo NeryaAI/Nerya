@@ -1,0 +1,65 @@
+"""Copy into a strategy-local rules.py; no I/O, orders or model calls.
+
+All limits are explicit reviewed strategy parameters, not universal trading
+recommendations. Price/equity inputs must come from the SDK's live/replay data.
+"""
+from decimal import Decimal
+
+
+def number(value, *, positive=False):
+    if isinstance(value, bool):
+        raise ValueError('boolean is not a market value')
+    result = Decimal(str(value))
+    if not result.is_finite() or result < 0 or positive and result == 0:
+        raise ValueError('invalid market value')
+    return result
+
+
+def fraction(value):
+    result = number(value)
+    if result > 1:
+        raise ValueError('percentages use fractions, not whole percents')
+    return result
+
+
+def spot_exit(*, price, entry_price, high_water, price_ts, now, opened_at,
+              max_age_seconds, stop_loss_pct, take_profit_pct,
+              trailing_stop_pct, max_holding_seconds):
+    price, entry, peak = number(price,positive=True), number(entry_price,positive=True), number(high_water,positive=True)
+    now, timestamp = number(now), number(price_ts)
+    age_limit = number(max_age_seconds,positive=True)
+    if timestamp > now or now-timestamp > age_limit:
+        return {'action':'recover_data','reason':'price_missing_or_stale'}
+    loss, profit, trailing = (fraction(value) for value in (stop_loss_pct,take_profit_pct,trailing_stop_pct))
+    peak = max(peak,price)
+    if price <= entry*(1-loss): reason='stop_loss'
+    elif price >= entry*(1+profit): reason='take_profit'
+    elif price <= peak*(1-trailing): reason='trailing_stop'
+    elif now-number(opened_at) >= number(max_holding_seconds,positive=True): reason='holding_deadline'
+    else: return {'action':'hold','reason':'exit_not_triggered','high_water':str(peak)}
+    return {'action':'close_owned_position','reason':reason,'high_water':str(peak)}
+
+
+def rebalance_signal(*, tick, lower, upper, outside_since, last_rebalance, now,
+                     observed_at, max_age_seconds, persistence_seconds,
+                     cooldown_seconds, expected_incremental_fees, total_execution_cost, cost_multiple):
+    if any(type(value) is not int for value in (tick,lower,upper)) or not lower<upper:
+        raise ValueError('invalid tick range')
+    now, observed = number(now), number(observed_at)
+    if observed>now or now-observed>number(max_age_seconds,positive=True):
+        return {'action':'recover_data','reason':'pool_state_stale'}
+    if lower<=tick<upper:
+        return {'action':'hold','reason':'inside_range','outside_since':None}
+    if outside_since is None:
+        return {'action':'hold','reason':'range_exit_first_observed','outside_since':float(now)}
+    if now-number(outside_since)<number(persistence_seconds,positive=True):
+        return {'action':'hold','reason':'range_exit_not_persistent'}
+    if last_rebalance is not None and now-number(last_rebalance)<number(cooldown_seconds,positive=True):
+        return {'action':'hold','reason':'rebalance_cooldown'}
+    if expected_incremental_fees is None or total_execution_cost is None:
+        return {'action':'hold','reason':'fee_economics_unknown'}
+    multiple=number(cost_multiple,positive=True)
+    if multiple<1: raise ValueError('cost multiple must be at least one')
+    if number(expected_incremental_fees)<=number(total_execution_cost)*multiple:
+        return {'action':'hold','reason':'fees_do_not_cover_execution'}
+    return {'action':'prepare_rebalance','reason':'persistent_range_exit_and_cost_gate_passed'}

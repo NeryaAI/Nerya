@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -232,7 +233,15 @@ def test_real_kernel_and_team_use_multiple_rounds_and_shared_snapshot(tmp_path, 
     monkeypatch.setattr("nerya.subagents.dispatcher.LLMGateway", Gateway)
     runtime = TriggerRuntime.boot(config)
     out = runtime.emit(runtime.from_payload({"source": "test", "kind": "strategy.tick", "target": TARGET, "strategy_id": package.strategy_id, "payload": {}}))
-    assert out.status == "executed", out.asdict()
+    assert out.status in {'queued','running','succeeded'},out.asdict()
+    from nerya.agent.task_runs import task_runs
+    deadline=time.monotonic()+15
+    while time.monotonic()<deadline:
+        run=task_runs(config).get(out.run_id)
+        if run['execution_status'] not in {'queued','running','stopping'}:break
+        time.sleep(0.05)
+    assert run['execution_status']=='succeeded',run
+    out.result=run['result']['turn']
     assert out.result["required_team_run"]["roles_failed"] == [], out.result["required_team_run"]
     assert set(out.result["required_team_run"]["roles_succeeded"]) == {"left", "right"}
     assert out.result["iterations"] >= 3

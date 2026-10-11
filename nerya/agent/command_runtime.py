@@ -18,12 +18,24 @@ from urllib.parse import urlencode
 
 from ..core.config import Config
 from ..harness.cancellation import signal_cancel, signal_steer
-from .command_store import CommandError, CommandStore, command_id, encode, input_context, validate_command_request
+from .command_store import LEASE_SECONDS, CommandError, CommandStore, command_id, encode, input_context, validate_command_request
+from .command_event_buffer import CommandEventBuffer
 from .history_mutations import _session_id
 from .streaming import get_default_bus
 
 _LOG = logging.getLogger(__name__)
 EPOCH = uuid.uuid4().hex
+
+
+def _control_busy_can_retry(exc: BaseException, last_success: float, now: float) -> bool:
+    """Tolerate brief writer contention, never a lost lease or disk failure."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    busy = (code & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} if isinstance(code, int) else str(exc).lower() in {"database is locked", "database table is locked"}
+    return busy and now - last_success < min(10.0, LEASE_SECONDS / 2)
+
+
 _FIELDS = ("source", "kind", "payload", "assistant_id", "conversation_kind", "strategy_id", "strategy_proposal_id", "reasoning_effort",
            "reasoning_summary", "permission_mode", "model_tier", "model_provider", "model_id",
            "model_context_window", "max_iterations", "max_total_tool_calls", "max_wall_seconds",
@@ -42,7 +54,7 @@ def outcome_state(result: dict) -> str:
         return "awaiting_approval"
     if any(word in stop for word in ("cancel", "interrupt", "operator_stop", "assistant_permissions_changed")):
         return "interrupted"
-    if result.get("aborted") or stop not in ("", "end_turn", "completed", "succeeded", "stop"):
+    if result.get("aborted") or stop not in ("", "end_turn", "completed", "succeeded", "stop", "done", "final", "final_answer"):
         return "blocked"
     return "succeeded"
 
@@ -171,16 +183,24 @@ class CommandRuntime:
         sid,cid,tid=row["session_id"],row["command_id"],row["turn_id"]
         request=json.loads(row["request_json"])
         request["turn_id"]=tid
+        from ..harness.cancellation import CancelToken,register_token,unregister_token
+        wall=float(request.get('max_wall_seconds') or 0)
+        token=CancelToken(deadline_s=time.time()+wall if wall>0 else None)
+        linked_task=bool(request.get('_task_run_id') or json.loads(row['context_json']).get('run_id'))
+        if linked_task:
+            request['_task_cancel_token']=token;register_token(tid,token)
         config=Config(paths=self.config.paths,data=copy.deepcopy(self.config.data))
+        config.data.setdefault('runtime',{}).update(command_id=cid,command_session_id=sid,command_turn_id=tid)
         done=threading.Event()
         event_failure=threading.Event()
         bus=get_default_bus()
         head=bus.latest_seq()
+        event_buffer=CommandEventBuffer(self.store,cid)
         def capture(event):
             if event.get("session_id")!=sid or event.get("turn_id")!=tid or int(event.get("seq") or 0)<=head:
                 return
             try:
-                self.store.record_event(cid,event)
+                event_buffer.append(event)
             except Exception:
                 event_failure.set()
                 signal_cancel(tid,reason="event_persistence_failed")
@@ -188,6 +208,7 @@ class CommandRuntime:
         unsubscribe=bus.subscribe(capture)
         def watch():
             renewed=0.0
+            last_control_success=time.monotonic()
             while not done.wait(0.4):
                 try:
                     if time.monotonic()-renewed>3:
@@ -199,9 +220,14 @@ class CommandRuntime:
                     if current["state"]=="stopping":
                         signal_cancel(tid,reason="operator_cancel")
                     self._guides(sid,tid)
-                except Exception:
+                    last_control_success=time.monotonic()
+                except Exception as exc:
+                    if _control_busy_can_retry(exc,last_control_success,time.monotonic()):
+                        _LOG.warning("command control briefly busy; retrying within the worker lease")
+                        continue
                     signal_cancel(tid,reason="command_control_unavailable")
                     _LOG.exception("command control failed")
+                    return
         watcher=threading.Thread(target=watch,name="nerya-command-control",daemon=True)
         watcher.start()
         result,error,state=None,None,"failed"
@@ -218,7 +244,20 @@ class CommandRuntime:
             if self.store.snapshot(sid,cid)["command"]["state"]=="stopping":
                 result={"turn_id":tid,"session_id":sid,"stopped_reason":"cancelled","final_text":""}
             else:
-                result=self.execute(config,request)
+                if request.get("_task_run_id"):
+                    from ..sdk.task_execution import execute_task_run
+                    result=execute_task_run(config,request)
+                else:
+                    from ..sdk.task_execution import scoped_task_config
+                    config=scoped_task_config(config,cid)
+                    if config.get('runtime.task_run_id'):
+                        for key in ('max_iterations','max_total_tool_calls','max_wall_seconds'):
+                            value=config.get('agent.native.'+key)
+                            if value is not None:request[key]=value
+                        remaining=float(config.get('agent.native.max_wall_seconds') or 0)
+                        if remaining>0:token.deadline_s=min(token.deadline_s or float('inf'),time.time()+remaining)
+                        request['_task_cancel_token']=token
+                    result=self.execute(config,request)
             if not isinstance(result,dict):
                 raise TypeError("invalid turn result")
             state=outcome_state(result)
@@ -231,6 +270,13 @@ class CommandRuntime:
             result = _json_safe(result)
             if result.get("ok") is False:
                 error={"code":str(result.get("error") or "turn_rejected"),"retrying":False}
+            reason=str(result.get("stopped_reason") or (result.get("budget") or {}).get("abort_reason") or "")
+            code={"stream_interrupted":"model_stream_interrupted",
+                  "cancelled:command_control_unavailable":"command_control_unavailable",
+                  "cancelled:command_lease_lost":"command_lease_lost",
+                  "cancelled:event_persistence_failed":"event_persistence_failed"}.get(reason)
+            if code:
+                error={"code":code,"retrying":False,"reason":reason}
             if event_failure.is_set():
                 state="blocked"
                 error={"code":"event_persistence_failed","retrying":False}
@@ -239,13 +285,33 @@ class CommandRuntime:
             error={"code":getattr(exc,"code",None) or ("rate_limited" if status==429 else "turn_failed"),
                    "status_code":status,"type":type(exc).__name__,"retrying":False,
                    "request_id":str(getattr(exc,"request_id","") or "")[:160]}
+            if getattr(exc, "stream_interrupted", False):
+                # Keep safe, structured attribution in the durable error card.
+                # No raw provider body, credentials or replay of prior tools.
+                error.update({
+                    "stream_output_committed": bool(getattr(exc, "stream_output_committed", True)),
+                    "retry_exhausted": str(getattr(exc, "retry_exhausted", "not_retryable")),
+                    "provider": str(getattr(exc, "provider", "") or "")[:80],
+                })
             _LOG.warning("conversation command %s failed: type=%s code=%s", cid, type(exc).__name__, error["code"])
         finally:
             done.set()
             watcher.join(timeout=5)
             unsubscribe()
+            try:
+                event_buffer.close()  # Commit final deltas before the command is terminal.
+            except Exception:
+                event_failure.set()
+                _LOG.exception("command final event flush failed")
+            if linked_task:unregister_token(tid)
+        if event_failure.is_set():
+            state="blocked"
+            error={"code":"event_persistence_failed","retrying":False}
         self.store.save_outcome(cid,sid,tid,state,result,error)
         self.store.finish(cid,sid,owner,state,result,error)
+        from ..sdk.task_execution import complete_task_run
+        try:complete_task_run(self.config,cid,result,state)
+        except Exception:_LOG.exception("task result projection failed; durable outcome retained")
         try:
             from .assistant_work import AssistantWork
             AssistantWork(self.config.paths).sync(sid)
@@ -253,8 +319,37 @@ class CommandRuntime:
             _LOG.exception("assistant result delivery failed; durable command outcome retained")
 
     def recover_tasks(self):
-        from .assistant_work import AssistantWork
-        AssistantWork(self.config.paths).recover(self)
+        """Only never-started valid system commands may resume automatically."""
+        sessions=[]
+        with self.store.transaction() as con:
+            rows=con.execute("""SELECT DISTINCT c.session_id FROM agent_commands c
+                JOIN agent_run_commands l ON l.command_id=c.command_id
+                WHERE c.state IN ('queued','running','stopping','awaiting_approval')""").fetchall()
+            for row in rows:
+                sid=row[0];queue=self.store._queue(con,sid)
+                if queue['pause_reason']=='operator' or queue['worker_owner']:continue
+                uncertain=con.execute("SELECT 1 FROM agent_commands WHERE session_id=? AND state='unconfirmed'",(sid,)).fetchone()
+                if uncertain:continue
+                queued=con.execute("""SELECT c.command_id,r.snapshot_json FROM agent_commands c
+                    JOIN agent_run_commands l ON l.command_id=c.command_id JOIN agent_runs r ON r.run_id=l.run_id
+                    WHERE c.session_id=? AND c.state='queued'""",(sid,)).fetchall()
+                for pending in queued:
+                    snapshot=json.loads(pending['snapshot_json'])
+                    if snapshot.get('expires_at',float('inf'))<=time.time():
+                        con.execute("UPDATE agent_commands SET state='interrupted',error_json=?,revision=revision+1 WHERE command_id=?",
+                            (encode({'code':'task_trigger_expired'}),pending['command_id']))
+                if queued and queue['pause_reason']=='restarted' and not self.store._decision_pending(con,sid):
+                    # Do not resume ordinary user commands accidentally sharing a session.
+                    foreign=con.execute("""SELECT 1 FROM agent_commands c WHERE c.session_id=? AND c.state='queued'
+                        AND NOT EXISTS(SELECT 1 FROM agent_run_commands l WHERE l.command_id=c.command_id)""",(sid,)).fetchone()
+                    if not foreign:con.execute("UPDATE agent_command_queues SET paused=0,pause_reason='' WHERE session_id=?",(sid,))
+                if not queue['paused'] or queue['pause_reason']=='restarted':sessions.append(sid)
+        for sid in sessions:self.kick(sid)
+        try:
+            from .assistant_work import AssistantWork
+            AssistantWork(self.config.paths).recover(self)
+        except Exception:
+            _LOG.exception("assistant task recovery failed; task-run recovery retained")
 
     def check_approvals(self, sid):
         from ..approval_service import ApprovalService
@@ -262,7 +357,7 @@ class CommandRuntime:
 
     def resolve_approval(self, record, *, start=True):
         from ..approval_service import ApprovalService
-        if str(record.get("kind") or "") in ("trade_intent", "wallet_swap"):
+        if str(record.get("kind") or "") in ("trade_intent", "wallet_swap", "financial_action", "financial_action_trade", "financial_grant", "financial_grant_trade"):
             return None  # Frozen financial actions keep their domain resume path.
         sid = record.get("requester_session_id") or record.get("session_id")
         tid = record.get("turn_id")
@@ -299,7 +394,7 @@ class CommandRuntime:
                 return {"ok": True, "state": state, "command_id": original["command_id"]}
             original = dict(original)
         request = json.loads(original["request_json"])
-        for key in ("resume_turn_id", "continuation_feedback", "interaction_id", "run_only"):
+        for key in ("resume_turn_id", "continuation_feedback", "interaction_id", "run_only", "_task_run_id"):
             request.pop(key, None)
         request.update(source="approval_continue", kind="approval.continue", payload={
             "text": "The requested permission was approved. Continue the original task within existing permissions.",
@@ -317,6 +412,13 @@ class CommandRuntime:
         return receipt
 
     def _guides(self,sid: str,tid: str):
+        from ..db.sqlite import connect_readonly
+        con = connect_readonly(self.config.paths.db)
+        try:
+            if not con.execute("SELECT 1 FROM agent_commands WHERE session_id=? AND turn_id=? AND kind='guide' AND state='queued' LIMIT 1", (sid,tid)).fetchone():
+                return
+        finally:
+            con.close()
         with self.store.transaction() as con:
             rows=con.execute("SELECT command_id,request_json FROM agent_commands WHERE session_id=? AND turn_id=? AND kind='guide' AND state='queued' ORDER BY position",(sid,tid)).fetchall()
             for row in rows:
@@ -331,6 +433,31 @@ class CommandRuntime:
             with self.store.transaction() as con:
                 con.execute("UPDATE agent_commands SET state=?,revision=revision+1,updated_at=? WHERE command_id=? AND state='delivering'",
                             ("delivered" if accepted else "queued",time.time(),cid))
+
+    def financial_decision(self,record,receipt,*,start=True):
+        """A domain-approved action resumes analysis in the same Run, once."""
+        aid=record.get('approval_id') or record.get('id');sid=record.get('session_id');tid=record.get('turn_id')
+        if not aid or not sid or not tid:return None
+        cid='funds_resume_'+hashlib.sha256(str(aid).encode()).hexdigest()[:40]
+        with self.store.transaction() as con:
+            original=con.execute("SELECT * FROM agent_commands WHERE session_id=? AND turn_id=? AND kind!='guide' ORDER BY created_at DESC LIMIT 1",(sid,tid)).fetchone()
+            old=con.execute('SELECT * FROM agent_commands WHERE command_id=?',(cid,)).fetchone()
+            if old:return {'ok':True,'duplicate':True,'command':self.store.public(old)}
+            if not original or original['state']!='awaiting_approval':return None
+            original=dict(original)
+            if record.get('state')!='approved':
+                self.store.end_decision(con,original,'financial_approval_'+str(record.get('state')))
+                return {'ok':True,'command_id':original['command_id']}
+        request=json.loads(original['request_json']);request.pop('_task_run_id',None)
+        request.update(source='financial_continue',kind='financial.receipt',payload={'text':
+            'The operator resolved the fixed funds action. Inspect its structured receipt and continue within the original permissions. '
+            'Do not repeat the submission. '+encode(receipt),'approval_id':aid})
+        context={**json.loads(original['context_json']),'financial_approval_id':aid,'captured_at':time.time()}
+        result=self.store.accept(cid=cid,sid=sid,actor=original['actor_id'],kind='send',request=request,context=context,
+            turn_id='turn_'+uuid.uuid4().hex,continuation=True)
+        with self.store.transaction() as con:self.store.end_decision(con,original,'financial_continued',state='succeeded')
+        if start:self.kick(sid)
+        return result
 
     def control(self,payload: dict):
         sid=payload.get("session_id")
@@ -416,7 +543,7 @@ def runtime(config: Config,execute: Callable[[Config,dict],dict] | None = None) 
             instance=CommandRuntime(config,execute or _execute_internal)
             _RUNTIMES[key]=instance
         else:
-            instance.config=config
+            if not config.get('runtime.task_run_id'):instance.config=config
         return instance
 
 

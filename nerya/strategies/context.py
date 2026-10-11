@@ -2107,6 +2107,7 @@ class StrategyContext:
     backtest_replay: Callable[..., dict[str, Any]] | None = None
     run_deadline: StrategyRunDeadline = field(default_factory=StrategyRunDeadline)
     inputs: Any = None
+    financial: Any = None
     # Only the continuous supervisor injects this stop-aware facade.
     stream: Any = None
 
@@ -2434,8 +2435,39 @@ def build_strategy_context(
         audit=audit,
     )
 
+    from ..financial.strategy_runtime import bind_run, validate_context
+    from ..sdk.financial_api import FinancialAPI
+    financial_config, financial_context = bind_run(
+        config, strategy_id=manifest.strategy_id, run_id=rid, mode=resolved_mode,
+        session_id=sid, max_run_seconds=manifest.policy.max_run_seconds,
+    )
+
+    def _financial_context(write):
+        if write:
+            run_deadline.raise_if_exceeded()
+            validate_context(financial_config, financial_context, preparing=True)
+        return financial_context
+
+    def _financial_resource(request):
+        from ..financial.contracts import FinancialError
+        from ..trading.accounts import get_account_profile
+        aid = request.get("account_id")
+        wid = request.get("wallet_id")
+        if aid and aid not in manifest.accounts:
+            raise FinancialError("strategy_financial_account_mismatch", 403)
+        if wid:
+            wallet_ids = {get_account_profile(paths, account).wallet_id for account in manifest.accounts}
+            if wid not in wallet_ids or (aid and get_account_profile(paths, aid).wallet_id != wid):
+                raise FinancialError("strategy_financial_wallet_mismatch", 403)
+        if request.get("market") and request["market"] not in manifest.markets:
+            raise FinancialError("strategy_financial_market_mismatch", 403)
+        if request.get("kind") == "trade" and (request.get("plan") or {}).get("strategy_id") != manifest.strategy_id:
+            raise FinancialError("strategy_financial_owner_mismatch", 403)
+
+    financial = FinancialAPI(financial_config, context_provider=_financial_context,
+                             validate_resource=_financial_resource, read_only=resolved_mode != "live")
     trading = StrategyTrading(
-        config=config,
+        config=financial_config,
         strategy_id=manifest.strategy_id,
         policy=policy_view,
         accounts=manifest.accounts,
@@ -2483,6 +2515,7 @@ def build_strategy_context(
         clock=clock or StrategyClock(),
         audit=audit,
         backtest_replay=_bound_backtest_replay,
+        financial=financial,
         run_deadline=run_deadline,
         inputs=StrategyInputContext(sources=manifest.extras.get("data_sources", []),
             market=market, news=news, markets=manifest.markets, run_id=rid),

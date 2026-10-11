@@ -8,6 +8,12 @@ author: Nerya
 
 # Strategy Author
 
+For CEX, on-chain Meme, prediction-market and LP/DeFi execution, read
+`references/mainstream-strategies.md` after financial_readiness. New strategies
+prefer Jupiter, Uniswap/Pancake LP and Aave rather than Byreal. The tested
+templates under `templates/` support deterministic exits and durable LP steps;
+they do not activate trading or replace the requested strategy thesis.
+
 Create and verify the user's strategy in this conversation. Preserve the requested
 rules, markets, timeframe, history period and risk limits. Never promote, activate
 schedules or place account orders unless separately requested. Historical simulated
@@ -57,7 +63,10 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    review plan does not turn the trading script into an Agent strategy.
 3. **Build the strategy-specific review plan.** Load
    `Skill(skill="strategy_author", file="templates/review-plan.md")` after settling
-   the strategy, and adapt it to THIS strategy rather than copying stock prose.
+   the strategy, and read `references/review-plan.md` for evidence and validation
+   requirements. Adapt the plan to THIS strategy rather than copying stock prose.
+   Record the review plan under `tuning.review_plan`; it does not create a trading
+   step or start an independent job.
    Save `strategy.yml::tuning` and its actual `subagents/strategy_tuner.agent.md`
    together in the SAME candidate; do not create a second trading strategy or a
    separate task. Supply these files in step 2's complete bundle, or edit the exact
@@ -87,7 +96,9 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    inspect, download and local-replay calls unless preparation fails or the user
    specifically requested download-only/offline operation. Keep strict coverage;
    never shorten the year, change timeframe or remove stops to get a green result.
-6. **Inspect the receipt and finish.** Report actual dates, requested dates, markets,
+6. **Inspect the receipt and finish.** Include the separate review plan and its
+   disabled schedule in the handoff; a plan is not a completed review. Report actual
+   dates, requested dates, markets,
    coverage, execution counts and research verdict. The tool automatically supplies
    the strategy/backtest card. Do not publish duplicate market/research charts merely
    to make a backtest card appear. A poor return is not a tool failure or permission

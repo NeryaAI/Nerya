@@ -144,6 +144,9 @@ class CronScheduler:
     script_runner: Any = None
 
     def _session_runner(self) -> ScheduledSessionRunner:
+        if self.scheduled_session_runner is None and self.kernel_factory is None:
+            import importlib
+            self.scheduled_session_runner=importlib.import_module("nerya.sdk.task_dispatch").ManagedScheduledRunner(self.config)
         if self.scheduled_session_runner is None:
             kernel_factory = self.kernel_factory
             delivery_fn = self.delivery_fn
@@ -218,6 +221,20 @@ class CronScheduler:
         fired: list[dict[str, Any]] = []
 
         for entry in self.list_entries():
+            if entry.session_kind in {'agent','script'} and self.kernel_factory is None and self.script_runner is None and self.delivery_fn is None and entry.in_window(now_dt) and not entry.archived:
+                from .schedule_clock import due_occurrence
+                occurrence=due_occurrence(self.config,entry,now_ts)
+                if occurrence is not None:
+                    runner=self._session_runner()
+                    if type(runner).__name__=="ManagedScheduledRunner":
+                        results=runner.run_many(entry,now_ts=now_ts,occurrence=occurrence)
+                        primary=results[0]
+                        fired.append({"schedule_id":entry.id,"session_id":primary.session_id,
+                            "event_id":primary.trigger_event_id,"session":primary.asdict(),"sessions":[r.asdict() for r in results]})
+                        state[entry.id]=occurrence["scheduled_at"]
+                        continue
+                elif type(self._session_runner()).__name__=="ManagedScheduledRunner":
+                    continue
             last_ts = state.get(entry.id)
             last_dt = (
                 datetime.fromtimestamp(last_ts, tz=timezone.utc)

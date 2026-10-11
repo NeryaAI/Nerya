@@ -453,6 +453,10 @@ class StrategyCodeGenerator:
         }
         if req.create_tuning:
             manifest["tuning"] = _tuning_block(req)
+        else:
+            # 纯脚本交易不启用 AI 复盘；仍交付独立、未启用的观察计划，避免
+            # 把“无 Agent 交易步骤”和“没有复盘计划”混为一谈。不会创建调度。
+            manifest["tuning"] = {"enabled": False, "review_plan": _default_review_plan(req)}
         if needs_agent:
             manifest["agent_task"] = {
                 "enabled": True,
@@ -1782,6 +1786,29 @@ def _tuning_block(req: StrategyGenerationRequest) -> dict[str, Any]:
             ],
         },
         "tuning_prompt": req.tuning_prompt or "",
+        "review_plan": _default_review_plan(req),
+    }
+
+
+def _default_review_plan(req: StrategyGenerationRequest) -> dict[str, str]:
+    """Authoring scaffold, not an active schedule or a claim of sufficient data."""
+    return {
+        "scope": f"{req.strategy_id} · {req.mode} · {', '.join(req.markets)}",
+        "focus": req.tuning_prompt or (
+            f"Review the {req.strategy_class} strategy's signals, data quality, execution "
+            "costs and risk controls using only evidence from the selected version."
+        ),
+        "validation_plan": (
+            "Compare the current and candidate versions on the same attributable data, "
+            "fees and evaluation window; check data coverage and leakage. Record actual "
+            "test results separately from this plan. Do not relax protected permissions."
+        ),
+        "next_review": (
+            "Set a strategy-specific evidence window and minimum sample requirement before "
+            "enabling review. After each review, identify the next observation focus and "
+            "propose any plan change with the strategy change; insufficient evidence means "
+            "continue observing, not a forced patch."
+        ),
     }
 
 

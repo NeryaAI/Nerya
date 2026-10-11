@@ -243,8 +243,8 @@ def _exchange_providers(client) -> list[dict[str, Any]]:
 
         # Make sure any workspace/providers/* are hot-loaded too —
         # mirrors routes_exchanges.list_all.
-        get_registry().reload_workspace(Path(client.config.paths.root))
-        return [dict(row) for row in list_providers()]
+        get_registry(client.config.paths.root).reload_workspace(Path(client.config.paths.root))
+        return [dict(row) for row in list_providers(client.config.paths.root)]
     except Exception:  # pragma: no cover — defensive readiness fallback
         return []
 

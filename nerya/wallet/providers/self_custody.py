@@ -116,7 +116,7 @@ _CAPABILITIES = WalletCapabilities(
         supported=True, status="partial",
         note=(
             "Real router quotes for bsc (PancakeSwap v2 getAmountsOut) and "
-            "solana (Jupiter /quote). Other chains require an aggregator wallet for real quotes."
+            "solana (Jupiter v2 /order, configured API key required). Other chains require an explicit router."
         ),
     ),
     swap=WalletCapability(
@@ -520,6 +520,9 @@ class SelfCustodyWallet(WalletProvider):
         confirmed = bool(out.get("confirmed"))
         from ..receipts import token_received, native_received
         actual = token_received(out.get('receipt'),addr_out,recipient,dec_out) if not is_native_out else None
+        from ..fees import evm_network_fee
+        from ...connectors.chains import ChainRegistry
+        network_fee = evm_network_fee(out.get('receipt'), str(out.get('tx_hash') or ''), ChainRegistry().get(conn.chain).native_symbol)
         if is_native_out and confirmed:
             actual = native_received(conn,out['tx_hash'],recipient)
         return WalletSwapResult(
@@ -535,6 +538,7 @@ class SelfCustodyWallet(WalletProvider):
                 "confirmed": confirmed, "real_quote": True,
                 'amount_out_source':('transaction_trace' if is_native_out else 'receipt') if actual is not None else 'unknown',
                 'expected_out':quote['amount_out'],
+                'network_fee': network_fee,
             },
         )
 
@@ -553,8 +557,12 @@ class SelfCustodyWallet(WalletProvider):
         return SolanaNative(
             chain="solana", rpc_url=rpc, live=live,
             credentials=DEXCredentials(rpc_url=rpc, signer_ref=self.signer_ref),
-            jupiter_url=str(self.config.get('jupiter_url') or 'https://api.jup.ag/swap/v1'),
+            jupiter_url=str(self.config.get('jupiter_url') or 'https://api.jup.ag/swap/v2'),
             jupiter_api_key=self._resolve_vault_secret(self.config['jupiter_api_key_ref']) if self.config.get('jupiter_api_key_ref') else '',
+            jupiter_exclude_dexes=tuple(self.config.get('jupiter_exclude_dexes') or ()),
+            jupiter_max_priority_fee_lamports=int(self.config.get('jupiter_max_priority_fee_lamports', 1_000_000)),
+            jupiter_max_total_fee_lamports=int(self.config.get('jupiter_max_total_fee_lamports', 2_000_000)),
+            jupiter_max_rent_lamports=int(self.config.get('jupiter_max_rent_lamports', 10_000_000)),
             **kwargs,
         )
 
@@ -585,6 +593,21 @@ class SelfCustodyWallet(WalletProvider):
             raise WalletQuoteError(
                 f"jupiter quote has no positive output: outAmount={doc.get('outAmount')!r}"
             )
+        gas_cost_usd, gas_budget = 0.0, {}
+        if conn.jupiter_url.rstrip('/').endswith('/v2'):
+            from ...financial.adapters import usd_price
+            try:
+                # Public quotes without a taker have no authoritative fee
+                # payer. Reserve the reviewed ceilings rather than claiming 0.
+                sol_price = usd_price('SOL', transport=self.transport)
+                network = Decimal(conn.jupiter_max_total_fee_lamports)/Decimal(10**9)
+                rent = Decimal(conn.jupiter_max_rent_lamports)/Decimal(10**9)
+                gas_cost_usd = float(network * sol_price)
+                gas_budget = {'asset':'NATIVE','amount':str(network+rent),'network_cap_native':str(network),
+                              'rent_cap_native':str(rent),'rent_is_refundable_reserve':True,
+                              'native_price_usd':str(sol_price),'native_input':mint_in == _SOL_MINT}
+            except Exception as exc:
+                raise WalletQuoteError('Jupiter fee valuation unavailable; cannot approve a zero-cost quote') from exc
         return WalletQuote(
             provider=self.id, chain="solana",
             token_in=token_in, token_out=token_out,
@@ -592,12 +615,17 @@ class SelfCustodyWallet(WalletProvider):
             expected_out=expected_out,
             min_out=int(doc.get('otherAmountThreshold') or int(out_amount*(1-int(slippage_bps)/10000))) / (10**dec_out),
             slippage_bps=int(slippage_bps),
+            gas_cost_usd=gas_cost_usd,
             extra={
                 "in_amount_raw": doc.get("inAmount"),
                 "out_amount_raw": doc.get("outAmount"),
                 "price_impact_pct": doc.get("priceImpactPct"),
                 "real_quote": True,
                 'decimals_in':dec_in,'decimals_out':dec_out,
+                'router': doc.get('router', 'jupiter_v1'),
+                'route_labels': [step.get('swapInfo', {}).get('label') for step in doc.get('routePlan', [])],
+                'fee_bps': doc.get('feeBps'), 'fee_mint': doc.get('feeMint'),
+                'gas_budget':gas_budget,
             },
         )
 
@@ -618,6 +646,10 @@ class SelfCustodyWallet(WalletProvider):
         # F11: Decimal conversion — float math truncated against the
         # frozen amount (e.g. 8.1 * 1e6 → 8099999).
         amount_in_raw = int(Decimal(str(amount_in)) * (10 ** Decimal(dec_in)))
+        from ...connectors.solana_native import _pubkey_from_signer
+        wallet_pubkey = _pubkey_from_signer(key)
+        if receiver and receiver.strip() != wallet_pubkey:
+            raise WalletPolicyDenied('solana destination addresses are not supported: receiver differs from signing wallet')
         # Quote once, price-check the approved floor BEFORE broadcasting,
         # then execute that exact quote. Jupiter's /swap only carries
         # slippageBps — without this pre-check a quote→broadcast race
@@ -626,6 +658,7 @@ class SelfCustodyWallet(WalletProvider):
         quote = conn.quote_jupiter(
             input_mint=mint_in, output_mint=mint_out,
             amount_in_raw=amount_in_raw, slippage_bps=int(slippage_bps),
+            taker=wallet_pubkey,
         )
         if min_out is not None and float(min_out) > 0:
             expected_out_wei = int(quote.get("outAmount") or 0)
@@ -643,17 +676,6 @@ class SelfCustodyWallet(WalletProvider):
         # it owns the source ATAs and pays the fees. A distinct
         # ``receiver`` destination is not supported on this path yet
         # (the v0 signer would refuse it anyway); refuse loudly here.
-        from ...connectors.solana_native import _pubkey_from_signer
-
-        wallet_pubkey = _pubkey_from_signer(key)
-        receiver_addr = (receiver or "").strip()
-        if receiver_addr and receiver_addr != wallet_pubkey:
-            raise WalletPolicyDenied(
-                f"solana destination addresses are not supported yet: "
-                f"receiver {receiver_addr} != signing wallet "
-                f"{wallet_pubkey} — Jupiter userPublicKey must be the "
-                f"wallet that signs (owns the source ATAs and pays fees)."
-            )
         out = conn.swap(
             input_mint=mint_in, output_mint=mint_out,
             amount_in_raw=amount_in_raw,
@@ -677,6 +699,7 @@ class SelfCustodyWallet(WalletProvider):
                 "confirmation_status": out.get("confirmation_status"),
                 "slot": out.get("slot"), "real_quote": True,
                 'amount_out_source':'transaction_meta' if actual_out is not None else 'unknown',
+                'network_fee': out.get('network_fee'),
             },
         )
 

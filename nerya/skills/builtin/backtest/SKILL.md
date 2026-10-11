@@ -63,6 +63,8 @@ silently substitute a shorter period, different timeframe or cached old report.
   coverage and execution counts. Economic WARN/FAIL is a completed calculation, not
   permission to change the strategy until profitable. The returned card opens the
   corresponding immutable report. No duplicate chart-publishing call is necessary.
+  Trailing the buy-and-hold benchmark is a WARN/review condition, not a failed
+  replay or failed strategy.
 - `blocked`: inspect structured diagnostics. Fix syntax/config/SDK issues before
   rerunning. Incomplete data is not proof the exchange only has 30 days; inspect the
   download receipt. Repair/resume missing segments with `historical_data` when needed;

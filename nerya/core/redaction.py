@@ -151,3 +151,25 @@ def redact_display_dict(data: Any) -> Any:
     if isinstance(data, str):
         return redact_text(data)
     return data
+
+
+def redact_public_record(data: Any, *, identity_fields: frozenset[str]) -> Any:
+    """Preserve validated public identities in a typed operator record.
+
+    通用长串过滤会误删地址和交易 Hash，破坏审批参数与回执查询。
+    仅调用方显式声明的身份字段可恢复，密钥字段仍使用原过滤器。
+    """
+    result=redact_display_dict(data)
+    address=re.compile(r"(?:[a-zA-Z0-9:_-]+:)?0x[a-fA-F0-9]{40}")
+    public_hash=re.compile(r"(?:0x)?(?:[a-fA-F0-9]{32}|[a-fA-F0-9]{64})|[1-9A-HJ-NP-Za-km-z]{32,90}")
+    public_id=re.compile(r'[A-Za-z][A-Za-z0-9_.:-]{0,199}')
+    def restore(raw,clean,key=""):
+        if isinstance(raw,dict) and isinstance(clean,dict):
+            for name,value in raw.items():
+                clean[name]=restore(value,clean.get(name),str(name))
+        elif isinstance(raw,list) and isinstance(clean,list):
+            return [restore(value,clean[index],key) for index,value in enumerate(raw)]
+        elif isinstance(raw,str) and key in identity_fields:
+            if address.fullmatch(raw) or public_hash.fullmatch(raw) or (key in {'order_id','order_ids','client_order_id','executor_id','intent_id','plan_id','execution_ref'} and public_id.fullmatch(raw)):return raw
+        return clean
+    return restore(data,result)

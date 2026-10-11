@@ -68,7 +68,8 @@ def _pending_tool(cfg: Config, approval_id: str, *, owner: str = "researcher") -
 
 def test_callback_route_accepts_either_approval_scope_only():
     required = route_scopes.required_scope("POST", "/approvals/callback")
-    assert required == "approve:trade|approve:tool"
+    assert required == "approve:trade|approve:tool|approve:funds"
+    assert route_scopes.authorize({'approve:funds'},'POST','/approvals/callback')==(True,None)
     assert route_scopes.authorize(
         {"approve:trade"}, "POST", "/approvals/callback"
     ) == (True, None)
@@ -79,7 +80,7 @@ def test_callback_route_accepts_either_approval_scope_only():
         {"read:sessions"}, "POST", "/approvals/callback"
     )
     assert allowed is False
-    assert reason == "insufficient_scope:needed_any=approve:trade|approve:tool"
+    assert reason == "insufficient_scope:needed_any=approve:trade|approve:tool|approve:funds"
 
 
 def test_trade_scope_can_resolve_trade_approval_for_another_owner(tmp_path, monkeypatch):

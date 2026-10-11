@@ -9,14 +9,14 @@ policy — the connector only ever receives a single-shot hex/base58 key.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.errors import TradingError
 from .base import OrderAck, Ticker
 from .dex_base import NativeDEXConnector
 
-JUPITER_BASE_URL = "https://api.jup.ag/swap/v1"
+JUPITER_BASE_URL = "https://api.jup.ag/swap/v2"
 
 
 @dataclass
@@ -24,7 +24,11 @@ class SolanaNative(NativeDEXConnector):
     venue: str = "SOLANA"
     chain: str = "solana"
     jupiter_url: str = JUPITER_BASE_URL
-    jupiter_api_key: str = ""
+    jupiter_api_key: str = field(default="", repr=False)
+    jupiter_exclude_dexes: tuple[str, ...] = ()
+    jupiter_max_priority_fee_lamports: int = 1_000_000
+    jupiter_max_total_fee_lamports: int = 2_000_000
+    jupiter_max_rent_lamports: int = 10_000_000
     default_slippage_bps: int = 50
 
     # ------------------------------------------------------------- reads
@@ -79,10 +83,16 @@ class SolanaNative(NativeDEXConnector):
         amount_in_raw: int,
         slippage_bps: int | None = None,
         only_direct_routes: bool = False,
+        taker: str | None = None,
     ) -> dict[str, Any]:
         """Fetch a Jupiter v6 quote. ``amount_in_raw`` is in base units
         (lamports for SOL, token-native units otherwise)."""
         slip = int(slippage_bps if slippage_bps is not None else self.default_slippage_bps)
+        if self.jupiter_url.rstrip('/').endswith('/v2'):
+            from .jupiter_v2 import quote
+            return quote(self, input_mint=input_mint, output_mint=output_mint,
+                         amount_in_raw=amount_in_raw, slippage_bps=slip,
+                         only_direct_routes=only_direct_routes, taker=taker)
         params = {
             "inputMint": input_mint,
             "outputMint": output_mint,
@@ -172,6 +182,15 @@ class SolanaNative(NativeDEXConnector):
         4. (default) poll until the signature confirms
         """
         self._check_live()
+        user_pubkey = user_public_key or _pubkey_from_signer(signer_private_key)
+        if self.jupiter_url.rstrip('/').endswith('/v2'):
+            from .jupiter_v2 import execute
+            slip = slippage_bps if slippage_bps is not None else self.default_slippage_bps
+            if quote is None:
+                quote = self.quote_jupiter(input_mint=input_mint, output_mint=output_mint,
+                    amount_in_raw=amount_in_raw, slippage_bps=slip, taker=user_pubkey)
+            return execute(self, quote, signer_private_key, input_mint=input_mint, output_mint=output_mint,
+                amount=amount_in_raw, slippage=slip, owner=user_pubkey, confirm=confirm, on_broadcast=on_broadcast)
         if quote is None:
             quote = self.quote_jupiter(
                 input_mint=input_mint, output_mint=output_mint,
@@ -212,8 +231,8 @@ class SolanaNative(NativeDEXConnector):
                             [signed_b64, {"encoding": "base64",
                                           "skipPreflight": False,
                                           "maxRetries": 3}])
-        if not tx_sig:
-            raise TradingError("solana sendTransaction returned empty signature")
+        if tx_sig != expected_sig:
+            raise TradingError("solana sendTransaction returned missing/mismatched signature", ambiguous=True)
         out: dict[str, Any] = {
             "signature": tx_sig,
             "output_mint": output_mint,
@@ -228,9 +247,23 @@ class SolanaNative(NativeDEXConnector):
                 out["confirmation_status"] = st.get("confirmationStatus")
                 out["slot"] = st.get("slot")
                 out["amount_out"] = self.transaction_output(tx_sig, user_public_key, output_mint)
+                out["network_fee"] = self.transaction_fee(tx_sig, user_public_key)
             except TradingError as exc:
                 out["confirmation_error"] = str(exc)
         return out
+
+    def transaction_fee(self, signature, owner):
+        """Observed network cost, including compute-unit priority fees; not rent."""
+        tx = self._rpc('getTransaction', [signature, {'encoding': 'jsonParsed', 'maxSupportedTransactionVersion': 0}])
+        meta = (tx or {}).get('meta') or {}
+        keys = ((tx or {}).get('transaction') or {}).get('message', {}).get('accountKeys', [])
+        if not keys or meta.get('fee') is None:
+            return {'status': 'unavailable'}
+        payer = keys[0].get('pubkey') if isinstance(keys[0], dict) else keys[0]
+        from .jupiter_v2 import integer
+        fee = integer(meta['fee'], 'observed network fee')
+        return {'status': 'observed', 'asset': 'SOL', 'amount_base': str(fee if payer == owner else 0),
+                'decimals': 9, 'payer': payer, 'transaction_hash': signature, 'source': 'transaction_meta'}
 
     def transaction_output(self, signature, owner, mint):
         tx = self._rpc("getTransaction",[signature,{"encoding":"jsonParsed","maxSupportedTransactionVersion":0}])

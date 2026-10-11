@@ -29,7 +29,7 @@ class LedgerState:
 
 
 class VirtualLedger:
-    def __init__(self, path: Path, account_id: str, initial_balance_usd: float):
+    def __init__(self, path: Path, account_id: str, initial_balance_usd: float, *, persist_init=True):
         self.path = Path(path)
         self._lock = RLock()
         if self.path.exists():
@@ -38,7 +38,8 @@ class VirtualLedger:
         else:
             self.state = LedgerState(account_id=account_id,
                                      cash_usd=float(initial_balance_usd))
-            self._flush()
+            if persist_init:
+                self._flush()
 
     def _flush(self) -> None:
         atomic_write_text(self.path, json.dumps(_serialize(self.state), indent=2))
@@ -118,10 +119,12 @@ def _deserialize(data: dict[str, Any]) -> LedgerState:
     )
 
 
-def open_ledger(paths, account_id: str, initial_balance_usd: float) -> VirtualLedger:
-    paths.virtual_ledgers.mkdir(parents=True, exist_ok=True)
+def open_ledger(paths, account_id: str, initial_balance_usd: float, *, persist_init=True) -> VirtualLedger:
+    if persist_init:
+        paths.virtual_ledgers.mkdir(parents=True, exist_ok=True)
     return VirtualLedger(
         path=paths.virtual_ledgers / f"{account_id}.json",
         account_id=account_id,
         initial_balance_usd=initial_balance_usd,
+        persist_init=persist_init,
     )

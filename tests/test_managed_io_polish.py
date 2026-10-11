@@ -4,6 +4,7 @@ import io
 import json
 import os
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -13,12 +14,14 @@ import pytest
 
 from nerya.agent.loop import LoopConfig, WorkspaceNativeAgentLoop
 from nerya.core.config import Config, DEFAULT_CONFIG
+from nerya.core.errors import LLMError
 from nerya.core.paths import WorkspacePaths
 from nerya.core.sandbox import sandbox_exec
 from nerya.harness.cancellation import CancelToken, CancelledError
 from nerya.llm.adapters._base import UrllibTransport
 from nerya.llm.gateway import LLMGateway
 from nerya.llm.messages import MessagesRequest, OpenAIMessagesBackend
+from nerya.llm.retry import is_retryable_stream_transport_error
 from nerya.subagents.tasks import TaskStore
 from nerya.tools.native.shell import run_shell_handler
 from nerya.tools.native.tasks import task_output_handler, task_stop_handler
@@ -144,6 +147,15 @@ class StreamTransport:
             raise OSError('connection lost after submitted request')
         return 200, {'stream_complete': True}, {'content-type': 'text/event-stream'}
 
+
+class PreOutputDisconnectOnce(StreamTransport):
+    def stream_json(self, url, *, headers, body, timeout, on_event):
+        if not self.calls:
+            self.calls.append(deepcopy(body))
+            raise ConnectionResetError('upstream disconnected before the first model delta')
+        return super().stream_json(url, headers=headers, body=body,
+                                   timeout=timeout, on_event=on_event)
+
 def backend(transport):
     return OpenAIMessagesBackend(api_key='fixture', model='gpt-4o', transport=transport)
 
@@ -186,6 +198,92 @@ def test_incomplete_stream_never_returns_tool_and_is_not_retryable(chunks, fail)
     assert caught.value.stream_interrupted and caught.value.retryable is False
     assert len(transport.calls) == 1
 
+
+def test_stream_disconnect_before_output_is_classified_for_bounded_retry():
+    transport = StreamTransport([], fail=True)
+    with pytest.raises(LLMError) as caught:
+        backend(transport)(request())
+    assert caught.value.stream_interrupted
+    assert caught.value.stream_output_committed is False
+    assert caught.value.retryable is True
+    assert caught.value.code == 'model_stream_connection_failed'
+
+
+@pytest.mark.parametrize('error,retryable', [
+    (ConnectionResetError('connection reset'), True),
+    (TimeoutError('read timed out'), True),
+    (ssl.SSLCertVerificationError('certificate verify failed'), False),
+    (PermissionError('access denied'), False),
+    (socket.gaierror(socket.EAI_AGAIN, 'DNS temporarily unavailable'), True),
+    (socket.gaierror(socket.EAI_NONAME, 'invalid DNS name'), False),
+])
+def test_stream_transport_failure_classifier_rejects_permanent_errors(error, retryable):
+    assert is_retryable_stream_transport_error(error) is retryable
+
+
+def test_tls_stream_failure_surfaces_without_replaying(tmp_path, monkeypatch):
+    class BadTlsTransport(StreamTransport):
+        def stream_json(self, url, *, headers, body, timeout, on_event):
+            self.calls.append(deepcopy(body))
+            raise ssl.SSLCertVerificationError('certificate verify failed')
+
+    transport = BadTlsTransport([])
+    loop = make_loop(gateway(tmp_path, monkeypatch, [transport]), [], [])
+    with pytest.raises(LLMError) as caught:
+        loop.run(system='fixture', user_message='Please answer.')
+    assert caught.value.retryable is False
+    assert caught.value.code == 'model_stream_tls_error'
+    assert len(transport.calls) == 1
+
+
+def test_stream_missing_finish_before_any_output_is_retryable():
+    transport = StreamTransport([])
+    with pytest.raises(LLMError) as caught:
+        backend(transport)(request())
+    assert caught.value.stream_interrupted and caught.value.retryable is True
+    assert caught.value.stream_output_committed is False
+
+
+@pytest.mark.parametrize('error,status,retryable', [
+    ({'status': 429, 'code': 'rate_limit_exceeded', 'message': 'RPM exhausted',
+      'request_id': 'req-fixture'}, 429, True),
+    ({'status': 429, 'code': 'insufficient_quota', 'message': 'credits exhausted'}, 429, False),
+    ({'status': 401, 'code': 'invalid_api_key', 'message': 'bad credentials'}, 401, False),
+    ({'code': 'invalid_model', 'message': 'unknown model'}, None, False),
+])
+def test_provider_sse_error_retains_reason_and_retry_policy(error, status, retryable):
+    transport = StreamTransport([{'error': error}])
+    with pytest.raises(LLMError) as caught:
+        backend(transport)(request())
+    assert caught.value.stream_output_committed is False
+    assert caught.value.retryable is retryable
+    if status:
+        assert caught.value.status_code == status
+    if 'request_id' in error:
+        assert caught.value.request_id == error['request_id']
+
+
+def test_sse_rate_limit_keeps_retry_after_and_explicit_no_retry():
+    for disabled in (False, True):
+        details = {'status': 429, 'code': 'rate_limit_exceeded',
+                   'message': 'temporarily busy', 'retry_after_ms': 1250}
+        if disabled:
+            details['retryable'] = False
+        with pytest.raises(LLMError) as caught:
+            backend(StreamTransport([{'error': details}]))(request())
+        assert caught.value.retry_after_s == 1.25
+        assert caught.value.retryable is not disabled
+
+
+def test_invalid_provider_sse_error_does_not_retry(tmp_path, monkeypatch):
+    transport = StreamTransport([{'error': {'status': 401, 'code': 'invalid_api_key',
+                                            'message': 'authentication rejected'}}])
+    loop = make_loop(gateway(tmp_path, monkeypatch, [transport]), [], [])
+    with pytest.raises(LLMError) as caught:
+        loop.run(system='fixture', user_message='Please answer.')
+    assert caught.value.status_code == 401 and caught.value.retryable is False
+    assert len(transport.calls) == 1
+
 def gateway(tmp_path, monkeypatch, transports):
     data = deepcopy(DEFAULT_CONFIG)
     data['llm']['tiers'] = {'medium': {'routes': [{'provider': f'fixture{i}', 'model': 'gpt-4o'}
@@ -203,8 +301,10 @@ def call(gw, **kwargs):
 def test_gateway_does_not_fallback_after_submitted_stream(tmp_path, monkeypatch):
     first = StreamTransport([delta(content='partial'), tool_chunks()[0]], fail=True)
     backup = StreamTransport([delta(content='backup'), finish()])
-    with pytest.raises(OSError):
+    with pytest.raises(LLMError) as caught:
         call(gateway(tmp_path, monkeypatch, [first, backup]))
+    assert isinstance(caught.value.__cause__, OSError)
+    assert caught.value.stream_output_committed is True
     assert len(first.calls) == 1 and backup.calls == []
 
 def test_gateway_can_fallback_after_explicit_pre_stream_rejection(tmp_path, monkeypatch):
@@ -261,6 +361,100 @@ def test_loop_partial_tool_is_not_executed_or_retried(tmp_path, monkeypatch):
         system='fixture', user_message='execute fixture', turn_id='interrupted')
     assert not writes and len(transport.calls) == 1 and outcome.aborted
     assert outcome.abort_reason == 'stream_interrupted'
+    assert '模型流式响应中断' in outcome.final_text
+    assert '1 步，0 次工具调用' in outcome.final_text
+    assert '错误详情' in outcome.final_text
+
+
+def test_pre_output_disconnect_retries_in_same_loop_round(tmp_path, monkeypatch):
+    writes, events = [], []
+    transport = PreOutputDisconnectOnce([delta(content='Verified answer.'), finish()])
+    loop = make_loop(gateway(tmp_path, monkeypatch, [transport]), events, writes)
+    loop.config.llm_retry_base_delay = 0
+    loop.config.llm_retry_max_delay = 0
+    result = loop.run(system='fixture', user_message='Please answer.', turn_id='pre-output-retry')
+    assert not result.aborted and result.final_text == 'Verified answer.'
+    assert result.iterations == 1 and result.extra_llm_attempts == 1
+    assert result.tool_calls == 0 and not writes and len(transport.calls) == 2
+    assert [event.block['text'] for event in events if event.block['kind'] == 'text_delta'] == ['Verified answer.']
+    assert any(event.block.get('retry', {}).get('state') == 'waiting' for event in events)
+
+
+def test_real_local_http_stream_disconnect_then_recover(tmp_path, monkeypatch):
+    """Integration: a 200 SSE socket closes before the first frame, then recovers."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers['Content-Length']))
+            seen.append(1)
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            if len(seen) == 2:
+                frames = [delta(content='Recovered from local SSE.'), finish()]
+                for frame in frames:
+                    self.wfile.write(('data: ' + json.dumps(frame) + '\n\n').encode())
+                self.wfile.write(b'data: [DONE]\n\n')
+                self.wfile.flush()
+
+    server = HTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=lambda: (server.handle_request(), server.handle_request()), daemon=True)
+    thread.start()
+    try:
+        gw = gateway(tmp_path, monkeypatch, [StreamTransport([])])
+        local_backend = OpenAIMessagesBackend(api_key='fixture', model='gpt-4o',
+            base_url=f'http://127.0.0.1:{server.server_port}/v1', timeout=3)
+        monkeypatch.setattr(gw, '_resolve_messages_backend', lambda *a, **k: local_backend)
+        writes, events = [], []
+        loop = make_loop(gw, events, writes)
+        loop.config.llm_retry_base_delay = 0
+        loop.config.llm_retry_max_delay = 0
+        result = loop.run(system='fixture', user_message='Please answer.')
+        assert not result.aborted and result.final_text == 'Recovered from local SSE.'
+        assert result.iterations == 1 and result.extra_llm_attempts == 1
+        assert len(seen) == 2 and not writes
+    finally:
+        server.server_close()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+
+
+def test_pre_output_disconnect_exhaustion_surfaces_real_failure(tmp_path, monkeypatch):
+    writes, events = [], []
+    transport = StreamTransport([], fail=True)
+    loop = make_loop(gateway(tmp_path, monkeypatch, [transport]), events, writes)
+    loop.config.llm_retry_attempts = 2
+    loop.config.llm_retry_base_delay = 0
+    loop.config.llm_retry_max_delay = 0
+    with pytest.raises(LLMError) as caught:
+        loop.run(system='fixture', user_message='Please answer.')
+    assert caught.value.code == 'model_stream_connection_failed'
+    assert caught.value.retry_exhausted == 'attempt_limit'
+    assert len(transport.calls) == 2 and not writes
+
+
+def test_after_completed_tool_pre_output_retry_never_repeats_write(tmp_path, monkeypatch):
+    writes, events = [], []
+    first = StreamTransport(tool_chunks())
+    second = PreOutputDisconnectOnce([delta(content='Done.'), finish()])
+    gw = gateway(tmp_path, monkeypatch, [first])
+    routed = []
+    def resolve(*args, **kwargs):
+        routed.append(1)
+        return backend(first if len(routed) == 1 else second)
+    monkeypatch.setattr(gw, '_resolve_messages_backend', resolve)
+    loop = make_loop(gw, events, writes)
+    loop.config.llm_retry_base_delay = 0
+    loop.config.llm_retry_max_delay = 0
+    result = loop.run(system='fixture', user_message='Complete the fixture.')
+    assert not result.aborted and result.final_text == 'Done.'
+    assert result.tool_calls == 1 and writes == [{'value': 1}]
+    assert len(first.calls) == 1 and len(second.calls) == 2
 
 def test_urllib_sse_parser_consumes_frames_and_done(monkeypatch):
     import urllib.request

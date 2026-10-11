@@ -317,11 +317,12 @@ def test_byreal_official_response_roundtrip_signs_selected_wallet(monkeypatch,ro
     def rpc(method,params):
         assert method=='sendTransaction'
         signed=base64.b64decode(params[0]);sk.verify_key.verify(message,signed[1:65])
-        sent.append(params);return 'sig'
+        sent.append(params);return __import__('base58').b58encode(signed[1:65]).decode()
     monkeypatch.setattr(conn,'_rpc',rpc)
     monkeypatch.setattr(conn,'get_mint_decimals',lambda mint:6)
     monkeypatch.setattr(conn,'wait_for_signature',lambda *a:{'confirmationStatus':'confirmed'})
     monkeypatch.setattr(conn,'transaction_output',lambda *a:2)
+    monkeypatch.setattr(conn,'transaction_fee',lambda *a:{'status':'unavailable'})
     provider=ByrealWallet(config={'signer_ref':'vault://test'},transport=Http())
     monkeypatch.setattr(provider,'_signer',lambda:key)
     monkeypatch.setattr(provider,'_solana',lambda **kw:conn)

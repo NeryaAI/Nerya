@@ -4,6 +4,14 @@ from __future__ import annotations
 def routes():
     def emit(client, payload):
         ev = payload.get("event") or payload
+        if not ev.get("dry_run"):
+            from ..triggers.event import TriggerEvent
+            probe=TriggerEvent.new(source=ev.get("source","user_command"),kind=ev["kind"],payload=ev.get("payload") or {},
+                                   target=ev.get("target","main"),strategy_id=ev.get("strategy_id"))
+            _,target,_=client.triggers_runtime.router._resolve_route(probe)
+            scopes=set(getattr(client,"auth_scopes",()))
+            if target=="skill:strategy.agent_task" and not scopes & {"api:all","execute:strategy"}:
+                return {"ok":False,"error":"task_scope_denied","_status":403}
         return client.triggers.emit(
             source=ev.get("source", "http"),
             kind=ev["kind"],
@@ -12,6 +20,7 @@ def routes():
             strategy_id=ev.get("strategy_id"),
             idempotency_key=ev.get("idempotency_key"),
             dry_run=bool(ev.get("dry_run", False)),
+            actor_id=getattr(client,"auth_actor_id",None),
         )
 
     def dry_run(client, payload):
@@ -30,6 +39,17 @@ def routes():
 
     def list_schedules(client, _query):
         return {"schedules": client.triggers.list_schedules()}
+
+    def preview_schedule(_client, payload):
+        # 纯计算接口：不实例化 Agent，不写调度、不触发交易或消息交付。
+        from ..triggers.schedule_preview import PreviewError, preview_schedule as preview
+        from ..core.errors import TriggerValidationError
+        try:
+            return preview(payload or {})
+        except PreviewError as exc:
+            return {"ok": False, "error": exc.code, "choices": exc.choices, "_status": 400}
+        except (TriggerValidationError, ValueError, TypeError, OverflowError):
+            return {"ok": False, "error": "invalid_schedule", "_status": 400}
 
     def add_schedule(client, payload):
         return client.triggers.add_schedule(
@@ -51,6 +71,12 @@ def routes():
             session_mode=payload.get("session_mode"),
             session_id=payload.get("session_id"),
             session_ids=payload.get("session_ids"),
+            overlap_policy=payload.get("overlap_policy","skip"),
+            execution=payload.get("execution") or {},
+            owner_actor_id=getattr(client,"auth_actor_id",None) or "local:loopback",
+            run_at=payload.get("run_at"),
+            anchor_at=payload.get("anchor_at"),
+            delay_seconds=payload.get('delay_seconds'),
         )
 
     def add_schedule_from_text(client, payload):
@@ -83,6 +109,8 @@ def routes():
         return client.triggers.run_schedule_now(
             id=payload["id"],
             reason=str(payload.get("reason") or "operator_manual_run"),
+            client_request_id=payload.get("client_request_id"),
+            actor_id=getattr(client,"auth_actor_id",None),
         )
 
     def schedule_status(client, query):
@@ -155,6 +183,7 @@ def routes():
         ("GET", "/triggers/routes", list_routes),
         ("GET", "/triggers/result", get_result),
         ("GET", "/triggers/schedules", list_schedules),
+        ("POST", "/triggers/schedules/preview", preview_schedule),
         ("POST", "/triggers/schedules/add", add_schedule),
         ("POST", "/triggers/schedules/add_from_text", add_schedule_from_text),
         ("POST", "/triggers/schedules/remove", remove_schedule),

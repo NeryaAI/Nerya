@@ -5,7 +5,7 @@ workers become unconfirmed; neither reads nor retries replay external effects.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import copy
 import hashlib
 import json
@@ -200,12 +200,14 @@ class CommandStore:
             con.close()
 
     def accept(self, *, cid: str, sid: str, actor: str, kind: str, request: dict,
-               context: dict, turn_id: str, continuation=False, identity_request=None):
+               context: dict, turn_id: str, continuation=False, identity_request=None,
+               connection=None):
         cid, sid = command_id(cid), _session_id(sid)
         digest = fingerprint(kind, identity_request if identity_request is not None else request)
         if len(encode(request).encode()) > 256_000:
             raise CommandError("command_too_large", 413)
-        with self.transaction() as con:
+        # Run 与 Command 必须在同一事务准入；普通聊天仍使用原有事务。
+        with (self.transaction() if connection is None else nullcontext(connection)) as con:
             queue = self._queue(con, sid)
             old = con.execute("SELECT * FROM agent_commands WHERE command_id=?", (cid,)).fetchone()
             if old:
@@ -258,6 +260,8 @@ class CommandStore:
                         (cid,sid,actor,kind,digest,encode(request),encode(context),state,turn_id,position,now,now))
             con.execute("UPDATE agent_command_queues SET revision=revision+1,updated_at=? WHERE session_id=?", (now,sid))
             row = con.execute("SELECT * FROM agent_commands WHERE command_id=?", (cid,)).fetchone()
+            from .task_runs import TaskRuns
+            TaskRuns.link_continuation(cid, request, connection=con, context=context)
             return {"ok": True, "duplicate": False, "command": self.public(row)}
 
     def _projection(self, con, row, *, full=False):
@@ -273,29 +277,48 @@ class CommandStore:
 
     def snapshot(self, sid: str, cid: str | None = None):
         sid = _session_id(sid)
+        # Healthy state polling does not acquire a writer lock. Serialize only
+        # queue creation/recovery, retaining the expired-lease safety contract.
+        con = connect(self.paths.db)
+        try:
+            con.execute("BEGIN")
+            if is_session_deleted(con, sid):
+                raise CommandError("session_deleted", 410)
+            row = con.execute("SELECT * FROM agent_command_queues WHERE session_id=?", (sid,)).fetchone()
+            if row is not None:
+                queue = dict(row)
+                expired = bool(queue["worker_owner"] and queue["lease_until"] < time.time())
+                restarted = queue["runtime_epoch"] != self.epoch and not queue["worker_owner"]
+                if not expired and not restarted:
+                    return self._snapshot(con, sid, cid, queue)
+        finally:
+            con.close()
         with self.transaction() as con:
             queue = self._queue(con, sid)
-            if cid:
-                row = con.execute("SELECT * FROM agent_commands WHERE command_id=? AND session_id=?", (command_id(cid),sid)).fetchone()
-                if not row:
-                    raise CommandError("command_not_found", 404)
-                return {"ok": True, "command": self._projection(con,row, full=True)}
-            rows = con.execute("SELECT * FROM agent_commands WHERE session_id=? AND "
-                               "(state IN ('queued','delivering','delivered','running','stopping','unconfirmed') OR command_id IN "
-                               "(SELECT command_id FROM agent_commands WHERE session_id=? ORDER BY created_at DESC LIMIT 30)) ORDER BY position", (sid,sid)).fetchall()
-            from ..db.repositories import AgentSessionRepository
-            checkpoint = AgentSessionRepository(con).peek_turn_checkpoint(sid)
-            safe_checkpoint = None
-            if checkpoint and not checkpoint.get("claim_id"):
-                cp = checkpoint.get("checkpoint") or {}
-                if isinstance(cp, dict) and cp.get("resumable"):
-                    safe_checkpoint = {"turn_id": checkpoint["turn_id"], "resumable": True,
-                                       "resume_count": cp.get("resume_count",0)}
-            session = AgentSessionRepository(con).get_session(sid)
-            branch = json.loads(session.get("meta_json") or "{}").get("branch_of") if session else None
-            return {"ok": True, "branch_of":branch, "commands": [self._projection(con,row) for row in rows],
-                    "queue": {k: queue[k] for k in ("paused","pause_reason","revision")},
-                    "checkpoint": safe_checkpoint, "server_time": time.time()}
+            return self._snapshot(con, sid, cid, queue)
+
+    def _snapshot(self, con, sid, cid, queue):
+        if cid:
+            row = con.execute("SELECT * FROM agent_commands WHERE command_id=? AND session_id=?", (command_id(cid),sid)).fetchone()
+            if not row:
+                raise CommandError("command_not_found", 404)
+            return {"ok": True, "command": self._projection(con,row, full=True)}
+        rows = con.execute("SELECT * FROM agent_commands WHERE session_id=? AND "
+                           "(state IN ('queued','delivering','delivered','running','stopping','unconfirmed') OR command_id IN "
+                           "(SELECT command_id FROM agent_commands WHERE session_id=? ORDER BY created_at DESC LIMIT 30)) ORDER BY position", (sid,sid)).fetchall()
+        from ..db.repositories import AgentSessionRepository
+        checkpoint = AgentSessionRepository(con).peek_turn_checkpoint(sid)
+        safe_checkpoint = None
+        if checkpoint and not checkpoint.get("claim_id"):
+            cp = checkpoint.get("checkpoint") or {}
+            if isinstance(cp, dict) and cp.get("resumable"):
+                safe_checkpoint = {"turn_id": checkpoint["turn_id"], "resumable": True,
+                                   "resume_count": cp.get("resume_count",0)}
+        session = AgentSessionRepository(con).get_session(sid)
+        branch = json.loads(session.get("meta_json") or "{}").get("branch_of") if session else None
+        return {"ok": True, "branch_of":branch, "commands": [self._projection(con,row) for row in rows],
+                "queue": {k: queue[k] for k in ("paused","pause_reason","revision")},
+                "checkpoint": safe_checkpoint, "server_time": time.time()}
 
     def claim(self, sid: str, owner: str):
         with self.transaction() as con:
@@ -346,7 +369,7 @@ class CommandStore:
                 return False  # A lost lease cannot manufacture a new authority state.
             now = time.time()
             current=con.execute("SELECT state FROM agent_commands WHERE command_id=?",(cid,)).fetchone()
-            if current and current[0]=="stopping" and state=="succeeded":
+            if current and current[0]=="stopping" and state!='unconfirmed':
                 # An in-flight reply can finish after stop admission. Preserve its
                 # evidence while reporting the operator's accepted stop outcome.
                 state="interrupted"
@@ -449,9 +472,16 @@ class CommandStore:
         return bool(changed)
 
     def record_event(self, cid: str, event: dict):
+        self.record_events(cid, [event])
+
+    def record_events(self, cid: str, events: list[dict]):
+        # One transaction per small replay batch, never one per model token.
+        # Serialize outside the lock and preserve order for pagination/replay.
+        rows = [(cid, str(event["event_id"]), encode(event)) for event in events]
+        if not rows:
+            return
         with self.transaction() as con:
-            con.execute("INSERT OR IGNORE INTO agent_command_events(command_id,event_id,payload_json) VALUES (?,?,?)",
-                        (cid,str(event["event_id"]),encode(event)))
+            con.executemany("INSERT OR IGNORE INTO agent_command_events(command_id,event_id,payload_json) VALUES (?,?,?)", rows)
 
     def events(self, sid: str, cid: str, after: int = 0, limit: int = 500):
         sid, cid = _session_id(sid), command_id(cid)
@@ -497,7 +527,8 @@ class CommandStore:
                     raise CommandError("command_not_running")
                 context = {**json.loads(row["context_json"]), "stop_requested": True}
                 con.execute("UPDATE agent_commands SET state='stopping',context_json=?,revision=revision+1,updated_at=? WHERE command_id=?", (encode(context),now,cid))
-                con.execute("UPDATE agent_command_queues SET paused=1,pause_reason='stopping',revision=revision+1 WHERE session_id=?", (sid,))
+                con.execute("UPDATE agent_command_queues SET paused=1,pause_reason=?,revision=revision+1 WHERE session_id=?",
+                    ('operator' if queue['paused'] and queue['pause_reason']=='operator' else 'stopping',sid))
             elif action in ("edit","remove","move"):
                 if not row or row["state"]!="queued" or row["kind"]=="guide":
                     raise CommandError("command_already_claimed")

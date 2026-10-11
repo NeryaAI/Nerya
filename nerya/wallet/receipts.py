@@ -5,6 +5,11 @@ TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 
 
 def native_received(conn, tx_hash, receiver):
+    base=native_received_base(conn,tx_hash,receiver)
+    return None if base is None else float(Decimal(base)/Decimal(10**18))
+
+
+def native_received_base(conn, tx_hash, receiver):
     """Net native value from this transaction, excluding gas and other transfers.
 
     RPCs without callTracer leave output accounting pending. A wallet/block
@@ -29,12 +34,18 @@ def native_received(conn, tx_hash, receiver):
                     total -= value
             return total + sum(received(child) for child in call.get('calls') or [])
 
-        return float(Decimal(received(trace)) / Decimal(10**18))
+        return received(trace)
     except Exception:
         return None
 
 
 def token_received(receipt, token, receiver, decimals):
+    total = token_received_base(receipt, token, receiver)
+    return None if total is None else float(Decimal(total)/(Decimal(10)**decimals))
+
+
+def token_received_base(receipt, token, receiver):
+    """Exact net ERC20 flow in raw units, including large settlement payouts."""
     if not isinstance(receipt,dict) or 'logs' not in receipt:
         return None
     total = 0
@@ -49,4 +60,4 @@ def token_received(receipt, token, receiver, decimals):
             total += value
         if str(topics[1])[-40:].lower() == receiver.lower().removeprefix('0x'):
             total -= value
-    return float(Decimal(total)/(Decimal(10)**decimals))
+    return total

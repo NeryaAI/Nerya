@@ -335,6 +335,9 @@ class ContinuousSupervisor:
                     return
 
     def _consume(self, service: _Service) -> None:
+        if self.task_executor is None:
+            self._consume_managed(service)
+            return
         from ..triggers.event import TriggerEvent
         from ..triggers.router import RouterResult
         from ..triggers.strategy_agent_task_executor import StrategyAgentTaskExecutor, TARGET
@@ -373,6 +376,47 @@ class ContinuousSupervisor:
                 service.queue.task_done()
                 service.agent_token = None
                 self._update(service, agent_active=False, active_event_id=None)
+
+    def _consume_managed(self,service):
+        from ..triggers.event import TriggerEvent
+        from ..triggers.router import RouterResult
+        from ..sdk.task_dispatch import admit_strategy
+        from ..agent.task_runs import task_runs
+        runs=task_runs(self.config);pending={}
+        while not service.token.is_set or pending:
+            item=None
+            if not service.token.is_set:
+                try:item=service.queue.get(timeout=0.5)
+                except queue.Empty:pass
+            else:time.sleep(0.5)
+            if item is not None:
+                event_id,expires,payload=item
+                try:
+                    if time.time()>expires:service.ledger.finish(event_id,'expired');continue
+                    service.ledger.finish(event_id,'running')
+                    event=TriggerEvent(event_id=event_id,source='script',kind='strategy.continuous',
+                        target='skill:strategy.agent_task',strategy_id=service.package.strategy_id,
+                        payload={'service_generation':service.generation,'expires_at':expires})
+                    route=RouterResult(event_id,'routed',event.target,None,service.package.strategy_id)
+                    receipt=admit_strategy(self.config,event,route,prepared_task=payload['task'],
+                        prepared_inputs=payload['inputs'],expected_hash=service.package.content_hash)
+                    pending[event_id]=(receipt.run_id,expires)
+                except Exception as exc:
+                    service.ledger.finish(event_id,'failed',{'error':type(exc).__name__})
+                finally:service.queue.task_done()
+            for event_id,(rid,expires) in list(pending.items()):
+                run=runs.get(rid);state=run['execution_status']
+                if service.token.is_set or time.time()>expires:
+                    if state in {'queued','running','stopping','awaiting_input','awaiting_approval'}:
+                        runs.stop(rid)
+                        run=runs.get(rid);state=run['execution_status']
+                if state not in {'queued','running','stopping','awaiting_input','awaiting_approval'}:
+                    detail={'run_id':rid,'task_id':rid,'session_id':run['session_id'],'turn_id':run.get('turn_id'),
+                        'agent_status':state,'reason':run.get('reason')}
+                    service.ledger.finish(event_id,state,detail);pending.pop(event_id)
+                    with service.lock:service.data['completed_events']+=1
+                    self._update(service,last_event={'event_id':event_id,'status':state,**detail})
+            self._update(service,agent_active=bool(pending),active_event_id=next(iter(pending),None))
 
     def _supervise(self, service: _Service) -> None:
         sid = service.package.strategy_id

@@ -46,7 +46,7 @@ def _error_code(text: str) -> str:
 
 
 def _schema(config, row: dict):
-    registry = get_registry()
+    registry = get_registry(config.paths.root)
     registry.reload_workspace(config.paths.root)
     spec = registry.find(str(row.get("venue") or ""))
     if row.get("wallet_id") and row.get("kind") in ("chain", "dex"):

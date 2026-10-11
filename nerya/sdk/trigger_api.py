@@ -19,15 +19,21 @@ class TriggerAPI:
     config: Config
     runtime: TriggerRuntime
 
+    def _manage_tasks(self):
+        if self.config.get('runtime.task_run_id') and not self.config.get('runtime.allow_task_management',False):
+            from ..core.errors import TriggerValidationError
+            raise TriggerValidationError('background task cannot create or modify schedules')
+
     def emit(self, *, source: str, kind: str, payload: dict[str, Any] | None = None,
              target: str = "main", strategy_id: str | None = None,
-             idempotency_key: str | None = None, dry_run: bool = False) -> dict[str, Any]:
+             idempotency_key: str | None = None, dry_run: bool = False,
+             actor_id: str | None = None) -> dict[str, Any]:
         event = TriggerEvent.new(
             source=source, kind=kind, payload=payload or {},
             target=target, strategy_id=strategy_id,
             idempotency_key=idempotency_key, dry_run=dry_run,
         )
-        return self.runtime.emit(event).asdict()
+        return (self.runtime.emit(event,actor_id=actor_id) if actor_id is not None else self.runtime.emit(event)).asdict()
 
     def dry_run(self, **kwargs: Any) -> dict[str, Any]:
         kwargs["dry_run"] = True
@@ -114,8 +120,11 @@ class TriggerAPI:
                      session_mode: str | None = None,
                      session_id: str | None = None,
                      session_ids: list[str] | None = None,
-                     execution: dict[str, Any] | None = None,
+                     overlap_policy: str = "skip", execution: dict[str, Any] | None = None,
                      owner_actor_id: str = "local:loopback",
+                     run_at: str | None = None,
+                     anchor_at: float | None = None,
+                     delay_seconds: int | None = None,
                      ) -> dict[str, Any]:
         """Register or update a schedule entry.
 
@@ -141,11 +150,19 @@ class TriggerAPI:
         * ``session_mode`` / ``session_id`` / ``session_ids`` — choose
           fresh, reused, or multi-session scheduled agent execution.
         """
+        if delay_seconds is not None:
+            from datetime import datetime,timezone
+            from ..core.errors import TriggerValidationError
+            if type(delay_seconds) is not int or delay_seconds<=0 or any(v is not None for v in (cron,every_seconds,run_at)):
+                raise TriggerValidationError('relative delay must be a positive integer without another schedule')
+            run_at=datetime.fromtimestamp(time.time()+delay_seconds,timezone.utc).isoformat()
         kwargs: dict[str, Any] = {"id": id, "kind": kind,
                                   "target": target,
-                                  "payload": payload or {},
+                                  "payload": payload or {}, "overlap_policy": overlap_policy,
                                   "execution": dict(execution or {}),
-                                  "owner_actor_id": owner_actor_id}
+                                  "owner_actor_id": owner_actor_id,
+                                  "anchor_at": anchor_at if anchor_at is not None else time.time(), "run_at": run_at}
+        self._manage_tasks()
         if strategy_id is not None:
             kwargs["strategy_id"] = strategy_id
         if every_seconds is not None:
@@ -202,13 +219,22 @@ class TriggerAPI:
         return [self._entry_to_dict(e) for e in load_schedules(self.config.paths)]
 
     def remove_schedule(self, *, id: str) -> dict[str, Any]:
+        self._manage_tasks()
         before = load_schedules(self.config.paths)
-        after = [e for e in before if e.id != id]
-        save_schedules(self.config.paths, after)
-        return {"ok": True, "id": id, "removed": len(before) - len(after)}
+        for entry in before:
+            if entry.id==id:entry.archived=True;entry.enabled=False
+        save_schedules(self.config.paths, before)
+        return {"ok": True, "id": id, "archived":any(e.id==id for e in before),"removed":0}
 
     def enable_schedule(self, *, id: str, enabled: bool = True) -> dict[str, Any]:
-        return self.update_schedule(id=id, enabled=enabled)
+        result=self.update_schedule(id=id, enabled=enabled)
+        if enabled and result.get('ok'):
+            from ..db.sqlite import connect
+            con=connect(self.config.paths.db)
+            try:
+                con.execute("UPDATE task_schedule_state SET paused_reason='',consecutive_failures=0 WHERE task_id=?",(id,));con.commit()
+            finally:con.close()
+        return result
 
     def pause_schedule(self, *, id: str) -> dict[str, Any]:
         """Alias: pause is just ``enable_schedule(enabled=False)``."""
@@ -220,6 +246,7 @@ class TriggerAPI:
 
     def update_schedule(self, *, id: str, **fields: Any) -> dict[str, Any]:
         """Patch individual fields of an existing schedule in place."""
+        self._manage_tasks()
         payload: dict[str, Any] = {"id": id}
         for key in (
             "kind", "every_seconds", "cron", "starts_at", "ends_at",
@@ -229,6 +256,7 @@ class TriggerAPI:
             "session_kind", "attached_skills", "delivery_targets",
             "session_ttl_seconds", "session_mode", "session_id",
             "session_ids",
+            "overlap_policy", "execution", "run_at", "anchor_at", "archived",
         ):
             if key in fields:
                 payload[key] = fields[key]
@@ -251,33 +279,27 @@ class TriggerAPI:
         return {"ok": True, "id": id, "schedule": self._entry_to_dict(updated_entry)}
 
     def run_schedule_now(self, *, id: str,
-                         reason: str = "operator_manual_run"
+                         reason: str = "operator_manual_run", client_request_id: str | None = None,
+                         actor_id: str | None = None,
                          ) -> dict[str, Any]:
-        """Fire the schedule immediately; updates last-tick state."""
+        """Create an independent manual Run without advancing the plan clock."""
         entry = next((e for e in load_schedules(self.config.paths) if e.id == id), None)
         if entry is None:
             return {"ok": False, "error": "schedule_not_found", "id": id}
+        if entry.archived:return {"ok":False,"error":"schedule_archived","id":id}
         now_ts = time.time()
-        if entry.session_kind == "agent":
-            from ..sdk.scheduled_session_factory import default_kernel_factory
-            try:
-                from ..messaging.scheduled_delivery import deliver_scheduled_session
-            except Exception:
-                deliver_scheduled_session = None
+        if entry.session_kind in {'agent','script'}:
+            from .task_dispatch import ManagedScheduledRunner
+            import uuid
+            runner=ManagedScheduledRunner(self.config)
             from ..triggers.scheduled_session import ScheduledSessionRunner
-            result = ScheduledSessionRunner(
-                config=self.config,
-                kernel_factory=default_kernel_factory,
-                delivery_fn=deliver_scheduled_session,
-            ).run_many(entry, now_ts=now_ts)
-            self._mark_schedule_fired(id, now_ts)
-            primary = result[0]
-            return {
-                "ok": all(r.ok for r in result),
-                "schedule_id": id,
-                "session": primary.asdict(),
-                "sessions": [r.asdict() for r in result],
-            }
+            request_id=client_request_id or "manual_"+uuid.uuid4().hex
+            result=[runner.run_once(entry,now_ts=now_ts,session_id=sid,manual_id=request_id,actor=actor_id)
+                    for sid in ScheduledSessionRunner._session_ids_for(entry,now_ts)]
+            primary=result[0]
+            return {"ok":True,"accepted":True,"schedule_id":id,"run_id":primary.run_id,
+                    "command_id":primary.command_id,"session_id":primary.session_id,
+                    "turn_id":primary.turn_id,"session":primary.asdict(),"sessions":[r.asdict() for r in result]}
         if entry.session_kind == "script":
             from ..scripts.runner import run_script
             try:
@@ -336,6 +358,24 @@ class TriggerAPI:
             row = self._entry_to_dict(entry)
             row["last_fired_ts"] = state.get(entry.id)
             row["latest_execution"] = latest_receipts.get(entry.id)
+            if entry.session_kind in {'agent','script'}:
+                from ..agent.task_runs import task_runs
+                from .task_execution import schedule_spec
+                run_store=task_runs(self.config)
+                latest=run_store.list(task_kind="scheduled_agent",task_id=entry.id,limit=1)["runs"]
+                if latest:row["latest_execution"]=latest[0]
+                from dataclasses import asdict
+                from ..agent.task_runs import revision
+                row["source_revision"]=revision(asdict(entry))
+                from ..db.sqlite import connect
+                con=connect(self.config.paths.db)
+                try:clock=con.execute('SELECT * FROM task_schedule_state WHERE task_id=?',(entry.id,)).fetchone()
+                finally:con.close()
+                if clock:
+                    from datetime import datetime,timezone
+                    row['next_due_at']=datetime.fromtimestamp(clock['next_due'],timezone.utc).isoformat() if clock['next_due'] is not None else None
+                    row['paused_reason']=clock['paused_reason'];row['consecutive_failures']=clock['consecutive_failures']
+                    if clock['paused_reason']:row['paused']=True
             rows.append(row)
         return {"ok": True, "schedules": rows}
 
@@ -373,6 +413,12 @@ class TriggerAPI:
             "session_mode": entry.session_mode,
             "session_id": entry.session_id,
             "session_ids": list(entry.session_ids or []),
+            "overlap_policy": entry.overlap_policy,
+            "execution": dict(entry.execution),
+            "owner_actor_id": entry.owner_actor_id,
+            "anchor_at": entry.anchor_at,
+            "run_at": entry.run_at,
+            "archived": entry.archived,
         }
         return {k: v for k, v in out.items() if v is not None}
 

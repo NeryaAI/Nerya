@@ -221,7 +221,7 @@ def routes():
                 sid,
                 trigger_payload=dict((payload or {}).get("trigger_payload") or {}),
                 trigger_event_id=(payload or {}).get("trigger_event_id"),
-                operator=(payload or {}).get("operator"),
+                operator=getattr(client,'auth_actor_id',None) or 'local:loopback',
                 note=str((payload or {}).get("note") or ""),
                 mode_override=(
                     str((payload or {})["mode_override"]).strip().lower()

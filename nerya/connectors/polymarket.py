@@ -9,7 +9,7 @@ Endpoints used (public):
 * ``https://clob.polymarket.com``          — CLOB v2 (orderbooks, orders)
 * ``https://gamma-api.polymarket.com``     — Gamma (market metadata)
 
-Writes use the versioned official py-clob-client-v2 signer and authenticated
+Writes use the pinned official polymarket-client signer and authenticated
 requests. Signed order hashes are persisted before posting; neither private
 keys nor signed payloads are written. Public metadata needs no credentials.
 
@@ -42,10 +42,10 @@ DATA_URL = 'https://data-api.polymarket.com'
 
 def _sdk_module():
     try:
-        import py_clob_client_v2
-        return py_clob_client_v2
+        from . import polymarket_client
+        return polymarket_client
     except ImportError as exc:
-        raise TradingError('polymarket signing requires py-clob-client-v2>=1.1.0,<2') from exc
+        raise TradingError('polymarket signing requires polymarket-client==0.12.0') from exc
 
 
 @dataclass
@@ -70,6 +70,9 @@ class PolymarketConnector(CEXConnectorBase):
     funder: str = ''
     chain_id: int = 137
     max_slippage_bps: int = 50
+    settlement_rpc_url: str = ''
+    settlement_exchange_code_hashes: dict[str,str] = field(default_factory=dict)
+    settlement_confirmations: int = 3
     _client: Any = field(default=None,repr=False)
     _submitted: dict = field(default_factory=dict,repr=False)
     _market_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -276,13 +279,7 @@ class PolymarketConnector(CEXConnectorBase):
         return records
 
     def _signed_order_hash(self,signed,neg_risk):
-        from py_clob_client_v2.config import get_contract_config
-        from py_clob_client_v2.order_utils import ExchangeOrderBuilderV1,ExchangeOrderBuilderV2
-        config=get_contract_config(self.chain_id)
-        v2=hasattr(signed,'timestamp')
-        address=(config.neg_risk_exchange_v2 if neg_risk else config.exchange_v2) if v2 else (config.neg_risk_exchange if neg_risk else config.exchange)
-        builder=(ExchangeOrderBuilderV2 if v2 else ExchangeOrderBuilderV1)(address,self.chain_id,self._sdk().signer)
-        return builder.build_order_hash(builder.build_order_typed_data(signed))
+        return self._sdk().signed_order_hash(signed)
 
     def get_balances(self):
         sdk=_sdk_module()
@@ -293,11 +290,14 @@ class PolymarketConnector(CEXConnectorBase):
         return [Balance(asset='PUSD',free=max(0,total-locked),locked=min(total,locked),total=total)]
 
     def get_positions_value(self):
-        owner=self.funder or self._sdk().signer.address()
-        rows=self._get(self.data_url,'positions',params={'user':owner,'limit':500,'sizeThreshold':0})
-        if isinstance(rows,dict) and isinstance(rows.get('raw'),list):rows=rows['raw']
-        if not isinstance(rows,list) or len(rows)>=500:raise TradingError('prediction positions response incomplete; cannot compute NAV')
-        return sum(_positive_number(r.get('currentValue',0),allow_zero=True) for r in rows)
+        from .prediction_data import portfolio_value
+        owner=self.funder or self._sdk().signer_address
+        return portfolio_value(self._get, self.data_url, owner)
+
+    def get_positions(self, *, status='OPEN', max_pages=100):
+        from .prediction_data import positions
+        owner = self.funder or self._sdk().signer_address
+        return positions(self._get, self.data_url, owner, status=status, max_pages=max_pages)
 
     def place_order(self,*,market,side,order_type,size,price=None,client_order_id=None,time_in_force='GTC',
                     reduce_only=False,leverage=None,margin_mode=None,position_side=None,position_idx=None,
@@ -369,7 +369,8 @@ class PolymarketConnector(CEXConnectorBase):
         px=Decimal(str(price))
         if not tick<=px<=Decimal(1)-tick or px%tick:raise TradingError('prediction price outside probability/tick range')
         expiration=int(params.get('expiration') or 0)
-        if venue_tif=='GTD' and expiration<=time.time()+60:raise TradingError('GTD expiration must exceed 60 second safety window')
+        if venue_tif=='GTD' and expiration<time.time()+180:
+            raise TradingError('GTD expiration must be at least 180 seconds in the future (including the 60 second safety window)')
         if expiration and venue_tif!='GTD':raise TradingError('expiration only applies to GTD')
         if side=='sell':
             balance=client.get_balance_allowance(sdk.BalanceAllowanceParams(asset_type=sdk.AssetType.CONDITIONAL,token_id=token))
@@ -410,7 +411,7 @@ class PolymarketConnector(CEXConnectorBase):
         side=str(doc.get('side') or spec.get('side') or '').lower()
         total=_positive_number(doc.get('original_size',spec.get('size',0)),allow_zero=True)
         matched=_positive_number(doc.get('size_matched',0),allow_zero=True)
-        filled=cost=0.;seen=set();pending=False
+        filled=cost=0.;seen=set();pending=False;settlements=[]
         sdk=_sdk_module()
         for trade_id in doc.get('associate_trades') or []:
             trades=client.get_trades(sdk.TradeParams(id=trade_id)) or []
@@ -429,6 +430,18 @@ class PolymarketConnector(CEXConnectorBase):
                     qty=_positive_number(fill.get('matched_amount',fill.get('size',0)),allow_zero=True)
                     px=_positive_number(fill.get('price'))
                     filled+=qty;cost+=qty*px
+                    settlements.append(str(trade['transaction_hash']))
+        fee_evidence={'status':'unverified'}
+        fee_value=None
+        if filled and self.settlement_rpc_url:
+            from .prediction_fees import confirmed_order_fees
+            from .evm_native import EVMNative
+            chain=EVMNative(chain='polygon',chain_id=137,rpc_url=self.settlement_rpc_url,transport=self.transport)
+            fee_evidence=confirmed_order_fees(chain._rpc,transactions=settlements,order_hash=oid,
+                owner=self.funder or client.signer_address,token_id=token,side=side,filled_shares=filled,
+                exchange_code_hashes=self.settlement_exchange_code_hashes,confirmations=self.settlement_confirmations)
+            fee_value=float(fee_evidence['fee_collateral'])
+            cost=float(fee_evidence['cumulative_notional'])
         status=_map_pm_status(doc.get('status'))
         if filled>total+1e-8:raise TradingError('prediction confirmed fills exceed order size')
         if pending or matched>filled+1e-8:status='partial' if filled else 'new'
@@ -437,7 +450,9 @@ class PolymarketConnector(CEXConnectorBase):
         elif status=='filled':status='new'  # no settled trade evidence yet
         return OrderAck(order_id=oid,client_order_id=cid,status=status,market=market,side=side,
             price=_float_or_zero(doc.get('price')) or None,size=total,filled=filled,avg_price=cost/filled if filled else None,
-            raw={'venue_status':doc.get('status'),'matched_unsettled':max(0,matched-filled),'fee_status':'unverified',
+            fee_usd=fee_value,
+            raw={'venue_status':doc.get('status'),'matched_unsettled':max(0,matched-filled),'fee_status':fee_evidence['status'],
+                 'fee_evidence':fee_evidence,
                  'cumulative_notional':cost,'prediction_market':True})
 
     def fetch_open_orders(self,*,symbols=None):

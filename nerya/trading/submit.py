@@ -93,6 +93,10 @@ def _maybe_auto_approve_strategy_order(
     intent: TradeIntent,
     risk,
 ):
+    if config.get("runtime.financial_action_id") and _auto_approvable_strategy_escalation(risk):
+        from ..financial.trade_permit import check_trade_permit
+        check_trade_permit(config,account_id=intent.account_id,market=intent.market)
+        return ApprovalGate(config).auto_approve(intent,risk,reason="finite_financial_authorization")
     if not bool(config.get("trading.strategy_orders.auto_approve_escalations", True)):
         return None
     if str(getattr(risk, "promotion_state", "") or "").strip().lower() in {
@@ -587,16 +591,45 @@ def submit_trade_plan(
     """
 
     paths = config.paths
+    from .instruments import position_bucket
+    meta = dict(plan.meta or {})
+    bucket = position_bucket(meta)
+    if plan.action in {"close_position", "reduce_position", "attach_protection"} and bucket == "net":
+        from contextlib import closing
+        with closing(PositionBook(paths)) as book:
+            shares = book.list_shares_history(strategy_id=plan.strategy_id, account_id=plan.account_id,
+                                             market=plan.market, open_only=True)
+        eligible = [share for share in shares if share.side == plan.side]
+        if len(eligible) > 1:
+            raise IntentValidationError("ambiguous_position_side")
+        if eligible:
+            bucket = eligible[0].position_side
+    elif bucket == "net" and plan.action == "open_position":
+        profile = get_account_profile(paths, plan.account_id)
+        if (profile.raw.get("provider_config") or {}).get("position_mode") in {"hedge", "hedged"}:
+            bucket = plan.side
+    meta["position_side"] = bucket
+    plan = replace(plan, meta=meta)
     from ..wallet.strategy_execution import is_wallet_account, submit_plan as submit_wallet_plan
+    if (config.get("financial.enabled",False) or config.get('runtime.task_run_id')) and not config.get("runtime.financial_action_id") and get_account_profile(paths,plan.account_id).is_real_money:
+        from ..financial.contracts import context_from_config
+        from ..financial.gateway import FinancialGateway
+        context=context_from_config(config,actor_id=config.get("runtime.financial_actor_id"),scopes=config.get("runtime.financial_actor_scopes",()))
+        gateway=FinancialGateway(config)
+        request={"kind":"trade","account_id":plan.account_id,"market":plan.market,"plan":plan.asdict()}
+        action=gateway.prepare(context,request,action_key=f"trade:{context.run_id or context.actor_id}:{plan.plan_id}")
+        return gateway.execute(context,action["action_id"],quote_hash=action["quote_hash"])
     if is_wallet_account(config,plan.account_id):
         return submit_wallet_plan(config,plan)
     prediction_account=get_account_profile(paths,plan.account_id)
     from ..connectors.provider_spec import get_registry
-    prediction_spec=get_registry().find(prediction_account.venue)
+    prediction_spec=get_registry(paths.root).find(prediction_account.venue)
     is_prediction=prediction_account.kind=='prediction_market' or bool(prediction_spec and prediction_spec.kind=='prediction_market')
     if is_prediction:
-        if plan.side!='long' or plan.entry.order_type not in ('market','limit') or plan.protection is not None:
+        if plan.side!='long' or plan.entry.order_type not in ('market','limit'):
             raise IntentValidationError('prediction outcome shares support long market/limit entry and owned-share exits; native short/TP/SL is unsupported')
+        if plan.protection is not None and plan.protection.mode == "hard_exchange":
+            raise IntentValidationError("prediction protection requires a local executor; native protection is unsupported")
     if plan.protection is not None:
         from .protection_store import validate_supported_specs
         validate_supported_specs(plan.protection)
@@ -793,7 +826,7 @@ def submit_trade_plan(
             "execution_blocker": execution_blocker,
         }
     snap = fresh_snapshot(config, plan.account_id, profile=profile)
-    store = CapitalReservationStore(paths)
+    store = CapitalReservationStore(paths,excluded_reservation_id="financial:"+config.get("runtime.financial_action_id") if config.get("runtime.financial_action_id") else None)
     # R2B7: sweep TTL-expired reservations up front so budget blocked by
     # a crashed executor actually frees when the TTL passes, instead of
     # only advancing as a side effect of active_for_account reads.
@@ -912,7 +945,8 @@ def submit_trade_plan(
     if risk_reducing:
         from contextlib import closing
         with closing(PositionBook(paths)) as book:
-            share = book.get_share(strategy_id=plan.strategy_id, account_id=plan.account_id, market=plan.market)
+            share = book.get_share(strategy_id=plan.strategy_id, account_id=plan.account_id, market=plan.market,
+                                   position_side=plan.meta.get("position_side"))
         size = float(candidate.size_base or 0.0)
         if (share is None or not share.is_open or share.side != plan.side
                 or size <= 0 or size > abs(share.size_share_base) + 1e-12):
@@ -923,20 +957,31 @@ def submit_trade_plan(
         "plan_action": plan.action,
         **dict(plan.meta or {}),
     })
-    reservation = store.reserve(
-        account_id=candidate.account_id,
-        strategy_id=candidate.strategy_id,
-        market=candidate.market,
-        side=candidate.side,
-        notional_usd=candidate.notional_usd,
-        estimated_fee_usd=candidate.estimated_fee_usd,
-        estimated_margin_usd=float(
-            (candidate.required_collateral or {}).get(profile.base_currency.upper(), 0.0)
-        ),
-        risk_evaluation_id=risk.risk_evaluation_id,
-        intent_id=intent.intent_id,
-        plan_id=plan.plan_id,
-    )
+    candidate.meta["max_slippage_bps"] = min(int(plan.entry.max_slippage_bps),
+                                              int(risk.limits_snapshot.get("max_slippage_bps", plan.entry.max_slippage_bps)))
+    from .accounts import account_revision
+    provider=get_registry(paths.root).find(profile.venue)
+    candidate.meta["account_binding"]=account_revision(profile)
+    if provider:candidate.meta["provider_binding"]=provider.binding()
+    financial_action_id=config.get("runtime.financial_action_id")
+    if financial_action_id:
+        from ..financial.trade_permit import check_trade_permit
+        check_trade_permit(config,account_id=candidate.account_id,market=candidate.market,notional_usd=candidate.notional_usd)
+        reservation=store.get("financial:"+financial_action_id)
+        if reservation is None:raise IntentValidationError("financial capital reservation missing")
+        from ..db.sqlite import connect as financial_connect
+        connection=financial_connect(paths.db)
+        try:
+            connection.execute("UPDATE capital_reservations SET strategy_id=?,intent_id=?,plan_id=?,market=?,side=? WHERE reservation_id=?",
+                (candidate.strategy_id,intent.intent_id,plan.plan_id,candidate.market,candidate.side,reservation.reservation_id))
+        finally:connection.close()
+    else:
+        try:
+            reservation = store.reserve_checked(candidate=candidate, profile=profile, snapshot=snap)
+        except TradingError as exc:
+            return {"status": "rejected", "plan_id": plan.plan_id, "session_id": session_id,
+                    "execution_blocker": str(exc), "risk_decision": risk.asdict(),
+                    "budget_decision": decision.asdict()}
     candidate.reservation_id = reservation.reservation_id
 
     orchestrator = ExecutorOrchestrator(config)
@@ -1026,6 +1071,7 @@ def _attach_protection_for_plan(config: Config, plan: TradePlan) -> dict[str, An
         account_id=plan.account_id,
         strategy_id=plan.strategy_id,
         market=plan.market,
+        position_side=plan.meta.get("position_side"),
     )
     if position is None:
         raise IntentValidationError(
@@ -1049,7 +1095,7 @@ def _attach_protection_for_plan(config: Config, plan: TradePlan) -> dict[str, An
         strategy_id=plan.strategy_id,
         account_id=plan.account_id,
         market=plan.market,
-        side=PositionBook(paths).get_share(account_id=plan.account_id, strategy_id=plan.strategy_id, market=plan.market).side,
+        side=position.side,
         mode=src.mode,
         stop_loss=src.stop_loss,
         take_profit=src.take_profit,
@@ -1103,6 +1149,7 @@ def _resolve_position_sized_plan(paths: Any, plan: TradePlan) -> TradePlan:
             strategy_id=plan.strategy_id,
             account_id=plan.account_id,
             market=plan.market,
+            position_side=plan.meta.get("position_side"),
         )
     except Exception:  # pragma: no cover - defensive only
         return plan

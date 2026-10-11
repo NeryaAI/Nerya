@@ -654,6 +654,8 @@ class StrategyEvolutionRunner:
             "forbidden_targets": list(cfg.forbidden_targets),
             "materializable_output_contract": _strategy_tuning_materializable_contract(pkg),
             "tuning_prompt": cfg.tuning_prompt,
+            # 计划随本次 package hash 冻结，供复盘 Agent 使用，不能拿当前文件解释旧运行。
+            "review_plan": dict(cfg.review_plan),
             "run_id": run_id,
         }
         envelope = dispatcher.dispatch(

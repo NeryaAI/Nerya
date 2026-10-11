@@ -52,6 +52,10 @@ ALL_SCOPES: frozenset[str] = frozenset({
     "trade:live",        # live exchange trade submit/cancel
     "approve:trade",     # respond to trade approvals
     "approve:tool",      # respond to tool approvals
+    "approve:funds",     # finite non-trading funds authorizations
+    "execute:strategy",  # admit reviewed strategy runs
+    "execute:automation",# admit automation runs and scheduler ticks
+    "read:funds",        # financial actions and grant inspection
     "gateway:webhook",   # inbound webhook (signed by platform)
     "gateway:send",      # outbound gateway send
     "admin:ops",         # ops/evidence/record + dev surface
@@ -106,6 +110,15 @@ class RouteRule:
 # default to ``admin:ops`` if no rule matches them.
 
 _RULES: tuple[RouteRule, ...] = (
+    RouteRule("POST", "/triggers/schedules/preview", "read:runtime", "read-only calendar validation; no task execution"),
+    RouteRule("GET", "/agent/runs", "read:sessions", "task run history"),
+    RouteRule('POST','/strategies/runtime/run_tick','execute:strategy','strategy manual execution'),
+    RouteRule("GET", "/agent/tasks/", "read:sessions", "task execution configuration"),
+    RouteRule("GET", "/agent/runs/", "read:sessions", "task run receipts"),
+    RouteRule("POST", "/agent/runs", "execute:strategy|execute:automation", "task-specific scope is checked by the handler"),
+    RouteRule("POST", "/agent/runs/", "write:chat|execute:strategy|execute:automation", "owned run control"),
+    RouteRule("GET", "/financial/", "read:funds", "financial audit"),
+    RouteRule("POST", "/financial/", "write:config|approve:funds|approve:trade|read:funds", "action-specific financial authorization"),
     RouteRule("GET", "/assistants", "read:runtime", "assistant profiles and gateway bindings"),
     RouteRule("GET", "/assistants/tasks", "read:sessions", "conversation-owned assistant tasks"),
     RouteRule("GET", "/assistants/results", "read:sessions", "assistant task conclusions and reports"),
@@ -239,7 +252,7 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule(
         "POST",
         "/approvals/callback",
-        "approve:trade|approve:tool",
+        "approve:trade|approve:tool|approve:funds",
         "handler partitions trade and tool approval scopes by record kind",
     ),
 
@@ -447,8 +460,8 @@ _RULES: tuple[RouteRule, ...] = (
     RouteRule("GET", "/triggers/routes", "read:runtime", ""),
     RouteRule("GET", "/triggers/result", "read:sessions", ""),
     RouteRule("GET", "/triggers/schedules", "read:runtime", ""),
-    RouteRule("POST", "/triggers/schedules/tick", "read:runtime", ""),
-    RouteRule("POST", "/triggers/schedules/run_now", "write:chat", ""),
+    RouteRule("POST", "/triggers/schedules/tick", "execute:automation", ""),
+    RouteRule("POST", "/triggers/schedules/run_now", "execute:automation", ""),
     RouteRule("GET", "/triggers/schedules/status", "read:runtime", ""),
     RouteRule(None, "/triggers/schedules/", "write:config", ""),
     RouteRule(None, "/triggers/routes/", "write:config", ""),

@@ -216,12 +216,18 @@ class PermissionEngine:
         if context.plan_only and (not descriptor.read_only or risk is not RiskLevel.READ or scope is PermissionScope.SECRETS):
             return PermissionDecision(kind=PermissionDecisionKind.DENY,
                 reason="plan mode permits investigation only", risk=risk, scope=scope)
-        policies = [context.tool_policy]
-        if context.current_tool_policy:
-            policies.append(context.current_tool_policy())
-        if any(not tool_policy_allows(normalise_tool_policy(policy), descriptor.name) for policy in policies):
+        if not tool_policy_allows(normalise_tool_policy(context.tool_policy), descriptor.name):
             return PermissionDecision(kind=PermissionDecisionKind.DENY,
                 reason="tool outside configured capability scope", risk=risk, scope=scope)
+        if context.current_tool_policy is not None:
+            try:
+                current = context.current_tool_policy()
+                allowed = tool_policy_allows(normalise_tool_policy(current), descriptor.name)
+            except Exception:
+                allowed = False
+            if not allowed:
+                return PermissionDecision(kind=PermissionDecisionKind.DENY,
+                    reason="tool scope was narrowed or revoked", risk=risk, scope=scope)
 
         if context.mode is PermissionMode.YOLO:
             for rule in context.deny_rules:

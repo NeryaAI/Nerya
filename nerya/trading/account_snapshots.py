@@ -104,8 +104,9 @@ class AccountSnapshot:
         return float(self.free_usd)
 
     @property
-    def positions_value_usd(self) -> float:
-        return float(self.open_order_notional_usd)
+    def positions_value_usd(self) -> float | None:
+        value = self.meta.get("positions_value_usd")
+        return float(value) if value is not None else None
 
     def asdict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -128,7 +129,10 @@ class AccountSnapshot:
 # ---------------------------------------------------------------------------
 
 
-def _con(paths: WorkspacePaths):
+def _con(paths: WorkspacePaths, *, readonly=False):
+    if readonly:
+        from ..db.sqlite import connect_preview
+        return connect_preview(paths.db)
     return connect(paths.db)
 
 
@@ -141,7 +145,7 @@ def _row_to_snapshot(row: dict[str, Any] | tuple) -> AccountSnapshot:
             "snapshot_id", "account_id", "ts", "source", "nav_usd",
             "cash_by_asset_json", "free_by_asset_json", "locked_by_asset_json",
             "margin_used_usd", "unrealized_pnl_usd", "open_order_notional_usd",
-            "health", "latency_ms", "raw_ref",
+            "health", "latency_ms", "raw_ref", "meta_json",
         )
         row = dict(zip(keys, row))
         get = lambda key, default=None: row.get(key, default)  # noqa: E731
@@ -161,6 +165,7 @@ def _row_to_snapshot(row: dict[str, Any] | tuple) -> AccountSnapshot:
         health=str(get("health") or "ok"),  # type: ignore[arg-type]
         latency_ms=int(get("latency_ms") or 0),
         raw_ref=(get("raw_ref") or None),
+        meta=json.loads(str(get("meta_json") or "{}")),
     )
 
 
@@ -172,8 +177,8 @@ def _persist(paths: WorkspacePaths, snap: AccountSnapshot) -> None:
             snapshot_id, account_id, ts, source, nav_usd,
             cash_by_asset_json, free_by_asset_json, locked_by_asset_json,
             margin_used_usd, unrealized_pnl_usd, open_order_notional_usd,
-            health, latency_ms, raw_ref
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            health, latency_ms, raw_ref, meta_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snap.snapshot_id,
@@ -190,18 +195,19 @@ def _persist(paths: WorkspacePaths, snap: AccountSnapshot) -> None:
             snap.health,
             snap.latency_ms,
             snap.raw_ref,
+            json.dumps(snap.meta, allow_nan=False),
         ),
     )
 
 
-def latest_snapshot(paths: WorkspacePaths, account_id: str) -> AccountSnapshot | None:
-    con = _con(paths)
+def latest_snapshot(paths: WorkspacePaths, account_id: str, *, readonly=False) -> AccountSnapshot | None:
+    con = _con(paths, readonly=readonly)
     row = con.execute(
         """
         SELECT snapshot_id, account_id, ts, source, nav_usd,
                cash_by_asset_json, free_by_asset_json, locked_by_asset_json,
                margin_used_usd, unrealized_pnl_usd, open_order_notional_usd,
-               health, latency_ms, raw_ref
+               health, latency_ms, raw_ref, meta_json
         FROM account_snapshots
         WHERE account_id = ?
         ORDER BY ts DESC
@@ -221,7 +227,7 @@ def latest_snapshots(paths: WorkspacePaths) -> list[AccountSnapshot]:
         SELECT s.snapshot_id, s.account_id, s.ts, s.source, s.nav_usd,
                s.cash_by_asset_json, s.free_by_asset_json, s.locked_by_asset_json,
                s.margin_used_usd, s.unrealized_pnl_usd, s.open_order_notional_usd,
-               s.health, s.latency_ms, s.raw_ref
+               s.health, s.latency_ms, s.raw_ref, s.meta_json
         FROM account_snapshots s
         JOIN (
             SELECT account_id, MAX(ts) AS max_ts
@@ -307,14 +313,14 @@ def equity_curve(
     return points
 
 
-def _position_book_marks(paths: WorkspacePaths, account_id: str) -> dict[str, float]:
+def _position_book_marks(paths: WorkspacePaths, account_id: str, *, readonly=False) -> dict[str, float]:
     """Return latest persisted marks for this account's open positions."""
 
     try:
         from .position_book import PositionBook
 
         marks: dict[str, float] = {}
-        for pos in PositionBook(paths).open_positions(account_id=account_id):
+        for pos in PositionBook(paths, readonly=readonly).open_positions(account_id=account_id):
             mark = float(pos.mark_price or 0.0)
             if mark > 0:
                 marks[pos.market] = mark
@@ -341,11 +347,11 @@ def _paper_position_totals(
     return market_value, unrealized
 
 
-def _position_book_open(paths: WorkspacePaths, account_id: str):
+def _position_book_open(paths: WorkspacePaths, account_id: str, *, readonly=False):
     try:
         from .position_book import PositionBook
 
-        return PositionBook(paths).open_positions(account_id=account_id)
+        return PositionBook(paths, readonly=readonly).open_positions(account_id=account_id)
     except Exception:  # pragma: no cover - read-model best effort
         log.debug("position book lookup failed for account %s", account_id, exc_info=True)
         return []
@@ -442,16 +448,17 @@ def _paper_snapshot(
     paths: WorkspacePaths,
     *,
     marks: dict[str, float] | None = None,
+    readonly=False,
 ) -> AccountSnapshot:
     """Project a snapshot from the per-account paper ledger."""
     from .virtual_ledger import open_ledger
 
-    ledger = open_ledger(paths, profile.id, profile.initial_balance_usd)
+    ledger = open_ledger(paths, profile.id, profile.initial_balance_usd, persist_init=not readonly)
     snap = ledger.snapshot()
     cash_usd = float(snap.get("cash_usd") or 0.0)
     fees = float(snap.get("fees_paid_usd") or 0.0)
     positions = snap.get("positions") or {}
-    effective_marks = dict(_position_book_marks(paths, profile.id))
+    effective_marks = dict(_position_book_marks(paths, profile.id, readonly=readonly))
     for key, value in (marks or {}).items():
         try:
             mark = float(value or 0.0)
@@ -459,14 +466,14 @@ def _paper_snapshot(
             continue
         if mark > 0:
             effective_marks[str(key)] = mark
-    book_positions = _position_book_open(paths, profile.id)
+    book_positions = _position_book_open(paths, profile.id, readonly=readonly)
     if book_positions:
         book_markets = {str(pos.market) for pos in book_positions}
         shares_by_position: dict[str, list[Any]] = {}
         try:
             from .position_book import PositionBook
 
-            book = PositionBook(paths)
+            book = PositionBook(paths, readonly=readonly)
             for pos in book_positions:
                 shares_by_position[pos.position_id] = book.list_shares(pos.position_id)
         except Exception:  # pragma: no cover — defensive against schema drift
@@ -513,6 +520,9 @@ def _paper_snapshot(
         health="ok",
         latency_ms=0,
         meta={
+            "positions_value_usd": open_notional,
+            "collections": {name: {"status": "ok", "source": "paper", "as_of": time.time()}
+                            for name in ("balances", "positions", "open_orders")},
             "trade_count": int(snap.get("trade_count") or 0),
             "fees_paid_usd": fees,
             "marks": effective_marks,
@@ -531,6 +541,9 @@ def _mock_snapshot(profile: AccountProfile) -> AccountSnapshot:
         free_by_asset={profile.base_currency.upper(): profile.initial_balance_usd},
         locked_by_asset={},
         health="ok",
+        meta={"positions_value_usd": 0.0,
+              "collections": {name: {"status": "ok", "source": "mock", "as_of": time.time()}
+                              for name in ("balances", "positions", "open_orders")}},
     )
 
 
@@ -552,6 +565,11 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
     locked_by_asset: dict[str, float] = {}
     nav_usd = 0.0
     error_meta: dict[str, Any] = {}
+    collections = {
+        name: {"status": "unknown", "as_of": None, "source": profile.venue}
+        for name in ("balances", "positions", "open_orders")
+    }
+    conn = None
 
     try:
         registry = ConnectorRegistry(workspace=config.paths.root)
@@ -559,6 +577,7 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
         connector_cfg = legacy_account.connector_cfg()
         conn = registry.get(profile.id, connector_cfg)
         balances = conn.get_balances()
+        collections["balances"].update(status="ok", as_of=time.time())
     except TradingError as exc:
         msg = str(exc).lower()
         if "auth" in msg or "key" in msg or "signature" in msg:
@@ -569,12 +588,14 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
             health = "degraded"
         error_meta = redact_dict({"error": str(exc)})
         balances = []
+        collections["balances"].update(status="error", error=error_meta["error"])
     except Exception as exc:  # pragma: no cover — defensive
         log.warning("live snapshot for %s degraded: %s", profile.id,
                     redact_dict({"error": str(exc)})["error"])
         health = "degraded"
         error_meta = redact_dict({"error": str(exc)})
         balances = []
+        collections["balances"].update(status="error", error=error_meta["error"])
 
     base_ccy = profile.base_currency.upper()
     for bal in balances or []:
@@ -599,8 +620,12 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
 
     latency = int((time.perf_counter() - started) * 1000)
 
+    positions_value = 0.0
     if health=='ok' and getattr(conn,'kind','')=='prediction_market':
-        try:nav_usd+=conn.get_positions_value()
+        try:
+            positions_value = conn.get_positions_value()
+            nav_usd += positions_value
+            collections["positions"].update(status="ok", as_of=time.time(), valuation_basis="outcome_market_value")
         except Exception as exc:
             health='degraded';error_meta['positions_error']=str(exc)
 
@@ -612,20 +637,39 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
     margin_used_usd = 0.0
     unrealized_pnl_usd = 0.0
     open_order_notional_usd = 0.0
-    try:
-        if health in ("ok",) and hasattr(conn, "fetch_positions"):
+    position_rows = []
+    open_order_rows = []
+    if collections["balances"]["status"] == "ok":
+        try:
             for pos in conn.fetch_positions():
+                position_rows.append(pos.asdict())
                 margin_used_usd += float(getattr(pos, "initial_margin_usd", 0.0) or 0.0)
                 unrealized_pnl_usd += float(getattr(pos, "unrealised_pnl_usd", 0.0) or 0.0)
-        if health in ("ok",) and hasattr(conn, "fetch_open_orders"):
+                positions_value += abs(float(getattr(pos, "notional_usd", 0.0) or 0.0))
+            collections["positions"].update(status="ok", as_of=time.time())
+        except NotImplementedError:
+            collections["positions"].update(status="unsupported")
+        except Exception as exc:
+            health = "degraded"
+            collections["positions"].update(status="error", error=redact_dict({"error": str(exc)})["error"])
+        try:
             for oo in conn.fetch_open_orders():
+                open_order_rows.append(oo.asdict())
                 px = float(getattr(oo, "price", 0.0) or 0.0)
                 sz = float(getattr(oo, "size", 0.0) or 0.0)
                 if px > 0 and sz > 0:
                     open_order_notional_usd += px * sz
-    except Exception as exc:  # pragma: no cover — defensive
-        log.warning("live snapshot derivatives fetch failed for %s: %s", profile.id,
-                    redact_dict({"error": str(exc)})["error"])
+            collections["open_orders"].update(status="ok", as_of=time.time())
+        except NotImplementedError:
+            collections["open_orders"].update(status="unsupported")
+        except Exception as exc:
+            health = "degraded"
+            collections["open_orders"].update(status="error", error=redact_dict({"error": str(exc)})["error"])
+    error_meta["collections"] = collections
+    error_meta["positions"] = position_rows
+    error_meta["open_orders"] = open_order_rows
+    if collections["positions"]["status"] == "ok":
+        error_meta["positions_value_usd"] = positions_value
 
     snap = AccountSnapshot(
         snapshot_id=_new_snapshot_id(),
@@ -856,7 +900,7 @@ def capture_snapshot(
     profile = profile or get_account_profile(config.paths, account_id)
 
     if profile.mode == "paper":
-        snap = _paper_snapshot(profile, config.paths, marks=marks)
+        snap = _paper_snapshot(profile, config.paths, marks=marks, readonly=not persist)
     elif profile.wallet_id and profile.kind in ("chain", "dex"):
         snap = _wallet_snapshot(profile, config)
     elif profile.reads_real_balances:
@@ -912,6 +956,7 @@ def fresh_snapshot(
     *,
     max_age_s: float | None = None,
     profile: AccountProfile | None = None,
+    persist: bool = True,
 ) -> AccountSnapshot:
     """Return a snapshot that is at most ``max_age_s`` seconds old.
 
@@ -925,10 +970,10 @@ def fresh_snapshot(
             "trading.snapshot.max_age_seconds", DEFAULT_MAX_AGE_S
         )
     )
-    existing = latest_snapshot(config.paths, account_id)
+    existing = latest_snapshot(config.paths, account_id, readonly=not persist)
     if existing and not existing.is_stale(max_age_s=threshold):
         return existing
-    return capture_snapshot(config, account_id, profile=profile)
+    return capture_snapshot(config, account_id, profile=profile, persist=persist)
 
 
 def free_usd_for_account(snap: AccountSnapshot, base_currency: str = "USDT") -> float:

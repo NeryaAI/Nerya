@@ -26,5 +26,10 @@ def broadcast_callback(config, execution_id):
         # The connector computes the hash before sending, so a transport timeout
         # still leaves an identity that can be looked up without re-broadcast.
         safe = {k:v for k,v in tx.items() if k not in ('raw_transaction','signed_tx','private_key')}
+        aid=config.get('runtime.financial_action_id')
+        if aid:
+            from ..financial.store import FinancialStore
+            FinancialStore(config).mark(aid,state='submitted',submission={
+                'transaction_hash':safe.get('tx_hash'),'chain':safe.get('chain'),'execution_ref':safe.get('execution_ref')})
         return write(config,execution_id,status='submitted',transaction=safe)
     return record

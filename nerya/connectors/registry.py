@@ -52,25 +52,34 @@ class ConnectorRegistry:
     workspace: Path
     vault_passphrase: str | None = None
     _cache: dict[str, Connector] = field(default_factory=dict, init=False)
+    _revisions: dict[str, tuple] = field(default_factory=dict, init=False)
 
-    def get(self, account_id: str, account_cfg: dict[str, Any]) -> Connector:
-        if account_id in self._cache:
+    def get(self, account_id: str, account_cfg: dict[str, Any], *, provider_binding: dict | None = None) -> Connector:
+        from .provider_spec import get_registry
+        from ..financial.contracts import digest
+        spec=get_registry(self.workspace).find(account_cfg.get("venue") or "mock")
+        revision=(provider_binding.get("revision") if provider_binding else spec.revision if spec else None,digest(account_cfg))
+        if account_id in self._cache and self._revisions.get(account_id)==revision:
             return self._cache[account_id]
         conn = build_connector(account_cfg, workspace=self.workspace,
-                                vault_passphrase=self.vault_passphrase)
+                                vault_passphrase=self.vault_passphrase,provider_binding=provider_binding)
         self._cache[account_id] = conn
+        self._revisions[account_id] = revision
         return conn
 
     def invalidate(self, account_id: str | None = None) -> None:
         if account_id:
             self._cache.pop(account_id, None)
+            self._revisions.pop(account_id,None)
         else:
             self._cache.clear()
+            self._revisions.clear()
 
     def reload_providers(self) -> None:
         from .provider_spec import get_registry
-        get_registry().reload_workspace(self.workspace)
+        get_registry(self.workspace).reload_workspace(self.workspace)
         self._cache.clear()
+        self._revisions.clear()
 
 
 def build_connector(
@@ -78,14 +87,15 @@ def build_connector(
     *,
     workspace: Path | None = None,
     vault_passphrase: str | None = None,
+    provider_binding: dict | None = None,
 ) -> Connector:
     """Construct a connector for an account config."""
     from .provider_spec import get_registry
     venue = (account_cfg.get("venue") or "mock").lower()
     cfg = dict(account_cfg)
     cfg["venue"] = venue
-    return get_registry().build(
-        cfg, workspace=workspace, vault_passphrase=vault_passphrase,
+    return get_registry(workspace).build(
+        cfg, workspace=workspace, vault_passphrase=vault_passphrase,provider_binding=provider_binding,
     )
 
 
@@ -199,10 +209,10 @@ def _resolve_ref(
         return None
 
 
-def list_providers() -> list[dict[str, Any]]:
+def list_providers(workspace: Path | None = None) -> list[dict[str, Any]]:
     """Public helper used by /exchanges API route + dashboard readiness."""
     from .provider_spec import get_registry
-    return [s.to_info() for s in get_registry().list_specs()]
+    return [s.to_info() for s in get_registry(workspace).list_specs()]
 
 
 __all__ = ["ConnectorRegistry", "build_connector", "list_providers"]

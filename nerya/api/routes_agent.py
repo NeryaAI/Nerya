@@ -608,6 +608,9 @@ def routes():
         from copy import deepcopy
         from ..core.config import Config
         run_config = Config(paths=run_config.paths,data=deepcopy(run_config.data))
+        if payload.get("_auth_actor_id"):
+            run_config.data.setdefault("runtime",{})["financial_actor_id"] = payload["_auth_actor_id"]
+            run_config.data["runtime"]["financial_actor_scopes"] = list(payload.get("_auth_scopes") or ())
         mode = payload.get("work_mode", "execute")
         if payload.get("resume_turn_id") and payload.get("session_id"):
             from ..db.sqlite import connect as _plan_connect
@@ -781,13 +784,15 @@ def routes():
             try:
                 from ..harness.cancellation import CancelToken
 
-                cancel_token = CancelToken()
+                cancel_token = payload.get('_task_cancel_token')
+                if not isinstance(cancel_token,CancelToken):cancel_token=CancelToken()
                 result = kernel.run_turn(
                     trigger=trigger,
                     strategy_id=payload.get("strategy_id"),
                     session_id=requested_session_id,
                     turn_id=payload.get("turn_id"),
                     cancel_token=cancel_token,
+                    attached_skills=run_config.get("agent.native.attached_skills") or None,
                     evidence_contract=(
                         payload.get("evidence_contract")
                         if isinstance(payload.get("evidence_contract"), dict)
@@ -1013,6 +1018,8 @@ def routes():
         the source column was enforced show up with ``source == ""`` — we
         keep those so older dashboards don't suddenly lose history.
         """
+        if row.get("source") in {"strategy_agent","scheduled_agent"}:
+            return True
         if row.get("strategy_id"):
             return False
         source = str(row.get("source") or "").strip().lower()
@@ -1058,6 +1065,7 @@ def routes():
                 limit=fetch_limit,
             )
             deleted = deleted_session_ids(con)
+            task_bindings=list(con.execute('SELECT session_id,task_kind,task_id,MAX(created_at) FROM agent_runs GROUP BY session_id'))
             by_id = {sid: row for sid, row in by_id.items() if sid not in deleted}
             rows = [row for row in rows if row.get("session_id") not in deleted]
             con.close()
@@ -1072,6 +1080,10 @@ def routes():
                     by_id[sid] = merge_session_dict(by_id[sid], row)
                 else:
                     by_id[sid] = db_session_asdict(row)
+            for binding in task_bindings:
+                if binding['session_id'] in by_id:
+                    by_id[binding['session_id']]['source']=binding['task_kind']
+                    by_id[binding['session_id']]['task_id']=binding['task_id']
         except Exception:
             pass
         sessions = list(by_id.values())

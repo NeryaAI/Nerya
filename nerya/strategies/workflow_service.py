@@ -220,8 +220,16 @@ def _apply_node_change(files: dict[str, str], manifest: dict[str, Any], node: di
             raise WorkflowError("Invalid Agent configuration")
         manifest.update(value)
     elif path == ["$tuning"]:
-        if not isinstance(value, dict) or set(value) - {"objectives", "proposal_policy", "tuning_prompt"}:
+        if not isinstance(value, dict) or set(value) - {"enabled", "review_plan", "objectives", "proposal_policy", "tuning_prompt"}:
             raise WorkflowError("Invalid review proposal configuration")
+        if "enabled" in value and not isinstance(value["enabled"], bool):
+            raise WorkflowError("Review enabled must be a boolean")
+        plan = value.get("review_plan", {})
+        if not isinstance(plan, dict) or len(plan) > 20 or any(
+            not isinstance(key, str) or not isinstance(text, str) or len(text) > 12000
+            for key, text in plan.items()
+        ):
+            raise WorkflowError("Review plan must contain bounded text fields")
         manifest.setdefault("tuning", {}).update(value)
     else:
         if path == ["tuning", "guardrails"] and isinstance(value, dict) and value.get("require_operator_approval") is False:

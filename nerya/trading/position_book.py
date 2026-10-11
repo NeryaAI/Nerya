@@ -101,6 +101,7 @@ class Position:
     updated_at: float = field(default_factory=time.time)
     closed_at: float | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+    position_side: str = "net"
 
     @property
     def is_open(self) -> bool:
@@ -138,6 +139,7 @@ class PositionShare:
     updated_at: float = field(default_factory=time.time)
     closed_at: float | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+    position_side: str = "net"
 
     @property
     def is_open(self) -> bool:
@@ -161,13 +163,18 @@ class PositionShare:
 
 
 class PositionBook:
-    def __init__(self, paths: WorkspacePaths):
+    def __init__(self, paths: WorkspacePaths, *, readonly=False):
         self.paths = paths
+        self.readonly = readonly
         self._con = None
 
     def _con_lazy(self):
         if self._con is None:
-            self._con = connect(self.paths.db)
+            if self.readonly:
+                from ..db.sqlite import connect_preview
+                self._con = connect_preview(self.paths.db)
+            else:
+                self._con = connect(self.paths.db)
         return self._con
 
     def close(self) -> None:
@@ -192,30 +199,33 @@ class PositionBook:
         account_id: str,
         strategy_id: str,
         market: str,
+        position_side: str | None = None,
     ) -> Position | None:
         """Return the merged open position only if ``strategy_id`` has a
         share in it. Callers that simply want the merged row regardless
         of strategy should use :meth:`get_open_merged`.
         """
         share = self.get_share(
-            strategy_id=strategy_id, account_id=account_id, market=market,
+            strategy_id=strategy_id, account_id=account_id, market=market, position_side=position_side,
         )
         if share is None or not share.is_open:
             return None
         return self.get_by_id(share.position_id)
 
     def get_open_merged(
-        self, *, account_id: str, market: str,
+        self, *, account_id: str, market: str, position_side: str | None = None,
     ) -> Position | None:
         row = self._con_lazy().execute(
             """
             SELECT * FROM positions
              WHERE account_id = ? AND market = ?
-               AND closed_at IS NULL
-             LIMIT 1
+               AND closed_at IS NULL AND (? IS NULL OR position_side = ?)
             """,
-            (account_id, market),
-        ).fetchone()
+            (account_id, market, position_side, position_side),
+        ).fetchall()
+        if len(row) > 1:
+            raise ValueError("ambiguous_position_side")
+        row = row[0] if row else None
         return _row_to_position(row) if row else None
 
     def get_by_id(self, position_id: str) -> Position | None:
@@ -230,16 +240,19 @@ class PositionBook:
         strategy_id: str,
         account_id: str,
         market: str,
+        position_side: str | None = None,
     ) -> PositionShare | None:
         row = self._con_lazy().execute(
             """
             SELECT * FROM position_shares
              WHERE strategy_id = ? AND account_id = ? AND market = ?
-               AND closed_at IS NULL
-             LIMIT 1
+               AND closed_at IS NULL AND (? IS NULL OR position_side = ?)
             """,
-            (strategy_id, account_id, market),
-        ).fetchone()
+            (strategy_id, account_id, market, position_side, position_side),
+        ).fetchall()
+        if len(row) > 1:
+            raise ValueError("ambiguous_position_side")
+        row = row[0] if row else None
         return _row_to_share(row) if row else None
 
     def list_shares(
@@ -360,6 +373,7 @@ class PositionBook:
         order_id: str | None = None,
         fill_id: str | None = None,
         ts: float | None = None,
+        position_side: str = "net",
     ) -> Position:
         """Apply a single fill to the merged position + originating share.
 
@@ -377,13 +391,13 @@ class PositionBook:
         ts = ts if ts is not None else time.time()
         if fill_id:
             already = self._con_lazy().execute(
-                "SELECT 1 FROM position_events WHERE fill_id = ? LIMIT 1",
+                "SELECT position_id FROM position_events WHERE fill_id = ? LIMIT 1",
                 (str(fill_id),),
             ).fetchone()
             if already is not None:
                 # B4: this exact fill was applied before — return the
                 # current state without touching size/PnL/fees.
-                merged = self.get_open_merged(account_id=account_id, market=market)
+                merged = self.get_by_id(already["position_id"])
                 if merged is not None:
                     return merged
                 row = self._con_lazy().execute(
@@ -400,7 +414,7 @@ class PositionBook:
         if abs(signed) < 1e-12:
             # Empty fill — nothing to do. Still return the current
             # merged state so callers can chain.
-            merged = self.get_open_merged(account_id=account_id, market=market)
+            merged = self.get_open_merged(account_id=account_id, market=market, position_side=position_side)
             if merged is None:
                 raise ValueError("apply_fill: empty fill with no open position")
             return merged
@@ -408,9 +422,11 @@ class PositionBook:
         funding = float(funding_usd or 0.0)
         venue_value = venue or _infer_venue(market)
 
-        merged = self.get_open_merged(account_id=account_id, market=market)
+        if position_side not in {"net", "long", "short"}:
+            raise ValueError("invalid_position_side")
+        merged = self.get_open_merged(account_id=account_id, market=market, position_side=position_side)
         share = (
-            self.get_share(strategy_id=strategy_id, account_id=account_id, market=market)
+            self.get_share(strategy_id=strategy_id, account_id=account_id, market=market, position_side=position_side)
             if merged is not None
             else None
         )
@@ -433,6 +449,7 @@ class PositionBook:
                 funding_usd=funding,
                 leverage=leverage,
                 source=source,
+                position_side=position_side,
                 executor_id=executor_id,
                 opened_at=ts,
                 updated_at=ts,
@@ -739,8 +756,8 @@ class PositionBook:
                 size_base, avg_entry_price, mark_price, liquidation_price,
                 realized_pnl_usd, unrealized_pnl_usd, fees_usd, funding_usd,
                 leverage, source, executor_id, protection_id,
-                opened_at, updated_at, closed_at, meta_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                opened_at, updated_at, closed_at, meta_json, position_side
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.position_id, position.account_id, position.strategy_id,
@@ -753,6 +770,7 @@ class PositionBook:
                 position.executor_id, position.protection_id,
                 position.opened_at, position.updated_at, position.closed_at,
                 json.dumps(position.meta),
+                position.position_side,
             ),
         )
 
@@ -784,6 +802,7 @@ class PositionBook:
             funding_share_usd=funding,
             opened_at=ts,
             updated_at=ts,
+            position_side=self.get_by_id(position_id).position_side,
         )
         con = self._con_lazy()
         con.execute(
@@ -792,8 +811,8 @@ class PositionBook:
                 share_id, position_id, account_id, strategy_id, market, venue,
                 size_share_base, avg_entry_share_price,
                 realized_pnl_share_usd, fees_share_usd, funding_share_usd,
-                opened_at, updated_at, closed_at, meta_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '{}')
+                opened_at, updated_at, closed_at, meta_json, position_side
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '{}', ?)
             """,
             (
                 share.share_id, share.position_id, share.account_id,
@@ -801,6 +820,7 @@ class PositionBook:
                 share.size_share_base, share.avg_entry_share_price,
                 share.realized_pnl_share_usd, share.fees_share_usd,
                 share.funding_share_usd, share.opened_at, share.updated_at,
+                share.position_side,
             ),
         )
         return share
@@ -927,6 +947,7 @@ def _row_to_position(row: Any) -> Position:
         updated_at=float(row["updated_at"] or 0.0),
         closed_at=(float(row["closed_at"]) if row["closed_at"] is not None else None),
         meta=json.loads(str(row["meta_json"] or "{}")),
+        position_side=str(row["position_side"]),
     )
 
 
@@ -947,6 +968,7 @@ def _row_to_share(row: Any) -> PositionShare:
         updated_at=float(row["updated_at"] or 0.0),
         closed_at=(float(row["closed_at"]) if row["closed_at"] is not None else None),
         meta=json.loads(str(row["meta_json"] or "{}")),
+        position_side=str(row["position_side"]),
     )
 
 

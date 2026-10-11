@@ -25,6 +25,9 @@ See :mod:`nerya.connectors.registry` for the thin facade used by callers.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import re
+import threading
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -186,10 +189,14 @@ class ExchangeProviderSpec:
     # is the right answer for ``mock``/``mock_chain`` and for
     # data-source-only paper accounts.
     credential_fields: tuple[CredentialField, ...] = ()
+    revision: str = "builtin"
 
     def matches(self, venue: str) -> bool:
         v = (venue or "").lower()
         return v == self.id or v in self.aliases
+
+    def binding(self):
+        return {"id":self.id,"revision":self.revision}
 
     def to_info(self) -> dict[str, Any]:
         return {
@@ -202,6 +209,7 @@ class ExchangeProviderSpec:
             "description": self.description, "supports": dict(self.supports),
             "instrument_types": list(self.instrument_types),
             "credential_fields": [f.to_dict() for f in self.credential_fields],
+            "revision": self.revision,
         }
 
 
@@ -214,16 +222,24 @@ class ExchangeProviderRegistry:
     :py:meth:`reload_workspace` call).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: Path | None = None) -> None:
         self._specs: list[ExchangeProviderSpec] = []
         self._workspace_loaded_for: Path | None = None
+        self.workspace = Path(workspace).resolve() if workspace else None
+        self._workspace_revision: str | None = None
+        self.errors: dict[str, str] = {}
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------ register
     def register(self, spec: ExchangeProviderSpec) -> None:
-        # Replace any existing spec with the same id — user providers
-        # can shadow builtins explicitly.
-        self._specs = [s for s in self._specs if s.id != spec.id]
-        self._specs.append(spec)
+        with self._lock:
+            if spec.id.startswith("user:"):
+                keys = {spec.id, *spec.aliases}
+                for existing in self._specs:
+                    if existing.id != spec.id and keys & {existing.id, *existing.aliases}:
+                        raise ValueError("provider_alias_collision")
+            self._specs = [s for s in self._specs if s.id != spec.id]
+            self._specs.append(spec)
 
     def clear_user_specs(self) -> None:
         self._specs = [s for s in self._specs if not s.id.startswith("user:")]
@@ -231,72 +247,120 @@ class ExchangeProviderRegistry:
     # ------------------------------------------------------ lookup
     def find(self, venue: str) -> ExchangeProviderSpec | None:
         v = (venue or "").lower()
-        for s in self._specs:
-            if s.matches(v):
-                return s
+        with self._lock:
+            for s in self._specs:
+                if s.matches(v):
+                    return s
         return None
 
     def list_specs(self) -> list[ExchangeProviderSpec]:
-        return list(self._specs)
+        with self._lock:
+            return list(self._specs)
 
     # ------------------------------------------------------ hot load
-    def reload_workspace(self, workspace: Path | None) -> None:
-        self.clear_user_specs()
-        if not workspace:
-            self._workspace_loaded_for = None
-            return
-        providers_dir = Path(workspace) / "providers"
-        if not providers_dir.exists():
-            self._workspace_loaded_for = Path(workspace)
-            return
-        for pdir in sorted(providers_dir.iterdir()):
-            if not pdir.is_dir():
-                continue
-            f = pdir / "provider.py"
-            if not f.exists():
-                continue
-            spec = _import_user_provider(f, pdir.name)
-            if spec is not None:
-                # Force the user-provider prefix so the id space can't
-                # collide with builtins.
-                if not spec.id.startswith("user:"):
-                    spec.id = f"user:{pdir.name}"
-                if not spec.aliases:
-                    spec.aliases = (pdir.name,)
-                self.register(spec)
-        self._workspace_loaded_for = Path(workspace)
+    def reload_workspace(self, workspace: Path | None):
+        root = Path(workspace).resolve() if workspace else None
+        if root != self.workspace:
+            # The legacy process registry remains builtin-only. Callers that
+            # need workspace capabilities use the returned scoped registry.
+            return get_registry(root)
+        if root is None:return self
+        from ..trading.components import TradingComponentRegistry, package_revision
+        providers_dir = root / "providers"
+        with self._lock:
+            staged = [s for s in self._specs if not s.id.startswith("user:")]
+            errors = {}
+            revision_parts = []
+            if providers_dir.is_dir():
+                for pdir in sorted(providers_dir.iterdir()):
+                    if not pdir.is_dir() or not (pdir / "provider.py").is_file():continue
+                    try:
+                        if pdir.is_symlink():raise ValueError("provider_symlink_forbidden")
+                        revision = package_revision(pdir)
+                        revision_parts.append((pdir.name,revision))
+                        old = next((s for s in self._specs if s.id == "user:"+pdir.name and s.revision == revision),None)
+                        if old is not None:
+                            staged.append(old);continue
+                        # Reuse the same immutable package snapshot as trading
+                        # components; provider helpers cannot change mid-call.
+                        snapshot = TradingComponentRegistry(root)._snapshot(pdir.name,pdir,revision)
+                        spec = _import_user_provider(snapshot / "provider.py",pdir.name,workspace=root,revision=revision)
+                        if spec is None:raise ValueError("provider_import_or_contract_failed")
+                        spec = replace(spec,id="user:"+pdir.name,aliases=spec.aliases or (pdir.name,),revision=revision)
+                        if spec.kind in {"cex","options","futures","derivatives"} and spec.runtime != "python_ccxt":
+                            raise ValueError("cex_provider_requires_ccxt")
+                        keys = {spec.id,*spec.aliases}
+                        if any(keys & {s.id,*s.aliases} for s in staged):raise ValueError("provider_alias_collision")
+                        staged.append(spec)
+                    except Exception as exc:
+                        errors[pdir.name]=str(exc) if isinstance(exc,ValueError) else getattr(exc,"code",type(exc).__name__)
+            self._specs=staged;self.errors=errors
+            self._workspace_revision=hashlib.sha256(repr(revision_parts).encode()).hexdigest()
+            self._workspace_loaded_for=root
+        return self
 
     # ------------------------------------------------------ build
     def build(
         self, account_cfg: dict[str, Any], *,
         workspace: Path | None = None,
         vault_passphrase: str | None = None,
+        provider_binding: dict | None = None,
     ) -> Connector:
-        if workspace and workspace != self._workspace_loaded_for:
-            self.reload_workspace(workspace)
+        root = Path(workspace).resolve() if workspace else self.workspace
+        if root != self.workspace:
+            return get_registry(root).build(account_cfg,workspace=root,vault_passphrase=vault_passphrase,provider_binding=provider_binding)
+        if root:self.reload_workspace(root)
         venue = (account_cfg.get("venue") or "").lower()
         spec = self.find(venue)
+        if provider_binding and (spec is None or spec.binding()!=provider_binding):
+            from ..trading.components import TradingComponentRegistry,package_revision
+            cid=provider_binding.get("id","");revision=provider_binding.get("revision","")
+            if not root or not re.fullmatch(r"user:[a-z][a-z0-9_-]{0,63}",cid) or not re.fullmatch(r"[a-f0-9]{64}",revision):
+                from ..core.errors import TradingError
+                raise TradingError("provider_recovery_unavailable")
+            name=cid.split(":",1)[1]
+            snapshot=TradingComponentRegistry(root).cache_dir/name/revision
+            if not snapshot.is_dir() or package_revision(snapshot)!=revision:
+                from ..core.errors import TradingError
+                raise TradingError("provider_recovery_unavailable")
+            archived=_import_user_provider(snapshot/"provider.py",name,workspace=root,revision=revision)
+            if archived is None:
+                from ..core.errors import TradingError
+                raise TradingError("provider_recovery_unavailable")
+            spec=replace(archived,id=cid,aliases=archived.aliases or (name,),revision=revision)
+            if not spec.matches(venue):
+                from ..core.errors import TradingError
+                raise TradingError("provider_recovery_identity_mismatch")
         if spec is None or spec.factory is None:
             from ..core.errors import TradingError
             raise TradingError(
                 f"unknown venue {venue!r} — known: "
                 + ", ".join(sorted({s.id for s in self._specs}))
             )
-        return spec.factory(
+        connector = spec.factory(
             account_cfg, workspace=workspace, vault_passphrase=vault_passphrase,
         )
+        if spec.id.startswith("user:") and spec.kind in {"cex","options","futures","derivatives"}:
+            from .ccxt_adapter import CcxtConnector
+            if type(connector) is not CcxtConnector:
+                from ..core.errors import TradingError
+                raise TradingError("cex_provider_requires_ccxt")
+        return connector
 
 
-def _import_user_provider(path: Path, name: str) -> ExchangeProviderSpec | None:
+def _import_user_provider(path: Path, name: str, *, workspace=None, revision="") -> ExchangeProviderSpec | None:
     """Import ``workspace/providers/<name>/provider.py`` and return its SPEC.
 
     Fails softly — a broken user provider must not prevent the rest of
     Nerya from booting. Errors are surfaced via dashboard readiness
     cards, not by crashing the registry.
     """
-    spec = importlib.util.spec_from_file_location(
-        f"nerya_user_provider_{name}", path,
-    )
+    namespace=hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
+    module_name=f"nerya_user_provider_{namespace}_{name}_{revision}"
+    cached=sys.modules.get(module_name)
+    if cached is not None:
+        return getattr(cached,"SPEC",None) or getattr(cached,"PROVIDER",None)
+    spec = importlib.util.spec_from_file_location(module_name, path, submodule_search_locations=[str(path.parent)])
     if spec is None or spec.loader is None:
         return None
     try:
@@ -304,6 +368,8 @@ def _import_user_provider(path: Path, name: str) -> ExchangeProviderSpec | None:
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
     except Exception:
+        for key in list(sys.modules):
+            if key==module_name or key.startswith(module_name+"."):sys.modules.pop(key,None)
         return None
     provider_spec = getattr(module, "SPEC", None)
     if isinstance(provider_spec, ExchangeProviderSpec):
@@ -317,20 +383,33 @@ def _import_user_provider(path: Path, name: str) -> ExchangeProviderSpec | None:
 
 # Singleton
 _registry: ExchangeProviderRegistry | None = None
+_workspace_registries: dict[Path, ExchangeProviderRegistry] = {}
+_registry_lock = threading.RLock()
 
 
-def get_registry() -> ExchangeProviderRegistry:
+def get_registry(workspace: Path | None = None) -> ExchangeProviderRegistry:
     global _registry
-    if _registry is None:
-        _registry = ExchangeProviderRegistry()
-        _register_builtins(_registry)
-    return _registry
+    with _registry_lock:
+        if workspace is not None:
+            root=Path(workspace).resolve()
+            registry=_workspace_registries.get(root)
+            if registry is None:
+                registry=ExchangeProviderRegistry(root)
+                _register_builtins(registry)
+                _workspace_registries[root]=registry
+            registry.reload_workspace(root)
+            return registry
+        if _registry is None:
+            _registry = ExchangeProviderRegistry()
+            _register_builtins(_registry)
+        return _registry
 
 
 def reset_registry() -> None:
     """Drop the cached singleton — used by tests."""
     global _registry
     _registry = None
+    _workspace_registries.clear()
 
 
 _CCXT_CREDENTIAL_FIELDS: dict[str, CredentialField] = {
@@ -511,6 +590,9 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
             workspace=workspace,account_id=str(cfg.get('id') or ''),
             signature_type=int(options.get('signature_type') or 0),funder=str(options.get('funder') or options.get('wallet_address') or ''),
             max_slippage_bps=int(options.get('max_slippage_bps',50)),
+            settlement_rpc_url=str(options.get('settlement_rpc_url') or ''),
+            settlement_exchange_code_hashes=dict(options.get('settlement_exchange_code_hashes') or {}),
+            settlement_confirmations=int(options.get('settlement_confirmations',3)),
         )
 
     def _bsc(cfg, *, workspace=None, vault_passphrase=None):
@@ -616,6 +698,12 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         credential_fields=(_CEX_API_KEY, _CEX_API_SECRET, _CEX_API_PASSPHRASE),
     ))
     reg.register(ExchangeProviderSpec(
+        id="deribit",label="Deribit (ccxt)",kind="options",runtime="python_ccxt",factory=_ccxt_factory("deribit"),
+        instrument_types=("options","perp","futures"),
+        supports={"ticker":True,"klines":True,"order_book":True,"balances":True,"place_order":False},
+        credential_fields=(_CEX_API_KEY,_CEX_API_SECRET),
+    ))
+    reg.register(ExchangeProviderSpec(
         id="hyperliquid", label="Hyperliquid (ccxt)", kind="cex",
         runtime="python_ccxt",
         aliases=("hl",), factory=_hyperliquid,
@@ -673,8 +761,8 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         id="polymarket", label="Polymarket (CLOB v2)",
         kind="prediction_market", runtime="python",
         aliases=("polymarket_v2", "pm"), factory=_polymarket,
-        install_hint="pip install 'py-clob-client-v2>=1.1.0,<2'",
-        install_command="pip install 'py-clob-client-v2>=1.1.0,<2'",
+        install_hint="pip install 'polymarket-client==0.12.0' (Python >=3.11)",
+        install_command="pip install 'polymarket-client==0.12.0'",
         docs_url="https://docs.polymarket.com/developers/CLOB/overview",
         links={"docs": "https://docs.polymarket.com/",
                "api": "https://docs.polymarket.com/developers/CLOB/overview"},

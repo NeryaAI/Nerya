@@ -409,7 +409,7 @@ def _evolution_graph(manifest: dict[str, Any], files: dict[str, str]) -> dict[st
         _node("agent", "tuner", str(subagent.get("name") or "strategy_tuner"), config=subagent,
               file=prompt_path if prompt_path in files else None, content=files.get(prompt_path),
               path=None if prompt_path in files else ["tuning", "subagent"], x=750, y=100, subtitle="strategy-specific plan · review & propose"),
-        _node("proposal", "tuning", "Change proposal", config={"objectives": tuning.get("objectives", []), "proposal_policy": _object(tuning.get("proposal_policy")), "tuning_prompt": tuning.get("tuning_prompt", "")}, path=["$tuning"], x=650, y=60, subtitle="code · configuration · prompt"),
+        _node("proposal", "tuning", "Change proposal", config={"enabled": bool(tuning.get("enabled")), "review_plan": _object(tuning.get("review_plan")), "objectives": tuning.get("objectives", []), "proposal_policy": _object(tuning.get("proposal_policy")), "tuning_prompt": tuning.get("tuning_prompt", "")}, path=["$tuning"], x=650, y=60, subtitle="code · configuration · prompt"),
         _node("validation", "tuning", "Validation & replay", config=_object(tuning.get("guardrails")), path=["tuning", "guardrails"], x=960, y=60, subtitle="static scan → backtest → shadow"),
         _node("approval", "operator", "Operator approval", config={"required": True}, x=960, y=300, subtitle="approval cannot be skipped", href="/self-evolution?tab=proposals"),
         _node("apply", "version", "Version & apply", config={"protected_scopes": ["accounts", "secrets", "live_trading_enabled"]}, x=650, y=440, subtitle="reviewed candidate only", href="/self-evolution?tab=proposals"),

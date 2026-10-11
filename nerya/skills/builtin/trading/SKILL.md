@@ -10,6 +10,11 @@ author: Nerya
 
 # Trading
 
+Use financial_readiness to distinguish implemented, configured and live-ready
+capabilities. For mainstream DEX/DeFi and prediction settlement load
+financial_ops and its mainstream-defi reference. Do not default new strategies
+to Byreal or infer LP support from a swap router's name.
+
 Use only after fresh market/account context exists. Live trading still
 requires runtime flags and approval gates.
 

@@ -6,6 +6,7 @@ import pytest
 
 from nerya.api import routes_llm
 from nerya.core.config import Config, DEFAULT_CONFIG
+from nerya.core.errors import LLMError
 from nerya.core.paths import WorkspacePaths
 from nerya.llm import ops
 
