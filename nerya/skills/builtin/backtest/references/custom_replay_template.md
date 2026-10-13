@@ -30,6 +30,12 @@ entrypoint() returns its actual saved callable. fetch_candles(market, *,
 interval, start, end, count) takes integer epoch seconds, permits only a saved
 market and bounded real public history, and never enables mock data. write_*
 functions write relative artifact names confined to the replay output directory.
+Signatures: write_json(name, value), write_text(name, value),
+write_csv(name, rows, *, fields=[...]). Supply fields even for empty trade rows.
+For example write_csv("equity.csv", equity_rows, fields=["ts", "equity"]).
+Script results carry StrategyResultStatus: compare result.status.value to error
+and reject any error tick before writing a completed financial result.
+Persist package/config hash plus source URL, raw data hash and exact window.
 Do not read os.environ, load internal config, import nerya.data, use raw HTTP,
 spawn subprocesses or read signer credentials in authored replay code.
 
