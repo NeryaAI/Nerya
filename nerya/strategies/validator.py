@@ -880,6 +880,11 @@ def _check_import(module: str, *, where: str, lineno: int) -> list[StrategyValid
             )
         )
         return out
+    if module == "nerya.strategies.research" or module.startswith("nerya.strategies.research."):
+        from ..skills.builtin.backtest.scripts.freeform_run import SCRIPT_CANDIDATES
+        if where not in SCRIPT_CANDIDATES:
+            return [StrategyValidationIssue(severity="blocker", code="research_sdk_outside_replay",
+                message="Research SDK is restricted to recognized strategy-local replay entrypoints", where=where)]
     if module.startswith("nerya"):
         if not _is_allowed_nerya(module):
             out.append(

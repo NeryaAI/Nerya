@@ -18,6 +18,20 @@ Run the saved package with native `strategy_backtest(engine="freeform",
 allow_mock=false)` or auto selection. Do not invent a `backtests/custom_replay.py`
 entrypoint; the runner does not discover it.
 
+Use the replay-only public facade:
+
+    from nerya.strategies.research import manifest, entrypoint, fetch_candles
+    from nerya.strategies.research import write_json, write_text, write_csv
+
+Only recognized replay entrypoints can import this module; it also checks the
+runner context at execution. manifest() returns the saved configuration;
+entrypoint() returns its actual saved callable. fetch_candles(market, *,
+interval, start, end, count) takes integer epoch seconds, permits only a saved
+market and bounded real public history, and never enables mock data. write_*
+functions write relative artifact names confined to the replay output directory.
+Do not read os.environ, load internal config, import nerya.data, use raw HTTP,
+spawn subprocesses or read signer credentials in authored replay code.
+
 The script should:
 
 1. Load historical or fixture data from a checked-in JSON/CSV/JSONL file, or
@@ -33,7 +47,7 @@ The script should:
 5. Write `result.json`, `report.md`, `equity.csv` (ts/equity rows) and
    `trades.csv` (trade rows or a header for zero trades) under
    `NERYA_BACKTEST_OUT_DIR`. The runner also supplies `NERYA_STRATEGY_ROOT` and
-   `NERYA_WORKSPACE`; use these paths, not guessed host directories.
+   `NERYA_WORKSPACE`; the research facade resolves them, not authored env reads.
    The financial artifact contract requires nonempty equity rows. If those
    cannot be established honestly, keep the backtest blocked and report
    bounded signal/branch checks separately; do not invent an equity curve.
