@@ -44,9 +44,15 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    For a clearly fresh creation request with no candidate ID, do not grep/list the
    workspace or recall memory just to hunt for an older strategy with the same name.
    Check current candidates before following an ID recalled from old history.
+   Do not read guessed test/source paths. A fresh creation does not need an
+   existing strategy tour; resolve installed capability through its Skill.
+   For a missing path, use returned file lists rather than repeat guesses.
 2. **Implement the strategy.** For non-candle inputs or a new workspace provider,
    first load `references/replay-capabilities.md` to choose an evidence path from
-   actual supported inputs. Settle its actual rules, parameters, inputs and
+   actual supported inputs. For a protocol/financial component, load
+   financial_ops and the installed component contract before drafting; generic
+   exchange templates do not establish that component's execution support.
+   Settle its actual rules, parameters, inputs and
    execution tests first; then author its separate review plan in step 3. When the
    request is sufficiently specified, prefer saving the completed bundle in one
    `strategy_draft_proposal(create_tuning=true, files={"main.py":..., "strategy.yml":..., "strategy.md":..., "subagents/strategy_tuner.agent.md":..., "tests/test_contract.py":...})`
@@ -68,6 +74,9 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    `Skill(skill="strategy_author", file="templates/review-plan.md")` after settling
    the strategy, and read `references/review-plan.md` for evidence and validation
    requirements. Adapt the plan to THIS strategy rather than copying stock prose.
+   Use valid objective IDs: risk_adjusted_return, drawdown, win_rate, slippage,
+   execution_quality, return, sharpe or sortino. Strategy-specific criteria such
+   as signal correctness belong in review_plan prose, not invented enum values.
    Record the review plan under `tuning.review_plan`; it does not create a trading
    step or start an independent job.
    Save `strategy.yml::tuning` and its actual `subagents/strategy_tuner.agent.md`
@@ -119,6 +128,8 @@ No housekeeping, deleted-test cleanup, environment probes or unrelated Git work 
 part of this path. Existing loaded references remain usable: reread only when a
 missing section, changed file, or actual error requires it. When passing `file`,
 use `Skill(skill=..., file=...)`, not guessed host paths or tool names.
+Reference paging uses offset>=0 and limit 1..400; omit paging fields normally
+and continue from returned next_offset only when another section is needed.
 
 For a requested fixed order size, make `policy.max_single_order_usd` consistent
 with `params.sizing.fixed_usd`; do not retain a scaffold's smaller hard-coded cap.
