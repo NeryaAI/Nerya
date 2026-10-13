@@ -2057,3 +2057,27 @@ def test_real_public_market_data_loads_for_native_and_strategy_paths(tmp_path) -
     assert strategy_features["first"]["_envelope"]["mode"] == "live"
     assert strategy_features["first"]["_envelope"]["source"] != "mock"
     assert strategy_features["rsi_14"] is not None
+
+def test_historical_candles_resolve_workspace_provider_without_global_registration(tmp_path, monkeypatch):
+    from nerya.connectors import registry as registry_mod
+    from nerya.data import candles as candles_mod
+    cfg = _config(tmp_path)
+    calls = []
+    class PublicConnector:
+        venue = 'RESEARCH_FEED'
+        connector_id = 'workspace:research'
+        def get_klines(self, market, *, interval, limit, since=None, end=None):
+            calls.append((market, interval, since, end))
+            return [[1700000000000, 1, 2, .5, 1.5, 10]]
+    def build(account, *, workspace=None, **kwargs):
+        assert workspace == tmp_path
+        assert account['venue'].lower() == 'research_feed'
+        assert account.get('live') is False
+        return PublicConnector()
+    monkeypatch.setattr(registry_mod, 'build_connector', build)
+    monkeypatch.setattr(candles_mod, '_fetch_public_rest_klines', lambda *a, **kw: [])
+    monkeypatch.setattr(candles_mod, '_fetch_ccxt_klines', lambda *a, **kw: [])
+    rows = fetch_candles('RESEARCH_FEED:ASSET/QUOTE', count=1, interval='1h',
+        config_like=cfg, allow_mock=False, start=1700000000, end=1700003600)
+    assert len(rows) == 1
+    assert calls == [('RESEARCH_FEED:ASSET/QUOTE', '1h', 1700000000000, 1700003600000)]

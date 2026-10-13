@@ -33,6 +33,7 @@ from ..tools.execution_contracts import (
 from ..tools.registry import ToolRegistry
 from .loop_state import LoopRunState
 from ..tools.result_contracts import (
+    NON_SUCCESS_RESULT_STATUSES,
     compacted_kept_data,
     parse_json_text,
     result_counts_as_success,
@@ -251,8 +252,19 @@ def failed_required_actions(pending: set[str], results: list[ToolResult]) -> set
                     and error.detail.get("execution_state") != "unknown"):
                 recoverable.add(name)
         elif not result_counts_as_success(result):
-            data = tool_json_data(result)
-            if isinstance(data, dict) and str(data.get("status") or data.get("state") or "").lower() in {"failed", "error", "invalid"}:
+            data = tool_json_data(result) or compacted_kept_data(result) or {}
+            # Semantic failure is owned by the producer, not a small loop-local
+            # status list. Keep approvals, pending effects and unknown writes
+            # constrained while reopening tools for deterministic repair.
+            status = str(data.get("status") or data.get("state") or "").strip().lower()
+            failed = (result.semantic_success is False
+                      or data.get("ok") is False or data.get("success") is False
+                      or status in NON_SUCCESS_RESULT_STATUSES | {"invalid"})
+            if (failed
+                    and status not in {"pending", "awaiting_approval", "submitted", "confirming", "unconfirmed", "needs_recovery"}
+                    and data.get("terminal") is not False
+                    and data.get("complete") is not False
+                    and data.get("execution_state") != "unknown"):
                 recoverable.add(name)
     return recoverable
 

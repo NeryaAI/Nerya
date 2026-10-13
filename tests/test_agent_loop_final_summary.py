@@ -405,6 +405,37 @@ def test_loop_blocks_contract_failure_even_for_arbitrary_tool_name() -> None:
     assert outcome.transition_reason == "required_artifact_missing_finalized"
 
 
+def test_blocked_required_tool_can_repair_then_verify_same_requirement():
+    calls = []
+    repaired = False
+
+    def check(call):
+        calls.append(call.name)
+        return _json_result(call, {'ok': repaired, 'status': 'completed' if repaired else 'blocked'})
+
+    def repair(call):
+        nonlocal repaired
+        calls.append(call.name)
+        repaired = True
+        return _json_result(call, {'ok': True})
+
+    gateway = _Gateway(
+        _response(_tool_use('verify_package', call_id='check1'), stop_reason='tool_use'),
+        _response(_tool_use('repair_package', call_id='repair'), stop_reason='tool_use'),
+        _response(_tool_use('verify_package', call_id='check2'), stop_reason='tool_use'),
+        _response({'type': 'text', 'text': 'verified repaired package'}),
+    )
+    loop = _loop(gateway, [
+        _descriptor('verify_package', check),
+        _descriptor('repair_package', repair, risk=RiskLevel.WRITE, read_only=False),
+    ], max_iterations=5, required_artifacts=({'kind': 'tool_result', 'tool': 'verify_package'},))
+    outcome = loop.run(system='system', user_message='repair and verify the package')
+    assert calls == ['verify_package', 'repair_package', 'verify_package']
+    assert {t['name'] for t in gateway.calls[1]['tools']} == {'verify_package', 'repair_package'}
+    assert not outcome.aborted
+    assert outcome.final_text == 'verified repaired package'
+
+
 def test_unoffered_only_tool_call_retries_without_execution() -> None:
     executed: list[str] = []
     gateway = _Gateway(

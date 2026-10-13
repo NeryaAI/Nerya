@@ -1,7 +1,7 @@
 ---
 name: strategy_author
 description: "Create, edit, debug and validate Nerya script, script-gated Agent and event Agent strategies. Use the main conversation; finish the requested historical replay without activating trading."
-version: 0.18.0
+version: 0.19.0
 license: MIT
 author: Nerya
 ---
@@ -9,8 +9,9 @@ author: Nerya
 # Strategy Author
 
 For CEX, on-chain Meme, prediction-market and LP/DeFi execution, read
-`references/mainstream-strategies.md` after financial_readiness. New strategies
-prefer Jupiter, Uniswap/Pancake LP and Aave rather than Byreal. The tested
+`references/mainstream-strategies.md` after financial_readiness. Preserve the
+requested chain and venue; select templates by their supported inputs and
+execution contract. The tested
 templates under `templates/` support deterministic exits and durable LP steps;
 they do not activate trading or replace the requested strategy thesis.
 
@@ -43,7 +44,9 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    For a clearly fresh creation request with no candidate ID, do not grep/list the
    workspace or recall memory just to hunt for an older strategy with the same name.
    Check current candidates before following an ID recalled from old history.
-2. **Implement the strategy.** Settle its actual rules, parameters, inputs and
+2. **Implement the strategy.** For non-candle inputs or a new workspace provider,
+   first load `references/replay-capabilities.md` to choose an evidence path from
+   actual supported inputs. Settle its actual rules, parameters, inputs and
    execution tests first; then author its separate review plan in step 3. When the
    request is sufficiently specified, prefer saving the completed bundle in one
    `strategy_draft_proposal(create_tuning=true, files={"main.py":..., "strategy.yml":..., "strategy.md":..., "subagents/strategy_tuner.agent.md":..., "tests/test_contract.py":...})`
@@ -83,7 +86,11 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    then `strategy_submit_proposal` for the SAME candidate. A normal
    creation request includes verification, not activation. Honor explicit draft-only
    or no-test restrictions. Do not repeatedly validate unchanged files.
-5. **Run the actual replay once.** Load `Skill(skill="backtest")` when its contract
+5. **Run the actual replay once.** Use the evidence path established in step 2;
+   candle history alone cannot replay protocol snapshots or financial actions.
+   An authored custom replay uses a supported package entrypoint, not a guessed
+   tool or a stand-alone test labelled as a backtest.
+   Load `Skill(skill="backtest")` when its contract
    is not already present. `strategy_backtest` owns preflight, reusable local history,
    coverage checks, isolated replay and reports. If the candidate already declares
    `strategy.yml.backtest`, call `strategy_backtest` directly with its `proposal_id`;

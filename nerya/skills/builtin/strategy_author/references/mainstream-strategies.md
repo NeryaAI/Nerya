@@ -1,9 +1,12 @@
 # Authoring executable mainstream market strategies
 
 Use financial_readiness before choosing an execution family, then load
-financial_ops and its mainstream-defi reference for schemas. Prefer existing
-CCXT spot/linear accounts, Jupiter Solana swaps, Uniswap/Pancake v3 LP,
-restricted Uniswap v4 LP and Aave v3. Do not choose Byreal by default or invent
+financial_ops and its mainstream-defi reference for schemas. Preserve the
+requested chain, venue and execution family. Select an existing compatible
+component or stage the missing integration through its proposal lane. Supported
+examples include CCXT spot/linear, Jupiter swaps, Uniswap/Pancake v3 LP,
+restricted Uniswap v4 LP and Aave v3; these are not defaults that override a
+chain request. Do not choose Byreal by default or invent
 native Raydium/Orca LP support merely because Jupiter can route a swap there.
 
 Build main.py:run using the established script, script-gated Agent or pure
@@ -47,6 +50,24 @@ plan. After a partial sequence, expose the exact remaining token inventory
 and pending child action instead of starting again. Treasury ratio swaps need
 an already configured supported route; LP support itself does not imply every
 swap router is supported.
+
+## Financial actions and protocol inventory
+
+Use the documented `ctx.financial.prepare/execute/get/reconcile` contract and
+reviewed component schema. Keep action identity and quote hash durable. Confirmed
+submission is not necessarily a fill; holding time starts from confirmed fill
+evidence. Classify failed-before-submission separately from pending/uncertain
+effects; reconcile those effects before considering another action.
+
+A generic portfolio row does not guarantee a protocol position identifier.
+Resolve strategy-owned inventory through the component's documented read surface,
+validate network/account/market and preserve the schema's identifier type. Do not
+convert numeric protocol IDs to strings or infer them from a market name. Close
+only owned confirmed exposure with its actual size and reduce-only semantics.
+
+Test parameter names/types and SDK results against the actual installed contract;
+permissive fake methods can conceal invalid closes or unsupported facades. For
+non-candle inputs read `references/replay-capabilities.md` before submission.
 
 ## Acceptance and review
 

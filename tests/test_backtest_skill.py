@@ -613,6 +613,8 @@ def test_strategy_backtest_handler_structures_missing_history(monkeypatch, tmp_p
     assert data["reason"] == "no_historical_data"
     assert data["coverage_ok"] is False
     assert "Do not retry with mock" in data["next_required_action"]["message"]
+    assert "Preserve the same candidate" in data["next_required_action"]["message"]
+    assert data["next_required_action"]["file"] == "references/replay-capabilities.md"
 
 
 def test_strategy_backtest_handler_flags_generic_onchain_market_before_waiver(

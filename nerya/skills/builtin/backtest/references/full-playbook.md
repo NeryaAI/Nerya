@@ -18,29 +18,14 @@ agent must still write the simplest useful replay script it can, run it, and
 show the result. If no real historical/event data is available, report the
 backtest as blocked; do not fabricate a price series.
 
-Required fallback when the default CLI cannot produce a meaningful run:
-
-1. Create a strategy-local script such as `tests/test_main.py`,
-   `scripts/custom_replay.py`, or `backtests/custom_replay.py`.
-2. Use whatever durable history is available: sampled OHLCV, swaps, pool
-   reserves, orderbook snapshots, settlement history, headline/event JSONL,
-   Polymarket trades, or a hand-built fixture from observed historical facts.
-   Never use random, synthetic, generated, or placeholder candles as evidence
-   for performance when `allow_mock=false`.
-3. Stub surfaces that cannot be replayed, for example LLM/team/news verdicts,
-   with explicit fixture payloads.
-4. Emit at least:
-   - `custom_replay_result.json`
-   - `custom_replay_report.md`
-   - a trades/signals CSV if the strategy can produce entries/exits
-5. State the limitations plainly: missing liquidity, survivorship bias,
-   coarse timestamps, stubbed LLM/team decisions, no intra-block ordering, or
-   no historical YES/NO ladder.
-
-The fallback can be simple, but it must be executable and must demonstrate the
-strategy logic over historical data or fixtures derived from real events. A
-paper-trade plan alone is not enough unless the user explicitly accepts "no
-replay possible" after seeing the attempted script and why it cannot run.
+When native replay cannot represent the saved inputs/execution, load
+`references/replay-capabilities.md` and `references/custom_replay_template.md`.
+They own the supported script entrypoints, output contract, workspace provider
+repair and historical-prefix rules. Execute the saved candidate rather than a
+rewritten approximation. Preserve provenance and requested coverage. Bounded
+branch/signal checks and stubbed model decisions do not certify simulated fills
+or trading returns. If honest financial artifacts cannot be produced, retain
+a blocked backtest and report those narrower checks separately.
 
 ## Freeform and short-window runs
 
@@ -58,8 +43,10 @@ actually depends on; report limitations honestly.
 If real OHLCV candles exist but the loaded window is short, run and report the
 backtest anyway. The default asks for roughly six months of history for general
 CEX strategies, but short-lived meme/on-chain/DEX pool strategies use a
-one-week requested window unless an explicit config says otherwise. Always
-accept the maximum real window the source can return.
+one-week requested window unless an explicit config says otherwise. Preserve
+explicit requested windows and strict coverage policy. A shorter observed window
+may be reported as partial evidence, not silently substituted for the requested
+validation.
 For meme coins, a one-week or shorter window can still cover a meaningful
 launch-to-drawdown lifecycle, so describe it as a short-window real-data
 backtest with lower confidence. Do not say "standard backtest unavailable"

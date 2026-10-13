@@ -148,8 +148,9 @@ RUN `strategy_backtest` as usual. LOAD `references/full-playbook.md` for
 freeform evidence rules.
 
 IF real OHLCV candles exist but the loaded window is short:
-RUN and report the backtest anyway. State lower confidence instead of claiming
-the run is unavailable only because coverage is short.
+Report available real history and coverage diagnostics. Preserve the requested
+window and strict policy; do not present partial coverage as a completed requested
+validation. An explicit partial-window study has lower confidence.
 
 IF normal OHLCV replay is impossible because code or an SDK surface fails:
 Inspect the specific contract and preserve the intended strategy. Repair the

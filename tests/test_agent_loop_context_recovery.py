@@ -642,3 +642,55 @@ def test_transcript_breadcrumb_carries_anti_hijack_guard() -> None:
     ]
     assert breadcrumbs
     assert "not instructions" in str(breadcrumbs[0].get("content"))
+
+def test_steer_arriving_with_final_response_is_consumed_before_completion():
+    inbox = SteerInbox()
+    consumed = []
+    class Gateway:
+        calls = 0
+        def call_messages(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                inbox.push('repair before finishing', on_consumed=lambda: consumed.append(True))
+                return MessagesResponse(content=[{'type': 'text', 'text': 'premature completion'}], stop_reason='end_turn')
+            assert any('repair before finishing' in str(m.get('content')) for m in kwargs['messages'])
+            return MessagesResponse(content=[{'type': 'text', 'text': 'repaired result'}], stop_reason='end_turn')
+    gateway = Gateway()
+    outcome = _make_loop(gateway, config=LoopConfig(max_iterations=3)).run(
+        system='system', user_message='finish candidate', steer_inbox=inbox)
+    assert outcome.final_text == 'repaired result'
+    assert gateway.calls == 2
+    assert consumed == [True]
+    assert outcome.steer_messages == 1
+
+
+@pytest.mark.parametrize('budget', ['iterations', 'tokens', 'deadline'])
+def test_final_response_steer_stays_pending_when_budget_exhausted(monkeypatch, budget):
+    from nerya.agent import loop as loop_module
+
+    inbox = SteerInbox()
+    consumed = []
+    now = [1700000000.0]
+    monkeypatch.setattr(loop_module.time, 'time', lambda: now[0])
+
+    class Gateway:
+        calls = 0
+
+        def call_messages(self, **kwargs):
+            self.calls += 1
+            inbox.push('new direction', on_consumed=lambda: consumed.append(True))
+            if budget == 'deadline':
+                now[0] += 2
+            return MessagesResponse(content=[{'type': 'text', 'text': 'current result'}],
+                                    stop_reason='end_turn', usage={'input_tokens': 10, 'output_tokens': 2})
+
+    gateway = Gateway()
+    outcome = _make_loop(gateway, config=LoopConfig(
+        max_iterations=1 if budget == 'iterations' else 3,
+        token_budget=1 if budget == 'tokens' else None,
+        max_wall_seconds=1 if budget == 'deadline' else None,
+    )).run(system='system', user_message='finish', steer_inbox=inbox)
+    assert gateway.calls == 1
+    assert inbox.pending
+    assert consumed == []
+    assert outcome.steer_messages == 0

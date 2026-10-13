@@ -8,9 +8,15 @@ strategies.
 
 Place one of these files in the strategy package:
 
-- `tests/test_main.py` for pytest replay smoke.
-- `scripts/custom_replay.py` for operator-run replay.
-- `backtests/custom_replay.py` for a strategy-local one-off replay.
+- `backtests/research_backtest.py`, `backtests/freeform_backtest.py`, or
+  `backtests/custom_backtest.py`.
+- `scripts/research_backtest.py`, `scripts/freeform_backtest.py`,
+  `scripts/custom_backtest.py`, or `scripts/custom_replay.py`.
+
+`tests/test_main.py` is a bounded test, not an executable backtest entrypoint.
+Run the saved package with native `strategy_backtest(engine="freeform",
+allow_mock=false)` or auto selection. Do not invent a `backtests/custom_replay.py`
+entrypoint; the runner does not discover it.
 
 The script should:
 
@@ -19,11 +25,20 @@ The script should:
    Fixtures must be derived from observed historical facts. Do not use random,
    synthetic, generated, or placeholder candles as evidence for performance
    when `allow_mock=false`.
-2. Build a lightweight fake context that exposes only the surfaces the strategy
-   uses.
+2. Execute the saved strategy entrypoint/helpers with historically bounded
+   inputs and real SDK result types. Model unavailable execution surfaces
+   explicitly; permissive fake methods cannot validate SDK compatibility.
 3. Step through events/bars/swaps in timestamp order.
 4. Capture each decision and any simulated fill.
-5. Write `custom_replay_result.json` and `custom_replay_report.md`.
+5. Write `result.json`, `report.md`, `equity.csv` (ts/equity rows) and
+   `trades.csv` (trade rows or a header for zero trades) under
+   `NERYA_BACKTEST_OUT_DIR`. The runner also supplies `NERYA_STRATEGY_ROOT` and
+   `NERYA_WORKSPACE`; use these paths, not guessed host directories.
+   The financial artifact contract requires nonempty equity rows. If those
+   cannot be established honestly, keep the backtest blocked and report
+   bounded signal/branch checks separately; do not invent an equity curve.
+   Preserve source, network, data hashes, package hash and requested/actual
+   window provenance with the artifacts.
 
 ## Result Shape
 

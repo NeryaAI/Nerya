@@ -77,3 +77,38 @@ def test_old_provider_can_query_after_removal_without_becoming_new_default(tmp_p
     assert old.exchange_id=="deribit"
     with pytest.raises(TradingError,match="unknown venue"):
         build_connector({"venue":"newvenue"},workspace=tmp_path)
+
+
+def test_historical_retrieval_hotloads_real_workspace_provider_and_isolates_it(tmp_path, monkeypatch):
+    from nerya.core.config import Config
+    from nerya.core.paths import WorkspacePaths
+    from nerya.data import candles
+
+    folder = tmp_path / 'providers' / 'research_feed'
+    folder.mkdir(parents=True)
+    (folder / 'provider.py').write_text("""
+from nerya.connectors.provider_spec import ExchangeProviderSpec
+class PublicHistory:
+    venue = 'research_feed'
+    connector_id = 'workspace:research_feed'
+    def get_klines(self, market, *, interval, limit, since=None, end=None):
+        assert market == 'RESEARCH_FEED:ASSET/QUOTE'
+        assert interval == '1h'
+        assert since == 1700000000000 and end == 1700003600000
+        return [[1700000000000, 1, 2, .5, 1.5, 10]]
+def factory(config, **kwargs):
+    assert config['live'] is False
+    return PublicHistory()
+SPEC = ExchangeProviderSpec('research_feed', 'Public history', 'chain',
+    aliases=('research_feed',), factory=factory,
+    supports={'klines': True, 'place_order': False})
+""")
+    monkeypatch.setattr(candles, '_fetch_public_rest_klines', lambda *a, **kw: [])
+    monkeypatch.setattr(candles, '_fetch_ccxt_klines', lambda *a, **kw: [])
+    config = Config(paths=WorkspacePaths(root=tmp_path))
+    rows = candles.fetch_candles('RESEARCH_FEED:ASSET/QUOTE', count=1, interval='1h',
+        start=1700000000, end=1700003600, config_like=config, allow_mock=False)
+    assert rows[0]['close'] == 1.5
+    assert rows[0]['_envelope']['connector_id'] == 'workspace:research_feed'
+    assert get_registry().find('research_feed') is None
+    assert get_registry(tmp_path / 'other').find('research_feed') is None
