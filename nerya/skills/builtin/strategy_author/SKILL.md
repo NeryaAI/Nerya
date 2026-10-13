@@ -47,6 +47,14 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    Do not read guessed test/source paths. A fresh creation does not need an
    existing strategy tour; resolve installed capability through its Skill.
    For a missing path, use returned file lists rather than repeat guesses.
+   Before discovery, keep a scope ledger for the turn: exact chain or network,
+   venue or protocol, venue-qualified market, timeframe, window, execution mode,
+   and explicit order restrictions. Later data, validation, and replay calls
+   must reuse those values. Discovery may fill a missing field, but it cannot
+   broaden the ledger to another venue, chain, market, or execution mode. If an
+   exact capability is absent, repair that provider or report the gap; do not
+   search for a convenient proxy. This is task state, not a venue-specific loop
+   rule.
 2. **Implement the strategy.** For non-candle inputs or a new workspace provider,
    first load `references/replay-capabilities.md` to choose an evidence path from
    actual supported inputs. For a protocol/financial component, load
@@ -112,6 +120,8 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    inspect, download and local-replay calls unless preparation fails or the user
    specifically requested download-only/offline operation. Keep strict coverage;
    never shorten the year, change timeframe or remove stops to get a green result.
+   Treat the scope ledger as part of the replay contract: the receipt must show
+   the same chain, network, exact market, timeframe, and requested window.
 6. **Inspect the receipt and finish.** Include the separate review plan and its
    disabled schedule in the handoff; a plan is not a completed review. Report actual
    dates, requested dates, markets,

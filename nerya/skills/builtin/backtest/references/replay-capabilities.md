@@ -4,6 +4,12 @@ Preserve the exact candidate, chain/network, venue-qualified market, rules,
 window and risk limits. A missing capability is a repair task, not a reason to
 replace the requested market, disable execution permanently or waive evidence.
 
+Keep these facts as a scope ledger from authoring through the receipt. Provider
+discovery may resolve an omitted identifier or source endpoint, but must not
+substitute another venue, instrument, network, or timeframe. If an exact source
+is unavailable, return a bounded missing-capability receipt with the requested
+scope intact. Do not turn a capability gap into a search for a correlated market.
+
 ## Resolve inputs before choosing an engine
 
 - Standard native replay applies when the saved entrypoint consumes historical
