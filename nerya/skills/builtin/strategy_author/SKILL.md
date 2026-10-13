@@ -35,7 +35,13 @@ closed candles using nerya.sdk.factors.calculate_factor. Do not substitute a
 similar factor for user-specified rules, inherit validation across markets, or
 resolve latest during replay. Ordinary strategies need no empty factor file.
 
-1. **Resolve scope once.** Reuse supplied markets and candidate IDs. For a requested
+1. **Resolve scope once.** If the user already names an exact protocol, venue,
+   chain, network, or instrument, load its installed component Skill/reference
+   first and use that component as the authoritative capability surface. Do not
+   load generic markets, CEX, CCXT, or ranking discovery before checking the named
+   component. Use generic market discovery only when the request leaves the market
+   or venue genuinely unspecified.
+   Reuse supplied markets and candidate IDs. For a requested
    crypto market-cap ranking use `market_data(action="ranked_universe", venue="binance",
    count=N, rank_by="market_cap", quote="USDT")`; keep its observed date and tradable
    exclusions. Do not launch additional ranking searches after a successful result.
