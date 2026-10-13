@@ -83,3 +83,21 @@ one Agent proposing changes to strategy code and the next review plan. Keep
 review cadence and triggers strategy-specific. Compare net returns to hold
 without relabeling underperformance as an execution failure. Retain missing
 fee, price, replay and chain-confirmation evidence as explicit review gaps.
+
+
+## Preserve the financial request envelope
+
+An SDK method name is not an action kind: account_state(request) reads a trade
+resource descriptor with kind=trade for a trading component. Source attribution
+belongs inside plan; unknown top-level metadata is rejected. Component parameters
+such as reduce_only and protocol position_id belong in request.parameters, with
+the component schema's original type. Read producer state before status as a
+compatibility fallback. Execute only prepared actions within authorization;
+query/reconcile pending original identities before another action.
+
+Never infer ownership merely because the account has one matching position.
+Recover owned exposure from the strategy's confirmed original action receipt and
+verified component inventory. Missing action attribution stays blocked. Disabled
+schedules and paper mode do not require deleting the requested execution path.
+A requested trading strategy still needs positive entry/exit contract tests and
+same-source replay, with account orders gated separately.
