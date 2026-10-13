@@ -1,14 +1,16 @@
 # Nerya · Monad Metropolis contribution
 
-Event: **Monad Metropolis**. This submission extends the existing Nerya product
-with a public-data-only Monad / Perpl market review and hypothetical sizing surface.
+Event: **Monad Metropolis**. Nerya is a skill-first autonomous trading workspace across LP, perpetuals and onchain token strategies. Agents author strategy packages, research with specialist teams, test assumptions and propose the next version. The event contribution extends that workspace to Monad/Perpl; the public calculator is an auxiliary interface.
 
-- Live judge URL: https://nerya-monad-metropolis.vercel.app
+- Auxiliary live Monad preview: https://nerya-monad-metropolis.vercel.app
 - Source branch: competition/monad-metropolis-20261013
-- Technical demo (145 seconds): https://nerya-monad-metropolis.vercel.app/demo.html
-- Pitch video (118 seconds): https://nerya-monad-metropolis.vercel.app/pitch.html
-- Editable deck: https://nerya-monad-metropolis.vercel.app/media/Nerya-Monad-Metropolis.pptx
 - Contribution source: competition/monad/
+- Revised multi-chain pitch with MiMo narration: https://youtu.be/BwE8dyEVloY
+- Editable deck: https://nerya-monad-metropolis.vercel.app/media/Nerya-Monad-Metropolis.pptx
+
+## Wider product
+
+Existing execution source includes reviewed Uniswap/PancakeSwap LP add/remove/collect, perpetual connectors and Jupiter swaps. Account binding, quote/risk/approval controls, capital reservations and reconciliation mediate execution. Genuine native recordings show RaydiumLP and Velocityperpetual packages/replays, Solana meme pool-watcher proposals, teams and an agent-authored strategy lab. These are distinct from real-money fill acceptance; the submission does not claim every adapter is live accepted or Monad LP/meme execution completed.
 
 ## New contribution / existing product disclosure
 
