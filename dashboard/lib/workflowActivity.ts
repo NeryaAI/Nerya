@@ -6,6 +6,13 @@ export type Activity = { id: string; kind: "script" | "agent"; status: string; t
 export type RuntimeTool = { id: string; name: string; input: unknown; output?: unknown; state: "running" | "returned" | "error"; elapsed?: number };
 const text = (v: unknown) => typeof v === "string" ? v : "";
 export const rows = (v: unknown): Facts[] => Array.isArray(v) ? v.map(asObject) : [];
+export function scriptFinancialEvidence(row: Facts): { actionId: string; phase: string; receipt: Facts } | null {
+  const metadata = asObject(asObject(asObject(row.outputs).result).metadata);
+  const receipt = asObject(metadata.receipt);
+  const actionId = text(metadata.action_id);
+  if (!actionId || !["confirmed", "submitted", "confirming", "unconfirmed", "needs_recovery"].includes(text(receipt.state))) return null;
+  return { actionId, phase: text(metadata.phase), receipt };
+}
 export function activities(runs: unknown, tasks: unknown): Activity[] {
   const result = new Map<string, Activity>();
   for (const row of rows(runs)) {
@@ -24,6 +31,9 @@ export function activities(runs: unknown, tasks: unknown): Activity[] {
 export function activityState(item: Activity, t: WorkflowText) {
   if (["failed", "error"].includes(item.status) || item.row.error) return { label: t("copy.lib_workflowActivity.001"), tone: "error" };
   if (["running", "queued"].includes(item.status)) return { label: t("copy.lib_workflowActivity.002"), tone: "running" };
+  const funds = item.kind === "script" ? scriptFinancialEvidence(item.row) : null;
+  if (funds?.receipt.state === "confirmed") return { label: t("copy.lib_workflowActivity.012"), tone: "neutral" };
+  if (funds) return { label: t("copy.lib_workflowActivity.013"), tone: "warning" };
   if (["skipped", "skip"].includes(item.status)) return { label: item.kind === "agent" ? t("copy.lib_workflowActivity.003") : t("copy.lib_workflowActivity.004"), tone: "muted" };
   const stop = text(item.row.stopped_reason);
   if (stop && !["end_turn", "stop", "completed"].includes(stop)) return { label: t("copy.lib_workflowActivity.005"), tone: "warning" };

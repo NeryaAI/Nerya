@@ -10,7 +10,7 @@ import remarkGfm from "remark-gfm";
 import { callApi } from "../../lib/clientApi";
 import { asObject } from "../../lib/workflowPresentation";
 import { fieldLabel } from "../../lib/agentConversation";
-import { activities, activityState, durationText, publicRuntimeEvents, runtimeTools, parallelMembers, type Activity, type Facts } from "../../lib/workflowActivity";
+import { activities, activityState, scriptFinancialEvidence, durationText, publicRuntimeEvents, runtimeTools, parallelMembers, type Activity, type Facts } from "../../lib/workflowActivity";
 import { useWorkflowText } from "./WorkflowCanvas";
 import { useLocale, useTranslations } from "next-intl";
 import { WorkflowRunCanvas } from "./WorkflowRunCanvas";
@@ -86,6 +86,7 @@ function RunDetails({ strategyId, item, live, onEdit, roleNames }: { strategyId:
   const chosenPath = asObject(task.metadata).path;
   const selectedRoles = asObject(task.metadata).selected_roles;
   const hasPath = typeof chosenPath === "string" && chosenPath.trim().length > 0;
+  const funds = item.kind === "script" ? scriptFinancialEvidence(task) : null;
   const toolTitles: Record<string, string> = { market_data: t("copy.components_workflows_WorkflowActivity.011"), team_run: t("copy.components_workflows_WorkflowActivity.012"), risk_check: t("copy.components_workflows_WorkflowActivity.013"), portfolio_summary: t("copy.components_workflows_WorkflowActivity.014"), strategy_history: t("copy.components_workflows_WorkflowActivity.015") };
   return <div data-testid="workflow-run-detail"><RunWorkspace
     title={item.kind === "agent" ? t("copy.components_workflows_WorkflowActivity.016") : t("copy.components_workflows_WorkflowActivity.017")}
@@ -98,6 +99,7 @@ function RunDetails({ strategyId, item, live, onEdit, roleNames }: { strategyId:
     {isRunning && <div className={styles.now} role="status"><span className={styles.pulse} /><span>{pending ? `${toolTitles[pending.name] || pending.name}…` : partial ? t("copy.components_workflows_WorkflowActivity.024") : t("copy.components_workflows_WorkflowActivity.025")}</span><WorkflowHelp label={t("copy.components_workflows_WorkflowActivity.026")}><p>{t("copy.components_workflows_WorkflowActivity.027")}</p></WorkflowHelp></div>}
     {error && <details className={styles.error} open><summary>{t("copy.components_workflows_WorkflowActivity.028")}</summary><p>{error}</p></details>}
     {errorMessage && <section className={styles.error}><strong>{t("copy.components_workflows_WorkflowActivity.029")}</strong><p>{errorMessage}</p></section>}
+    {funds && <section className={styles.response} data-testid="workflow-financial-receipt"><div className={styles.responseTitle}>{t("copy.components_workflows_WorkflowActivity.072")}</div><p>{String(task.reason || item.reason)}</p><Evidence value={{ action_id: funds.actionId, state: funds.receipt.state, phase: funds.phase, transaction_hash: funds.receipt.transaction_hash, block_number: funds.receipt.block_number, position_id: funds.receipt.position_id }} /><details><summary>{t("copy.components_workflows_WorkflowActivity.073")}</summary><Evidence value={funds.receipt} /></details></section>}
     {state.tone === "warning" && task.stopped_reason != null && <p className={styles.notice}>{t("copy.components_workflows_WorkflowActivity.030")}{String(task.stopped_reason)}</p>}
     {item.kind === "agent" && (reply || partial) ? <section className={styles.response} data-testid="workflow-run-response"><div className={styles.responseTitle}>{reply ? t("copy.components_workflows_WorkflowActivity.033") : t("copy.components_workflows_WorkflowActivity.034")}</div><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ children, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer">{children}</a> }}>{reply || partial}</ReactMarkdown></section> : item.kind === "script" && task.outputs != null ? <section className={styles.response}><div className={styles.responseTitle}>{t("copy.components_workflows_WorkflowActivity.035")}</div><Evidence value={task.outputs} /></section> : !isRunning && !errorMessage && !hasPath && <p className={styles.text}>{item.reason || t("copy.components_workflows_WorkflowActivity.036")}</p>}
     <div className={styles.links}>{sessionId && <Link href={`/chat/${encodeURIComponent(sessionId)}`}>{t("copy.components_workflows_WorkflowActivity.050")} <NeryaGlyph name="arrowUpRight" size={16} /></Link>}<button type="button" onClick={() => onEdit(item.kind)}>{t("copy.components_workflows_WorkflowActivity.051")} <NeryaGlyph name="arrowRight" size={16} /></button></div>

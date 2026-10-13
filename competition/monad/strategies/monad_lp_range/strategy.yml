@@ -1,0 +1,53 @@
+version: 1
+strategy_id: monad_lp_range
+title: LP range · Monad testnet
+mode: paper
+entrypoint: main.py:run
+execution_mode: script
+agent_task:
+  enabled: false
+markets: []
+accounts:
+- monad_demo_testnet
+schedule:
+  type: interval
+  every_seconds: 15
+  enabled: false
+policy:
+  max_single_order_usd: 10
+  max_daily_notional_usd: 30
+  max_open_positions: 1
+  allow_direct_order: true
+  min_confidence: 1
+  max_run_seconds: 60
+llm_policy:
+  default_tier: light
+  allowed_tiers:
+  - light
+  max_calls_per_run: 1
+tuning:
+  enabled: false
+news_sources:
+- monad_lp_public
+params:
+  chain_id: 10143
+  chain: monad-testnet
+  account_id: monad_demo_testnet
+  execution_enabled: false
+  cycle_id: demo_1
+  component_id: builtin:uniswap
+  observation_source: monad_lp_public
+  max_data_age_seconds: 30
+  max_hold_seconds: 180
+  range_ticks: 200
+  amount0_max: '0.01'
+  amount1_max: '0.01'
+  minimum_liquidity: 1
+  collect0_max: '1'
+  collect1_max: '1'
+  slippage_bps: 100
+  wallet_id: monad_demo_testnet
+  protocol: uniswap_v3
+  pool_id: wmon_nusdc
+  pool: {}
+  deployment_sha256: ''

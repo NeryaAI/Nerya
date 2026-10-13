@@ -1,0 +1,180 @@
+[
+  {
+    "type": "function",
+    "inputs": [
+      {
+        "name": "accountAddress",
+        "internalType": "address",
+        "type": "address"
+      }
+    ],
+    "name": "getAccountByAddr",
+    "outputs": [
+      {
+        "name": "accountInfo",
+        "internalType": "struct AccountInfo",
+        "type": "tuple",
+        "components": [
+          {
+            "name": "accountId",
+            "internalType": "uint256",
+            "type": "uint256"
+          },
+          {
+            "name": "balanceCNS",
+            "internalType": "uint256",
+            "type": "uint256"
+          },
+          {
+            "name": "lockedBalanceCNS",
+            "internalType": "uint256",
+            "type": "uint256"
+          },
+          {
+            "name": "frozen",
+            "internalType": "enum FreezeStatusEnum",
+            "type": "uint8"
+          },
+          {
+            "name": "accountAddr",
+            "internalType": "address",
+            "type": "address"
+          },
+          {
+            "name": "positions",
+            "internalType": "struct PositionBitMap",
+            "type": "tuple",
+            "components": [
+              {
+                "name": "bank1",
+                "internalType": "uint256",
+                "type": "uint256"
+              },
+              {
+                "name": "bank2",
+                "internalType": "uint256",
+                "type": "uint256"
+              },
+              {
+                "name": "bank3",
+                "internalType": "uint256",
+                "type": "uint256"
+              },
+              {
+                "name": "bank4",
+                "internalType": "uint256",
+                "type": "uint256"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "inputs": [
+      {
+        "name": "accountId",
+        "internalType": "uint256",
+        "type": "uint256"
+      }
+    ],
+    "name": "getAccountById",
+    "outputs": [
+      {
+        "name": "accountInfo",
+        "internalType": "struct AccountInfo",
+        "type": "tuple",
+        "components": [
+          {
+            "name": "accountId",
+            "internalType": "uint256",
+            "type": "uint256"
+          },
+          {
+            "name": "balanceCNS",
+            "internalType": "uint256",
+            "type": "uint256"
+          },
+          {
+            "name": "lockedBalanceCNS",
+            "internalType": "uint256",
+            "type": "uint256"
+          },
+          {
+            "name": "frozen",
+            "internalType": "enum FreezeStatusEnum",
+            "type": "uint8"
+          },
+          {
+            "name": "accountAddr",
+            "internalType": "address",
+            "type": "address"
+          },
+          {
+            "name": "positions",
+            "internalType": "struct PositionBitMap",
+            "type": "tuple",
+            "components": [
+              {
+                "name": "bank1",
+                "internalType": "uint256",
+                "type": "uint256"
+              },
+              {
+                "name": "bank2",
+                "internalType": "uint256",
+                "type": "uint256"
+              },
+              {
+                "name": "bank3",
+                "internalType": "uint256",
+                "type": "uint256"
+              },
+              {
+                "name": "bank4",
+                "internalType": "uint256",
+                "type": "uint256"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "inputs": [
+      {
+        "name": "allow",
+        "internalType": "bool",
+        "type": "bool"
+      }
+    ],
+    "name": "allowOrderForwarding",
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "inputs": [
+      {
+        "name": "amountCNS",
+        "internalType": "uint256",
+        "type": "uint256"
+      }
+    ],
+    "name": "createAccount",
+    "outputs": [
+      {
+        "name": "accountId",
+        "internalType": "uint256",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  }
+]

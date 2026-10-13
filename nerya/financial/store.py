@@ -335,6 +335,8 @@ class FinancialStore:
             if not row:raise FinancialError("financial_action_not_found",404)
             if expected_state and row["state"]!=expected_state:return False
             if row["state"]=="confirmed" and state!="confirmed":return False
+            if error_code is None and state in {'unconfirmed','needs_recovery','confirming','submitted'}:
+                error_code=row['error_code']
             submitted = submission or json.loads(row["submission_json"] or "{}")
             if state == "failed_before_submission" and submitted:
                 # A provider's late error cannot erase a recorded transaction

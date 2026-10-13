@@ -20,6 +20,19 @@ class FinancialGateway:
         from .adapters import adapter_for
         return adapter_for(self.config,request,quote=quote,recovery=recovery)
 
+    def _execution_config(self,action,context):
+        import copy
+        from dataclasses import asdict
+        from ..core.config import Config
+        data=copy.deepcopy(self.config.data)
+        data.setdefault('runtime',{}).update(financial_action_id=action['action_id'],
+            financial_context={**asdict(context),'scopes':sorted(context.scopes)})
+        return Config(paths=self.config.paths,data=data)
+
+    def _action_adapter(self,action,context,*,quote=None):
+        if self.adapters is not None:return self.adapter(action['request'],quote=quote)
+        return FinancialGateway(self._execution_config(action,context)).adapter(action['request'],quote=quote)
+
     @staticmethod
     def _producer(context,action):
         if action.get("run_id")!=context.run_id:raise FinancialError("financial_run_binding_mismatch",403)
@@ -112,7 +125,7 @@ class FinancialGateway:
         config=self.config
         if config.paths.config.exists():
             from ..core.config import load_config
-            fresh=load_config(config.paths)
+            fresh=load_config(config.paths.root)
             if not fresh.get('financial.enabled',False) or fresh.kill_switch():raise FinancialError('financial_operations_disabled',403)
             if not fresh.live_trading_enabled():raise FinancialError('live_trading_disabled',403)
             self.config.data['financial']=fresh.data['financial']
@@ -220,7 +233,7 @@ class FinancialGateway:
         # New quote is a new reviewable version. Previous approvals never carry
         # over to changed calldata, minimum output, gas or routes.
         quote=self.checked_quote(action['request'],self._quote(context,action['request']))
-        adapter=self.adapter(action['request'],quote=quote)
+        adapter=self._action_adapter(action,context,quote=quote)
         if self.adapters is None and action['request'].get('wallet_id'):
             from ..wallet.bindings import binding_fingerprint
             quote['binding_fingerprint']=binding_fingerprint(self.config,action['request'])
@@ -295,7 +308,7 @@ class FinancialGateway:
             from .task_binding import task_security_revision
             if task_security_revision(self.config,context.task_kind,context.task_id)!=context.security_revision:
                 raise FinancialError("financial_task_security_revision_changed")
-        try:self.adapter(action["request"],quote=action["quote"]).validate(action["request"],action["quote"])
+        try:self._action_adapter(action,context,quote=action["quote"]).validate(action["request"],action["quote"])
         except FinancialError as exc:
             if (action['kind']=='bridge_swap' and exc.code=='finite_bridge_allowance_required') or exc.code=='finite_protocol_allowance_required':
                 self.store.mark(aid,state='awaiting_prerequisite',receipt={'reason':exc.code})
@@ -329,17 +342,13 @@ class FinancialGateway:
             # Owned signers supply identity before network broadcast.
             self.store.mark(aid,state="submitted",submission=ref)
         try:
-            import copy
-            from ..core.config import Config
-            execution_data=copy.deepcopy(self.config.data)
-            execution_data.setdefault("runtime",{})["financial_action_id"]=aid
-            execution_config=Config(paths=self.config.paths,data=execution_data)
-            executor=self.adapter(action["request"],quote=action["quote"]) if self.adapters is not None else FinancialGateway(execution_config).adapter(action["request"],quote=action["quote"])
+            executor=self._action_adapter(action,context,quote=action["quote"])
             result=executor.execute(action["request"],action["quote"],submitted)
             state=result.get("state","unconfirmed")
             if state not in {"confirmed","submitted","confirming","unconfirmed","needs_recovery","failed_before_submission",'rejected'}:
                 state="unconfirmed"
-            self.store.mark(aid,state=state,receipt=result,submission=result.get("submission"))
+            self.store.mark(aid,state=state,receipt=result,submission=result.get("submission"),
+                            error_code=result.get('reason') if state=='failed_before_submission' else None)
             self.store.mark_steps(aid,result)
         except Exception as exc:
             # Even a transport exception can follow a successful submission.
@@ -362,7 +371,7 @@ class FinancialGateway:
             raise
         state=result.get("state","unconfirmed")
         if state not in {"confirmed","submitted","confirming","unconfirmed","needs_recovery",'rejected'}:state="unconfirmed"
-        self.store.mark(aid,state=state,receipt=result)
+        self.store.mark(aid,state=state,receipt=result,error_code=action.get('error_code') if state in {'unconfirmed','needs_recovery','confirming'} else None)
         self.store.mark_steps(aid,result)
         self._publish(aid)
         return self.store.get_action(aid,context,operator='api:all' in context.scopes or 'admin:ops' in context.scopes)

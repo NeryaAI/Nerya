@@ -50,6 +50,7 @@ class TradingComponentSpec:
     abi_version: int = ABI_VERSION
     account_state: bool = False
     cancel: bool = False
+    trade_transport: str | None = None
 
     def __post_init__(self):
         from jsonschema import Draft202012Validator
@@ -59,6 +60,8 @@ class TradingComponentSpec:
             raise FinancialError("invalid_trading_component", 422)
         if not self.actions or set(self.actions) - KINDS or not self.market_types or set(self.market_types) - MARKET_TYPES:
             raise FinancialError("invalid_trading_component_capabilities", 422)
+        if self.trade_transport is not None and (self.trade_transport != 'onchain_perpetual' or set(self.actions) != {'trade'} or set(self.market_types) != {'linear'}):
+            raise FinancialError("invalid_trade_transport", 422)
         if self.parameters_schema.get("type") != "object" or self.parameters_schema.get("additionalProperties") is not False:
             raise FinancialError("component_parameters_must_be_closed_schema", 422)
         Draft202012Validator.check_schema(self.parameters_schema)
@@ -80,7 +83,7 @@ class TradingComponentSpec:
     def info(self):
         return {"version": self.version, "actions": list(self.actions), "market_types": list(self.market_types),
                 "abi_version": self.abi_version, "parameters_schema": self.parameters_schema,
-                "dependencies": list(self.dependencies), "account_state": self.account_state, "cancel": self.cancel}
+                "dependencies": list(self.dependencies), "account_state": self.account_state, "cancel": self.cancel, "trade_transport": self.trade_transport}
 
 
 @dataclass(frozen=True)
@@ -140,6 +143,7 @@ def _builtin_components():
         ("permit2", "defi.permit2", "Permit2Funds", ("permit2_approval",), ("transfer",)),
         ("uniswap", "defi.uniswap", "UniswapFunds", ("lp_add","lp_remove","lp_collect"), ("lp",)),
         ("pancakeswap", "defi.pancakeswap", "PancakeSwapFunds", ("lp_add","lp_remove","lp_collect"), ("lp",)),
+        ("v3_swap", "defi.pancake_swap", "V3SwapTransport", ("swap",), ("spot",)),
         ("prediction_settlement", "defi.prediction", "PredictionRedemptionFunds", ("redeem",), ("prediction",)),
     )
     result = {}
@@ -154,6 +158,9 @@ def _builtin_components():
         if name == 'prediction_settlement':
             from ..financial.defi.prediction import REDEMPTION_SCHEMA
             parameters = REDEMPTION_SCHEMA
+        if name == 'v3_swap':
+            from ..financial.defi.pancake_swap import SWAP_SCHEMA
+            parameters = SWAP_SCHEMA
         spec = TradingComponentSpec(name, "1", actions, markets, factory,parameters_schema=parameters,account_state=name in {"aave","uniswap","pancakeswap"})
         revision = digest({"abi": ABI_VERSION, "manifest": spec.info(), "source":core_hash.hexdigest(),"dependencies":dependencies})
         cid = "builtin:" + name
@@ -251,7 +258,7 @@ class TradingComponentRegistry:
             if not isinstance(component, TradingComponentSpec):
                 raise FinancialError("invalid_trading_component", 422)
             # Ordinary CEX orders retain CCXT, RiskGate and OrderTracker.
-            if "trade" in component.actions:
+            if "trade" in component.actions and component.trade_transport != 'onchain_perpetual':
                 raise FinancialError("cex_components_require_exchange_provider", 422)
             component.validate_dependencies()
             cid = "user:" + plugin_id + ":" + component.id
@@ -346,6 +353,8 @@ class TradingComponentRegistry:
                        "lp_add":"builtin:uniswap","lp_remove":"builtin:uniswap","lp_collect":"builtin:uniswap"}.get(request["kind"])
                 if request['kind'] in {'lp_add', 'lp_remove', 'lp_collect'} and request.get('protocol') == 'pancakeswap_v3':
                     cid = 'builtin:pancakeswap'
+                if request['kind'] == 'swap' and request.get('protocol') in {'pancakeswap_v3','uniswap_v3'} and request.get('chain') in {'monad','monad-testnet'}:
+                    cid = 'builtin:v3_swap'
                 if request['kind'] == 'redeem' and request.get('protocol') == 'polymarket_ctf':
                     cid = 'builtin:prediction_settlement'
                 if not cid:

@@ -215,7 +215,17 @@ class EvmFunds:
 
     def execute(self,request,quote,submitted):
         from eth_account import Account
-        self.validate(request,quote)
+        try:self.validate(request,quote)
+        except FinancialError as exc:
+            # This exact boundary precedes key resolution, signing and RPC send.
+            # Only known deterministic pre-sign rejections can release funds.
+            if exc.code in {'financial_quote_expired','transfer_plan_mismatch','allowance_plan_mismatch',
+                            'swap_plan_mismatch','lp_plan_mismatch','wallet_funds_permission_disabled',
+                            'protocol_transaction_identity_mismatch','protocol_deployment_changed',
+                            'protocol_gas_quote_changed','protocol_gas_limit_changed'}:
+                return {'state':'failed_before_submission','reason':exc.code,
+                        'submission_phase':'evm_pre_sign_validation','signer_resolved':False}
+            raise
         key=self.provider._resolve_signer_key()
         try:
             if Account.from_key(key).address!=self.sender:raise FinancialError("wallet_signer_mismatch",403)

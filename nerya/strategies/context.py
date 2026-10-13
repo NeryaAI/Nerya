@@ -2397,7 +2397,7 @@ def build_strategy_context(
         ]
         if missing_sources:
             for src, fetcher in default_fetchers_for(
-                missing_sources, markets=manifest.markets
+                missing_sources, markets=manifest.markets, config=config, manifest=manifest
             ).items():
                 news.register(src, fetcher)
     except Exception:  # pragma: no cover - never block context build

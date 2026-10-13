@@ -1,0 +1,56 @@
+version: 1
+strategy_id: monad_meme_momentum
+title: nMEME pool momentum · Monad testnet
+mode: paper
+entrypoint: main.py:run
+execution_mode: script
+agent_task:
+  enabled: false
+markets: []
+accounts:
+- monad_demo_testnet
+schedule:
+  type: interval
+  every_seconds: 15
+  enabled: false
+policy:
+  max_single_order_usd: 10
+  max_daily_notional_usd: 30
+  max_open_positions: 1
+  allow_direct_order: true
+  min_confidence: 1
+  max_run_seconds: 60
+llm_policy:
+  default_tier: light
+  allowed_tiers:
+  - light
+  max_calls_per_run: 1
+tuning:
+  enabled: false
+news_sources:
+- monad_meme_public
+params:
+  chain_id: 10143
+  chain: monad-testnet
+  account_id: monad_demo_testnet
+  execution_enabled: false
+  cycle_id: demo_1
+  component_id: builtin:v3_swap
+  observation_source: monad_meme_public
+  max_data_age_seconds: 30
+  max_hold_seconds: 180
+  test_token_symbol: nMEME
+  test_token: ''
+  quote_token: ''
+  entry_amount: '0.001'
+  slippage_bps: 100
+  stop_bps: 200
+  momentum_bps: 10
+  max_momentum_bps: 300
+  min_sample_seconds: 10
+  max_sample_seconds: 300
+  wallet_id: monad_demo_testnet
+  protocol: uniswap_v3
+  pool_id: nmeme_wmon
+  pool: {}
+  deployment_sha256: ''

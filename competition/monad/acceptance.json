@@ -1,0 +1,315 @@
+{
+  "schema": "nerya_monad_testnet_acceptance/v1",
+  "observed_at": "2026-10-13T14:33:09.562812+00:00",
+  "chain_id": 10143,
+  "network": "Monad testnet",
+  "scope": "Public direct-chain receipts + native SDK financial store; no secrets or real-money return claim",
+  "valuation": "USD-labelled runtime fields use fixed test units; test AUSD/nUSDC/nMEME have no monetary value; test price feeds are not market oracles",
+  "lp": {
+    "strategy_id": "monad_lp_range",
+    "execution": "Native UI ticks with explicit operator recovery for collect",
+    "phase": "done",
+    "nft_id": 4,
+    "strategy_owner": "strategy:monad_lp_range",
+    "range_ticks": [
+      276120,
+      276520
+    ],
+    "latest_liquidity": "0",
+    "latest_tokens_owed_base": [
+      "0",
+      "0"
+    ],
+    "receipts": [
+      {
+        "action_id": "fund_d04dab8c85224c86ae5b06f50fc31064",
+        "kind": "lp_add",
+        "state": "confirmed",
+        "actor_id": "strategy:monad_lp_range",
+        "producer_run_id": "run_ec71b2e719d1",
+        "transaction_hash": "0x968ffd5b60c92a283b28fc33dcf1a5b2194bf539237465389bcd6864851f9402",
+        "block_number": 70695362,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 670394,
+        "gas_mon": "0.068380188",
+        "position_id": "4",
+        "settled_fee_usd": "0.0683801880",
+        "cashflows": [
+          {
+            "credit_base": "0",
+            "debit_base": "4804"
+          },
+          {
+            "credit_base": "0",
+            "debit_base": "4999999999990264"
+          }
+        ]
+      },
+      {
+        "action_id": "fund_264e0649e58e4bc18e588259fdac0f3e",
+        "kind": "lp_collect",
+        "state": "confirmed",
+        "actor_id": "strategy:monad_lp_range",
+        "producer_run_id": "recover_a53bf20cc8ad476aa6d6c70d38388b13",
+        "transaction_hash": "0xfae7d48f687b444d2d8e376eb4c0a3473d381990c23644ad47183916b4e158d6",
+        "block_number": 70700193,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 159144,
+        "gas_mon": "0.016232688",
+        "position_id": "4",
+        "settled_fee_usd": "0.0162326880",
+        "cashflows": [
+          {
+            "credit_base": "0",
+            "debit_base": "0"
+          },
+          {
+            "credit_base": "0",
+            "debit_base": "0"
+          }
+        ]
+      },
+      {
+        "action_id": "fund_66ac421a2a4e4a1b9d28863c8a36bf68",
+        "kind": "lp_remove",
+        "state": "confirmed",
+        "actor_id": "strategy:monad_lp_range",
+        "producer_run_id": "run_415b4ab19cfb",
+        "transaction_hash": "0xe11df6fad685c9ff5ce70ddabc4136c8acebc7f195c2baf5d7abdfbc14126fd0",
+        "block_number": 70701821,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 338244,
+        "gas_mon": "0.034500888",
+        "position_id": "4",
+        "settled_fee_usd": "0.0345008880",
+        "cashflows": [
+          {
+            "credit_base": "4803",
+            "debit_base": "0"
+          },
+          {
+            "credit_base": "4999999999990263",
+            "debit_base": "0"
+          }
+        ]
+      }
+    ]
+  },
+  "perp": {
+    "strategy_id": "monad_perp_sma",
+    "execution": "Actual public hourly SMA6/18 short crossing; native ticks with explicit operator recovery of failed pre-submission open",
+    "phase": "done",
+    "side": "short",
+    "base_amount": "100",
+    "receipts": [
+      {
+        "action_id": "fund_6ecbe7dd2a1e4df4883f5274066e87cd",
+        "kind": "trade",
+        "state": "confirmed",
+        "actor_id": "strategy:monad_perp_sma",
+        "producer_run_id": "recover_a82321c9cb5e476f8c813fb1d5ee9b5c",
+        "transaction_hash": "0xf9d19ed79f651b9301cf227d47c9cb897b0d85c646b828d1c8c6eb643c31c6dd",
+        "block_number": 70700024,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 3761809,
+        "gas_mon": "0.387466327003761809",
+        "filled_size": "100",
+        "average_price": "0.02409",
+        "settled_fee_usd": "0.000832"
+      },
+      {
+        "action_id": "fund_6e82b459fb0d4fb39703fb7bd78700a1",
+        "kind": "trade",
+        "state": "confirmed",
+        "actor_id": "strategy:monad_perp_sma",
+        "producer_run_id": "run_9c1f0b6892b8",
+        "transaction_hash": "0xa0bc89e1e3d3887e6525d8ef86bf0fd72c4de26d6398f000a59ab893685996d0",
+        "block_number": 70702739,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 305122,
+        "gas_mon": "0.031427566",
+        "filled_size": "100",
+        "average_price": "0.02451",
+        "settled_fee_usd": "0.000846"
+      }
+    ]
+  },
+  "meme": {
+    "strategy_id": "monad_meme_momentum",
+    "native_status": "confirmed_roundtrip",
+    "native_phase": "done",
+    "operator_roundtrip_status": "confirmed",
+    "operator_receipts": [
+      {
+        "action_id": "fund_8a8c99dc8ddc4a4d9c3755e8c90c99c3",
+        "kind": "swap",
+        "state": "confirmed",
+        "actor_id": "monad-testnet-operator",
+        "producer_run_id": null,
+        "transaction_hash": "0xd04ec64494aa6a2f35474bdb0107d20864fcfc88ece271d19c26d8ea75bf12d3",
+        "block_number": 70690177,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 222230,
+        "gas_mon": "0.02266746",
+        "amount_in": "0.001",
+        "amount_out": "0.990417028152877209",
+        "settled_fee_usd": "0.02266746",
+        "cashflows": [
+          {
+            "asset": "0xFb8bf4c1CC7a94c73D209a149eA2AbEa852BC541",
+            "credit_base": "0",
+            "debit_base": "1000000000000000"
+          },
+          {
+            "asset": "0xb1d3D03554E4F3eCe91F460659D7f81c86EC919F",
+            "credit_base": "990417028152877209",
+            "debit_base": "0"
+          }
+        ]
+      },
+      {
+        "action_id": "fund_e45a859f0b6f46ac87d49a1c6a36b9f5",
+        "kind": "swap",
+        "state": "confirmed",
+        "actor_id": "monad-testnet-operator",
+        "producer_run_id": null,
+        "transaction_hash": "0x5382153d4f8971c1e82e59b97017e49955dd7d6eb4d324dbcf0c13d82017d36b",
+        "block_number": 70696850,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 224628,
+        "gas_mon": "0.022912056",
+        "amount_in": "0.990417028152877209",
+        "amount_out": "0.000994028690058822",
+        "settled_fee_usd": "0.022912056",
+        "cashflows": [
+          {
+            "asset": "0xb1d3D03554E4F3eCe91F460659D7f81c86EC919F",
+            "credit_base": "0",
+            "debit_base": "990417028152877209"
+          },
+          {
+            "asset": "0xFb8bf4c1CC7a94c73D209a149eA2AbEa852BC541",
+            "credit_base": "994028690058822",
+            "debit_base": "0"
+          }
+        ]
+      }
+    ],
+    "stimulus": "Parent-created onchain test swaps are controlled test stimuli, not organic market discovery",
+    "native_receipts": [
+      {
+        "action_id": "fund_ee5ea943d5ed4c62bcb5016306d624a0",
+        "kind": "swap",
+        "state": "confirmed",
+        "actor_id": "strategy:monad_meme_momentum",
+        "producer_run_id": "run_5223029c8dd1",
+        "transaction_hash": "0x9a0e2b177e4453ec9effa227d77cc27ae3d4f89210d74cbd79701b6807aa20cc",
+        "amount_in": "0.001",
+        "amount_out": "0.977385467585813649",
+        "settled_fee_usd": "0.020551878",
+        "cashflows": [
+          {
+            "asset": "0xFb8bf4c1CC7a94c73D209a149eA2AbEa852BC541",
+            "credit_base": "0",
+            "debit_base": "1000000000000000"
+          },
+          {
+            "asset": "0xb1d3D03554E4F3eCe91F460659D7f81c86EC919F",
+            "credit_base": "977385467585813649",
+            "debit_base": "0"
+          }
+        ],
+        "block_number": 70704708,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 201489,
+        "gas_mon": "0.020551878"
+      },
+      {
+        "action_id": "fund_343df96fbb85441983caf305ca102339",
+        "kind": "swap",
+        "state": "confirmed",
+        "actor_id": "strategy:monad_meme_momentum",
+        "producer_run_id": "run_159412f2fe78",
+        "transaction_hash": "0xb6037e70c640a7801f1592d9b655c5e4e8217798961dbb068237cbf3016c69f6",
+        "amount_in": "0.977385467585813649",
+        "amount_out": "0.000994028560517547",
+        "settled_fee_usd": "0.020798616",
+        "cashflows": [
+          {
+            "asset": "0xb1d3D03554E4F3eCe91F460659D7f81c86EC919F",
+            "credit_base": "0",
+            "debit_base": "977385467585813649"
+          },
+          {
+            "asset": "0xFb8bf4c1CC7a94c73D209a149eA2AbEa852BC541",
+            "credit_base": "994028560517547",
+            "debit_base": "0"
+          }
+        ],
+        "block_number": 70705478,
+        "chain_status": "success",
+        "canonical_block_verified": true,
+        "gas_used": 203908,
+        "gas_mon": "0.020798616"
+      }
+    ],
+    "execution": "Native operator-triggered ticks using actual observed pool momentum after a controlled onchain test stimulus; no organic market-discovery claim",
+    "stimulus_receipt": {
+      "action_id": "fund_888b8a5f43dd4e8697972e1209446661",
+      "kind": "swap",
+      "state": "confirmed",
+      "actor_id": "monad-testnet-operator",
+      "producer_run_id": null,
+      "transaction_hash": "0x32869db2212d2304cf44f2c7d8a3bbb6848a1d7c20fb3a5c147d1bb3bbb7529e",
+      "amount_in": "0.001",
+      "amount_out": "0.990377921037547055",
+      "settled_fee_usd": "0.020556876",
+      "cashflows": [
+        {
+          "asset": "0xFb8bf4c1CC7a94c73D209a149eA2AbEa852BC541",
+          "credit_base": "0",
+          "debit_base": "1000000000000000"
+        },
+        {
+          "asset": "0xb1d3D03554E4F3eCe91F460659D7f81c86EC919F",
+          "credit_base": "990377921037547055",
+          "debit_base": "0"
+        }
+      ],
+      "block_number": 70704221,
+      "chain_status": "success",
+      "canonical_block_verified": true,
+      "gas_used": 201538,
+      "gas_mon": "0.020556876"
+    },
+    "reconcile_run_id": "run_4284222962d7",
+    "token_accounting": {
+      "entry_wmon": "0.001",
+      "bought_nmeme": "0.977385467585813649",
+      "sold_nmeme": "0.977385467585813649",
+      "returned_wmon": "0.000994028560517547",
+      "wmon_quantity_change_before_gas": "-0.000005971439482453",
+      "native_gas_mon": "0.041350494"
+    }
+  },
+  "autonomy": "All schedules disabled; recorded native runs are operator-triggered. Completed testnet roundtrips do not establish unattended operation or profitability.",
+  "validation": {
+    "focused_suite": {
+      "files": 7,
+      "passed": 135,
+      "deselected": 4,
+      "seconds": 7.49,
+      "selection": "Repository pytest default: -m smoke"
+    },
+    "receipt_verification": "Ten distinct successful testnet receipts and canonical blocks checked through public RPC: native LP 3, native Perp 2, native Meme 2, prior operator Meme 2 and controlled stimulus 1. NFT 4 zero liquidity/owed was separately checked in the preceding acceptance pass."
+  },
+  "native_cycles_complete": 3
+}

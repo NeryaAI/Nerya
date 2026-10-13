@@ -1,0 +1,5 @@
+# Generated local QA/evidence and internal worker handoffs.
+**/validation/
+**/__pycache__/
+**/STATUS.md
+**/NATIVE-INTEGRATION.md

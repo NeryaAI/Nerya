@@ -14,6 +14,7 @@ from nerya.core.paths import WorkspacePaths
 from nerya.connectors.evm_native import EVMNative
 from nerya.connectors.solana_native import SolanaNative,_pubkey_from_signer,_read_shortvec_u16
 from nerya.financial.adapters import EvmFunds,CexFunds
+from nerya.financial.contracts import FinancialError
 from nerya.financial.solana_funds import SolanaFunds,message
 from nerya.financial.credit import verify_credit
 
@@ -72,6 +73,22 @@ def test_owned_evm_sign_broadcast_and_independent_confirmation(tmp_path,kind):
     assert adapter.status(request,quote,out['submission'])['state']=='confirmed'
     rpc.receipt['status']='0x0';assert adapter.status(request,quote,out['submission'])['state']=='needs_recovery'
     assert len(rpc.sent)==1
+
+
+def test_expired_evm_pre_sign_validation_never_resolves_signer_or_broadcasts(tmp_path):
+    cfg=config(tmp_path);rpc=Rpc()
+    connector=EVMNative(chain='base',chain_id=8453,rpc_url='https://rpc.invalid',live=True,transport=rpc)
+    def forbidden_key():raise AssertionError('pre-sign rejection must not resolve key')
+    adapter=EvmFunds(cfg,{'chain':'base'},connector=connector,provider=SimpleNamespace(_resolve_signer_key=forbidden_key),
+                     wallet_config={'address':SENDER,'native_symbol':'ETH','token_symbols':{TOKEN:'USDC'}})
+    result=adapter.execute({'wallet_id':'test','kind':'wallet_transfer'}, {'expires_at':time.time()-1},rpc.identity.append)
+    assert result=={'state':'failed_before_submission','reason':'financial_quote_expired',
+                   'submission_phase':'evm_pre_sign_validation','signer_resolved':False}
+    assert rpc.sent==rpc.identity==[]
+    def unknown(*_):raise FinancialError('unclassified_execution_error')
+    adapter.validate=unknown
+    with pytest.raises(FinancialError,match='unclassified_execution_error'):
+        adapter.execute({}, {},rpc.identity.append)
 
 
 def test_solana_owned_signer_uses_persisted_signature_and_finalized_message(tmp_path):

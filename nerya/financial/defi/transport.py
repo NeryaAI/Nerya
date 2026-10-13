@@ -84,7 +84,7 @@ class ProtocolFunds(EvmFunds):
         aid=self.config.get("runtime.financial_action_id")
         if not aid:raise FinancialError("protocol_action_identity_required",403)
         result=super().execute(request,quote,lambda ref:submitted({**ref,"action_id":aid}))
-        result["submission"]["action_id"]=aid
+        if result.get('submission'):result["submission"]["action_id"]=aid
         return result
 
     def verified_receipt(self,quote,submission):

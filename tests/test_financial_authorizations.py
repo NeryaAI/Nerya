@@ -74,6 +74,15 @@ def test_duplicate_never_resubmits_even_after_timeout(tmp_path):
     assert resolved["state"]=="confirmed" and adapter.calls==1
 
 
+def test_uncertain_reconciliation_preserves_original_error_evidence(tmp_path):
+    store,gw,ctx,adapter,_=setup(tmp_path)
+    action=gw.prepare(ctx,request(),action_key='original-error')
+    store.mark(action['action_id'],state='unconfirmed',error_code='financial_quote_expired')
+    adapter.status=lambda *_:{'state':'unconfirmed','reason':'transaction_reference_missing'}
+    gw.reconcile(ctx,action['action_id'])
+    assert store.get_action(action['action_id'],ctx,internal=True)['error_code']=='financial_quote_expired'
+
+
 def test_revocation_and_plan_mode(tmp_path):
     store,gw,ctx,adapter,grant=setup(tmp_path)
     action=gw.prepare(ctx,request(),action_key="p")

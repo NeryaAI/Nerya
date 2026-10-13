@@ -1,0 +1,7 @@
+build/
+__pycache__/
+validation/
+*.journal.json
+*.lock
+*.config.json
+*.deployment.json

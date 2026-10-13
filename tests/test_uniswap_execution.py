@@ -2,7 +2,7 @@ from dataclasses import replace
 import time
 
 import pytest
-from eth_abi import encode
+from eth_abi import encode, decode
 from eth_utils import keccak
 
 from nerya.financial.contracts import FinancialError
@@ -29,6 +29,7 @@ class LpRpc(Rpc):
         if method=="eth_call":
             target=args[0]["to"].lower();selector=args[0]["data"][:10]
             cases={
+                "supportsInterface(bytes4)":(["bool"],[False]),
                 "getPool(address,address,uint24)":(["address"],[POOL_ADDRESS]),
                 "tickSpacing()":(["int24"],[10]),
                 "slot0()":(["uint160","int24","uint16","uint16","uint16","uint8","bool"],[2**96,0,0,0,0,0,True]),
@@ -114,6 +115,66 @@ def test_lp_mint_quote_binds_pool_asset_amounts_ticks_and_owner(tmp_path,monkeyp
     assert quote["asset_amounts"][ASSET]=="10"
     assert quote["operation"]=="mint" and quote["minimum_liquidity"]==1
     assert quote["position_owner"]=="actor:operator"
+
+
+def test_lp_deadline_starts_after_slow_inventory_scan(tmp_path,monkeypatch):
+    cfg,rpc,ctx,name=setup(tmp_path,monkeypatch)
+    clock=[time.time()]
+    monkeypatch.setattr('nerya.financial.defi.uniswap.time.time',lambda:clock[0])
+    def slow_inventory(self):
+        clock[0]+=45
+        return []
+    monkeypatch.setattr(UniswapFunds,'_inventory',slow_inventory)
+    action=FinancialGateway(cfg).prepare(ctx,request(name),action_key='slow-inventory')
+    q=FinancialGateway(cfg).store.get_action(action['action_id'],ctx,internal=True)['quote']
+    typ='(address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256)'
+    args=decode([typ],bytes.fromhex(q['transaction']['data'][10:]))[0]
+    assert args[-1]==int(clock[0])+30
+    assert q['wire']['deadline']==args[-1]
+
+
+def test_bounded_lp_quote_window_applies_to_calldata_and_expiry(tmp_path,monkeypatch):
+    cfg,rpc,ctx,name=setup(tmp_path,monkeypatch)
+    cfg.data['financial']['defi']['quote_window_seconds']=120
+    gateway=FinancialGateway(cfg)
+    action=gateway.prepare(ctx,request(name),action_key='bounded-window')
+    quote=gateway.store.get_action(action['action_id'],ctx,internal=True)['quote']
+    assert 118<quote['wire']['deadline']-time.time()<=120
+    assert quote['expires_at']<=quote['wire']['deadline']
+    cfg.data['financial']['defi']['quote_window_seconds']=121
+    with pytest.raises(FinancialError,match='invalid_protocol_quote_window'):
+        gateway.prepare(ctx,request(name),action_key='unbounded-window')
+
+
+def test_refresh_standard_lp_preserves_saved_action_owner(tmp_path,monkeypatch):
+    cfg,rpc,ctx,name=setup(tmp_path,monkeypatch)
+    assert not cfg.get('runtime.financial_context')
+    gateway=FinancialGateway(cfg)
+    action=gateway.prepare(ctx,request(name),action_key='owner-refresh')
+    refreshed=gateway.refresh(ctx,action['action_id'],expected_revision=action['revision'])
+    assert refreshed['state']=='prepared'
+    quote=gateway.store.get_action(action['action_id'],ctx,internal=True)['quote']
+    assert quote['position_owner']=='actor:operator'
+
+
+def test_enumerable_inventory_reads_actual_nfts_without_claims_or_log_scan(tmp_path,monkeypatch):
+    cfg,rpc,ctx,name=setup(tmp_path,monkeypatch)
+    rpc.minted=True;rpc.liquidity=2000000000
+    original=rpc._rpc
+    def enumerable(method,args):
+        if method=='eth_getLogs':raise AssertionError('enumerable inventory must not scan logs')
+        if method=='eth_call':
+            selector=args[0]['data'][:10]
+            if selector=='0x'+keccak(text='supportsInterface(bytes4)')[:4].hex():return '0x'+encode(['bool'],[True]).hex()
+            if selector=='0x'+keccak(text='tokenOfOwnerByIndex(address,uint256)')[:4].hex():return '0x'+encode(['uint256'],[NFT_ID]).hex()
+        return original(method,args)
+    rpc._rpc=enumerable
+    data=dict(cfg.data)
+    data['runtime']={**cfg.data['runtime'],'financial_context':{'actor_id':'operator'}}
+    adapter=FinancialGateway(type(cfg)(cfg.paths,data)).adapter(request(name))
+    inventory=adapter._inventory()
+    assert [row['token_id'] for row in inventory]==[NFT_ID]
+    assert adapter.book.claims(adapter._key(NFT_ID),'actor:operator')==({}, {})
 
 
 @pytest.mark.parametrize("v4",[False,True])

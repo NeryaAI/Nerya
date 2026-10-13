@@ -33,6 +33,8 @@ _SPECS = (
     ChainSpec("mantle", 5000, "MNT"), ChainSpec("fantom", 250, "FTM"), ChainSpec("celo", 42220, "CELO"),
     ChainSpec("gnosis", 100, "XDAI"), ChainSpec("sepolia", 11155111, testnet=True),
     ChainSpec("base-sepolia", 84532, testnet=True),
+    ChainSpec("monad", 143, "MON", confirmations=1),
+    ChainSpec("monad-testnet", 10143, "MON", confirmations=1, testnet=True),
 )
 CHAIN_IDS = {item.name: item.chain_id for item in _SPECS}
 ALIASES = {"eth": "ethereum", "bnb": "bsc", "bnb-chain": "bsc", "arb": "arbitrum", "robinhood-chain": "robinhood"}

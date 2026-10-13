@@ -15,6 +15,7 @@ waits for the transaction receipt before reporting success.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +54,25 @@ class EVMNative(NativeDEXConnector):
     venue: str = "EVM"
     chain: str = "ethereum"
     chain_id: int = 1
+
+    def _rpc(self, method: str, params: list[Any]) -> Any:
+        # Monad testnet public providers cap eth_getLogs block ranges. Preserve
+        # every filter and cover each block once; a failed page fails the read.
+        if (method == 'eth_getLogs' and self.chain_id == 10143 and len(params) == 1
+                and isinstance(params[0], dict) and 'blockHash' not in params[0]):
+            query = params[0]
+            start, end = query.get('fromBlock'), query.get('toBlock')
+            if isinstance(start, str) and isinstance(end, str) and start.startswith('0x') and end.startswith('0x'):
+                beginning, ending = int(start, 16), int(end, 16)
+                if ending - beginning >= 100:
+                    pages = [dict(query, fromBlock=hex(block), toBlock=hex(min(ending, block + 99)))
+                             for block in range(beginning, ending + 1, 100)]
+                    with ThreadPoolExecutor(max_workers=3) as pool:
+                        results = list(pool.map(lambda page: NativeDEXConnector._rpc(self, method, [page]), pages))
+                    if any(not isinstance(rows, list) for rows in results):
+                        raise TradingError('eth_getLogs page returned non-list payload')
+                    return [log for rows in results for log in rows]
+        return super()._rpc(method, params)
 
     def get_balance(self, address: str) -> float:
         """Native-asset balance in ETH units (or chain's native unit)."""

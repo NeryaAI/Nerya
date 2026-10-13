@@ -1,85 +1,106 @@
-# Nerya · Monad Metropolis contribution
+# Nerya · Monad testnet strategies
 
-Event: **Monad Metropolis**. Nerya is a skill-first autonomous trading workspace across LP, perpetuals and onchain token strategies. Agents author strategy packages, research with specialist teams, test assumptions and propose the next version. The event contribution extends that workspace to Monad/Perpl; the public calculator is an auxiliary interface.
+Nerya is a trading agent workspace with native strategy packages, operator
+approvals, bounded financial grants and recoverable execution. This contribution
+adds Monad testnet execution for concentrated liquidity, Perpl MON perpetuals
+and an explicitly identified meme test token. The demo target is **Monad testnet,
+chain 10143**. It makes no real-money profit claim.
 
-- Auxiliary live Monad preview: https://nerya-monad-metropolis.vercel.app
-- Source branch: competition/monad-metropolis-20261013
-- Contribution source: competition/monad/
-- Revised multi-chain technical demo with MiMo narration: https://youtu.be/f0TsD7-WInY
-- Revised multi-chain pitch with MiMo narration: https://youtu.be/BwE8dyEVloY
-- Editable deck: https://nerya-monad-metropolis.vercel.app/media/Nerya-Monad-Metropolis.pptx
+## Recorded execution
 
-## Wider product
+| Package | Observed acceptance | What remains distinct |
+|---|---|---|
+| `monad_lp_range` | Native UI mint, fee collection and full removal of strategy-owned NFT 4 | Collection required explicit operator recovery; all ticks were manually triggered |
+| `monad_perp_sma` | Actual public hourly SMA6/18 short signal; confirmed 100 MON open and reduce-only close | Failed pre-submission open was recovered by the operator; unattended operation is not established |
+| `monad_meme_momentum` | Native momentum buy and full sell confirmed, spending 0.001 WMON and selling the exact 0.977385467585813649 nMEME credit | Parent created an onchain test stimulus; this is controlled signal acceptance, not organic market discovery |
 
-Existing execution source includes reviewed Uniswap/PancakeSwap LP add/remove/collect, perpetual connectors and Jupiter swaps. Account binding, quote/risk/approval controls, capital reservations and reconciliation mediate execution. Genuine native recordings show RaydiumLP and Velocityperpetual packages/replays, Solana meme pool-watcher proposals, teams and an agent-authored strategy lab. These are distinct from real-money fill acceptance; the submission does not claim every adapter is live accepted or Monad LP/meme execution completed.
+[Public acceptance](acceptance.json) records transaction hashes, canonical blocks,
+SDK action identities and quantities. All three native cycles are complete. Ten
+distinct native/operator/stimulus receipts were independently checked against the
+public testnet RPC. The exited
+LP NFT has zero liquidity and zero recorded tokens owed. LP collection returned
+zero fees in this cycle; the demo does not claim fee income. The native Meme exit
+returned 0.000994028560517547 WMON from a 0.001 WMON entry, a decrease of
+0.000005971439482453 WMON before gas. Native buy/sell gas totalled 0.041350494
+test MON; neither token recovery nor the test stimulus is presented as profit.
 
-## New contribution / existing product disclosure
+The LP pool is a canonical UniV3 test deployment, **not an official venue**. nUSDC
+and nMEME are test assets with no monetary value. USD-labelled runtime fields use
+fixed test units; test feeds are not market-price oracles. Perpl test AUSD is test
+margin. Actual token flows, gas and venue fees are evidence of execution, not profit.
 
-The event contribution is the Monad mainnet identity check, Perpl public market
-and closed-hour candle observations, shared hypothetical loss-budget calculation,
-native tool/skill adapter, and public judge website with a bounded serverless proxy.
-The website compares $1,000 notional with an editable candidate defaulting to $300,
-using the actual venue fee and explicit assumptions. No sample prices or invented
-execution history are shown. Both CLI and website reuse core.mjs; the web packaging
-copy is byte-for-byte identical.
+## Native packages and controls
 
-**Nerya predates this contribution.** Its agent runtime, dashboard, native tool and
-skill framework, strategy/proposal workflows, and runtime Risk Gate / Approval Gate
-are existing product foundations, not claimed as newly built for this event. This
-public website is a narrow observation and scenario interface. Its budget verdict
-is a shared-core calculation, not evidence that the full runtime gates or an
-agent-driven order workflow have executed. The native adapter is included in source. The technical video separately records its real tool call, a saved MON report and successful reread in an isolated Nerya workspace. No order was placed. A relative-path read initially failed and was corrected; the video retains that recovery.
+Each package in [strategies/](strategies/README.md) contains `strategy.yml`,
+`strategy.md`, `main.py`, an SDK-only action journal and operator-reviewed limits.
+Shipped templates default to paper mode, disabled execution and disabled schedules.
+Configured demo packages are promoted through native proposals. `limits.yml` is
+protected operator configuration and is applied separately before grant review.
 
-## Run and test
+- LP: observe the real tick, align a bounded range, mint within token caps, watch
+  range/fee growth, collect and remove only the confirmed strategy NFT.
+- Perp: use contiguous closed public candles, compute SMA6/18 crossing, enter one
+  isolated position, then close its actual filled quantity. Software stop/hold
+  checks require fresh active ticks; they are not venue stop orders.
+- Meme: compare real nMEME/WMON pool prices across distinct blocks, enter only
+  within the momentum/sample bounds, then sell exactly the confirmed buy credit.
 
-From the repository root, with Node.js 20+:
+All writes pass through native FinancialAPI prepare/execute/reconcile. Runtime
+identity is `strategy:<id>` with a producer lease, package security revision,
+finite grant and account/wallet permissions. Uncertain submissions reconcile the
+original action; an unsubmitted plan may be discarded and replaced only through
+an explicit audited operator recovery. Old producer leases are never reopened.
 
-    node competition/monad/test.mjs
-    node competition/monad/scripts/market.mjs '{"symbol":"MON","notional":300}'
+The isolated demo runs were launched through **strategy detail → Overview →
+Run tick**. Native run history displays action IDs, confirmed receipts, NFT IDs,
+blocks and transaction hashes. Default public readers are explicitly bound to the
+selected workspace and reviewed deployment; stale/wrong-chain data cannot produce
+a trade. The temporary competition data-source integration is opt-in.
 
-The first command tests scenario arithmetic without external requests. The second
-makes real public HTTP requests and prints the observation and hypothetical result.
+## Contribution map
 
-For the website:
+| Source | Purpose |
+|---|---|
+| [strategies/](strategies/README.md) | Three native packages, read-only data adapters, proposal/configuration helpers and focused checks |
+| [perpl/](perpl/README.md) | Workspace-loaded perpetual component, public observations and authenticated execution/recovery |
+| [testnet/](testnet/README.md) | Pinned canonical UniV3 test deployment and explicit test assets |
+| [web/](web/README.md) | Auxiliary public market/scenario explorer and presentation pages |
+| [skill/SKILL.md](skill/SKILL.md) | Agent playbook for public Monad/Perpl research |
 
-    cd competition/monad/web
-    npm run build
-    npm test
-    npm start
+**Nerya predates this event.** The agent runtime, dashboard, proposal system, SDK
+and approval framework are existing foundations. This event work adds the Monad
+execution integration, native testnet packages, data binding and acceptance evidence.
 
-Open http://127.0.0.1:8787 yourself. No dependency installation or secrets required.
-For Vercel packaging use npm run build:vercel; vercel.json explicitly selects
-framework:null, dist static output, and the /api serverless rewrite.
+The auxiliary explorer is available at
+[the public preview](https://nerya-monad-metropolis.vercel.app). Source includes
+[demo.html](web/demo.html) and [pitch.html](web/pitch.html). These pages and older
+media may describe an earlier read-only/mainnet preview. They do not independently
+prove the latest testnet trades; use the dated acceptance JSON and native recordings
+for that evidence. Final recordings: [technical demo](https://youtu.be/qZfdje2ilmY) and [pitch](https://youtu.be/iowgZhj1GvY).
 
-Explicit network validation:
+## Focused checks
 
-    npm run validate:live
-    node verify-hosted.mjs
+From the repository root, in the project's Python environment:
 
-The hosted check uses unauthenticated HTTP against the live URL, verifies real root
-HTML and module/CSS/config assets, reads context/candles/eth_chainId, checks rejected
-routes and methods, and runs the shared snapshot/scenario through the deployed API
-for MON/BTC/ETH. Raw responses and the dated acceptance report are saved under
-web/validation/hosted/. Neither command controls a browser or trading runtime.
-See web/README.md for hosting and CORS details. GitHub Pages needs a separate HTTPS
-proxy: current Perpl HTTP responses do not grant the tested cross-origin read.
+```bash
+python -m pytest -q tests/test_monad_perpl.py tests/test_monad_pancake_swap.py tests/test_monad_log_pagination.py tests/test_financial_config_fence.py tests/test_uniswap_execution.py tests/test_financial_authorizations.py tests/test_financial_transport_paths.py
+python competition/monad/strategies/tests/test_packages.py
+python competition/monad/strategies/tests/test_recovery.py
+node --test dashboard/tests/script-financial-receipt.test.cjs
+```
 
-## Capability boundaries
+Tests use controlled inputs/fake transports. The public acceptance JSON separately
+records real testnet receipts. The signal replay helper reads actual public candles
+and reports crossings without simulated PnL or trade claims.
 
-Public reads only: Perpl context, recent closed hourly candles for MON/BTC/ETH, and
-Monad RPC eth_chainId (chain 143). The proxy rejects arbitrary upstream URLs,
-transaction RPC methods, unsupported markets, writes, unapproved origins, and
-out-of-bound candle windows. No account keys, wallet connection, signatures,
-collateral transfer, or order execution.
+For the auxiliary explorer, use `node competition/monad/test.mjs`, then the
+commands in `web/README.md`. Its hypothetical risk calculator remains separate
+from the runtime Risk Gate and actual execution.
 
-Default scenario: assumed $1,000 capital, 5% adverse move, 2% loss budget, two taker
-fees, and assumed 10 bps slippage per side. At the live reported 3.45 bps fee,
-$1,000 notional produces $52.69 stress loss and $300 produces $15.807 (displayed
-$15.81), against a $20 assumed budget. Outcomes recalculate with actual source fees
-and inputs. Old or future-skewed observations require review.
+## Public package boundary
 
-Funding, liquidation, gas, margin requirements, actual fills, existing positions,
-and execution depth are excluded. The mathematical ceiling is not an executable
-size recommendation. No live fills, profit, backtest performance, or real-money
-acceptance is claimed. Hosted HTTP acceptance is distinct from browser visual /
-interaction acceptance. The final recording shows actual refresh and resizing in the deployed interface; desktop BTC and a 390px mobile viewport were also checked.
+Publish source, documentation, tests and `acceptance.json`. Exclude workspaces,
+vaults, signer files, journals, enrollment outputs, private config, prompts, raw
+recordings and validation logs. Perpl/testnet/strategies `validation/`, testnet
+`build/` and journals/config/deployment outputs, web `dist/`, `.vercel/` and `media/`
+are ignored. The acceptance file contains only selected public chain facts and SDK action identities; it contains no wallet key, API token or signer reference.

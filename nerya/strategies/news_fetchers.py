@@ -119,6 +119,8 @@ def default_fetchers_for(
     source_names: Iterable[str],
     *,
     markets: Iterable[str] = (),
+    config: Any = None,
+    manifest: Any = None,
 ) -> dict[str, NewsFetcher]:
     """Build a ``{source -> fetcher}`` map for the configured source names.
 
@@ -133,6 +135,20 @@ def default_fetchers_for(
         out["crypto"] = crypto_news_fetcher()
     if "equity" in wanted:
         out["equity"] = equity_news_fetcher(markets)
+    monad_sources = {"monad_lp_public", "monad_perp_public", "monad_meme_public"}
+    if wanted & monad_sources and config is not None and manifest is not None:
+        settings = config.get("plugins.monad_strategy_data", {})
+        if settings.get("enabled") is True:
+            from pathlib import Path
+            expected = settings.get("workspace")
+            deployment = settings.get("deployment_path")
+            if not expected or not deployment or Path(expected).resolve() != config.paths.root.resolve():
+                raise ValueError("Monad public reader workspace/deployment binding required")
+            from competition.monad.strategies.readers import fetchers
+            raw = {**manifest.asdict(), **manifest.extras}
+            if raw["params"].get("chain_id") != 10143:
+                raise ValueError("Monad public strategy data is testnet-only")
+            out.update({key: value for key, value in fetchers([raw], deployment).items() if key in wanted & monad_sources})
     return out
 
 

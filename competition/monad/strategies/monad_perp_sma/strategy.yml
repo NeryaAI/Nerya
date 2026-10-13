@@ -1,0 +1,46 @@
+version: 1
+strategy_id: monad_perp_sma
+title: Perpl MON SMA6/18 · Monad testnet
+mode: paper
+entrypoint: main.py:run
+execution_mode: script
+agent_task:
+  enabled: false
+markets:
+- PERPL:MON/AUSD
+accounts:
+- monad_perpl_testnet
+schedule:
+  type: interval
+  every_seconds: 15
+  enabled: false
+policy:
+  max_single_order_usd: 10
+  max_daily_notional_usd: 30
+  max_open_positions: 1
+  allow_direct_order: true
+  min_confidence: 1
+  max_run_seconds: 60
+llm_policy:
+  default_tier: light
+  allowed_tiers:
+  - light
+  max_calls_per_run: 1
+tuning:
+  enabled: false
+news_sources:
+- monad_perp_public
+params:
+  chain_id: 10143
+  chain: monad-testnet
+  account_id: monad_perpl_testnet
+  execution_enabled: false
+  cycle_id: demo_1
+  component_id: user:perpl:perpl
+  observation_source: monad_perp_public
+  max_data_age_seconds: 30
+  max_hold_seconds: 180
+  fixed_base: '100'
+  slippage_bps: 50
+  stop_bps: 200
+  max_negative_pnl_bps: 100

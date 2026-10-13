@@ -386,7 +386,9 @@
         "068": "Loading…",
         "069": "Records unavailable",
         "070": "No recorded runs",
-        "071": "Agent"
+        "071": "Agent",
+        "072": "Financial action receipt",
+        "073": "Receipt evidence"
       },
       "components_workflows_WorkflowAgentSettings": {
         "001": "Inherit main Agent · {value0}",
@@ -673,7 +675,9 @@
         "008": "Request submitted",
         "009": "Agent ended",
         "010": "Status unrecorded",
-        "011": "Not recorded"
+        "011": "Not recorded",
+        "012": "Financial action confirmed",
+        "013": "Financial action needs confirmation"
       },
       "lib_workflowPresentation": {
         "001": "{value0} days",

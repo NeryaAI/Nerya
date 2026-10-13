@@ -1,5 +1,6 @@
 """Owned Uniswap v3/v4 ERC20 position lifecycles, without implicit approvals."""
 import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 from eth_abi import encode
@@ -132,7 +133,13 @@ class UniswapFunds(ProtocolFunds):
         if count>maximum:raise FinancialError("lp_inventory_size_exceeds_limit",422)
         if count==0:return []
         ids={int(row["state"]["token_id"]) for row in self.book.positions(chain=self.chain,protocol=self.protocol,owner_address=self.sender)}
-        if len(ids)!=count:
+        enumerable=False
+        if not self.v4:
+            enumerable=self.call(self.manager,'supportsInterface(bytes4)',['bytes4'],[bytes.fromhex('780e9d63')],['bool'])[0]
+        if enumerable:
+            ids={self.call(self.manager,'tokenOfOwnerByIndex(address,uint256)',['address','uint256'],[self.sender,index],['uint256'])[0] for index in range(count)}
+            if len(ids)!=count:raise FinancialError('lp_inventory_reconciliation_required',503)
+        elif len(ids)!=count:
             start=self.deployment.get("start_block")
             if type(start) is not int or start<0:raise FinancialError("lp_inventory_coverage_required",422)
             latest=self.connector.get_block_number();ids=set()
@@ -143,10 +150,11 @@ class UniswapFunds(ProtocolFunds):
                 if not isinstance(logs,list):raise FinancialError("lp_inventory_evidence_unavailable",503)
                 ids.update(int(log["topics"][3],16) for log in logs if len(log.get("topics",[]))==4)
                 if len(ids)>maximum:raise FinancialError("lp_inventory_size_exceeds_limit",422)
-        positions=[]
-        for token_id in sorted(ids):
+        def position_if_owned(token_id):
             owner=self.call(self.manager,"ownerOf(uint256)",["uint256"],[token_id],["address"])[0]
-            if owner.lower()==self.sender.lower():positions.append(self._position(token_id))
+            return self._position(token_id) if owner.lower()==self.sender.lower() else None
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            positions=[position for position in executor.map(position_if_owned,sorted(ids)) if position is not None]
         if len(positions)!=count:raise FinancialError("lp_inventory_reconciliation_required",503)
         return positions
 
@@ -228,6 +236,12 @@ class UniswapFunds(ProtocolFunds):
             exiting=sum((Decimal(int(quantity) if self.v4 else min(int(quantity),wire[f"collect{index}_max"]))/10**pool["decimals"][index]*Decimal(pool["prices_usd"][index])
                          for index,quantity in enumerate(position["tokens_owed_base"])),Decimal(0))
         risk=movement if spend else exiting if operation in {"decrease","decrease_collect"} else Decimal(position["owed_value_usd"])
+        # Inventory scans can take longer than the short execution window.
+        # Start the calldata deadline after the read-only inventory work.
+        window=self.config.get('financial.defi.quote_window_seconds',30)
+        if type(window) is not int or not 30<=window<=120:raise FinancialError('invalid_protocol_quote_window',422)
+        wire["deadline"]=int(time.time())+window
+        tx=v4_call(self.manager,self.sender,operation,pool["key"],wire) if self.v4 else v3_call(self.manager,self.sender,operation,wire,spacing=pool["tick_spacing"])
         quote=self.transaction_quote(request,tx,risk_usd=risk,spend_assets=spend,prices=prices,prerequisites=prerequisites)
         # Protocol exposure is separate from the underlying tokens returned
         # on exit. Removing LP risk does not assert that ETH became cash USD.
@@ -242,7 +256,7 @@ class UniswapFunds(ProtocolFunds):
         limits=self.config.get("financial.portfolio_limits",{}).get("wallet:"+request["wallet_id"],{})
         reasons=evaluate(before,after,limits,mode=str(self.config.get("trading.risk_mode","normal")))
         if reasons:raise FinancialError(reasons[0],403)
-        return {**quote,"pool":pool,"position_before":position,"position_owner":owner,"operation":operation,"wire":wire,
+        return {**quote,"expires_at":min(time.time()+window,wire['deadline']),"pool":pool,"position_before":position,"position_owner":owner,"operation":operation,"wire":wire,
             "minimum_liquidity":(request.get("parameters") or {}).get("minimum_liquidity",0),"inventory":inventory,
             "portfolio_effect":{"before":before.asdict(),"after":after.asdict(),"source":self.protocol+":lp_inventory","as_of":time.time()}}
 

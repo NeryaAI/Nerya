@@ -1,0 +1,4 @@
+enabled: true
+max_single_order_usd: 10
+max_daily_notional_usd: 30
+max_open_positions: 1
