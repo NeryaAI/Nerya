@@ -1,0 +1,12 @@
+{
+  "name": "nerya-monad-judge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node server.mjs",
+    "test": "node --test test.mjs",
+    "validate:live": "node validate-live.mjs",
+    "build:vercel": "node build-vercel.mjs"
+  }
+}

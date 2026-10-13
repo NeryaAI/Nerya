@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {scenario} from './core.mjs';
+const current = {sourceAgeSeconds: 4, takerFeeBps: 3.45};
+const blocked = scenario(current);
+assert.equal(blocked.status, 'Review required');
+assert.equal(blocked.lossBudget, 20);
+assert.ok(Math.abs(blocked.totalLoss - 52.69) < 1e-8);
+assert.equal(scenario(current, {notional: 300}).status, 'Within scenario budget');
+assert.equal(scenario({...current, sourceAgeSeconds: 121}, {notional: 300}).status, 'Review required');
+assert.throws(() => scenario(current, {capital: -1}));
+assert.throws(() => scenario(current, {notional: 'invalid'}));
+console.log('Risk budget, fees, invalid inputs and stale data checks passed');

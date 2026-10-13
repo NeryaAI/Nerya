@@ -1806,7 +1806,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
                 <div className="h-full flex items-center justify-center text-ink-500 text-sm">
                   {t("loadingConversation")}
                 </div>
-              ) : (
+              ) : !active ? null : (
                 <div ref={transcriptRef} className={styles.conversation} data-testid="conversation-content">
                   {isExternalSource(active?.source) ? <ExternalSessionTimeline session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} traces={active!.messages.flatMap(m => m.role === "assistant" && m.turn?.external_call ? [m.turn.external_call] : [])} userMessages={active!.messages.filter((m): m is UserMessage => m.role === 'user')} pendingApprovals={pendingApprovals} onApprovalAction={resolveApproval} resolvingApprovalIds={resolvingApprovalIds} /> : <ConversationTimeline publicOnly={isAssistantConversation} messages={active!.messages} session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} renderMessage={(m,mi)=>
                     m.role === "user" ? (

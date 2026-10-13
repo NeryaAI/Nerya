@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101219">
+  <meta name="description" content="Explore live public Perpl data on Monad and compare hypothetical position sizes against a transparent loss budget.">
+  <title>Nerya · Monad risk lens</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="Nerya home"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 25V7h5l12 18h5V7h-5v11L10 7"/></svg><span>nerya<span class="brand-dot">.</span></span></a>
+    <span class="edition">PUBLIC JUDGE EXPLORER <span>01 / MONAD</span></span>
+    <a href="#sources" class="text-link">Hosting & sources ↗</a>
+  </header>
+  <main>
+    <section class="intro" aria-labelledby="headline">
+      <div><p class="eyebrow">MONAD MAINNET <span>×</span> PERPL</p><h1 id="headline">Same market.<br><span>A smaller exposure.</span></h1><p class="lede">Read the live market. Stress a $1,000 hypothetical position. Then see what changes at $300.</p></div>
+      <div class="scope-note"><span class="scope-icon" aria-hidden="true">◎</span><strong>Observation → scenario → review</strong><p>A public window into Nerya’s risk reasoning. No account connection, signing, or order execution.</p></div>
+    </section>
+
+    <section class="market-section" aria-labelledby="market-title">
+      <div class="section-top"><h2 id="market-title"><span class="step">01</span> Observe the market</h2><div class="market-actions"><label for="symbol" class="sr-only">Market</label><select id="symbol"><option value="MON">MON / USD</option><option value="BTC">BTC / USD</option><option value="ETH">ETH / USD</option></select><button id="refresh" type="button">Refresh live data <span aria-hidden="true">↻</span></button></div></div>
+      <div id="source-status" class="source-status" role="status" aria-live="polite">Preparing public requests…</div>
+      <div id="fetch-error" class="error" role="alert" hidden></div>
+      <div class="market-grid" id="market-data" aria-busy="true">
+        <div class="quote-panel"><p class="label">PERPL MARK PRICE · USD</p><p id="mark" class="mark">—</p><dl class="quotes"><div><dt>Bid</dt><dd id="bid">—</dd></div><div><dt>Ask</dt><dd id="ask">—</dd></div><div><dt>Spread</dt><dd id="spread">—</dd></div><div><dt>Taker fee / side</dt><dd id="fee">—</dd></div></dl></div>
+        <div class="chart-panel"><div class="chart-caption"><span>Closed hourly prices</span><span id="chart-period">Up to 72 hours · live source</span></div><div id="chart" class="chart"><p class="empty">The chart appears after a successful public observation.</p></div><p id="chart-detail" class="chart-detail">No sample or fallback prices.</p></div>
+      </div>
+      <dl class="provenance"><div><dt>Network</dt><dd id="network">Awaiting chain verification</dd></div><div><dt>Observed at</dt><dd id="observed">—</dd></div><div><dt>Source age</dt><dd id="age">—</dd></div><div><dt>Market block</dt><dd id="block">—</dd></div></dl>
+    </section>
+
+    <section class="scenario-section" aria-labelledby="scenario-title">
+      <div class="section-top"><h2 id="scenario-title"><span class="step">02</span> Resize the hypothetical</h2><span class="tag">CALCULATION ONLY</span></div>
+      <div class="scenario-grid">
+        <form id="inputs" novalidate>
+          <div class="notional-heading"><label for="notional">Candidate notional</label><span class="unit">USD</span></div>
+          <div class="notional-entry"><span aria-hidden="true">$</span><input id="notional" name="notional" type="number" min="0" max="1000" step="any" value="300" inputmode="decimal" aria-describedby="notional-help"></div>
+          <label for="notional-range" class="sr-only">Candidate notional slider in dollars</label><input id="notional-range" type="range" min="0" max="1000" step="1" value="300">
+          <div class="range-labels"><span>$0</span><span>$1,000</span></div>
+          <div class="presets"><button type="button" data-notional="1000">$1,000 original</button><button type="button" data-notional="300">$300 resized</button></div>
+          <p id="notional-help" class="help">Move the size; both columns use the same observation and assumptions.</p>
+          <div class="assumption-inputs">
+            <label>Hypothetical capital <span>USD</span><input name="capital" type="number" min="0.01" max="100000000" step="any" value="1000" inputmode="decimal"></label>
+            <label>Adverse price move <span>%</span><input name="adversePct" type="number" min="0" max="100" step="any" value="5" inputmode="decimal"></label>
+            <label>Loss budget / capital <span>%</span><input name="maxLossPct" type="number" min="0.01" max="100" step="any" value="2" inputmode="decimal"></label>
+            <label>Assumed slippage / side <span>bps</span><input name="slippageBps" type="number" min="0" max="10000" step="any" value="10" inputmode="decimal"></label>
+          </div><p id="input-error" class="error" role="alert" hidden></p>
+        </form>
+        <div class="comparison" id="comparison" aria-live="polite" aria-atomic="true"><p class="empty">Waiting for live data. The comparison uses the venue’s reported taker fee.</p></div>
+      </div>
+    </section>
+
+    <section class="assumptions" aria-labelledby="assumptions-title"><h2 id="assumptions-title"><span class="step">03</span> Know what this assumes</h2><div class="assumptions-grid"><div><h3>A deliberately narrow stress test</h3><p>Flat account. One hypothetical position. An adverse move in either direction. Two taker fees from the public market configuration and two slippage allowances you choose.</p><p>USD is a comparison unit. Capital is your assumption, not a wallet balance. “Within scenario budget” applies only to this calculation.</p></div><div><h3>What the numbers leave out</h3><p>Funding, liquidation, margin requirements, gas, actual fills, existing positions, and execution depth are excluded. The maximum notional is a mathematical budget ceiling, not an executable size recommendation.</p><p>Observations older than 120 seconds, or more than 10 seconds in the future, require review even if the loss fits the budget.</p></div></div><details><summary>Show the shared-core calculation</summary><p>Move loss = notional × adverse move ÷ 100.<br>Round-trip costs = notional × (2 × taker fee bps + 2 × assumed slippage bps) ÷ 10,000.<br>Stress loss = move loss + round-trip costs.<br>Loss budget = hypothetical capital × loss budget % ÷ 100.</p><p>Both sizes call the same <code>scenario()</code> in the shared core. Source age is recalculated while this page stays open.</p></details></section>
+
+    <section id="sources" class="sources" aria-labelledby="sources-title"><h2 id="sources-title">Hosting & sources</h2><p id="transport-mode">Reading connection configuration…</p><p>Perpl can return a successful HTTP response without granting browser CORS access. A static host needs an HTTPS public-data proxy if direct requests are blocked. GitHub Pages serves files; it cannot run that proxy. The supplied local server supports local review.</p><div class="source-links"><a href="https://app.perpl.xyz/api/v1/pub/context" target="_blank" rel="noopener noreferrer">Perpl public context ↗</a><a href="https://rpc.monad.xyz" target="_blank" rel="noopener noreferrer">Monad public RPC ↗</a><a id="candle-source" hidden target="_blank" rel="noopener noreferrer">Current candle source ↗</a></div><details><summary>Inspect the current observation</summary><pre id="raw-observation">No observation received.</pre></details></section>
+  </main>
+  <footer><span>nerya<span class="brand-dot">.</span> <span class="footer-label">TRADING-NATIVE INTELLIGENCE</span></span><span>Public observations. Hypothetical outcomes.</span></footer>
+  <noscript><p class="error">JavaScript is required for live public requests and interactive calculations. No values are preloaded.</p></noscript>
+</body>
+</html>

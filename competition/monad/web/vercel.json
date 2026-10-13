@@ -1,0 +1,16 @@
+{
+  "buildCommand": "node build-vercel.mjs",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/public.mjs": {
+      "maxDuration": 20
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/:route*",
+      "destination": "/api/public?route=:route*"
+    }
+  ],
+  "framework": null
+}
