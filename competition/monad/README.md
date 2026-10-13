@@ -31,6 +31,27 @@ margin. Actual token flows, gas and venue fees are evidence of execution, not pr
 
 ## Native packages and controls
 
+The V4 recording separately demonstrates **new strategy creation and review**:
+one natural-language sentence starts native agent authoring of
+`mon_perpl_trend60`, followed by disclosed operator guidance on SDK calls, data
+bindings and recovery behavior. The agent updates proposal `prp_4c350ba4db7f`;
+the operator inspects it in the native review UI. An independent offline run
+passed all 16 candidate tests, and native validation reported no blockers.
+
+**This candidate remains pending review, not installed and not traded.**
+Historical validation returned `NoHistoricalData`, and the standard Approve Add
+attempt was blocked. No historical waiver or approval bypass was used. Paper
+mode, execution and direct orders remain disabled, with both trading and tuning
+schedules disabled. Candidate close-position typing/inventory binding, terminal
+failure classification and recovery-before-gate behavior still have known
+execution limitations. Passing mock-based tests does not establish live readiness.
+
+[Authoring acceptance](authoring-acceptance.json) records the audited source
+hashes, test result, guidance, database-recovery history boundary and review
+outcome without publishing private candidate files. This creation evidence is
+separate from the three previously completed testnet cycles below; those receipts
+do not prove execution of the new candidate.
+
 Each package in [strategies/](strategies/README.md) contains `strategy.yml`,
 `strategy.md`, `main.py`, an SDK-only action journal and operator-reviewed limits.
 Shipped templates default to paper mode, disabled execution and disabled schedules.
@@ -76,7 +97,11 @@ The auxiliary explorer is available at
 [demo.html](web/demo.html) and [pitch.html](web/pitch.html). These pages and older
 media may describe an earlier read-only/mainnet preview. They do not independently
 prove the latest testnet trades; use the dated acceptance JSON and native recordings
-for that evidence. Final recordings: [technical demo](https://youtu.be/qZfdje2ilmY) and [pitch](https://youtu.be/iowgZhj1GvY).
+for that evidence. Final V4 recording: [technical demo](https://youtu.be/q2hzmdbyRr8)
+(175.061333 seconds), showing one-sentence authoring, disclosed manual guidance
+and recovery, the candidate held for review, and the prior three testnet execution
+routes. The new candidate was not installed, activated or traded.
+[Pitch](https://youtu.be/iowgZhj1GvY) remains published.
 
 ## Focused checks
 
@@ -99,7 +124,9 @@ from the runtime Risk Gate and actual execution.
 
 ## Public package boundary
 
-Publish source, documentation, tests and `acceptance.json`. Exclude workspaces,
+Publish source, documentation, tests, `acceptance.json` and the sanitized
+`authoring-acceptance.json` process record. The new pending-review candidate is
+not distributed as a ready trading template. Exclude workspaces,
 vaults, signer files, journals, enrollment outputs, private config, prompts, raw
 recordings and validation logs. Perpl/testnet/strategies `validation/`, testnet
 `build/` and journals/config/deployment outputs, web `dist/`, `.vercel/` and `media/`

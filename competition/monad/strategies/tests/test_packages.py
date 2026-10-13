@@ -236,6 +236,32 @@ class Packages(unittest.TestCase):
                 self.assertEqual(load_package_from_dir(staged).strategy_id,row['strategy_id'])
 
 
+    def test_new_perpl_id_uses_public_feed_and_rejects_wrong_bindings(self):
+        from unittest.mock import patch
+        from competition.monad.strategies.readers import fetchers
+        manifest = self.manifest(IDS[1])
+        manifest['strategy_id'] = 'mon_perpl_trend60'
+        observed = {'kind': 'perpl', 'chain_id': 10143, 'market': 'PERPL:MON/AUSD', 'candles': []}
+        with patch('competition.monad.strategies.readers.perpl_snapshot', return_value=observed) as public, patch('competition.monad.strategies.readers.pool_snapshot') as pool:
+            self.assertEqual(fetchers([manifest], DEPLOYMENT)['monad_perp_public'](limit=1), [observed])
+            public.assert_called_once_with()
+            pool.assert_not_called()
+            for section, key, value in [('params', 'chain_id', 143), ('params', 'chain', 'monad'),
+                    ('params', 'account_id', ''), ('root', 'accounts', ['other']),
+                    ('root', 'markets', ['PERPL:MON/USD']), ('root', 'news_sources', [])]:
+                wrong = deepcopy(manifest)
+                (wrong if section == 'root' else wrong[section])[key] = value
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    fetchers([wrong], DEPLOYMENT)
+            self.assertEqual(public.call_count, 1)
+            public.return_value = {**observed, 'chain_id': 143}
+            with self.assertRaises(ValueError):
+                fetchers([manifest], DEPLOYMENT)['monad_perp_public']()
+        with patch('competition.monad.strategies.readers.pool_snapshot', return_value={'kind': 'pool'}) as pool:
+            self.assertEqual(fetchers([self.manifest(IDS[0])], DEPLOYMENT)['monad_lp_public'](), [{'kind': 'pool'}])
+            pool.assert_called_once()
+
+
 class NativeRunner(unittest.TestCase):
     def test_installed_native_strategy_actor_grant_recovery_and_restart(self):
         from unittest.mock import patch

@@ -125,7 +125,26 @@ def fetchers(manifests, deployment_path):
     output = {}
     for manifest in manifests:
         p = manifest['params']
-        def fetch(*, since=None, limit=1, manifest=manifest):
-            return [perpl_snapshot() if manifest['strategy_id']=='monad_perp_sma' else pool_snapshot(manifest,deployment_path)]
-        output[p['observation_source']] = fetch
+        source = p['observation_source']
+        if source == 'monad_perp_public':
+            if (type(p.get('chain_id')) is not int or p['chain_id'] != 10143
+                    or p.get('chain') != 'monad-testnet'
+                    or manifest.get('markets') != ['PERPL:MON/AUSD']
+                    or not isinstance(p.get('account_id'), str) or not p['account_id'].strip()
+                    or manifest.get('accounts') != [p['account_id']]
+                    or source not in manifest.get('news_sources', [])):
+                raise ValueError('Perpl public reader testnet market/account/source binding required')
+            def fetch(*, since=None, limit=1):
+                row = perpl_snapshot()
+                if row.get('chain_id') != 10143 or row.get('market') != 'PERPL:MON/AUSD':
+                    raise ValueError('Perpl public observation identity mismatch')
+                return [row]
+        elif source in {'monad_lp_public', 'monad_meme_public'}:
+            def fetch(*, since=None, limit=1, manifest=manifest):
+                return [pool_snapshot(manifest, deployment_path)]
+        else:
+            raise ValueError('Unsupported Monad public observation source')
+        if source in output:
+            raise ValueError('Duplicate Monad public observation source')
+        output[source] = fetch
     return output

@@ -1,0 +1,55 @@
+{
+  "schema": "nerya_monad_authoring_acceptance/v1",
+  "observed_date": "2026-10-13",
+  "scope": "Native agent strategy creation and review evidence only; not an executable trading template or live acceptance",
+  "candidate": {
+    "proposal_id": "prp_4c350ba4db7f",
+    "strategy_id": "mon_perpl_trend60",
+    "status": "pending_review",
+    "installed": false,
+    "promoted": false,
+    "traded": false,
+    "intended_rule": "Monad testnet 10143 PERPL:MON/AUSD; long-only 100 MON at 1x on a closed hourly SMA6/18 upward cross; exit on downward cross or 60 seconds after confirmed fill"
+  },
+  "provenance": {
+    "creation": "An operator supplied one natural-language sentence to the configured Nerya agent, which authored a new candidate through native proposal tools",
+    "model": "GPT-5.5 high via the configured sub2api provider during continuation",
+    "manual_guidance": "Operator supplied subsequent SDK, data-source and state-recovery corrections; this was not an unassisted one-shot generation",
+    "candidate_editing": "Candidate code corrections were made by the native agent; the external audit worker did not patch the candidate",
+    "history_boundary": "Generation continued after an isolated workspace database recovery; some earlier conversation history was lost",
+    "evidence_basis": "Candidate source and offline tests were directly audited; native UI review and blocked Approve Add outcome were reported by the recording operator"
+  },
+  "review_gates": {
+    "mode": "paper",
+    "execution_enabled": false,
+    "allow_direct_order": false,
+    "trading_schedule_enabled": false,
+    "tuning_schedule_enabled": false,
+    "tuning_enabled": true,
+    "native_validation": {"ok": true, "blockers": [], "warning_codes": ["orphan_no_trade_path"]},
+    "historical_backtest": "NoHistoricalData; no historical performance evidence",
+    "approve_add": "Blocked by the standard historical validation requirement",
+    "historical_waiver_used": false,
+    "approval_bypassed": false,
+    "decision": "Hold for review; do not install or activate"
+  },
+  "offline_validation": {
+    "passed": 16,
+    "seconds": 0.16,
+    "network_or_orders": false,
+    "bytecode_and_pytest_cache_disabled": true,
+    "candidate_files_checked_unchanged": 31,
+    "source_sha256": {
+      "main.py": "93a7d5eeb22050590b8080611ffa450796eeebf466abf79cb274287674df8566",
+      "strategy.yml": "be934f12bcd6c8db1f266d4b22e6937a394c73c2512dd5b364671c36e11b0157",
+      "tests/test_contract.py": "5d1033385e81507a3a26d95787beee906d983c61a0c414eb48a64298671a19e5",
+      "validation_report.json": "2f38659db39276d8a123f04aa0ad3f5045008983e421abbf41c52b7132dd29b2"
+    }
+  },
+  "remaining_execution_limitations": [
+    "Close request serializes position_id as a string, while the Perpl component requires a positive integer; the standard StrategyPosition read model does not expose that venue position ID",
+    "Failure classification omits the actual failed_before_submission state; the similarly named contract test uses rejected",
+    "Recovery runs before the execution-disabled gate and can reconcile and update state if prior pending actions exist"
+  ],
+  "public_boundary": "Only this sanitized process record is published. Candidate files, caches, configuration, credentials and raw logs remain excluded. Earlier three-strategy testnet receipts in acceptance.json belong to different packages and do not validate this new candidate. No profitability claim."
+}
