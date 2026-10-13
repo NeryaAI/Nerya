@@ -135,6 +135,18 @@ def normalize_klines(venue: str, rows: list[Any]) -> list[dict[str, Any]]:
                 })
         return out
 
+    # Workspace providers may return canonical rows. Validate the shared
+    # historical contract and preserve source/volume availability metadata.
+    if isinstance(rows[0], dict) and "ts" in rows[0]:
+        from .history_store import normalize_row, HistoryDataError
+
+        for row in rows:
+            try:
+                out.append(normalize_row(row))
+            except (HistoryDataError, TypeError, ValueError, KeyError):
+                continue
+        return out
+
     # Best-effort generic array of six numbers
     for r in rows:
         if isinstance(r, list | tuple) and len(r) >= 6:

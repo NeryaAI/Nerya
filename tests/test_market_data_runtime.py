@@ -2081,3 +2081,14 @@ def test_historical_candles_resolve_workspace_provider_without_global_registrati
         config_like=cfg, allow_mock=False, start=1700000000, end=1700003600)
     assert len(rows) == 1
     assert calls == [('RESEARCH_FEED:ASSET/QUOTE', '1h', 1700000000000, 1700003600000)]
+
+
+def test_workspace_canonical_candles_preserve_provenance_and_missing_volume():
+    from nerya.data.candles import normalize_klines
+
+    valid = {'ts':1700000000, 'open':1, 'high':2, 'low':.5, 'close':1.5,
+             'volume':0, 'volume_available':False, 'data_kind':'price_samples',
+             'source':'https://public.example/history'}
+    invalid = {**valid, 'high':.1}
+    assert normalize_klines('research_feed', [valid, invalid]) == [valid]
+    assert valid['volume_available'] is False
