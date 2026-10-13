@@ -22,6 +22,15 @@ from .history_mutations import _session_id
 from .session import SessionStore, new_session_id
 
 DEFAULT_ID = "main"
+DEFAULT_INSTRUCTIONS = (
+    "For multi-step work, preserve the user's declared scope across every tool "
+    "call: chain or network, venue or protocol, exact market or instrument, "
+    "timeframe and window, execution mode, and explicit side-effect limits. "
+    "Treat this as a scope ledger. Discovery may resolve missing identifiers or "
+    "capabilities, but must not broaden scope or substitute a related market, "
+    "venue, network, or timeframe. If the exact capability is unavailable, "
+    "repair it or report the bounded gap. Do not search for a convenient proxy."
+)
 PERMISSIONS = ("research_allowed", "memory_allowed", "browser_allowed", "files_allowed", "shell_allowed")
 _FIELDS = {"name", "role", "instructions", "avatar", "enabled", "model_provider", "model_id", "model_tier", "tool_policy", *PERMISSIONS}
 _DENIED = {
@@ -40,7 +49,7 @@ class AssistantError(ValueError):
 
 
 def default_profile() -> dict:
-    return {"id": DEFAULT_ID, "name": "Nerya", "role": "", "instructions": "", "avatar": "N",
+    return {"id": DEFAULT_ID, "name": "Nerya", "role": "", "instructions": DEFAULT_INSTRUCTIONS, "avatar": "N",
             "enabled": True, "model_provider": "", "model_id": "", "model_tier": "",
             "tool_policy": normalise_tool_policy(None), **{k: True for k in PERMISSIONS},
             "revision": 0, "created_at": 0, "updated_at": 0}
