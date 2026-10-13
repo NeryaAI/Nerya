@@ -5,6 +5,7 @@ Event: **Monad Metropolis**. Nerya is a skill-first autonomous trading workspace
 - Auxiliary live Monad preview: https://nerya-monad-metropolis.vercel.app
 - Source branch: competition/monad-metropolis-20261013
 - Contribution source: competition/monad/
+- Revised multi-chain technical demo with MiMo narration: https://youtu.be/f0TsD7-WInY
 - Revised multi-chain pitch with MiMo narration: https://youtu.be/BwE8dyEVloY
 - Editable deck: https://nerya-monad-metropolis.vercel.app/media/Nerya-Monad-Metropolis.pptx
 
