@@ -22,6 +22,7 @@ Use the replay-only public facade:
 
     from nerya.strategies.research import manifest, entrypoint, fetch_candles
     from nerya.strategies.research import write_json, write_text, write_csv
+    from nerya.strategies.research import validate_financial_request, validate_financial_call
 
 Only recognized replay entrypoints can import this module; it also checks the
 runner context at execution. manifest() returns the saved configuration;
@@ -31,6 +32,12 @@ market and bounded real public history, and never enables mock data. write_*
 functions write relative artifact names confined to the replay output directory.
 Do not read os.environ, load internal config, import nerya.data, use raw HTTP,
 spawn subprocesses or read signer credentials in authored replay code.
+
+Financial replay doubles must call validate_financial_request(request) and
+validate_financial_call(method, *args, **kwargs) before simulating any prepare,
+execute, get, reconcile or account_state result. These perform real contract
+checks without credentials or side effects. A correctly typed simulated result
+is still not an account fill. Use actual ResultBuilder for script returns.
 
 The script should:
 

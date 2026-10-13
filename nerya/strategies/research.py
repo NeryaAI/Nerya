@@ -70,3 +70,18 @@ def entrypoint():
     fn=getattr(module,name)
     if not callable(fn):raise ValueError('Saved entrypoint must be callable')
     return fn
+
+def validate_financial_request(request):
+    """Check the same request envelope without resolving funds or credentials."""
+    _roots()
+    from ..financial.contracts import normalize_request
+    return normalize_request(request)
+
+def validate_financial_call(method, *args, **kwargs):
+    """Bind a simulated financial call to the installed keyword-only contract."""
+    _roots()
+    from inspect import signature
+    from ..sdk.financial_api import FinancialAPI
+    if method not in {'prepare','execute','get','reconcile','account_state'}:
+        raise ValueError('Unsupported research financial method')
+    signature(getattr(FinancialAPI,method)).bind(None,*args,**kwargs)

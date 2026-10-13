@@ -768,3 +768,15 @@ def test_research_sdk_reads_only_declared_market_and_saved_entrypoint(tmp_path, 
     with pytest.raises(ValueError,match='bounds'):
         research.fetch_candles('PUBLIC:ASSET/QUOTE',interval='1h',start=1,end=7201,count=1)
     assert len(calls)==1
+
+
+def test_research_financial_contract_rejects_permissive_simulator_calls(tmp_path,monkeypatch):
+    from nerya.strategies import research
+    from nerya.financial.contracts import FinancialError
+    for key,value in {'NERYA_FREEFORM_BACKTEST':'1','NERYA_STRATEGY_ROOT':str(tmp_path),
+        'NERYA_BACKTEST_OUT_DIR':str(tmp_path/'backtests/run'),'NERYA_WORKSPACE':str(tmp_path)}.items():
+        monkeypatch.setenv(key,value)
+    research.validate_financial_call('execute','action',quote_hash='hash')
+    with pytest.raises(TypeError):research.validate_financial_call('execute','action','hash')
+    with pytest.raises(FinancialError):research.validate_financial_request({'kind':'trade','plan':{}})
+    assert research.validate_financial_request({'kind':'trade','account_id':'account','market':'PUBLIC:ASSET/QUOTE','plan':{}})['account_id']=='account'
