@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .types import ToolResult
+from .types import ToolErrorKind, ToolResult
 
 
 TEAM_REPORT_RESULT_PROTOCOL = "nerya.team_report.v1"
@@ -120,6 +120,32 @@ def result_counts_as_success(result: ToolResult) -> bool:
     return True
 
 
+def result_allows_repair(result: ToolResult) -> bool:
+    """Interpret completed failure at the tool boundary, never replay permission.
+
+    Pending approvals and uncertain effects keep their original recovery path.
+    Legacy JSON inference stays here instead of leaking state names into loops.
+    """
+    data = tool_json_data(result) or compacted_kept_data(result) or {}
+    detail = result.error.detail if result.error is not None else {}
+    unresolved = {"pending", "awaiting_approval", "submitted", "confirming",
+                  "unconfirmed", "needs_recovery"}
+    for payload in (data, detail):
+        if (any(str(payload.get(key) or "").strip().lower() in unresolved
+                for key in ("status", "state"))
+                or payload.get("terminal") is False
+                or payload.get("complete") is False
+                or payload.get("execution_state") == "unknown"):
+            return False
+    if result.is_error:
+        return result.error is not None and result.error.kind == ToolErrorKind.EXECUTION_ERROR
+    status = str(data.get("status") or data.get("state") or "").strip().lower()
+    return (not result_counts_as_success(result) and (
+        result.semantic_success is False or data.get("ok") is False
+        or data.get("success") is False
+        or status in NON_SUCCESS_RESULT_STATUSES | {"invalid"}))
+
+
 def team_report_data(result: ToolResult) -> dict[str, Any] | None:
     """Return a valid team-report payload declared by the result producer.
 
@@ -171,6 +197,7 @@ __all__ = [
     "parse_compacted_kept_jsonish",
     "parse_json_text",
     "result_counts_as_success",
+    "result_allows_repair",
     "team_report_data",
     "team_report_has_usable_output",
     "team_report_should_finalize",

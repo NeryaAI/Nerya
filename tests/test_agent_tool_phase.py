@@ -260,3 +260,41 @@ def test_producer_declared_failure_reopens_tools_without_json_guessing():
     result = ToolResult.from_text(tool_use_id='failed', name='probe', text='repair needed')
     result.semantic_success = False
     assert failed_required_actions({'probe'}, [result]) == {'probe'}
+
+
+@pytest.mark.parametrize('detail', [
+    {'status': 'failed', 'state': 'submitted'},
+    {'execution_state': 'unknown'},
+    {'terminal': False},
+    {'complete': False},
+])
+def test_execution_error_with_unresolved_effect_does_not_open_repair(detail):
+    from nerya.agent.tool_phase import failed_required_actions
+    result = ToolResult.from_error(tool_use_id='failed', name='probe', error=ToolError(
+        kind=ToolErrorKind.EXECUTION_ERROR, message='provider failed', detail=detail))
+    assert failed_required_actions({'probe'}, [result]) == set()
+
+
+def test_submitted_state_overrides_failed_status_for_required_operation():
+    from nerya.agent.tool_phase import failed_required_actions
+    result = ToolResult.from_json(tool_use_id='submitted', name='probe',
+        data={'ok': False, 'status': 'failed', 'state': 'submitted'}, semantic_success=False)
+    assert failed_required_actions({'probe'}, [result]) == set()
+
+
+@pytest.mark.parametrize('status,expected', [('failed', {'probe'}), ('pending', set())])
+def test_compacted_required_result_preserves_repair_boundary(status, expected):
+    import json
+    from nerya.agent.tool_phase import failed_required_actions
+    result = ToolResult.from_text(tool_use_id='compacted', name='probe',
+        text='[compacted_kept] ' + json.dumps({'ok': False, 'status': status}))
+    assert failed_required_actions({'probe'}, [result]) == expected
+
+
+def test_latest_required_result_supersedes_previous_failure():
+    from nerya.agent.tool_phase import failed_required_actions
+    failed = ToolResult.from_json(tool_use_id='failed', name='probe', data={'ok': False})
+    pending = ToolResult.from_json(tool_use_id='pending', name='probe',
+        data={'ok': False, 'state': 'submitted'})
+    assert failed_required_actions({'probe'}, [failed, pending]) == set()
+    assert failed_required_actions({'probe'}, [pending, failed]) == {'probe'}

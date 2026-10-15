@@ -849,9 +849,8 @@ _COMPACT_FINAL_SYNTHESIS_SYSTEM = (
     "state the safe refusal or guardrail instead of offering an illustrative "
     "implementation. Preserve material constraints from the original user "
     "request such as channel/source context, trigger command or entrypoint, "
-    "destination, actor, chain or network, venue-qualified market, timeframe, "
-    "window, language, and delivery surface when stating the bounded conclusion. "
-    "Never replace a requested source or market with a convenient proxy."
+    "destination, actor, timeframe, language, and delivery surface when stating "
+    "the bounded conclusion."
 )
 _COMPACT_REQUIRED_TOOL_SYSTEM = (
     "You are Nerya in required-tool recovery mode. Use the provided compact "

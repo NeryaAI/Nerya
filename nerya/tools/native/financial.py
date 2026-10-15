@@ -47,7 +47,7 @@ def register_financial_tools(registry,deps,*,replace=False):
         required=list(fields)
         if action=='prepare':fields['parent_action_id']={'type':'string'}
         descriptors.append(make_native_descriptor(name="financial_"+action,
-            description={"readiness":"Read local trading dependencies and configured execution prerequisites. Does not resolve secrets, call providers, enable trading or certify live-money execution.",
+            description={"readiness":"Read local dependencies and builtin execution prerequisites. Discover workspace components through financial_components; absence here does not establish missing provider support. Does not resolve secrets, call providers, enable trading or certify live-money execution.",
                          "components":"Read available workspace trading components, immutable revisions, actions and parameter schemas. A declaration is not live verification.",
                          "account_state":"Read actual protocol account state, positions, collateral, debt and collection health through an available component. No order or signature.",
                          "prepare":"Prepare a fixed financial action and quote. Read financial_ops Skill first. No funds are sent.",

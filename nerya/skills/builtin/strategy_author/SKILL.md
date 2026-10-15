@@ -35,12 +35,12 @@ closed candles using nerya.sdk.factors.calculate_factor. Do not substitute a
 similar factor for user-specified rules, inherit validation across markets, or
 resolve latest during replay. Ordinary strategies need no empty factor file.
 
-1. **Resolve scope once.** If the user already names an exact protocol, venue,
-   chain, network, or instrument, load its installed component Skill/reference
-   first and use that component as the authoritative capability surface. Do not
-   load generic markets, CEX, CCXT, or ranking discovery before checking the named
-   component. Use generic market discovery only when the request leaves the market
-   or venue genuinely unspecified.
+1. **Resolve scope once.** For a named protocol or financial component, load
+   financial_ops, then call financial_components to inspect installed component
+   IDs, revisions, actions and parameter schemas. financial_readiness covers
+   builtin configuration prerequisites; its omissions do not establish missing
+   workspace support. Use the selected component's documented contract before
+   market discovery. For unspecified markets, discover the missing identifiers.
    Reuse supplied markets and candidate IDs. For a requested
    crypto market-cap ranking use `market_data(action="ranked_universe", venue="binance",
    count=N, rank_by="market_cap", quote="USDT")`; keep its observed date and tradable
@@ -53,14 +53,11 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    Do not read guessed test/source paths. A fresh creation does not need an
    existing strategy tour; resolve installed capability through its Skill.
    For a missing path, use returned file lists rather than repeat guesses.
-   Before discovery, keep a scope ledger for the turn: exact chain or network,
-   venue or protocol, venue-qualified market, timeframe, window, execution mode,
-   and explicit order restrictions. Later data, validation, and replay calls
-   must reuse those values. Discovery may fill a missing field, but it cannot
-   broaden the ledger to another venue, chain, market, or execution mode. If an
-   exact capability is absent, repair that provider or report the gap; do not
-   search for a convenient proxy. This is task state, not a venue-specific loop
-   rule.
+   Record the requested chain/network, venue-qualified market, timeframe, history
+   window and execution restrictions in the candidate. Complete scope resolution
+   when these match the selected component and data source; retain an explicit
+   capability gap when they cannot be resolved. Read the recovery procedure in
+   references/replay-capabilities.md for missing history or unsupported inputs.
 2. **Implement the strategy.** For non-candle inputs or a new workspace provider,
    first load `references/replay-capabilities.md` to choose an evidence path from
    actual supported inputs. For a protocol/financial component, load
@@ -126,8 +123,6 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    inspect, download and local-replay calls unless preparation fails or the user
    specifically requested download-only/offline operation. Keep strict coverage;
    never shorten the year, change timeframe or remove stops to get a green result.
-   Treat the scope ledger as part of the replay contract: the receipt must show
-   the same chain, network, exact market, timeframe, and requested window.
 6. **Inspect the receipt and finish.** Include the separate review plan and its
    disabled schedule in the handoff; a plan is not a completed review. Report actual
    dates, requested dates, markets,
