@@ -15,6 +15,12 @@ execution contract. The tested
 templates under `templates/` support deterministic exits and durable LP steps;
 they do not activate trading or replace the requested strategy thesis.
 
+For a plain paper CEX EMA/crossover, load
+`references/mainstream-strategies.md` and author the strategy's own `main.py`;
+there is no `templates/mainstream/` asset subtree. Do not guess a path such as
+`templates/mainstream/ema_cross.py.j2`. If the request explicitly adds an Agent
+confirmation step, load `references/trend_follow_subagent.md` instead.
+
 Create and verify the user's strategy in this conversation. Preserve the requested
 rules, markets, timeframe, history period and risk limits. Never promote, activate
 schedules or place account orders unless separately requested. Historical simulated
