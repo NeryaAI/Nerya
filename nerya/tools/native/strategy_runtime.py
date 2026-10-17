@@ -641,10 +641,25 @@ def _execution_error(call: ToolCall, message: str) -> ToolResult:
 def _backtest_error(call: ToolCall, exc: Exception, *, reason: str, strategy_id: str | None, proposal_id: str | None) -> ToolResult:
     """Keep diagnostics and target identity even when no report was produced."""
     message = f"backtest failed: {type(exc).__name__}: {exc}"
+    next_required_action = (
+        {
+            "type": "restart_service_before_replay",
+            "message": (
+                "The replay worker and API loaded different runtime versions. "
+                "Restart the Nerya service, then rerun the same strategy_backtest "
+                "request. Do not mix SDK versions or change the strategy thesis."
+            ),
+        }
+        if reason == "runtime_version_changed"
+        else {
+            "type": "repair_replay_contract" if reason == "backtest_sdk_unsupported" else "inspect_backtest_error",
+            "message": "Do not retry the unchanged call or invent performance. Preserve the strategy thesis and risk controls; fix the indicated contract or use a documented historical execution model, then rerun.",
+        }
+    )
     result = ToolResult.from_json(tool_use_id=call.id, name=call.name,
         semantic_success=False,
         data={"result_type": "backtest_result", "ok": False,
-            "backtest_status": "blocked" if reason in {"backtest_sdk_unsupported", "backtest_dependency_missing", "backtest_preflight_failed", "backtest_data_incomplete", "backtest_data_invalid", "backtest_invalid_input"} else "failed",
+            "backtest_status": "blocked" if reason in {"runtime_version_changed", "backtest_sdk_unsupported", "backtest_dependency_missing", "backtest_preflight_failed", "backtest_data_incomplete", "backtest_data_invalid", "backtest_invalid_input"} else "failed",
             "strategy_id": strategy_id, "proposal_id": proposal_id,
             "reason": reason, "message": message,
             "surface": getattr(exc, "surface", None),
@@ -653,10 +668,17 @@ def _backtest_error(call: ToolCall, exc: Exception, *, reason: str, strategy_id:
             "failure_path": getattr(exc, "failure_path", None),
             "diagnostics": getattr(exc, "receipt", None),
             "missing_module": getattr(exc, "module", None),
-            "next_required_action": {"type": "repair_replay_contract" if reason == "backtest_sdk_unsupported" else "inspect_backtest_error",
-                "message": "Do not retry the unchanged call or invent performance. Preserve the strategy thesis and risk controls; fix the indicated contract or use a documented historical execution model, then rerun."}})
+            "next_required_action": next_required_action})
     result.is_error = True
-    result.error = ToolError(kind=ToolErrorKind.EXECUTION_ERROR, message=message)
+    result.error = ToolError(
+        kind=ToolErrorKind.EXECUTION_ERROR,
+        message=message,
+        retryable=False if reason == "runtime_version_changed" else None,
+        recovery_hint=(
+            {"action": next_required_action["type"], **next_required_action}
+            if reason == "runtime_version_changed" else {}
+        ),
+    )
     return result
 
 

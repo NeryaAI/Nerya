@@ -175,6 +175,37 @@ def test_dependency_failure_is_actionable_and_engine_can_be_selected(tmp_path, m
     assert not out.is_error and out.content[0].data["engine"] == "native"
 
 
+def test_runtime_version_mismatch_has_terminal_recovery_contract(tmp_path, monkeypatch):
+    from nerya.skills.builtin.backtest.scripts.process_replay import ReplayWorkerError
+
+    def stale_runtime(**kwargs):
+        raise ReplayWorkerError({
+            "type": "RuntimeError",
+            "message": (
+                "runtime version changed since the API started; restart the "
+                "service before replaying, rather than mixing SDK versions"
+            ),
+        })
+
+    monkeypatch.setattr(
+        "nerya.skills.builtin.backtest.scripts.backtest_run.run_strategy_backtest",
+        stale_runtime,
+    )
+    cfg = Config(paths=WorkspacePaths(tmp_path))
+    out = strategy_backtest_handler(
+        ToolCall(name="strategy_backtest", arguments={"strategy_id": "qa", "engine": "native"}),
+        config=cfg,
+    )
+
+    assert out.is_error
+    data = out.content[0].data
+    assert data["reason"] == "runtime_version_changed"
+    assert data["backtest_status"] == "blocked"
+    assert data["next_required_action"]["type"] == "restart_service_before_replay"
+    assert out.error.retryable is False
+    assert out.error.recovery_hint["action"] == "restart_service_before_replay"
+
+
 def test_benchmark_underperformance_is_warning_without_changing_replay_success():
     cfg = load_config(markets=["MOCK:BTC"], overrides={"warmup_bars": 0})
     def run(ctx):
