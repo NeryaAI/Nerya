@@ -136,6 +136,8 @@ class BacktestConfig:
     @classmethod
     def from_raw(cls, raw: dict[str, Any] | None) -> "BacktestConfig":
         raw = dict(raw or {})
+        scalar_fee_bps = _scalar_bps(raw.pop("fee_bps", None), "fee_bps")
+        scalar_slippage_bps = _scalar_bps(raw.pop("slippage_bps", None), "slippage_bps")
         unknown = sorted(set(raw) - {f.name for f in fields(cls)})
         if unknown:
             raise BacktestConfigError("unknown backtest setting(s): " + ", ".join(unknown))
@@ -145,6 +147,14 @@ class BacktestConfig:
         mock_raw = raw.get("mock_surfaces") or {}
         if not isinstance(mock_raw, dict):
             raise BacktestConfigError("mock_surfaces must be a mapping")
+        fee_defaults = cls().fee_bps_by_venue
+        slip_defaults = cls().slip_bps_by_venue
+        if scalar_fee_bps is not None:
+            fee_defaults = {venue: scalar_fee_bps for venue in fee_defaults}
+            fee_defaults["UNKNOWN"] = scalar_fee_bps
+        if scalar_slippage_bps is not None:
+            slip_defaults = {venue: scalar_slippage_bps for venue in slip_defaults}
+            slip_defaults["UNKNOWN"] = scalar_slippage_bps
         cfg = cls(
             initial_capital_usd=float(raw.get("initial_capital_usd", 10000.0)),
             warmup_bars=int(raw.get("warmup_bars", 50)),
@@ -155,8 +165,8 @@ class BacktestConfig:
             timeframes=_str_list(raw.get("timeframes")),
             markets=[str(m) for m in (raw.get("markets") or [])],
             indicators=_int_list_map(raw.get("indicators")),
-            fee_bps_by_venue=_float_map(raw.get("fee_bps_by_venue"), cls().fee_bps_by_venue),
-            slip_bps_by_venue=_float_map(raw.get("slip_bps_by_venue"), cls().slip_bps_by_venue),
+            fee_bps_by_venue=_float_map(raw.get("fee_bps_by_venue"), fee_defaults),
+            slip_bps_by_venue=_float_map(raw.get("slip_bps_by_venue"), slip_defaults),
             fill_mode=str(raw.get("fill_mode", "entry_current_open__exit_next_open")),
             allow_short=bool(raw.get("allow_short", True)),
             max_open_trades=int(raw.get("max_open_trades", 1)),
@@ -333,3 +343,17 @@ def _float_map(raw: Any, defaults: dict[str, float]) -> dict[str, float]:
     for key, value in raw.items():
         out[str(key).upper()] = float(value)
     return out
+
+
+def _scalar_bps(raw: Any, name: str) -> float | None:
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, bool):
+        raise BacktestConfigError(f"{name} must be a finite non-negative number")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise BacktestConfigError(f"{name} must be a finite non-negative number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise BacktestConfigError(f"{name} must be a finite non-negative number")
+    return value
