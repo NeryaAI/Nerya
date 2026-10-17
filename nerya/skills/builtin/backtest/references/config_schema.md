@@ -13,6 +13,8 @@ points.
 | `tf` | string | `1h` | Candle interval. |
 | `markets` | string[] | [] | Filled from `strategy.yml` by CLI. |
 | `indicators` | map | SMA/EMA/RSI/ATR | Period lists by indicator name. |
+| `fee_bps` | number | venue defaults | Scalar fee shorthand; explicit `fee_bps_by_venue` entries override it. |
+| `slippage_bps` | number | venue defaults | Scalar slippage shorthand; explicit `slip_bps_by_venue` entries override it. |
 | `fee_bps_by_venue` | map | venue defaults | Fee charged on each fill. |
 | `slip_bps_by_venue` | map | venue defaults | Simulated adverse slippage. |
 | `fill_mode` | string | `entry_current_open__exit_next_open` | V1 locked. |

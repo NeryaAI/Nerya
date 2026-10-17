@@ -14,8 +14,11 @@ Keep domain methodology in these lazy references and workspace adapters, not
 in always-on prompts or venue-specific agent-loop branches.
 
 Custom script configuration is separate from native strategy.yml::backtest.
-The latter accepts only documented BacktestConfig fields; engine, window_hours,
-execution_model, fee_source or assumed_slippage_bps are not native settings.
+The latter accepts only documented BacktestConfig fields; `fee_bps` and
+`slippage_bps` are scalar shorthand for the native venue maps, while explicit
+`fee_bps_by_venue` / `slip_bps_by_venue` entries override them. Engine,
+window_hours, execution_model, fee_source and assumed_slippage_bps are not
+native settings.
 Keep custom assumptions in params/custom script and its report. Use the
 replay-only nerya.strategies.research facade from the custom replay reference,
 not internal config/data imports or environment reads. Do not weaken validation.
