@@ -97,8 +97,14 @@ export default async function globalSetup() {
   if (process.env.NERYA_TEST_SKIP_RESET === "1") {
     console.log("[setup] NERYA_TEST_SKIP_RESET=1, skipping workspace reset");
   } else {
-    const repoRoot = resolve(__dirname, "..", "..", "..", "..");
-    const resetScript = join(repoRoot, "Nerya", "tools", "reset_workspace.py");
+    const repoRoot = resolve(__dirname, "..", "..", "..");
+    const resetScript = join(repoRoot, "tools", "reset_workspace.py");
+    if (!existsSync(resetScript)) {
+      throw new Error(
+        `[setup] reset_workspace.py not found at ${resetScript}. ` +
+          `Expected the dashboard checkout's repository root to contain tools/reset_workspace.py.`,
+      );
+    }
     const fullArg = process.env.NERYA_TEST_RESET === "full" ? ["--full"] : [];
     const args = [
       resetScript,
