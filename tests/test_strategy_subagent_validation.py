@@ -218,6 +218,35 @@ backtest:
     assert "unknown backtest setting" in issues[0].message
 
 
+def test_scalar_fee_and_slippage_backtest_defaults_are_valid() -> None:
+    files = _files_with_main(
+        "def run(ctx):\n"
+        "    return ctx.result.hold(reason='fixture')\n"
+    )
+    files["strategy.yml"] += """
+backtest:
+  fee_bps: 5
+  slippage_bps: 2
+"""
+
+    result = validate_proposal_files(
+        strategy_id="no_subagent_required",
+        files=files,
+    )
+
+    assert result.ok, [issue.message for issue in result.blockers]
+    from nerya.skills.builtin.backtest.scripts.config import BacktestConfig
+
+    config = BacktestConfig.from_raw({
+        "fee_bps": 5,
+        "slippage_bps": 2,
+        "fee_bps_by_venue": {"BINANCE": 7},
+    })
+    assert config.fee_bps_by_venue["DEX"] == 5
+    assert config.fee_bps_by_venue["BINANCE"] == 7
+    assert config.slip_bps_by_venue["DEX"] == 2
+
+
 def test_backtest_incompatible_candle_facade_aliases_are_blocked() -> None:
     result = validate_proposal_files(
         strategy_id="no_subagent_required",
