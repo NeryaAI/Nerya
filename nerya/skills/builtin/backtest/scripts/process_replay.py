@@ -14,6 +14,12 @@ from .engine import BacktestResult
 from .run_state import atomic_json
 
 
+_RUNTIME_VERSION_CHANGED_MESSAGE = (
+    "runtime version changed since the API started; restart the service "
+    "before replaying, rather than mixing SDK versions"
+)
+
+
 class ReplayWorkerError(RuntimeError):
     def __init__(self, error):
         self.receipt = error
@@ -21,8 +27,13 @@ class ReplayWorkerError(RuntimeError):
         self.module = error.get("module")
         self.market = error.get("market")
         self.bar_ts = error.get("bar_ts")
-        self.reason = "backtest_sdk_unsupported" if self.surface else "backtest_execution_failed"
-        super().__init__(f"{error.get('type', 'ReplayWorkerError')}: {error.get('message', 'replay worker failed')}")
+        message = str(error.get("message", "replay worker failed"))
+        self.reason = (
+            "runtime_version_changed"
+            if message == _RUNTIME_VERSION_CHANGED_MESSAGE
+            else "backtest_sdk_unsupported" if self.surface else "backtest_execution_failed"
+        )
+        super().__init__(f"{error.get('type', 'ReplayWorkerError')}: {message}")
 
 
 def _stop(process):
