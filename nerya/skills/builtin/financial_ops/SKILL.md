@@ -6,11 +6,21 @@ description: Prepare, execute and reconcile finite-authorized trading, swaps, tr
 # Financial operations
 
 Call financial_components to discover installed builtin and workspace component
-IDs, immutable revisions, actions and parameter schemas. Select the component
-matching the requested protocol and read its contract before authoring requests.
+IDs, immutable revisions, actions and parameter schemas. For paper or backtest
+authoring, pass `mode="paper"` or `mode="backtest"` plus the requested
+protocol/market. That route is a bounded read-only inventory for strategy
+routing; it does not grant `read:funds`, approvals, signers or execution.
+Select the component matching the requested protocol and read its contract
+before authoring requests.
 Run financial_readiness for local builtin configuration prerequisites; its
 families list excludes workspace components and cannot establish their absence.
 Neither tool certifies live execution or grants permission.
+
+If the paper/backtest inventory returns `capability_gap`, preserve the exact
+protocol, market and missing action in the candidate receipt. Do not create a
+CEX proxy, silently switch to a related market, or call financial_prepare to
+make the gap disappear. A Uniswap component exposing only LP actions is not a
+paper/backtest swap component.
 
 For LP/DeFi, lending, prediction settlement and durable LP rebalancing, read
 references/mainstream-defi.md. Workspace-specific protocols use their installed
