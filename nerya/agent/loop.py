@@ -3309,6 +3309,18 @@ class WorkspaceNativeAgentLoop:
             if not tool_uses:
                 if aborted_reason:
                     break
+                # Guidance can arrive while the last provider request is in
+                # flight. Give it a model round before accepting stale final
+                # text; delivery is confirmed only by the normal inbox drain.
+                if (steer_inbox is not None and getattr(steer_inbox, "pending", 0)
+                        and not text_only_final_attempt
+                        and iterations < self.config.iteration_limit
+                        and (not self.config.token_budget
+                             or usage.total_tokens < self.config.token_budget)
+                        and (deadline is None or time.time() < deadline)):
+                    final_text = ""
+                    transition_reason = "operator_steer_pending_at_completion"
+                    continue
                 # An empty provider response is not task completion. Resume
                 # from verified tool results, never replay a completed write.
                 # Use persisted nudges so checkpoint continuation stays bounded.

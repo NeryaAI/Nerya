@@ -21,8 +21,46 @@ def test_empty_workspace_never_looks_live_ready_or_leaks_credentials(tmp_path, m
     cfg=Config(WorkspacePaths(tmp_path),deepcopy(DEFAULT_CONFIG))
     result=execution_readiness(cfg,version_provider=lambda name:None)
     assert result['network_probed'] is False
+    assert result['inventory_scope'] == 'builtin_execution_families'
+    assert result['workspace_components_included'] is False
     assert all(row['state']!='ready_for_preflight' and row['live_verified'] is False for row in result['families'])
     assert 'native_orca_lp' in result['unsupported']
+
+
+def test_readiness_discovery_resolves_workspace_contract_without_building_transport(tmp_path, monkeypatch):
+    from nerya.tools.native.financial import register_financial_tools
+    from nerya.tools.registry import ToolRegistry
+    from nerya.tools.result_contracts import tool_json_data
+    from nerya.tools.types import ToolCall
+
+    def denied(*a, **kw):
+        raise AssertionError('network_or_secret_access_forbidden')
+    monkeypatch.setattr(socket.socket, 'connect', denied)
+    monkeypatch.setattr('nerya.security.secrets.SecretVault.open', denied)
+    directory = tmp_path / 'plugins' / 'example'
+    directory.mkdir(parents=True)
+    (directory / 'trading.py').write_text('''
+from nerya.trading.components import TradingComponentSpec
+def build(config, request):
+    raise AssertionError('discovery_must_not_construct_transport')
+TRADING_COMPONENTS = (TradingComponentSpec(
+    'funds', '1', ('wallet_transfer',), ('transfer',), build),)
+''')
+    data = deepcopy(DEFAULT_CONFIG)
+    data['runtime'].update(financial_actor_id='operator', financial_actor_scopes=['read:funds'])
+    cfg = Config(WorkspacePaths(tmp_path), data)
+    readiness = execution_readiness(cfg, version_provider=lambda _: None)
+    registry = ToolRegistry()
+    register_financial_tools(registry, SimpleNamespace(config=cfg))
+    discovery = readiness['workspace_component_discovery']
+    result = registry.get(discovery['tool']).handler(ToolCall(
+        id='discover', name=discovery['tool'], arguments=discovery['arguments']))
+    assert not result.is_error
+    component = next(row for row in tool_json_data(result)['components']
+                     if row['id'] == 'user:example:funds')
+    assert component['actions'] == ['wallet_transfer']
+    assert component['parameters_schema']['additionalProperties'] is False
+    assert component['revision'] and component['live_verified'] is False
 
 
 def test_jupiter_requires_rpc_signer_api_key_and_dependencies(tmp_path):

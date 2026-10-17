@@ -8,9 +8,42 @@ strategies.
 
 Place one of these files in the strategy package:
 
-- `tests/test_main.py` for pytest replay smoke.
-- `scripts/custom_replay.py` for operator-run replay.
-- `backtests/custom_replay.py` for a strategy-local one-off replay.
+- `backtests/research_backtest.py`, `backtests/freeform_backtest.py`, or
+  `backtests/custom_backtest.py`.
+- `scripts/research_backtest.py`, `scripts/freeform_backtest.py`,
+  `scripts/custom_backtest.py`, or `scripts/custom_replay.py`.
+
+`tests/test_main.py` is a bounded test, not an executable backtest entrypoint.
+Run the saved package with native `strategy_backtest(engine="freeform",
+allow_mock=false)` or auto selection. Do not invent a `backtests/custom_replay.py`
+entrypoint; the runner does not discover it.
+
+Use the replay-only public facade:
+
+    from nerya.strategies.research import manifest, entrypoint, fetch_candles
+    from nerya.strategies.research import write_json, write_text, write_csv
+    from nerya.strategies.research import validate_financial_request, validate_financial_call
+
+Only recognized replay entrypoints can import this module; it also checks the
+runner context at execution. manifest() returns the saved configuration;
+entrypoint() returns its actual saved callable. fetch_candles(market, *,
+interval, start, end, count) takes integer epoch seconds, permits only a saved
+market and bounded real public history, and never enables mock data. write_*
+functions write relative artifact names confined to the replay output directory.
+Signatures: write_json(name, value), write_text(name, value),
+write_csv(name, rows, *, fields=[...]). Supply fields even for empty trade rows.
+For example write_csv("equity.csv", equity_rows, fields=["ts", "equity"]).
+Script results carry StrategyResultStatus: compare result.status.value to error
+and reject any error tick before writing a completed financial result.
+Persist package/config hash plus source URL, raw data hash and exact window.
+Do not read os.environ, load internal config, import nerya.data, use raw HTTP,
+spawn subprocesses or read signer credentials in authored replay code.
+
+Financial replay doubles must call validate_financial_request(request) and
+validate_financial_call(method, *args, **kwargs) before simulating any prepare,
+execute, get, reconcile or account_state result. These perform real contract
+checks without credentials or side effects. A correctly typed simulated result
+is still not an account fill. Use actual ResultBuilder for script returns.
 
 The script should:
 
@@ -19,11 +52,20 @@ The script should:
    Fixtures must be derived from observed historical facts. Do not use random,
    synthetic, generated, or placeholder candles as evidence for performance
    when `allow_mock=false`.
-2. Build a lightweight fake context that exposes only the surfaces the strategy
-   uses.
+2. Execute the saved strategy entrypoint/helpers with historically bounded
+   inputs and real SDK result types. Model unavailable execution surfaces
+   explicitly; permissive fake methods cannot validate SDK compatibility.
 3. Step through events/bars/swaps in timestamp order.
 4. Capture each decision and any simulated fill.
-5. Write `custom_replay_result.json` and `custom_replay_report.md`.
+5. Write `result.json`, `report.md`, `equity.csv` (ts/equity rows) and
+   `trades.csv` (trade rows or a header for zero trades) under
+   `NERYA_BACKTEST_OUT_DIR`. The runner also supplies `NERYA_STRATEGY_ROOT` and
+   `NERYA_WORKSPACE`; the research facade resolves them, not authored env reads.
+   The financial artifact contract requires nonempty equity rows. If those
+   cannot be established honestly, keep the backtest blocked and report
+   bounded signal/branch checks separately; do not invent an equity curve.
+   Preserve source, network, data hashes, package hash and requested/actual
+   window provenance with the artifacts.
 
 ## Result Shape
 

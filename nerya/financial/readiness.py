@@ -125,6 +125,9 @@ def execution_readiness(config, *, version_provider=None):
         [] if lp_resources else ['configured_lp_child_actions_required'],lp_resources,['Uses Uniswap/Pancake child actions; each action retains its own approval and quote.',
                'Only confirmed exit proceeds may fund the next step. A failed sequence never silently starts over.'],needs_funds=True))
     return {'as_of':time.time(),'probe_kind':'local_configuration_only','network_probed':False,
+            'inventory_scope':'builtin_execution_families',
+            'workspace_components_included':False,
+            'workspace_component_discovery':{'tool':'financial_components','arguments':{}},
             'dependencies':dependencies,'families':result,
             'unsupported':['native_raydium_lp','native_orca_lp','native_meteora_lp','byreal_lp',
                            'inverse_futures','polymarket_proxy_redemption','polymarket_combo_redemption'],

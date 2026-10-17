@@ -5,10 +5,16 @@ description: Prepare, execute and reconcile finite-authorized trading, swaps, tr
 
 # Financial operations
 
-Run financial_readiness before claiming execution is available. For Jupiter,
-Uniswap/Pancake LP, Aave, prediction settlement and durable LP rebalancing,
-read `references/mainstream-defi.md`. Prefer these mainstream routes for new
-strategies; Byreal is a compatibility binding, not the default.
+Call financial_components to discover installed builtin and workspace component
+IDs, immutable revisions, actions and parameter schemas. Select the component
+matching the requested protocol and read its contract before authoring requests.
+Run financial_readiness for local builtin configuration prerequisites; its
+families list excludes workspace components and cannot establish their absence.
+Neither tool certifies live execution or grants permission.
+
+For LP/DeFi, lending, prediction settlement and durable LP rebalancing, read
+references/mainstream-defi.md. Workspace-specific protocols use their installed
+component reference and parameter schema.
 
 Use the native financial_prepare / financial_execute / financial_get / financial_reconcile tools. Capability and account permissions remain producer-owned. Loading this Skill grants no funds permissions.
 

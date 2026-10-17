@@ -135,6 +135,18 @@ def normalize_klines(venue: str, rows: list[Any]) -> list[dict[str, Any]]:
                 })
         return out
 
+    # Workspace providers may return canonical rows. Validate the shared
+    # historical contract and preserve source/volume availability metadata.
+    if isinstance(rows[0], dict) and "ts" in rows[0]:
+        from .history_store import normalize_row, HistoryDataError
+
+        for row in rows:
+            try:
+                out.append(normalize_row(row))
+            except (HistoryDataError, TypeError, ValueError, KeyError):
+                continue
+        return out
+
     # Best-effort generic array of six numbers
     for r in rows:
         if isinstance(r, list | tuple) and len(r) >= 6:
@@ -1212,6 +1224,8 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
     """
     conn = connector
     venue = _venue_of(market)
+    paths = _workspace_paths(config_like)
+    workspace = getattr(paths, "root", None) if paths is not None else None
     err = ""
     wallet_market_venues = set(_wallet_market_data_source_by_canonical().keys())
     if _canonical_venue(venue)=='POLYMARKET':
@@ -1246,7 +1260,7 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
                 conn = registry.get_or_build(account_cfg)
             else:
                 from ..connectors.registry import build_connector
-                conn = build_connector({"venue": venue, "kind": "cex"})
+                conn = build_connector({"venue": venue, "kind": "cex", "live": False}, workspace=workspace)
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
             conn = None
@@ -1310,7 +1324,7 @@ def fetch_candles(market: str, *, count: int = 60, interval: str = "1m",
         try:
             from ..connectors.registry import build_connector
 
-            c = build_connector({"venue": candidate.lower(), "kind": "cex", "live": False})
+            c = build_connector({"venue": candidate.lower(), "kind": "cex", "live": False}, workspace=workspace)
             rows = _connector_get_klines(
                 c,
                 market_id,

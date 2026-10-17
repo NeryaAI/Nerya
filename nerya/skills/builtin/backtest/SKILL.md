@@ -1,7 +1,7 @@
 ---
 name: backtest
 description: "Run a saved Nerya strategy over reusable local historical data; diagnose errors and present version-bound results without activation."
-version: 0.5.0
+version: 0.6.0
 license: MIT
 author: Nerya
 ---
@@ -13,6 +13,9 @@ author: Nerya
 Use `strategy_backtest` with the exact candidate `proposal_id` (or `strategy_id`
 for a saved promoted strategy). Choose `engine:"native"` for the strategy's SDK
 entrypoint; `engine:"freeform"` only for an intentionally authored custom replay.
+Omit `engine` (auto) when the package already owns the appropriate replay; auto
+recognizes its supported custom script. For non-candle inputs or unavailable
+history, load `references/replay-capabilities.md` before choosing another engine.
 Keep `allow_mock:false` for real historical results.
 
 If the target `strategy.yml` already declares a `backtest:` block, **do not inspect
@@ -68,7 +71,9 @@ silently substitute a shorter period, different timeframe or cached old report.
 - `blocked`: inspect structured diagnostics. Fix syntax/config/SDK issues before
   rerunning. Incomplete data is not proof the exchange only has 30 days; inspect the
   download receipt. Repair/resume missing segments with `historical_data` when needed;
-  keep the same candidate, period and risk rules. Never retry an unchanged failure.
+  keep the same candidate, period and risk rules. For a missing provider or an
+  unsupported input surface, use `references/replay-capabilities.md` to repair
+  the data/replay capability. Never retry an unchanged failure.
 - `failed/cancelled`: retain `run_receipt`, `failure_path`, source snapshot and cached
   downloads. Do not present a partial report as a completed run. Cancelled execution
   does not authorize starting another worker without an active request.

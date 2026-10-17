@@ -227,3 +227,74 @@ def test_read_validation_refreshes_after_mutation_without_replaying_the_write():
     assert not invoke("check_file","fresh-read").is_error
     assert invoke("change_file","edit-duplicate").error.kind == ToolErrorKind.DEDUPED
     assert [call.id for call in calls_seen] == ["read1","read2","edit1","fresh-read"]
+
+def test_blocked_required_operation_opens_repair_surface_without_completing():
+    from nerya.agent.tool_phase import failed_required_actions
+    state = _state(required_next_tool_names={'probe'})
+    blocked = ToolResult.from_json(tool_use_id='blocked', name='probe',
+        data={'ok': False, 'backtest_status': 'blocked', 'reason': 'source_unavailable'})
+    _phase(lambda _: BatchResult(results=[blocked])).run(
+        [ToolCall(name='probe', id='blocked')], state=state)
+    assert 'probe' in state.required_next_tool_names
+    assert 'probe' not in state.successful_tool_names
+    assert failed_required_actions({'probe'}, state.completed_tool_results) == {'probe'}
+
+
+@pytest.mark.parametrize('data', [
+    {'ok': False, 'status': status}
+    for status in ('pending', 'awaiting_approval', 'submitted', 'confirming',
+                   'unconfirmed', 'needs_recovery')
+] + [
+    {'ok': False, 'execution_state': 'unknown'},
+    {'ok': False, 'terminal': False},
+    {'ok': False, 'complete': False},
+])
+def test_nonterminal_required_effect_keeps_recovery_constrained(data):
+    from nerya.agent.tool_phase import failed_required_actions
+    result = ToolResult.from_json(tool_use_id='pending', name='probe', data=data)
+    assert failed_required_actions({'probe'}, [result]) == set()
+
+
+def test_producer_declared_failure_reopens_tools_without_json_guessing():
+    from nerya.agent.tool_phase import failed_required_actions
+    result = ToolResult.from_text(tool_use_id='failed', name='probe', text='repair needed')
+    result.semantic_success = False
+    assert failed_required_actions({'probe'}, [result]) == {'probe'}
+
+
+@pytest.mark.parametrize('detail', [
+    {'status': 'failed', 'state': 'submitted'},
+    {'execution_state': 'unknown'},
+    {'terminal': False},
+    {'complete': False},
+])
+def test_execution_error_with_unresolved_effect_does_not_open_repair(detail):
+    from nerya.agent.tool_phase import failed_required_actions
+    result = ToolResult.from_error(tool_use_id='failed', name='probe', error=ToolError(
+        kind=ToolErrorKind.EXECUTION_ERROR, message='provider failed', detail=detail))
+    assert failed_required_actions({'probe'}, [result]) == set()
+
+
+def test_submitted_state_overrides_failed_status_for_required_operation():
+    from nerya.agent.tool_phase import failed_required_actions
+    result = ToolResult.from_json(tool_use_id='submitted', name='probe',
+        data={'ok': False, 'status': 'failed', 'state': 'submitted'}, semantic_success=False)
+    assert failed_required_actions({'probe'}, [result]) == set()
+
+
+@pytest.mark.parametrize('status,expected', [('failed', {'probe'}), ('pending', set())])
+def test_compacted_required_result_preserves_repair_boundary(status, expected):
+    import json
+    from nerya.agent.tool_phase import failed_required_actions
+    result = ToolResult.from_text(tool_use_id='compacted', name='probe',
+        text='[compacted_kept] ' + json.dumps({'ok': False, 'status': status}))
+    assert failed_required_actions({'probe'}, [result]) == expected
+
+
+def test_latest_required_result_supersedes_previous_failure():
+    from nerya.agent.tool_phase import failed_required_actions
+    failed = ToolResult.from_json(tool_use_id='failed', name='probe', data={'ok': False})
+    pending = ToolResult.from_json(tool_use_id='pending', name='probe',
+        data={'ok': False, 'state': 'submitted'})
+    assert failed_required_actions({'probe'}, [failed, pending]) == set()
+    assert failed_required_actions({'probe'}, [pending, failed]) == {'probe'}

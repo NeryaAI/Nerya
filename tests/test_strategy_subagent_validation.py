@@ -722,3 +722,61 @@ def test_backtest_incompatible_portfolio_and_trading_surfaces_are_blocked() -> N
     assert "ctx.portfolio.recent_trades is not part of StrategyContext" in messages
     assert "ctx.market.round_qty is not part of StrategyContext" in messages
     assert "ctx.trading.place_market_order is not part of StrategyContext" in messages
+
+def test_research_sdk_only_allowed_in_recognized_replay_entrypoint():
+    source = "from nerya.strategies.research import fetch_candles, write_json"+chr(10)
+    files = _files_with_main("def run(ctx): return ctx.result.hold(reason='test')"+chr(10))
+    files['scripts/freeform_backtest.py'] = source
+    result = validate_proposal_files(strategy_id='no_subagent_required',files=files)
+    assert result.ok
+    files['main.py'] = source + files['main.py']
+    result = validate_proposal_files(strategy_id='no_subagent_required',files=files)
+    assert any(x.code == 'research_sdk_outside_replay' for x in result.blockers)
+
+
+def test_research_sdk_rejects_live_context_and_artifact_escape(tmp_path, monkeypatch):
+    from nerya.strategies.research import write_json
+    monkeypatch.delenv('NERYA_FREEFORM_BACKTEST',raising=False)
+    with pytest.raises(RuntimeError,match='replay'):write_json('result.json',{})
+    monkeypatch.setenv('NERYA_FREEFORM_BACKTEST','1')
+    monkeypatch.setenv('NERYA_STRATEGY_ROOT',str(tmp_path))
+    monkeypatch.setenv('NERYA_BACKTEST_OUT_DIR',str(tmp_path/'backtests/run'))
+    monkeypatch.setenv('NERYA_WORKSPACE',str(tmp_path))
+    with pytest.raises(ValueError,match='escapes'):write_json('../escape.json',{})
+    write_json('result.json',{'ok':True})
+    assert (tmp_path/'backtests/run/result.json').exists()
+
+
+def test_research_sdk_reads_only_declared_market_and_saved_entrypoint(tmp_path, monkeypatch):
+    from nerya.strategies import research
+    from nerya.data import candles
+    from nerya.core import yaml_io
+    monkeypatch.setenv('NERYA_FREEFORM_BACKTEST','1')
+    monkeypatch.setenv('NERYA_STRATEGY_ROOT',str(tmp_path))
+    monkeypatch.setenv('NERYA_BACKTEST_OUT_DIR',str(tmp_path/'backtests/run'))
+    monkeypatch.setenv('NERYA_WORKSPACE',str(tmp_path))
+    yaml_io.dump(tmp_path/'strategy.yml',{'markets':['PUBLIC:ASSET/QUOTE'],'entrypoint':'main.py:run'})
+    (tmp_path/'main.py').write_text('def run(ctx): return 42'+chr(10))
+    calls=[]
+    monkeypatch.setattr(candles,'fetch_candles',lambda market,**kwargs:calls.append((market,kwargs)) or [{'ts':1}])
+    assert research.entrypoint()(None)==42
+    assert research.fetch_candles('PUBLIC:ASSET/QUOTE',interval='1h',start=1,end=3601,count=2)==[{'ts':1}]
+    assert calls[0][1]['allow_mock'] is False
+    assert calls[0][1]['config_like'].paths.root==tmp_path
+    with pytest.raises(ValueError,match='saved candidate'):
+        research.fetch_candles('OTHER:ASSET/QUOTE',interval='1h',start=1,end=3601,count=2)
+    with pytest.raises(ValueError,match='bounds'):
+        research.fetch_candles('PUBLIC:ASSET/QUOTE',interval='1h',start=1,end=7201,count=1)
+    assert len(calls)==1
+
+
+def test_research_financial_contract_rejects_permissive_simulator_calls(tmp_path,monkeypatch):
+    from nerya.strategies import research
+    from nerya.financial.contracts import FinancialError
+    for key,value in {'NERYA_FREEFORM_BACKTEST':'1','NERYA_STRATEGY_ROOT':str(tmp_path),
+        'NERYA_BACKTEST_OUT_DIR':str(tmp_path/'backtests/run'),'NERYA_WORKSPACE':str(tmp_path)}.items():
+        monkeypatch.setenv(key,value)
+    research.validate_financial_call('execute','action',quote_hash='hash')
+    with pytest.raises(TypeError):research.validate_financial_call('execute','action','hash')
+    with pytest.raises(FinancialError):research.validate_financial_request({'kind':'trade','plan':{}})
+    assert research.validate_financial_request({'kind':'trade','account_id':'account','market':'PUBLIC:ASSET/QUOTE','plan':{}})['account_id']=='account'

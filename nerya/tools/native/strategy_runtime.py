@@ -2189,9 +2189,15 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
                 "No durable historical candles were available for the "
                 "requested market/timeframe or fallback timeframes. Do "
                 "not retry with mock, synthetic, random, or placeholder "
-                "data; either choose a market with real historical "
-                "candles or ask the operator for a data source."
+                "data. Preserve the same candidate, requested chain, "
+                "market, timeframe and window. Inspect the data-source "
+                "receipt and workspace provider capability; repair the "
+                "missing adapter or author a supported strategy-local "
+                "replay from real historical inputs. If no durable "
+                "source exists, report the exact gap as blocked."
             ),
+            "skill": "backtest",
+            "file": "references/replay-capabilities.md",
         }
         if proposal_id:
             try:
