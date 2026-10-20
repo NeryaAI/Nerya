@@ -42,8 +42,11 @@ similar factor for user-specified rules, inherit validation across markets, or
 resolve latest during replay. Ordinary strategies need no empty factor file.
 
 1. **Resolve scope once.** For a named protocol or financial component, load
-   financial_ops, then call financial_components to inspect installed component
-   IDs, revisions, actions and parameter schemas. financial_readiness covers
+   financial_ops, then call financial_components with
+   `mode="paper"`/`"backtest"` and the requested protocol/market when the
+   candidate is not live-authorized. This inspects installed component IDs,
+   revisions, actions and parameter schemas through a bounded read-only route;
+   it does not grant funds permissions. financial_readiness covers
    builtin configuration prerequisites; its omissions do not establish missing
    workspace support. Use the selected component's documented contract before
    market discovery. For unspecified markets, discover the missing identifiers.
@@ -51,6 +54,9 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    crypto market-cap ranking use `market_data(action="ranked_universe", venue="binance",
    count=N, rank_by="market_cap", quote="USDT")`; keep its observed date and tradable
    exclusions. Do not launch additional ranking searches after a successful result.
+   A connector row with `credential_status.status="missing"` and
+   `configured=false` means the live/public transport is not configured; it
+   does not erase an installed connector or create a paper replay component.
    When `venue_mapping_complete:true`, use `market_ids` directly: do not call
    `list_symbols`, web search/fetch, or another ranking source to revalidate them.
    For a clearly fresh creation request with no candidate ID, do not grep/list the
@@ -62,8 +68,11 @@ resolve latest during replay. Ordinary strategies need no empty factor file.
    Record the requested chain/network, venue-qualified market, timeframe, history
    window and execution restrictions in the candidate. Complete scope resolution
    when these match the selected component and data source; retain an explicit
-   capability gap when they cannot be resolved. Read the recovery procedure in
-   references/replay-capabilities.md for missing history or unsupported inputs.
+   `capability_gap` when the requested action is not advertised. Read the
+   recovery procedure in references/replay-capabilities.md for missing history
+   or unsupported inputs. A blocked, non-retryable `capability_gap` stops
+   proposal submission and replay for that candidate; report the exact missing
+   action instead of switching venues or inventing a proxy.
 2. **Implement the strategy.** For non-candle inputs or a new workspace provider,
    first load `references/replay-capabilities.md` to choose an evidence path from
    actual supported inputs. For a protocol/financial component, load
