@@ -466,6 +466,10 @@ STRATEGY_BACKTEST_SCHEMA: dict[str, Any] = {
                 "coverage_policy": {"type": "string", "enum": ["strict", "allow_partial"]},
                 "allow_timeframe_fallback": {"type": "boolean"},
                 "max_run_seconds": {"type": "number", "exclusiveMinimum": 0},
+                "fee_bps": {"type": "number", "minimum": 0,
+                    "description": "Scalar fee shorthand applied to every venue unless fee_bps_by_venue overrides it."},
+                "slippage_bps": {"type": "number", "minimum": 0,
+                    "description": "Scalar slippage shorthand applied to every venue unless slip_bps_by_venue overrides it."},
                 "fee_bps_by_venue": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}},
                 "slip_bps_by_venue": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}}
             }
