@@ -17,6 +17,12 @@ from .run_state import atomic_json
 from .....core.runtime_identity import SDK_BUILD_ID
 
 
+_RUNTIME_VERSION_CHANGED_MESSAGE = (
+    "runtime version changed since the API started; restart the service "
+    "before replaying, rather than mixing SDK versions"
+)
+
+
 def _no_network(*args, **kwargs):
     raise RuntimeError("Network access is disabled during historical replay; prepare local data before executing the strategy")
 
@@ -30,7 +36,7 @@ def main(argv=None) -> int:
     try:
         request = json.loads(request_path.read_text(encoding="utf-8"))
         if request.get("sdk_build_id") not in (None, SDK_BUILD_ID):
-            raise RuntimeError("runtime version changed since the API started; restart the service before replaying, rather than mixing SDK versions")
+            raise RuntimeError(_RUNTIME_VERSION_CHANGED_MESSAGE)
         cfg = BacktestConfig.from_raw(request["config"])
         # Ordinary Python/HTTP clients cannot fetch today's data during replay.
         # This guard is not an operating-system security sandbox.
