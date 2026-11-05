@@ -13,7 +13,7 @@ import re
 import time
 from typing import Any
 
-from ..db.sqlite import connect
+from ..db.sqlite import connect, connect_preview
 from .history_mutations import _session_id, is_session_deleted
 
 ACTIVE = ("running", "stopping")
@@ -41,6 +41,13 @@ def validate_command_request(kind, request):
         raise CommandError("invalid_command_request", 400)
     if request.get("work_mode", "execute") not in ("execute", "plan", "goal"):
         raise CommandError("invalid_work_mode", 400)
+    intent = request.get("assistant_intent")
+    if intent is not None:
+        if (not isinstance(intent, dict) or set(intent) - {"disposition", "target_task_id"}
+                or intent.get("disposition") not in {"auto", "conversation", "task_create", "task_read", "task_follow_up"}
+                or not isinstance(intent.get("target_task_id", ""), str)
+                or len(intent.get("target_task_id", "")) > 160):
+            raise CommandError("invalid_assistant_intent", 400)
     message = request.setdefault("payload", {})
     if not isinstance(message, dict):
         raise CommandError("invalid_command_request", 400)
@@ -177,9 +184,18 @@ class CommandStore:
         item["attachments"] = request.get("payload", {}).get("attachments", [])
         item["editable_settings"] = {key: request[key] for key in EDIT_SETTINGS if key in request}
         item["queue_editable"] = queue_editable(request)
-        item["show_user"] = request.get("source") not in ("approval_continue", "interaction_continue")
-        item["has_result"] = bool(result)
+        item["show_user"] = request.get("source") not in ("approval_continue", "interaction_continue", "goal_continue")
+        item["has_result"] = bool(item.pop("has_result", bool(result)))
         item["error"] = json.loads(error) if error else None
+        delivery = item.pop("delivery_json", None)
+        if delivery:
+            try:
+                from ..task_delivery import public_delivery
+                item["delivery"] = public_delivery(json.loads(delivery))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item["delivery"] = None
+        else:
+            item["delivery"] = None
         if full:
             item["result"] = json.loads(result) if result else None
         return item
@@ -260,14 +276,17 @@ class CommandStore:
                         (cid,sid,actor,kind,digest,encode(request),encode(context),state,turn_id,position,now,now))
             con.execute("UPDATE agent_command_queues SET revision=revision+1,updated_at=? WHERE session_id=?", (now,sid))
             row = con.execute("SELECT * FROM agent_commands WHERE command_id=?", (cid,)).fetchone()
+            from .goals import admit_goal
+            admit_goal(con, row, request)
             from .task_runs import TaskRuns
             TaskRuns.link_continuation(cid, request, connection=con, context=context)
             return {"ok": True, "duplicate": False, "command": self.public(row)}
 
-    def _projection(self, con, row, *, full=False):
+    def _projection(self, con, row, *, full=False, user=None):
         item = self.public(row,full=full)
-        user = con.execute("SELECT content,deleted FROM agent_messages WHERE session_id=? AND message_id=?",
-                           (row["session_id"],row["turn_id"]+":user")).fetchone()
+        if con is not None:
+            user = con.execute("SELECT content,deleted FROM agent_messages WHERE session_id=? AND message_id=?",
+                               (row["session_id"],row["turn_id"]+":user")).fetchone()
         if user is not None:
             if user["deleted"]:
                 item["show_user"] = False
@@ -279,7 +298,7 @@ class CommandStore:
         sid = _session_id(sid)
         # Healthy state polling does not acquire a writer lock. Serialize only
         # queue creation/recovery, retaining the expired-lease safety contract.
-        con = connect(self.paths.db)
+        con = connect_preview(self.paths.db)
         try:
             con.execute("BEGIN")
             if is_session_deleted(con, sid):
@@ -290,22 +309,38 @@ class CommandStore:
                 expired = bool(queue["worker_owner"] and queue["lease_until"] < time.time())
                 restarted = queue["runtime_epoch"] != self.epoch and not queue["worker_owner"]
                 if not expired and not restarted:
-                    return self._snapshot(con, sid, cid, queue)
+                    snapshot = self._snapshot(con, sid, cid, queue)
+                    con.commit()
+                    return self._render_snapshot(snapshot)
         finally:
             con.close()
         with self.transaction() as con:
             queue = self._queue(con, sid)
-            return self._snapshot(con, sid, cid, queue)
+            snapshot = self._snapshot(con, sid, cid, queue)
+        return self._render_snapshot(snapshot)
 
     def _snapshot(self, con, sid, cid, queue):
         if cid:
             row = con.execute("SELECT * FROM agent_commands WHERE command_id=? AND session_id=?", (command_id(cid),sid)).fetchone()
             if not row:
                 raise CommandError("command_not_found", 404)
-            return {"ok": True, "command": self._projection(con,row, full=True)}
-        rows = con.execute("SELECT * FROM agent_commands WHERE session_id=? AND "
+            user = con.execute("SELECT content,deleted FROM agent_messages WHERE session_id=? AND message_id=?",
+                               (sid,row["turn_id"]+":user")).fetchone()
+            from .goals import read_goal
+            return {"kind": "command", "row": dict(row), "user": dict(user) if user else None,
+                    "goal": read_goal(con,sid)}
+        rows = con.execute("SELECT command_id,session_id,kind,fingerprint,request_json,context_json,state,turn_id,position,revision,created_at,updated_at,"
+                           "NULL AS result_json,(result_json IS NOT NULL AND result_json != '') AS has_result,error_json,delivery_json "
+                           "FROM agent_commands WHERE session_id=? AND "
                            "(state IN ('queued','delivering','delivered','running','stopping','unconfirmed') OR command_id IN "
                            "(SELECT command_id FROM agent_commands WHERE session_id=? ORDER BY created_at DESC LIMIT 30)) ORDER BY position", (sid,sid)).fetchall()
+        rows = [dict(row) for row in rows]
+        users = {}
+        if rows:
+            placeholders = ",".join("?" for _ in rows)
+            user_rows = con.execute("SELECT message_id,content,deleted FROM agent_messages WHERE session_id=? AND message_id IN (" + placeholders + ")",
+                                    [sid] + [row["turn_id"]+":user" for row in rows]).fetchall()
+            users = {row["message_id"]: dict(row) for row in user_rows}
         from ..db.repositories import AgentSessionRepository
         checkpoint = AgentSessionRepository(con).peek_turn_checkpoint(sid)
         safe_checkpoint = None
@@ -316,9 +351,21 @@ class CommandStore:
                                    "resume_count": cp.get("resume_count",0)}
         session = AgentSessionRepository(con).get_session(sid)
         branch = json.loads(session.get("meta_json") or "{}").get("branch_of") if session else None
-        return {"ok": True, "branch_of":branch, "commands": [self._projection(con,row) for row in rows],
-                "queue": {k: queue[k] for k in ("paused","pause_reason","revision")},
+        from .goals import read_goal
+        return {"kind": "list", "rows": rows, "users": users, "goal": read_goal(con,sid),
+                "branch_of": branch, "queue": {k: queue[k] for k in ("paused","pause_reason","revision")},
                 "checkpoint": safe_checkpoint, "server_time": time.time()}
+
+    def _render_snapshot(self, snapshot):
+        if snapshot["kind"] == "command":
+            return {"ok": True, "command": self._projection(None, snapshot["row"], full=True, user=snapshot["user"]),
+                    "goal": snapshot["goal"]}
+        users = snapshot["users"]
+        return {"ok": True, "branch_of": snapshot["branch_of"],
+                "commands": [self._projection(None, row, user=users.get(row["turn_id"]+":user"))
+                             for row in snapshot["rows"]],
+                "goal": snapshot["goal"], "queue": snapshot["queue"],
+                "checkpoint": snapshot["checkpoint"], "server_time": snapshot["server_time"]}
 
     def claim(self, sid: str, owner: str):
         with self.transaction() as con:
@@ -327,7 +374,14 @@ class CommandStore:
                 return None
             if con.execute("SELECT 1 FROM agent_commands WHERE session_id=? AND state='unconfirmed'", (sid,)).fetchone():
                 return None
-            row = con.execute("SELECT * FROM agent_commands WHERE session_id=? AND kind!='guide' AND state='queued' ORDER BY position LIMIT 1", (sid,)).fetchone()
+            con.execute("""UPDATE agent_commands SET state='removed',revision=revision+1,updated_at=?
+                WHERE session_id=? AND state='queued' AND json_extract(request_json,'$.source')='goal_continue'
+                AND NOT EXISTS (SELECT 1 FROM agent_goal_commands g JOIN agent_goals goal USING(goal_id)
+                    WHERE g.command_id=agent_commands.command_id AND goal.status IN ('active','paused'))""",(time.time(),sid))
+            row = con.execute("""SELECT * FROM agent_commands WHERE session_id=? AND kind!='guide' AND state='queued'
+                AND (COALESCE(json_extract(request_json,'$.source'),'')!='goal_continue' OR EXISTS
+                    (SELECT 1 FROM agent_goal_commands g JOIN agent_goals goal USING(goal_id)
+                     WHERE g.command_id=agent_commands.command_id AND goal.status='active')) ORDER BY position LIMIT 1""", (sid,)).fetchone()
             if not row:
                 return None
             request=json.loads(row["request_json"])
@@ -344,18 +398,35 @@ class CommandStore:
                 return None
             if queue["paused"] and not run_once:
                 return None
+            if (row["kind"] == "resume" and request.get("interaction_id")) or request.get("source") == "approval_continue":
+                from ..task_delivery import inherit_delivery
+                inherit_delivery(self.paths, con, row["command_id"])
             now = time.time()
             con.execute("UPDATE agent_command_queues SET worker_owner=?,lease_until=?,runtime_epoch=? WHERE session_id=?", (owner,now+LEASE_SECONDS,self.epoch,sid))
             context = json.loads(row["context_json"])
             context["execution_started_at"] = now
             con.execute("UPDATE agent_commands SET state='running',context_json=?,revision=revision+1,updated_at=? WHERE command_id=?", (encode(context),now,row["command_id"]))
             request = json.loads(row["request_json"])
-            if row["kind"] == "send" and request.get("source") != "approval_continue":
+            if row["kind"] == "send" and request.get("source") not in ("approval_continue", "goal_continue"):
                 from ..db.repositories import AgentSessionRepository
                 AgentSessionRepository(con).record_message(message_id=row["turn_id"]+":user", session_id=sid,
                     turn_id=row["turn_id"], role="user", content=str(request.get("payload",{}).get("text") or ""),
-                    meta={"source_command_id":row["command_id"], "attachments":request.get("payload",{}).get("attachments",[])})
-            return dict(con.execute("SELECT * FROM agent_commands WHERE command_id=?", (row["command_id"],)).fetchone())
+                    meta={"source_command_id":row["command_id"], "attachments":request.get("payload",{}).get("attachments",[]),
+                          **({"task_message":context["task_message"]} if context.get("task_message") else {})})
+            claimed = dict(con.execute("SELECT * FROM agent_commands WHERE command_id=?", (row["command_id"],)).fetchone())
+        try:
+            from .task_control import assignment_for_command, assignment_started, mark_input
+            assignment = assignment_for_command(self.paths, claimed["command_id"])
+            if assignment:
+                assignment_started(self.paths, assignment["assignment_id"], worker_owner=owner)
+                with self.transaction() as receipt_con:
+                    input_rows = receipt_con.execute("SELECT input_id FROM task_inputs WHERE command_id=? AND state IN ('delivered','replay_pending')",
+                                                     (claimed["command_id"],)).fetchall()
+                for input_row in input_rows:
+                    mark_input(self.paths, input_row["input_id"], state="read")
+        except (ImportError, ValueError, KeyError):
+            pass
+        return claimed
 
     def heartbeat(self, sid: str, owner: str):
         with self.transaction() as con:
@@ -373,7 +444,8 @@ class CommandStore:
                 # An in-flight reply can finish after stop admission. Preserve its
                 # evidence while reporting the operator's accepted stop outcome.
                 state="interrupted"
-                if result is not None: result={**result,"stopped_reason":"cancelled","stop_requested":True}
+                if result is not None:
+                    result = {**result, "stopped_reason": "cancelled", "stop_requested": True}
             con.execute("UPDATE agent_commands SET state=?,result_json=?,error_json=?,revision=revision+1,updated_at=? WHERE command_id=?",
                         (state,encode(result) if result is not None else None,encode(error) if error else None,now,cid))
             # Preserve a terminal message even when a gate failed before Kernel

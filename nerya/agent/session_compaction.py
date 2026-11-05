@@ -278,9 +278,11 @@ def _normalise_rows(
         if not isinstance(content, str) or not content.strip():
             continue
         text = content[: max(1, int(cap))]
+        evidence = _execution_evidence_note(row) if role == 'assistant' else ''
         out.append({
+            "execution_evidence": evidence,
             "user_constraints": _signal_lines(content, _DECISION_RE) if role == "user" else [],
-            "evidence_anchors": _record_anchors(row),
+            "evidence_anchors": [*([evidence] if evidence else []), *_record_anchors(row)],
             "role": role,
             "content": text,
             "message_id": str(row.get("message_id") or f"row:{idx}"),
@@ -289,6 +291,24 @@ def _normalise_rows(
             "message_seq": int(row.get("message_seq") or 0),
         })
     return out
+
+
+def _execution_evidence_note(row: Mapping[str, Any]) -> str:
+    """Use durable host counters, never infer execution from assistant prose."""
+    meta = row.get('meta')
+    if not isinstance(meta, dict):
+        try:
+            meta = json.loads(str(row.get('meta_json') or '{}'))
+        except (ValueError, TypeError):
+            return ''
+    turn = meta.get('turn') if isinstance(meta, dict) else None
+    budget = turn.get('budget') if isinstance(turn, dict) else None
+    count = budget.get('tool_calls') if isinstance(budget, dict) else None
+    if type(count) is not int or count < 0:
+        return ''  # Historical records without counters remain unknown.
+    boundary = ('No tool execution was recorded; this assistant text is not an execution receipt.'
+                if count == 0 else 'Call count is not proof of successful operations or task completion.')
+    return f'[Historical runtime evidence: recorded_tool_calls={count}. {boundary}]'
 
 
 def _record_anchors(row: Mapping[str, Any]) -> list[str]:
@@ -326,7 +346,9 @@ def _record_anchors(row: Mapping[str, Any]) -> list[str]:
 
 def _strip_internal(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [
-        {"role": str(item.get("role") or ""), "content": str(item.get("content") or "")}
+        {"role": str(item.get("role") or ""),
+         "content": ((str(item['execution_evidence']) + '\n') if item.get('execution_evidence') else '')
+                    + str(item.get("content") or "")}
         for item in items
         if str(item.get("role") or "") in ("user", "assistant")
         and str(item.get("content") or "").strip()

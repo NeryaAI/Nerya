@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from ..core.redaction import redact_display_dict
 from ..tools.types import ToolResult
+from ..tools.verification import public_verification_receipt
 from .attachments import ATTACHMENT_BLOCK_TYPES, assistant_attachment_block
 from .transcript_blocks import ApprovalRequestBlock, ToolResultBlock
 
@@ -96,9 +97,17 @@ def project_tool_results(
                     else None
                 ),
                 compaction=rendered.get("compaction"),
+                semantic_success=result.semantic_success,
+                result_protocol=result.result_protocol,
+                verification=public_verification_receipt(result.metadata.get("verification")),
             ).as_dict()
         )
         display = tool_display_result(result, rendered)
+        # Successful file mutations invalidate earlier turn-scoped checks even
+        # when their display result was compacted. Paths remain display-redacted.
+        mutations = [modifier.path for modifier in result.context_modifiers if modifier.kind == "file_mutate"]
+        if mutations and not result.is_error:
+            event_blocks[-1]["modified_paths"] = redact_display_dict({"paths": mutations})["paths"]
         if display is not None:
             event_blocks[-1]["display_result"] = display
 

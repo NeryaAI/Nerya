@@ -48,7 +48,7 @@ from ..core.errors import TriggerValidationError
 from ..core.paths import WorkspacePaths
 
 
-_VALID_SESSION_KINDS = frozenset({"trigger", "agent", "script"})
+_VALID_SESSION_KINDS = frozenset({"trigger", "agent", "script", "market", "private_account"})
 _VALID_SESSION_MODES = frozenset({"ephemeral", "reuse", "fanout"})
 _SESSION_MODE_ALIASES = {
     "new": "ephemeral",

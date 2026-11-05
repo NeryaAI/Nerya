@@ -1,0 +1,6 @@
+{
+  "strategy_authoring": {
+    "required_checks": ["source_binding", "request_scope_match", "strategy_contract", "behavioral_tests", "historical_run", "data_coverage", "historical_data", "replay_source", "execution_integrity", "report_output"],
+    "required_artifacts": ["candidate", "report", "run_receipt"]
+  }
+}

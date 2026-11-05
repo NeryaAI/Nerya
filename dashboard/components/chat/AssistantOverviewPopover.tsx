@@ -54,7 +54,7 @@ function Overview({assistant, tasks, lastActiveAt, onEdit, onOpenReports, onOpen
   const reports = useAssistantResults(assistant.id);
   const [inspected, setInspected] = useState<AssistantTask | null>(null);
   const [expandedOutputs, setExpandedOutputs] = useState(false);
-  const results = reports.rows.filter(row => row.state === "succeeded");
+  const results = reports.rows;
   const legacyOutputs = tasks.rows.filter(task => task.state === "succeeded" && Boolean(task.output) && !reports.rows.some(row => row.task_id === task.task_id));
   const last = Math.max(lastActiveAt || 0, ...tasks.rows.map(task => conversationTimestamp(task.updated_at) || 0));
   const relative = last ? relativeTime(last, locale) : "";
@@ -83,7 +83,7 @@ function Overview({assistant, tasks, lastActiveAt, onEdit, onOpenReports, onOpen
       {reports.error ? <div role="status" className="py-2 text-xs text-warn">{t("resultLoadFailed")}<button type="button" className="ml-2 min-h-9 underline" onClick={reports.retry}>{t("retry")}</button></div> : null}
       {!reports.loading && !reports.error && !results.length && !legacyOutputs.length ? <p className="py-3 text-sm text-[color:var(--text-muted)]">{t("noOutputs")}</p> : null}
       {(expandedOutputs ? results : results.slice(0, 3)).map(row => <button type="button" key={row.command_id} onClick={() => onOpenResult(row.command_id)} data-testid="assistant-output" title={row.title}
-        className="flex min-h-11 w-full min-w-0 items-start gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-[color:var(--panel-bg)]"><FileIcon size={16} className="mt-0.5 shrink-0 text-[color:var(--text-muted)]"/><span className="min-w-0 flex-1"><span className="block truncate text-sm">{row.title}</span><span className="mt-0.5 block truncate text-xs text-[color:var(--text-muted)]">{t("taskStates.succeeded")}{conversationTimestamp(row.created_at) ? " · " + relativeTime(conversationTimestamp(row.created_at)!, locale) : ""}</span></span></button>)}
+        className="flex min-h-11 w-full min-w-0 items-start gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-[color:var(--panel-bg)]"><FileIcon size={16} className="mt-0.5 shrink-0 text-[color:var(--text-muted)]"/><span className="min-w-0 flex-1"><span className="block truncate text-sm">{row.title}</span><span className="mt-0.5 block truncate text-xs text-[color:var(--text-muted)]">{t.has("taskStates." + row.state) ? t("taskStates." + row.state) : row.state}{conversationTimestamp(row.created_at) ? " · " + relativeTime(conversationTimestamp(row.created_at)!, locale) : ""}</span></span></button>)}
       {(expandedOutputs ? legacyOutputs : legacyOutputs.slice(0, Math.max(0, 3 - results.length))).map(task => <button type="button" key={task.task_id} onClick={() => setInspected(task)} className="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm hover:bg-[color:var(--panel-bg)]"><FileIcon size={16}/><span className="min-w-0 truncate">{task.title}</span></button>)}
       {results.length + legacyOutputs.length > 3 ? <button type="button" className="min-h-9 px-2 text-xs text-[color:var(--text-muted)] underline" onClick={() => setExpandedOutputs(value => !value)}>{t(expandedOutputs ? "fewerOutputs" : "allOutputs")}</button> : null}
     </section>

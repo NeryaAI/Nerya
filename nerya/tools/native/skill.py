@@ -43,7 +43,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from ...core.sandbox import sandbox_exec
 from ...security.runtime_env import build_process_env
-from ...skills.discovery import catalog_ids, catalog_parent
+from ...skills.discovery import catalog_ids, catalog_parent, catalog_roots, rank_skill_metadata
 from ...skills.registry import SkillRegistry, _enabled_ok, load_entry, discover_entries
 from ...skills.manifest import _slugify
 from ..tool_errors import schema_validation_result
@@ -282,6 +282,49 @@ class SkillIndex:
         )
         return [r for r in rows if r.skill_id in visible]
 
+    def delivery_contract(self, call: ToolCall, skill_id: str, workflow_id: str) -> dict:
+        """Read fixed data-only builtin floors; discovery metadata is not policy."""
+        from ...task_delivery import DeliveryError
+
+        if skill_access_error(call, skill_id) is not None:
+            raise DeliveryError("delivery_skill_access_denied", 403)
+        record = self.get(skill_id)
+        if record is None or record.skill_id != skill_id or record.source != "builtin":
+            raise DeliveryError("trusted_delivery_contract_missing", 400)
+        builtin = Path(__file__).resolve().parents[2] / "skills" / "builtin"
+        root = Path(record.path).parent
+        target = root / "references" / "delivery-contract.json"
+        if (root.parent.resolve() != builtin or root.is_symlink()
+                or Path(record.path).is_symlink() or target.parent.is_symlink()
+                or target.is_symlink() or not target.resolve().is_relative_to(root.resolve())
+                or skill_asset_access_error(call, record, target, self) is not None):
+            raise DeliveryError("untrusted_delivery_contract_source", 400)
+        try:
+            with target.open("rb") as stream:
+                raw = stream.read(16385)
+            if len(raw) > 16384:
+                raise ValueError()
+            document = json.loads(raw)
+            if not isinstance(document, dict) or not document or len(document) > 32:
+                raise ValueError()
+            for floor in document.values():
+                if not isinstance(floor, dict) or set(floor) != {"required_checks", "required_artifacts"}:
+                    raise ValueError()
+                for values in floor.values():
+                    if (not isinstance(values, list) or not 1 <= len(values) <= 32
+                            or any(not isinstance(value, str) or not value or len(value) > 128
+                                   or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-" for c in value)
+                                   for value in values) or len(set(values)) != len(values)):
+                        raise ValueError()
+        except (OSError, ValueError, UnicodeError):
+            raise DeliveryError("trusted_delivery_contract_invalid", 400) from None
+        if workflow_id not in document:
+            available = ",".join(sorted(document))
+            raise DeliveryError("trusted_delivery_workflow_missing; availableWorkflows: " + available, 400)
+        return {"skill_id": skill_id, "workflow_id": workflow_id,
+                "source": "builtin:" + target.relative_to(builtin).as_posix(),
+                "revision": hashlib.sha256(raw).hexdigest(), **document[workflow_id]}
+
     def render_for_prompt(self, *, max_chars: int | None = None, allowed_skills=None) -> str:
         """Render the standard progressive-disclosure skill catalog.
 
@@ -303,6 +346,18 @@ class SkillIndex:
             entries.append(entry)
             used += len(entry) + 1
         return "<available_skills>\n" + "\n".join(entries) + "\n</available_skills>"
+
+    def search(self, query: str, *, limit: int = 8, refresh: bool = False, allowed_skills=None) -> list[dict[str, Any]]:
+        rows = self.records(refresh=refresh, allowed_skills=allowed_skills)
+        by_id = {record.skill_id: record for record in rows}
+        roots = catalog_roots((row.skill_id, Path(row.path).parent, row.catalog_parent) for row in rows)
+        result = []
+        for match in rank_skill_metadata(query, ((row.skill_id, row.description) for row in rows))[:limit]:
+            row = by_id[match["skill_id"]]
+            result.append({**match, "description": row.description[:1024], "source": row.source,
+                           "revision": row.revision, "workflow": roots[row.skill_id],
+                           "load": {"skill": row.skill_id}})
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -369,12 +424,37 @@ def skill_view_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult
                 call, f"'file' must stay inside the skill directory: {rel!r}",
             )
         if not candidate.is_file():
+            denied = skill_asset_access_error(call, record, candidate, skill_index)
+            if denied is not None:
+                return denied
+            siblings: list[str] = []
+            try:
+                for sibling in sorted(candidate.parent.iterdir()):
+                    relative = sibling.relative_to(base).as_posix()
+                    if (len(relative) > 256 or sibling.is_symlink()
+                            or any(part.startswith(".") for part in Path(relative).parts)
+                            or len(json.dumps(siblings + [relative])) > 3072):
+                        continue
+                    checked = resolve_workspace_path(relative, root=base)
+                    if (skill_asset_access_error(call, record, checked, skill_index) is None
+                            and checked.is_file()):
+                        siblings.append(relative)
+                        if len(siblings) == 12:
+                            break
+            except (OSError, ValueError, RuntimeError):
+                pass
+            message = f"skill asset not found: {sid}/{rel}"[:384]
+            # Error renderers may omit recovery_hint; keep exact paths visible.
+            message += (". Available sibling files (Skill read): " + json.dumps(siblings)
+                        if siblings else ". No accessible sibling files found in the requested directory.")
             return ToolResult.from_error(
                 tool_use_id=call.id,
                 name=call.name,
                 error=ToolError(
                     kind=ToolErrorKind.NOT_FOUND,
-                    message=f"skill asset not found: {sid}/{rel}",
+                    message=message,
+                    recovery_hint={"action": "read_skill_asset", "skill": record.skill_id,
+                                   "candidates": siblings},
                 ),
             )
         target = candidate
@@ -458,6 +538,9 @@ def is_browser_skill_script_run(payload: dict[str, Any]) -> bool:
 
 def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolResult:
     args = call.arguments or {}
+    offset, limit = args.get("offset", 0), args.get("limit", 80)
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 400:
+        return schema_validation_result(call, "offset must be non-negative; limit must be 1..400.")
     sid = str(args.get("skill_id") or "").strip()
     name = str(args.get("name") or args.get("script") or "").strip()
     if not sid or not name:
@@ -494,12 +577,14 @@ def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolRe
                 message=f"failed to read script: {exc}",
             ),
         )
-    head = "\n".join(text.splitlines()[:80])
+    lines = text.splitlines()
+    page = lines[offset:offset + limit]
+    end = min(offset + limit, len(lines))
     return ToolResult(
         tool_use_id=call.id,
         name=call.name,
         content=[
-            ToolResultPart.text_part(head),
+            ToolResultPart.text_part("\n".join(page)),
             ToolResultPart.json_part(
                 {
                     "skill_id": skill_index.get(sid).skill_id,
@@ -509,8 +594,10 @@ def script_inspect_handler(call: ToolCall, *, skill_index: SkillIndex) -> ToolRe
                     "name": name,
                     "path": str(p),
                     "size": p.stat().st_size,
-                    "lines_total": text.count("\n") + 1,
-                    "lines_shown": min(80, text.count("\n") + 1),
+                    "lines_total": len(lines),
+                    "lines_shown": len(page),
+                    "offset": offset,
+                    "next_offset": end if end < len(lines) else None,
                 }
             ),
         ],

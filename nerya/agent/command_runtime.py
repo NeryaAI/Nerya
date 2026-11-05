@@ -39,7 +39,7 @@ def _control_busy_can_retry(exc: BaseException, last_success: float, now: float)
 _FIELDS = ("source", "kind", "payload", "assistant_id", "conversation_kind", "strategy_id", "strategy_proposal_id", "reasoning_effort",
            "reasoning_summary", "permission_mode", "model_tier", "model_provider", "model_id",
            "model_context_window", "max_iterations", "max_total_tool_calls", "max_wall_seconds",
-           "evidence_contract", "resume_turn_id", "continuation_feedback", "work_mode", "interaction_id", "plan_id", "run_only")
+           "evidence_contract", "assistant_intent", "resume_turn_id", "continuation_feedback", "work_mode", "goal_token_budget", "interaction_id", "plan_id", "run_only")
 
 
 def outcome_state(result: dict) -> str:
@@ -70,6 +70,8 @@ class CommandRuntime:
         raw = payload.get("request")
         if not isinstance(raw, dict):
             raise CommandError("invalid_command_request", 400)
+        if raw.get("source") == "goal_continue" or raw.get("kind") == "goal.continue":
+            raise CommandError("goal_continuation_host_only",403)
         if raw.get("source") == "approval_continue" or raw.get("kind") == "approval.continue":
             # Old clients may still post after the callback. Resolve the durable
             # decision instead of admitting their second continuation.
@@ -123,10 +125,19 @@ class CommandRuntime:
             from ..strategies.workflow_graph import package_revision
             files, source = source_files(self.config.paths, str(request["strategy_id"]), request.get("strategy_proposal_id"))
             context["strategy_source"] = {**source, "revision":package_revision(files)}
-        receipt = self.store.accept(cid=payload.get("command_id"),sid=payload.get("session_id"),
-            actor=str(payload.get("_auth_actor_id") or "local"),kind=kind,request=request,context=context,
-            turn_id=str(request.get("resume_turn_id") or "turn_"+uuid.uuid4().hex),
-            continuation=kind=="resume" or bool(request.get("interaction_id")) or request.get("source")=="approval_continue", identity_request=identity_request)
+        with self.store.transaction() as con:
+            from ..strategies.request_scope import admit_task_context, ScopeError
+            try:
+                binding = admit_task_context(con, request, kind)
+            except ScopeError as exc:
+                raise CommandError("task_context_unverified", 409) from exc
+            if binding is not None:
+                context["task_context_binding"] = binding
+            receipt = self.store.accept(cid=payload.get("command_id"),sid=payload.get("session_id"),
+                actor=str(payload.get("_auth_actor_id") or "local"),kind=kind,request=request,context=context,
+                turn_id=str(request.get("resume_turn_id") or "turn_"+uuid.uuid4().hex),
+                continuation=kind=="resume" or bool(request.get("interaction_id")) or request.get("source")=="approval_continue",
+                identity_request=identity_request, connection=con)
         if start and not receipt["duplicate"]:
             self.kick(receipt["command"]["session_id"])
         return receipt
@@ -166,6 +177,9 @@ class CommandRuntime:
                     row=self.store.claim(sid,owner)
                     if row is None:
                         if not waiting:
+                            from .goals import enqueue_if_idle
+                            if enqueue_if_idle(self.store,sid):
+                                continue
                             self._workers.pop(sid,None)
                             return
                 if row is None:
@@ -186,9 +200,10 @@ class CommandRuntime:
         from ..harness.cancellation import CancelToken,register_token,unregister_token
         wall=float(request.get('max_wall_seconds') or 0)
         token=CancelToken(deadline_s=time.time()+wall if wall>0 else None)
-        linked_task=bool(request.get('_task_run_id') or json.loads(row['context_json']).get('run_id'))
-        if linked_task:
-            request['_task_cancel_token']=token;register_token(tid,token)
+        # Cancellation also covers request-local ingress/classification before
+        # a kernel exists. It never changes the admitted request fingerprint.
+        request['_task_cancel_token']=token
+        register_token(tid,token)
         config=Config(paths=self.config.paths,data=copy.deepcopy(self.config.data))
         config.data.setdefault('runtime',{}).update(command_id=cid,command_session_id=sid,command_turn_id=tid)
         done=threading.Event()
@@ -281,6 +296,9 @@ class CommandRuntime:
                 state="blocked"
                 error={"code":"event_persistence_failed","retrying":False}
         except Exception as exc:
+            if isinstance(getattr(exc,"turn_result",None),dict):
+                result=exc.turn_result
+                result["execution_elapsed_ms"]=round((time.monotonic()-started)*1000)
             status=getattr(exc,"status_code",None)
             error={"code":getattr(exc,"code",None) or ("rate_limited" if status==429 else "turn_failed"),
                    "status_code":status,"type":type(exc).__name__,"retrying":False,
@@ -293,6 +311,16 @@ class CommandRuntime:
                     "retry_exhausted": str(getattr(exc, "retry_exhausted", "not_retryable")),
                     "provider": str(getattr(exc, "provider", "") or "")[:80],
                 })
+                if error["code"] == "model_stream_tls_error":
+                    for key, allowed in (
+                        ("tls_error_class", ("SSLCertVerificationError", "SSLEOFError",
+                            "SSLZeroReturnError", "SSLWantReadError", "SSLWantWriteError",
+                            "SSLSyscallError", "SSLError")),
+                        ("tls_error_category", ("cert_verify", "eof", "handshake", "unknown")),
+                    ):
+                        value = getattr(exc, key, None)
+                        if isinstance(value, str) and value in allowed:
+                            error[key] = value
             _LOG.warning("conversation command %s failed: type=%s code=%s", cid, type(exc).__name__, error["code"])
         finally:
             done.set()
@@ -303,12 +331,21 @@ class CommandRuntime:
             except Exception:
                 event_failure.set()
                 _LOG.exception("command final event flush failed")
-            if linked_task:unregister_token(tid)
+            unregister_token(tid)
         if event_failure.is_set():
             state="blocked"
             error={"code":"event_persistence_failed","retrying":False}
         self.store.save_outcome(cid,sid,tid,state,result,error)
         self.store.finish(cid,sid,owner,state,result,error)
+        try:
+            from .task_control import assignment_for_command, assignment_ended
+            assignment = assignment_for_command(self.config.paths, cid)
+            if assignment:
+                assignment_ended(self.config.paths, assignment["assignment_id"], state={"succeeded": "ended", "awaiting_input": "waiting", "awaiting_approval": "waiting", "blocked": "blocked"}.get(state, "failed"))
+        except (ImportError, ValueError, KeyError):
+            pass
+        from .goals import account_turn
+        account_turn(self.store,cid)
         from ..sdk.task_execution import complete_task_run
         try:complete_task_run(self.config,cid,result,state)
         except Exception:_LOG.exception("task result projection failed; durable outcome retained")
@@ -317,6 +354,8 @@ class CommandRuntime:
             AssistantWork(self.config.paths).sync(sid)
         except Exception:
             _LOG.exception("assistant result delivery failed; durable command outcome retained")
+        from .goals import sync_parent
+        sync_parent(self,sid)
 
     def recover_tasks(self):
         """Only never-started valid system commands may resume automatically."""
@@ -350,6 +389,8 @@ class CommandRuntime:
             AssistantWork(self.config.paths).recover(self)
         except Exception:
             _LOG.exception("assistant task recovery failed; task-run recovery retained")
+        from .goals import recover as recover_goals
+        recover_goals(self)
 
     def check_approvals(self, sid):
         from ..approval_service import ApprovalService
@@ -401,6 +442,8 @@ class CommandRuntime:
             "approval_id": aid, "approval_state": "approved"})
         context = {**json.loads(original["context_json"]), "approval_id": aid,
                    "captured_at": time.time(), "input_text": request["payload"]["text"]}
+        if context.pop("assistant_request", None) is not None:
+            context["assistant_continuation_source_command_id"] = original["command_id"]
         receipt = self.store.accept(cid=cid, sid=sid, actor=original["actor_id"], kind="send",
             request=request, context=context, turn_id="turn_"+uuid.uuid4().hex, continuation=True)
         # Admission and closing the original decision are retryable with the
@@ -455,6 +498,8 @@ class CommandRuntime:
             'The operator resolved the fixed funds action. Inspect its structured receipt and continue within the original permissions. '
             'Do not repeat the submission. '+encode(receipt),'approval_id':aid})
         context={**json.loads(original['context_json']),'financial_approval_id':aid,'captured_at':time.time()}
+        if context.pop("assistant_request", None) is not None:
+            context["assistant_continuation_source_command_id"] = original["command_id"]
         result=self.store.accept(cid=cid,sid=sid,actor=original['actor_id'],kind='send',request=request,context=context,
             turn_id='turn_'+uuid.uuid4().hex,continuation=True)
         with self.store.transaction() as con:self.store.end_decision(con,original,'financial_continued',state='succeeded')

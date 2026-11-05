@@ -34,6 +34,7 @@ The legacy ``/approvals/*``, ``/evolution/*``, ``/agent/open_turns``,
 from __future__ import annotations
 
 from typing import Any, Iterable, Optional
+from urllib.parse import quote
 
 from ..core import jsonl
 from ._envelope import action, debug_ref, error, ok, source_ref, warn
@@ -203,6 +204,11 @@ def _proposal_item(prop: dict[str, Any]) -> dict[str, Any]:
                 label="Open detail",
                 href=f"/inbox?type=proposal&id={pid}",
             ),
+            *([action(
+                id="preview",
+                label="Preview",
+                href=f"/workspace/pages/preview?proposal_id={quote(str(pid), safe='')}",
+            )] if prop.get("kind") == "core_config_patch" and prop.get("target") == "ui/workspace.yml" else []),
         ],
         "data": prop,
     }

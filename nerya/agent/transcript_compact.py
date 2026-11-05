@@ -32,6 +32,7 @@ persist the result. That keeps the test surface tight.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -183,6 +184,118 @@ def _extract_file_refs(text: str) -> list[str]:
     return refs
 
 
+_EVIDENCE_MARKER = "[compacted_kept]"
+_EVIDENCE_SENSITIVE_KEY_RE = re.compile(
+    r"(authorization|api[_-]?key|bearer|cookie|credential|password|secret|token|raw|body|prompt|instruction|command)",
+    re.I,
+)
+_EVIDENCE_SAFE_KEYS = frozenset({
+    "action", "chain", "chain_id", "count", "error", "error_code", "fee", "kind",
+    "provider", "reason", "recovery", "row_count", "rule_id", "safe_to_retry",
+    "source", "status", "timestamp", "tool", "retryable",
+    "historical_data_verified", "financial_execution_allowed",
+    "tick_spacing", "fee_tier", "number", "hash", "sha256",
+})
+_EVIDENCE_CONTAINERS = frozenset({
+    "_envelope", "rows_sample", "recovery", "block", "sources", "verification",
+})
+_EVIDENCE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#@+?=-]{0,191}$")
+
+
+def _typed_evidence(value: Any, *, limit: int = 80) -> list[str]:
+    fields: list[str] = []
+
+    def walk(node: Any, depth: int = 0) -> None:
+        if len(fields) >= limit or depth > 3:
+            return
+        if isinstance(node, dict):
+            # Keep identity-bearing rows before ordinary metadata, bounded by the
+            # same field budget; this prevents generic metadata from hiding IDs.
+            for raw_key in sorted(node, key=lambda key: not (
+                    str(key).lower() in {"rows", "rows_sample", "data", "items"}
+                    or str(key).lower().endswith(("_id", "_hash", "_address", "_identity")))):
+                item = node[raw_key]
+                if len(fields) >= limit:
+                    return
+                key = str(raw_key or "").strip().lower().replace("-", "_")
+                if key in _EVIDENCE_CONTAINERS and isinstance(item, (dict, list)):
+                    walk(item, depth + 1)
+                    continue
+                if (not key or _EVIDENCE_SENSITIVE_KEY_RE.search(key)
+                        or (key not in _EVIDENCE_SAFE_KEYS and not key.endswith((
+                            "_id", "_hash", "_address", "_identity", "_scope",
+                            "_number", "_count", "_status", "_code")))):
+                    continue
+                if type(item) is bool or type(item) in (int, float):
+                    fields.append(f"{key}={item}")
+                elif isinstance(item, str):
+                    text = " ".join(item.split())
+                    if text and len(text) <= 192 and _EVIDENCE_VALUE_RE.fullmatch(text):
+                        fields.append(f"{key}={text}")
+                elif isinstance(item, (dict, list)):
+                    walk(item, depth + 1)
+        elif isinstance(node, list):
+            for item in node[:8]:
+                walk(item, depth + 1)
+
+    walk(value)
+    return fields
+
+
+def _compacted_kept(text: str) -> Any:
+    if not isinstance(text, str) or len(text) > 512_000:
+        return None
+    encoded = text.partition(_EVIDENCE_MARKER)[2].strip() or text.strip()
+    try:
+        return json.loads(encoded) if encoded else None
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
+def _tool_evidence(selected: list[dict[str, Any]]) -> list[str]:
+    names: dict[str, str] = {}
+    evidence: list[str] = []
+    for msg in selected:
+        if (isinstance(msg.get("content"), str)
+                and msg.get("kind") == "transcript.compact.breadcrumb"):
+            for line in str(msg["content"]).splitlines():
+                if line.startswith("- tool evidence: ") and len(line) <= 900:
+                    evidence.append(line)
+        for entry in _content_entries(msg):
+            if entry.get("type") == "tool_use":
+                call_id = str(entry.get("id") or entry.get("tool_use_id") or "")
+                name = str(entry.get("name") or "")
+                if call_id and name and len(call_id) <= 128 and len(name) <= 128:
+                    names[call_id] = name
+    for msg in selected:
+        for entry in _content_entries(msg):
+            if entry.get("type") != "tool_result":
+                continue
+            call_id = str(entry.get("tool_use_id") or entry.get("id") or "")
+            if not call_id or len(call_id) > 128:
+                continue
+            parts = [f"tool_result_id={call_id}"]
+            if names.get(call_id):
+                parts.append(f"tool={names[call_id]}")
+            compaction = entry.get("compaction") if isinstance(entry.get("compaction"), dict) else {}
+            raw_ref = compaction.get("raw_ref")
+            if (isinstance(raw_ref, str) and len(raw_ref) <= 192
+                    and re.fullmatch(r"[\w:/.-]+", raw_ref)):
+                parts.append(f"raw_ref={raw_ref}")
+            inner = entry.get("content")
+            texts = [inner] if isinstance(inner, str) else [
+                str(part.get("text")) for part in inner or []
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            ] if isinstance(inner, list) else []
+            for text in texts[:2]:
+                fields = _typed_evidence(_compacted_kept(text))
+                if fields:
+                    parts.extend(fields)
+                    break
+            evidence.append("- tool evidence: " + " ".join(dict.fromkeys(parts)))
+    return list(dict.fromkeys(evidence))[:12]
+
+
 def _summarize_evicted_run(
     messages: list[dict[str, Any]],
     indices: list[int],
@@ -200,11 +313,11 @@ def _summarize_evicted_run(
         roles[role] = roles.get(role, 0) + 1
         content = msg.get("content")
         text = _text_from_content(content)
-        if role == "user":
+        if role == "user" and not _tool_result_ids(msg):
             line = _compact_line(text)
             if line and line not in user_lines:
                 user_lines.append(line)
-        elif role == "assistant":
+        elif role == "assistant" and not _tool_use_ids(msg):
             line = _compact_line(text)
             if line and line not in assistant_lines:
                 assistant_lines.append(line)
@@ -213,9 +326,10 @@ def _summarize_evicted_run(
                 name = str(entry.get("name") or "")
                 if name and name not in tools:
                     tools.append(name)
-        for ref in _extract_file_refs(text):
+        for ref in _extract_file_refs(text[:4000]):
             if ref not in file_refs:
                 file_refs.append(ref)
+    evidence = _tool_evidence(selected)
 
     lines = [
         f"{summary_prefix} dropped {len(indices)} message(s) between positions {indices[0]} and {indices[-1]}.",
@@ -232,6 +346,8 @@ def _summarize_evicted_run(
         lines.append("- tools: " + ", ".join(tools[:8]))
     if file_refs:
         lines.append("- files/artifacts: " + ", ".join(file_refs[:8]))
+    if evidence:
+        lines.append("\n".join(evidence)[:10000])
     return "\n".join(lines)
 
 

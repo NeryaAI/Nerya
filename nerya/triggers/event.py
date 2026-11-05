@@ -29,6 +29,8 @@ log = logging.getLogger(__name__)
 KNOWN_SOURCES: frozenset[str] = frozenset({
     "script", "schedule", "price", "user_command", "webhook",
     "scheduled_session",   # compatibility cron/session path
+    "market",              # read-only market observation source
+    "private_account",     # authenticated account observation source
 })
 
 # Back-compat alias for call sites that inspected the old name.

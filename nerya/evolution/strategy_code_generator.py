@@ -48,6 +48,8 @@ files and copies them into the workspace on approval.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import ast
 import logging
 import re
@@ -61,6 +63,7 @@ from ..core.normalize import norm_key
 from ..core.paths import WorkspacePaths
 from ..core.time import now_iso
 from ..strategies.validator import StrategyValidation, validate_proposal_files
+from ..strategies.execution_contract import is_aave_market
 from .patch_proposal import Proposal, create_proposal
 
 
@@ -149,6 +152,8 @@ class StrategyGenerationRequest:
     mode: str = "paper"
     markets: tuple[str, ...] = ()
     accounts: tuple[str, ...] = ()
+    chain: Optional[str] = None
+    protocol: Optional[str] = None
     schedule_cron: str = ""
     schedule_every_seconds: Optional[int] = None
     news_sources: tuple[str, ...] = ()
@@ -169,6 +174,12 @@ class StrategyGenerationRequest:
     actual strategy logic, custom backtests, or a richer ``strategy.md``
     when the agent has already drafted them — the templates are a
     fallback, not a constraint.
+    """
+
+    timeframe: Optional[str] = None
+    """Explicit candle timeframe, independent of schedule; omission stays unchanged.
+
+    An authored ``files['strategy.yml'].timeframe`` must agree when both are supplied.
     """
 
 
@@ -198,6 +209,15 @@ class StrategyGenerationResult:
 # ---------------------------------------------------------------------------
 # Generator
 # ---------------------------------------------------------------------------
+
+
+class StrategyGenerationInputError(NeryaError):
+    """A source field that must be corrected before any proposal is staged."""
+
+    def __init__(self, field: list[str], correction: str):
+        self.field = field
+        self.correction = correction
+        super().__init__(f"{'.'.join(field)}: {correction}")
 
 
 class StrategyCodeGenerator:
@@ -297,6 +317,10 @@ class StrategyCodeGenerator:
 
     @staticmethod
     def _validate_request(req: StrategyGenerationRequest) -> None:
+        if req.timeframe is not None and (
+            not isinstance(req.timeframe, str) or not req.timeframe.strip()
+        ):
+            raise StrategyGenerationInputError(["timeframe"], "Use a non-blank candle timeframe string.")
         if not _STRATEGY_ID_RE.match(req.strategy_id or ""):
             raise NeryaError(
                 f"strategy_id must match {_STRATEGY_ID_RE.pattern}, got {req.strategy_id!r}"
@@ -329,22 +353,65 @@ class StrategyCodeGenerator:
         files: dict[str, str] = {}
         manifest = self._render_manifest(req)
         files["strategy.yml"] = yaml_io.dumps(manifest)
-        files["strategy.md"] = self._render_playbook(req)
-        files["main.py"] = self._render_main(req)
-        files["tests/test_contract.py"] = self._render_contract_test(req)
+        if "strategy.md" not in req.files:
+            files["strategy.md"] = self._render_playbook(req)
+        if "main.py" not in req.files:
+            authored = yaml_io.loads(req.files.get("strategy.yml", "")) or {}
+            params = authored.get("params", {}) if isinstance(authored, dict) else {}
+            lp_configured = isinstance(params, dict) and all(
+                isinstance(params.get(key), dict)
+                for key in ("lp_policy", "lp_source", "lp_execution")
+            )
+            if _execution_mode(req) == "script" and lp_configured:
+                templates = Path(__file__).parents[1] / "skills/builtin/strategy_author/templates"
+                files["main.py"] = (templates / "lp_range_strategy.py.j2").read_text(encoding="utf-8")
+                for helper in ("lp_range_policy", "lp_rebalance", "risk_rules"):
+                    files[f"{helper}.py"] = (templates / f"{helper}.py.j2").read_text(encoding="utf-8")
+            elif _execution_mode(req) == "script" and all(is_aave_market(m) for m in req.markets):
+                templates = Path(__file__).parents[1] / "skills/builtin/strategy_author/templates"
+                # An explicit saved contract selects the reusable implementation.
+                # Never infer rate thresholds, pool identity or accounting from prose.
+                authored = yaml_io.loads(req.files.get("strategy.yml", "")) or {}
+                params = authored.get("params", {}) if isinstance(authored, dict) else {}
+                rate_policy = isinstance(params, dict) and all(
+                    isinstance(params.get(key), dict)
+                    for key in ("rate_policy", "rate_source", "rate_replay")
+                )
+                entry = "aave_rate_strategy" if rate_policy else "aave_strategy"
+                files["main.py"] = (templates / f"{entry}.py.j2").read_text(encoding="utf-8")
+                if rate_policy:
+                    files["aave_rate_policy.py"] = (templates / "aave_rate_policy.py.j2").read_text(encoding="utf-8")
+                files["aave_supply.py"] = (templates / "aave_supply.py.j2").read_text(encoding="utf-8")
+            else:
+                files["main.py"] = self._render_main(req)
+                if _uses_trend_confirmation_scaffold(req):
+                    templates = Path(__file__).parents[1] / "skills/builtin/strategy_author/templates"
+                    for helper in ("ema_cross", "strategy_execution"):
+                        files[f"{helper}.py"] = (templates / f"{helper}.py.j2").read_text(encoding="utf-8")
+        if "tests/test_contract.py" not in req.files:
+            if "main.py" not in req.files and "lp_range_policy.py" in files:
+                templates = Path(__file__).parents[1] / "skills/builtin/strategy_author/templates"
+                files["tests/test_contract.py"] = (templates / "lp_range_contract.py.j2").read_text(encoding="utf-8")
+            else:
+                files["tests/test_contract.py"] = self._render_contract_test(req)
         # The manifest may have *added* subagents on top of req.subagents
         # (e.g. defaulting market_analyst for trend strategies). Honour
         # whatever ended up in the manifest so prompt files line up.
         manifest_subagents = list(manifest.get("subagents") or [])
         for name in manifest_subagents:
+            if f"subagents/{name}.agent.md" in req.files:
+                continue
             prompt = req.extra_subagent_prompts.get(name) or _default_subagent_prompt(
                 name=name,
                 strategy_id=req.strategy_id,
                 strategy_class=req.strategy_class,
                 markets=req.markets,
+                entry_confirmation=(
+                    _uses_trend_confirmation_scaffold(req) and name == req.subagents[0]
+                ),
             )
             files[f"subagents/{name}.agent.md"] = prompt
-        if req.create_tuning:
+        if req.create_tuning and "subagents/strategy_tuner.agent.md" not in req.files:
             files["subagents/strategy_tuner.agent.md"] = _tuning_subagent_prompt(req)
         # Apply caller-supplied overrides last so the agent's draft of
         # `main.py` / `tests/test_main.py` / `strategy.md` always wins
@@ -368,6 +435,12 @@ class StrategyCodeGenerator:
             files["strategy.yml"],
             manifest,
         )
+        if _uses_trend_confirmation_scaffold(req):
+            merged_manifest = yaml_io.loads(files["strategy.yml"])
+            merged_manifest.setdefault("timeframe", "15m")
+            files["strategy.yml"] = yaml_io.dumps(merged_manifest)
+        if "main.py" in files:
+            files["main.py"] = _normalize_agent_no_dispatch_returns(files["main.py"], files["strategy.yml"])
         # Main-Agent and dashboard proposals share the same resource graph.
         # Later staged file edits are discovered from source, not a stale DAG.
         from ..strategies.workflow_graph import ensure_workflow_file
@@ -451,6 +524,20 @@ class StrategyCodeGenerator:
             "subagents": effective_subagents,
             "news_sources": list(req.news_sources),
         }
+        if req.chain:
+            manifest["chain"] = req.chain
+        if req.protocol:
+            manifest["protocol"] = req.protocol
+        if req.timeframe is not None:
+            manifest["timeframe"] = req.timeframe
+        if _uses_trend_confirmation_scaffold(req):
+            manifest["agent_task"] = {"enabled": False}
+            manifest["params"] = {
+                "indicator": {"fast_period": 12, "slow_period": 48},
+                "lookback": 160, "confidence": max(0.65, policy["min_confidence"]),
+                "confirmation_agent": req.subagents[0],
+                "confirmation_min_confidence": policy["min_confidence"],
+            }
         if req.create_tuning:
             manifest["tuning"] = _tuning_block(req)
         else:
@@ -487,11 +574,25 @@ class StrategyCodeGenerator:
             source = _agent_task_template(req)
         else:
             source = _MAIN_TEMPLATES[_template_class(req)](req)
+        if source.lstrip().startswith("# @nerya.version "):
+            if req.title:
+                title = " ".join(req.title.split())[:200]
+                source = re.sub(
+                    r"(?m)^# @nerya.title .*$",
+                    lambda _match: f"# @nerya.title {title}",
+                    source,
+                    count=1,
+                )
+            return source
         logic = (
             "Collect strategy inputs and dispatch analysis to the configured Agent roles; replay may use the template's script fallback."
             if execution_mode in {"agent", "agent_team"} else {
                 "scalping": "Combine momentum, RSI and volume for entry; inspect the strategy's position for tactical exits and bracket protection.",
-                "trend": "Compute moving-average signals and features; use the configured subagent recommendation when present, otherwise evaluate crosses and the strategy's position.",
+                "trend": (
+                    "Evaluate closed-candle EMA crosses and settled positions; confirm eligible entries only, and exit longs deterministically without Agent calls."
+                    if req.subagents else
+                    "Compute moving-average signals and features; evaluate crosses and the strategy's position."
+                ),
                 "news": "Read new items, classify them and evaluate the configured analysis recommendation; replay uses the template's historical fallback.",
             }[_template_class(req)]
         )
@@ -513,6 +614,9 @@ class StrategyCodeGenerator:
 
     @staticmethod
     def _render_contract_test(req: StrategyGenerationRequest) -> str:
+        if _uses_trend_confirmation_scaffold(req):
+            templates = Path(__file__).parents[1] / "skills/builtin/strategy_author/templates"
+            return (templates / "ema_confirm_contract.py.j2").read_text(encoding="utf-8")
         return _CONTRACT_TEST_TEMPLATE.format(strategy_id=req.strategy_id)
 
 
@@ -575,6 +679,9 @@ def _normalize_inline_manifest(content: str) -> str:
 
     def normalize_schedule(value: Any, *, default_cron: str) -> dict[str, Any]:
         schedule = value if isinstance(value, dict) else {}
+        if schedule.get("type") == "none":
+            schedule.setdefault("enabled", False)
+            return schedule
         if "every_seconds" in schedule or "interval_seconds" in schedule:
             schedule.setdefault("type", "interval")
             if "every_seconds" not in schedule and "interval_seconds" in schedule:
@@ -582,7 +689,7 @@ def _normalize_inline_manifest(content: str) -> str:
         else:
             schedule.setdefault("type", "cron")
             schedule.setdefault("cron", default_cron)
-        schedule.setdefault("enabled", True)
+        schedule.setdefault("enabled", False)
         return schedule
 
     execution = raw.get("execution")
@@ -622,6 +729,13 @@ def _normalize_inline_manifest(content: str) -> str:
 
     tuning = raw.get("tuning")
     if isinstance(tuning, dict):
+        if tuning.get("subagent") is not None and not isinstance(tuning["subagent"], dict):
+            raise StrategyGenerationInputError(
+                ["files", "strategy.yml", "tuning", "subagent"],
+                'Use an object, for example {name: strategy_tuner, '
+                'prompt_file: subagents/strategy_tuner.agent.md, tier: medium}. '
+                'Move a sibling tuning.prompt_file into tuning.subagent.prompt_file.',
+            )
         if tuning.get("enabled") and not isinstance(tuning.get("schedule"), dict):
             tuning["schedule"] = {
                 "type": "cron",
@@ -661,6 +775,11 @@ def _merge_manifest_defaults(content: str, defaults: dict[str, Any]) -> str:
     if not isinstance(raw, dict):
         return content
 
+    if "timeframe" in defaults and "timeframe" in raw and raw["timeframe"] != defaults["timeframe"]:
+        raise StrategyGenerationInputError(
+            ["files", "strategy.yml", "timeframe"],
+            "Match the explicit request timeframe, or omit the request timeframe to preserve the authored manifest.",
+        )
     for key, value in defaults.items():
         raw.setdefault(key, value)
 
@@ -682,7 +801,7 @@ def _merge_manifest_defaults(content: str, defaults: dict[str, Any]) -> str:
             if key in defaults:
                 raw.setdefault(key, defaults[key])
 
-    for key in ("policy", "llm_policy"):
+    for key in ("policy", "llm_policy", "params"):
         if isinstance(defaults.get(key), dict) and isinstance(raw.get(key), dict):
             merged = dict(defaults[key])
             merged.update(raw[key])
@@ -743,13 +862,57 @@ def _normalize_inline_main_py(
     out = _replace_legacy_bar_strategy_main_for_agent_modes(out, req)
     if "StrategyAgentTask.dispatch" in out and "context=" in out and "metadata=" not in out:
         out = out.replace("context=", "metadata=")
-    if "StrategyAgentTask.dispatch" in out:
-        out = re.sub(r"return\s+StrategyResult\.skip\(", "return StrategyAgentTask.skip(", out)
-        out = re.sub(r"return\s+ctx\.result\.skip\(", "return StrategyAgentTask.skip(", out)
-        if "StrategyAgentTask.skip(" in out:
-            out = _ensure_strategy_agent_task_import(out)
     out = re.sub(r"return\s+ctx\.result\.agent_task\(([^)\n]+)\)", r"return \1", out)
     return out
+
+
+def _normalize_agent_no_dispatch_returns(content: str, manifest_source: str) -> str:
+    """Map explicit no-dispatch returns only at the saved Agent entrypoint.
+
+    A script may use Agent objects as data without opting into its executor.
+    Unknown arguments, result envelopes and helper returns stay with validation.
+    """
+    manifest = yaml_io.loads(manifest_source)
+    task = manifest.get("agent_task") if isinstance(manifest, dict) else None
+    if not isinstance(task, dict) or task.get("enabled") is not True:
+        return content
+    entrypoint = str(manifest.get("entrypoint") or "main.py:run")
+    module, _, function = entrypoint.partition(":")
+    if module != "main.py":
+        return content
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return content
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    target = functions.get("build_agent_task") or functions.get(function or "run")
+    if target is None or not target.args.args:
+        return content
+    context = target.args.args[0].arg
+    factories = {f"{owner}.{method}" for owner in (f"{context}.result", "StrategyResult")
+                 for method in ("hold", "skip")}
+    replacements = []
+    pending = list(target.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        pending.extend(ast.iter_child_nodes(node))
+        if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        if (_agent_task_call_name(call.func) not in factories or call.args
+                or any(kw.arg not in {"reason", "metadata"} for kw in call.keywords)):
+            continue
+        arguments = [_source_expr(content, kw.value) for kw in call.keywords]
+        kwargs = [f"{kw.arg}={value}" for kw, value in zip(call.keywords, arguments)]
+        if not any(kw.arg == "reason" for kw in call.keywords):
+            kwargs.append("reason=''")
+        start, end = _ast_node_span(content, call)
+        replacements.append((start, end, "StrategyAgentTask.skip(" + ", ".join(kwargs) + ")"))
+    if not replacements:
+        return content
+    return _ensure_strategy_agent_task_import(_apply_source_replacements(content, replacements))
 
 
 def _replace_legacy_bar_strategy_main_for_agent_modes(
@@ -1561,10 +1724,10 @@ def _build_schedule(req: StrategyGenerationRequest) -> dict[str, Any]:
         return {
             "type": "interval",
             "every_seconds": int(req.schedule_every_seconds),
-            "enabled": True,
+            "enabled": False,
         }
     cron = req.schedule_cron or _default_cron(req.strategy_class)
-    return {"type": "cron", "cron": cron, "enabled": True}
+    return {"type": "cron", "cron": cron, "enabled": False}
 
 
 def _default_cron(strategy_class: str) -> str:
@@ -1588,6 +1751,14 @@ def _execution_mode(req: StrategyGenerationRequest) -> str:
     if _requires_agent_team(req):
         return "agent_team"
     return "script"
+
+
+def _uses_trend_confirmation_scaffold(req: StrategyGenerationRequest) -> bool:
+    return (
+        _execution_mode(req) == "script" and _template_class(req) == "trend"
+        and bool(req.subagents) and "main.py" not in req.files
+        and not all(is_aave_market(m) for m in req.markets)
+    )
 
 
 def _template_class(req: StrategyGenerationRequest) -> str:
@@ -1975,100 +2146,72 @@ def _scalping_template(req: StrategyGenerationRequest) -> str:
 
 
 def _trend_template(req: StrategyGenerationRequest) -> str:
-    market = req.markets[0]
-    subagent_call = ""
     if req.subagents:
-        sa = req.subagents[0]
-        subagent_call = (
-            "    signal = _ma_cross_signal(candles)\n"
-            f'    analysis = ctx.subagents.run("{sa}", payload={{"market": market, "signal": signal, "features": features}})\n'
-            '    output = analysis.get("output") or {}\n'
-            '    rec = output.get("recommendation")\n'
-            '    if rec not in {"buy", "sell"}:\n'
-            '        return ctx.result.hold(reason=output.get("thesis", "subagent declined"))\n'
-            '    confidence = float(output.get("confidence", 0.0) or 0.0)\n'
-            '    if confidence < ctx.policy.min_confidence:\n'
-            '        return ctx.result.hold(reason="subagent confidence below policy")\n'
-            "    position = ctx.portfolio.position(market)\n"
-            "    if rec == 'sell':\n"
-            "        if position is None or position.size <= 0:\n"
-            "            return ctx.result.hold(reason='no long position to close')\n"
-            "        return ctx.trading.close_position(market=market, side='long',\n"
-            "            confidence=confidence, reasoning_ref=output.get('thesis', ''))\n"
-            "    if position is not None and position.size != 0:\n"
-            "        return ctx.result.hold(reason='position slot already occupied')\n"
-            "    return ctx.trading.open_position(\n"
-            "        market=market,\n"
-            "        side='long',\n"
-            '        sizing=ctx.config.params["sizing"],\n'
-            '        protection=ctx.config.params.get("protection"),\n'
-            "        confidence=confidence,\n"
-            '        reasoning_ref=output.get("thesis", ""),\n'
-            "    )\n"
-        )
-    else:
-        subagent_call = (
-            "    signal = _ma_cross_signal(candles)\n"
-            "    # v6 side-aware exit/entry. ``positions(market)`` returns this\n"
-            "    # strategy's own share (NOT the merged total), so ``signed`` is\n"
-            "    # the slice this strategy is responsible for.\n"
-            "    positions = ctx.portfolio.positions(market)\n"
-            "    position = positions[0] if positions else None\n"
-            "    signed = (\n"
-            "        float(position.get('size') or position.get('quantity') or position.get('qty') or 0.0)\n"
-            "        if position else 0.0\n"
-            "    )\n"
-            "    last = float(candles[-1].get('close') or 0.0)\n"
-            "    entry = float(position.get('avg_price') or position.get('entry_price') or last) if position else 0.0\n"
-            "    side_factor = 1.0 if signed >= 0 else -1.0\n"
-            "    pnl_pct = ((last - entry) / entry) * side_factor if entry and signed else 0.0\n"
-            "    # Historical OHLCV replay cannot run live bracket executors.\n"
-            "    # Check 2%/5% exits on every candle, even without an MA cross.\n"
-            "    # These closed-candle exits are not proof of intra-bar live\n"
-            "    # bracket fill prices or execution timing.\n"
-            "    if abs(signed) > 0 and (pnl_pct <= -0.02 or pnl_pct >= 0.05):\n"
-            "        position_side = 'long' if signed > 0 else 'short'\n"
-            "        return ctx.trading.close_position(\n"
-            "            market=market, side=position_side, confidence=0.68,\n"
-            "            reasoning_ref=f'protective_exit pnl={pnl_pct:.4f}',\n"
-            "        )\n"
-            '    if signal["cross"] == "none":\n'
-            '        return ctx.result.hold(reason="no moving-average cross", metadata={"signal": signal, "features": features})\n'
-            "    cross_side = \"long\" if signal[\"cross\"] == \"golden_cross\" else \"short\"\n"
-            "    # A cross that aligns with the existing share is a no-op for\n"
-            "    # this template — doubling down on a trend without sizing logic\n"
-            "    # is how strategies leak capital.\n"
-            "    if signed > 0 and cross_side == \"long\":\n"
-            '        return ctx.result.hold(reason="golden_cross already long", metadata={"signal": signal, "size": signed})\n'
-            "    if signed < 0 and cross_side == \"short\":\n"
-            '        return ctx.result.hold(reason="death_cross already short", metadata={"signal": signal, "size": signed})\n'
-            "    # Opposing cross while holding a share → flatten the share.\n"
-            "    # ``close_position`` releases protection and uses close_all\n"
-            "    # sizing so a SHORT close emits a buy of |signed|, not a bare\n"
-            "    # ``sell`` (which would grow the short — the v6 runaway bug).\n"
-            "    if abs(signed) > 0:\n"
-            "        position_side = 'long' if signed > 0 else 'short'\n"
-            "        return ctx.trading.close_position(\n"
-            "            market=market,\n"
-            "            side=position_side,\n"
-            "            confidence=0.65,\n"
-            '            reasoning_ref=f"close on {signal[\'cross\']} fast_sma={signal[\'fast_now\']:.4f} slow_sma={signal[\'slow_now\']:.4f}",\n'
-            "        )\n"
-            "    # Fresh entry — no existing share for this strategy. Ship the\n"
-            "    # entry market order with bracket TP/SL atomically.\n"
-            "    confidence = 0.62 if cross_side == 'long' else 0.6\n"
-            "    return ctx.trading.open_position(\n"
-            "        market=market,\n"
-            "        side=cross_side,\n"
-            '        sizing=ctx.config.params["sizing"],\n'
-            '        protection={\n'
-            '            "stop_loss": {"type": "pct", "value": 0.02},\n'
-            '            "take_profit": {"type": "pct", "value": 0.05},\n'
-            "        },\n"
-            "        confidence=confidence,\n"
-            '        reasoning_ref=f"{signal[\'cross\']} fast_sma={signal[\'fast_now\']:.4f} slow_sma={signal[\'slow_now\']:.4f}",\n'
-            "    )\n"
-        )
+        templates = Path(__file__).parents[1] / "skills/builtin/strategy_author/templates"
+        return (templates / "ema_cross_confirm.py.j2").read_text(encoding="utf-8")
+    market = req.markets[0]
+    subagent_call = (
+        "    signal = _ma_cross_signal(candles)\n"
+        "    # v6 side-aware exit/entry. ``positions(market)`` returns this\n"
+        "    # strategy's own share (NOT the merged total), so ``signed`` is\n"
+        "    # the slice this strategy is responsible for.\n"
+        "    positions = ctx.portfolio.positions(market)\n"
+        "    position = positions[0] if positions else None\n"
+        "    signed = (\n"
+        "        float(position.get('size') or position.get('quantity') or position.get('qty') or 0.0)\n"
+        "        if position else 0.0\n"
+        "    )\n"
+        "    last = float(candles[-1].get('close') or 0.0)\n"
+        "    entry = float(position.get('avg_price') or position.get('entry_price') or last) if position else 0.0\n"
+        "    side_factor = 1.0 if signed >= 0 else -1.0\n"
+        "    pnl_pct = ((last - entry) / entry) * side_factor if entry and signed else 0.0\n"
+        "    # Historical OHLCV replay cannot run live bracket executors.\n"
+        "    # Check 2%/5% exits on every candle, even without an MA cross.\n"
+        "    # These closed-candle exits are not proof of intra-bar live\n"
+        "    # bracket fill prices or execution timing.\n"
+        "    if abs(signed) > 0 and (pnl_pct <= -0.02 or pnl_pct >= 0.05):\n"
+        "        position_side = 'long' if signed > 0 else 'short'\n"
+        "        return ctx.trading.close_position(\n"
+        "            market=market, side=position_side, confidence=0.68,\n"
+        "            reasoning_ref=f'protective_exit pnl={pnl_pct:.4f}',\n"
+        "        )\n"
+        '    if signal["cross"] == "none":\n'
+        '        return ctx.result.hold(reason="no moving-average cross", metadata={"signal": signal, "features": features})\n'
+        "    cross_side = \"long\" if signal[\"cross\"] == \"golden_cross\" else \"short\"\n"
+        "    # A cross that aligns with the existing share is a no-op for\n"
+        "    # this template — doubling down on a trend without sizing logic\n"
+        "    # is how strategies leak capital.\n"
+        "    if signed > 0 and cross_side == \"long\":\n"
+        '        return ctx.result.hold(reason="golden_cross already long", metadata={"signal": signal, "size": signed})\n'
+        "    if signed < 0 and cross_side == \"short\":\n"
+        '        return ctx.result.hold(reason="death_cross already short", metadata={"signal": signal, "size": signed})\n'
+        "    # Opposing cross while holding a share → flatten the share.\n"
+        "    # ``close_position`` releases protection and uses close_all\n"
+        "    # sizing so a SHORT close emits a buy of |signed|, not a bare\n"
+        "    # ``sell`` (which would grow the short — the v6 runaway bug).\n"
+        "    if abs(signed) > 0:\n"
+        "        position_side = 'long' if signed > 0 else 'short'\n"
+        "        return ctx.trading.close_position(\n"
+        "            market=market,\n"
+        "            side=position_side,\n"
+        "            confidence=0.65,\n"
+        '            reasoning_ref=f"close on {signal[\'cross\']} fast_sma={signal[\'fast_now\']:.4f} slow_sma={signal[\'slow_now\']:.4f}",\n'
+        "        )\n"
+        "    # Fresh entry — no existing share for this strategy. Ship the\n"
+        "    # entry market order with bracket TP/SL atomically.\n"
+        "    confidence = 0.62 if cross_side == 'long' else 0.6\n"
+        "    return ctx.trading.open_position(\n"
+        "        market=market,\n"
+        "        side=cross_side,\n"
+        '        sizing=ctx.config.params["sizing"],\n'
+        '        protection={\n'
+        '            "stop_loss": {"type": "pct", "value": 0.02},\n'
+        '            "take_profit": {"type": "pct", "value": 0.05},\n'
+        "        },\n"
+        "        confidence=confidence,\n"
+        '        reasoning_ref=f"{signal[\'cross\']} fast_sma={signal[\'fast_now\']:.4f} slow_sma={signal[\'slow_now\']:.4f}",\n'
+        "    )\n"
+    )
     return (
         '"""Auto-generated trend-following strategy.\n\n'
         f"Strategy id: {req.strategy_id}\n"
@@ -2679,8 +2822,18 @@ def _default_subagent_prompt(
     strategy_id: str,
     strategy_class: str,
     markets: Iterable[str],
+    entry_confirmation: bool = False,
 ) -> str:
     market_list = ", ".join(markets) or "<markets>"
+    if entry_confirmation:
+        return (
+            f"# {name}\n\nStrategy: `{strategy_id}`; markets: {market_list}.\n\n"
+            "Read-only entry confirmation. The script has already proved an upward EMA cross\n"
+            "and a flat position. Evaluate only the supplied closed candles and signals.\n"
+            "Return JSON: decision ENTRY or HOLD, numeric confidence 0..1, drivers and\n"
+            "veto_reason. Never place orders or mutate state; the script owns exits,\n"
+            "sizing, protection and the saved confidence threshold.\n"
+        )
     return (
         f"# {name}\n\n"
         f"Strategy: `{strategy_id}` ({strategy_class}); markets: {market_list}.\n\n"

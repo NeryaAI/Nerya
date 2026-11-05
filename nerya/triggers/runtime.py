@@ -51,6 +51,11 @@ class TriggerRuntime:
         if event.dry_run:
             return self.router.dry_run(event)
         routed = self.router.route(event)
+        try:
+            from ..agent.task_control import dispatch_trigger
+            task_delivery = dispatch_trigger(self.config.paths, event.asdict(), config=self.config)
+        except Exception as exc:
+            task_delivery = {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
         if (
             routed.status == "routed"
             and (routed.target or event.target) == "skill:strategy.agent_task"
@@ -211,6 +216,12 @@ class TriggerRuntime:
         from ..sdk.strategy_api import StrategyAPI
 
         mode = payload.get("mode_override") or payload.get("mode")
+        if str(mode or "").strip().lower() == "live":
+            from ..trading.live_trigger import admit_live_trigger
+            admission = admit_live_trigger(self.config, strategy_id, payload)
+            if not admission["allowed"]:
+                return {"status": "blocked", "reason": "live_trigger_admission_blocked", "admission": admission,
+                        "trigger_event_id": event.event_id}
         note = (
             payload.get("note")
             or payload.get("manual_reason")

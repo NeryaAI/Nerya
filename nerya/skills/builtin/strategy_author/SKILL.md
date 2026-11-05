@@ -26,6 +26,25 @@ rules, markets, timeframe, history period and risk limits. Never promote, activa
 schedules or place account orders unless separately requested. Historical simulated
 orders are not account orders; a no-live-order request does not forbid backtesting.
 
+Start once before authoring, for the current command only, with the trusted
+`strategy_authoring` delivery contract. The host supplies producer-owned checks
+after validation and replay; do not add `checks` to later delivery updates.
+
+```json
+{
+  "skill_id": "strategy_author",
+  "workflow_id": "strategy_authoring",
+  "requested_scope": {"summary": "Author, validate and replay the requested strategy", "limitations": []},
+  "stages": [
+    {"id": "scope", "state": "pending", "required_artifacts": ["candidate"], "required_checks": ["source_binding", "request_scope_match", "strategy_contract"]},
+    {"id": "validation", "state": "pending", "required_checks": ["behavioral_tests"]},
+    {"id": "replay", "state": "pending", "required_checks": ["historical_run", "data_coverage", "historical_data", "replay_source", "execution_integrity"]},
+    {"id": "report", "state": "pending", "required_artifacts": ["report", "run_receipt"], "required_checks": ["report_output"]},
+    {"id": "deliver", "state": "pending"}
+  ]
+}
+```
+
 A ban on submission means authored draft only: do not submit or promote it.
 A ban on running/promotion/trading does not ban implementation or explicitly
 requested isolated tests. “No orders” is a runtime restriction, NOT a request for
