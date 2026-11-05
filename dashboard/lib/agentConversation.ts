@@ -37,6 +37,49 @@ const labels: Record<string, string> = { summary: "copy.agentFieldLabels.001", f
 export function fieldLabel(key: string, zh: boolean): string {
   return labels[key] ? i18nCopy(zh, labels[key]) : key.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
 }
+const deliveryReasonCopy: Record<string, string> = {
+  required_checks_missing: "copy.deliveryEvidence.reason_required_checks_missing",
+  required_artifacts_missing: "copy.deliveryEvidence.reason_required_artifacts_missing",
+  completed_stage_missing: "copy.deliveryEvidence.reason_completed_stage_missing",
+  producer_evidence_missing: "copy.deliveryEvidence.reason_producer_evidence_missing",
+  verified_artifact_missing: "copy.deliveryEvidence.reason_verified_artifact_missing",
+  required_stage_pending: "copy.deliveryEvidence.reason_required_stage_pending",
+  stage_blocked: "copy.deliveryEvidence.reason_stage_blocked",
+  check_missing: "copy.deliveryEvidence.reason_check_missing",
+  check_failed: "copy.deliveryEvidence.reason_check_failed",
+  check_stale: "copy.deliveryEvidence.reason_check_stale",
+  check_unknown: "copy.deliveryEvidence.reason_check_unknown",
+  check_pending: "copy.deliveryEvidence.reason_check_pending",
+  check_unverified: "copy.deliveryEvidence.reason_check_unverified",
+  artifact_missing: "copy.deliveryEvidence.reason_artifact_missing",
+  artifact_unverified: "copy.deliveryEvidence.reason_artifact_unverified",
+  trusted_delivery_contract_missing: "copy.deliveryEvidence.reason_trusted_delivery_contract_missing",
+  trusted_delivery_contract_invalid: "copy.deliveryEvidence.reason_trusted_delivery_contract_invalid",
+  trusted_delivery_workflow_missing: "copy.deliveryEvidence.reason_trusted_delivery_workflow_missing",
+  untrusted_delivery_contract_source: "copy.deliveryEvidence.reason_untrusted_delivery_contract_source",
+  delivery_contract_binding_mismatch: "copy.deliveryEvidence.reason_delivery_contract_binding_mismatch",
+  delivery_contract_stale: "copy.deliveryEvidence.reason_delivery_contract_stale",
+  request_scope_unverified: "copy.deliveryEvidence.reason_request_scope_unverified",
+  invalid_span: "copy.deliveryEvidence.reason_invalid_span",
+  capability_gap: "copy.deliveryEvidence.reason_capability_gap",
+  decision_request_unconfirmed: "copy.deliveryEvidence.reason_decision_request_unconfirmed",
+  data_coverage: "copy.deliveryEvidence.reason_data_coverage",
+  historical_replay: "copy.deliveryEvidence.reason_historical_replay",
+};
+
+export function localizeDeliveryReasons(value: string, zh: boolean): string {
+  // Accept one structured reason, never search/replace within result Markdown.
+  const match = /^([a-z_]+|UNVERIFIED_SCOPE)(?::[A-Za-z0-9_.-]+)?$/.exec(value);
+  if (!match) return value;
+  const specific: Record<string, string> = {
+    "check_missing:data_coverage": "data_coverage",
+    "check_missing:historical_replay": "historical_replay",
+    "check_missing:historical_run": "historical_replay",
+    UNVERIFIED_SCOPE: "request_scope_unverified",
+  };
+  const key = deliveryReasonCopy[specific[value] || match[1]];
+  return key ? i18nCopy(zh, key) : value;
+}
 const transportKeys = new Set(["kind", "type", "role", "done", "ok", "success", "attempt", "call_id", "tool_use_id", "tokens", "usage", "model", "provider"]);
 export function safeLink(value: unknown): string {
   try { const url = new URL(string(value)); return ["https:", "http:"].includes(url.protocol) ? url.href : ""; } catch { return ""; }
@@ -136,14 +179,48 @@ export function toolPresentation(step: ToolStep, runState: string, zh: boolean) 
   const name = string(d.action || d.skill_id || d.name).toLowerCase();
   const status = string(result.status || result.state || d.status).toLowerCase();
   const rawResult = record(d.result);
-  const failed = d.ok === false || rawResult.ok === false || rawResult.success === false || rawResult.isError === true || result.isError === true || result.ok === false || result.success === false || Boolean(d.error || rawResult.error || result.error) || ["failed","error","timed_out"].includes(status) || (typeof result.exit_code === "number" && result.exit_code !== 0);
-  const waiting = !failed && (/awaiting_(approval|input)|pending_approval|requires_approval/.test(status) || !step.result && ["awaiting_approval","awaiting_input","blocked"].includes(runState));
+  const genericFailed = d.ok === false || rawResult.ok === false || rawResult.success === false || rawResult.isError === true || result.isError === true || result.ok === false || result.success === false || Boolean(d.error || rawResult.error || result.error) || ["failed","error","timed_out"].includes(status) || (typeof result.exit_code === "number" && result.exit_code !== 0);
+  const completion = record(result.completion), producer = record(step.result?.data);
+  // Exact legacy executor contract: the interaction boundary prevented startup.
+  // Other aborted calls remain failures; do not infer this from run state alone.
+  const notStartedInteraction = producer.skill_id === "native" && producer.ok === false &&
+    producer.error_kind === "aborted" && producer.elapsed_ms === 0 && producer.result === null &&
+    producer.error === "Not started: waiting for user interaction" && d.result === null && d.error === producer.error;
+  const deliveryHardFailure = name === "delivery_finalize" && [d, rawResult, result].some(row => row.success === false || row.isError === true || row.is_error === true
+    || Boolean(row.error || row.error_kind || row.error_code || row.workflow_contract_error)
+    || (Array.isArray(row.errors) ? row.errors.length > 0 : Boolean(row.errors))
+    || [row.status, row.state].some(value => ["failed", "error", "timed_out", "timeout", "cancelled", "canceled"].includes(string(value).toLowerCase()))
+    || (typeof row.exit_code === "number" && row.exit_code !== 0));
+  // Only the native finalizer's computed projection can distinguish an unmet
+  // delivery condition from a tool failure. Transport failures always win.
+  const computedDelivery = Boolean(step.result) && name === "delivery_finalize" && producer.action === "delivery_finalize" && producer.skill_id === "native"
+    && producer.ok === true && producer.result_protocol === "nerya.task_delivery.v1"
+    && result.protocol === "nerya.task_delivery.v1" && !deliveryHardFailure && d.ok !== false
+    && (rawResult === result || rawResult.ok !== false)
+    && typeof completion.allowed === "boolean" && result.ok === completion.allowed
+    && producer.semantic_success === completion.allowed && result.status === completion.status
+    && typeof completion.computed_at === "number" && Number.isFinite(completion.computed_at)
+    && Array.isArray(completion.reasons) && completion.reasons.every(reason => typeof reason === "string" && Boolean(reason.trim()))
+    && (completion.allowed ? ["complete", "partial"].includes(String(completion.status)) && completion.reasons.length === 0
+      : ["partial", "incomplete"].includes(String(completion.status)) && completion.reasons.length > 0);
+  const failed = !notStartedInteraction && !computedDelivery && (genericFailed || (Boolean(step.result) && name === "delivery_finalize"));
+  const warning = computedDelivery && completion.status !== "complete";
+  let summary = toolResultSummary(result, zh);
+  if (notStartedInteraction) summary = zh ? "未执行：等待用户回答后继续。" : "Not executed: waiting for the user's answer.";
+  if (warning) {
+    summary = (completion.reasons as string[]).slice(0, 3).map(reason => {
+      const localized = localizeDeliveryReasons(reason, zh);
+      return localized === reason ? i18nCopy(zh, "copy.lib_agentConversation.deliveryUnmet") : localized;
+    }).join(i18nCopy(zh, "copy.deliveryEvidence.scopeSeparator")).slice(0, 240)
+      || i18nCopy(zh, "copy.lib_agentConversation.deliveryPartialHint");
+  }
+  const waiting = !failed && (notStartedInteraction || /awaiting_(approval|input)|pending_approval|requires_approval/.test(status) || !step.result && ["awaiting_approval","awaiting_input","blocked"].includes(runState));
   const pending = !step.result && working(runState) && !failed && !waiting;
   const preparing = pending && d.phase === "input_streaming";
-  const state = failed ? (i18nCopy(zh, "copy.lib_agentConversation.005")) : waiting ? (i18nCopy(zh, "copy.lib_agentConversation.010")) : preparing ? (i18nCopy(zh, "copy.lib_agentConversation.011")) : pending ? (i18nCopy(zh, "copy.lib_agentConversation.006"))
+  const state = notStartedInteraction ? (zh ? "等待回答" : "Waiting for answer") : failed ? (i18nCopy(zh, "copy.lib_agentConversation.005")) : warning ? i18nCopy(zh, completion.status === "partial" ? "copy.deliveryEvidence.partialDelivery" : "copy.deliveryEvidence.incomplete") : waiting ? (i18nCopy(zh, "copy.lib_agentConversation.010")) : preparing ? (i18nCopy(zh, "copy.lib_agentConversation.011")) : pending ? (i18nCopy(zh, "copy.lib_agentConversation.006"))
     : step.result ? (d.ok === true ? (i18nCopy(zh, "copy.lib_agentConversation.007")) : (i18nCopy(zh, "copy.lib_agentConversation.008"))) : (i18nCopy(zh, "copy.lib_agentConversation.009"));
   const semantic = toolSemantics(name, payload, zh);
-  return { name, ...semantic, state, failed, pending, waiting, preparing, payload, result, summary: toolResultSummary(result, zh) };
+  return { name, ...semantic, state, failed, warning, pending, waiting, preparing, notStartedInteraction, payload, result, summary };
 }
 
 export function childResult(row: AgentWork, output: unknown, attempt: number, zh: boolean): ChatResult {

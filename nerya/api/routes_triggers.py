@@ -177,6 +177,76 @@ def routes():
             "by_route": [stats.asdict() for stats in agg.values()],
         }
 
+    def trigger_health(client, query):
+        from ..agent.task_control import trigger_health as read_health
+        return {"ok": True, "sources": read_health(client.config.paths, (query or {}).get("source") or None)}
+
+    def trigger_deliveries(client, query):
+        from ..agent.task_control import list_dead_letters
+        from ..db.sqlite import connect
+        task_id = (query or {}).get("task_id")
+        state = (query or {}).get("state") or ""
+        with connect(client.config.paths.db) as con:
+            if task_id:
+                rows = con.execute("SELECT * FROM task_trigger_deliveries WHERE task_id=? ORDER BY created_at DESC LIMIT 100", (task_id,)).fetchall()
+            elif state:
+                rows = con.execute("SELECT * FROM task_trigger_deliveries WHERE state=? ORDER BY created_at DESC LIMIT 100", (state,)).fetchall()
+            else:
+                rows = con.execute("SELECT * FROM task_trigger_deliveries ORDER BY created_at DESC LIMIT 100").fetchall()
+        return {"ok": True, "deliveries": [dict(row) for row in rows], "dead_letters": list_dead_letters(client.config.paths)}
+
+    def trigger_dead_letters(client, query):
+        from ..agent.task_control import list_dead_letters
+        return {"ok": True, "dead_letters": list_dead_letters(client.config.paths, state=(query or {}).get("state") or "open")}
+
+    def trigger_replay_dead_letter(client, payload):
+        from ..agent.task_control import replay_dead_letter
+        try:
+            return {"ok": True, **replay_dead_letter(client.config.paths, dead_letter_id=str(payload.get("dead_letter_id") or ""), config=client.config)}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "_status": 404}
+
+    def market_watches(client, _query):
+        from ..triggers.market_source import load_market_watches
+        return {"ok": True, "watches": [watch.__dict__ for watch in load_market_watches(client.config.paths)]}
+
+    def market_watch_save(client, payload):
+        from ..core import yaml_io
+        from ..triggers.market_source import load_market_watches
+        watch = dict(payload or {})
+        watch_id = str(watch.get("id") or "").strip()
+        market = str(watch.get("market") or "").strip()
+        if not watch_id or not market:
+            return {"ok": False, "error": "watch_id_and_market_required", "_status": 400}
+        current = [row.__dict__ for row in load_market_watches(client.config.paths)]
+        current = [row for row in current if row["id"] != watch_id]
+        current.append(watch)
+        yaml_io.dump(client.config.paths.triggers_market_sources_file, {"version": 1, "watches": current})
+        return {"ok": True, "watches": current}
+
+    def market_watch_remove(client, payload):
+        from ..core import yaml_io
+        from ..triggers.market_source import load_market_watches
+        watch_id = str((payload or {}).get("id") or "")
+        current = [row.__dict__ for row in load_market_watches(client.config.paths) if row.id != watch_id]
+        yaml_io.dump(client.config.paths.triggers_market_sources_file, {"version": 1, "watches": current})
+        return {"ok": True, "watches": current}
+
+    def market_poll(client, _payload):
+        from ..triggers.market_source import poll
+        return {"ok": True, **poll(client.config)}
+
+    def market_watch_state(client, query):
+        from ..db.sqlite import connect
+        watch_id = (query or {}).get("id")
+        with connect(client.config.paths.db) as con:
+            rows = con.execute("SELECT * FROM market_watch_state" + (" WHERE watch_id=?" if watch_id else " ORDER BY updated_at DESC"), (watch_id,) if watch_id else ()).fetchall()
+        return {"ok": True, "states": [dict(row) for row in rows]}
+
+    def private_account_poll(client, payload):
+        from ..triggers.private_account_source import poll
+        return {"ok": True, **poll(client.config, account_id=(payload or {}).get("account_id"))}
+
     return [
         ("POST", "/triggers/emit", emit),
         ("POST", "/triggers/dry_run", dry_run),
@@ -202,4 +272,14 @@ def routes():
         ("POST", "/triggers/explain", explain),
         ("POST", "/triggers/replay", replay),
         ("GET", "/triggers/stats", stats),
+        ("GET", "/triggers/task/health", trigger_health),
+        ("GET", "/triggers/task/deliveries", trigger_deliveries),
+        ("GET", "/triggers/task/dead_letters", trigger_dead_letters),
+        ("POST", "/triggers/task/dead_letters/replay", trigger_replay_dead_letter),
+        ("GET", "/triggers/market/watches", market_watches),
+        ("POST", "/triggers/market/watches/save", market_watch_save),
+        ("POST", "/triggers/market/watches/remove", market_watch_remove),
+        ("POST", "/triggers/market/poll", market_poll),
+        ("GET", "/triggers/market/state", market_watch_state),
+        ("POST", "/triggers/private_accounts/poll", private_account_poll),
     ]

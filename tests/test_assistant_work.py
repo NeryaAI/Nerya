@@ -71,7 +71,69 @@ def test_repeated_creation_and_completion_are_idempotent(setup):
     assert len(work.results("main")) == 1
 
 
-@pytest.mark.parametrize("state", ["succeeded", "failed", "interrupted", "removed"])
+@pytest.mark.parametrize("renamed_title", [None, "BTC/USDT 回测复盘"])
+def test_explicit_task_title_survives_autotitle_reload_and_followup(setup, monkeypatch, renamed_title):
+    from unittest.mock import Mock
+
+    from nerya.agent.history_mutations import rename_session
+    from nerya.agent.kernel import AgentKernel
+    from nerya.agent.session import SessionStore, merge_session_dict
+
+    cfg, manager, assistants, sid, work = setup
+    monkeypatch.setattr(manager, "kick", lambda _sid: None)
+    gateway = Mock()
+    gateway.return_value.call.side_effect = RuntimeError("title model unavailable")
+    monkeypatch.setattr("nerya.agent.kernel.LLMGateway", gateway)
+    title = "BTC/USDT 1H 均线趋势策略回测30天"
+    delegated = call(kind="strategy")
+    delegated.arguments.update(
+        title="  " + title + "  ",
+        prompt="请根据主对话中的要求执行这个委派任务，先检查已有策略和可用数据，再完成 BTC/USDT 1H 均线趋势策略的最近30天回测，并报告结果。",
+    )
+    receipt = work.create(cfg, delegated, sid, "owner", manager=manager)
+    child = receipt["task_session_id"]
+
+    def finish_turn(turn_id, text):
+        # Reconstruct the store on each turn to exercise persisted metadata.
+        instance = AgentKernel.__new__(AgentKernel)
+        instance.config = cfg
+        instance._sessions = SessionStore(cfg.paths.root)
+        instance._sessions.append_turn(child, turn_id)
+        instance._maybe_auto_title_session(
+            session_id=child, strategy_id=None, user_text=text, final_text="已完成回测",
+        )
+
+    finish_turn("task-turn-1", delegated.arguments["prompt"])
+    with manager.store.transaction() as con:
+        assert AgentSessionRepository(con).get_session(child)["title"] == title
+    meta = SessionStore(cfg.paths.root).load(child).meta
+    assert meta["title"] == title
+    assert meta["title_source"] == "operator"
+    assert "title_generation_attempts" not in meta
+
+    if renamed_title:
+        rename_session(cfg.paths, {"session_id": child, "title": renamed_title})
+    with manager.store.transaction() as con:
+        con.execute("UPDATE agent_commands SET state='succeeded' WHERE command_id=?", (receipt["command_id"],))
+    followup = "请补充最大回撤和逐笔交易结果"
+    manager.submit({
+        "session_id": child, "command_id": "title-followup",
+        "request": {"payload": {"text": followup}}, "_auth_actor_id": "owner",
+    }, start=False)
+    finish_turn("task-turn-2", followup)
+
+    expected_title = renamed_title or title
+    with manager.store.transaction() as con:
+        row = AgentSessionRepository(con).get_session(child)
+    assert row["title"] == expected_title
+    reloaded = SessionStore(cfg.paths.root).load(child)
+    assert merge_session_dict(reloaded, row)["meta"]["title"] == expected_title
+    assert assistants.conversations("main", "task")[0]["title"] == expected_title
+    assert AssistantWork(cfg.paths).tasks(sid=sid)[0]["title"] == title
+    gateway.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["succeeded", "failed", "interrupted", "removed", "blocked"])
 def test_task_delivery_preserves_agent_reply_without_generated_copy(setup, monkeypatch, state):
     import json
     cfg, manager, _assistants, sid, work = setup

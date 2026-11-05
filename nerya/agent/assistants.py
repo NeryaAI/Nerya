@@ -32,6 +32,22 @@ _DENIED = {
     "shell_allowed": ["run_shell", "shell_*", "skill_script_run", "script_run", "process_*"],
 }
 
+# Producer-owned role contract, projected each turn without changing saved profiles.
+_EXECUTION_EVIDENCE = (
+    "Task, proposal and artifact creation requires tool evidence for that exact request; "
+    "a prior assistant reply or send_message is not execution evidence. "
+    "Never put API keys or secrets in HTML, client-side code or chat; use configured "
+    "server-side account data and report missing access."
+)
+_COORDINATION_RECEIPTS = (
+    'For requested work, load Skill(skill="tasks") for coordination before domain skills. '
+    "Every distinct requested task requires a successful assistant_task_create invocation "
+    "and its own receipt in the current turn, including subsequent requests in this chat. "
+    "Never derive task IDs or copy a previous receipt. With no successful receipt, report "
+    "creation as unconfirmed. For existing work, resolve it with assistant_task_list/read "
+    "and use assistant_task_message for follow-up instructions."
+)
+
 
 class AssistantError(ValueError):
     def __init__(self, code: str, status: int = 400):
@@ -192,7 +208,16 @@ class AssistantStore:
     def home(self, aid: str) -> dict:
         profile = self.get(aid, enabled=True)
         sid = "assistant_" + hashlib.sha256(aid.encode()).hexdigest()[:24]
-        self.bind(sid, aid, source="assistant", title=profile["name"])
+        while True:
+            try:
+                self.bind(sid, aid, source="assistant", title=profile["name"])
+                break
+            except AssistantError as exc:
+                if exc.code != "session_deleted":
+                    raise
+                # Retained tombstones define a durable chain; concurrent callers
+                # converge on the same successor through bind's transaction.
+                sid = "assistant_" + hashlib.sha256(sid.encode()).hexdigest()[:24]
         return {"session_id": sid, "assistant_id": aid, "assistant_name": profile["name"]}
 
     def conversation(self, aid: str, title: str = "") -> dict:
@@ -268,8 +293,20 @@ def assistant_config(config: Config, profile: dict | None, *, session_id: str | 
         execution = meta.get("conversation_kind") == "task" or source.startswith(("scheduled", "strategy", "subagent", "team", "trigger"))
         if not execution:
             native["assistant_coordination_only"] = True
-            native["tool_policy"] = merge_policy(native["tool_policy"], {"allow_groups": [["assistant_task_create", "task_create", "task_list", "task_get", "task_output", "task_stop", "task_summary", "Skill", "skill_view", "memory_*", "ask_user", "request_user_input", "send_message"]]})
+            native["tool_policy"] = merge_policy(native["tool_policy"], {"allow_groups": [["assistant_task_create", "assistant_task_list", "assistant_task_read", "assistant_task_message", "worker_report", "task_handback", "task_subscribe", "task_trigger_health", "task_create", "task_list", "task_get", "task_output", "task_stop", "task_summary", "Skill", "skill_view", "memory_*", "ask_user", "request_user_input", "send_message"]]})
     native["assistant_profile"] = copy.deepcopy(profile)
+    role_parts = [profile["role"], _EXECUTION_EVIDENCE]
+    if native["assistant_coordination_only"]:
+        role_parts.append(_COORDINATION_RECEIPTS)
+    elif session_id:
+        role_parts.append(
+            f"You are executing task conversation {session_id}. Follow-up instructions in this "
+            "conversation are already delivered to this task; do not forward them again "
+            "merely because the original user wording says to tell or add instructions to this task. "
+            "Perform the requested work here. Contact another task only when the instructions "
+            "explicitly request collaboration with that different task."
+        )
+    native["assistant_profile"]["role"] = "\n\n".join(part for part in role_parts if part)
     return Config(paths=config.paths, data=data)
 
 

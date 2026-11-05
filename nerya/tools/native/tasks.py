@@ -41,6 +41,106 @@ from ..types import (
     ToolResult,
 )
 
+WORKER_REPORT_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "status": {"type": "string", "enum": ["progress", "ready", "waiting", "blocked", "failed"]},
+        "summary": {"type": "string", "maxLength": 4000},
+        "human_action": {"type": "string", "maxLength": 2000},
+        "artifacts": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+        "evidence_refs": {"type": "array", "items": {"type": "string"}, "maxItems": 32},
+        "next_action": {"type": "string", "maxLength": 2000},
+        "safe_to_retry": {"type": "boolean"},
+        "scope": {"type": "boolean"},
+    },
+    "required": ["status", "summary"],
+}
+
+HANDBACK_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "request": {"type": "string", "minLength": 1, "maxLength": 12000},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
+    },
+    "required": ["request", "reason"],
+}
+
+TASK_SUBSCRIBE_SCHEMA: dict[str, Any] = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1, "maxLength": 64},
+        "kind": {"type": "string", "maxLength": 128},
+        "match": {"type": "object", "additionalProperties": True, "maxProperties": 32},
+    },
+    "required": ["task_id", "source"],
+}
+
+
+def task_subscribe_handler(call: ToolCall, *, deps) -> ToolResult:
+    """Create an internal Trigger subscription for a lead conversation task."""
+    from ...agent.assistant_work import AssistantWork
+    from ...agent.task_control import subscribe_task
+    if not deps.config or not deps.active_session_id:
+        return _usage_error(call, "task_subscription_requires_lead_conversation")
+    args = call.arguments or {}
+    try:
+        task_id = str(args.get("task_id") or "")
+        work = AssistantWork(deps.paths)
+        task = next(iter(work.tasks(task_id=task_id)), None)
+        if not task or deps.active_session_id != task["parent_session_id"]:
+            return _usage_error(call, "assistant_task_owner_mismatch")
+        row = subscribe_task(deps.paths, task_id=task_id, source=str(args.get("source") or ""),
+                             kind=str(args.get("kind") or ""), match=args.get("match") or {})
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data={"ok": True, "subscription": row}, semantic_success=True)
+    except ValueError as exc:
+        return _usage_error(call, str(exc))
+
+
+def task_trigger_health_handler(call: ToolCall, *, deps) -> ToolResult:
+    from ...agent.task_control import trigger_health
+    rows = trigger_health(deps.paths, str((call.arguments or {}).get("source") or "") or None)
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data={"ok": True, "sources": rows}, semantic_success=True)
+
+
+def _task_assignment(deps):
+    from ...agent.task_control import assignment_for_command
+    command_id = str(deps.config.get("runtime.command_id", "") or "") if deps.config else ""
+    if not command_id or not deps.paths:
+        return None
+    return assignment_for_command(deps.paths, command_id)
+
+
+def worker_report_handler(call: ToolCall, *, deps) -> ToolResult:
+    """Persist a bounded worker report; completion remains host-derived."""
+    from ...agent.task_control import worker_report
+    assignment = _task_assignment(deps)
+    if assignment is None:
+        return _usage_error(call, "task_worker_report_requires_assignment")
+    try:
+        payload = dict(call.arguments or {})
+        payload["scope"] = payload.get("scope", True)
+        report = worker_report(deps.paths, task_id=assignment["task_id"], assignment_id=assignment["assignment_id"],
+                               command_id=assignment["command_id"], payload=payload)
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data={"ok": True, "report": report}, semantic_success=True)
+    except ValueError as exc:
+        return _usage_error(call, str(exc))
+
+
+def task_handback_handler(call: ToolCall, *, deps) -> ToolResult:
+    """Return out-of-mandate work to the parent coordinator."""
+    from ...agent.task_control import handback
+    assignment = _task_assignment(deps)
+    if assignment is None:
+        return _usage_error(call, "task_handback_requires_assignment")
+    try:
+        row = handback(deps.paths, task_id=assignment["task_id"], assignment_id=assignment["assignment_id"],
+                       command_id=assignment["command_id"], request=str((call.arguments or {}).get("request") or ""),
+                       reason=str((call.arguments or {}).get("reason") or ""))
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data={"ok": True, "handback": row}, semantic_success=True)
+    except ValueError as exc:
+        return _usage_error(call, str(exc))
+
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -70,6 +170,18 @@ SUBAGENT_RUN_ASYNC_SCHEMA: dict[str, Any] = {
     "required": ["name"],
 }
 
+ASSISTANT_TASK_CREATE_DESCRIPTION = (
+    "Delegate requested work (research, strategies, reports, panels or other artifacts) "
+    "to an independent task conversation. Load the tasks Skill for coordination. "
+    "Every distinct requested task needs an actual call and its own successful receipt "
+    "before claiming it was created, including later requests in the same chat. "
+    "Return only the receipt's task_id, task_session_id, command_id and state; queued "
+    "does not mean completed or artifacts created. Never derive IDs or reuse a previous "
+    "receipt for new work. Use assistant_task_list/read/message for existing-task follow-ups. "
+    "Supply a title, kind and complete instructions with user constraints. Simple chat "
+    "stays here; task_create is only for explicitly requested recurring schedules."
+)
+
 ASSISTANT_TASK_CREATE_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {"title": {"type": "string", "minLength": 1, "maxLength": 160},
@@ -77,6 +189,39 @@ ASSISTANT_TASK_CREATE_SCHEMA = {
                    "prompt": {"type": "string", "minLength": 1, "maxLength": 12000}},
     "required": ["title", "prompt"],
 }
+
+ASSISTANT_TASK_LIST_SCHEMA = {"type":"object","properties":{},"additionalProperties":False}
+ASSISTANT_TASK_READ_SCHEMA = {"type":"object","additionalProperties":False,"properties":{
+    "command_id":{"type":"string","description":"Read this task's exact historical command and delivery; omit for current state."},
+    "task_id":{"type":"string"},"offset":{"type":"integer","minimum":0},
+    "limit":{"type":"integer","minimum":1,"maximum":16000}},"required":["task_id"]}
+ASSISTANT_TASK_MESSAGE_SCHEMA = {"type":"object","additionalProperties":False,"properties":{
+    "task_id":{"type":"string"},"message":{"type":"string","minLength":1,"maxLength":12000},
+    "request_id":{"type":"string","minLength":8,"maxLength":128,"description":"Stable ID for one deliberate instruction; reuse on retry, change for a new instruction."},
+    "mode":{"type":"string","enum":["follow_up","guide"],"description":"Default follow_up queues a new turn. Only the parent assistant may guide an already running task."}},
+    "required":["task_id","message","request_id"]}
+
+
+def assistant_task_collaboration_handler(call, *, config, session_id, actor_id, operation):
+    from ...agent.assistant_work import AssistantWork
+    from ...agent.assistants import AssistantError
+    from ...agent.command_store import CommandError
+    if not config or not session_id or call.metadata.get("agent_id") or call.metadata.get("agent_parent_session_id"):
+        return _usage_error(call,"assistant_task_requires_lead_conversation")
+    try:
+        work=AssistantWork(config.paths)
+        args=call.arguments or {}
+        if operation == "list":
+            rows=work.visible_tasks(session_id,actor_id)
+            result={"tasks":rows,"count":len(rows)}
+        elif operation == "read":
+            result=work.read_task(session_id,args["task_id"],actor_id,offset=args.get("offset",0),limit=args.get("limit",8000),command_id=args.get("command_id"))
+        else:
+            result=work.message_task(config,session_id,args["task_id"],args["message"],actor_id,
+                request_id=args["request_id"],turn_id=call.turn_id,mode=args.get("mode","follow_up"))
+        return ToolResult.from_json(tool_use_id=call.id,name=call.name,data=result,semantic_success=True)
+    except (AssistantError,CommandError) as exc:
+        return _usage_error(call,exc.code)
 
 TASK_CREATE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -608,6 +753,7 @@ def task_summary_handler(
 
 
 __all__ = [
+    "WORKER_REPORT_SCHEMA", "HANDBACK_SCHEMA", "TASK_SUBSCRIBE_SCHEMA", "worker_report_handler", "task_handback_handler", "task_subscribe_handler", "task_trigger_health_handler",
     "SUBAGENT_RUN_ASYNC_SCHEMA",
     "TASK_CREATE_SCHEMA",
     "TASK_GET_SCHEMA",

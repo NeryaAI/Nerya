@@ -25,6 +25,19 @@ def config(tmp_path):
     return Config(paths=WorkspacePaths(tmp_path), data=copy.deepcopy(DEFAULT_CONFIG))
 
 
+def test_task_role_identifies_delivered_followups_without_rewriting_user_input(config):
+    store = AssistantStore(config.paths)
+    child = "taskchat_delivered_followup"
+    store.bind(child, "main", kind="task", title="Local task")
+    projected = assistant_config(config, store.get("main"), session_id=child)
+    role = projected.get("agent.native.assistant_profile.role")
+    assert child in role
+    assert "already delivered to this task" in role
+    assert "do not forward them again" in role
+    assert projected.get("agent.native.assistant_coordination_only") is False
+    assert store.get("main")["role"] != role
+
+
 def test_profile_validation_persistence_revision_and_model(config):
     store = AssistantStore(config.paths)
     assert [profile["id"] for profile in store.list()] == ["main"]

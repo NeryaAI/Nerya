@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -49,12 +50,21 @@ def _ensure_wal_mode(con: sqlite3.Connection) -> None:
 
 
 def connect(path: Path) -> sqlite3.Connection:
+    # Operator-only escape hatch for hosts with unreliable WAL shared memory.
+    # Never silently switch modes after an I/O error; an offline transition is
+    # required for an existing database and all writers must share this setting.
+    journal_mode = os.environ.get("NERYA_SQLITE_JOURNAL_MODE", "wal").strip().lower()
+    if journal_mode not in {"wal", "delete"}:
+        raise ValueError("NERYA_SQLITE_JOURNAL_MODE must be wal or delete")
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(path), timeout=5.0, isolation_level=None)
     try:
         con.execute("PRAGMA busy_timeout=5000")
-        _ensure_wal_mode(con)
-        con.execute("PRAGMA synchronous=NORMAL")
+        if journal_mode == "wal":
+            _ensure_wal_mode(con)
+        elif _journal_mode(con) != "delete":
+            raise sqlite3.OperationalError("rollback journal mode requires an offline database transition")
+        con.execute("PRAGMA synchronous=" + ("FULL" if journal_mode == "delete" else "NORMAL"))
         con.execute("PRAGMA foreign_keys=ON")
         con.row_factory = sqlite3.Row
         from .migrations import apply_migrations

@@ -141,7 +141,7 @@ def respond(manager, body):
         # The original input remains immutable even after a continuation completes.
         original = con.execute("SELECT * FROM agent_commands WHERE session_id=? AND turn_id=? AND command_id!=? ORDER BY created_at LIMIT 1", (sid,row["turn_id"],"response_"+iid)).fetchone()
         request = json.loads(original["request_json"])
-        if request.get("source") == "approval_continue" or request.get("kind") == "approval.continue":
+        if request.get("source") in ("approval_continue","goal_continue") or request.get("kind") in ("approval.continue","goal.continue"):
             request["source"], request["kind"] = "user_chat", "user.message"
         if not same:
             con.execute("UPDATE agent_interactions SET state='answered',response_id=?,response_json=?,actor_id=?,revision=revision+1,updated_at=? WHERE interaction_id=?", (rid,encode(response),actor,time.time(),iid))
@@ -156,6 +156,10 @@ def respond(manager, body):
     # an answered interaction permanently blocking normal follow-ups.
     request.pop("run_only", None)
     if row["kind"] == "question":
+        # The answer is already persisted in the interaction record. The
+        # continuation feedback remains model context, but must not be
+        # published as an ordinary user-chat message.
+        request["source"] = "interaction_continue"
         request.update(resume_turn_id=row["turn_id"], continuation_feedback=feedback)
         request["payload"] = {"text": ""}
         kind = "resume"

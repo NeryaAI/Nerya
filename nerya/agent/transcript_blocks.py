@@ -122,6 +122,9 @@ class ToolResultBlock:
     completed_at: float = 0.0
     recovery: Optional[dict[str, Any]] = None
     compaction: Optional[dict[str, Any]] = None
+    semantic_success: Optional[bool] = None
+    result_protocol: str = ""
+    verification: Optional[dict[str, Any]] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -139,6 +142,9 @@ class ToolResultBlock:
             "completed_at": self.completed_at,
             "recovery": self.recovery,
             "compaction": self.compaction,
+            "semantic_success": self.semantic_success,
+            "result_protocol": self.result_protocol,
+            "verification": self.verification,
         }
 
 

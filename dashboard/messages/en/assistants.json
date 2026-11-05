@@ -1,5 +1,6 @@
 {
   "assistants": {
+    "taskMessageOrigin": "Instruction from another task",
     "title": "Assistants",
     "description": "Persistent specialists share their identity, permissions and conversations across web and gateways.",
     "create": "New assistant",
@@ -79,7 +80,7 @@
     "taskStates": {
       "queued": "Queued",
       "running": "Working",
-      "succeeded": "Completed",
+      "succeeded": "Turn finished",
       "failed": "Needs attention",
       "cancelled": "Stopped",
       "interrupted": "Stopped",
@@ -91,10 +92,22 @@
       "blocked": "Needs attention",
       "unconfirmed": "Needs recovery",
       "stopping": "Stopping…"
+      ,"progress": "Making progress"
+      ,"ready": "Ready for review"
+      ,"waiting": "Waiting"
     },
     "taskConversations": "Task conversations",
     "backToAssistant": "Back to assistant",
     "openTaskConversation": "Open task conversation",
+    "taskCreated": "Task created.",
+    "taskFollowupAdmitted": "Follow-up admitted.",
+    "creationDeliveryUnconfirmed": "Delivery not confirmed.",
+    "deliveryStates": {
+      "unconfirmed": "Delivery unconfirmed",
+      "incomplete": "Delivery incomplete",
+      "partial": "Partially delivered",
+      "complete": "Delivery complete"
+    },
     "reportsAndResults": "Reports and results",
     "resultLoadFailed": "Could not load results.",
     "noResults": "Completed task results appear here.",
@@ -103,6 +116,8 @@
     "replying": "Assistant is replying",
     "replyFailed": "I could not finish this reply. Please try again.",
     "replyStopped": "This reply was stopped.",
+    "deliveryUnconfirmed": "Delivery is not confirmed. The text below is the agent's report, not a verified completion receipt.",
+    "earlierDeliveryUnresolved": "{count} earlier delivery records still need resolution",
     "retryReply": "Try again",
     "continueReply": "Continue reply",
     "messageAssistant": "Message {name}…",
@@ -150,4 +165,5 @@
     "personalInstructions": "Assistant preferences (optional)",
     "personalInstructionsHint": "How would you like this assistant to help you?"
   }
+  ,"taskDesk": {"title":"Trigger Desk","description":"Manage read-only market watches, task Trigger delivery and recovery.","watches":"Market watches","addWatch":"Add or update watch","watchId":"Watch ID","market":"Market","priceThreshold":"Price move %","fundingThreshold":"Funding absolute rate","volatilityThreshold":"Volatility %","cooldown":"Cooldown seconds","saveWatch":"Save watch","pollNow":"Poll now","enabled":"Enabled","paused":"Paused","noWatches":"No market watches configured.","health":"Source health","noHealth":"No source health recorded.","deliveries":"Recent deliveries","deadLetters":"Dead letters","noDeadLetters":"No open dead letters.","replay":"Replay","watchRequired":"Watch ID and market are required."}
 }

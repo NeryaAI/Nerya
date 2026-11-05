@@ -1,0 +1,26 @@
+{
+  "command_id": "acmd_ba52eb34aa83d090ae5385af",
+  "task_session_id": "taskchat_ba52eb34aa83d090ae5385af",
+  "task_id": "awork_ba52eb34aa83d090ae5385af",
+  "state": "succeeded",
+  "title": "Aave USDC 收益策略回测（30天，不启用交易）",
+  "summary": "# Aave USDC 收益策略（prp_a47f1867e6e7）— 完成总结\n\n## 最终交付状态\n✅ 已提交待审草案 `prp_a47f1867e6e7`",
+  "delivery": {
+    "protocol": "nerya.task_delivery.v1",
+    "command_id": "acmd_ba52eb34aa83d090ae5385af",
+    "delivery_id": "delivery_9f5d3629225f418f8c2e336a94af215f",
+    "delivery_revision": 6,
+    "completion": {
+      "allowed": false,
+      "status": "incomplete",
+      "reasons": ["verified_artifact_missing", "required_stage_pending", "artifact_missing:candidate", "artifact_missing:report", "artifact_missing:run_receipt", "check_missing:data_coverage", "check_missing:execution_integrity", "check_missing:historical_data", "check_missing:historical_run", "check_missing:replay_source", "check_missing:report_output", "check_failed:strategy_contract", "check_missing:behavioral_tests", "check_failed:strategy_structure", "check_missing:strategy_behavior"]
+    },
+    "checks": [
+      {"check_id": "source_binding", "status": "passed", "required": true},
+      {"check_id": "strategy_contract", "status": "failed", "required": true},
+      {"check_id": "behavioral_tests", "status": "missing", "required": true},
+      {"check_id": "strategy_structure", "status": "failed", "required": true},
+      {"check_id": "strategy_behavior", "status": "missing", "required": true}
+    ]
+  }
+}

@@ -1294,6 +1294,124 @@ def _v28_lp_rebalances(con):
         WHERE state NOT IN ('completed','stopped')""")
 
 
+def _v29_task_delivery_contract(con):
+    """Persist the delivery projection beside durable command state."""
+    columns = {row[1] for row in con.execute("PRAGMA table_info(agent_commands)").fetchall()}
+    if "delivery_json" not in columns:
+        con.execute("ALTER TABLE agent_commands ADD COLUMN delivery_json TEXT")
+
+
+def _v31_task_control_plane(con):
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS task_mandates (
+        task_id TEXT PRIMARY KEY, parent_task_id TEXT NOT NULL DEFAULT '', command_id TEXT NOT NULL,
+        session_id TEXT NOT NULL, actor_id TEXT NOT NULL, task_kind TEXT NOT NULL, objective TEXT NOT NULL,
+        scope_json TEXT NOT NULL, allowed_tools_json TEXT NOT NULL, execution_mode TEXT NOT NULL,
+        policy_revision TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active', created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_assignments (
+        assignment_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, session_id TEXT NOT NULL, command_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'pending', worker_owner TEXT NOT NULL DEFAULT '',
+        started_at REAL, ended_at REAL, last_report_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_worker_reports (
+        report_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, assignment_id TEXT NOT NULL, command_id TEXT NOT NULL,
+        state TEXT NOT NULL, summary TEXT NOT NULL, human_action TEXT NOT NULL DEFAULT '', artifacts_json TEXT NOT NULL,
+        evidence_refs_json TEXT NOT NULL, next_action TEXT NOT NULL DEFAULT '', safe_to_retry INTEGER NOT NULL DEFAULT 0,
+        in_scope INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS task_inputs (
+        input_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, assignment_id TEXT NOT NULL, command_id TEXT NOT NULL,
+        sender_session_id TEXT NOT NULL, body TEXT NOT NULL, state TEXT NOT NULL, delivered_at REAL NOT NULL,
+        read_at REAL, replay_count INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS task_handbacks (
+        handback_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, assignment_id TEXT NOT NULL, command_id TEXT NOT NULL,
+        request TEXT NOT NULL, reason TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', target_task_id TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_reports_task ON task_worker_reports(task_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_task_inputs_state ON task_inputs(task_id, state);
+    """)
+
+
+def _v32_task_trigger_plane(con):
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS task_trigger_subscriptions (
+        subscription_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, source TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT '', match_json TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+        last_cursor TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_subscription_unique
+        ON task_trigger_subscriptions(task_id, source, kind, match_json);
+    CREATE TABLE IF NOT EXISTS task_trigger_events (
+        event_id TEXT PRIMARY KEY, source TEXT NOT NULL, kind TEXT NOT NULL,
+        source_cursor TEXT NOT NULL DEFAULT '', idempotency_key TEXT NOT NULL DEFAULT '',
+        occurred_at TEXT NOT NULL, payload_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'recorded', created_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_trigger_idempotency
+        ON task_trigger_events(source, idempotency_key) WHERE idempotency_key <> '';
+    CREATE TABLE IF NOT EXISTS task_trigger_deliveries (
+        delivery_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, task_id TEXT NOT NULL,
+        subscription_id TEXT NOT NULL, state TEXT NOT NULL, input_id TEXT NOT NULL DEFAULT '',
+        command_id TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_trigger_delivery_unique ON task_trigger_deliveries(event_id, task_id);
+    CREATE TABLE IF NOT EXISTS task_trigger_sources (
+        source TEXT PRIMARY KEY, cursor TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'ready',
+        consecutive_failures INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_trigger_event_source ON task_trigger_events(source, created_at);
+    CREATE INDEX IF NOT EXISTS idx_task_trigger_delivery_task ON task_trigger_deliveries(task_id, created_at);
+    CREATE TABLE IF NOT EXISTS market_watch_state (
+        watch_id TEXT PRIMARY KEY, market TEXT NOT NULL, last_sample_ts REAL,
+        last_price REAL, last_funding_rate REAL, last_volatility_pct REAL,
+        last_alerts_json TEXT NOT NULL DEFAULT '{}', last_cursor TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL
+    );
+    """)
+
+
+def _v33_trigger_delivery_recovery(con):
+    columns = {row[1] for row in con.execute("PRAGMA table_info(task_trigger_deliveries)").fetchall()}
+    for name, definition in (
+        ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("max_attempts", "INTEGER NOT NULL DEFAULT 3"),
+        ("next_retry_at", "REAL"),
+        ("last_attempt_at", "REAL"),
+    ):
+        if name not in columns:
+            con.execute(f"ALTER TABLE task_trigger_deliveries ADD COLUMN {name} {definition}")
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS task_trigger_dead_letters (
+        dead_letter_id TEXT PRIMARY KEY, delivery_id TEXT NOT NULL, event_id TEXT NOT NULL,
+        task_id TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, error TEXT NOT NULL,
+        attempts INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'open', replay_count INTEGER NOT NULL DEFAULT 0,
+        created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_trigger_dead_delivery ON task_trigger_dead_letters(delivery_id);
+    CREATE INDEX IF NOT EXISTS idx_task_trigger_dead_state ON task_trigger_dead_letters(state, created_at);
+    """)
+
+
+def _v34_private_account_events(con):
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS private_account_watch_state (
+        account_id TEXT PRIMARY KEY, last_snapshot_id TEXT NOT NULL DEFAULT '',
+        last_snapshot_ts REAL, last_fingerprint TEXT NOT NULL DEFAULT '',
+        last_order_cursor TEXT NOT NULL DEFAULT '', last_event_ts REAL, updated_at REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS live_trigger_admissions (
+        admission_id TEXT PRIMARY KEY, event_id TEXT NOT NULL, strategy_id TEXT NOT NULL,
+        account_id TEXT NOT NULL, mode TEXT NOT NULL, status TEXT NOT NULL,
+        blocker TEXT NOT NULL DEFAULT '', approval_id TEXT NOT NULL DEFAULT '',
+        risk_evaluation_id TEXT NOT NULL DEFAULT '', intent_id TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL, updated_at REAL NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_live_admission_event_strategy ON live_trigger_admissions(event_id, strategy_id);
+    CREATE INDEX IF NOT EXISTS idx_live_admission_status ON live_trigger_admissions(status, created_at);
+    """)
+
+
 # Append new migrations to the end of this list. Never renumber; new
 # work always becomes a *new* version. The registry validator above
 # enforces a contiguous 1..N sequence at startup.
@@ -1338,6 +1456,21 @@ MIGRATIONS: list[Migration] = [
     Migration(version=26, name="financial_grant_issuer", up=_v26_financial_grant_issuer),
     Migration(version=27, name="unique_protocol_receipt_effect", up=_v27_unique_protocol_effect),
     Migration(version=28, name="lp_rebalances", up=_v28_lp_rebalances),
+    Migration(version=29, name="task_delivery_contract", up=_v29_task_delivery_contract),
+    Migration(version=30, name="conversation_goals", up=lambda con: [con.execute(sql) for sql in (
+        """CREATE TABLE agent_goals (session_id TEXT PRIMARY KEY, goal_id TEXT NOT NULL UNIQUE,
+            objective TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+            token_budget INTEGER, tokens_used INTEGER NOT NULL DEFAULT 0, time_used_seconds REAL NOT NULL DEFAULT 0,
+            source_command_id TEXT NOT NULL, last_command_id TEXT NOT NULL, stop_reason TEXT NOT NULL DEFAULT '',
+            no_progress_turns INTEGER NOT NULL DEFAULT 0, blocker TEXT NOT NULL DEFAULT '',
+            completion_requested INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL)""",
+        """CREATE TABLE agent_goal_commands (command_id TEXT PRIMARY KEY, goal_id TEXT NOT NULL,
+            accounted INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL)""",
+    )]),
+    Migration(version=31, name="task_control_plane", up=_v31_task_control_plane),
+    Migration(version=32, name="task_trigger_plane", up=_v32_task_trigger_plane),
+    Migration(version=33, name="trigger_delivery_recovery", up=_v33_trigger_delivery_recovery),
+    Migration(version=34, name="private_account_events", up=_v34_private_account_events),
 ]
 
 
